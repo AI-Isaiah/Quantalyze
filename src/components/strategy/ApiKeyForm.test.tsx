@@ -187,3 +187,144 @@ describe("Phase 122 — ApiKeyForm sfox token-only (SFOX-08)", () => {
     ).toBeInTheDocument();
   });
 });
+
+/**
+ * Phase 167.2 / KCS-01 — the optional `submitBlockedReason` prop.
+ *
+ * WHY. On the strategy key card, an Add Key submitted while a tracked sync
+ * attempt is live would start a second sync beside it, and the card holds one
+ * attempt at a time. The key card passes the reason; the form disables its
+ * submit, ties the reason to it with `aria-describedby`, and refuses the
+ * Enter-key submit the same way (the NEW-C37-02 lesson: a disabled button does
+ * not stop Enter inside an input).
+ *
+ * WHY OPTIONAL. The form is shared with `AllocatorExchangeManager`, which
+ * passes nothing and must render exactly as before (RESEARCH P6).
+ *
+ * The reason strings below are HAND-TYPED synthetic values: this component
+ * renders whatever it is given, and the locked copy is pinned where it is
+ * built (`ApiKeyManager.test.tsx`).
+ */
+describe("ApiKeyForm — KCS-01 submitBlockedReason", () => {
+  const REASON =
+    'Wait for the sync of "Example Bybit" to finish before connecting another key.';
+
+  function fillForm() {
+    fireEvent.change(screen.getByLabelText("Label"), {
+      target: { value: "Example Label" },
+    });
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "example-key" },
+    });
+    fireEvent.change(screen.getByLabelText("API Secret"), {
+      target: { value: "example-secret" },
+    });
+  }
+
+  it("blocked: Connect Key is disabled, described by the reason, and neither a click nor Enter submits", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ApiKeyForm
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+        loading={false}
+        error={null}
+        submitBlockedReason={REASON}
+      />,
+    );
+    fillForm();
+
+    const submit = screen.getByRole("button", { name: "Connect Key" });
+    expect(submit).toBeDisabled();
+    // The label and the style of the button are unchanged; only the state is.
+    expect(submit).toHaveTextContent("Connect Key");
+    expect(submit).toHaveAccessibleDescription(REASON);
+    const describedBy = submit.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    const line = document.getElementById(describedBy!);
+    expect(line?.tagName).toBe("P");
+    expect(line?.textContent).toBe(REASON);
+    expect(line).toHaveClass("text-xs", "text-text-muted", "mt-3");
+
+    fireEvent.click(submit);
+    // The Enter-key path: a submit event on the form itself.
+    fireEvent.submit(submit.closest("form")!);
+    await Promise.resolve();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("the reason renders after the form's error line when both are present", () => {
+    render(
+      <ApiKeyForm
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        loading={false}
+        error="Example error"
+        submitBlockedReason={REASON}
+      />,
+    );
+    const errorLine = screen.getByText("Example error");
+    const reasonLine = screen.getByText(REASON);
+    expect(
+      errorLine.compareDocumentPosition(reasonLine) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("unblocking unmounts the line and enables Connect Key, which then submits", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <ApiKeyForm
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+        loading={false}
+        error={null}
+        submitBlockedReason={REASON}
+      />,
+    );
+    rerender(
+      <ApiKeyForm
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+        loading={false}
+        error={null}
+        submitBlockedReason={null}
+      />,
+    );
+    expect(screen.queryByText(REASON)).toBeNull();
+    const submit = screen.getByRole("button", { name: "Connect Key" });
+    expect(submit).toBeEnabled();
+    expect(submit).not.toHaveAttribute("aria-describedby");
+
+    fillForm();
+    fireEvent.click(submit);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  });
+
+  it("CONTROL: without the prop the form renders as before (no caption, enabled submit, no aria-describedby)", () => {
+    const { container, unmount } = render(
+      <ApiKeyForm onSubmit={vi.fn()} onCancel={vi.fn()} loading={false} error={null} />,
+    );
+    const submit = screen.getByRole("button", { name: "Connect Key" });
+    expect(submit).toBeEnabled();
+    expect(submit).not.toHaveAttribute("aria-describedby");
+    // The footer caption is the only paragraph: no reason line was added.
+    expect(container.querySelectorAll("p")).toHaveLength(1);
+    // React's useId values differ per mount; everything else must match.
+    const normalise = (html: string) => html.replace(/_r_[0-9a-z]+_|«[^»]*»|:r[0-9a-z]+:/g, "ID");
+    const withoutProp = normalise(container.innerHTML);
+    unmount();
+
+    // An explicit null renders the same DOM as an absent prop.
+    const { container: explicitNull } = render(
+      <ApiKeyForm
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        loading={false}
+        error={null}
+        submitBlockedReason={null}
+      />,
+    );
+    expect(normalise(explicitNull.innerHTML)).toBe(withoutProp);
+  });
+});

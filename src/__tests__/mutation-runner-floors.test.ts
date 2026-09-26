@@ -637,8 +637,29 @@ describe("corpus re-derivation", () => {
     // MEASURED over `scanCorpus` at this commit (the fast static re-derivation,
     // no lane): `filesTotal 76`, `annotated 49`, `totalAnchored 426`,
     // `twins 426`, `waivers 0`.
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 426 -> 428.
+    // TWO new arms, both named N (OPS-08-F2: a poisoned candidate beside a
+    // healthy one), one in each of the already-annotated
+    // test_ledger_refresh_fanout.sql (23 -> 24) and
+    // test_ledger_refresh_composite_arm.sql (20 -> 21). No file joined the
+    // annotated set, so FILES_FLOOR and the 49/76 coverage ratio are UNCHANGED.
+    // MEASURED: `node scripts/mutation-runner/run.mjs --parse-only` printed
+    // `coverage: files 49/76` and `arms: 0/428/0` (428 annotated, 0 waived),
+    // and the full lane run's biting count agreed (see run.mjs ARMS_FLOOR).
     const totalAnchored = annotated.reduce((n, f) => n + f.prose, 0);
-    expect(totalAnchored).toBe(426);
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, review fix round 1):
+    // 428 -> 445. SEVENTEEN new arms: N2, T, N3, U, V1, V2 and W in each ledger
+    // gate (fan-out 24 -> 31, composite 21 -> 28), and the three arms of the NEW
+    // file test_cron_runs_rls.sql, which moves FILES_FLOOR 49 -> 50 and the
+    // coverage ratio to 50/77. MEASURED: `node scripts/mutation-runner/run.mjs
+    // --parse-only` printed `coverage: files 50/77` and `arms: 0/445/0`, and the
+    // one full lane run agreed (see run.mjs ARMS_FLOOR).
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 2): 445 -> 449.
+    // FOUR new arms: a W/deadlock sub-arm in each ledger gate (fan-out
+    // 31 -> 32, composite 28 -> 29) and ANON 2 / USER 2 in test_cron_runs_rls.sql
+    // (3 -> 5). No file joined the annotated set, so FILES_FLOOR stays 50.
+    // MEASURED per file on narrowed lane runs (biting 32, 29, 5).
+    expect(totalAnchored).toBe(449);
   });
 });
 
@@ -1560,7 +1581,12 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
   }
 
   /** Run the extracted block from REPO_ROOT (it imports run.mjs by relative path) against `log`. */
-  function runCountRecheck(log: string) {
+  // 164.4.2-09: `env` exists because the step now reads GITHUB_EVENT_NAME (a
+  // SUBSET run is legal only on a pull_request). A test that drives a SUBSET
+  // log MUST pass it explicitly: vitest in CI inherits the real event name
+  // (`push` on main, `pull_request` on a PR), so an inherited value would make
+  // the same test pass on one event and fail on the other.
+  function runCountRecheck(log: string, env: Record<string, string> = {}) {
     const dir = mkdtempSync(join(tmpdir(), "count-recheck-"));
     try {
       const logPath = join(dir, "mutation-runner.log");
@@ -1570,7 +1596,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       const res = spawnSync("bash", [script], {
         cwd: REPO_ROOT,
         encoding: "utf8",
-        env: { ...process.env, RUNNER_LOG: logPath },
+        env: { ...process.env, RUNNER_LOG: logPath, ...env },
       });
       return { status: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
     } finally {
@@ -1584,6 +1610,12 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
   // of the GREEN input rather than independently-typed fixtures.
   const GREEN_LOG = [
     "mutation-runner: scope supabase/tests",
+    // ⭐ ADDED 2026-09-23 (Phase 164.4.2 plan 09, DECISION D): the count-recheck
+    // step now MEASURE_FAILs on a log with no `scope:` line — an absent line is
+    // never read as a FULL run. The runner prints exactly one per corpus run,
+    // BEFORE any lane, in this position (plan 07's FULL-after log). The
+    // denominator equals the `coverage:` numerator below, as a real FULL run's does.
+    "scope: FULL 50/50 annotated files",
     "  baseline  supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
     "  arm SHAPE 1                  exit   3  RED (identity ok)  (1.7s)",
     "  restore   supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
@@ -1594,7 +1626,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // arms:/biting:/lane-invocations: move and the new per-file row are below;
     // see FILES_FLOOR / ARMS_FLOOR in scripts/mutation-runner/run.mjs for the
     // full measured run this fixture is copied from.
-    "coverage: files 49/76",
+    "coverage: files 50/77",
     // 164.4-01: the exclusion, named. Two synthetic basenames rather than the
     // real 27 — the arms below mutate the COUNT against the NAMES, and a
     // fixture carrying the live corpus would have to move on every batch.
@@ -1783,9 +1815,36 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // 425 -> 426 would have silently destroyed the THREE DELIBERATE MISMATCHES
     // (lane-invocations 426, biting 426 and the row-sum) by turning each into
     // an agreement, leaving those arms passing on a log they no longer mutate.
-    "arms: 426/426/0   (executed/annotated/waived)",
-    "biting: 426   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
-    "lane-invocations: 426   (arm lanes actually spawned — tallied inside runLane, independent of the 426 the verdict loop counted; plus 49 baseline / 49 restore leg(s))",
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 426 -> 428,
+    // and NO row is added — TWO EXISTING rows move by one each, the ledger
+    // pair: test_ledger_refresh_composite_arm.sql 20 -> 21 and
+    // test_ledger_refresh_fanout.sql 23 -> 24 (arm N in each, OPS-08-F2). The
+    // `plus 49 baseline / 49 restore leg(s)` half does NOT move: those legs
+    // count FILES, and no file joined the annotated set. MEASURED via a full
+    // lane run, `node scripts/mutation-runner/run.mjs` (see run.mjs's
+    // ARMS_FLOOR lineage for the headline lines, exit 0). Every `.replace()`
+    // below was moved by a script that MEASURED each needle at exactly ONE
+    // occurrence before substituting and refused otherwise, and the THREE
+    // DELIBERATE MISMATCHES keep their gap of one: lane-invocations 429 against
+    // 428, biting 429 against executed 428, and rows summing to 427 against an
+    // aggregate of 428.
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, review fix round 1):
+    // 428 -> 445, and the leg counts 49 -> 50: TWO EXISTING rows move (the
+    // ledger pair, composite 21 -> 28 and fan-out 24 -> 31) and ONE row is ADDED
+    // (test_cron_runs_rls.sql, 3), because a new file joined the annotated set.
+    // Copied from ONE full lane run (see run.mjs ARMS_FLOOR). The THREE
+    // DELIBERATE MISMATCHES keep their gap of one: lane-invocations 446 against
+    // 445, biting 446 against executed 445, and rows summing to 444 against an
+    // aggregate of 445.
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 2): 445 -> 449,
+    // THREE EXISTING rows move (fan-out 31 -> 32, composite 28 -> 29,
+    // test_cron_runs_rls.sql 3 -> 5) and no row is added; the leg counts stay
+    // 50. The THREE DELIBERATE MISMATCHES keep their gap of one:
+    // lane-invocations 450 against 449, biting 450 against executed 449, and
+    // rows summing to 448 against an aggregate of 449.
+    "arms: 449/449/0   (executed/annotated/waived)",
+    "biting: 449   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 449   (arm lanes actually spawned — tallied inside runLane, independent of the 449 the verdict loop counted; plus 50 baseline / 50 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -1843,6 +1902,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_capital_ownership_column.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
     "  file test_compute_jobs_error_kind_copy_parity.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
     "  file test_create_wizard_strategy_for_key.sql: sections 9 / judged 9 / annotated 9 / waived 0 / biting 9",
+    "  file test_cron_runs_rls.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_csv_daily_returns_perkey_rls.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
     "  file test_csv_finalize_atomic_fold.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
     "  file test_csv_finalize_auth_guard.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
@@ -1853,8 +1913,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_get_published_trust_signals.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_get_verified_cohort_rank_gate.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_guard_wizard_draft_updates_auth_uid.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
-    "  file test_ledger_refresh_composite_arm.sql: sections 20 / judged 20 / annotated 20 / waived 0 / biting 20",
-    "  file test_ledger_refresh_fanout.sql: sections 23 / judged 23 / annotated 23 / waived 0 / biting 23",
+    "  file test_ledger_refresh_composite_arm.sql: sections 29 / judged 29 / annotated 29 / waived 0 / biting 29",
+    "  file test_ledger_refresh_fanout.sql: sections 32 / judged 32 / annotated 32 / waived 0 / biting 32",
     "  file test_ledger_refresh_staleness.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     "  file test_metrics_by_basis_write.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
     "  file test_prod_prober_cadence.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
@@ -1881,7 +1941,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_wizard_composite_fence.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_wizard_composite_members.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     "  file test_wizard_session_idempotency.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
-    "per-arm lane time: mean 2.0s over 426 arm run(s)",
+    "per-arm lane time: mean 2.0s over 449 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -1893,7 +1953,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(r.out).toContain("the runner's two tallies agree");
     // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2): 423 -> 425.
     // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 425 -> 426.
-    expect(r.out).toContain("426 arm lane(s) spawned");
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 426 -> 428.
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 428 -> 445.
+    expect(r.out).toContain("449 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -2089,7 +2151,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2): 49/48 ->
     // 50/49 — GREEN_LOG now carries 49 real per-file rows (one more, the new
     // gate file), so the injected 50th row is caught against a numerator of 49.
-    expect(r.out).toContain("printed 50 per-file row(s) but reported 49 annotated file(s)");
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 50/49 -> 51/50,
+    // one more real per-file row (test_cron_runs_rls.sql).
+    expect(r.out).toContain("printed 51 per-file row(s) but reported 50 annotated file(s)");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2106,8 +2170,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // the row sum must stay exactly one BELOW the aggregate. Moving only one of
     // these two numbers would either close the gap (the arm stops failing) or
     // widen it to two (it fails for the wrong reason).
-    expect(r.out).toContain("rows sum to 425 biting arm(s) but the aggregate");
-    expect(r.out).toContain("reports 426");
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 425/426 ->
+    // 427/428, both halves together, so the gap stays exactly one.
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 427/428 ->
+    // 444/445, both halves together, so the gap stays exactly one.
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 2): 444/445 ->
+    // 448/449, both halves together, so the gap stays exactly one.
+    expect(r.out).toContain("rows sum to 448 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 449");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2127,12 +2197,16 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 425 ->
     // 426 in the NEEDLE and in `executed`/`biting`. The severed value stays 0 —
     // it is the parse-only shape being simulated, not a count.
-    const severed = GREEN_LOG.replace(/^lane-invocations: 426 /m, "lane-invocations: 0 ");
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 426 -> 428 in
+    // the NEEDLE and in `executed`/`biting`; the severed value stays 0.
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 428 -> 445 in the
+    // NEEDLE and in `executed`/`biting`; the severed value stays 0.
+    const severed = GREEN_LOG.replace(/^lane-invocations: 449 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
     expect(r.out).toContain("GATE failing, not the corpus");
-    expect(r.out).toContain("executed=426 lane-invocations=0 biting=426");
+    expect(r.out).toContain("executed=449 lane-invocations=0 biting=449");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2144,15 +2218,23 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // unchanged, and this arm would then assert an exit 1 that never comes. It
     // has no `.not.toBe(GREEN_LOG)` calibration; that `expect(status).toBe(1)`
     // IS the calibration, per the 2026-09-20 note above.
-    const extra = GREEN_LOG.replace(/^lane-invocations: 426 /m, "lane-invocations: 427 ");
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): NEEDLE 426 ->
+    // 428 and DELIBERATE MISMATCH 427 -> 429, both halves, gap of one kept.
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): NEEDLE 428 -> 445
+    // and DELIBERATE MISMATCH 429 -> 446, both halves, gap of one kept.
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 2): NEEDLE 445 -> 449
+    // and DELIBERATE MISMATCH 446 -> 450, both halves, gap of one kept.
+    const extra = GREEN_LOG.replace(/^lane-invocations: 449 /m, "lane-invocations: 450 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("executed=426 lane-invocations=427 biting=426");
+    expect(r.out).toContain("executed=449 lane-invocations=450 biting=449");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
     // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 425 -> 426.
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 426 /m, "lane-invocations: abc ");
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 426 -> 428.
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 428 -> 445.
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 449 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -2176,7 +2258,11 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // 426 in BOTH the needle and the replacement. Only the W field differs
     // between them — executed and biting are untouched on purpose, so nothing
     // but the waiver count can be what fires.
-    const waived = GREEN_LOG.replace(/^arms: 426\/426\/0 /m, `arms: 426/426/${WAIVED_CEILING + 1} `);
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 426 -> 428 in
+    // BOTH the needle and the replacement; only the W field differs.
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 428 -> 445 in
+    // BOTH the needle and the replacement; only the W field differs.
+    const waived = GREEN_LOG.replace(/^arms: 449\/449\/0 /m, `arms: 449/449/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -2198,14 +2284,211 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // field; the biting-above-executed arm moves its NEEDLE 425 -> 426 and its
     // DELIBERATE MISMATCH 426 -> 427, because a mismatch that becomes an
     // agreement is a no-op substitution and stops exercising anything.
-    const zero = GREEN_LOG.replace(/^arms: 426\/426\/0 /m, "arms: 0/426/0 ");
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 426 -> 428,
+    // moved INDIVIDUALLY: executed-is-zero keeps its literal 0; the
+    // biting-above-executed arm's NEEDLE 426 -> 428 and MISMATCH 427 -> 429.
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 428 -> 445,
+    // moved INDIVIDUALLY: executed-is-zero keeps its literal 0; the
+    // biting-above-executed arm's NEEDLE 428 -> 445 and MISMATCH 429 -> 446.
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 2): 445 -> 449,
+    // moved INDIVIDUALLY: executed-is-zero keeps its literal 0; the
+    // biting-above-executed arm's NEEDLE 445 -> 449 and MISMATCH 446 -> 450.
+    const zero = GREEN_LOG.replace(/^arms: 449\/449\/0 /m, "arms: 0/449/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
-    const spliced = GREEN_LOG.replace(/^biting: 426 /m, "biting: 427 ");
+    const spliced = GREEN_LOG.replace(/^biting: 449 /m, "biting: 450 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
-    expect(s.out).toContain("biting (427) exceeds executed (426)");
+    expect(s.out).toContain("biting (450) exceeds executed (449)");
+  });
+
+  // ── 164.4.2-09, DECISION D: the step judges WHAT THE RUN COVERED ─────────
+  // A pull request may mutate only the gate files it changed; a push mutates
+  // the whole corpus. The step reads a log it did not produce, so the scope
+  // line is what tells it which numbers are comparable. These arms drive every
+  // new branch against the REAL extracted step body, because a fence nobody
+  // watched fail is a fence nobody has — and a real SUBSET run in CI needs a
+  // lucky pull request that changes gate files and nothing else.
+  //
+  // The SUBSET log is the runner's own SUBSET output shape (plan 07's tracer
+  // log and run.mjs's print sites), over two rows copied from GREEN_LOG, so
+  // its tallies are real numbers: 6 + 2 = 8 arms. Coverage, unreachable,
+  // lane-blocked and lane-probe stay the FULL scan's, exactly as a SUBSET run
+  // prints them.
+  const SUBSET_LOG = [
+    "mutation-runner: scope supabase/tests",
+    "scope: SUBSET 2/50 annotated files: test_allocator_equity_derived_rls.sql test_allocator_equity_pre_terminus_flag.sql",
+    "",
+    "coverage: files 50/77",
+    "unreachable: 2 file(s) raise outside the runner's identity idiom — a.sql b.sql (TODOS [REDUNDER-NONIDIOM])",
+    "lane-blocked: 2 file(s) probe pg_extension for pg_cron and are NOT yet annotated — d.sql e.sql (the lane hosts pg_cron since Phase 164.4.1, so a non-empty class here is STALE — see the lane-probe line)",
+    "lane-probe: pg_cron absent — lane-blocked class is current",
+    "arms: 8/8/0   (executed/annotated/waived)",
+    "biting: 8   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 8   (arm lanes actually spawned — tallied inside runLane, independent of the 8 the verdict loop counted; plus 2 baseline / 2 restore leg(s))",
+    "  file test_allocator_equity_derived_rls.sql: sections 6 / judged 6 / annotated 6 / waived 0 / biting 6",
+    "  file test_allocator_equity_pre_terminus_flag.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
+    "per-arm lane time: mean 2.0s over 8 arm run(s)",
+    "",
+    "ARMS_FLOOR: NOT compared — this SUBSET run covered 2 of 49 annotated files; ARMS_FLOOR is compared by the full-corpus run (push to main).",
+    // Review 164.4.2 WR-03: the static upper bound the runner compares on every
+    // SUBSET run — the full corpus's annotated-minus-waived total, at the floor.
+    // ⭐ Built from the imported ARMS_FLOOR (round-2 review IN-01), because the
+    // count-recheck step re-reads the floor from run.mjs: a literal here would be
+    // one more pin a floor raise must move, failing with a message that blames
+    // the corpus instead of this fixture.
+    `ARMS_FLOOR (static upper bound): ${ARMS_FLOOR} annotated-unwaived >= floor ${ARMS_FLOOR}`,
+    "",
+    "✅ No defects in the SUBSET: every annotated arm of these 2 of 49 annotated files bit its own arm first. NOT full-corpus coverage.",
+    "",
+  ].join("\n");
+  // Review 164.4.2 WR-07: the step now compares the SUBSET's printed names with
+  // the list changed-paths derived, so a pull_request run carries that list —
+  // exactly the two files SUBSET_LOG names.
+  const SUBSET_FILES =
+    "supabase/tests/test_allocator_equity_derived_rls.sql supabase/tests/test_allocator_equity_pre_terminus_flag.sql";
+  const PR = { GITHUB_EVENT_NAME: "pull_request", SQL_GATE_FILES: SUBSET_FILES };
+  const PUSH = { GITHUB_EVENT_NAME: "push" };
+
+  it("GREEN: a FULL log passes on a push AND on a pull request — every existing arm, ARMS_FLOOR included", () => {
+    for (const env of [PUSH, PR]) {
+      const r = runCountRecheck(GREEN_LOG, env);
+      expect(r.status, `${env.GITHUB_EVENT_NAME}\n${r.out}`).toBe(0);
+      expect(r.out).toContain("scope: FULL 50/50 annotated files");
+      expect(r.out).toContain("both floors and the waiver ceiling hold");
+      // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 426 -> 428.
+      // The right-hand side is ARMS_FLOOR as the step re-reads it from run.mjs.
+      // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 428 -> 445.
+      expect(r.out).toContain("biting arms 449 >= 449");
+    }
+  });
+
+  it("GREEN: a SUBSET log on a pull_request passes and SAYS ARMS_FLOOR was not compared, and where it is", () => {
+    const r = runCountRecheck(SUBSET_LOG, PR);
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain(`ARMS_FLOOR (${ARMS_FLOOR}) was NOT compared`);
+    expect(r.out).toContain("compared by the full-corpus run on the push to main");
+    expect(r.out).toContain("This is NOT full-corpus coverage.");
+    // ⛔ It must never print the sentence claiming both floors held.
+    expect(r.out).not.toContain("both floors");
+    expect(r.out).not.toContain("MEASURE_FAIL");
+  });
+
+  it("RED: NO scope line is a MEASURE_FAIL — an absent line is never read as a FULL run", () => {
+    const without = GREEN_LOG.replace(/^scope: .*\n/m, "");
+    expect(without, "the deletion must actually change the log").not.toBe(GREEN_LOG);
+    for (const env of [PUSH, PR]) {
+      const r = runCountRecheck(without, env);
+      expect(r.status, r.out).toBe(1);
+      expect(r.out).toContain("MEASURE_FAIL: the run printed NO 'scope:' line");
+      expect(r.out).not.toContain("two tallies agree");
+    }
+  });
+
+  it("RED: a SUBSET log on a push fails, naming both the scope and the event", () => {
+    const r = runCountRecheck(SUBSET_LOG, PUSH);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL: the run narrowed to a SUBSET");
+    expect(r.out).toContain("on a 'push' event");
+    // An unset event is not a pull_request either.
+    const unset = runCountRecheck(SUBSET_LOG, { GITHUB_EVENT_NAME: "" });
+    expect(unset.status, unset.out).toBe(1);
+    expect(unset.out).toContain("on a 'unset' event");
+  });
+
+  it("RED: a SUBSET count that disagrees with the names it prints fails, quoting both", () => {
+    const lying = SUBSET_LOG.replace("scope: SUBSET 2/50 ", "scope: SUBSET 3/50 ");
+    expect(lying).not.toBe(SUBSET_LOG);
+    const r = runCountRecheck(lying, PR);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("CLAIMS 3 file(s) but NAMES 2");
+  });
+
+  it("RED: a SUBSET whose per-file rows do not match its named files fails — the row count is k, not N", () => {
+    const extraRow = SUBSET_LOG.replace(
+      "  file test_allocator_equity_pre_terminus_flag.sql:",
+      "  file test_api_keys_exchange_not_user_writable.sql: sections 0 / judged 0 / annotated 0 / waived 0 / biting 0\n  file test_allocator_equity_pre_terminus_flag.sql:",
+    );
+    expect(extraRow).not.toBe(SUBSET_LOG);
+    const r = runCountRecheck(extraRow, PR);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("printed 3 per-file row(s) but its SUBSET scope line names 2 file(s)");
+  });
+
+  it("RED: a SUBSET scope line without the runner's ARMS_FLOOR-not-compared line fails", () => {
+    const without = SUBSET_LOG.replace(/^ARMS_FLOOR: NOT compared .*\n/m, "");
+    expect(without).not.toBe(SUBSET_LOG);
+    const r = runCountRecheck(without, PR);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("the run printed NO 'ARMS_FLOOR: NOT compared");
+  });
+
+  it("RED: a SUBSET whose printed names differ from the list changed-paths derived fails, quoting both (review 164.4.2 WR-07)", () => {
+    // Same count, different file: the claim-versus-names arm cannot see this.
+    const swapped = { ...PR, SQL_GATE_FILES: SUBSET_FILES.replace("derived_rls", "something_else") };
+    expect(swapped.SQL_GATE_FILES).not.toBe(SUBSET_FILES);
+    const r = runCountRecheck(SUBSET_LOG, swapped);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("the SUBSET the run printed is not the SUBSET changed-paths derived");
+    expect(r.out).toContain("test_allocator_equity_something_else.sql");
+    // Silent-failure-hunter round 2, WR-05: SQL_GATE_FILES is the list the runner
+    // was GIVEN, so this arm proves the runner mutated its input, not that the
+    // derivation was right. The message must claim no more than that.
+    expect(r.out).toContain("than the list changed-paths handed it");
+    expect(r.out).not.toContain("than this pull request changed");
+    // A derived list that is absent is a MEASURE_FAIL, never a match.
+    const absent = runCountRecheck(SUBSET_LOG, { ...PR, SQL_GATE_FILES: "" });
+    expect(absent.status, absent.out).toBe(1);
+    expect(absent.out).toContain("MEASURE_FAIL: the run says SUBSET but SQL_GATE_FILES");
+    // Order and duplicates do not matter: it is a SET comparison.
+    const reordered = runCountRecheck(SUBSET_LOG, { ...PR, SQL_GATE_FILES: SUBSET_FILES.split(" ").reverse().join(" ") });
+    expect(reordered.status, reordered.out).toBe(0);
+  });
+
+  it("RED: a SUBSET log without the static-bound line, or with a bound under ARMS_FLOOR, fails (review 164.4.2 WR-03)", () => {
+    const without = SUBSET_LOG.replace(/^ARMS_FLOOR \(static upper bound\): .*\n/m, "");
+    expect(without, "the deletion must actually change the log").not.toBe(SUBSET_LOG);
+    const r = runCountRecheck(without, PR);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("the run printed NO 'ARMS_FLOOR (static upper bound)");
+    // The bound re-read out of process: a log whose bound is under the floor
+    // fails even if the runner's own verdict was somehow lost.
+    const under = SUBSET_LOG.replace(
+      `${ARMS_FLOOR} annotated-unwaived >= floor ${ARMS_FLOOR}`,
+      `${ARMS_FLOOR - 1} annotated-unwaived >= floor ${ARMS_FLOOR}`,
+    );
+    expect(under).not.toBe(SUBSET_LOG);
+    const u = runCountRecheck(under, PR);
+    expect(u.status, u.out).toBe(1);
+    expect(u.out).toContain(
+      `ARMS_FLOOR regression (static upper bound): ${ARMS_FLOOR - 1} annotated-unwaived arm(s) < floor ${ARMS_FLOOR}`,
+    );
+  });
+
+  it("RED: a FULL-labelled run that mutated only two files fails — the fallback form is judged as FULL", () => {
+    // `(subset fallback: …)` means the runner fell back to the WHOLE corpus.
+    // A log that says so while describing two files is caught by the FULL
+    // row-count arm, not waved through as a subset.
+    const mislabelled = SUBSET_LOG.replace(
+      /^scope: SUBSET .*$/m,
+      "scope: FULL 50/50 annotated files (subset fallback: no listed file is annotated: test_x.sql)",
+    );
+    expect(mislabelled).not.toBe(SUBSET_LOG);
+    const r = runCountRecheck(mislabelled, PR);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("printed 2 per-file row(s) but reported 50 annotated file(s)");
+  });
+
+  it("RED: two scope lines, or a DIAGNOSTIC one, are not this gate", () => {
+    const twice = GREEN_LOG.replace("scope: FULL 50/50 annotated files", "scope: FULL 50/50 annotated files\nscope: FULL 50/50 annotated files");
+    const t = runCountRecheck(twice, PUSH);
+    expect(t.status, t.out).toBe(1);
+    expect(t.out).toContain("printed 2 'scope:' lines");
+    const diag = GREEN_LOG.replace("scope: FULL 50/50 annotated files", "scope: DIAGNOSTIC supabase/tests/test_x.sql");
+    const d = runCountRecheck(diag, PUSH);
+    expect(d.status, d.out).toBe(1);
+    expect(d.out).toContain("is neither the FULL nor the SUBSET form");
   });
 });
 
@@ -2396,5 +2679,115 @@ describe("[164.8.2-WR-07] slice anchors fail loud instead of degenerating", () =
     expect(() =>
       sliceBetweenAnchors(mutant, "\n  sql-mutation:", "\n  plan-anchor-verify:"),
     ).toThrow(/ANCHOR MISSING: "\\n {2}plan-anchor-verify:"/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 164.4.2-07 (DECISION D) — the SUBSET path keeps every floor's FULL-CORPUS
+// meaning. A subset run (`--subset-from`) can exit 0, which is new: until this
+// phase only a full run could. So the floors must be pinned on the subset path
+// in BOTH directions, one layer above the runner:
+//   - ARMS_FLOOR is NOT compared on a subset — a narrowed biting count under a
+//     full-corpus floor would always fail, and renormalising the floor to the
+//     narrowed denominator is the laundering CONTEXT's vacuity fence forbids;
+//   - FILES_FLOOR and WAIVED_CEILING STILL fire on a subset, and FILES_FLOOR's
+//     numerator is the FULL scan's — the stale-low direction the runner is blind
+//     to by construction if a subset ever fed it a narrowed count.
+// Driven through `runCorpus` with an injected lane runner, so no cluster is
+// needed; the assertions read ONLY `floor` defects and the printed lines, never
+// the stub's arm verdicts.
+// ---------------------------------------------------------------------------
+describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally against a lower-bound floor, and never moves one", () => {
+  const FIXTURE_DIR = join(REPO_ROOT, "scripts", "mutation-runner", "fixtures");
+  const PROBE_ABSENT = { status: 0, output: "NOTICE:  LANE-PROBE: pg_cron absent", seconds: 0, measureFail: null, invoked: true };
+  const stubLane = ({ leg }: { leg: string }) =>
+    leg === "probe" ? PROBE_ABSENT : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+  type Defect = { kind: string; detail: string };
+  const floorDefects = (defects: Defect[], re: RegExp) => defects.filter((d) => d.kind === "floor" && re.test(d.detail));
+  const drive = (opts: Record<string, unknown>) => {
+    const lines: string[] = [];
+    const r = runCorpus({ scopeDir: FIXTURE_DIR, laneRunner: stubLane, log: (s: string) => lines.push(s), ...opts });
+    return { r, lines };
+  };
+
+  it("AIM: the fixture corpus has exactly ONE annotated file carrying ONE waiver — so a one-file subset IS the whole annotated set, and any floor difference below is the MODE's", () => {
+    const corpus = scanCorpus(FIXTURE_DIR);
+    expect(corpus.annotatedFiles).toEqual(["mini-gate.sql"]);
+    const waivers = readFileSync(join(FIXTURE_DIR, "mini-gate.sql"), "utf8")
+      .split("\n")
+      .filter((l) => WAIVER.test(l));
+    expect(waivers).toHaveLength(1);
+  });
+
+  it("a SUBSET run raises NO biting-count ARMS_FLOOR defect though its biting count is far below ARMS_FLOOR — and SAYS the floor was not compared", () => {
+    const { r, lines } = drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 1, armsFloor: ARMS_FLOOR, waivedCeiling: 1 });
+    expect(r.subset, "the run must actually have been a SUBSET run").toBe(true);
+    expect(r.bitingArms, "AIM: the biting count must sit below the real constant, or the absence proves nothing").toBeLessThan(ARMS_FLOOR);
+    // The subset's BITING count is never compared to ARMS_FLOOR…
+    expect(floorDefects(r.defects, /^ARMS_FLOOR regression: \d+ biting arm/)).toEqual([]);
+    // …but since review 164.4.2 WR-03 the corpus-wide static upper bound IS.
+    // This one-file fixture bounds at 2 annotated-unwaived arms, far under the
+    // real floor, so that — and only that — ARMS_FLOOR defect fires.
+    expect(floorDefects(r.defects, /ARMS_FLOOR/).map((d) => d.detail)).toEqual([
+      expect.stringMatching(/^ARMS_FLOOR regression \(static upper bound\): 2 annotated-unwaived arm\(s\) < floor /),
+    ]);
+    expect(lines.some((l) => /^ARMS_FLOOR: NOT compared — this SUBSET run covered 1 of 1 annotated files/.test(l))).toBe(true);
+    expect(lines.filter((l) => l.startsWith("scope: "))).toEqual(["scope: SUBSET 1/1 annotated files: mini-gate.sql"]);
+  });
+
+  it("CONTROL: a FULL run over the SAME fixture with the SAME floor still raises the ARMS_FLOOR regression", () => {
+    const { r, lines } = drive({ filesFloor: 1, armsFloor: ARMS_FLOOR, waivedCeiling: 1 });
+    expect(r.subset).toBe(false);
+    expect(floorDefects(r.defects, /^ARMS_FLOOR regression: \d+ biting arm\(s\) < floor /)).toHaveLength(1);
+    expect(lines.filter((l) => l.startsWith("scope: "))).toEqual(["scope: FULL 1/1 annotated files"]);
+    expect(r.exitCode).toBe(1);
+  });
+
+  it("FILES_FLOOR still FIRES on a subset run when violated", () => {
+    const { r } = drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 99, armsFloor: 0, waivedCeiling: 1 });
+    expect(r.subset).toBe(true);
+    expect(floorDefects(r.defects, /^FILES_FLOOR regression: 1 annotated file\(s\) < floor 99$/)).toHaveLength(1);
+    expect(r.exitCode).toBe(1);
+  });
+
+  it("WAIVED_CEILING still FIRES on a subset run when violated", () => {
+    const { r } = drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 1, armsFloor: 0, waivedCeiling: 0 });
+    expect(r.subset).toBe(true);
+    expect(floorDefects(r.defects, /^WAIVED_CEILING exceeded: 1 waived arm\(s\) > ceiling 0\./)).toHaveLength(1);
+    expect(r.exitCode).toBe(1);
+  });
+
+  it("FILES_FLOOR's numerator on a subset run is the FULL scan's, never the narrowed count — both directions", () => {
+    // The self-test corpus has many annotated files; narrowing to ONE makes a
+    // renormalised numerator (1) distinguishable from the full one (N).
+    const full = scanCorpus(SELFTEST_DIR).filesAnnotated;
+    expect(full, "AIM: the narrowed and full numerators must differ, or this arm cannot tell them apart").toBeGreaterThan(1);
+    const at = (filesFloor: number) =>
+      runCorpus({
+        scopeDir: SELFTEST_DIR,
+        subsetFiles: ["nonbiting-gate.sql"],
+        filesFloor,
+        armsFloor: 0,
+        waivedCeiling: 99,
+        laneRunner: stubLane,
+        log: () => {},
+      });
+    const holds = at(full);
+    expect(holds.subset).toBe(true);
+    expect(holds.filesAnnotated).toBe(full);
+    expect(floorDefects(holds.defects, /FILES_FLOOR/), "a floor equal to the FULL count must hold on a subset run").toEqual([]);
+    const fires = at(full + 1);
+    expect(floorDefects(fires.defects, /FILES_FLOOR regression/), "one above the FULL count must fire on a subset run").toHaveLength(1);
+  });
+
+  it("the CLI can never hand a subset run a lowered floor: main's runCorpus call passes no floor, ceiling or lane runner", () => {
+    const code = maskJsComments(readFileSync(RUNNER_PATH, "utf8"));
+    const at = code.indexOf("\nfunction main(argv) {");
+    expect(at, "main(argv) not found in the masked source").toBeGreaterThan(-1);
+    const end = code.indexOf("\n}\n", at);
+    expect(end).toBeGreaterThan(at);
+    const mainBody = code.slice(at, end);
+    const calls = mainBody.match(/runCorpus\(\{[^}]*\}\)/g) ?? [];
+    expect(calls).toEqual(["runCorpus({ scopeDir, onlyFile, onlyArm, subsetFiles })"]);
   });
 });

@@ -36,20 +36,24 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Annotated, Any
 
+import httpx
+import sentry_sdk
 import structlog
 from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
+from postgrest.exceptions import APIError
 from pydantic import BaseModel, ValidationInfo, field_validator, model_validator
 
 from services import exchange as exchange_svc
 from services.basis_series import derive_basis_series
-from services.db import get_supabase, one, rows
+from services.db import db_read_with_retry, get_supabase, one, rows
 from services.ingestion import get_adapter
 from services.ingestion.adapter import FlowType, KeySubmissionRequest, Source, Trade
 from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
 from services.closed_sets import CRYPTO_VENUES as _CRYPTO_VENUES
 from services.closed_sets import sfox_enabled_server
 from services.closed_sets import mt5_enabled_server
+from services.job_worker import CLAIMABLE_STATUSES, JOB_CHAIN_FOLLOW_ON
 from services.metrics import periods_per_year_for_asset_class
 # WIZFORM-ABANDON / D-40 — imported from the module that OWNS it
 # (`services.mt5_client`, a leaf whose only in-tree import is `services.redact`),
@@ -769,6 +773,147 @@ _RESYNC_DRAFT_RESUME_WINDOW = timedelta(hours=8)
 # (migrations/20260716090000...sql:181+) minus 'pending'.
 _IN_FLIGHT_JOB_STATUSES = frozenset({"running", "done_pending_children"})
 
+# Every compute_jobs status that will still do work: the claimable set
+# (`pending`, `failed_retry`) plus the in-flight set above. `done` and
+# `failed_final` are the only terminal statuses. The TypeScript mirror is
+# `IN_FLIGHT_JOB_STATUSES` in `src/lib/compute-state.ts`.
+_NON_TERMINAL_JOB_STATUSES = frozenset(CLAIMABLE_STATUSES) | _IN_FLIGHT_JOB_STATUSES
+
+
+def _chain_kinds_from(head: str) -> frozenset[str]:
+    """The job kinds a chain starting at ``head`` can reach, walked over the
+    canonical ``JOB_CHAIN_FOLLOW_ON`` map rather than re-listed here."""
+    seen: set[str] = set()
+    frontier = [head]
+    while frontier:
+        kind = frontier.pop()
+        if kind in seen:
+            continue
+        seen.add(kind)
+        frontier.extend(JOB_CHAIN_FOLLOW_ON.get(kind, ()))
+    return frozenset(seen)
+
+
+# The chain a resync starts: process_key_long and every follow-on it can
+# enqueue (sync_trades, derive_broker_dailies, compute_analytics_from_csv).
+# This is `FACTSHEET_CHAIN_KINDS` in `src/lib/compute-state.ts` minus the
+# legacy `compute_analytics` kind, which nothing enqueues any more.
+_RESYNC_CHAIN_KINDS = _chain_kinds_from("process_key_long")
+
+# Review-fix round 1 (HIGH-1) — how old a non-terminal chain job may be and
+# still count as LIVE for the resync chain-in-flight guard in `process_key`. An
+# older row reads as absent, so it cannot refuse a resync for ever.
+#
+# DERIVED, the same way as `_RESYNC_DRAFT_RESUME_WINDOW` above. Each
+# compute_jobs row is ONE hop of the chain: a follow-on hop is a NEW row with
+# its own `created_at`. So the most a healthy row can age is the single-hop
+# ceiling. `process_key_long` has the largest `TIMEOUT_PER_KIND` of the four
+# chain kinds (1800 s), so its 13,230 s (~3.7 h) single-hop figure bounds every
+# kind, and the house sizing rule gives 8 hours. That is strictly below
+# `STRATEGY_ANALYTICS_REAP_THRESHOLD` ("16 hours").
+#
+# ⚠️ Err loose, as the draft window does: too tight lets a slow but healthy
+# hop admit a second chain, which is the defect this guard closes.
+_RESYNC_CHAIN_JOB_LIVE_WINDOW = timedelta(hours=8)
+
+# The only `last_error` that `reset_stalled_compute_jobs` writes when it puts
+# a stuck `running` row back to `pending` (migration
+# 20260516104201_compute_jobs_audit_2026_05_07_residual.sql). A claim clears
+# `last_error`, so only a reset row that has not been re-claimed carries it.
+_WORKER_STALLED_LAST_ERROR = "worker_stalled"
+
+
+# Round-2 review (SFH MED-2) — the failures a resync chain-guard read may meet
+# and still be reported QUIETLY (a warning, no exception capture): a PostgREST
+# error, and a transport or timeout error. The same split as
+# `services/benchmark.py`'s `_CACHE_READ_ERRORS`. Anything else is a
+# programming or infrastructure error: it logs at error level and is captured.
+_GUARD_READ_QUIET_ERRORS: tuple[type[BaseException], ...] = (
+    APIError,
+    httpx.HTTPError,
+    OSError,
+)
+
+
+def _sentry_report(send: Any, *, what: str) -> None:
+    """Run one Sentry call without ever masking the request it reports on, and
+    say so in the log when it fails (round-2 review, LOW-6: this used to be a
+    bare ``except: pass``)."""
+    try:
+        send()
+    except Exception as sentry_exc:  # noqa: BLE001 — the report must not break the resync
+        log.warning(
+            "process_key.sentry_report_failed",
+            what=what,
+            error_type=type(sentry_exc).__name__,
+        )
+
+
+def _report_guard_read_failure(
+    exc: BaseException,
+    *,
+    event: str,
+    strategy_id: Any,
+    correlation_id: str,
+    guard_skipped: bool,
+) -> None:
+    """Log and report a failed resync chain-guard read (round-2 review, SFH
+    MED-2).
+
+    A DB or network error (`_GUARD_READ_QUIET_ERRORS`) logs at warning. Any
+    other exception logs at error level and is captured. When the failure
+    makes the guard SKIP (``guard_skipped``), that fall-through is itself
+    reported to Sentry whatever the error, because it can admit a second
+    chain."""
+    fields: dict[str, Any] = {
+        "strategy_id": strategy_id,
+        "correlation_id": correlation_id,
+        "error_type": type(exc).__name__,
+        "error": str(exc)[:200],
+    }
+    if isinstance(exc, _GUARD_READ_QUIET_ERRORS):
+        log.warning(event, **fields)
+    else:
+        log.error(event, **fields)
+        _sentry_report(lambda: sentry_sdk.capture_exception(exc), what=event)
+    if guard_skipped:
+        _sentry_report(
+            lambda: sentry_sdk.capture_message(
+                "resync chain guard skipped: its compute_jobs read failed "
+                f"({type(exc).__name__}); a second chain may start",
+                level="warning",
+            ),
+            what=event,
+        )
+
+
+def _chain_job_dead_reason(job: dict[str, Any]) -> str | None:
+    """Why a non-terminal chain job is NOT live evidence of a running chain, or
+    None when it is live.
+
+    `reset_stalled_compute_jobs` puts a stuck `running` row back to `pending`
+    without touching `attempts`, and the claim increments `attempts` with no
+    cap. So a job whose worker keeps dying cycles running -> pending for ever
+    and never reaches a terminal status. Such a row must not refuse a resync.
+    - ``worker_stalled``: the watchdog reset it; the last worker died on it.
+    - ``attempts_exhausted``: it has used its whole attempt budget and is not
+      running. A normal failure at that count goes `failed_final`, so only a
+      stall reset leaves such a row claimable.
+    - ``attempts_over_budget``: it is running past its budget, which only a
+      stall reset plus a re-claim can produce. A `running` row AT its budget
+      is its legitimate final attempt (the claim counts it), so it stays live.
+    """
+    if job.get("last_error") == _WORKER_STALLED_LAST_ERROR:
+        return "worker_stalled"
+    attempts = job.get("attempts")
+    max_attempts = job.get("max_attempts")
+    if isinstance(attempts, int) and isinstance(max_attempts, int):
+        if attempts > max_attempts:
+            return "attempts_over_budget"
+        if attempts >= max_attempts and job.get("status") != "running":
+            return "attempts_exhausted"
+    return None
+
 
 def _resume_duplicate_job(
     *,
@@ -854,7 +999,9 @@ def _wizard_duplicate_reply(
     """The single WIZARD_DUPLICATE body, shared by BOTH emitters.
 
     There are two of them — the pre-check and the 23505 race-winner arm — and
-    they drifted apart in every prior fix to this contract. One builder means a
+    they drifted apart in every prior fix to this contract. (A third caller,
+    the resync chain-in-flight guard in ``process_key``, reuses this builder
+    for the same reason.) One builder means a
     future change to the shape cannot land on one arm only.
 
     Status 200 (NOT 409) per the API-7 spec: idempotency is a feature, not a
@@ -1505,6 +1652,166 @@ async def process_key(
                 job_state=_job_state,
             )
 
+    # CHAIN-IN-FLIGHT GUARD (2026-09-24). The draft pre-check above only sees a
+    # verification that is still `draft`, and process_key_long moves it out of
+    # draft within seconds. A full chain (process_key_long -> sync_trades ->
+    # derive_broker_dailies -> compute) can take many minutes after that. Before
+    # this guard, every wizard reload or Retry in that window started a SECOND
+    # chain. The SQL status bridge then wrote `computing` back while any job of
+    # the strategy was non-terminal, so the first chain's `complete` lasted
+    # under a second and the wizard poll never saw it.
+    #
+    # So a resync is refused as a duplicate while ANY job of the chain it would
+    # start is non-terminal for this strategy. No draft is minted and nothing is
+    # enqueued. `queued` is True because a non-terminal job does exist, and
+    # `job_state` is "running" because it was in flight before this call (the
+    # PYAPI-09 contract above).
+    #
+    # WHICH VERIFICATION THE REPLY NAMES (review-fix round 1, MEDIUM-4). Only a
+    # `process_key_long` row carries its session's `verification_id` (in
+    # `metadata`); the follow-on hops are enqueued with none. The newest
+    # verification of the strategy is NOT necessarily that chain's session, so
+    # its status is reported only when its id equals the job's own
+    # `verification_id`. Otherwise (a follow-on hop, or a newer unrelated
+    # verification) the reply carries the job's verification id, which may be
+    # None, and `status: None`, and a warning is logged. An unrelated
+    # verification's status is never presented as this chain's.
+    #
+    # Tenant scope is the same as the draft pre-check's: this runs after the
+    # `_caller_owns_strategy` gate, so the strategy_id filter carries it.
+    #
+    # Both reads go through `db_read_with_retry` (a gateway 504 is retried inside
+    # one gateway window). If the job read still fails, the guard is SKIPPED and
+    # the resync takes the path it took before this guard existed, logged with
+    # context and reported (`_report_guard_read_failure`: a DB or network error
+    # at warning, anything else at error with an exception capture, and the
+    # fall-through itself always to Sentry): a read failure must never become a
+    # bare 500 on a user's Retry.
+    # The cost is the pre-guard behaviour (a possible second chain), not a
+    # stuck user.
+    #
+    # A job that is non-terminal is not always LIVE (review-fix round 1,
+    # HIGH-1). A row older than `_RESYNC_CHAIN_JOB_LIVE_WINDOW` reads as absent,
+    # and a crash-looping row (`_chain_job_dead_reason`) is logged at warning
+    # and reported to Sentry, then skipped, so the resync goes through. Without
+    # both, a job whose worker keeps dying would refuse every resync for ever.
+    if body.flow_type == "resync":
+        live_cutoff = datetime.now(timezone.utc) - _RESYNC_CHAIN_JOB_LIVE_WINDOW
+        try:
+            chain_job_rows = rows(
+                await db_read_with_retry(
+                    lambda: supabase.table("compute_jobs")
+                    .select(
+                        "id,kind,status,attempts,max_attempts,last_error,created_at,metadata"
+                    )
+                    .eq("strategy_id", strategy_id)
+                    .in_("kind", sorted(_RESYNC_CHAIN_KINDS))
+                    .in_("status", sorted(_NON_TERMINAL_JOB_STATUSES))
+                    .gte("created_at", live_cutoff.isoformat())
+                    .order("created_at", desc=True)
+                    .limit(20)
+                    .execute()
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — classified and reported below
+            _report_guard_read_failure(
+                exc,
+                event="process_key.resync_chain_inflight_read_failed",
+                strategy_id=strategy_id,
+                correlation_id=correlation_id,
+                guard_skipped=True,
+            )
+            chain_job_rows = []
+        inflight_chain_job: list[dict[str, Any]] = []
+        for chain_job in chain_job_rows:
+            dead_reason = _chain_job_dead_reason(chain_job)
+            if dead_reason is None:
+                inflight_chain_job = [chain_job]
+                break
+            log.warning(
+                "process_key.resync_chain_job_not_live",
+                strategy_id=strategy_id,
+                correlation_id=correlation_id,
+                job_id=str(chain_job.get("id")),
+                job_kind=chain_job.get("kind"),
+                job_status=chain_job.get("status"),
+                attempts=chain_job.get("attempts"),
+                max_attempts=chain_job.get("max_attempts"),
+                reason=dead_reason,
+            )
+            _sentry_report(
+                lambda: sentry_sdk.capture_message(
+                    f"resync chain guard skipped a non-live {chain_job.get('kind')} "
+                    f"job ({dead_reason})",
+                    level="warning",
+                ),
+                what="process_key.resync_chain_job_not_live",
+            )
+        if inflight_chain_job:
+            try:
+                latest_verification = one(
+                    await db_read_with_retry(
+                        lambda: supabase.table("strategy_verifications")
+                        .select("id,status,trust_tier")
+                        .eq("strategy_id", strategy_id)
+                        .order("created_at", desc=True)
+                        .limit(1)
+                        .maybe_single()
+                        .execute()
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — a job IS in flight; reply without it
+                _report_guard_read_failure(
+                    exc,
+                    event="process_key.resync_chain_inflight_verification_read_failed",
+                    strategy_id=strategy_id,
+                    correlation_id=correlation_id,
+                    guard_skipped=False,
+                )
+                latest_verification = None
+            live_job = inflight_chain_job[0]
+            job_metadata = live_job.get("metadata")
+            chain_verification_id = (
+                job_metadata.get("verification_id")
+                if isinstance(job_metadata, dict)
+                else None
+            )
+            if (
+                chain_verification_id is not None
+                and latest_verification is not None
+                and latest_verification.get("id") == chain_verification_id
+            ):
+                reply_verification: dict[str, Any] = latest_verification
+            else:
+                log.warning(
+                    "process_key.resync_chain_inflight_verification_unmatched",
+                    strategy_id=strategy_id,
+                    correlation_id=correlation_id,
+                    job_id=str(live_job.get("id")),
+                    job_kind=live_job.get("kind"),
+                    chain_verification_id=chain_verification_id,
+                    latest_verification_id=(
+                        latest_verification.get("id") if latest_verification else None
+                    ),
+                )
+                reply_verification = {
+                    "id": chain_verification_id,
+                    "status": None,
+                    "trust_tier": None,
+                }
+            log.info(
+                "process_key.resync_chain_inflight_dedup_hit",
+                job_id=str(live_job.get("id")),
+                job_kind=live_job.get("kind"),
+                job_status=live_job.get("status"),
+            )
+            return _wizard_duplicate_reply(
+                existing=reply_verification,
+                correlation_id=correlation_id,
+                queued=True,
+                job_state="running",
+            )
+
     trust_tier = "csv_uploaded" if body.source == "csv" else "api_verified"
     try:
         draft_insert = (
@@ -1959,8 +2266,9 @@ async def process_key(
         },
     ).execute()
 
-    # reconstruct_positions (BACKBONE-09 wiring); persisted in P8.
-    await adapter.reconstruct_positions(trades)
+    # No reconstruct_positions call here (removed 2026-09-24): its result was
+    # discarded, never persisted, and its missing-mark warning misreported
+    # a diagnostic as understated equity. Same removal as long_fetch step 5.
 
     # Final transition
     supabase.rpc(

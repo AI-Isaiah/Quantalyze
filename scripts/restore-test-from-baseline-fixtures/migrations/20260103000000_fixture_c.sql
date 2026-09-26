@@ -41,3 +41,16 @@ SELECT 1;
 INSERT INTO fx_keep (id, label, status) VALUES (1, 'ref_a', 'verified'), (2, 'ref_b', DEFAULT) ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO fx_keep (id, label) VALUES (3, 'ref_c') ON CONFLICT (id) DO NOTHING;
+
+-- 164.9.1-05 ([164.9-TEST-ANALYTICS-URL-REARM]): the fixture analog of the
+-- analytics destination seed in
+-- supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql,
+-- same statement shape (unqualified target, ON CONFLICT (key) DO NOTHING). The
+-- value is the normalize self-test's SYNTHETIC stand-in for a PROD-shaped host,
+-- never a real host. The restore replays it and then, inside the same
+-- transaction, the normalisation fragment rewrites it to the loopback sink: arm
+-- 33 reads the sink after a COMMIT, arm 34 reads this stand-in after a ROLLBACK.
+-- It is added HERE, below the fx_keep statements, so the fixture ledger keeps its
+-- three rows, the fx_keep statements keep their line numbers, and the replay's
+-- first unqualified statement is still an fx_keep one (arm 23 leg (b) names it).
+INSERT INTO system_settings (key, value) VALUES ('analytics_service_url', 'https://selftest-stand-in.up.railway.app') ON CONFLICT (key) DO NOTHING;

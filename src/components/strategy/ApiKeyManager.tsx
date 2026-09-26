@@ -7,17 +7,55 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "./ApiKeyForm";
-import { SyncProgress, type SyncStatus } from "./SyncProgress";
+import {
+  addKeyBlockedReason,
+  COMPOSITE_CARD_NOTE,
+  deleteCompositeWarning,
+  DELETE_MEMBERSHIP_UNCHECKED_COPY,
+  EMPTY_NOLINK_COPY,
+  FINISH_UNVERIFIED_NOTE,
+  SHAPE_UNKNOWN_CARD_NOTE,
+  ENQUEUE_BOUND_MS,
+  LINK_UPDATE_BOUND_MS,
+  type PanelStopReason,
+} from "./key-card-copy";
+import {
+  SyncProgress,
+  type EvidenceBaseline,
+  type SyncStatus,
+  type SyncStatusInfo,
+} from "./SyncProgress";
 import { UpdateMt5SecretDialog } from "./UpdateMt5SecretDialog";
+import { readChainJobState } from "./chain-job-state";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 import type { ApiKey } from "@/lib/types";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 import { isComputedAnalytics, isUntrustedKeySyncStatus } from "@/lib/closed-sets";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 interface ApiKeyManagerProps {
   strategyId: string;
   currentKeyId: string | null;
   defaultExchange?: string;
+  /**
+   * Phase 167.2 / KCS-23: what the edit page could tell about the strategy.
+   * "single" means NOT a composite (a single-key or an unlinked strategy, both
+   * of which may be linked from this card); "composite" is a strategy with
+   * `strategy_keys` members; "unknown" is a member count the page could not
+   * read. A card-local tri-state, deliberately not `StrategyShape` from
+   * `@/lib/strategy-shape`, whose csv and unlinked arms this card does not
+   * need. Defaults to "single", so every existing render is unchanged.
+   */
+  keyShape?: "single" | "composite" | "unknown";
+  /**
+   * 167.2-REVIEW CR-02: on a composite, the ids of its `strategy_keys`
+   * members, read by the edit page. The card then lists ONLY these keys, so
+   * KCS23-COMPOSITE ("reads from every key below") is true of the list as
+   * rendered. Ignored for any other shape. Absent on a composite lists no key
+   * (fail closed: a key the page did not name a member is never claimed as one).
+   */
+  compositeMemberKeyIds?: readonly string[];
 }
 
 /**
@@ -68,19 +106,42 @@ const SYNC_UNAVAILABLE_COPY =
  *     source precisely so it reaches users. Reading `error` alone rendered
  *     "Trade sync failed" over the top of it.
  */
-async function syncFailureMessage(res: Response): Promise<string> {
+async function syncFailureMessage(res: Response): Promise<EnqueueAnswerError> {
   const contentType = res.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {
     const body: unknown = await res.json().catch(() => null);
     if (body !== null && typeof body === "object") {
       const fields = body as Record<string, unknown>;
-      if (typeof fields.error === "string" && fields.error) return fields.error;
+      if (typeof fields.error === "string" && fields.error) {
+        return new EnqueueAnswerError(fields.error, "verdict");
+      }
       if (typeof fields.human_message === "string" && fields.human_message) {
-        return fields.human_message;
+        return new EnqueueAnswerError(fields.human_message, "verdict");
       }
     }
   }
-  return SYNC_UNAVAILABLE_COPY;
+  return new EnqueueAnswerError(SYNC_UNAVAILABLE_COPY, "transport");
+}
+
+/**
+ * 167.2-REVIEW-SFH-R2 R2-M1: what a failed enqueue answer IS. `verdict`: the
+ * route itself answered with a JSON `error` / `human_message` body, so it is
+ * the route's refusal of this sync. `transport`: a non-JSON failure (a
+ * platform 504 at the route's `maxDuration`, a proxy's HTML page), which says
+ * nothing about whether the upstream enqueue committed. `unrecognized`: a 2xx
+ * without enqueue evidence. A thrown `fetch` is not this class, and reads as
+ * transport. The message is what the panel shows on a LIVE attempt, exactly
+ * as before; the kind decides only whether a LATE answer may replace the
+ * `enqueue_bound` panel.
+ */
+class EnqueueAnswerError extends Error {
+  constructor(
+    message: string,
+    readonly kind: "verdict" | "transport" | "unrecognized",
+  ) {
+    super(message);
+    this.name = "EnqueueAnswerError";
+  }
 }
 
 /**
@@ -98,6 +159,19 @@ function isSyncEnqueued(body: unknown): boolean {
     typeof body === "object" &&
     (body as Record<string, unknown>).ok === true
   );
+}
+
+/**
+ * 167.2-REVIEW-SFH-R2 R2-L2: did this enqueued answer queue a NEW job for this
+ * attempt? `/api/keys/sync` answers `ok: true` for a duplicate submission
+ * (`code: "WIZARD_DUPLICATE"`) and can carry `queued: false`; neither is a job
+ * this attempt started. Only a new job lets the panel's give-up attribute a
+ * `failed_final` chain to this attempt (KCS-02: per-attempt evidence). The
+ * composite branch carries no `queued` field and did enqueue.
+ */
+function enqueuedNewJob(body: unknown): boolean {
+  const fields = body as Record<string, unknown>;
+  return fields.queued !== false && fields.code !== "WIZARD_DUPLICATE";
 }
 
 /**
@@ -132,8 +206,10 @@ function isSyncEnqueued(body: unknown): boolean {
  * below is kept as a second line: it is what makes this component's rule
  * independent of how the panel gates its poll.
  *
- * ENDED-ATTEMPT BRANCHES. The attempt is registered before any await, so a
- * failure elsewhere (the post-add catch) sees it as live from the click. A
+ * ENDED-ATTEMPT BRANCHES. The attempt is registered before any await, so
+ * anything that checks `attemptRef` sees it as live from the click (until
+ * 167.2 KCS-01 that included an untracked post-add sync's catch; the post-add
+ * sync is now itself the tracked attempt). A
  * continuation of an attempt that has already ended (its terminal arrived, then
  * its own post-enqueue re-read threw, possibly after a NEWER attempt started)
  * may not write the panel or the marker: `endAttempt` answers false for it.
@@ -158,13 +234,62 @@ interface SyncAttempt {
  */
 const TERMINAL_REREAD_BOUND_MS = 15_000;
 
+/**
+ * Phase 167.2 / KCS-02 (RESEARCH P4, Q2): how long the pre-enqueue baseline
+ * read of `strategy_analytics.computed_at` may take. It is the same class of
+ * request as the terminal re-read above (one owner-scoped PostgREST read, and
+ * supabase-js sets no timeout of its own), so it takes the same bound. On
+ * expiry or error the attempt continues with an `"unknown"` baseline: the panel
+ * then admits a terminal only after it has read `computing` itself (evidence
+ * (a)), and never on a changed `computed_at` (evidence (b)).
+ */
+const BASELINE_READ_BOUND_MS = 15_000;
+
+/**
+ * Phase 167.2 / KCS-04: what one key-list read tells the terminal arm. `ok` is
+ * whether the list now on screen came from a clean read; `subjectStatus` is the
+ * `sync_status` of the sync panel's subject key (`lastAttemptedKeyId`) in the
+ * rows that were APPLIED, or null when the subject is not among them. A read
+ * dropped as out of date (WR-04) answers with the applied read's outcome.
+ */
+interface KeysReadOutcome {
+  ok: boolean;
+  subjectStatus: string | null;
+  /**
+   * 167.2-REVIEW-SFH L-2: whether the subject key is among the applied rows at
+   * all. A subject missing from them (deleted in another tab) used to read as
+   * `subjectStatus: null`, i.e. "not untrusted", and the panel showed "Up to
+   * date" for a key the list no longer held.
+   */
+  subjectPresent: boolean;
+}
+
 
 // 167-06 security delta (UF-1): authored copy for a delete whose outcome we
 // could not confirm. A raw PostgREST message never reaches the page.
 const DELETE_FAILED_COPY =
   "Failed to delete key. Try again, and contact support if it keeps failing.";
 
-export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: ApiKeyManagerProps) {
+export function ApiKeyManager({
+  strategyId,
+  currentKeyId,
+  defaultExchange,
+  keyShape = "single",
+  compositeMemberKeyIds,
+}: ApiKeyManagerProps) {
+  /**
+   * Phase 167.2 / KCS-23: may this card offer a control that writes
+   * `strategies.api_key_id` (Resync, Use & Sync, Add Key)? Only when the page
+   * knows the strategy is NOT a composite. `handleLinkKey` writes that column
+   * unconditionally, so on a composite `Use & Sync` would silently turn it into
+   * a single-key strategy, and `Add Key` links the new key the same way. An
+   * "unknown" shape fails closed on these controls, since it might be a
+   * composite, but NOT on the remedy controls: `Update password`, `Delete` and
+   * each key's pill stay, because the /strategies "Sign-in failed" pill links
+   * here for exactly that remedy. The three link handlers also return early
+   * when this is false (defence in depth behind the missing buttons).
+   */
+  const linkControlsAllowed = keyShape === "single";
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -182,10 +307,25 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   // target. Without it, the retry closure would see null and no-op
   // (pre-existing bug found in Task 1.2 Phase 3 eng review).
   const [lastAttemptedKeyId, setLastAttemptedKeyId] = useState<string | null>(null);
+  // Phase 167.2 / KCS-04: the same subject, mirrored into a ref wherever the
+  // state is set. `loadKeys` is a useCallback keyed on `currentKeyId` only, so
+  // it reads the subject here rather than from the render it closed over.
+  const lastAttemptedKeyIdRef = useRef<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  // 167.2-REVIEW-R2 WR-02 (founder decision 2026-09-24): what the Delete
+  // confirm knows about the key's composite memberships. "checking" holds the
+  // confirm's Delete while the bounded read is open; the answer is shown as an
+  // amber warning inside the confirm, and never blocks the delete. The seq
+  // ref drops an answer for a confirm that was closed or re-opened meanwhile.
+  const [deleteCheck, setDeleteCheck] = useState<
+    | { state: "checking" }
+    | { state: "none" }
+    | { state: "warn"; text: string }
+  >({ state: "none" });
+  const deleteCheckSeqRef = useRef(0);
   // Phase 164.5.3 / MT5CREDS Plan 05 — the id of the MT5 key whose password
   // is being corrected. Distinct from Reconnect: this key's credential is
   // WRONG and needs re-validation, not merely "try the stored one again".
@@ -195,6 +335,31 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   // the one their render closed over, and it never drives a render itself
   // (`syncingKeyId` does).
   const attemptRef = useRef<SyncAttempt | null>(null);
+  // 167.2-REVIEW-SFH M-1: the attempt whose `enqueue_bound` panel is on screen,
+  // or null. Its late enqueue answer may update THAT panel (a late 2xx says
+  // the sync started; a late rejection shows the route's own failure), and
+  // only while nothing newer began: every registration clears it.
+  const unconfirmedAttemptRef = useRef<SyncAttempt | null>(null);
+  // Phase 167.2 / KCS-02: the tracked attempt's pre-enqueue `computed_at`
+  // (see `readEvidenceBaseline`), and a per-attempt sequence that keys the
+  // panel. The panel stays mounted from `error` into a Retry, so without the
+  // key its "has read computing" evidence would carry into the next attempt.
+  const [evidenceBaseline, setEvidenceBaseline] = useState<EvidenceBaseline>("unknown");
+  const [attemptSeq, setAttemptSeq] = useState(0);
+  // 167.2-REVIEW-SFH-R2 R2-L2: whether the live attempt's enqueue queued a NEW
+  // job (see `enqueuedNewJob`). Reset at every registration.
+  const [attemptEnqueuedNewJob, setAttemptEnqueuedNewJob] = useState(false);
+  // Phase 167.2 / KCS-22: which give-up ended the attempt as `no_result` (the
+  // reason the panel forwarded), so the panel says how long it waited. Reset
+  // at every attempt's registration.
+  const [panelStopReason, setPanelStopReason] = useState<PanelStopReason | null>(null);
+  // Phase 167.2 / KCS-01 (RESEARCH P7, the reverse overlap): true while an
+  // Add Key is in flight, from before its validate request until it hands off
+  // to its own tracked attempt. A ref, not `loading`: `loading` is async
+  // state, so a handler running before the re-render would read it stale
+  // (the NEW-C37-02 lesson). While it is set, `handleSyncTrades` registers
+  // nothing, so no attempt can start that the add would then collide with.
+  const addInFlightRef = useRef(false);
   // 167-06 fix round 2 (167-REVIEW-06-R2 WR-04): the key-list reads are
   // ORDERED. Each `loadKeys` call takes the next number; a response older than
   // the newest one already applied is dropped. Without it, an attempt's own
@@ -202,15 +367,59 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   // install the snapshot from before the job ran, lifting R2's withhold beside
   // a key whose sign-in had failed on the server.
   const keysReadSeqRef = useRef(0);
-  const appliedKeysReadRef = useRef<{ seq: number; ok: boolean }>({ seq: 0, ok: true });
+  // KCS-04: the applied read also records its subject status, so a dropped
+  // read answers with what the list on screen actually shows.
+  const appliedKeysReadRef = useRef<{ seq: number } & KeysReadOutcome>({
+    seq: 0,
+    ok: true,
+    subjectStatus: null,
+    subjectPresent: false,
+  });
+  // 167.2-REVIEW-SFH L-1: a terminal SUCCESS was withheld because the list
+  // could not be re-read (not because its key is untrusted). The panel lands
+  // on idle and unmounts, so without this nothing said a sync had just
+  // finished once a later read cleared the load-error banner. Cleared only by
+  // the next attempt's registration, never by a list read.
+  const [finishUnverified, setFinishUnverified] = useState(false);
   const router = useRouter();
 
-  // Resolves true when the list was re-read cleanly, false when the read
-  // failed (and `loadError` is set). The terminal-success arm needs the answer:
-  // it shows a success only after a re-read that could have withheld it. A read
-  // dropped as out of date (WR-04) answers with the outcome of the newer read
-  // that was applied instead, since that is what the list now shows.
-  const loadKeys = useCallback(async (opts?: { lastSyncedKeyId?: string }): Promise<boolean> => {
+  // 167.2-REVIEW IN-02: an unmount mid-attempt drops the live attempt, so every
+  // liveness guard (`attemptRef.current !== attempt`) stops its continuations:
+  // no baseline read, no enqueue follow-up, no list read and no
+  // `router.refresh()` of whatever route the owner navigated to.
+  useEffect(
+    () => () => {
+      attemptRef.current = null;
+      unconfirmedAttemptRef.current = null;
+    },
+    [],
+  );
+
+  /**
+   * 167.2-REVIEW IN-01: the core of `retireWithheldSuccess`, as a STABLE
+   * callback that reads nothing from its render (only the stable
+   * `setSyncStatus`), so `loadKeys` can depend on it honestly. It used to call
+   * the render-scoped `retireWithheldSuccess` under an `eslint-disable` of
+   * exhaustive-deps: safe only while that function read nothing from its
+   * render, and the disable would have hidden the lint the moment it did.
+   */
+  const retireSuccessIf = useCallback((subjectUntrusted: boolean) => {
+    if (!subjectUntrusted) return;
+    setSyncStatus((prev) => (isComputedAnalytics(prev) ? "idle" : prev));
+  }, []);
+
+  // Resolves `{ ok, subjectStatus }` (see `KeysReadOutcome`): `ok` is false
+  // when the read failed (and `loadError` is set), and `subjectStatus` is the
+  // panel subject's status in the rows this read APPLIED. The terminal-success
+  // arm needs both: it shows a success only after a clean re-read whose rows
+  // show the subject trusted (KCS-04). A read dropped as out of date (WR-04)
+  // answers with the outcome of the newer read that was applied instead, since
+  // that is what the list now shows.
+  //
+  // Phase 167.2 / KCS-04: every applied read also retires a shown success
+  // whose subject it finds untrusted (`retireWithheldSuccess`), so a success
+  // never outlives the moment the list shows its key untrusted.
+  const loadKeys = useCallback(async (opts?: { lastSyncedKeyId?: string }): Promise<KeysReadOutcome> => {
     const seq = ++keysReadSeqRef.current;
     const supabase = createClient();
     // Project only the allowlist — never `.select("*")` on api_keys from a
@@ -225,16 +434,34 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       .from("api_keys")
       .select(API_KEY_USER_COLUMNS)
       .order("created_at", { ascending: false });
-    if (seq < appliedKeysReadRef.current.seq) return appliedKeysReadRef.current.ok;
-    appliedKeysReadRef.current = { seq, ok: !keysErr };
-    if (keysErr) {
-      console.error("[ApiKeyManager] api_keys fetch failed:", keysErr.message);
+    if (seq < appliedKeysReadRef.current.seq) {
+      const { ok, subjectStatus, subjectPresent } = appliedKeysReadRef.current;
+      return { ok, subjectStatus, subjectPresent };
+    }
+    // 167.2-REVIEW-SFH L-2: `data: null` with no error is not a clean read
+    // either (it used to be recorded as `ok: true`), so it takes the error arm.
+    if (keysErr || !data) {
+      // The rows on screen are unchanged, so is their subject status.
+      const { subjectStatus: prevStatus, subjectPresent: prevPresent } =
+        appliedKeysReadRef.current;
+      appliedKeysReadRef.current = {
+        seq,
+        ok: false,
+        subjectStatus: prevStatus,
+        subjectPresent: prevPresent,
+      };
+      const message = keysErr?.message ?? "the key list read returned no rows and no error";
+      console.error("[ApiKeyManager] api_keys fetch failed:", message);
       // H-0395: a non-empty error (network/RLS/session) is NOT "no keys".
       // Surface a distinct, retryable error state and keep whatever keys we
       // had — never let the failure collapse into the empty "no keys" UI.
-      setLoadError(keysErr.message);
-      return false;
+      setLoadError(message);
+      return { ok: false, subjectStatus: prevStatus, subjectPresent: prevPresent };
     }
+    const subjectRow = data.find((k) => k.id === lastAttemptedKeyIdRef.current);
+    const subjectStatus = subjectRow?.sync_status ?? null;
+    const subjectPresent = subjectRow !== undefined;
+    appliedKeysReadRef.current = { seq, ok: true, subjectStatus, subjectPresent };
     // Reached only on a clean response: clear any prior load error so a
     // successful retry restores the normal list / genuine-empty state.
     setLoadError(null);
@@ -250,8 +477,13 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       const targetKey = data.find((k) => k.id === targetKeyId);
       if (targetKey?.last_sync_at) setLastSyncAt(targetKey.last_sync_at);
     }
-    return true;
-  }, [currentKeyId]);
+    // KCS-04: the new call site of the one retirement helper. It judges by
+    // THESE rows, never by a render's copy, and its updater leaves every
+    // in-flight value (syncing, computing) and every non-success alone.
+    // IN-01: through the stable core, an honest dependency (no lint disable).
+    retireSuccessIf(isUntrustedKeySyncStatus(subjectStatus));
+    return { ok: true, subjectStatus, subjectPresent };
+  }, [currentKeyId, retireSuccessIf]);
 
   useEffect(() => {
     loadKeys();
@@ -269,7 +501,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     return true;
   }, []);
 
-  const handleSyncStatusChange = useCallback(async (status: SyncStatus) => {
+  const handleSyncStatusChange = useCallback(async (status: SyncStatus, info?: SyncStatusInfo) => {
     // Only the live attempt's poll may move the panel, and only after its own
     // enqueue response resolved: a read taken before then is the strategy's
     // PREVIOUS analytics row, and its terminal status would end this attempt
@@ -295,7 +527,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       // goes idle) and surfaces the load error instead: an unverified list
       // cannot vouch for the subject key.
       attempt.settling = true;
-      let reread = false;
+      let reread: KeysReadOutcome | null = null;
       let boundTimer: ReturnType<typeof setTimeout> | undefined;
       try {
         // 167-06 fix round 2 (SFH2-MED-1): the re-read is raced against
@@ -316,6 +548,12 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
             { keyId: attempt.keyId },
           );
           setLoadError("The key list re-read did not answer in time.");
+          // 167.2-REVIEW-SFH M-6: an owner-scoped read hanging for 15 s is an
+          // operational signal; tags only (no key id, no strategy id).
+          captureToSentry(new Error("the terminal key-list re-read did not answer within its bound"), {
+            level: "warning",
+            tags: { component: "ApiKeyManager", stage: "terminal-reread-bound" },
+          });
         } else {
           reread = outcome;
         }
@@ -329,20 +567,55 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           err,
         );
         setLoadError(err instanceof Error ? err.message : "The key list re-read failed.");
+        // 167.2-REVIEW-SFH M-6: captured, not only logged.
+        captureToSentry(err, {
+          tags: { component: "ApiKeyManager", stage: "terminal-reread" },
+        });
       } finally {
         clearTimeout(boundTimer);
         endAttempt(attempt);
-        setSyncStatus(reread ? status : "idle");
+        // Phase 167.2 / KCS-04: the moment of withholding is the moment of
+        // retirement. A success is set only when the re-read resolved cleanly
+        // AND its applied rows show the subject key trusted. Beside an
+        // untrusted subject the panel lands on idle, as after a failed re-read,
+        // so no later re-read (the load-error Retry, a refresh, another tab's
+        // fix or delete) can lift a render-time withhold and re-show it.
+        // 167.2-REVIEW-SFH L-2: and only while the subject is still among the
+        // applied rows; a subject deleted elsewhere shows no success.
+        const subjectTrusted =
+          reread !== null &&
+          reread.subjectPresent &&
+          !isUntrustedKeySyncStatus(reread.subjectStatus);
+        setSyncStatus(reread?.ok && subjectTrusted ? status : "idle");
+        // 167.2-REVIEW-SFH L-1: withheld because the LIST is unverified (a
+        // failed, thrown or timed-out re-read), not because of the key: say
+        // that the sync finished, in a note the later reads do not clear.
+        if (reread === null || !reread.ok) setFinishUnverified(true);
         router.refresh();
       }
+    } else if (status === "no_result") {
+      // Phase 167.2 / KCS-22: the panel stopped checking (its poll cap or its
+      // missing-row grace ran out) with no accepted result. That ends the
+      // attempt, so Resync, Update password and Delete are usable again, but it
+      // is not a failure: no "Sync failed", no Retry, no error detail.
+      endAttempt(attempt);
+      setSyncStatus("no_result");
+      setPanelStopReason(info?.stopReason ?? null);
+      setSyncError(null);
     } else if (status === "error") {
       endAttempt(attempt);
       setSyncStatus("error");
-      // FINDING-8: when the poller times out (SyncProgress fires onStatusChange("error")
-      // after POLL_MAX_ATTEMPTS without any syncError from the catch block),
-      // syncError stays null and the UI shows "Sync failed" with no detail text.
-      // Fill a default message for the timeout case so the user has actionable context.
-      setSyncError((prev) => prev ?? "Analytics computation timed out. Please retry or contact support.");
+      // Phase 167.2 / KCS-22 (lineage: FINDING-8). This arm used to fill a
+      // default timeout sentence whenever syncError was null, because the
+      // poller's give-up arrived here as "error". A give-up is now `no_result`
+      // (the arm above), so the only thing that reaches this arm from the panel
+      // is an evidenced failed row, and it carries its own reason: the row's
+      // server-scrubbed `computation_error`, the field the wizard's
+      // SyncPreviewStep already renders. With no reason the panel shows "Sync
+      // failed" with no detail line; a timeout claim with no timeout behind it
+      // was a false line. An enqueue failure's message (set by
+      // `handleSyncTrades`' catch) is never overwritten.
+      setSyncError((prev) => prev ?? info?.computationError ?? null);
     } else {
       setSyncStatus(status);
     }
@@ -373,7 +646,28 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
    * that mirrors other state. 167-UI-SPEC S1 / S1b: the retry-in-flight cell
    * (no credential claim under a spinner) and the optimistic cell (a claim
    * renders only from a status read back from the server).
+   *
+   * Phase 167.2 / KCS-04 (KCS-05 names the replacement): R2's "withheld" is now
+   * "RETIRED". The terminal arm of `handleSyncStatusChange` lands on idle when
+   * its re-read's applied rows show the subject untrusted, and every applied
+   * list read retires a shown success whose subject it finds untrusted. This
+   * render-time derivation stays as a BACKSTOP only: it should never find a
+   * success to hide, and it is no longer what keeps a success off screen,
+   * because a withhold lapsed the moment a later re-read (another tab's fix or
+   * delete, the load-error Retry) stopped reading the key as untrusted.
    */
+  /**
+   * 167.2-REVIEW CR-02: the keys this card LISTS. On a composite, only its
+   * members (see `compositeMemberKeyIds`); every other shape lists every key
+   * the owner has, as before. `keys` stays the full list: the subject lookups
+   * and the Add Key blocked reason read it, and none of them is a claim about
+   * the composite.
+   */
+  const listedKeys =
+    keyShape === "composite"
+      ? keys.filter((k) => compositeMemberKeyIds?.includes(k.id) ?? false)
+      : keys;
+
   const panelSubjectUntrusted = isUntrustedKeySyncStatus(
     keys.find((k) => k.id === lastAttemptedKeyId)?.sync_status,
   );
@@ -421,10 +715,27 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
    * `idle`; the terminal arm of `handleSyncStatusChange` also lands on `idle`
    * when its bounded re-read fails or times out. It runs from event handlers
    * only; it is not an effect.
+   *
+   * Phase 167.2 / KCS-04 (KCS-05: R2's "withheld" becomes "retired"). The
+   * residual this closes (167 D-18 residual 2): the guard above reads THIS
+   * tab's view, so a change made in another tab (the key's password fixed, the
+   * key deleted) reached this tab only through a later re-read, which lifted
+   * R2's withhold and re-showed the success without passing through here. Now:
+   *   - the terminal arm never SETS a success beside an untrusted subject (it
+   *     lands on idle, see `handleSyncStatusChange`), which is the moment of
+   *     withholding becoming the moment of retirement;
+   *   - `loadKeys` calls this with `subjectUntrusted` taken from the rows it
+   *     APPLIED, a new call site of this one helper and not a second
+   *     mechanism, so a success shown for a healthy key is retired by the
+   *     first read that shows that key untrusted, before any later heal read.
+   * The optional argument is what lets `loadKeys` judge by its own rows; every
+   * event-handler caller omits it and keeps the render-time guard above. Still
+   * no effect: `withholdPanelSuccess` is watched by nothing.
    */
-  function retireWithheldSuccess() {
-    if (!panelSubjectUntrusted) return;
-    setSyncStatus((prev) => (isComputedAnalytics(prev) ? "idle" : prev));
+  function retireWithheldSuccess(subjectUntrusted: boolean = panelSubjectUntrusted) {
+    // IN-01: a thin wrapper over the stable core; this is the one place the
+    // render-scoped default (`panelSubjectUntrusted`) is read.
+    retireSuccessIf(subjectUntrusted);
   }
 
   async function handleAddKey(data: {
@@ -439,7 +750,16 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     // to POST /api/keys/validate-and-encrypt and create duplicate api_keys
     // rows. The Connect button is already disabled via `loading`, but Enter
     // inside an <Input> submits the form regardless and setLoading is async.
-    if (loading) return;
+    // Phase 167.2 / KCS-01: nor while a tracked attempt is live. The post-add
+    // sync runs AS the tracked attempt, and the card holds one attempt at a
+    // time, so an add during a live attempt could only collide with it. This
+    // is defence in depth behind the disabled Connect Key. `addInFlightRef` is
+    // checked too because, unlike `loading`, it is never read stale.
+    if (loading || addInFlightRef.current || attemptRef.current !== null) return;
+    // KCS-23: an add links the new key to this strategy (via the tracked
+    // attempt's `handleLinkKey`), which a composite or unknown shape forbids.
+    if (!linkControlsAllowed) return;
+    addInFlightRef.current = true;
     setLoading(true);
     setError(null);
 
@@ -499,130 +819,74 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         throw new Error("Your key was verified but not saved. Please try again.");
       }
 
-      const supabase = createClient();
-
-      // NEW-C37-03: surface auto-link errors instead of swallowing them.
-      // Pre-fix: the {error} from the strategies.update was discarded; if
-      // RLS denied the update (stale cookie / not owner) the sync would
-      // run against the OLD api_key_id and present wrong data as success.
-      const { error: linkError } = await supabase
-        .from("strategies")
-        .update({ api_key_id: newKeyId })
-        .eq("id", strategyId);
-      if (linkError) {
-        throw new Error(
-          `Failed to link key to strategy: ${linkError.message}`,
-        );
-      }
-
-      // Phase 167 / 167-06, R5 (167-CONTEXT D-18): the panel's subject is
-      // about to move to the new key (`setLastAttemptedKeyId` below), and R2
-      // would then judge the new, healthy key instead. A success R2 was
-      // withholding beside the old key's failed sign-in would re-appear, so it
-      // is retired here, after the link succeeded. A failed validation or link
-      // throws before this point and leaves the subject where it was.
+      // Phase 167 / 167-06, R5 (167-CONTEXT D-18), kept by 167.2 KCS-05: the
+      // panel's subject is about to move to the new key (the tracked attempt
+      // below sets `lastAttemptedKeyId`), and R2 would then judge the new,
+      // healthy key instead. A success R2 was withholding beside the old key's
+      // failed sign-in would re-appear, so it is retired here. A failed
+      // validation throws before this point and leaves the subject where it was.
       // ⚠️ This guard reads the subject's trust status AS OF THE SUBMIT CLICK:
-      // the closure is that render's. A re-read landing during the validate or
-      // link awaits above can make it stale. Only a success line is affected,
-      // because the updater is functional and returns every in-flight value
-      // unchanged. That is a residual, named beside the cross-tab one in D-18
-      // (a change made in another tab reaches this tab only through a re-read),
-      // and neither is fixed here. While a tracked attempt is live the subject
-      // does not move (below) and this is a no-op: the panel is in flight.
+      // the closure is that render's. A re-read landing during the validate
+      // await above can make it stale. Only a success line is affected, because
+      // the updater is functional and returns every in-flight value unchanged.
+      // That is a residual, named beside the cross-tab one in D-18 (a change
+      // made in another tab reaches this tab only through a re-read), and
+      // neither is fixed here.
       retireWithheldSuccess();
 
-      // Auto-sync trades in background (don't block the UI).
-      //
-      // 140.3-08 / SEAMUX-05 (B-06) — observe the HTTP OUTCOME, not just a
-      // transport rejection. This was `fetch(…).catch(…)`, and the comment
-      // beside it claimed it handled 401/403/500 errors. It could not:
-      // `.catch()` fires ONLY when the request never completes, so every one
-      // of those — and a breaker 503 — RESOLVED the promise and was invisible.
-      // The user was told the key was added and nothing ever said the sync had
-      // not started.
+      setShowForm(false);
+
+      // Phase 167.2 / KCS-01: the sync after an add RUNS AS the card's one
+      // tracked attempt. `handleSyncTrades` registers the attempt before its
+      // first await, links the new key (NEW-C37-03: a failed link throws before
+      // any sync request is sent), sends the enqueue, applies
+      // `isSyncEnqueued`, enters `computing` and ends itself through
+      // `endAttempt`. So the post-add sync takes the in-flight marker, is
+      // polled, has the new key as its subject and Retry target, and reports
+      // its own failure on the panel with the route's own message.
       //
       // Still NOT awaited: "don't block the UI" is a real requirement and the
-      // add-key flow continues below regardless. The outcome is observed
-      // INSIDE the promise chain and routed to the same SyncProgress surface
-      // an explicit sync failure uses, so a failed background sync cannot be
-      // read as a completed one.
+      // add flow continues below regardless.
       //
-      // `lastAttemptedKeyId` is set so SyncProgress's Retry button has a
-      // target; without it the retry closure would see null and no-op (the
-      // pre-existing bug the state's own comment above records).
-      //
-      // 167-06 fix round (D-18): NOT while a tracked attempt is live. The panel
-      // then belongs to that attempt, and `lastAttemptedKeyId` is its subject
-      // (R2) and its Retry target. Moving it here judged that attempt's later
-      // success against the NEW key, so an untrusted key's success could show
-      // beside its own "Sign-in failed" pill. This post-add sync does not own
-      // the panel in that case (see the catch below).
-      if (attemptRef.current === null) setLastAttemptedKeyId(newKeyId);
-      fetch("/api/keys/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ strategy_id: strategyId }),
-      })
-        .then(async (res) => {
-          if (!res.ok) throw new Error(await syncFailureMessage(res));
-          // Same enqueue-evidence requirement as the explicit sync below —
-          // one shape at both members of the class, not two.
-          const body: unknown = await res.json().catch(() => null);
-          if (!isSyncEnqueued(body)) throw new Error(SYNC_UNAVAILABLE_COPY);
-        })
-        .catch((err: unknown) => {
-          // FINDING-10: keep the operator log — it is how a never-synced key
-          // gets diagnosed, and the caught value goes HERE rather than to the
-          // DOM (140.3-07's B-27 discipline).
-          console.warn("[ApiKeyManager] background sync after key add failed:", err);
-          // Phase 167 / 167-06, R6 (167-CONTEXT D-18), as corrected in the
-          // 167-06 fix round: this failure never touches a live tracked
-          // attempt. This post-add sync is not registered in the one sync slot
-          // and the Add Key form is not modal, so it can fail while ANOTHER
-          // key's attempt is live. Writing `error` then stopped that attempt's
-          // poll and left its marker set, dead-locking every Resync and Use &
-          // Sync, and R4's and R5's remedy controls, until a reload. R6 as
-          // first shipped also cleared the marker here, which ended an attempt
-          // this failure did not stop: when the attempt was still awaiting its
-          // own enqueue, its 202 then resumed polling with no marker, so its
-          // key's pill claimed a credential state under a spinner and its
-          // Update password and Delete were enabled mid-attempt
-          // (167-REVIEW-06 CR-01).
-          // So, while an attempt is live, the panel and the marker are its own:
-          // it keeps polling and ends itself, and this failure reaches the
-          // console only. ⚠️ That loss is a named residual of the post-add sync
-          // bypassing the slot (D-18, routed to 167.2), not a claim that the
-          // failure does not matter. When no attempt is live the panel is idle
-          // or showing a finished attempt, and the failure is shown there
-          // (SEAMUX-05 / B-06).
-          if (attemptRef.current !== null) return;
-          // 167-06 fix round 2 (167-REVIEW-06-R2 WR-01): the failure shown is
-          // the NEW key's, so the panel's Retry must target the new key. The
-          // gate above `fetch` decided the subject once, at link time, and a
-          // tracked attempt on another key can have started (or been live) and
-          // then ENDED before this failure lands, leaving `lastAttemptedKeyId`
-          // on that key. Retry then re-linked the strategy to it, undoing this
-          // Add Key's link. So the subject moves here, with the failure. An
-          // `error` is never withheld (R2), so this move cannot re-show a
-          // success.
-          setLastAttemptedKeyId(newKeyId);
-          setSyncStatus("error");
-          setSyncError(
-            err instanceof Error ? err.message : SYNC_UNAVAILABLE_COPY,
-          );
-        });
-
-      setShowForm(false);
+      // LINEAGE of the untracked chain this call replaces, kept so the reasons
+      // are not lost with the code:
+      //  - 140.3-08 / SEAMUX-05 (B-06): it was `fetch(…).catch(…)`, which saw
+      //    only transport rejections, so a 401/403/500 or a breaker 503 was
+      //    invisible. It then observed the HTTP outcome and the enqueue
+      //    evidence, one shape at both call sites.
+      //  - FINDING-10: its catch kept an operator log. The tracked attempt's
+      //    failure now reaches the panel itself.
+      //  - 167-06 R6, as corrected in the 167-06 fix round (167-REVIEW-06
+      //    CR-01): it was never registered in the one sync slot, so it could
+      //    fail while ANOTHER key's attempt was live, and its failure then
+      //    reached the console only. That was the named residual (1) of D-18.
+      //  - 167-06 fix round 2 (167-REVIEW-06-R2 WR-01): the subject moved with
+      //    the failure so the panel's Retry targeted the new key.
+      // KCS-01 closes that residual: this sync IS the tracked attempt, and the
+      // overlap that made it untracked cannot start (Add Key is blocked while
+      // an attempt is live; no second attempt starts during an add).
+      // The add hands off to its own attempt here, so the reverse-overlap
+      // guard is lifted immediately before the call it would otherwise block.
+      addInFlightRef.current = false;
+      void handleSyncTrades(newKeyId);
       await loadKeys();
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add key");
     } finally {
+      addInFlightRef.current = false;
       setLoading(false);
     }
   }
 
   async function handleLinkKey(keyId: string) {
+    // KCS-23: the one write of `strategies.api_key_id` on this card. Never on a
+    // composite, nor on a strategy the page could not classify. It throws
+    // rather than returning, so a caller cannot go on to sync as if the key
+    // were linked.
+    if (!linkControlsAllowed) {
+      throw new Error("This strategy's keys are not linked from this card.");
+    }
     const supabase = createClient();
     // C1/FINDING-4: destructure and throw on error so handleSyncTrades
     // cannot proceed to /api/keys/sync against the wrong api_key_id when
@@ -636,11 +900,115 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     if (linkError) {
       throw new Error(`Failed to link key to strategy: ${linkError.message}`);
     }
-    router.refresh();
+    // 167.2-REVIEW WR-04 (lineage): `router.refresh()` used to run here,
+    // unconditionally, so a link update answering after its bound (the
+    // request is deliberately not aborted) refreshed whatever page was current.
+    // The live-attempt path in `handleSyncTrades` refreshes instead.
+  }
+
+  /**
+   * 167.2-REVIEW WR-05 / 167.2-REVIEW-R2 WR-02 — which composites would this
+   * Delete shrink? `strategy_keys.api_key_id` cascades on the key's DELETE,
+   * and the database's guard refuses only for a PUBLISHED composite, so
+   * deleting a member of any other composite removes the key from it (its
+   * last member leaves it "unlinked").
+   *
+   * FOUNDER DECISION 2026-09-24 (round 2): warn, never block. Round 1 REFUSED
+   * such a Delete on every card; the owner may now delete after the confirm
+   * names each composite and says what deleting does.
+   *
+   * One owner-scoped read (RLS `strategy_keys_owner`), the composite's own
+   * name and status embedded through `strategy_keys_strategy_id_fkey`,
+   * bounded like the card's other reads (`BASELINE_READ_BOUND_MS`, 15 s).
+   * Answers the memberships (a composite whose embed could not be read is
+   * listed with a null name, never dropped), or "unreadable" (an error, a
+   * throw or the bound: logged, and captured with tags only). Never throws.
+   *
+   * ⚠️ Residual (167.2-REVIEW-SFH-R2 R2-L4 (b)): RLS on SELECT filters rather
+   * than errors, so a regressed `strategy_keys_owner` answers `[]` and the
+   * confirm shows no warning. A server-side guard needs a migration and
+   * belongs to Phase 167.2.1 (KCS-15: no migration in this phase).
+   */
+  async function readKeyCompositeMemberships(
+    keyId: string,
+  ): Promise<{ name: string | null; status: string | null }[] | "unreadable"> {
+    let boundTimer: ReturnType<typeof setTimeout> | undefined;
+    let failure: string | null = null;
+    try {
+      const bound = new Promise<"timed_out">((resolve) => {
+        boundTimer = setTimeout(() => resolve("timed_out"), BASELINE_READ_BOUND_MS);
+      });
+      const supabase = createClient() as unknown as SupabaseClient;
+      const outcome = await Promise.race([
+        supabase
+          .from("strategy_keys")
+          .select("strategy_id, strategies ( name, status )")
+          .eq("api_key_id", keyId),
+        bound,
+      ]);
+      if (outcome === "timed_out") {
+        failure = `no answer within ${BASELINE_READ_BOUND_MS} ms`;
+      } else if (outcome.error || !Array.isArray(outcome.data)) {
+        failure = outcome.error?.message ?? "no rows array and no error";
+      } else {
+        return (outcome.data as Array<{
+          strategies?: { name?: unknown; status?: unknown } | null;
+        }>).map((row) => ({
+          name: typeof row?.strategies?.name === "string" ? row.strategies.name : null,
+          status: typeof row?.strategies?.status === "string" ? row.strategies.status : null,
+        }));
+      }
+    } catch (err) {
+      failure = err instanceof Error ? err.message : String(err);
+    } finally {
+      clearTimeout(boundTimer);
+    }
+    console.error(
+      "[ApiKeyManager] composite membership read before a delete failed; the confirm warns instead:",
+      failure,
+    );
+    // SFH-R2 R2-L4 (a): captured like every other read on this card. Tags
+    // only: no key id and no strategy id.
+    captureToSentry(new Error("composite membership read before a delete failed"), {
+      level: "warning",
+      tags: { component: "ApiKeyManager", stage: "delete-membership-read" },
+    });
+    return "unreadable";
+  }
+
+  /**
+   * 167.2-REVIEW-R2 WR-02 (founder decision): the card's Delete button opens
+   * the confirm AND starts the membership read. The confirm's Delete is held
+   * only while the read is open (at most 15 s), so the owner decides with the
+   * answer in front of them; the answer never refuses the delete.
+   */
+  async function handleDeleteClick(keyId: string) {
+    const seq = ++deleteCheckSeqRef.current;
+    setDeleteCheck({ state: "checking" });
+    setConfirmDelete(keyId);
+    const memberships = await readKeyCompositeMemberships(keyId);
+    if (deleteCheckSeqRef.current !== seq) return;
+    setDeleteCheck(
+      memberships === "unreadable"
+        ? { state: "warn", text: DELETE_MEMBERSHIP_UNCHECKED_COPY }
+        : memberships.length > 0
+          ? { state: "warn", text: deleteCompositeWarning(memberships) }
+          : { state: "none" },
+    );
+  }
+
+  /** Close the confirm and forget its membership answer. */
+  function closeDeleteConfirm() {
+    deleteCheckSeqRef.current += 1;
+    setDeleteCheck({ state: "none" });
+    setConfirmDelete(null);
   }
 
   async function handleDeleteKey(keyId: string) {
     const supabase = createClient();
+    // 167.2-REVIEW-R2 WR-02 (founder decision 2026-09-24): no membership
+    // refusal here. The confirm the owner just accepted named every composite
+    // this key belongs to (`handleDeleteClick`), or said it could not check.
     // 167-06 fix round: `.select("id")` returns the rows the DELETE removed.
     // Without it, a delete that RLS filtered down to zero rows answers with no
     // error, the row was dropped locally, R5 retired a withheld success, and
@@ -651,7 +1019,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       .delete()
       .eq("id", keyId)
       .select("id");
-    setConfirmDelete(null);
+    closeDeleteConfirm();
     if (deleteError) {
       // 167-06 security delta (UF-1): the raw PostgREST message goes to the
       // console only; the page gets authored copy.
@@ -705,55 +1073,425 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     router.refresh();
   }
 
+  /**
+   * Phase 167.2 / KCS-02: read the strategy's `computed_at` immediately before
+   * the enqueue, so the panel can tell this attempt's terminal from the previous
+   * run's (see `EvidenceBaseline`). An absent row answers `{ computedAt: null }`,
+   * a real value. An error, a throw, or `BASELINE_READ_BOUND_MS` expiring answers
+   * `"unknown"` and logs; it never fails the attempt.
+   */
+  async function readEvidenceBaseline(): Promise<EvidenceBaseline> {
+    // 167.2-REVIEW-SFH M-3 / M-6: an unknown baseline silently disables
+    // evidence (b) for the whole attempt (a fast failure can then only end at
+    // the cap), so each of the three arms below is captured at warning level,
+    // tags only.
+    const captureUnknown = (why: string) =>
+      captureToSentry(new Error(`the evidence baseline read ${why}; the baseline is unknown`), {
+        level: "warning",
+        tags: { component: "ApiKeyManager", stage: "evidence-baseline" },
+      });
+    let boundTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const bound = new Promise<"timed_out">((resolve) => {
+        boundTimer = setTimeout(() => resolve("timed_out"), BASELINE_READ_BOUND_MS);
+      });
+      const supabase = createClient();
+      const outcome = await Promise.race([
+        supabase
+          .from("strategy_analytics")
+          .select("computed_at")
+          .eq("strategy_id", strategyId)
+          .maybeSingle(),
+        bound,
+      ]);
+      if (outcome === "timed_out") {
+        console.error(
+          `[ApiKeyManager] the evidence baseline read did not answer within ${BASELINE_READ_BOUND_MS} ms; continuing with an unknown baseline [strategy_id=${strategyId}]`,
+        );
+        captureUnknown("did not answer within its bound");
+        return "unknown";
+      }
+      if (outcome.error) {
+        console.error(
+          `[ApiKeyManager] the evidence baseline read failed; continuing with an unknown baseline [strategy_id=${strategyId}]:`,
+          outcome.error.message,
+        );
+        captureUnknown("failed");
+        return "unknown";
+      }
+      return { computedAt: outcome.data?.computed_at ?? null };
+    } catch (err) {
+      console.error(
+        `[ApiKeyManager] the evidence baseline read threw; continuing with an unknown baseline [strategy_id=${strategyId}]:`,
+        err,
+      );
+      captureUnknown("threw");
+      return "unknown";
+    } finally {
+      clearTimeout(boundTimer);
+    }
+  }
+
+  /**
+   * 167.2-REVIEW WR-04: read the strategy's `api_key_id` back from the server,
+   * after the link update and immediately before the enqueue. Bounded like the
+   * baseline read (one owner-scoped PostgREST read, no timeout of its own).
+   * Answers the linked id (null when none), or `"unreadable"` on an error, a
+   * throw or the bound, and logs those. Never throws.
+   */
+  async function readLinkedKeyId(): Promise<string | null | "unreadable"> {
+    let boundTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const bound = new Promise<"timed_out">((resolve) => {
+        boundTimer = setTimeout(() => resolve("timed_out"), BASELINE_READ_BOUND_MS);
+      });
+      const supabase = createClient();
+      const outcome = await Promise.race([
+        supabase.from("strategies").select("api_key_id").eq("id", strategyId).maybeSingle(),
+        bound,
+      ]);
+      if (outcome === "timed_out") {
+        console.error(
+          `[ApiKeyManager] the link read-back did not answer within ${BASELINE_READ_BOUND_MS} ms; no sync is sent [strategy_id=${strategyId}]`,
+        );
+        return "unreadable";
+      }
+      if (outcome.error) {
+        console.error(
+          `[ApiKeyManager] the link read-back failed; no sync is sent [strategy_id=${strategyId}]:`,
+          outcome.error.message,
+        );
+        return "unreadable";
+      }
+      return outcome.data?.api_key_id ?? null;
+    } catch (err) {
+      console.error(
+        `[ApiKeyManager] the link read-back threw; no sync is sent [strategy_id=${strategyId}]:`,
+        err,
+      );
+      return "unreadable";
+    } finally {
+      clearTimeout(boundTimer);
+    }
+  }
+
   async function handleSyncTrades(keyId: string) {
-    // The attempt is registered BEFORE any await, so the post-add catch and
-    // `handleSyncStatusChange` see it as live from the first click.
+    // Phase 167.2 / KCS-01: the card never starts a second sync while one is
+    // live, nor while an Add Key is in flight (RESEARCH P7: the add would then
+    // collide with it). Every Resync / Use & Sync is disabled in both windows;
+    // this is the handler guard behind those disables, and the one that covers
+    // the panel's Retry and the post-add call, which no card button gates.
+    if (addInFlightRef.current || attemptRef.current !== null) return;
+    // KCS-23: every sync from this card first re-links the strategy to `keyId`
+    // (`handleLinkKey`), so none starts on a composite or an unknown shape. This
+    // also covers the panel's Retry and the post-add call.
+    if (!linkControlsAllowed) return;
+    // The attempt is registered BEFORE any await, so `handleSyncStatusChange`
+    // and anything else that checks `attemptRef` see it as live from the first
+    // click.
     const attempt: SyncAttempt = { keyId, enqueued: false, settling: false };
     attemptRef.current = attempt;
+    unconfirmedAttemptRef.current = null;
+    // KCS-02: a fresh panel and no baseline until this attempt has read one.
+    setAttemptSeq((seq) => seq + 1);
+    setEvidenceBaseline("unknown");
+    setAttemptEnqueuedNewJob(false);
+    setPanelStopReason(null);
+    setFinishUnverified(false);
     setSyncingKeyId(keyId);
     setLastAttemptedKeyId(keyId);
+    lastAttemptedKeyIdRef.current = keyId;
     setSyncStatus("syncing");
     setSyncError(null);
     setError(null);
 
     try {
-      // Link key to strategy first
-      await handleLinkKey(keyId);
-
-      // Fetch trades
-      const res = await fetch("/api/keys/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ strategy_id: strategyId }),
-      });
-
-      if (!res.ok) {
-        throw new Error(await syncFailureMessage(res));
+      // 167.2-REVIEW CR-01 / WR-06 — THE PRE-ATTEMPT JOB-STATE GATE. Orchestrator
+      // decision (autonomous review-fix round): before any attempt links a key
+      // or enqueues (Resync, Use & Sync, the post-add sync, the panel's Retry),
+      // read whether a factsheet-chain job is in flight, and refuse while one
+      // is or while the read cannot answer (fail closed).
+      //   - CR-01: `no_result` and `unconfirmed` end an attempt whose job may
+      //     still be running. The enqueue dedupes on (strategy, kind) and hands
+      //     back the EXISTING job, and all of the panel's evidence is scoped to
+      //     the STRATEGY, never the key. So `Use & Sync` on another key was
+      //     served by the previous key's job, and the panel said "Up to date"
+      //     under the new key: one key's result shown as another's.
+      //   - WR-06: KCS-22 removed Retry on `no_result` because a re-POST during
+      //     `failed_retry` inserts a second job (F-3), and Resync on the same
+      //     key is that same re-POST.
+      // The gate runs BEFORE the link, so a refused attempt writes nothing. It
+      // ends the attempt as the amber `unconfirmed` panel with its own reason:
+      // the sync "did not start", which is exactly what the card knows.
+      const gate = await readChainJobState(strategyId);
+      if (attemptRef.current !== attempt) return;
+      if (gate.kind !== "settled") {
+        if (gate.kind === "unreadable") {
+          console.warn(
+            `[ApiKeyManager] the job-state read was unreadable; the sync is refused [strategy_id=${strategyId}]:`,
+            gate.reason,
+          );
+          captureToSentry(new Error(`pre-attempt job-state read unreadable: ${gate.reason}`), {
+            level: "warning",
+            tags: { component: "ApiKeyManager", stage: "pre-attempt-job-state" },
+          });
+        }
+        if (endAttempt(attempt)) {
+          setSyncStatus("unconfirmed");
+          // 167.2-REVIEW-R2 IN-04: a deterministic DEGRADED answer gets copy
+          // that names support instead of promising "in a moment".
+          setPanelStopReason(
+            gate.kind === "in_flight"
+              ? "chain_in_flight"
+              : gate.persistent
+                ? "chain_unreadable_persistent"
+                : "chain_unreadable",
+          );
+          setSyncError(null);
+        }
+        return;
       }
 
-      // 140.3-08 / SEAMUX-05 (B-15) — a 2xx is not evidence that a job was
-      // enqueued, and this line used to assume it was. `/api/keys/sync` answers
-      // an unrecognised upstream shape with a deliberately UN-stamped
-      // passthrough, so the one response meaning "nothing was enqueued" was the
-      // one that started a 15-minute poll for it, ending in a timeout that
-      // blamed the computation.
-      //
-      // The fix is NOT entering the state. A wall-clock backstop would only time
-      // the symptom out — the poll would still run, and the user would still be
-      // told their analytics were computing when nothing was.
-      const body: unknown = await res.json().catch(() => null);
-      if (!isSyncEnqueued(body)) {
-        throw new Error(SYNC_UNAVAILABLE_COPY);
+      // Link key to strategy first.
+      // Phase 167.2 / KCS-03: raced against `LINK_UPDATE_BOUND_MS`, the same
+      // shape as the enqueue race below. supabase-js sets no request timeout,
+      // so a link update that never answered held the marker and the spinner
+      // with no end. On expiry the attempt ends as `unconfirmed` / `link_bound`
+      // ("Sync not started") and RETURNS before the baseline read and the
+      // enqueue, so no enqueue is ever sent for this attempt. That is the only
+      // reason the card may say the sync did not start (UI-SPEC § KCS-03). The
+      // late answer is still awaited so it is logged (a late rejection reaches
+      // the catch, which logs it because the attempt already ended); it never
+      // resumes the attempt.
+      const linked = handleLinkKey(keyId).then(() => "linked" as const);
+      let linkTimer: ReturnType<typeof setTimeout> | undefined;
+      let linkOutcome: "linked" | "timed_out";
+      try {
+        const bound = new Promise<"timed_out">((resolve) => {
+          linkTimer = setTimeout(() => resolve("timed_out"), LINK_UPDATE_BOUND_MS);
+        });
+        linkOutcome = await Promise.race([linked, bound]);
+      } finally {
+        clearTimeout(linkTimer);
+      }
+      if (linkOutcome === "timed_out") {
+        console.error(
+          `[ApiKeyManager] the link update did not answer within ${LINK_UPDATE_BOUND_MS} ms; no sync is sent [key_id=${keyId}]`,
+        );
+        // 167.2-REVIEW-SFH M-6: tags only (the key id stays in the console).
+        captureToSentry(new Error("the link update did not answer within its bound"), {
+          level: "warning",
+          tags: { component: "ApiKeyManager", stage: "link-bound" },
+        });
+        if (endAttempt(attempt)) {
+          setSyncStatus("unconfirmed");
+          setPanelStopReason("link_bound");
+          setSyncError(null);
+        }
+        // 167.2-REVIEW-SFH M-1: a late link answer, either way, is logged AND
+        // captured (a 15 s link update is a wedged request). It changes no
+        // panel: "This sync did not start … reload to check which key is
+        // linked" stays true whichever way the link landed, and no sync is
+        // sent for it.
+        try {
+          await linked;
+          console.warn(
+            `[ApiKeyManager] the link update answered after its ${LINK_UPDATE_BOUND_MS} ms bound; the attempt had already ended, so no sync is sent [key_id=${keyId}]`,
+          );
+        } catch (lateErr) {
+          console.warn("[ApiKeyManager] sync failed after its attempt ended:", lateErr);
+        }
+        captureToSentry(new Error("the link update answered after its bound"), {
+          level: "warning",
+          tags: { component: "ApiKeyManager", stage: "late-link-answer" },
+        });
+        return;
+      }
+
+      // The link landed for the live attempt: refresh the page's server data
+      // now (moved here from `handleLinkKey` by WR-04, so a late link from an
+      // attempt that already ended can never refresh the page).
+      if (attemptRef.current === attempt) router.refresh();
+
+      // 167.2-REVIEW WR-04 — READ THE LINK BACK BEFORE THE ENQUEUE. The link
+      // request is not aborted on its bound (by design: aborting cannot stop a
+      // server-side write), so an OLDER attempt's stalled link can land after
+      // this attempt's link and re-link the strategy to the older key; this
+      // attempt's job would then sync a key that is not the panel's subject.
+      // So the server's `strategies.api_key_id` is read back here: anything but
+      // this attempt's key, or a read that cannot answer, refuses the attempt
+      // as `unconfirmed` / `link_unverified`, and nothing is enqueued.
+      // Residual: a stalled link landing between this read and the handler's
+      // own read of the column is not closed; the pre-attempt gate narrows it
+      // (no new attempt starts while the previous attempt's job is in flight).
+      const linkedNow = await readLinkedKeyId();
+      if (attemptRef.current !== attempt) return;
+      if (linkedNow !== keyId) {
+        if (linkedNow !== "unreadable") {
+          console.error(
+            `[ApiKeyManager] the strategy is not linked to this attempt's key when read back; no sync is sent [strategy_id=${strategyId}]`,
+          );
+        }
+        captureToSentry(new Error("link read-back did not confirm this attempt's key"), {
+          level: "warning",
+          tags: {
+            component: "ApiKeyManager",
+            stage: linkedNow === "unreadable" ? "link-verify-unreadable" : "link-verify-mismatch",
+          },
+        });
+        if (endAttempt(attempt)) {
+          setSyncStatus("unconfirmed");
+          setPanelStopReason("link_unverified");
+          setSyncError(null);
+        }
+        return;
+      }
+
+      // KCS-02 (RESEARCH P3): the baseline is read AFTER the link update and
+      // immediately before the enqueue, which keeps the window in which a
+      // recurring job could move `computed_at` unnoticed as narrow as it can be.
+      const baseline = await readEvidenceBaseline();
+      if (attemptRef.current !== attempt) return;
+      setEvidenceBaseline(baseline);
+
+      // The enqueue exchange: the request, its failure message, its body and
+      // the enqueue evidence, as one unit so ONE bound covers all of it.
+      const enqueueExchange = async (): Promise<{ newJob: boolean }> => {
+        const res = await fetch("/api/keys/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ strategy_id: strategyId }),
+        });
+
+        if (!res.ok) {
+          throw await syncFailureMessage(res);
+        }
+
+        // 140.3-08 / SEAMUX-05 (B-15) — a 2xx is not evidence that a job was
+        // enqueued, and this line used to assume it was. `/api/keys/sync`
+        // answers an unrecognised upstream shape with a deliberately UN-stamped
+        // passthrough, so the one response meaning "nothing was enqueued" was
+        // the one that started a 15-minute poll for it, ending in a timeout
+        // that blamed the computation.
+        //
+        // The fix is NOT entering the state. A wall-clock backstop would only
+        // time the symptom out — the poll would still run, and the user would
+        // still be told their analytics were computing when nothing was.
+        const body: unknown = await res.json().catch(() => null);
+        if (!isSyncEnqueued(body)) {
+          throw new EnqueueAnswerError(SYNC_UNAVAILABLE_COPY, "unrecognized");
+        }
+        return { newJob: enqueuedNewJob(body) };
+      };
+
+      // Phase 167.2 / KCS-03 (RESEARCH Q2, P5): the exchange is raced against
+      // `ENQUEUE_BOUND_MS`, the same shape as the `TERMINAL_REREAD_BOUND_MS`
+      // race. Before it, an enqueue that never answered spun the panel and held
+      // the marker until the route's own `maxDuration`. On expiry the card
+      // cannot know whether a job was enqueued, so the attempt ends as the
+      // UI-only `unconfirmed` state (KCS03-ENQUEUE), never as `error`: that
+      // would render "Sync failed", a claim the card cannot make.
+      // The request is NOT aborted: aborting cannot stop a server-side enqueue,
+      // and it would turn a late 202 into a rejection. Instead the handler keeps
+      // waiting for the late answer, so its outcome is logged (a late rejection
+      // reaches the catch below, which logs it because the attempt already
+      // ended), and the liveness guard after this block drops it, so a late 202
+      // starts no poll and writes nothing.
+      const enqueued = enqueueExchange();
+      let enqueueTimer: ReturnType<typeof setTimeout> | undefined;
+      let enqueueOutcome: { newJob: boolean } | "timed_out";
+      try {
+        const bound = new Promise<"timed_out">((resolve) => {
+          enqueueTimer = setTimeout(() => resolve("timed_out"), ENQUEUE_BOUND_MS);
+        });
+        enqueueOutcome = await Promise.race([enqueued, bound]);
+      } finally {
+        clearTimeout(enqueueTimer);
+      }
+      if (enqueueOutcome === "timed_out") {
+        console.error(
+          `[ApiKeyManager] the enqueue did not answer within ${ENQUEUE_BOUND_MS} ms; the sync is unconfirmed [key_id=${keyId}]`,
+        );
+        // 167.2-REVIEW-SFH M-6: a wedged /api/keys/sync; tags only.
+        captureToSentry(new Error("the enqueue did not answer within its bound"), {
+          level: "warning",
+          tags: { component: "ApiKeyManager", stage: "enqueue-bound" },
+        });
+        if (endAttempt(attempt)) {
+          setSyncStatus("unconfirmed");
+          setPanelStopReason("enqueue_bound");
+          setSyncError(null);
+          unconfirmedAttemptRef.current = attempt;
+        }
+        // 167.2-REVIEW-SFH M-1 — THE LATE ANSWER IS EVIDENCE. It used to be
+        // dropped to a console.warn, so the panel kept promising "it may still
+        // be running" about a sync the server had since refused, or kept
+        // saying "not confirmed" about one it had accepted. A late answer
+        // never resumes the ended attempt (no poll, no marker: KCS-03 / P5),
+        // but while THIS attempt's `enqueue_bound` panel is still the one on
+        // screen and no attempt is live, it updates that panel: a late 2xx
+        // with enqueue evidence says the sync started (KCS-LATE-STARTED); a
+        // late rejection shows the route's own failure. Either way it is
+        // captured at warning level: a 180 s enqueue is a wedged route.
+        //
+        // 167.2-REVIEW-SFH-R2 R2-M1: only a ROUTE VERDICT (a JSON error body the
+        // route itself produced) replaces the panel with "Sync failed". A late
+        // answer lands between this bound and the route's `maxDuration`, where
+        // the likeliest failures are the platform's non-JSON 504 and a rejected
+        // fetch; the upstream enqueue may already have committed behind either,
+        // so the honest `enqueue_bound` panel ("it may still be running") stays.
+        // The capture's `kind` tag tells a verdict from a transport failure.
+        const stillShown = () =>
+          attemptRef.current === null && unconfirmedAttemptRef.current === attempt;
+        let lateKind: "started" | "verdict" | "transport" | "unrecognized";
+        try {
+          await enqueued;
+          lateKind = "started";
+          console.warn(
+            `[ApiKeyManager] the enqueue answered after its ${ENQUEUE_BOUND_MS} ms bound; the attempt had already ended, so no poll starts [key_id=${keyId}]`,
+          );
+          if (stillShown()) setPanelStopReason("enqueue_late_started");
+        } catch (lateErr) {
+          lateKind = lateErr instanceof EnqueueAnswerError ? lateErr.kind : "transport";
+          console.warn("[ApiKeyManager] sync failed after its attempt ended:", lateErr);
+          if (lateKind === "verdict" && stillShown()) {
+            unconfirmedAttemptRef.current = null;
+            setSyncStatus("error");
+            setSyncError((lateErr as Error).message);
+          }
+        }
+        captureToSentry(new Error("the enqueue answered after its bound"), {
+          level: "warning",
+          tags: { component: "ApiKeyManager", stage: "late-enqueue-answer", kind: lateKind },
+        });
+        return;
       }
 
       // A job IS enqueued -- analytics may still be computing.
       // SyncProgress will poll strategy_analytics to track completion. From
       // here on its reads may end this attempt (see `SyncAttempt`).
+      // KCS-03 (RESEARCH P5): but only the live attempt may act on the answer.
+      // A late answer (after its bound expired, or after the attempt otherwise
+      // ended) starts no poll and moves no state.
+      if (attemptRef.current !== attempt) return;
       attempt.enqueued = true;
+      setAttemptEnqueuedNewJob(enqueueOutcome.newJob);
       setSyncStatus("computing");
       // NEW-C37-04: pass the key being synced so lastSyncAt reads from
       // the correct row.
-      await loadKeys({ lastSyncedKeyId: keyId });
+      // 167.2-REVIEW-SFH L-4: in its own try. It used to share the enqueue's
+      // try, so a throw here (a network-layer failure; supabase-js returns
+      // errors rather than throwing) ended a live, ENQUEUED attempt as "Sync
+      // failed" and stopped its poll. The job exists; only the list refresh
+      // failed, so it is logged and the attempt keeps running.
+      try {
+        await loadKeys({ lastSyncedKeyId: keyId });
+      } catch (refreshErr) {
+        console.error(
+          "[ApiKeyManager] the post-enqueue key-list re-read threw; the attempt keeps running:",
+          refreshErr,
+        );
+      }
       router.refresh();
     } catch (err) {
       // Only a live attempt reports its own failure. If this one was already
@@ -797,20 +1535,40 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold text-text-primary">Exchange API Keys</h2>
-        {!showForm && (
+        {linkControlsAllowed && !showForm && (
           <Button size="sm" onClick={() => setShowForm(true)}>
             Add Key
           </Button>
         )}
       </div>
 
-      {showForm && (
+      {/* KCS-23 (UI-SPEC S3): the one line that explains the missing link
+          controls, directly under the header. 167.2-REVIEW-SFH H-2: an
+          "unknown" shape gets its own line too (KCS-SHAPE-UNKNOWN). It used to
+          get none, so a transient member-count failure removed every sync
+          control with nothing to say why: failing closed on the write is
+          right, failing closed SILENTLY was the defect. */}
+      {keyShape === "composite" && (
+        <p className="text-xs text-text-muted">{COMPOSITE_CARD_NOTE}</p>
+      )}
+      {keyShape === "unknown" && (
+        <p className="text-xs text-text-muted">{SHAPE_UNKNOWN_CARD_NOTE}</p>
+      )}
+
+      {linkControlsAllowed && showForm && (
         <ApiKeyForm
           onSubmit={handleAddKey}
           onCancel={() => { setShowForm(false); setError(null); }}
           loading={loading}
           error={error}
           defaultExchange={defaultExchange}
+          // Phase 167.2 / KCS-01: Connect Key is blocked for the whole of a
+          // live attempt, and says which key's sync it is waiting for.
+          submitBlockedReason={
+            syncingKeyId
+              ? addKeyBlockedReason(keys.find((k) => k.id === syncingKeyId)?.label)
+              : null
+          }
         />
       )}
 
@@ -836,15 +1594,18 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         </Card>
       )}
 
-      {keys.length === 0 && !loadError && !showForm && (
+      {listedKeys.length === 0 && !loadError && !showForm && (
         <Card>
           <p className="text-sm text-text-muted text-center py-4">
-            No API keys connected. Add a read-only exchange key to import your trading data.
+            {/* H-2: a card with no Add Key never invites one (KCS-EMPTY-NOLINK). */}
+            {linkControlsAllowed
+              ? "No API keys connected. Add a read-only exchange key to import your trading data."
+              : EMPTY_NOLINK_COPY}
           </p>
         </Card>
       )}
 
-      {keys.map((key) => (
+      {listedKeys.map((key) => (
         <Card key={key.id} data-testid={`api-key-card-${key.id}`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -868,12 +1629,15 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
               </div>
             </div>
             <div className="flex items-center gap-2">
-              {key.id === currentKeyId ? (
+              {/* KCS-23: no Resync / Use & Sync on a composite or an unknown
+                  shape; both write `strategies.api_key_id`. */}
+              {!linkControlsAllowed ? null : key.id === currentKeyId ? (
                 <Button
                   size="sm"
                   variant="ghost"
                   onClick={() => handleSyncTrades(key.id)}
-                  disabled={!!syncingKeyId}
+                  // KCS-01 / RESEARCH P7: also while an Add Key is in flight.
+                  disabled={!!syncingKeyId || loading}
                 >
                   {syncingKeyId === key.id ? "Syncing\u2026" : "Resync"}
                 </Button>
@@ -882,7 +1646,8 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
                   size="sm"
                   variant="ghost"
                   onClick={() => handleSyncTrades(key.id)}
-                  disabled={!!syncingKeyId}
+                  // KCS-01 / RESEARCH P7: also while an Add Key is in flight.
+                  disabled={!!syncingKeyId || loading}
                 >
                   {syncingKeyId === key.id ? "Syncing\u2026" : "Use & Sync"}
                 </Button>
@@ -922,7 +1687,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => setConfirmDelete(key.id)}
+                onClick={() => handleDeleteClick(key.id)}
                 // Phase 167 / 167-06, R5 (167-CONTEXT D-18): a key is never
                 // deleted during its own sync. Deleting it mid-attempt removes
                 // the panel's subject while the retirement must leave
@@ -996,8 +1761,12 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           `withholdPanelSuccess`. Never withheld in flight, never on error. */}
       {syncStatus !== "idle" && !withholdPanelSuccess && (
         <SyncProgress
+          key={attemptSeq}
           strategyId={strategyId}
+          evidenceBaseline={evidenceBaseline}
+          attemptEnqueuedNewJob={attemptEnqueuedNewJob}
           syncStatus={syncStatus}
+          stopReason={panelStopReason}
           lastSyncAt={lastSyncAt}
           syncError={syncError}
           onRetry={() => lastAttemptedKeyId && handleSyncTrades(lastAttemptedKeyId)}
@@ -1005,17 +1774,46 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         />
       )}
 
+      {/* 167.2-REVIEW-SFH L-1 (UI-SPEC KCS-FINISH-UNVERIFIED): a terminal
+          success withheld for an unverified list leaves this muted note,
+          which a later list read does not clear. */}
+      {finishUnverified && syncStatus === "idle" && (
+        <p data-testid="sync-finish-unverified" className="text-xs text-text-muted">
+          {FINISH_UNVERIFIED_NOTE}
+        </p>
+      )}
+
       <Modal
         open={!!confirmDelete}
-        onClose={() => setConfirmDelete(null)}
+        onClose={closeDeleteConfirm}
         title="Delete API Key"
       >
         <p className="text-sm text-text-secondary mb-4">
           This will permanently remove this API key. Trade data already imported will not be affected.
         </p>
+        {/* 167.2-REVIEW-R2 WR-02 (founder decision 2026-09-24): the composites
+            this Delete would shrink, by name, or that they could not be
+            checked. Amber (DESIGN.md § Color: a recoverable consequence, not a
+            failure). It informs the choice and never blocks it. */}
+        {deleteCheck.state === "warn" && (
+          <p
+            data-testid="delete-composite-warning"
+            role="status"
+            className="text-sm text-warning mb-4"
+          >
+            {deleteCheck.text}
+          </p>
+        )}
         <div className="flex justify-end gap-3">
-          <Button variant="secondary" onClick={() => setConfirmDelete(null)}>Cancel</Button>
-          <Button variant="danger" onClick={() => confirmDelete && handleDeleteKey(confirmDelete)}>Delete</Button>
+          <Button variant="secondary" onClick={closeDeleteConfirm}>Cancel</Button>
+          <Button
+            variant="danger"
+            // Held only while the bounded membership read is open (<= 15 s).
+            disabled={deleteCheck.state === "checking"}
+            onClick={() => confirmDelete && handleDeleteKey(confirmDelete)}
+          >
+            Delete
+          </Button>
         </div>
       </Modal>
 

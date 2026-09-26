@@ -10,12 +10,18 @@ import { Skeleton } from "@/components/ui/Skeleton";
  * **Server Component** — no client directive. `loading.tsx` is an RSC by
  * convention; the Skeleton primitives are pure markup.
  *
- * **Dominant anchor (52-UI-SPEC §Dominant visual anchor):** the KPI strip is
- * the largest, first region — a full-width 4-cell grid above the equity-chart
- * placeholder — so the skeleton reads unmistakably as the allocations dashboard
- * loading, not a generic spinner. The page shell is fully fluid (no px cap), so
- * the skeleton fills the same envelope as the page it stands in for (Task 1;
- * founder decision 2026-08-09 — dense tables lost their cap).
+ * **Dominant anchor (52-UI-SPEC §Dominant visual anchor), suspended by Phase
+ * 167.1.2 / D-02:** the skeleton used to open with a full-width 4-cell KPI grid
+ * above a 320px equity-chart placeholder. While the equity history is rebuilt,
+ * the Overview (the default tab) renders neither: no factsheet KPI strip and no
+ * curve, only a short "being rebuilt" text panel. A skeleton that promises a
+ * KPI row and a chart and then swaps to a paragraph is a layout shift that
+ * briefly implies numbers that will not come (review round 1 IN-04). So the
+ * anchor is a text-block placeholder shaped like that panel. Plan 11 of Phase
+ * 167.1.2 restores the KPI anchor and the chart placeholder when it defines
+ * "ready". The page shell is fully fluid (no px cap), so the skeleton fills the
+ * same envelope as the page it stands in for (Task 1; founder decision
+ * 2026-08-09 — dense tables lost their cap).
  *
  * ⛔ That last sentence is a CLAIM, and `loading.test.tsx` now carries the
  * assertion behind it (153.2 review WR-06 — it did not, for a whole release).
@@ -33,28 +39,22 @@ export default function AllocationsLoading() {
         <Skeleton className="h-9 w-40" />
       </div>
 
-      {/* DOMINANT ANCHOR — the KPI strip: a full-width 4-cell grid, the first
-          and largest region, matching the live KpiStrip @container shape. */}
-      <div className="@container" aria-hidden>
-        {/* The `@container` HOST and the `@sm`/`@lg` grid variants must sit on
-            SEPARATE elements — an element never queries its own container size
-            (CSS containment spec), so the host wraps the grid. */}
-        <div className="grid grid-cols-1 gap-3 @sm:grid-cols-2 @lg:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div
-              key={i}
-              className="space-y-2 rounded-lg border border-border bg-surface p-4"
-            >
-              <Skeleton className="h-2.5 w-16" />
-              <Skeleton className="h-6 w-24" />
-              <Skeleton className="h-2.5 w-28" />
-            </div>
-          ))}
-        </div>
+      {/* Phase 167.1.2 / D-02: the Overview renders the "being rebuilt" text
+          panel in place of the KPI strip and the curve, so the skeleton draws
+          that panel's shape (eyebrow, heading, three body lines) and no KPI
+          grid or chart block. `max-w-prose` mirrors the panel's body measure
+          and is not a px cap. */}
+      <div
+        data-testid="allocations-loading-rebuilding-block"
+        className="mt-6 max-w-prose space-y-3 border-t border-border py-8"
+        aria-hidden
+      >
+        <Skeleton className="h-2.5 w-24" />
+        <Skeleton className="h-5 w-72 max-w-full" />
+        <Skeleton className="h-3 w-full" />
+        <Skeleton className="h-3 w-full" />
+        <Skeleton className="h-3 w-2/3" />
       </div>
-
-      {/* Equity-chart placeholder — sits below the KPI anchor. */}
-      <Skeleton className="mt-6 h-[320px] w-full" />
 
       {/* Holdings rows placeholder. */}
       <div className="mt-6 space-y-3">

@@ -934,6 +934,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         staleSelf: "node scripts/check-baseline-staleness.mjs --self-test",
         stale: "node scripts/check-baseline-staleness.mjs",
         scriptSelf: "bash scripts/restore-test-from-baseline.sh --self-test",
+        // Phase 164.9.1 round-1 review (M3): the emitter's own refusal arms.
+        normalizeSelf:
+          "bash scripts/test-only-normalize-analytics-url.sh --self-test",
         scriptRun:
           'bash scripts/restore-test-from-baseline.sh --run --mode "$MODE"',
       };
@@ -951,6 +954,20 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         liveCommandIndex(b, cmds.scriptSelf),
         "the restore script's --self-test must run BEFORE its --run",
       ).toBeLessThan(liveCommandIndex(b, cmds.scriptRun));
+      expect(
+        liveCommandIndex(b, cmds.normalizeSelf),
+        "the normalize script's --self-test must run BEFORE the restore that concatenates its fragment",
+      ).toBeLessThan(liveCommandIndex(b, cmds.scriptRun));
+      calibrate(
+        "the normalize script's --self-test is EXECUTED, not mentioned",
+        (s) =>
+          s.replace(
+            `run: ${cmds.normalizeSelf}`,
+            `run: echo skipped # ${cmds.normalizeSelf}`,
+          ),
+        (t) =>
+          liveCommandIndex(jobBlock(t, RESTORE_JOB), cmds.normalizeSelf) > -1,
+      );
       calibrate(
         "the restore script's --run is EXECUTED, not mentioned",
         (s) =>

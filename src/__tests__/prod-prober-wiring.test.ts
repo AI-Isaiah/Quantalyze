@@ -64,6 +64,13 @@ import {
   UNRECORDED_VERDICT,
 } from "../../scripts/prod-prober/arms/cron-drift.mjs";
 import { ARM as MT5_ARM, classifyProbe } from "../../scripts/prod-prober/arms/mt5.mjs";
+import {
+  LEDGER_FANOUT_FAILURE_CRON_NAME,
+  LEDGER_FANOUT_FAILURE_ERROR,
+  LEDGER_FANOUT_FUNCTION,
+  LEDGER_FANOUT_JOB,
+  LEDGER_FANOUT_SQL,
+} from "../../scripts/prod-prober/arms/cron-obs.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "prod-prober.yml");
@@ -831,12 +838,22 @@ describe("[164.1-05] kinds and floors", () => {
   /**
    * Hand-typed on purpose. Spelling it `[...DEFECT_KINDS]` would make the
    * assertion agree with the implementation by construction — a list that can
-   * never disagree with the thing it checks. Twenty-one names, sorted.
+   * never disagree with the thing it checks. Twenty-two names, sorted.
+   * ⭐ 21 -> 22 in the Phase 164.6 review fix: `cron-ledger-fanout-failed`,
+   * raised by cron-obs when a ledger refresh fan-out run ended in an error of
+   * that function (every candidate of the tick failed, so it now raises).
+   * ⭐ 22 -> 25 in the Phase 164.6 round-2 fix: `-stuck`, `-absent` and
+   * `-candidate-failed`, because the fan-out no longer raises when every
+   * candidate fails — the failure row commits and is counted instead.
    */
   const EXPECTED_DEFECT_KINDS = [
     "absurdity",
     "credential-absent",
     "cron-drift",
+    "cron-ledger-fanout-absent",
+    "cron-ledger-fanout-candidate-failed",
+    "cron-ledger-fanout-failed",
+    "cron-ledger-fanout-stuck",
     "cron-no-observation",
     "cron-non-2xx",
     "cron-secret-in-command",
@@ -1895,7 +1912,13 @@ describe("[164.1-05] kinds and floors", () => {
     // is no literal `k/50` in the source to count. Executing the self-test is
     // the only honest way to derive the number — and it is fixtures-only, no
     // network, under a tenth of a second.
-    expect(SELF_TEST_SCENARIOS).toBe(83);
+    // ⭐ 83 -> 84 in the Phase 164.6 review fix: one red cron-obs fixture,
+    // ledger-fanout-failed.json, adds one isolation scenario.
+    // ⭐ 84 -> 91 in the Phase 164.6 round-2 fix: three red cron-obs fixtures
+    // (stuck, too few runs, committed failure rows) and four dedicated
+    // scenarios (unparsable, psql failure, the runs floor, and an earlier
+    // step's measure-fail beside a failing fan-out).
+    expect(SELF_TEST_SCENARIOS).toBe(91);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);
@@ -3132,5 +3155,61 @@ describe("[164.6.5-03] D-10: the mt5 arm's declared environment and the workflow
     expect(supplied).not.toContain("RAILWAY_ENVIRONMENT");
     const missing = declared.filter((n) => !supplied.includes(n));
     expect(missing, "the removed member is named in the diff").toEqual(["RAILWAY_ENVIRONMENT"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.6-R2 WR-02] cron-obs's ledger fan-out constants are BOUND to their
+// sources of truth.
+//
+// ⛔ THE DEFECT. The self-test answers LEDGER_FANOUT_SQL from a fixture routed
+// on two substrings, so nothing in the SQL predicate is ever executed. A typo in
+// a constant, or a future rename of the SQL function, would make every count
+// read 0 on PROD forever while the self-test stayed green. Each assertion below
+// reads the SOURCE (the committed manifest, the function snapshots) and fails
+// on drift.
+// ---------------------------------------------------------------------------
+describe("[164.6-R2 WR-02] cron-obs ledger fan-out constants match the manifest and the SQL", () => {
+  const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
+  const jobs: Array<{ jobname: string; command: string; active: boolean }> = manifest.jobs;
+  const snapshot = (fn: string) => readFileSync(join(FUNCTIONS_DIR, `${fn}.sql`), "utf8");
+  const FAILURE_ROW_RE = (cronName: string, error: string) =>
+    new RegExp(`INSERT INTO public\\.cron_runs[^;]*?VALUES\\s*\\(\\s*'${cronName}'\\s*,\\s*'error'\\s*,\\s*now\\(\\)\\s*,\\s*'${error}'`);
+
+  it("LEDGER_FANOUT_JOB is an ACTIVE manifest job whose command calls public.<LEDGER_FANOUT_FUNCTION>()", () => {
+    expect(Array.isArray(jobs) && jobs.length > 0, "PRECONDITION: the manifest lists jobs").toBe(true);
+    const entry = jobs.find((j) => j.jobname === LEDGER_FANOUT_JOB);
+    expect(entry, `no manifest job is named ${LEDGER_FANOUT_JOB}`).toBeDefined();
+    expect(entry!.active).toBe(true);
+    expect(entry!.command).toContain(`public.${LEDGER_FANOUT_FUNCTION}()`);
+  });
+
+  it("the function snapshot DEFINES public.<LEDGER_FANOUT_FUNCTION>() and writes its failure row under the arm's two literals", () => {
+    const body = snapshot(LEDGER_FANOUT_FUNCTION);
+    expect(body).toMatch(new RegExp(`CREATE OR REPLACE FUNCTION public\\.${LEDGER_FANOUT_FUNCTION}\\(\\)`));
+    expect(body).toMatch(FAILURE_ROW_RE(LEDGER_FANOUT_FAILURE_CRON_NAME, LEDGER_FANOUT_FAILURE_ERROR));
+  });
+
+  it("the COMPOSITE fan-out writes its failure row under the same two literals, so failure_rows counts it too", () => {
+    expect(snapshot("enqueue_ledger_composite_refresh")).toMatch(
+      FAILURE_ROW_RE(LEDGER_FANOUT_FAILURE_CRON_NAME, LEDGER_FANOUT_FAILURE_ERROR),
+    );
+  });
+
+  it("LEDGER_FANOUT_SQL quotes every constant, and never names metadata or a status column", () => {
+    for (const lit of [LEDGER_FANOUT_JOB, LEDGER_FANOUT_FUNCTION, LEDGER_FANOUT_FAILURE_CRON_NAME, LEDGER_FANOUT_FAILURE_ERROR]) {
+      expect(LEDGER_FANOUT_SQL).toContain(`'${lit}'`);
+    }
+    expect(LEDGER_FANOUT_SQL).not.toMatch(/\bmetadata\b/);
+    expect(LEDGER_FANOUT_SQL).not.toMatch(/\bstatus\b/);
+  });
+
+  it("CALIBRATION: a renamed function or a drifted failure literal is caught", () => {
+    const body = snapshot(LEDGER_FANOUT_FUNCTION);
+    expect(body).not.toMatch(FAILURE_ROW_RE(LEDGER_FANOUT_FAILURE_CRON_NAME, "candidate_enqueue_failure"));
+    expect(body).not.toMatch(FAILURE_ROW_RE("ledger_refresh_fan_out", LEDGER_FANOUT_FAILURE_ERROR));
+    const entry = jobs.find((j) => j.jobname === LEDGER_FANOUT_JOB)!;
+    expect(entry.command).not.toContain(`public.${LEDGER_FANOUT_FUNCTION}_v2()`);
+    expect(jobs.find((j) => j.jobname === `${LEDGER_FANOUT_JOB}_x`)).toBeUndefined();
   });
 });

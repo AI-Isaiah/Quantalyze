@@ -6,6 +6,7 @@ import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
 import EquityChartWidget from "./widgets/performance/EquityChart";
+import { EquityHistoryRebuilding } from "./components/EquityHistoryRebuilding";
 import { buildAllocatorPortfolioFactsheetPayload } from "@/lib/factsheet/allocator-portfolio-payload";
 import {
   FactsheetProvider,
@@ -27,6 +28,11 @@ import { FactsheetBody } from "@/app/factsheet/[id]/v2/FactsheetView";
  * header is suppressed (the AllocationsTabs page header already names
  * the surface) and the demo AllocatorSection is suppressed (this IS the
  * allocator's view; demo portfolios are out of place here).
+ *
+ * Phase 167.1.2 / D-02 ("Hide it until correct"): all of the above is the
+ * "ready" branch only. While `equityHistoryState !== "ready"` the Overview
+ * renders `EquityHistoryRebuilding` in place of the curve AND the factsheet,
+ * and builds no factsheet payload at all.
  */
 export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   const {
@@ -63,21 +69,44 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // "connected — no positions synced yet" copy to an allocator who
     // disconnected their only key.
     hasConnectedKeys = false,
+    // Phase 167.1.2 / D-02 ("Hide it until correct"): while the history is
+    // rebuilt the producer withholds the curve, and neither the curve nor any
+    // factsheet KPI computed from it renders.
+    equityHistoryState,
+    equityCurveSource,
   } = props;
+  // Fail-closed: ONLY an explicit "ready" may show the curve. A missing field,
+  // null, "" or any state added later (a destructuring default fires on
+  // `undefined` alone) all read as rebuilding.
+  const isRebuilding = equityHistoryState !== "ready";
+  // Phase 167.1.2 / IN-01 (founder copy call 2026-09-25): a brand-new book has
+  // no history for D-02 to withhold. Its own-book series has two sources, the
+  // derived curve (`equityCurveSource === "derived"`) and the legacy snapshots
+  // (`snapshotCount > 0`), and this is true only when both are empty. It is the
+  // negation of the Scenario composer's rebuilding-note gate, so the Overview
+  // and the composer read the same book the same way. Such a book gets the
+  // warm-up note instead of the "being rebuilt" panel. An undefined count is
+  // not `=== 0`, so a malformed payload falls through to the panel.
+  const hasNoHistoryYet =
+    snapshotCount === 0 && equityCurveSource !== "derived";
 
   const holdingsEmpty = holdingsSummary.length === 0;
 
   const factsheetPayload = useMemo(
     () =>
-      buildAllocatorPortfolioFactsheetPayload(equityDailyPoints, {
-        allocatorId: props.allocator_id,
-        portfolioName: portfolio?.name ?? "My Portfolio",
-        computedAt: analytics?.computed_at ?? null,
-        markets: activeVenues,
-        startDate: equityDailyPoints[0]?.date ?? null,
-        aum: analytics?.total_aum ?? null,
-      }),
+      // D-02: no factsheet payload (so no KPI) is built while rebuilding.
+      isRebuilding
+        ? null
+        : buildAllocatorPortfolioFactsheetPayload(equityDailyPoints, {
+            allocatorId: props.allocator_id,
+            portfolioName: portfolio?.name ?? "My Portfolio",
+            computedAt: analytics?.computed_at ?? null,
+            markets: activeVenues,
+            startDate: equityDailyPoints[0]?.date ?? null,
+            aum: analytics?.total_aum ?? null,
+          }),
     [
+      isRebuilding,
       equityDailyPoints,
       props.allocator_id,
       portfolio,
@@ -97,7 +126,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             connected key with reconstructed (if baseline-unknown) history.
             Surface the banner here too so the gap reads as a data-horizon
             limit, not a missing connection. */}
-        {equityBaselineUnknown && <BaselineUnknownBanner />}
+        {equityBaselineUnknown && (
+          <BaselineUnknownBanner historyRebuilding={isRebuilding} />
+        )}
         {/* DOGFOOD-1 (Phase 110.1): `hasConnectedKeys` is derived server-side
             from the canonical isPerKeyDailiesEligibleKey predicate, NOT
             `activeVenues.length > 0`. The venue set counts is_active keys
@@ -149,7 +180,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           venue's data horizon). Non-blocking — live holdings + AUM behind it
           remain accurate; the trustworthy curve rebuilds as daily snapshots
           accrue. */}
-      {equityBaselineUnknown && <BaselineUnknownBanner />}
+      {equityBaselineUnknown && (
+        <BaselineUnknownBanner historyRebuilding={isRebuilding} />
+      )}
       <InsightStrip
         analytics={analytics}
         portfolioId={portfolio?.id ?? null}
@@ -157,7 +190,18 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         className="mt-3 px-1"
       />
 
-      {factsheetPayload ? (
+      {isRebuilding ? (
+        // D-02: replaces BOTH the curve slot and the factsheet, and is checked
+        // BEFORE the warm-up fallback, so a book whose history is withheld
+        // never sees the "appear once" copy. IN-01: a brand-new book has
+        // nothing withheld, so it gets the warm-up note alone. The curve slot
+        // stays unmounted either way, as D-02 requires.
+        hasNoHistoryYet ? (
+          <FactsheetWarmupNote snapshotCount={snapshotCount} />
+        ) : (
+          <EquityHistoryRebuilding />
+        )
+      ) : factsheetPayload ? (
         <FactsheetProvider payload={factsheetPayload}>
           <FactsheetBody
             payload={factsheetPayload}
@@ -170,26 +214,38 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       ) : (
         <>
           {equitySlot}
-          <div
-            role="status"
-            data-testid="overview-factsheet-warmup"
-            className="mx-auto mt-8 max-w-[1100px] py-12 text-center"
-          >
-            <p className="text-fixed-10 font-mono uppercase tracking-[0.18em] text-text-muted">
-              Portfolio factsheet
-            </p>
-            <p className="mt-3 text-sm text-text-secondary">
-              Aggregated factsheet panels appear once at least two days of
-              blended equity history are available. The data flows from
-              the API keys you connect on the My Allocation page.
-            </p>
-            {snapshotCount > 0 && snapshotCount < 2 && (
-              <p className="mt-2 text-fixed-11 text-text-muted">
-                {snapshotCount} snapshot recorded so far.
-              </p>
-            )}
-          </div>
+          <FactsheetWarmupNote snapshotCount={snapshotCount} />
         </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The Overview's warm-up note, shown when there is too little history to build
+ * factsheet panels from. It renders in two places: the "ready" branch before
+ * two days have accrued, and (Phase 167.1.2 / IN-01) a brand-new book under
+ * D-02 that has no history for the rebuilding panel to describe.
+ */
+function FactsheetWarmupNote({ snapshotCount }: { snapshotCount: number }) {
+  return (
+    <div
+      role="status"
+      data-testid="overview-factsheet-warmup"
+      className="mx-auto mt-8 max-w-[1100px] py-12 text-center"
+    >
+      <p className="text-fixed-10 font-mono uppercase tracking-[0.18em] text-text-muted">
+        Portfolio factsheet
+      </p>
+      <p className="mt-3 text-sm text-text-secondary">
+        Aggregated factsheet panels appear once at least two days of
+        blended equity history are available. The data flows from
+        the API keys you connect on the My Allocation page.
+      </p>
+      {snapshotCount > 0 && snapshotCount < 2 && (
+        <p className="mt-2 text-fixed-11 text-text-muted">
+          {snapshotCount} snapshot recorded so far.
+        </p>
       )}
     </div>
   );
@@ -251,8 +307,17 @@ function StalenessBanner({ lastSyncAt }: { lastSyncAt: string | null }) {
  * condition is data-driven (resolves only as trustworthy daily-refresh rows
  * accrue), so a one-shot dismiss would let the user re-acquire the wrong mental
  * model on the next load.
+ *
+ * Phase 167.1.2 / D-02 (review round 1 SFH-05): while the equity history is
+ * rebuilt the curve stays hidden however many snapshots accrue, so the banner
+ * must not promise that "a full performance history builds up from here". The
+ * rebuilding variant keeps the data-horizon explanation and drops the promise.
  */
-function BaselineUnknownBanner() {
+function BaselineUnknownBanner({
+  historyRebuilding,
+}: {
+  historyRebuilding: boolean;
+}) {
   return (
     <div
       role="status"
@@ -268,8 +333,10 @@ function BaselineUnknownBanner() {
       <span>
         Some positions were funded before your exchange&apos;s available data
         window, so absolute equity and drawdown can&apos;t be reconstructed for
-        that earlier period. Your live holdings and current AUM are accurate, and
-        a full performance history builds up from here as daily snapshots accrue.
+        that earlier period.{" "}
+        {historyRebuilding
+          ? "Your live holdings and AUM do not use that history."
+          : "Your live holdings and current AUM are accurate, and a full performance history builds up from here as daily snapshots accrue."}
       </span>
     </div>
   );

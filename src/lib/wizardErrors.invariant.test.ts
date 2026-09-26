@@ -342,7 +342,13 @@ const ROUTES: readonly RouteUnderTest[] = [
     // membership check in `SubmitStep.tsx` is genuinely reached for them. The
     // three rows land in the SAME commit the route starts emitting them
     // (verified at source, not assumed).
-    expectedSites: 32,
+    //
+    // Round-2 review (SFH HIGH-1): 32 -> 33, a genuinely NEW coded rejection,
+    // `SUBMITTED_ANALYTICS_NOT_QUEUED` (a dispatch failure after the promotion
+    // committed). It lands with its roster row in `SubmitStep.tsx`, and
+    // `EXPECTED_FINALIZE_REJECTION_SITES` moves 32 -> 33 with it, so the
+    // code-less ledger stays at 0.
+    expectedSites: 33,
   },
   {
     // ⭐ 161-09 / WIZERR-08 — THE FOURTH ENTRY, and the blindness it closes is
@@ -777,7 +783,9 @@ const KNOWN_CODELESS_FINALIZE_REJECTIONS = 0;
  * and 32 − 29 = 3. A plan that had invented two rejections to "fix" would have
  * moved this literal too.
  */
-const EXPECTED_FINALIZE_REJECTION_SITES = 32;
+// Round-2 review (SFH HIGH-1): 32 -> 33, the CODED
+// `SUBMITTED_ANALYTICS_NOT_QUEUED` 503 in `answerDispatchFailedAfterPromotion`.
+const EXPECTED_FINALIZE_REJECTION_SITES = 33;
 
 /**
  * HAND-TYPED. The two routes 142.2-07 split, by LABEL.

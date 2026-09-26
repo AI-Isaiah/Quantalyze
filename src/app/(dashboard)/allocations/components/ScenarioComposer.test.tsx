@@ -261,6 +261,53 @@ vi.mock("@/lib/scenario", async (importOriginal) => {
   };
 });
 
+// Phase 167.1 review round 2 WR-04 (silent-failure-hunter) — the composer's
+// Sentry captures are recorded here so the missing-key capture can be pinned
+// (level, tags, count only, never a key id). Same shape as the
+// ScenarioCommitDrawer suite's recorder; no other case in this file asserts on
+// Sentry, so replacing the lazy capture with a recorder is additive-safe.
+const composerSentryCalls = vi.hoisted(
+  () =>
+    [] as Array<{
+      err: unknown;
+      options: {
+        tags: Record<string, string>;
+        extra?: Record<string, unknown>;
+        level?: string;
+      };
+    }>,
+);
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: (
+    err: unknown,
+    options: {
+      tags: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    },
+  ) => {
+    composerSentryCalls.push({ err, options });
+    return Promise.resolve();
+  },
+  addSentryBreadcrumb: () => Promise.resolve(),
+  shouldCaptureNow: () => true,
+  __resetCaptureThrottleForTests: () => {},
+}));
+
+// Phase 167.1 review round 2 WR-01 — `excludedUntrusted` renders nowhere
+// until the founder answers D-06, so the composer's wiring of D-20's
+// manager-side set is observable only at the call. A PASS-THROUGH spy: the real
+// helper runs, so every other case in this file sees the real summary, and the
+// AUMTRUST block can assert the arguments and the result.
+vi.mock("../lib/live-holdings-summary", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../lib/live-holdings-summary")>();
+  return {
+    ...actual,
+    summarizeLiveHoldings: vi.fn(actual.summarizeLiveHoldings),
+  };
+});
+
 vi.mock("./CustomRangePicker", () => ({
   CustomRangePicker: vi.fn(
     (props: {
@@ -317,6 +364,7 @@ import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 // @/lib/scenario is never mocked, so these are the genuine functions the composer
 // runs. ENGINE-01: no alias collapse is involved — the engine set is series-space.
 import { buildPerKeyStrategyForBuilderSet } from "../lib/scenario-adapter";
+import { summarizeLiveHoldings } from "../lib/live-holdings-summary";
 import {
   computeScenario as realComputeScenario,
   buildDateMapCache as realBuildDateMapCache,
@@ -333,7 +381,10 @@ import { blendPeriodsPerYear } from "@/lib/closed-sets";
 // attribute on the per-key leverage inputs the phase adds.
 import { MAX_LEVERAGE } from "@/lib/leverage";
 import { formatCurrency } from "@/lib/utils";
-import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
+import {
+  buildHoldingRef,
+  type FlaggedHolding,
+} from "../lib/holding-outcome-adapter";
 // IMPACT-02 — imported REAL (never mocked) so the R3 guard's positive control
 // renders a genuine PercentileRankBadge in isolation, proving the testid query
 // that asserts ABSENCE on the projection is non-vacuous.
@@ -511,6 +562,8 @@ function makePayload(
     ],
     equityCurveSource: "legacy",
     derivedCurveComputedAt: null,
+    // Phase 167.1.2 / D-02: the producer emits "rebuilding" for every allocator.
+    equityHistoryState: "rebuilding",
     minHistoryDepthMonths: 12,
     equityBaselineUnknown: false,
     activeVenues: ["Binance"],
@@ -903,6 +956,10 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const payload = makePayload({
       lastSyncAt: "2026-06-24T00:00:00.000Z",
       allKeysStale: true,
+      // Phase 167.1.2 / D-02: moved to "ready" explicitly. While "rebuilding"
+      // the own-book series is withheld in BOTH modes, so the blank-mode gate
+      // this test pins is only observable once the history may be shown.
+      equityHistoryState: "ready",
     });
     render(
       <ScenarioComposer
@@ -6868,8 +6925,11 @@ describe("ScenarioComposer — Phase 43 GUARD-01 static guard + assembled degene
     // (D) The chart-bound Peer / Mandate / OwnBookDelta props degrade HONESTLY:
     // a 0-constituent degenerate blend yields no peer rank (below floor → null),
     // no mandate panel (no constituents → undefined), and the own-book delta is
-    // undefined because the default book equity (2 points) gives <2 derivable
-    // returns. None is a fabricated zero/NaN — they are the honest absence.
+    // undefined because gate=false forces BLANK mode, which empties the own-book
+    // series before the delta is built (measured 2026-09-25: the chart receives
+    // `equityDailyPoints: []` here). The `bookReturns.length < 2` guard is pinned
+    // by its own case in the 167.1.2 D-02 describe block, not by this render.
+    // None is a fabricated zero/NaN — they are the honest absence.
     const props = lastChartProps();
     expect(props.scenarioPeer ?? null).toBeNull();
     expect(props.scenarioMandate ?? null).toBeNull();
@@ -15363,5 +15423,1467 @@ describe("ScenarioComposer — review round 2: partial-book dollars (F2/F4/F5)",
     expect(
       notionalDollars([F2_KEY_A, F2_KEY_B]).reduce((a, b) => a + b, 0),
     ).toBe(F2_MODELLED_BOOK);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1 AUMTRUST — the headline AUM says when it includes holdings from
+// keys needing attention.
+//
+// Founder decision 2026-09-22, binding: KEEP THE TOTAL AND FLAG IT. A holding
+// from a key whose sync is untrusted (`sign_in_failed`, `revoked`) stays in the
+// PORTFOLIO AUM field's live total, and a muted sentence beside the field names
+// how many of those dollars come from such keys. Excluding them was rejected: a
+// password rotation would then read as an AUM loss.
+//
+// This block carries the tracer case (State A). Plan 03 extends it with State B
+// (the override note), every absence state, and the component half of D-06.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
+  const AT_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-06-${String(i + 1).padStart(2, "0")}`,
+  );
+  // Distinct series per key, for the same reason F2 gives: identical series
+  // would let a wrong key set pass by coincidence.
+  const AT_SERIES_A = AT_DATES.map((date, i) => ({
+    date,
+    value: [0.004, -0.001, 0.002, 0.0005][i % 4],
+  }));
+  const AT_SERIES_B = AT_DATES.map((date, i) => ({
+    date,
+    value: [-0.012, 0.021, -0.006, 0.017][i % 4],
+  }));
+
+  // Synthetic identifiers only — the repo and `.planning/` are public.
+  const AT_KEY_TRUSTED = "aumtrust-key-a";
+  const AT_KEY_SIGN_IN_FAILED = "aumtrust-key-b";
+  /** The D-06 pin's key. Its own id, so the name says the status it carries. */
+  const AT_KEY_REVOKED = "aumtrust-key-d";
+  const AT_ALL_KEYS = [AT_KEY_TRUSTED, AT_KEY_SIGN_IN_FAILED];
+
+  // ── THE HAND-COMPUTED BOOK ────────────────────────────────────────────────
+  //   trusted        (key-a, spot)   480,000
+  //   sign_in_failed (key-b, spot)    12,345
+  //   live total                     492,345   ← the field, unchanged by 167.1
+  //   total − untrusted              480,000   ← the REJECTED alternative
+  // The ~39× gap between the two holdings keeps a basis or set mix-up far
+  // outside any rounding slack. SPOT holdings, so each equity contribution IS
+  // its `value_usd` and the fixture's arithmetic is the reader's arithmetic.
+  const AT_TRUSTED_USD = 480_000;
+  const AT_UNTRUSTED_USD = 12_345;
+  const AT_LIVE_TOTAL = 492_345;
+  const AT_TOTAL_MINUS_UNTRUSTED = 480_000;
+
+  /** Two contributing keys, the second `sign_in_failed`. Each holding carries
+   *  its OWN (venue, symbol, holding_type) triple: `holdingByRef` keys on that
+   *  triple, not on the key, so a shared triple would collapse two holdings
+   *  into one map entry and one of them would silently vanish from the sum. */
+  function atPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      apiKeys: [
+        winApiKey(AT_KEY_TRUSTED),
+        { ...winApiKey(AT_KEY_SIGN_IN_FAILED), sync_status: "sign_in_failed" },
+      ],
+      holdingsSummary: [
+        {
+          ...HOLDING_BTC,
+          venue: "binance",
+          symbol: "AUMTRUST-A",
+          holding_type: "spot" as const,
+          value_usd: AT_TRUSTED_USD,
+          api_key_id: AT_KEY_TRUSTED,
+        },
+        {
+          ...HOLDING_BTC,
+          venue: "okx",
+          symbol: "AUMTRUST-B",
+          holding_type: "spot" as const,
+          value_usd: AT_UNTRUSTED_USD,
+          api_key_id: AT_KEY_SIGN_IN_FAILED,
+        },
+      ],
+      perKeyReturnsByApiKeyId: {
+        [AT_KEY_TRUSTED]: AT_SERIES_A,
+        [AT_KEY_SIGN_IN_FAILED]: AT_SERIES_B,
+      },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: [...AT_ALL_KEYS],
+      allocatorEligibleApiKeyIds: [...AT_ALL_KEYS],
+      contributingApiKeyIds: [...AT_ALL_KEYS],
+      bookEntryGateSatisfied: true,
+    });
+  }
+
+  function renderAt(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  function aumField(): HTMLInputElement {
+    return screen.getByTestId("scenario-aum-input") as HTMLInputElement;
+  }
+
+  /** One key and its one holding, for the state-by-state cases (plan 03). */
+  interface AtKeySpec {
+    id: string;
+    status: string | null;
+    venue: string;
+    symbol: string;
+    /** Spot holding: its `value_usd` IS its equity contribution. */
+    spotUsd?: number;
+    /** Derivative holding: its equity contribution is `unrealized_pnl_usd`.
+     *  `value_usd` is a far-away notional, so a wrong-field read shows.
+     *  `null` is a derivative whose P&L the venue did not report. */
+    derivPnlUsd?: number | null;
+    /** Defaults true. False drops the key from `contributingApiKeyIds` and
+     *  gives it no return series. */
+    contributing?: boolean;
+    /** Defaults true. False drops the key from BOTH eligibility sets (and
+     *  therefore from the contributing set too). */
+    eligible?: boolean;
+  }
+
+  /** A book built from `AtKeySpec`s. Every spec carries its OWN
+   *  (venue, symbol), so each holding has a distinct `buildHoldingRef` triple
+   *  (see `atPayload`); each case asserts that as its self-proof. */
+  function atBook(specs: AtKeySpec[]): MyAllocationDashboardPayload {
+    const eligible = specs.filter((s) => s.eligible !== false).map((s) => s.id);
+    const contributing = specs
+      .filter((s) => s.eligible !== false && s.contributing !== false)
+      .map((s) => s.id);
+    return makePayload({
+      apiKeys: specs.map((s) => ({ ...winApiKey(s.id), sync_status: s.status })),
+      holdingsSummary: specs.map((s) =>
+        s.derivPnlUsd !== undefined
+          ? {
+              ...HOLDING_BTC,
+              venue: s.venue,
+              symbol: s.symbol,
+              holding_type: "derivative" as const,
+              value_usd: 900_000,
+              unrealized_pnl_usd: s.derivPnlUsd,
+              side: "long" as const,
+              api_key_id: s.id,
+            }
+          : {
+              ...HOLDING_BTC,
+              venue: s.venue,
+              symbol: s.symbol,
+              holding_type: "spot" as const,
+              value_usd: s.spotUsd ?? 0,
+              api_key_id: s.id,
+            },
+      ),
+      perKeyReturnsByApiKeyId: Object.fromEntries(
+        contributing.map((id, i) => [
+          id,
+          i % 2 === 0 ? AT_SERIES_A : AT_SERIES_B,
+        ]),
+      ),
+      perKeyDailiesGateSatisfied: contributing.length === eligible.length,
+      eligibleApiKeyIds: eligible,
+      allocatorEligibleApiKeyIds: eligible,
+      contributingApiKeyIds: contributing,
+      bookEntryGateSatisfied: contributing.length > 0,
+    });
+  }
+
+  /** Fixture self-proof: no two holdings share a triple, so none collapses
+   *  out of `holdingByRef` and silently vanishes from the sum. */
+  function expectDistinctTriples(payload: MyAllocationDashboardPayload) {
+    expect(new Set(payload.holdingsSummary.map(buildHoldingRef)).size).toBe(
+      payload.holdingsSummary.length,
+    );
+  }
+
+  /** A COMMITTED manual AUM: a change, then the blur that commits it. */
+  function commitAum(value: string) {
+    const el = aumField();
+    fireEvent.change(el, { target: { value } });
+    fireEvent.blur(el);
+  }
+
+  // ── THE STATE B BOOK ──────────────────────────────────────────────────────
+  //   trusted        (key-a, spot)   37,655
+  //   untrusted      (key-b, spot)   12,345
+  //   live total                     50,000   ← what the override note quotes
+  //   committed manual override      75,000   ← what the field then shows
+  const AT_B_TRUSTED_USD = 37_655;
+  const AT_B_UNTRUSTED_USD = 12_345;
+  const AT_B_LIVE_TOTAL = 50_000;
+  function atStateBBook(
+    secondKeyStatus: string | null = "sign_in_failed",
+  ): MyAllocationDashboardPayload {
+    return atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: secondKeyStatus,
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: AT_B_UNTRUSTED_USD,
+      },
+    ]);
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("AUMTRUST tracer (D-02/D-03, D-15 pin 1): a sign_in_failed holding stays in the PORTFOLIO AUM field and the field says so — 'Includes $12,345 from keys needing attention.'", () => {
+    const payload = atPayload();
+
+    // Fixture self-proof (non-vacuity). (1) Every holding has a distinct
+    // triple, so none collapses out of `holdingByRef`. (2) The hand-typed
+    // total is the arithmetic of the two holdings. (3) The rejected
+    // alternative really is a different number from the kept total, so the
+    // discriminating negative below cannot pass under both.
+    expect(new Set(payload.holdingsSummary.map(buildHoldingRef)).size).toBe(
+      payload.holdingsSummary.length,
+    );
+    expect(AT_TRUSTED_USD + AT_UNTRUSTED_USD).toBe(AT_LIVE_TOTAL);
+    expect(AT_LIVE_TOTAL - AT_UNTRUSTED_USD).toBe(AT_TOTAL_MINUS_UNTRUSTED);
+    expect(AT_TOTAL_MINUS_UNTRUSTED).not.toBe(AT_LIVE_TOTAL);
+
+    renderAt(payload);
+
+    // D-03 / D-15 pin 1 — the untrusted holding is STILL COUNTED. The field
+    // shows the same total it showed before this phase.
+    expect(aumField().value).toBe(String(AT_LIVE_TOTAL));
+    // The discriminating negative: dropping the untrusted holding is the
+    // alternative the founder rejected, and it must not be reachable by
+    // accident.
+    expect(aumField().value).not.toBe(String(AT_TOTAL_MINUS_UNTRUSTED));
+
+    // D-02 — exactly ONE disclosure for the one number (D-08), and its text is
+    // typed out here, never built from the noun constant or the formatter: an
+    // oracle that reads the source's own string would pass against any string.
+    const notes = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].textContent).toBe(
+      "Includes $12,345 from keys needing attention.",
+    );
+  });
+
+  it("AUMTRUST State B (D-08/D-18): a committed override moves the disclosure INTO the override note, as a clause on the live total it quotes — one marker, never two", () => {
+    const payload = atStateBBook();
+    expectDistinctTriples(payload);
+    expect(AT_B_TRUSTED_USD + AT_B_UNTRUSTED_USD).toBe(AT_B_LIVE_TOTAL);
+    renderAt(payload);
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+
+    commitAum("75000");
+
+    // The field now shows the allocator's own number, so a standalone
+    // "Includes …" beside it would read as qualifying the MANUAL value, which
+    // is false. The disclosure follows the live total into the note.
+    expect(aumField().value).toBe("75000");
+    const note = screen.getByTestId("scenario-aum-override-note");
+    expect(note.textContent).toBe(
+      "Overrides live-holdings total $50,000, which includes $12,345 from keys needing attention.",
+    );
+    // D-08: exactly ONE marker for the one number, and it is the nested one.
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "includes $12,345 from keys needing attention",
+    );
+    expect(
+      markers[0].closest('[data-testid="scenario-aum-override-note"]'),
+    ).toBe(note);
+  });
+
+  it("AUMTRUST State B regression (UI-SPEC § 1): with no untrusted holding the override note is byte-identical to today and no marker exists", () => {
+    // Same book, second key trusted: the one difference from the State B case.
+    const payload = atStateBBook(null);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+
+    commitAum("75000");
+
+    expect(screen.getByTestId("scenario-aum-override-note").textContent).toBe(
+      "Overrides live-holdings total $50,000.",
+    );
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+  });
+
+  it("AUMTRUST placement follows the COMMITTED value (RESEARCH Pitfall 3): typing without a blur neither moves nor removes the marker", () => {
+    const payload = atStateBBook();
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    // Mid-typing: the field text is the allocator's, but nothing is committed,
+    // so the marker stays standalone (State A) and no override note exists.
+    fireEvent.change(aumField(), { target: { value: "75000" } });
+    expect(aumField().value).toBe("75000");
+    expect(screen.queryByTestId("scenario-aum-override-note")).toBeNull();
+    const typing = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(typing).toHaveLength(1);
+    expect(typing[0].textContent).toBe(
+      "Includes $12,345 from keys needing attention.",
+    );
+    expect(
+      typing[0].closest('[data-testid="scenario-aum-override-note"]'),
+    ).toBeNull();
+
+    // The blur commits, and only then does the marker move (State B).
+    fireEvent.blur(aumField());
+    const committed = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(committed).toHaveLength(1);
+    expect(committed[0].textContent).toBe(
+      "includes $12,345 from keys needing attention",
+    );
+    expect(
+      committed[0].closest('[data-testid="scenario-aum-override-note"]'),
+    ).not.toBeNull();
+  });
+
+  // ── The absence states (UI-SPEC § 1 states 1, 2, 4, 6, 7), the count gate,
+  //    pin 4, the tone and the component half of D-06 ─────────────────────────
+
+  /** The manual override as the commit boundary sees it: `undefined` means no
+   *  manual value is committed. Used as the non-vacuity check that a commit
+   *  really landed before asserting where the marker is (or is not). */
+  function atManualAumOnWire(): number | undefined {
+    return vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.manualAumUsd;
+  }
+
+  // ── THE LIVE ≤ 0 BOOK ─────────────────────────────────────────────────────
+  //   trusted        (key-a, derivative, unrealized)  -5,000
+  //   sign_in_failed (key-b, spot)                      1,000
+  //   live total                                       -4,000   ← not on screen
+  // An untrusted holding IS summed here, so only the "is the live total on
+  // screen?" half of the gate keeps the marker away.
+  function atNonPositiveBook(): MyAllocationDashboardPayload {
+    return atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "deribit",
+        symbol: "AUMTRUST-A-PERP",
+        derivPnlUsd: -5_000,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: "sign_in_failed",
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: 1_000,
+      },
+    ]);
+  }
+
+  it("AUMTRUST absent, state 1 (blank slate): switching to Blank slate removes the marker — the AUM is the allocator's own and has no key basis", () => {
+    const payload = atPayload();
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    // Non-vacuity: the same book in book mode DOES carry the marker.
+    expect(screen.getAllByTestId("scenario-aum-untrusted-note")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(
+      screen.getByRole("radio", { name: /Blank slate/i }),
+    ).toHaveAttribute("aria-checked", "true");
+
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+  });
+
+  it("AUMTRUST absent, state 2 (D-15 pin 3): an all-trusted book renders NO marker element — never an 'Includes $0' claim when no untrusted holding exists", () => {
+    const payload = atStateBBook(null);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    // The live total IS on screen, so only the count gate keeps the marker away.
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+    expect(screen.queryByText(/keys needing attention/i)).toBeNull();
+  });
+
+  // ⛔ D-18 REOPENED 2026-09-24 by the founder ("Reopen, show the marker"):
+  // whenever the figure on screen includes untrusted dollars, the marker
+  // shows. This case used to pin state 4 as ABSENT (review WR-04 recorded the
+  // vanishing marker as a known limit); it now pins State C, flipped
+  // deliberately, not drifted.
+  it("AUMTRUST state 4, State C (D-18 REOPENED, review WR-04): the field is blank because the live total is <= 0, and the hint now names that total and the untrusted part of it — the marker does not vanish", () => {
+    const payload = atNonPositiveBook();
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    // The field is still blank and still asks for a value (D-03: the number
+    // and its refusal are unchanged; only the disclosure moved).
+    expect(aumField().value).toBe("");
+    const hint = screen.getByTestId("scenario-aum-required-note");
+    expect(hint.textContent).toBe(
+      "Required to size and commit. The live-holdings total is -$4,000, which includes $1,000 from keys needing attention.",
+    );
+    // D-08: ONE marker, nested in the hint as a clause on the total it names.
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "includes $1,000 from keys needing attention",
+    );
+    expect(markers[0].closest('[data-testid="scenario-aum-required-note"]')).toBe(
+      hint,
+    );
+    expect(markers[0].hasAttribute("class")).toBe(false);
+    // The blank field's accessible description is the hint that explains it.
+    expect(aumField()).toHaveAccessibleDescription(
+      "Required to size and commit. The live-holdings total is -$4,000, which includes $1,000 from keys needing attention.",
+    );
+  });
+
+  it("AUMTRUST state 4 regression (D-18 REOPENED): with no untrusted holding the blank-field hint is byte-identical to before and the input carries no description", () => {
+    const base = atNonPositiveBook();
+    const payload: MyAllocationDashboardPayload = {
+      ...base,
+      apiKeys: base.apiKeys.map((k) => ({ ...k, sync_status: null })),
+    };
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe("");
+    expect(screen.getByTestId("scenario-aum-required-note").textContent).toBe(
+      "Required to size and commit.",
+    );
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+    expect(aumField().hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  // ⛔ D-18 REOPENED 2026-09-24 (review IN-06): this case used to pin state 6
+  // as ABSENT. The number on screen then IS the live total, so it now pins
+  // State A beside the field, flipped deliberately.
+  it("AUMTRUST state 6 (D-18 REOPENED, review IN-06): a committed manual value EQUAL to the live total renders no override note, and the field — which then shows the live total — carries State A", () => {
+    const payload = atStateBBook();
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+
+    // Select-all → delete → retype, then blur: React's value tracker swallows a
+    // change to the value already in the DOM (see the 151 WR-04 note above), so
+    // a single change to "50000" would commit nothing and test a bare blur.
+    const el = aumField();
+    fireEvent.change(el, { target: { value: "" } });
+    fireEvent.change(el, { target: { value: "50000" } });
+    fireEvent.blur(el);
+    // Non-vacuity: a manual value really is committed, and equals the live one.
+    expect(atManualAumOnWire()).toBe(AT_B_LIVE_TOTAL);
+
+    expect(screen.queryByTestId("scenario-aum-override-note")).toBeNull();
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Includes $12,345 from keys needing attention.",
+    );
+    expect(aumField()).toHaveAccessibleDescription(
+      "Includes $12,345 from keys needing attention.",
+    );
+  });
+
+  it("AUMTRUST absent, state 7 (D-18): a committed manual value with a live total <= 0 renders no override note and no marker", () => {
+    const payload = atNonPositiveBook();
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    commitAum("75000");
+    expect(atManualAumOnWire()).toBe(75_000);
+    expect(aumField().value).toBe("75000");
+
+    expect(screen.queryByTestId("scenario-aum-override-note")).toBeNull();
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+  });
+
+  it("AUMTRUST D-07: the gate is the untrusted COUNT, not the amount — a lone untrusted derivative with negative unrealized P&L renders its signed amount", () => {
+    // trusted spot 50,000 keeps the live total > 0 (48,765.4); the only
+    // untrusted holding is a derivative whose equity is -1,234.6. The
+    // derivative gets its OWN venue/symbol so its triple differs.
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: 50_000,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: "sign_in_failed",
+        venue: "deribit",
+        symbol: "AUMTRUST-B-PERP",
+        derivPnlUsd: -1_234.6,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    // Hyphen-minus, as the composer's whole-dollar renderer emits it.
+    expect(markers[0].textContent).toBe(
+      "Includes -$1,235 from keys needing attention.",
+    );
+  });
+
+  it("AUMTRUST review IN-02: the disclosed part may EXCEED the total it qualifies — a trusted losing derivative beside an untrusted spot holding prints $5,000 beside 1000, unclamped (D-07: amount <= total is not an invariant)", () => {
+    //   trusted        (key-a, derivative, unrealized)  -4,000
+    //   sign_in_failed (key-b, spot)                      5,000
+    //   live total                                        1,000
+    // Pinned so a later "clamp the part to the whole" change is deliberate:
+    // clamping would under-state the dollars from keys needing attention.
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "deribit",
+        symbol: "AUMTRUST-A-PERP",
+        derivPnlUsd: -4_000,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: "sign_in_failed",
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: 5_000,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe("1000");
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Includes $5,000 from keys needing attention.",
+    );
+  });
+
+  // ⛔ D-06 answered (b) 2026-09-24: this case used to end "and renders no
+  // marker". Pin 4 is unchanged (the key adds nothing to the field or to the
+  // includes amount); what changed is that D-20's $Y now renders, so the
+  // excluded holding is named instead of silently absent.
+  it("AUMTRUST D-15 pin 4 (component): a sign_in_failed key that is allocator-eligible but NOT contributing adds nothing to the field or the includes amount, and D-06 (b) names it as excluded", () => {
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: "sign_in_failed",
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: AT_UNTRUSTED_USD,
+        contributing: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    // Fixture self-proof: the key IS allocator-eligible and is NOT contributing.
+    expect(payload.allocatorEligibleApiKeyIds).toContain(AT_KEY_SIGN_IN_FAILED);
+    expect(payload.contributingApiKeyIds).not.toContain(AT_KEY_SIGN_IN_FAILED);
+    renderAt(payload);
+
+    // The field is the modelled book only: 480,000, not 492,345.
+    expect(aumField().value).toBe(String(AT_TRUSTED_USD));
+    expect(aumField().value).not.toBe(String(AT_LIVE_TOTAL));
+    // No includes part (nothing untrusted is summed); the excludes part only.
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $12,345 from keys needing attention.",
+    );
+  });
+
+  it("AUMTRUST tone (D-09, UI-SPEC U-01): State A is muted steady-state text with no role, no aria-live and no warning colour", () => {
+    renderAt(atPayload());
+    const marker = screen.getByTestId("scenario-aum-untrusted-note");
+    const cls = marker.getAttribute("class") ?? "";
+    expect(cls).toContain("text-xs");
+    expect(cls).toContain("text-text-muted");
+    expect(cls).not.toMatch(/warning|amber|danger|destructive|accent/i);
+    expect(marker.hasAttribute("role")).toBe(false);
+    expect(marker.hasAttribute("aria-live")).toBe(false);
+  });
+
+  it("AUMTRUST tone (D-09): State B's nested marker carries no class of its own and inherits the override note's muted voice", () => {
+    renderAt(atStateBBook());
+    commitAum("75000");
+
+    const marker = screen.getByTestId("scenario-aum-untrusted-note");
+    expect(marker.hasAttribute("class")).toBe(false);
+    expect(marker.hasAttribute("role")).toBe(false);
+    expect(marker.hasAttribute("aria-live")).toBe(false);
+    const note = marker.closest(
+      '[data-testid="scenario-aum-override-note"]',
+    ) as HTMLElement | null;
+    expect(note).not.toBeNull();
+    const cls = note?.getAttribute("class") ?? "";
+    expect(cls).toContain("text-text-muted");
+    expect(cls).not.toMatch(/warning|amber|danger|destructive|accent/i);
+    expect(note?.hasAttribute("role")).toBe(false);
+    expect(note?.hasAttribute("aria-live")).toBe(false);
+  });
+
+  it("AUMTRUST review WR-03: an untrusted derivative with no reported P&L is disclosed as unavailable, never as a known $0 — in State A and inside the override note", () => {
+    // trusted spot 37,655 + sign_in_failed spot 12,345 + sign_in_failed
+    // derivative with a null P&L (sums as 0) = 50,000, unchanged (D-03).
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: "sign_in_failed",
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: AT_B_UNTRUSTED_USD,
+      },
+      {
+        id: "aumtrust-key-c",
+        status: "sign_in_failed",
+        venue: "deribit",
+        symbol: "AUMTRUST-C-PERP",
+        derivPnlUsd: null,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+
+    const stateA = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(stateA).toHaveLength(1);
+    expect(stateA[0].textContent).toBe(
+      "Includes $12,345 from keys needing attention (value unavailable for 1 holding).",
+    );
+
+    commitAum("75000");
+    expect(screen.getByTestId("scenario-aum-override-note").textContent).toBe(
+      "Overrides live-holdings total $50,000, which includes $12,345 from keys needing attention (value unavailable for 1 holding).",
+    );
+    expect(screen.getAllByTestId("scenario-aum-untrusted-note")).toHaveLength(1);
+  });
+
+  // ── THE MISSING-KEY BOOK (review WR-05) ──────────────────────────────────
+  // A payload asserting book entry with an EMPTY contributing set (the degrade
+  // branch, the one place such a holding is summed), and a third holding whose
+  // key is absent from apiKeys (the key list dropped it).
+  //
+  // ⚠️ Review round 2 IN-06: SSR CANNOT EMIT THIS PAYLOAD. In production
+  // `bookEntryGateSatisfied === contributingApiKeyIds.length > 0`, so
+  // `bookEntryGateSatisfied: true` beside an empty contributing set never
+  // arrives. The cases built on this book pin a GUARD for a payload that
+  // breaks that invariant (the flag is read, not re-derived), not a state an
+  // allocator can reach today. Read a failure here as "the degrade branch
+  // stopped failing loud", not as a production regression.
+  const AT_KEY_MISSING = "aumtrust-key-h";
+  function atMissingKeyBook(
+    secondKeyStatus: string | null,
+  ): MyAllocationDashboardPayload {
+    return makePayload({
+      apiKeys: [
+        winApiKey(AT_KEY_TRUSTED),
+        { ...winApiKey(AT_KEY_SIGN_IN_FAILED), sync_status: secondKeyStatus },
+      ],
+      holdingsSummary: [
+        {
+          ...HOLDING_BTC,
+          venue: "binance",
+          symbol: "AUMTRUST-A",
+          holding_type: "spot" as const,
+          value_usd: AT_TRUSTED_USD,
+          api_key_id: AT_KEY_TRUSTED,
+        },
+        {
+          ...HOLDING_BTC,
+          venue: "okx",
+          symbol: "AUMTRUST-B",
+          holding_type: "spot" as const,
+          value_usd: AT_UNTRUSTED_USD,
+          api_key_id: AT_KEY_SIGN_IN_FAILED,
+        },
+        {
+          ...HOLDING_BTC,
+          venue: "kraken",
+          symbol: "AUMTRUST-H",
+          holding_type: "spot" as const,
+          value_usd: 4_444,
+          api_key_id: AT_KEY_MISSING,
+        },
+      ],
+      perKeyReturnsByApiKeyId: {
+        [AT_KEY_TRUSTED]: AT_SERIES_A,
+        [AT_KEY_SIGN_IN_FAILED]: AT_SERIES_B,
+      },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: [...AT_ALL_KEYS],
+      allocatorEligibleApiKeyIds: [...AT_ALL_KEYS],
+      contributingApiKeyIds: [],
+      bookEntryGateSatisfied: true,
+    });
+  }
+
+  it("AUMTRUST review WR-05: a summed holding whose key is missing from apiKeys is disclosed as from a key with an unknown sync status — never read as trusted — and logged", () => {
+    // The degrade branch (a payload asserting book entry with an EMPTY
+    // contributing set) is the one place such a holding is summed.
+    //   trusted        (key-a, spot)            480,000
+    //   sign_in_failed (key-b, spot)             12,345
+    //   key missing from apiKeys (spot)           4,444
+    //   live total                              496,789
+    const payload = atMissingKeyBook("sign_in_failed");
+    expectDistinctTriples(payload);
+    // Fixture self-proof: the third key really is absent from apiKeys.
+    expect(payload.apiKeys.map((k) => k.id)).not.toContain(AT_KEY_MISSING);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderAt(payload);
+
+      // D-03: the total is unchanged — the missing-key holding stays in.
+      expect(aumField().value).toBe("496789");
+      const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+      expect(markers).toHaveLength(1);
+      expect(markers[0].textContent).toBe(
+        "Includes $12,345 from keys needing attention and $4,444 from keys with an unknown sync status.",
+      );
+      expect(
+        errSpy.mock.calls.some((c) =>
+          String(c[0]).includes("missing from the key list"),
+        ),
+      ).toBe(true);
+      // Review round 2 IN-02: the log carries a count, never a key id — not
+      // the missing key's, nor either listed key's.
+      const logged = errSpy.mock.calls.flat().map(String).join(" ");
+      for (const keyId of [AT_KEY_MISSING, AT_KEY_TRUSTED, AT_KEY_SIGN_IN_FAILED]) {
+        expect(logged).not.toContain(keyId);
+      }
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("AUMTRUST review round 2 WR-04: the missing-key anomaly reaches an operator — one warning-level Sentry capture tagged holding_key_missing_from_key_list, carrying the count and never a key id", () => {
+    const payload = atMissingKeyBook("sign_in_failed");
+    composerSentryCalls.length = 0;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderAt(payload);
+      const captures = composerSentryCalls.filter(
+        (c) => c.options.tags.reason === "holding_key_missing_from_key_list",
+      );
+      expect(captures).toHaveLength(1);
+      expect(captures[0].options.level).toBe("warning");
+      expect(captures[0].options.tags).toEqual({
+        component: "ScenarioComposer",
+        reason: "holding_key_missing_from_key_list",
+      });
+      expect(captures[0].options.extra).toEqual({ unknown_status_count: 1 });
+      // No key id anywhere in what leaves for Sentry: not the missing key,
+      // and not either listed key.
+      const sent = JSON.stringify({
+        message: (captures[0].err as Error).message,
+        options: captures[0].options,
+      });
+      for (const keyId of [AT_KEY_MISSING, AT_KEY_TRUSTED, AT_KEY_SIGN_IN_FAILED]) {
+        expect(sent).not.toContain(keyId);
+      }
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("AUMTRUST review round 2 WR-04 (control): a book with no missing key sends no missing-key capture", () => {
+    composerSentryCalls.length = 0;
+    renderAt(atStateBBook());
+    expect(
+      composerSentryCalls.filter(
+        (c) => c.options.tags.reason === "holding_key_missing_from_key_list",
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("AUMTRUST review round 2 IN-01 / IN-05: with both parts present, \"(value unavailable for N …)\" follows the part it belongs to — an untrusted holding's missing P&L never reads as qualifying the unknown-status amount", () => {
+    // The untrusted key's one holding is a derivative whose P&L the venue did
+    // not report (sums as 0). Live total: 480,000 + 0 + 4,444 = 484,444.
+    const base = atMissingKeyBook("sign_in_failed");
+    const payload: MyAllocationDashboardPayload = {
+      ...base,
+      holdingsSummary: base.holdingsSummary.map((h) =>
+        h.api_key_id === AT_KEY_SIGN_IN_FAILED
+          ? {
+              ...h,
+              symbol: "AUMTRUST-B-PERP",
+              holding_type: "derivative" as const,
+              value_usd: 900_000,
+              unrealized_pnl_usd: null,
+              side: "long" as const,
+            }
+          : h,
+      ),
+    };
+    expectDistinctTriples(payload);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderAt(payload);
+      expect(aumField().value).toBe("484444");
+      const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+      expect(markers).toHaveLength(1);
+      expect(markers[0].textContent).toBe(
+        "Includes $0 from keys needing attention (value unavailable for 1 holding) and $4,444 from keys with an unknown sync status.",
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("AUMTRUST review WR-05: a missing-key holding alone (every listed key trusted) still renders the marker — the gate counts unknown-status holdings too", () => {
+    const payload = atMissingKeyBook(null);
+    expectDistinctTriples(payload);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderAt(payload);
+      expect(aumField().value).toBe("496789");
+      const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+      expect(markers).toHaveLength(1);
+      expect(markers[0].textContent).toBe(
+        "Includes $4,444 from keys with an unknown sync status.",
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("AUMTRUST a11y (review WR-02): the PORTFOLIO AUM input's accessible description is whichever note qualifies its value — the State A disclosure, then the override note once a manual value is committed", () => {
+    renderAt(atStateBBook());
+    // State A: focus on the field announces the disclosure beside it. The
+    // expected text is typed, never read back from the DOM node.
+    expect(aumField()).toHaveAccessibleDescription(
+      "Includes $12,345 from keys needing attention.",
+    );
+
+    commitAum("75000");
+    // State B: the field shows the allocator's own number, and the note that
+    // qualifies it (and carries the nested clause) is the description.
+    expect(aumField()).toHaveAccessibleDescription(
+      "Overrides live-holdings total $50,000, which includes $12,345 from keys needing attention.",
+    );
+  });
+
+  it("AUMTRUST a11y (review WR-02): with no untrusted holding and no override the input carries no aria-describedby, so it never points at an element that is not rendered", () => {
+    renderAt(atStateBBook(null));
+    expect(aumField().hasAttribute("aria-describedby")).toBe(false);
+
+    commitAum("75000");
+    expect(aumField()).toHaveAccessibleDescription(
+      "Overrides live-holdings total $50,000.",
+    );
+  });
+
+  it("D-20 (review round 2 WR-01): the composer hands summarizeLiveHoldings the payload's manager-side keys — eligibleApiKeyIds minus allocatorEligibleApiKeyIds — so a sign_in_failed manager key is left out of excludedUntrusted while a revoked key stays in", () => {
+    const AT_KEY_MANAGER = "aumtrust-key-m";
+    const base = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_MANAGER,
+        status: "sign_in_failed",
+        venue: "okx",
+        symbol: "AUMTRUST-M",
+        spotUsd: 55_555,
+        eligible: false,
+      },
+      {
+        id: AT_KEY_REVOKED,
+        status: "revoked",
+        venue: "kraken",
+        symbol: "AUMTRUST-D",
+        spotUsd: 3_210,
+        eligible: false,
+      },
+    ]);
+    // The manager key is per-key-dailies ELIGIBLE but not ALLOCATOR-eligible:
+    // it feeds a strategy the owner runs as a manager. The revoked key is in
+    // neither set, so the payload cannot say whose book it is (D-20).
+    const payload: MyAllocationDashboardPayload = {
+      ...base,
+      eligibleApiKeyIds: [AT_KEY_TRUSTED, AT_KEY_MANAGER],
+      allocatorEligibleApiKeyIds: [AT_KEY_TRUSTED],
+    };
+    expectDistinctTriples(payload);
+    expect(payload.contributingApiKeyIds).toEqual([AT_KEY_TRUSTED]);
+    renderAt(payload);
+
+    const spy = vi.mocked(summarizeLiveHoldings);
+    expect(spy).toHaveBeenCalled();
+    const lastArgs = spy.mock.calls.at(-1)?.[0];
+    expect(lastArgs?.managerSideApiKeyIds).toEqual([AT_KEY_MANAGER]);
+    // Hand-listed: only the revoked key's 3,210 is D-20's $Y. Counting the
+    // manager key would give 58,765 over two holdings.
+    const lastResult = spy.mock.results.at(-1)?.value as ReturnType<
+      typeof summarizeLiveHoldings
+    >;
+    expect(lastResult.excludedUntrusted).toEqual({
+      amount: 3_210,
+      count: 1,
+      unavailable: 0,
+    });
+    // D-03: the field is the contributing book only.
+    expect(aumField().value).toBe(String(AT_TRUSTED_USD));
+  });
+
+  it("D-06 (component pin, answered (b) 2026-09-24): a revoked key's holding outside the eligible and contributing sets stays out of the field, and the marker now says so — 'Excludes $55,555 from keys needing attention.'", () => {
+    // ⭐ CONTEXT D-06 RESOLVED 2026-09-24 by the founder: option (b). Until
+    // plan 05 this test pinned the OPEN behaviour — the revoked key's holdings
+    // silently absent and `queryByText(/excludes/i)` null. It is flipped here
+    // DELIBERATELY to the UI-SPEC § 3 string: the total is unchanged (D-03),
+    // and the exclusion is disclosed rather than silent.
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_REVOKED,
+        status: "revoked",
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: 55_555,
+        eligible: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    // Fixture self-proof: the revoked key is in neither set.
+    expect(payload.allocatorEligibleApiKeyIds).not.toContain(AT_KEY_REVOKED);
+    expect(payload.contributingApiKeyIds).not.toContain(AT_KEY_REVOKED);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_TRUSTED_USD));
+    expect(aumField().value).not.toBe(String(AT_TRUSTED_USD + 55_555));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $55,555 from keys needing attention.",
+    );
+  });
+
+  // ── D-06 (b), UI-SPEC § 3 (M3) — every textContent row ─────────────────────
+  //   trusted        (key-a, spot, contributing)       37,655
+  //   sign_in_failed (key-b, spot, contributing)       12,345   ← X (includes)
+  //   revoked        (key-d, spot, in no eligible set)  8,000   ← Y (excludes)
+  //   live total                                       50,000   ← unchanged
+  // `withIncludes: false` makes key-b trusted, so the book carries Y only.
+  const AT_M3_EXCLUDED_USD = 8_000;
+  function atM3Book(withIncludes: boolean): MyAllocationDashboardPayload {
+    return atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: withIncludes ? "sign_in_failed" : null,
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: AT_B_UNTRUSTED_USD,
+      },
+      {
+        id: AT_KEY_REVOKED,
+        status: "revoked",
+        venue: "kraken",
+        symbol: "AUMTRUST-D",
+        spotUsd: AT_M3_EXCLUDED_USD,
+        eligible: false,
+      },
+    ]);
+  }
+
+  it("D-06 (b) M3 State A, excludes only: 'Excludes $8,000 from keys needing attention.' — one marker, the field unchanged", () => {
+    const payload = atM3Book(false);
+    expectDistinctTriples(payload);
+    expect(payload.contributingApiKeyIds).not.toContain(AT_KEY_REVOKED);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $8,000 from keys needing attention.",
+    );
+  });
+
+  it("D-06 (b) M3 State A, both: 'Includes $12,345 and excludes $8,000 from keys needing attention.' — one marker, the field unchanged", () => {
+    const payload = atM3Book(true);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Includes $12,345 and excludes $8,000 from keys needing attention.",
+    );
+  });
+
+  it("D-06 (b) M3 State B, excludes only: the override note reads '…$50,000, which excludes $8,000 from keys needing attention.' with the one nested marker", () => {
+    const payload = atM3Book(false);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    commitAum("75000");
+
+    expect(aumField().value).toBe("75000");
+    const note = screen.getByTestId("scenario-aum-override-note");
+    expect(note.textContent).toBe(
+      "Overrides live-holdings total $50,000, which excludes $8,000 from keys needing attention.",
+    );
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "excludes $8,000 from keys needing attention",
+    );
+    expect(markers[0].closest('[data-testid="scenario-aum-override-note"]')).toBe(
+      note,
+    );
+  });
+
+  it("D-06 (b) M3 State B, both: the override note reads '…$50,000, which includes $12,345 and excludes $8,000 from keys needing attention.'", () => {
+    const payload = atM3Book(true);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    commitAum("75000");
+
+    expect(screen.getByTestId("scenario-aum-override-note").textContent).toBe(
+      "Overrides live-holdings total $50,000, which includes $12,345 and excludes $8,000 from keys needing attention.",
+    );
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "includes $12,345 and excludes $8,000 from keys needing attention",
+    );
+  });
+
+  it("D-06 (b) count gate: an excluded untrusted holding whose equity is exactly $0 still renders 'Excludes $0 from keys needing attention.' — the gate is the excluded COUNT, never the amount", () => {
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_LIVE_TOTAL,
+      },
+      {
+        id: AT_KEY_REVOKED,
+        status: "revoked",
+        venue: "deribit",
+        symbol: "AUMTRUST-D-PERP",
+        derivPnlUsd: 0,
+        eligible: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $0 from keys needing attention.",
+    );
+  });
+
+  it("D-06 (b): the excludes clause is absent in blank mode, and absent in state 7 (a manual value with a live total <= 0), where no figure on screen contains the live total", () => {
+    // Blank mode: the same book carries the excludes marker in book mode.
+    renderAt(atM3Book(false));
+    expect(screen.getAllByTestId("scenario-aum-untrusted-note")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+    expect(screen.queryByText(/excludes/i)).toBeNull();
+    cleanup();
+
+    // State 7: trusted derivative -5,000 is the whole live total; the revoked
+    // spot 8,000 is excluded. A committed manual value hides the live total.
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "deribit",
+        symbol: "AUMTRUST-A-PERP",
+        derivPnlUsd: -5_000,
+      },
+      {
+        id: AT_KEY_REVOKED,
+        status: "revoked",
+        venue: "kraken",
+        symbol: "AUMTRUST-D",
+        spotUsd: AT_M3_EXCLUDED_USD,
+        eligible: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    // Non-vacuity: before the commit the live total is named in the hint
+    // (State C), and the excludes clause is there.
+    expect(screen.getByTestId("scenario-aum-required-note").textContent).toBe(
+      "Required to size and commit. The live-holdings total is -$5,000, which excludes $8,000 from keys needing attention.",
+    );
+    commitAum("75000");
+    expect(atManualAumOnWire()).toBe(75_000);
+    expect(screen.queryByTestId("scenario-aum-override-note")).toBeNull();
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+    expect(screen.queryByText(/excludes/i)).toBeNull();
+  });
+
+  // ── Review round 3 WR-01 — the production-reachable missing-key path ──────
+  // `getUserApiKeys` drops a key row on an unsupported exchange, but that
+  // key's holdings still arrive. It is in no eligible set, so the narrowing
+  // (always on in production) drops them. Until round 3 they landed in no
+  // part and the marker said nothing: "nothing silently disappears" failed on
+  // the one path an allocator can reach.
+  const AT_KEY_UNLISTED = "aumtrust-key-u";
+  function atUnlistedKeyBook(
+    unlisted: { spotUsd?: number; derivPnlUsd?: number },
+    withIncludes = false,
+  ): MyAllocationDashboardPayload {
+    const base = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: withIncludes ? "sign_in_failed" : null,
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: AT_B_UNTRUSTED_USD,
+      },
+      {
+        id: AT_KEY_UNLISTED,
+        status: null,
+        venue: "kraken",
+        symbol: unlisted.derivPnlUsd !== undefined ? "AUMTRUST-U-PERP" : "AUMTRUST-U",
+        ...unlisted,
+        eligible: false,
+      },
+    ]);
+    // The key list dropped the row, as `getUserApiKeys` does.
+    return {
+      ...base,
+      apiKeys: base.apiKeys.filter((k) => k.id !== AT_KEY_UNLISTED),
+    };
+  }
+
+  it("review round 3 WR-01 State A: a holding whose key the key list dropped stays out of the field, and the marker says so — 'Excludes $4,444 from keys with an unknown sync status.'", () => {
+    const payload = atUnlistedKeyBook({ spotUsd: 4_444 });
+    expectDistinctTriples(payload);
+    // Fixture self-proof: the holding arrives, its key does not, and it is in
+    // neither eligible set nor the contributing set.
+    expect(payload.holdingsSummary.map((h) => h.api_key_id)).toContain(AT_KEY_UNLISTED);
+    expect(payload.apiKeys.map((k) => k.id)).not.toContain(AT_KEY_UNLISTED);
+    expect(payload.eligibleApiKeyIds).not.toContain(AT_KEY_UNLISTED);
+    expect(payload.contributingApiKeyIds).not.toContain(AT_KEY_UNLISTED);
+    renderAt(payload);
+
+    // D-03: the field is the contributing book only, 50,000 not 54,444.
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $4,444 from keys with an unknown sync status.",
+    );
+  });
+
+  it("review round 3 WR-01 State B, with an includes part: '…$50,000, which includes $12,345 from keys needing attention, and excludes $4,444 from keys with an unknown sync status.'", () => {
+    const payload = atUnlistedKeyBook({ spotUsd: 4_444 }, true);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    commitAum("75000");
+
+    expect(screen.getByTestId("scenario-aum-override-note").textContent).toBe(
+      "Overrides live-holdings total $50,000, which includes $12,345 from keys needing attention, and excludes $4,444 from keys with an unknown sync status.",
+    );
+    expect(screen.getAllByTestId("scenario-aum-untrusted-note")).toHaveLength(1);
+  });
+
+  it("review round 3 WR-01 count gate: a dropped unknown-status holding whose equity is exactly $0 still renders 'Excludes $0 from keys with an unknown sync status.' — the gate is the COUNT, never the amount", () => {
+    const payload = atUnlistedKeyBook({ derivPnlUsd: 0 });
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $0 from keys with an unknown sync status.",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 / D-02 + D-03 — the own-book comparison is hidden while the
+// allocator's equity history is rebuilt, and the absence is DISCLOSED.
+//
+// Why this matters: the own-book line and the "vs your book" delta are built
+// from `equityDailyPoints`, the curve D-02 withholds because it could count one
+// exchange account twice or read a no-sync day as zero. A Sharpe/Sortino/max-DD
+// delta against that curve would be a wrong number the allocator can act on.
+// Hiding it silently would read as "no book"; the one sentence says why.
+// The live-book KPIs (`liveBaselineMetrics`) come from the per-key blend, not
+// from that curve, so D-03 keeps them visible.
+//
+// The fixture carries a 3-point curve (2 derivable returns, the minimum for a
+// delta), so case 3 proves the SAME fixture yields a delta when "ready" and the
+// absences in case 1 are the gate, not a too-short series.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while rebuilding", () => {
+  const OWN_BOOK_REBUILDING_COPY =
+    "Your book's own history is being rebuilt, so the comparison with your current book is not shown.";
+  const THREE_POINT_CURVE = [
+    { date: "2026-01-01", value: 100_000 },
+    { date: "2026-01-02", value: 101_000 },
+    { date: "2026-01-03", value: 99_500 },
+  ];
+  type D02ChartProps = {
+    equityDailyPoints: Array<{ date: string; value: number }>;
+    scenarioOwnBookDelta?: { book_n?: number } | undefined;
+  };
+  const lastChart = (): D02ChartProps =>
+    vi.mocked(ScenarioFactsheetChart).mock.calls.at(-1)![0] as D02ChartProps;
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    cleanup();
+  });
+
+  it("rebuilding: no own-book series reaches the chart, no own-book delta, and the disclosure renders once (and not in blank mode)", () => {
+    const payload = makePayload({
+      equityDailyPoints: THREE_POINT_CURVE,
+      equityHistoryState: "rebuilding",
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    const props = lastChart();
+    expect(props.equityDailyPoints).toEqual([]);
+    expect(props.scenarioOwnBookDelta).toBeUndefined();
+
+    const notes = screen.getAllByTestId("scenario-ownbook-rebuilding");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].textContent).toBe(OWN_BOOK_REBUILDING_COPY);
+
+    // Blank slate has no own book to compare against, so the sentence would
+    // explain an absence the user chose; it does not render there.
+    fireEvent.click(screen.getByRole("radio", { name: /blank slate/i }));
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  });
+
+  // Review round 1 (WR-01 / SFH-01): the composer gate is fail-closed. A
+  // payload with NO field, null, "" or an unknown state withholds the own-book
+  // series exactly like "rebuilding"; only an explicit "ready" shows it. The
+  // 3-point curve is present in every case, so an absent delta is the gate.
+  it.each([
+    ["missing", undefined, true],
+    ["null", null, false],
+    ["an empty string", "", false],
+    ["an unrecognised state", "partial", false],
+  ])("equityHistoryState %s → the own-book series is withheld and disclosed (fail-closed)", (_label, value, deleteField) => {
+    const payload = makePayload({
+      equityDailyPoints: THREE_POINT_CURVE,
+      equityHistoryState: value as never,
+    });
+    if (deleteField) {
+      delete (payload as Partial<MyAllocationDashboardPayload>).equityHistoryState;
+      expect("equityHistoryState" in payload).toBe(false);
+    }
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const props = lastChart();
+    expect(props.equityDailyPoints).toEqual([]);
+    expect(props.scenarioOwnBookDelta).toBeUndefined();
+    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
+  });
+
+  it("rebuilding: the live-book KPIs (liveBaselineMetrics) still reach the KPI strip (D-03)", () => {
+    const payload = makePayload({
+      equityDailyPoints: THREE_POINT_CURVE,
+      equityHistoryState: "rebuilding",
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const kpiProps = vi.mocked(KpiStrip).mock.calls.at(-1)![0];
+    const live = kpiProps.liveMetrics as unknown as {
+      twr?: number | null;
+      sharpe?: number | null;
+      max_drawdown?: number | null;
+    };
+    expect(live.twr).toBe(payload.liveBaselineMetrics.ytdTwr);
+    expect(live.sharpe).toBe(payload.liveBaselineMetrics.sharpe);
+    expect(live.max_drawdown).toBe(payload.liveBaselineMetrics.maxDd);
+  });
+
+  // Review round 1 (SFH-05): the disclosure explains an absence D-02 caused.
+  // A book with no snapshot yet (a first connect) has no own-book history to
+  // withhold, so the sentence would be false there. `snapshotCount` survives
+  // the withholding, so the composer can tell the two apart.
+  it("rebuilding + a live book with NO snapshot yet: no disclosure (nothing was withheld); with snapshots it renders", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload({ equityHistoryState: "rebuilding", snapshotCount: 0 })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Book mode is live (the default fixture has holdings), so only the
+    // snapshot condition decides the absence.
+    expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+
+    cleanup();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ equityHistoryState: "rebuilding", snapshotCount: 3 })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
+  });
+
+  // Review round 2 (WR-02): the own-book series has TWO sources, the
+  // trustworthy derived curve and the legacy snapshots. `snapshotCount` counts
+  // only the legacy rows, so a book whose history is ALL derived (every legacy
+  // row terminus-flagged, or no legacy row at all) reports 0 snapshots while
+  // D-02 still withholds a real curve. Gating on the legacy count alone
+  // silenced the disclosure for exactly that book.
+  it("rebuilding + NO legacy snapshot but a trustworthy DERIVED curve: the disclosure renders (something was withheld)", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          equityHistoryState: "rebuilding",
+          snapshotCount: 0,
+          equityCurveSource: "derived",
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
+
+    // Control: the same zero-snapshot book on the legacy source has nothing to
+    // withhold, so the case above is decided by the derived source alone.
+    cleanup();
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          equityHistoryState: "rebuilding",
+          snapshotCount: 0,
+          equityCurveSource: "legacy",
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  });
+
+  // Review round 1 (WR-02): the `bookReturns.length < 2` guard in
+  // `scenarioOwnBookDelta`. A 2-point book yields ONE return, and a Sharpe or
+  // Sortino delta from one observation is not a number worth showing. The
+  // series DOES reach the chart (so "ready" is honoured); only the delta is
+  // absent, which isolates the guard from the rebuilding gate above.
+  it("ready + a 2-point book (one derivable return): the series reaches the chart but no own-book delta is built", () => {
+    const TWO_POINT_CURVE = THREE_POINT_CURVE.slice(0, 2);
+    const payload = makePayload({
+      equityDailyPoints: TWO_POINT_CURVE,
+      equityHistoryState: "ready",
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const props = lastChart();
+    expect(props.equityDailyPoints).toEqual(TWO_POINT_CURVE);
+    expect(props.scenarioOwnBookDelta).toBeUndefined();
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  });
+
+  it("ready (regression guard): the own-book series and delta flow as before and no disclosure renders", () => {
+    const payload = makePayload({
+      equityDailyPoints: THREE_POINT_CURVE,
+      equityHistoryState: "ready",
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const props = lastChart();
+    expect(props.equityDailyPoints).toEqual(THREE_POINT_CURVE);
+    expect(props.scenarioOwnBookDelta).toBeDefined();
+    expect(props.scenarioOwnBookDelta?.book_n).toBe(2);
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
   });
 });

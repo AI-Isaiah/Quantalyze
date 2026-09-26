@@ -14,6 +14,9 @@ import { NextRequest } from "next/server";
  *     → 200 with both keys preserved VERBATIM (f8).
  *   - On RPC SQLSTATE '42501' (auth / ownership): 403.
  *   - On unexpected RPC error: 500 with generic copy.
+ *   - On SQLSTATE '40001' (lost enqueue race, Phase 164.6 OPS-08-TS): the RPC
+ *     is re-issued exactly once; a success answers 200, a second 40001 the
+ *     existing 500. No other code is ever retried.
  *   - On invalid body (missing / non-uuid api_key_id): 400.
  *   - Emits `allocator.holdings.sync_requested` audit event on success.
  *
@@ -85,6 +88,12 @@ function makeReq(body: unknown) {
 describe("POST /api/allocator/holdings/sync", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // mockReset, not only clearAllMocks: clearing leaves unconsumed
+    // `mockResolvedValueOnce` results queued, so a 40001 a regression failed
+    // to consume would leak into the NEXT case. Measured 2026-09-24 while
+    // neutering the OPS-08-TS retry: the leak turned the unrelated audit case
+    // red as well, which blurs which case the neuter actually broke.
+    mockRpc.mockReset();
     mockRpc.mockResolvedValue({
       data: { ok: true, job_id: TEST_JOB_ID },
       error: null,
@@ -166,7 +175,73 @@ describe("POST /api/allocator/holdings/sync", () => {
     expect(res.status).toBe(403);
     const body = await res.json();
     expect(body.error).toContain("not found or not owned");
+    // OPS-08-TS: only a 40001 is retried. A permission denial asked twice is
+    // still a permission denial, and a second call is wasted load.
+    expect(mockRpc, "a 42501 was retried — only a 40001 may be").toHaveBeenCalledTimes(1);
 
+    consoleSpy.mockRestore();
+  });
+
+  // ── 5b. D-23 (Phase 164.9.1) — a disconnected key answers 409 ───
+  // Migration 20260924233749 restored 075's refusal: the RPC raises
+  // `api_key_disconnected` with SQLSTATE P0001 for a soft-disconnected key,
+  // before it looks for an in-flight job. The allocator must be told to
+  // reconnect the key, not shown "Could not start sync. Try again", which
+  // invites a retry that can never succeed.
+  it("returns 409 when RPC raises P0001 api_key_disconnected (key disconnected)", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: null,
+      error: { code: "P0001", message: "api_key_disconnected" },
+    });
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ api_key_id: TEST_API_KEY_ID }));
+
+    expect(res.status, "a disconnected key fell through to the generic 500").toBe(409);
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    const body = await res.json();
+    expect(body.error).toMatch(/disconnected/i);
+    expect(body.error).toMatch(/reconnect/i);
+    // The refusal is a user state, not a server fault: no error log, no
+    // audit of a sync that was never requested, and no retry.
+    expect(consoleSpy).not.toHaveBeenCalled();
+    expect(mockLogAuditEvent).not.toHaveBeenCalled();
+    expect(mockRpc).toHaveBeenCalledTimes(1);
+    // Round-1 review (silent-failure-hunter M4): the refusal leaves ONE info
+    // line, so it can be counted, and that line names no user and no key.
+    expect(
+      infoSpy,
+      "the 409 refusal left no trace at all — a user looping on a stale tab is invisible",
+    ).toHaveBeenCalledTimes(1);
+    const infoLine = infoSpy.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
+    expect(infoLine).toContain("refused: api key disconnected");
+    expect(infoLine, "the info line leaked the key id").not.toContain(TEST_API_KEY_ID);
+    expect(infoLine, "the info line leaked the user id").not.toMatch(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+    );
+    consoleSpy.mockRestore();
+    infoSpy.mockRestore();
+  });
+
+  // ── 5c. D-23 guard — the mapping keys on the MESSAGE, not all of P0001
+  // P0001 is the generic `RAISE EXCEPTION` class, so any future raise in the
+  // RPC shares it. Mapping every P0001 to "disconnected" would tell a user to
+  // reconnect a key that is fine and hide the real fault from the logs.
+  it("returns 500, not 409, for a P0001 carrying any other message", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: null,
+      error: { code: "P0001", message: "something_else" },
+    });
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ api_key_id: TEST_API_KEY_ID }));
+
+    expect(res.status, "the 409 mapping was widened past api_key_disconnected").toBe(500);
+    expect((await res.json()).error).toContain("Could not start sync");
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("(code=P0001)"), expect.anything());
     consoleSpy.mockRestore();
   });
 
@@ -193,7 +268,81 @@ describe("POST /api/allocator/holdings/sync", () => {
 
     // Internals logged, not surfaced in body.
     expect(consoleSpy).toHaveBeenCalled();
+    // LOW-2 (164.6 review fix): the line names the code, and a first-attempt
+    // failure never claims a retry it did not make.
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("(code=PGRST301)"), expect.anything());
+    expect(consoleSpy).not.toHaveBeenCalledWith(expect.stringContaining("after 1 retry"), expect.anything());
+    // OPS-08-TS control: a non-40001 error is never retried.
+    expect(mockRpc, "a PGRST301 was retried — only a 40001 may be").toHaveBeenCalledTimes(1);
     consoleSpy.mockRestore();
+  });
+
+  // ── 6b. OPS-08-TS (Phase 164.6) — a lost enqueue race self-heals ─
+  // `_enqueue_compute_job_internal` raises 40001 when this enqueue loses the
+  // in-flight race and the winner has already advanced. The route re-issues
+  // the whole RPC once (retry-safe: the RPC catches unique_violation only, so
+  // a 40001 aborted its whole transaction), and the allocator sees a success
+  // instead of "Could not start sync".
+  it("retries a 40001 once and answers 200, auditing the sync exactly once", async () => {
+    mockRpc
+      .mockResolvedValueOnce({
+        data: null,
+        error: { code: "40001", message: "enqueue race lost" },
+      })
+      .mockResolvedValueOnce({
+        data: { ok: true, job_id: TEST_JOB_ID },
+        error: null,
+      });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ api_key_id: TEST_API_KEY_ID }));
+
+    expect(res.status, "a lost enqueue race reached the allocator as an error").toBe(200);
+    expect(await res.json()).toEqual({ ok: true, job_id: TEST_JOB_ID });
+    expect(mockRpc, "the lost race must be re-issued exactly once").toHaveBeenCalledTimes(2);
+    expect(mockRpc).toHaveBeenNthCalledWith(2, "request_allocator_holdings_sync", {
+      p_api_key_id: TEST_API_KEY_ID,
+    });
+    expect(
+      mockLogAuditEvent,
+      "the eventual success must be audited once — not per attempt",
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      warnSpy.mock.calls.some((c) => /retrying once/.test(String(c[0]))),
+      "the retried attempt must leave a console.warn trail",
+    ).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  it("a 40001 that survives the single retry answers the existing 500, with no audit and no third call", async () => {
+    const lostRace = {
+      data: null,
+      error: { code: "40001", message: "enqueue race lost" },
+    };
+    mockRpc.mockResolvedValueOnce(lostRace).mockResolvedValueOnce(lostRace);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ api_key_id: TEST_API_KEY_ID }));
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toContain("Could not start sync");
+    expect(
+      mockRpc,
+      "the retry budget is ONE — one request must never execute the RPC more than twice",
+    ).toHaveBeenCalledTimes(2);
+    expect(mockLogAuditEvent, "a failed sync was audited as requested").not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    // LOW-2 (164.6 review fix): the final error says a retry already happened.
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("RPC failed after 1 retry"),
+      expect.anything(),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("(code=40001)"), expect.anything());
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 
   // ── 7. Audit event emitted on success path ──────────────────────

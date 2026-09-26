@@ -87,6 +87,9 @@ interface MockStrategyRow {
   review_note: string | null;
   created_at: string;
   api_key_id: string | null;
+  // Phase 167.2 (KCS-12): the list reads the analytics status to decide the
+  // share note. Computed by default, so these cases see no note.
+  strategy_analytics: { computation_status: string | null } | null;
 }
 
 const state = vi.hoisted(() => ({
@@ -102,14 +105,23 @@ vi.mock("@/lib/supabase/server", () => ({
     auth: {
       getUser: async () => ({ data: { user: state.user }, error: null }),
     },
+    // Phase 167.2 (KCS-06 / KCS-12): the page also reads the owner's key
+    // statuses (api_keys, strategy_keys) and, per uncomputed row, the compute-job RPC. Both are allowed
+    // DELIBERATELY, answering empty; any other table still throws.
+    rpc: async () => ({ data: [], error: null }),
     from: (table: string) => {
-      if (table !== "strategies" && table !== "contact_requests") {
+      if (
+        table !== "strategies" &&
+        table !== "contact_requests" &&
+        table !== "api_keys" &&
+        table !== "strategy_keys"
+      ) {
         throw new Error(`Unexpected table: ${table}`);
       }
       const listResult =
-        table === "contact_requests"
-          ? { data: [], error: null }
-          : { data: state.strategies, error: null };
+        table === "strategies"
+          ? { data: state.strategies, error: null }
+          : { data: [], error: null };
       const builder = {
         select: () => builder,
         eq: () => builder,
@@ -138,6 +150,7 @@ function row(id: string, status: string): MockStrategyRow {
     review_note: null,
     created_at: "2026-01-01T00:00:00.000Z",
     api_key_id: null,
+    strategy_analytics: { computation_status: "complete" },
   };
 }
 

@@ -67,7 +67,9 @@
  *    re-dump will close this" is not a thing a test run can observe. `routeKind`
  *    below holds the routing rules, each with the evidence it turns on; two of
  *    the three rules ARE evidence-keyed, and the third is an explicit list of
- *    three arms whose root causes the fix round derived one at a time.
+ *    arms whose root causes were derived one at a time (since 2026-09-25 one
+ *    module keyed by its measured refusal; the three arm-token keys it also held
+ *    were removed when Phase 164.9.1 closed those arms).
  *
  * ── USAGE ──────────────────────────────────────────────────────────────────
  *   bash scripts/local-stack/run.sh up           # the lane needs a booted stack
@@ -118,7 +120,15 @@ export const DESTINATION = "[164.9-LIVEDB-LANE-EXECUTION-CENSUS]";
  * repo's floor idiom inverted: the gate holds the upper bound, the vitest
  * ratchet holds the staleness.
  */
-export const ENTRY_CEILING = 18;
+// SHRUNK 2026-09-23 (Phase 164.4.2 plan 08 checkpoint RED, CI run 35914559318
+// attempt 2): 18 -> 10, in the commit that deleted the eight entries the lane's
+// default-ACL reset and non-public objects stopped reproducing.
+// SHRUNK 2026-09-25 (Phase 164.9.1 plan 10): 10 -> 7, in the commit that deleted
+// the three K3 entries the phase fixed - g10b P12 (M1, the fan-in initial status),
+// request-allocator-holdings-sync-queued (M2, the in-flight look-up and the
+// disconnected-key refusal) and match-decisions-xor-rls (the D-14 rewrite of its
+// arms to the current uniqueness invariant, with M3's comments).
+export const ENTRY_CEILING = 7;
 
 /**
  * THE ARM-COUNT FLOOR. `counts.files` alone cannot detect a module that reported
@@ -185,30 +195,33 @@ export function classifySignature(failure) {
  */
 
 /**
- * K3 — the three arms the fix round derived one at a time. Each needs a
+ * K3 — the arms whose root causes were derived one at a time. Each needs a
  * migration against a production catalogue or a decision about which invariant
  * is current; neither is a fixture's or a ledger's call. Keyed on the module
  * plus a short stable token of the arm name rather than the whole title, so a
- * prose edit to a test name does not silently re-route it.
+ * prose edit to a test name does not silently re-route it — or, where every arm
+ * of a module fails through one shared call, on the module plus the measured
+ * refusal (`evidence`).
  */
 const K3_ARMS = [
+  // REMOVED 2026-09-25 (Phase 164.9.1 plan 10): the three arm-token keys "P12:"
+  // (g10b), "widened UNIQUE:" (match-decisions-xor-rls) and "Queued path"
+  // (request-allocator-holdings-sync-queued). Their arms pass on the lane with the
+  // phase's migrations replayed, and their ledger lines were deleted in the same
+  // commit. The token-keyed branch in `routeKind` stays for any future entry.
   {
-    module: "src/__tests__/compute-jobs-audit-2026-05-07-g10b.test.ts",
-    token: "P12:",
-    why: "enqueue_compute_job routes to the ten-arg _enqueue_compute_job_internal, whose INSERT omits status; the fan-in state is never entered. A production defect, needs a migration.",
-  },
-  {
-    module: "src/__tests__/match-decisions-xor-rls.test.ts",
-    token: "widened UNIQUE:",
-    why: "asserts a unique index migration 081 REPLACED. Repair means deciding what the arm asserts under the CURRENT invariant — an intent question, not fixture drift.",
-  },
-  {
-    module: "src/__tests__/request-allocator-holdings-sync-queued.test.ts",
-    // ⚠️ NOT "Queued path returns": vitest joins suite and arm with ` > `, and
-    // this arm's name straddles that join. Measured 2026-09-21 — the longer
-    // token matched nothing and the arm fell silently into the K1 catch-all.
-    token: "Queued path",
-    why: "the Queued shape is returned only from an exception handler the RPC's optimistic look-up prevents from ever firing. Needs an RPC change or a decision that the shape is retired.",
+    // ⭐ EVIDENCE-KEYED, not token-keyed: every arm in this module seeds through
+    // the same call, so the measured refusal is the discriminator, scoped to the
+    // module so the same text elsewhere still lands in the K1 residue.
+    // RECLASSIFIED 2026-09-23 (Phase 164.4.2 plan 08 checkpoint RED, CI run
+    // 35914559318 attempt 2). These six were K2 while the image's default ACLs
+    // re-granted EXECUTE and the call reached the body's role gate. With those
+    // defaults reset, the lane holds the dump's grants, which are PROD's: Migration
+    // B (20260814120000) withdrew `authenticated` EXECUTE, and the refusal now
+    // comes from the GRANT layer. The lane is RIGHT; the arms call a door PROD shut.
+    module: "src/__tests__/wizard-rpcs-live-db.test.ts",
+    evidence: /permission denied for function create_wizard_strategy\b/,
+    why: "the arms seed as `authenticated` through create_wizard_strategy, whose authenticated EXECUTE Migration B (20260814120000) withdrew — PROD's state, reproduced by the lane. Needs the arms re-pointed at a service_role seed, or retired in favour of the SQL gate, as the module's own header prescribes.",
   },
 ];
 
@@ -226,11 +239,17 @@ export function routeKind(failure) {
   // role gate refused it — which is NOT the EXECUTE denial the other nine
   // failures are, and is why the fix round insisted these six be treated as a
   // separate question. A baseline re-dump may not close them.
+  // ⚠️ 2026-09-23: this rule currently routes NOTHING. The six stopped reaching
+  // the body once the lane's default-ACL reset made the GRANT layer answer, and
+  // were re-routed to K3 (see K3_ARMS). The rule stays: it is evidence-keyed, so
+  // a body-gate refusal that reappears is still named for what it is.
   if (BODY_ROLE_GATE_RE.test(blob)) return "K2-function-body-role-gate";
 
-  // R-K3, ARM-KEYED. See K3_ARMS.
+  // R-K3, ARM-KEYED (a token of the arm name) or, for one module, EVIDENCE-KEYED
+  // (the measured refusal). See K3_ARMS.
   for (const arm of K3_ARMS) {
-    if (failure.file === arm.module && failure.fullName.includes(arm.token)) {
+    if (failure.file !== arm.module) continue;
+    if (arm.token ? failure.fullName.includes(arm.token) : arm.evidence.test(blob)) {
       return "K3-migration-or-invariant-decision";
     }
   }
@@ -857,6 +876,32 @@ function selfTest() {
       message: "expected { code: '42501', …(2) } to be null",
       actual: '{ "code": "42501", "message": "create_wizard_strategy: caller role (authenticated) may not write wizard drafts" }',
     }) === "K2-function-body-role-gate",
+  ]);
+
+  // ── 2026-09-23 (Phase 164.4.2 plan 08 checkpoint RED): once the lane stopped
+  //    re-granting EXECUTE through the image's default ACLs, the six wizard arms
+  //    are refused at the GRANT layer — PROD's own state since Migration B
+  //    (20260814120000) withdrew `authenticated` EXECUTE on create_wizard_strategy.
+  //    That is an arm calling a door PROD shut, NOT a baseline that lost a grant,
+  //    so it must not fall into the K1 residue whose closing act is a re-dump. ──
+  cases.push([
+    "classifier: a GRANT-layer refusal of create_wizard_strategy in the wizard module routes to K3, not to the K1 residue",
+    routeKind({
+      file: "src/__tests__/wizard-rpcs-live-db.test.ts",
+      fullName: "x",
+      message: "expected { code: '42501', …(2) } to be null",
+      actual: '{ "code": "42501", "message": "permission denied for function create_wizard_strategy" }',
+    }) === "K3-migration-or-invariant-decision",
+  ]);
+
+  cases.push([
+    "classifier: the same GRANT-layer refusal in ANOTHER module stays in the K1 residue (the rule is module-scoped)",
+    routeKind({
+      file: "src/__tests__/some-other-live-db.test.ts",
+      fullName: "x",
+      message: "expected { code: '42501', …(2) } to be null",
+      actual: '{ "code": "42501", "message": "permission denied for function create_wizard_strategy" }',
+    }) === "K1-baseline-privilege-state-absent",
   ]);
 
   cases.push([

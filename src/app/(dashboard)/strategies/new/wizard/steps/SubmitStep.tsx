@@ -511,6 +511,12 @@ export function SubmitStep({
             "DRAFT_LOOKUP_FAILED",
             "DRAFT_FINALIZE_FAILED",
             "SEAM_RESPONSE_UNREADABLE",
+            // Round-2 review (SFH HIGH-1) — the submission is SAVED and only
+            // the analytics dispatch failed. Admitted HERE IN THE SAME COMMIT
+            // the route started emitting it; omitted, it would fall to UNKNOWN
+            // and the user would not learn their strategy was submitted.
+            // RECOVERABLE: the Retry replays the finalize and re-dispatches.
+            "SUBMITTED_ANALYTICS_NOT_QUEUED",
           ],
         );
         // 140.4-12 / SEAMRIM-08 — EACH LIST OWNS ITS OWN VOCABULARY, AND

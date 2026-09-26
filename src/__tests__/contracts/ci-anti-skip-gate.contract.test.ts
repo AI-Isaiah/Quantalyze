@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -37,7 +38,11 @@ import { join } from "node:path";
  */
 
 const ROOT = process.cwd();
-const STEP_NAME = "Run SQL self-tests against test Supabase project";
+// Renamed by Phase 164.4.2 (DECISION B): the corpus left shared TEST for a
+// local-stack database private to the job's own runner, and the step's name
+// says so. The body it names is the same anti-SKIP gate — only where it
+// CONNECTS moved — so this pin follows the name rather than being retired.
+const STEP_NAME = "Run SQL self-tests against the local-stack lane";
 const CI_YML = join(ROOT, ".github/workflows/ci.yml");
 
 /** Pull a step's `run: |` body out of the workflow, dedented. */
@@ -123,6 +128,14 @@ writeFileSync(join(bindir, "psql"), PSQL_STUB);
 chmodSync(join(bindir, "psql"), 0o755);
 const scriptPath = join(workdir, "step.sh");
 writeFileSync(scriptPath, SCRIPT);
+// The lane handoff `scripts/local-stack/run.sh up` writes in CI, stubbed. Since
+// Phase 164.4.2 the step reads its DSN from this file (named by LANE_ENV_FILE)
+// instead of from a secret, and refuses any DB_URL that is not loopback — so the
+// stub must name 127.0.0.1 or every scenario below would measure that refusal
+// instead of the skip behaviour it exists to pin. Never a real DSN; the psql on
+// PATH is the stub above.
+const laneEnvPath = join(workdir, "stack-env");
+writeFileSync(laneEnvPath, 'DB_URL="postgresql://stub@127.0.0.1:54322/postgres"\n');
 
 afterAll(() => rmSync(workdir, { recursive: true, force: true }));
 
@@ -134,7 +147,7 @@ function runGate(env: Record<string, string> = {}, cwd: string = ROOT) {
     env: {
       ...process.env,
       PATH: `${bindir}:${process.env.PATH ?? ""}`,
-      TEST_SUPABASE_DB_URL: "postgresql://stub",
+      LANE_ENV_FILE: laneEnvPath,
       RUNNER_TEMP: runnerTemp,
       // [164.8.4] Same category as RUNNER_TEMP: since this phase the step redacts
       // psql's captured output through `sed -E -f
@@ -241,7 +254,10 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
       expect(logged.length).toBeGreaterThan(70);
       expect(logged).not.toContain(target);
       expect(out).toContain(`::notice file=supabase/tests/${target}::`);
-      expect(out).toContain("not executed against shared TEST");
+      // Phase 164.4.2: the job no longer runs on shared TEST, so the notice names
+      // the lane it DOES run on. What is pinned is unchanged: the exclusion is
+      // announced per file, never silent.
+      expect(out).toContain("not executed on this job's local-stack lane");
       expect(out).toMatch(/\d+ excluded \(LANE-ONLY/);
     } finally {
       rmSync(logDir, { recursive: true, force: true });
@@ -563,7 +579,82 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
   });
 
   it("still runs psql with -X, like the sibling invocations in the same job", () => {
-    expect(SCRIPT).toContain('psql "$TEST_SUPABASE_DB_URL" -X -v ON_ERROR_STOP=1 -f "$f"');
+    expect(SCRIPT).toContain('psql "$LANE_DB_URL" -X -v ON_ERROR_STOP=1 -f "$f"');
+  });
+
+  // Phase 164.4.2: the DSN comes from the lane's handoff file, not a secret. The
+  // guard's two refusals are what keep this step from (a) passing having run
+  // nothing when the boot step did not finish, and (b) running the corpus
+  // against a database that is not the runner's own — shared TEST is shared and
+  // PROD is PROD. Both are EXECUTED here, not grepped.
+  it("fails loud when the lane handoff is absent — a run with no database is never a pass", () => {
+    const { code, out } = runGate({ LANE_ENV_FILE: join(workdir, "no-such-handoff") });
+    expect(code).not.toBe(0);
+    expect(out).toContain("the local-stack lane's DB_URL is required to run SQL self-tests");
+    expect(out).not.toContain("SQL self-tests passed");
+  });
+
+  it("refuses a handoff whose DB_URL is not loopback, before any file reaches psql", () => {
+    const dir = mkdtempSync(join(tmpdir(), "antiskip-remote-"));
+    const handoff = join(dir, "stack-env");
+    const logPath = join(dir, "invocation.log");
+    writeFileSync(handoff, 'DB_URL="postgresql://stub@db.example.invalid:5432/postgres"\n');
+    try {
+      // NON-VACUITY CONTROL (review 164.4.2 WR-10). The refusal below is judged by
+      // an EMPTY invocation log, and a log that is missing reads as `[]` too — so a
+      // stub that stopped logging, or a harness that never reached psql, would pass
+      // it while measuring nothing. The SAME harness with the loopback handoff must
+      // leave a NON-EMPTY log first.
+      const controlLog = join(dir, "control-invocation.log");
+      runGate({ STUB_INVOCATION_LOG: controlLog });
+      const controlLogged = existsSync(controlLog)
+        ? readFileSync(controlLog, "utf8").split("\n").filter(Boolean)
+        : [];
+      expect(
+        controlLogged.length,
+        "CONTROL: a loopback handoff through the same harness handed NO file to psql — the invocation log measures nothing, so the empty log below proves nothing",
+      ).toBeGreaterThan(0);
+
+      const { code, out } = runGate({ LANE_ENV_FILE: handoff, STUB_INVOCATION_LOG: logPath });
+      expect(code).not.toBe(0);
+      // Review 164.4.2 WR-08: the step's glob was replaced by capability-probe's
+      // parse-based rule, whose refusal is worded as a non-loopback DSN.
+      expect(out).toContain("the lane handoff's DB_URL is not a loopback DSN");
+      // Silent-failure-hunter round 2, WR-06: the step prints the line above
+      // whenever node exits non-zero, a probe that could not LOAD included. Only
+      // refuseNonLocalDsnCli prints the line below, with the rule's own reason.
+      expect(out, "the refusal came from the probe's rule, not from a probe that failed to run").toContain(
+        "::error::refusing a non-local database: the handoff's DB_URL names a host other than 127.0.0.1/localhost",
+      );
+      let logged: string[] = [];
+      try {
+        logged = readFileSync(logPath, "utf8").split("\n").filter(Boolean);
+      } catch {
+        logged = [];
+      }
+      expect(logged, "a non-loopback DSN still handed corpus files to psql").toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a loopback-looking DB_URL whose ?host= would re-point libpq — the glob it replaced accepted it (review 164.4.2 WR-08)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "antiskip-hostq-"));
+    const handoff = join(dir, "stack-env");
+    writeFileSync(handoff, 'DB_URL="postgresql://stub@127.0.0.1:54322/postgres?host=db.example.invalid"\n');
+    try {
+      const { code, out } = runGate({ LANE_ENV_FILE: handoff });
+      expect(code, out).not.toBe(0);
+      expect(out).toContain("the lane handoff's DB_URL is not a loopback DSN");
+      // Silent-failure-hunter round 2, WR-06: as above, only the probe's own rule
+      // prints this line, so a probe that failed to load cannot pass this test.
+      expect(out, "the refusal came from the probe's rule, not from a probe that failed to run").toContain(
+        "::error::refusing a non-local database: the handoff's DB_URL carries a query string",
+      );
+      expect(out, "the refusal must never echo the DSN's host").not.toContain("example.invalid");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("does not re-introduce the empty-corpus 'exit 0' anywhere in the step", () => {
