@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.96.0.1] - 2026-09-26 — the unstarted phases split into one-topic phases, and the backlog re-routed to them
+
+### Notes
+- Roadmap and backlog only; no code, workflow or migration changes. Five commits, five themes:
+  - **The unstarted phases are split by topic.** 164.6.6 is narrowed, and 164.6.8 OUTAGEALERT is new. 170 splits into 170 LAYOUT and 170.1 COPY. 165 splits three ways by ecosystem into 165 ACTIONSDEPS, 165.1 PIPDEPS and 165.2 NPMDEPS.
+  - **Three new phases are booked.** 164.9.3 CLAIMPAIR takes the claim-time 23505 pairing, booked as `[164.9.3-CLAIM-PAIR-23505]`. 164.9.4 CIOFFMUTEX takes `python` and `e2e-seeded` off the shared-TEST mutex, which a measured CI run spent 36 of 50 minutes waiting on. 164.9.5 AUTOREDUMP re-dumps the committed baseline after each PROD migration apply.
+  - **The MT5 wedge items move to 164.6.8.** `MT5-SWITCH-WEDGE-CAUSE-01` and `MT5-PROBER-WEDGE-CALIBRATION-01` now name it as owner. This was applied after Phase 164.6.5 merged.
+  - **Four items leave 164.5.2 by founder decision.** The claim wedge (a `failed_retry` job plus a `pending` job make every claim raise 23505) goes to 164.9.3. The three fan-in graph bugs (a child stranded when its parent fails, a 23505 when a `match_decisions` delete cascades, a 40P01 deadlock in a diamond) go to the newly booked 164.9.3.1 FANINGRAPH, recorded as `[164.9.3.1-FANIN-GRAPH-RESIDUALS]`.
+  - **The 164.9.2 SC-4 restore is recorded, and `[164.9-CRIT8-RESTORE-DISPATCH-RECORD]` is closed.** The preflight run printed a 41/41 self-test. The first restore attempt was refused by the activity gate, and nothing was written. The second restore committed `tables=63 policies=155 functions=121 ledger_rows=277 survivors=2/2`.
+- **Known limit:** every booked phase above is unstarted and stays frozen until the founder lifts the new-phase freeze.
+
 ## [0.96.0.0] - 2026-09-26 — MT5VALIDATEWEDGE: the gateway can restart a wedged MT5 terminal on its own (not yet seen live), and the wizard stops promising a retry that cannot work
 
 _PR #866 (167.2.1 FACTSHEETBUILDABLE) landed first as 0.95.0.0, so this entry, first written as 0.94.0.0, re-bumped to 0.96.0.0._
