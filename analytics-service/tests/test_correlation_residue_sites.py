@@ -23,7 +23,10 @@ branch instead of the residue branch.
 
 from __future__ import annotations
 
+import asyncio
 import math
+import sys
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -35,7 +38,9 @@ from services.dispersion import (
     pairwise_correlation_or_none,
     residue_floor,
 )
-from services.portfolio_risk import compute_correlation_matrix
+from services.match_engine import _compute_corr_with_portfolio
+from services.portfolio_optimizer import _avg_corr, find_improvement_candidates
+from services.portfolio_risk import compute_correlation_matrix, compute_rolling_correlation
 from tests.dispersion_fixtures import CONSTANT_YIELDS, apy, nav_constant_yield
 
 _YIELD_IDS = list(CONSTANT_YIELDS)
@@ -158,3 +163,193 @@ def test_c1_constant_yield_leg_equals_the_all_zero_leg(yield_id: str) -> None:
     assert all(with_const["k"][c] is None and with_const[c]["k"] is None for c in ("n", "m"))
     nm = with_const["n"]["m"]
     assert nm is not None and math.isfinite(nm)
+
+
+# ---------------------------------------------------------------------------
+# C2 - portfolio_risk.compute_rolling_correlation
+# ---------------------------------------------------------------------------
+
+
+def test_c2_all_zero_leg_gives_an_empty_series() -> None:
+    """The D-07 reference, measured on today's code: every window of an
+    all-zero leg is NaN and is dropped, so the pair's series is empty."""
+    zero = pd.Series(0.0, index=nav_constant_yield(1e-4).index)
+    assert compute_rolling_correlation({"k": zero, "n": _noise(zero.index, seed=21)}) == {"k:n": []}
+
+
+@pytest.mark.parametrize("yield_id", _YIELD_IDS)
+def test_c2_constant_yield_leg_equals_the_all_zero_leg(yield_id: str) -> None:
+    const = _residue_leg(yield_id)
+    n = _noise(const.index, seed=21)
+    m = 0.6 * n + _noise(const.index, seed=22)
+    with_const = compute_rolling_correlation({"k": const, "n": n, "m": m})
+    with_zero = compute_rolling_correlation({"k": _zeros_like(const), "n": n, "m": m})
+    assert with_const == with_zero
+    assert with_const["k:n"] == [] and with_const["k:m"] == []
+    assert len(with_const["n:m"]) > 0
+    assert all(p["value"] is not None and math.isfinite(p["value"]) for p in with_const["n:m"])
+
+
+# ---------------------------------------------------------------------------
+# C3 - portfolio_optimizer.find_improvement_candidates: corr_with_portfolio
+# ---------------------------------------------------------------------------
+
+
+def _c3_corr(port_leg: pd.Series, candidate: pd.Series) -> object:
+    out = find_improvement_candidates({"p": port_leg}, {"c": candidate}, {"p": 1.0})
+    assert [r["strategy_id"] for r in out] == ["c"], "the noisy candidate must be scored"
+    return out[0]["corr_with_portfolio"]
+
+
+@pytest.mark.parametrize("yield_id", _YIELD_IDS)
+def test_c3_corr_with_a_constant_yield_portfolio_equals_the_all_zero_portfolio(yield_id: str) -> None:
+    """S2 already drops a residue CANDIDATE, so the reachable residue leg is the
+    portfolio baseline: a portfolio of one constant-yield strategy. Only the
+    correlation key is compared; the blends differ, so the deltas legitimately do."""
+    const = _residue_leg(yield_id)
+    candidate = _noise(const.index, seed=31)
+    with_zero = _c3_corr(_zeros_like(const), candidate)
+    assert with_zero is None, "D-07 reference: an all-zero portfolio has no correlation today"
+    assert _c3_corr(const, candidate) == with_zero
+
+
+def test_c3_two_correlated_noisy_legs_keep_a_correlation() -> None:
+    idx = nav_constant_yield(1e-4).index
+    port = _noise(idx, seed=32)
+    corr = _c3_corr(port, 0.7 * port + _noise(idx, seed=33, scale=0.005))
+    assert isinstance(corr, float) and math.isfinite(corr) and corr > 0.5
+
+
+# ---------------------------------------------------------------------------
+# C4 - portfolio_optimizer._avg_corr
+# ---------------------------------------------------------------------------
+
+
+def _c4_frame(first: pd.Series) -> pd.DataFrame:
+    n = _noise(first.index, seed=41)
+    return pd.DataFrame({"k": first, "n": n, "m": 0.5 * n + _noise(first.index, seed=42)})
+
+
+@pytest.mark.parametrize("yield_id", _YIELD_IDS)
+def test_c4_avg_corr_with_a_constant_yield_column_equals_the_all_zero_column(yield_id: str) -> None:
+    const = _residue_leg(yield_id)
+    with_zero = _avg_corr(_c4_frame(_zeros_like(const)))
+    assert with_zero is None, "D-07 reference: an all-zero column poisons the average to None today"
+    assert _avg_corr(_c4_frame(const)) == with_zero
+
+
+def test_c4_avg_corr_of_noisy_columns_is_finite() -> None:
+    idx = nav_constant_yield(1e-4).index
+    avg = _avg_corr(_c4_frame(_noise(idx, seed=43)))
+    assert avg is not None and math.isfinite(avg)
+
+
+# ---------------------------------------------------------------------------
+# C5 - match_engine._compute_corr_with_portfolio
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("yield_id", _YIELD_IDS)
+def test_c5_constant_yield_leg_equals_the_all_zero_leg(yield_id: str) -> None:
+    const = _residue_leg(yield_id)
+    noise = _noise(const.index, seed=51)
+    zero = _zeros_like(const)
+    assert _compute_corr_with_portfolio(zero, noise) is None, "D-07 reference (portfolio leg)"
+    assert _compute_corr_with_portfolio(noise, zero) is None, "D-07 reference (candidate leg)"
+    assert _compute_corr_with_portfolio(const, noise) is None
+    assert _compute_corr_with_portfolio(noise, const) is None
+
+
+def test_c5_two_correlated_noisy_legs_keep_a_correlation() -> None:
+    idx = nav_constant_yield(1e-4).index
+    a = _noise(idx, seed=52)
+    r = _compute_corr_with_portfolio(a, 0.8 * a + _noise(idx, seed=53, scale=0.004))
+    assert r is not None and math.isfinite(r) and r > 0.5
+
+
+# ---------------------------------------------------------------------------
+# C6 - routers/portfolio.py BTC benchmark_comparison, driven end to end
+# ---------------------------------------------------------------------------
+
+
+def _c6_supabase(returns: pd.Series) -> tuple[MagicMock, MagicMock]:
+    """A stub client for _compute_portfolio_analytics: one strategy at weight 1."""
+    records = [{"date": d.strftime("%Y-%m-%d"), "value": float(v)} for d, v in returns.items()]
+    equity = [
+        {"date": r["date"], "value": float(e)}
+        for r, e in zip(records, (1.0 + returns).cumprod())
+    ]
+    pa = MagicMock()
+    pa.insert.return_value.execute.return_value = MagicMock(data=[{"id": "analytics-1"}])
+    pa.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(data=[])
+    pa.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+    ps = MagicMock()
+    ps.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[
+        {"strategy_id": "s1", "current_weight": 1.0, "strategies": {"id": "s1", "name": "S1"}},
+    ])
+    sa = MagicMock()
+    sa.select.return_value.in_.return_value.execute.return_value = MagicMock(data=[
+        {"strategy_id": "s1", "returns_series": records, "equity_curve": equity, "total_aum": 100.0},
+    ])
+    pal = MagicMock()
+    pal.select.return_value.eq.return_value.eq.return_value.is_.return_value.limit.return_value.execute.return_value = MagicMock(data=[])
+    pal.insert.return_value.execute.return_value = MagicMock(data=[{"id": "alert-1"}])
+    pf = MagicMock()
+    pf.select.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock(
+        data={"created_at": "2024-01-01T00:00:00+00:00"}
+    )
+    ws = MagicMock()
+    ws.select.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(data=[])
+    strat = MagicMock()
+    strat.select.return_value.in_.return_value.execute.return_value = MagicMock(data=[])
+    tables = {
+        "portfolio_analytics": pa, "portfolio_strategies": ps, "strategy_analytics": sa,
+        "portfolio_alerts": pal, "portfolios": pf, "weight_snapshots": ws, "strategies": strat,
+    }
+    sb = MagicMock()
+    sb.table.side_effect = lambda name: tables.setdefault(name, MagicMock())
+    return sb, pa
+
+
+def _c6_correlation(strategy_returns: pd.Series, btc: pd.Series) -> object:
+    from routers import portfolio as portfolio_mod
+
+    sb, pa = _c6_supabase(strategy_returns)
+
+    async def _btc(symbol: str) -> tuple[pd.Series, bool]:
+        return btc, False
+
+    prior = sys.modules.get("routers.portfolio")
+    sys.modules["routers.portfolio"] = portfolio_mod
+    try:
+        portfolio_mod._compute_semaphore = asyncio.Semaphore(3)
+        with patch.object(portfolio_mod, "get_supabase", return_value=sb), \
+             patch.object(portfolio_mod, "get_benchmark_returns", side_effect=_btc):
+            asyncio.run(portfolio_mod._compute_portfolio_analytics("portfolio-1"))
+    finally:
+        if prior is None:
+            sys.modules.pop("routers.portfolio", None)
+        else:
+            sys.modules["routers.portfolio"] = prior
+    payload = pa.update.call_args_list[-1][0][0]
+    bc = payload["benchmark_comparison"]
+    assert bc is not None and bc["symbol"] == "BTC", "the benchmark block must have run"
+    return bc["correlation"]
+
+
+@pytest.mark.parametrize("yield_id", _YIELD_IDS)
+def test_c6_benchmark_correlation_of_a_constant_yield_portfolio_equals_the_all_zero_one(
+    yield_id: str,
+) -> None:
+    const = _residue_leg(yield_id)
+    btc = _noise(const.index, seed=61, scale=0.03)
+    with_zero = _c6_correlation(_zeros_like(const), btc)
+    assert with_zero is None, "D-07 reference: an all-zero portfolio has no BTC correlation today"
+    assert _c6_correlation(const, btc) == with_zero
+
+
+def test_c6_a_noisy_portfolio_keeps_its_benchmark_correlation() -> None:
+    idx = nav_constant_yield(1e-4).index
+    btc = _noise(idx, seed=62, scale=0.03)
+    corr = _c6_correlation(0.3 * btc + _noise(idx, seed=63), btc)
+    assert isinstance(corr, float) and math.isfinite(corr) and corr > 0.3
