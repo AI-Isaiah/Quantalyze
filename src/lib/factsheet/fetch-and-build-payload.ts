@@ -582,6 +582,9 @@ async function buildFromResolved(
  * for the same id, predicate and rows. DOMAIN: this holds for a builder that
  * does not throw. A throw in the basis reads or the build is not a null exit,
  * and the probe cannot see it; the page's own error handling owns that case.
+ * So "buildable" means "no null exit", not "renders" (167.2.1-REVIEW IN-03): a
+ * share note chosen from this answer is silent about a builder throw at the
+ * recipient's request, which is outside the note's domain.
  * WHAT HOLDS IT (167.2.1-REVIEW WR-04, corrected). The invariant is
  * structural, not sampled: `buildFromResolved` and `buildFromBuildableSeries`
  * declare a non-null return, and the resolved series is a `BuildableSeries`,
