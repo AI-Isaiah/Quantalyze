@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "166.1"
 current_phase_name: ENGINEFLOOR
 status: executing
-stopped_at: Completed 166.1-03-PLAN.md
-last_updated: "2026-09-24T21:30:00.000Z"
-last_activity: 2026-09-24
-last_activity_desc: "2026-09-24: 164.6 (v0.90.0.0), 167.1, 167.2 shipped; 166 executed 10/10 (v0.91.0.0) and in review; PROD baseline re-dumped after the 164.6 apply (v0.90.0.1). Census by VERIFICATION status==passed across all worktrees: 35/54 phases."
-state_head: 93d2ab394092fca23d41972ae4e573f84d58fe99
+stopped_at: Completed 166.1-09-PLAN.md
+last_updated: "2026-09-26T13:35:46.816Z"
+last_activity: 2026-09-26
+last_activity_desc: "Phase 166.1 plan 09 executed: D-24 carried red-first, Python gate sweep green at 3a8f8ad01 (contains origin/main ea4167a3f), release 0.97.0.0 ENGINEFLOOR committed; all 166.1 plans executed, review and verification next"
+state_head: 4bb47eac4cb1a83c181922c8039aee4ac4228bbc
 progress:
   total_phases: 54
   completed_phases: 35
@@ -502,7 +502,7 @@ Status: Executing Phase 166.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-26 — Phase 166.1 plan 03 executed (correlation sites C1-C8 on two shared helpers in services/dispersion.py: two strategies with the same compounding constant yield no longer match at 1.0, and every site emits what an all-zero leg already gets)
+Last activity: 2026-09-26 — Phase 166.1 plan 09 executed (D-24: a constant positive daily-returns CSV is rejected at every length, red test first; origin/main merged at 3a8f8ad01 and every Python gate green there; release commit 46fcca88e, v0.97.0.0 ENGINEFLOOR, derived from origin/main 0.96.0.0; Phase 166.3 recompute recorded as founder-gated, pending)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1176,6 +1176,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.6 P04 | ~26 min | 2 tasks | 6 modified |
 | Phase 164.6 P05 | ~9 min | 2 tasks | 2 modified |
 | Phase 164.6.5 P08 | ~40 min | 2 tasks | 11 modified |
+| Phase 166.1 P09 | ~20 min | 3 tasks | 5 modified |
 
 ## Accumulated Context
 

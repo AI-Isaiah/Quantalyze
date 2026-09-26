@@ -3153,7 +3153,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 166.1-09-PLAN.md — a leading D-24 tracer (a constant positive daily-returns CSV rejected at every length, red test first), then the whole-phase Python gate sweep (pytest with the TEST database variables unset, strict mypy, the qstats-gate census, ruff no-new over the 01 + 01b + 03 + 09 union, anchor check in CI's `--pending` form) and the single release commit (VERSION, package.json, CHANGELOG), recording Phase 166.3's recompute state as counts only (D-14, D-23)
+- [x] 166.1-09-PLAN.md — a leading D-24 tracer (a constant positive daily-returns CSV rejected at every length, red test first), then the whole-phase Python gate sweep (pytest with the TEST database variables unset, strict mypy, the qstats-gate census, ruff no-new over the 01 + 01b + 03 + 09 union, anchor check in CI's `--pending` form) and the single release commit (VERSION, package.json, CHANGELOG), recording Phase 166.3's recompute state as counts only (D-14, D-23)
 
 ⭐ **2026-09-26 (FOUNDER DECISION, 166.1-CONTEXT D-24):** an exactly constant positive daily-returns CSV is rejected at every length (today a short one is accepted and a longer one rejected, by float summation). The work is routed to 166.1-09, which must be amended and re-checked before it runs. ✅ Amended 2026-09-26 as plan 09's leading Task 1.
 
