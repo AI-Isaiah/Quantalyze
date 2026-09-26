@@ -1,4 +1,6 @@
 import type { JointMetrics } from "./types";
+import { mean } from "@/lib/portfolio-math-utils";
+import { beta as betaOf, dispersion, pearson, sharpe } from "@/lib/return-stats";
 
 /**
  * Port of `joint_metrics()` from `/tmp/gen_factsheet_v3.py`. Computes
@@ -15,30 +17,21 @@ export function jointMetrics(rets: number[], bench: number[], rf = 0, periodsPer
 
   const m = mean(rets);
   const mb = mean(bench);
-  const s = pstdev(rets, m);
-  const sb = pstdev(bench, mb);
 
-  let cov = 0;
-  let varB = 0;
-  for (let i = 0; i < n; i++) {
-    cov += (rets[i] - m) * (bench[i] - mb);
-    varB += (bench[i] - mb) ** 2;
-  }
-  cov /= n;
-  varB /= n;
-
-  const beta = varB > 0 ? cov / varB : 0;
+  // Beta, correlation, tracking error and information ratio are computed by
+  // `@/lib/return-stats` (Phase 166.2 D-17), not by a local formula. A leg whose
+  // only dispersion is float residue (a compounding constant yield) therefore
+  // answers exactly as an all-zero leg does (D-07): 0 for each ratio here.
+  const beta = betaOf(rets, bench) ?? 0;
   const alpha = (m - beta * mb) * periodsPerYear;
-  const corr = s > 0 && sb > 0 ? cov / (s * sb) : 0;
+  const corr = pearson(rets, bench) ?? 0;
   const r2 = corr * corr;
 
-  let teSum = 0;
-  for (let i = 0; i < n; i++) {
-    const diff = rets[i] - bench[i] - (m - mb);
-    teSum += diff * diff;
-  }
-  const trackingError = Math.sqrt(teSum / n) * Math.sqrt(periodsPerYear);
-  const infoRatio = trackingError > 0 ? ((m - mb) * periodsPerYear) / trackingError : 0;
+  // Tracking error and information ratio are the dispersion and the Sharpe of
+  // the ACTIVE series (strategy minus benchmark), population sd.
+  const active = rets.map((r, i) => r - bench[i]);
+  const trackingError = dispersion(active, 0).sd * Math.sqrt(periodsPerYear);
+  const infoRatio = sharpe(active, { periodsPerYear, ddof: 0 }) ?? 0;
   const treynor = beta !== 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / beta : 0;
 
   let upBenchSum = 0;
@@ -68,16 +61,4 @@ export function jointMetrics(rets: number[], bench: number[], rf = 0, periodsPer
     up_capture: upCapture,
     down_capture: downCapture,
   };
-}
-
-function mean(xs: number[]): number {
-  let s = 0;
-  for (const x of xs) s += x;
-  return s / xs.length;
-}
-
-function pstdev(xs: number[], m: number): number {
-  let s = 0;
-  for (const x of xs) s += (x - m) * (x - m);
-  return Math.sqrt(s / xs.length);
 }

@@ -10,6 +10,8 @@
  */
 
 import type { RollWindowPick } from "./types";
+import { mean, stdDev } from "@/lib/portfolio-math-utils";
+import { beta, sharpe } from "@/lib/return-stats";
 
 export const ROLL_WINDOW_6MO = 126;
 export const ROLL_WINDOW_90D = 90;
@@ -56,25 +58,10 @@ export function rollingBeta(
   const n = Math.min(strat.length, bench.length);
   const out: Array<number | null> = new Array(n).fill(null);
   for (let i = window - 1; i < n; i++) {
-    let sumS = 0;
-    let sumB = 0;
-    for (let k = i - window + 1; k <= i; k++) {
-      sumS += strat[k];
-      sumB += bench[k];
-    }
-    const ms = sumS / window;
-    const mb = sumB / window;
-    let cov = 0;
-    let varB = 0;
-    for (let k = i - window + 1; k <= i; k++) {
-      const ds = strat[k] - ms;
-      const db = bench[k] - mb;
-      cov += ds * db;
-      varB += db * db;
-    }
-    cov /= window;
-    varB /= window;
-    out[i] = varB !== 0 ? cov / varB : 0;
+    // Each window's beta comes from `@/lib/return-stats` (Phase 166.2 D-17): a
+    // bench window whose only dispersion is float residue reads 0, exactly as an
+    // all-zero window does (D-07).
+    out[i] = beta(strat.slice(i - window + 1, i + 1), bench.slice(i - window + 1, i + 1)) ?? 0;
   }
   return out;
 }
@@ -91,7 +78,7 @@ export function rollingVol(
   const sqrtN = Math.sqrt(periodsPerYear);
   for (let i = window - 1; i < rets.length; i++) {
     const w = rets.slice(i - window + 1, i + 1);
-    out[i] = pstdev(w) * sqrtN;
+    out[i] = stdDev(w, false) * sqrtN;
   }
   return out;
 }
@@ -102,12 +89,10 @@ export function rollingSharpe(
   periodsPerYear = 252,
 ): Array<number | null> {
   const out: Array<number | null> = new Array(rets.length).fill(null);
-  const sqrtN = Math.sqrt(periodsPerYear);
   for (let i = window - 1; i < rets.length; i++) {
-    const w = rets.slice(i - window + 1, i + 1);
-    const m = mean(w);
-    const s = pstdev(w);
-    out[i] = s > 0 ? (m * periodsPerYear) / (s * sqrtN) : 0;
+    // The window's Sharpe comes from `@/lib/return-stats` (Phase 166.2 D-17),
+    // population sd: a residue window reads 0, as an all-zero window does (D-07).
+    out[i] = sharpe(rets.slice(i - window + 1, i + 1), { periodsPerYear, ddof: 0 }) ?? 0;
   }
   return out;
 }
@@ -134,17 +119,4 @@ export function rollingSortino(
     out[i] = dd > 0 ? (m * periodsPerYear) / dd : 0;
   }
   return out;
-}
-
-function mean(xs: number[]): number {
-  let s = 0;
-  for (const x of xs) s += x;
-  return s / xs.length;
-}
-
-function pstdev(xs: number[]): number {
-  const m = mean(xs);
-  let s = 0;
-  for (const x of xs) s += (x - m) * (x - m);
-  return Math.sqrt(s / xs.length);
 }
