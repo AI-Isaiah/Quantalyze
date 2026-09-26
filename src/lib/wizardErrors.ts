@@ -6084,6 +6084,11 @@ export const CSV_RULE_LABELS: Readonly<Record<string, string>> = {
   nav_non_zero: "NAV cannot be zero",
   daily_return_lower_bound: "Daily return cannot be ≤ -100%",
   daily_sharpe_sentinel: "Daily Sharpe > 10 looks unrealistic",
+  // 166.1 round-1 WR-01 / SFH MEDIUM-3 (amends 166.1 D-04; founder D-24 made
+  // every constant positive series reach this rule): a daily-returns column
+  // that never changes has no Sharpe at all, so it cannot share the Sharpe
+  // sentinel's label, which states a comparison that was never made.
+  daily_returns_constant: "Daily returns never change",
   currency_usd_or_blank: "Currency must be USD or left blank",
   qty_price_positive: "Quantity and price must be positive",
   // QA report 2026-05-21 ISSUE-012: the underlying pandera rule key was
@@ -6120,6 +6125,24 @@ export const CSV_RULE_LABELS: Readonly<Record<string, string>> = {
 export function formatCsvRuleCauseSingle(humanLabel: string): string {
   return `Rule violated: ${humanLabel}. Expand below for the row-level breakdown.`;
 }
+
+/**
+ * 166.1 round-1 WR-01 — the single-rule cause sentence for a rule that failed
+ * on the WHOLE file, not on a row (every error carries the absent-row sentinel
+ * `row: 0`). `formatCsvRuleCauseSingle` points at a "row-level breakdown" that
+ * does not exist for such a rule.
+ */
+export function formatCsvRuleCauseFileLevel(humanLabel: string): string {
+  return `Rule violated: ${humanLabel}. We checked the whole file, so no single row is at fault.`;
+}
+
+/**
+ * 166.1 round-1 WR-01 — the panel headline when validation failed but no REAL
+ * row did (every error is file-level, `row: 0`). The row-count headline read
+ * "1 row failed validation" for a rule that names no row. Keeps the phrase
+ * "failed validation", which `e2e/csv-upload-flow.spec.ts` matches.
+ */
+export const CSV_FILE_LEVEL_HEADLINE = "Your file failed validation";
 
 /*
  * ⚰️ REMOVED 161-REVIEW / CR-02 — `formatColumnInDataframeMessage(raw)`.

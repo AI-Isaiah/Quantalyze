@@ -392,7 +392,40 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  // EMPTY, and that is a MEASURED state, not an unused feature.
+  // ⭐ Two rows of the SAME shape as the Phase 164.1.1 row described below: a
+  // forward migration adds a function the dated PROD dump cannot yet carry.
+  {
+    name: "enforce_api_keys_account_share_same_owner",
+    side: "snapshot-only",
+    capturedAt: "2026-09-25",
+    clearedBy:
+      "a regeneration of supabase/schema/baseline.sql taken AFTER " +
+      "20260925120000_api_keys_account_identity.sql has applied to PROD " +
+      "(Phase 167.1.2 PR B; the supabase-migrate `apply` job on its merge commit).",
+    reason:
+      "Phase 167.1.2 plan 03 ships the api_keys same-owner trigger function in a " +
+      "forward migration. supabase/schema/baseline.sql is a dated PROD dump " +
+      "(see supabase/schema/BASELINE.md) that predates this migration, so the " +
+      "function exists in the migration-replay snapshot and not yet in the " +
+      "baseline until the next refresh.",
+  },
+  {
+    name: "set_departed_key_history_inclusion",
+    side: "snapshot-only",
+    capturedAt: "2026-09-25",
+    clearedBy:
+      "a regeneration of supabase/schema/baseline.sql taken AFTER " +
+      "20260925120000_api_keys_account_identity.sql has applied to PROD " +
+      "(Phase 167.1.2 PR B; the supabase-migrate `apply` job on its merge commit).",
+    reason:
+      "Phase 167.1.2 plan 03 ships the departed-key history owner RPC in a " +
+      "forward migration. supabase/schema/baseline.sql is a dated PROD dump " +
+      "(see supabase/schema/BASELINE.md) that predates this migration, so the " +
+      "function exists in the migration-replay snapshot and not yet in the " +
+      "baseline until the next refresh.",
+  },
+  // EMPTY (of any OTHER row), and that is a MEASURED state, not an unused
+  // feature.
   //
   // ⭐ It was briefly non-empty: Phase 164.1.1 added a `snapshot-only` row for
   // `prod_prober_cadence_check` on 2026-09-18, because the function landed in a

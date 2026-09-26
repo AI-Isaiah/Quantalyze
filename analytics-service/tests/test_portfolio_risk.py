@@ -153,7 +153,7 @@ def test_risk_decomposition_zero_volatility():
     """All-zero weights produce zero portfolio vol → the marginal/component
     decomposition is genuinely undefined (you cannot attribute a share of a
     portfolio that carries no risk), so marginal_risk_pct and component_var
-    must be 0 for every entry.
+    must be None for every entry (166.1 D7; they were 0 before).
 
     NOTE: this test deliberately does NOT assert standalone_vol == 0.
     standalone_vol is sqrt(cov[i][i]) — a per-strategy property independent of
@@ -161,13 +161,14 @@ def test_risk_decomposition_zero_volatility():
     here (H-0803 fixed the zero-vol branch to return them). The per-strategy
     invariant is pinned by test_risk_decomposition_zero_weights_standalone_vol_
     is_per_strategy below; this test only pins the two values that are correctly
-    zero, so it stays valid regardless of the standalone_vol value.
+    undefined, so it stays valid regardless of the standalone_vol value.
     """
     weights = [0.0, 0.0, 0.0]
     cov = np.array([[0.04, 0.01, 0.005], [0.01, 0.03, 0.002], [0.005, 0.002, 0.02]])
     result = compute_risk_decomposition(weights, cov)
-    assert all(r["marginal_risk_pct"] == 0 for r in result)
-    assert all(r["component_var"] == 0 for r in result)
+    # 166.1 D7 (founder 2026-09-26), round-1 SFH MEDIUM-2: undefined is None, not 0.
+    assert all(r["marginal_risk_pct"] is None for r in result)
+    assert all(r["component_var"] is None for r in result)
 
 
 def test_risk_decomposition_zero_weights_standalone_vol_is_per_strategy():
@@ -186,8 +187,9 @@ def test_risk_decomposition_zero_weights_standalone_vol_is_per_strategy():
     expected_standalone = [float(np.sqrt(cov[i][i])) for i in range(len(weights))]
     assert [r["standalone_vol"] for r in result] == pytest.approx(expected_standalone)
     # The decomposition itself remains undefined at zero portfolio vol.
-    assert all(r["marginal_risk_pct"] == 0 for r in result)
-    assert all(r["component_var"] == 0 for r in result)
+    # 166.1 D7 (founder 2026-09-26), round-1 SFH MEDIUM-2: undefined is None, not 0.
+    assert all(r["marginal_risk_pct"] is None for r in result)
+    assert all(r["component_var"] is None for r in result)
 
 
 def test_risk_decomposition_negative_variance_collapses_to_zeros():
@@ -195,8 +197,8 @@ def test_risk_decomposition_negative_variance_collapses_to_zeros():
     port_var > 0 else 0`. A non-PSD covariance matrix (numerical
     instability / a near-singular cov produced by float arithmetic) can
     yield port_var < 0. The `if port_var > 0 else 0` guard must collapse
-    port_vol to 0 so the marginal/component ATTRIBUTION is zero (undefined at
-    zero portfolio vol) rather than taking sqrt of a negative port_var (→ NaN).
+    port_vol to 0 so the marginal/component ATTRIBUTION is None (undefined at
+    zero portfolio vol; 0 before 166.1 D7) rather than taking sqrt of a negative port_var (→ NaN).
     standalone_vol = sqrt(cov[i][i]) is per-strategy and stays nonzero (H-0803).
     Tests only ever fed positive-definite cov + the all-zero-weight case before;
     the negative-variance branch was unexercised.
@@ -207,11 +209,12 @@ def test_risk_decomposition_negative_variance_collapses_to_zeros():
     weights = [0.5, -0.5]
     assert (np.array(weights) @ cov_non_psd @ np.array(weights)) < 0
     result = compute_risk_decomposition(weights, cov_non_psd)
-    # Negative port_var → port_vol == 0 → the zero-vol branch zeroes the
+    # Negative port_var → port_vol == 0 → the zero-vol branch nulls the
     # ATTRIBUTION (marginal/component) with no NaN from sqrt of a negative...
     assert len(result) == 2
-    assert all(r["marginal_risk_pct"] == 0 for r in result)
-    assert all(r["component_var"] == 0 for r in result)
+    # 166.1 D7 (founder 2026-09-26), round-1 SFH MEDIUM-2: undefined is None, not 0.
+    assert all(r["marginal_risk_pct"] is None for r in result)
+    assert all(r["component_var"] is None for r in result)
     # ...but standalone_vol = sqrt(cov[i][i]) is a per-strategy property,
     # independent of weights/port_vol — here sqrt(1.0) = 1.0, NOT 0 (H-0803).
     expected_standalone = [float(np.sqrt(cov_non_psd[i][i])) for i in range(len(weights))]

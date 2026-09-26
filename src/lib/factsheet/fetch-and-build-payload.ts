@@ -477,7 +477,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v6", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v7", id,
  * computedAt], a `null` computedAt included. 167.2.1-REVIEW-R2 IN-01: the key
  * moves more often than "once per successful run". The status bridge
  * `sync_strategy_analytics_status` (latest definition: migration

@@ -581,7 +581,7 @@ describe("FactsheetView — M-1: a per-scalar null in the persisted MTM cache st
 });
 
 describe("FactsheetView — B-1: the leverage-invariance pin does NOT apply at L=0 (0/0 is not invariant)", () => {
-  it("at L=0 on an MTM book, Sharpe/Sortino render the honest derived 0 — NOT the persisted overlay", () => {
+  it("at L=0 on an MTM book, Sharpe and Sortino render the honest '—' — NOT the persisted overlay", () => {
     const { container, getByText } = renderBody(fixtureMtmWithBundle());
     act(() => {
       fireEvent.click(getByText("Mark-to-market"));
@@ -594,13 +594,16 @@ describe("FactsheetView — B-1: the leverage-invariance pin does NOT apply at L
       fireEvent.change(levInput(container)!, { target: { value: "0" } });
     });
 
-    // r → 0·r zeroes every daily return, so the client derive honestly yields sharpe=0,
-    // sortino=0, ann_vol=0 and flat charts. The invariance proof (mean·√P/sd) is 0/0 at
-    // L=0 and does NOT hold there, so the pin must NOT overwrite the derived zeros with
-    // the persisted non-zero value (else "Sharpe 1.20" would render next to "Ann. Vol
-    // 0.0%"). Pre-fix (unguarded pin) rendered the persisted 1.20/1.90 here.
-    expect(readCell(container, "Sharpe")).toBe(num(0));
-    expect(readCell(container, "Sortino")).toBe(num(0));
+    // r → 0·r zeroes every daily return, so the client derive honestly yields no
+    // Sharpe ("—": an all-zero series has no dispersion, founder decision D7,
+    // 2026-09-26), no Sortino ("—": no losing day, review round 2 HI-02),
+    // ann_vol=0 and flat charts. The invariance proof
+    // (mean·√P/sd) is 0/0 at L=0 and does NOT hold there, so the pin must NOT
+    // overwrite the derived values with the persisted non-zero value (else "Sharpe
+    // 1.20" would render next to "Ann. Vol 0.0%"). Pre-fix (unguarded pin) rendered
+    // the persisted 1.20/1.90 here.
+    expect(readCell(container, "Sharpe")).toBe("—");
+    expect(readCell(container, "Sortino")).toBe("—");
     // Sanity: leverage genuinely applied (Ann. Vol collapsed to 0) — not the L=1 path.
     expect(readCell(container, "Ann. Vol")).toBe(pct(0, 1));
   });

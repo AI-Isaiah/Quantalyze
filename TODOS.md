@@ -67,6 +67,9 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    - **DEC-4** — the advisory lock, in its own phase, with a REAL concurrency test. It touches two
      RPCs that run on every job transition for every strategy; a half-applied lock discipline reads
      as protection while providing none.
+     ⭐ **TAKEN 2026-09-26 by Phase 164.5.2 BRIDGELOCK** — migration
+     `20260926120000_mark_compute_job_bridge_advisory_lock.sql` (both RPCs in one file) and the
+     LANE-ONLY two-backend gate `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql`.
 
    **B. Detection gap found during the 2026-08-25 prod outage:**
    - **0.04 — PYAPI-06 cannot detect the outage it was built for.** The client omits `X-Service-Key`
@@ -8061,6 +8064,45 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       **Closed when:** each item's verdict is written into `167-UAT.md` (verdict and counts only —
       no key id, account number or server name).
 
+## Phase 167.1.2 (ACCOUNTTRUTH) — PR B review round 4, routed items (logged 2026-09-26)
+
+- [ ] **`[167.1.2-REUSED-RETRY-ENDS-FAILED-FINAL]` A toggle can report success while the recompose
+      it reused ends `failed_final` and the curve never shows the change (booked 2026-09-26, from
+      the PR B round-4 silent-failure-hunter, finding F-4, LOW).**
+      **What happens.** `set_departed_key_history_inclusion` reuses the caller's `failed_retry`
+      `derive_allocator_equity` row when it is the only recompose row: it goes back to `pending`,
+      due now, with `attempts` untouched, so the toggle grants no retry budget. A row one attempt
+      short of `max_attempts` that fails once more ends `failed_final`. The RPC has already
+      returned success by then, so the owner sees the toggle accepted and a curve that still
+      reads the old value. The next toggle enqueues a fresh job, but nothing tells the owner to
+      make one.
+      **Why not fixed in PR B.** It is not a database-side refusal the RPC can make: the outcome
+      is decided after commit, by the worker. What the owner sees about a failed recompose is a
+      client question (the departed-keys overview and its status line).
+      **Owner: Phase 167.1.2 PR C (plan 04)**, the client half that calls this RPC and renders the
+      departed-keys overview. It decides whether that surface shows a failed recompose, and how.
+      No earlier `TODOS.md` entry names PR C (grep `PR C`: 0 hits on 2026-09-26), so this entry
+      is its first.
+      **Trigger:** PR C's planning, or any client code that calls
+      `set_departed_key_history_inclusion`, whichever is first.
+
+- [ ] **`[167.1.2-SECOND-FAILED-RETRY-ROW-STAYS]` A second, older `failed_retry` recompose row
+      beside the caller's pending one is left in place by the toggle (booked 2026-09-26, from the
+      PR B round-4 migration-reviewer, INFO-3).**
+      **What happens.** The reuse only fires when a `failed_retry` row is the caller's ONLY
+      in-flight-or-retry recompose row. When a pre-existing `pending` or `done_pending_children`
+      row sits beside it, the RPC does not flip it (the flip would collide on
+      `compute_jobs_one_inflight_per_kind_allocator`) and folds into the in-flight row through the
+      enqueue's dedup. The `failed_retry` row stays. The RPC did not create that pairing, but it
+      does not clear it either, and once the row is due it is the claim-wedge pairing.
+      **Owner: Phase 164.9.3 CLAIMPAIR**, which owns the pairing class
+      (`[164.9.3-CLAIM-PAIR-23505]`: a due `failed_retry` row plus a `pending` twin of the same
+      (kind, allocator) makes every claim entry point raise 23505). This is one more way the pair
+      can already exist when a caller arrives; the class fix there covers it. ⚠️ At the time of
+      writing, the 164.9.3 ROADMAP section and its `TODOS.md` entry live on the unmerged docs
+      branch that inserted the phase, not on this branch.
+      **Trigger:** Phase 164.9.3 planning.
+
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
 - **"Do NOT implement" landmines (keep documented, do not touch):** bridge-scoring precompute;
@@ -9593,6 +9635,22 @@ follows is what was deliberately left, with the reason.
   - **Not done in 161.1:** both files are outside the phase's declared scope, and a half-applied
     lock discipline (one RPC locking, the other not) is worse than a documented window — it reads
     as protection while providing none. Wants its own phase and its own concurrency test.
+  - ✅ CLOSED 2026-09-26 by Phase 164.5.2 BRIDGELOCK. Migration
+    `20260926120000_mark_compute_job_bridge_advisory_lock.sql` makes BOTH `mark_compute_job_done`
+    and `mark_compute_job_failed` take `pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'),
+    hashtext(<strategy id>))` inside their strategy guard, before the bridge call, in ONE
+    migration, so the half-applied discipline this entry warned about never exists. Evidence, per
+    the plan 01 SUMMARY: the LANE-ONLY two-backend gate
+    `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql` went RED naming arm L1 with the done
+    lock line removed and RED naming arm L2 with the failed lock line removed, and GREEN with each
+    restored byte-identically. ⚠️ The key is the TWO-integer form, not the single-key
+    `hashtext(p_strategy_id::text)` the fix shape above suggested, so a mark never queues behind a
+    trade sync. ⚠️ **What stays OPEN:** the lock covers terminal-mark against terminal-mark only.
+    The bridge's non-mark callers and the other writers of the rows it reads (the Python deferred
+    bridge call, both claim RPCs, `reset_stalled_compute_jobs`, the orphan terminalizer, enqueue,
+    a cross-strategy fan-in release, the refresh-marker retraction) stay unserialized, and a lock
+    inside the bridge itself is routed to **Phase 164.5.2.1 BRIDGERESIDUE**. The bridge's
+    read-order pins stay load-bearing.
 
 161.1-D2. **⚠️ A systematic enqueue failure in either fan-out is indistinguishable from "nothing
   was stale".** Both `enqueue_ledger_refresh_for_strategies` and `enqueue_ledger_composite_refresh`
@@ -9805,6 +9863,10 @@ follows is what was deliberately left, with the reason.
   half-applied lock discipline reads as protection while providing none. 164.1 is otherwise guards
   and observability (low blast radius); this would dominate its risk profile. Needs a test that
   genuinely exercises concurrent bridge calls, not a unit test.
+  ⭐ **TAKEN 2026-09-26 by Phase 164.5.2 BRIDGELOCK** — its own phase, as decided: migration
+  `20260926120000_mark_compute_job_bridge_advisory_lock.sql` locks both RPCs in one file, and the
+  gate `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql` drives two real backends over
+  `dblink` on the lane (LANE-ONLY), which is the concurrent test this decision asked for.
 
 161.1-D4. **Prose/derivation nits, non-blocking.**
   - `analytics-service/tests/test_computing_started_at_stamp.py:649` — census docstring
