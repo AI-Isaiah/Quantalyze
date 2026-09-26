@@ -984,6 +984,15 @@ here, but this precondition sits here because this is where a reader would go to
      reads `computing`, which is not terminal-success, so a recurrence of the original failure
      stamps loudly. And if the retry budget runs out instead, branch (b) sees an unhealthy row
      and un-publishes it.
+     ⛔ **CORRECTED 2026-09-26 (164.6.7 verification W-1), the bold sentence and "Confirm that on
+     the deployed commit; do not assume it" above kept as lineage.** There is no such fix to look
+     for. Round-2 fixer A took the qualify option, and keeping the attempt-1 publish state in job
+     metadata cannot close the gap anyway, because branch (a) rewrites the row before attempt 2
+     reads anything. So the condition is flat: **the retry protects `complete_with_warnings` /
+     `computation_warned` rows only. A plain-`complete` row is unprotected across the retry, in
+     both ways described above.** The gap is `TODOS.md` `[164.6.7-RETRY-PLAIN-COMPLETE]`, routed
+     to Phase 164.5.2 BRIDGELOCK; its fix is a bridge migration. Until that phase ships, do not
+     go looking for the fix on the deployed commit.
    - **Overclaim: "ends `failed_final` with no terminal stamp from this site" is true of Python
      and says nothing about the bridge.** If the re-read also fails on the FINAL attempt, the job
      ends `failed_final` with `last_error_kind = 'transient'`. Its `last_error` should carry the
@@ -1078,6 +1087,11 @@ here, but this precondition sits here because this is where a reader would go to
    stated in item 2's 2026-09-26 correction. No test drives one marked job through the Python
    `READ_ERROR` raise, the bridge on `failed_retry` and the next attempt in a single run; the
    `supabase/tests` corpus exercises the bridge on `failed_retry` on its own. Item 4 is met for the Python decision. Do not read it as met for the end state.
+   ⛔ **CORRECTED 2026-09-26 (164.6.7 verification W-1), "under the condition stated in item 2's
+   2026-09-26 correction" above kept as lineage.** That condition pointed at a fix that does not
+   exist. There is no condition: the protection holds for `complete_with_warnings` /
+   `computation_warned` rows only, and a plain-`complete` row is not protected across the retry.
+   The gap is `TODOS.md` `[164.6.7-RETRY-PLAIN-COMPLETE]`, routed to Phase 164.5.2 BRIDGELOCK.
    📜 *Lineage, superseded 2026-09-25:* "**How to check it is met.** Read
    `run_stitch_composite_job`: a live re-read of the row (through `_refresh_marker_still_on_row` or
    an equivalent) must sit before its composite-marker comparison. A test must go RED when that
