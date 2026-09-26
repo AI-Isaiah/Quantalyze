@@ -2388,7 +2388,26 @@ export const FILES_FLOOR = 51;
 //    bit its own arm first.`, exit 0. Per-file line:
 //    `test_api_keys_account_identity.sql: sections 34 / judged 34 / annotated
 //    34 / waived 0 / biting 34`.
-export const ARMS_FLOOR = 484;
+//
+// ⭐ RE-DERIVED 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, PR B review round 3):
+//    484 -> 485. ONE new arm, HIST-retry, in the ALREADY-ANNOTATED
+//    supabase/tests/test_api_keys_account_identity.sql (34 -> 35): a toggle
+//    beside the caller's failed_retry recompose REUSES that row (moved to
+//    now()) and never queues a pending twin of it; its twin makes the RPC's
+//    failed_retry lookup find nothing (AND FALSE). HIST-enqueues' twin find
+//    string moved with the enqueue call's new indentation, which moves no arm
+//    or step. No file joined the annotated set, so FILES_FLOOR stays 51;
+//    WAIVED_CEILING stays 0. MEASURED first on a narrowed `--file` run:
+//    `arms: 35/35/0`, `biting: 35`, `No defects in the narrowed scope.` Then
+//    ONE full lane run with no file edited during it and this constant still
+//    at 484: `scope: FULL 51/51 annotated files`, `coverage: files 51/78`,
+//    `arms: 485/485/0`, `biting: 485`, `lane-invocations: 485` (plus 51
+//    baseline / 51 restore legs), `lane-blocked: 0 file(s)`, `lane-probe:
+//    pg_cron AVAILABLE`, `per-arm lane time: mean 1.1s over 485 arm run(s)`,
+//    `✅ No defects. Every annotated arm bit its own arm first.`, exit 0.
+//    Per-file line: `test_api_keys_account_identity.sql: sections 35 / judged
+//    35 / annotated 35 / waived 0 / biting 35`.
+export const ARMS_FLOOR = 485;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

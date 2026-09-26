@@ -44,7 +44,9 @@
 --   2. api_keys.history_inclusion (D-05, D-09): the owner's include/exclude
 --      choice for a departed (disconnected or revoked) key's history.
 --   3. set_departed_key_history_inclusion(uuid, text): the owner RPC that
---      writes (2) and asks for the allocator curve to be recomposed.
+--      writes (2) and asks for the allocator curve to be recomposed, reusing
+--      the caller's recompose row where one exists (a failed_retry row is
+--      moved forward, never given a pending twin; see the RPC body).
 --   4. reconnect_allocator_api_key: refuses by name when a live sibling already
 --      holds the same (user, exchange, venue_account_id) (Pitfall 5). Once ccxt
 --      keys carry an account id (plan 02, PR C) a reconnect into an occupied
@@ -431,16 +433,57 @@ BEGIN
    WHERE id = p_api_key_id
      AND user_id = v_uid;
 
-  -- Recompose the caller's curve. Allocator-scoped, so enqueue_compute_job's
-  -- own gate requires p_allocator_id = auth.uid(), and its in-flight dedup
-  -- hands back the pending job locked above, so a burst of toggles is one job.
-  v_job := enqueue_compute_job(
-    p_strategy_id  := NULL,
-    p_kind         := 'derive_allocator_equity',
-    p_allocator_id := v_uid
-  );
+  -- Recompose the caller's curve, never by queuing a pending TWIN of a
+  -- failed_retry recompose. enqueue_compute_job's in-flight dedup and the
+  -- partial unique index compute_jobs_one_inflight_per_kind_allocator both
+  -- ignore failed_retry, so an enqueue beside a failed_retry row inserts a
+  -- second, pending row for the same allocator. MEASURED on the pg-lane
+  -- 2026-09-26: a due failed_retry derive_allocator_equity row beside a pending
+  -- one makes claim_compute_jobs and both claim_compute_jobs_with_priority
+  -- overloads raise 23505 on that index (the worker-spin class of 2026-04-28).
+  -- So when a failed_retry row is the caller's ONLY recompose row, it is
+  -- REUSED: it is already locked by step 1, and moving next_attempt_at to now()
+  -- is all the claim functions need to take it (status IN ('pending',
+  -- 'failed_retry') AND next_attempt_at <= now()); they clear its last_error
+  -- and error_kind themselves. attempts is left alone, so the toggle grants no
+  -- retry budget: a row one attempt short of max_attempts ends failed_final if
+  -- it fails again, and the next toggle then enqueues a fresh job. The job
+  -- reads history_inclusion when it runs, so it picks up the new value.
+  -- When a pending or done_pending_children row also exists (a pairing this
+  -- RPC did not create), the failed_retry row is NOT moved forward, because
+  -- ranking it first is exactly the 23505 shape; the enqueue's dedup hands
+  -- back the in-flight row instead and inserts nothing.
+  SELECT cj.id INTO v_job
+    FROM public.compute_jobs cj
+   WHERE cj.allocator_id = v_uid
+     AND cj.kind = 'derive_allocator_equity'
+     AND cj.status = 'failed_retry'
+     AND NOT EXISTS (
+           SELECT 1
+             FROM public.compute_jobs o
+            WHERE o.allocator_id = v_uid
+              AND o.kind = 'derive_allocator_equity'
+              AND o.status IN ('pending', 'done_pending_children'))
+   ORDER BY cj.next_attempt_at, cj.id
+   LIMIT 1;
 
-  -- Step 3. Lock and re-check the job the enqueue returned. Step 1 cannot see
+  IF v_job IS NOT NULL THEN
+    UPDATE public.compute_jobs
+       SET next_attempt_at = now()
+     WHERE id = v_job;
+  ELSE
+    -- Allocator-scoped, so enqueue_compute_job's own gate requires
+    -- p_allocator_id = auth.uid(), and its in-flight dedup hands back the
+    -- pending job locked above, so a burst of toggles is one job.
+    v_job := enqueue_compute_job(
+      p_strategy_id  := NULL,
+      p_kind         := 'derive_allocator_equity',
+      p_allocator_id := v_uid
+    );
+  END IF;
+
+  -- Step 3. Lock and re-check the job the enqueue returned (a reused
+  -- failed_retry row is already locked by step 1 and passes). Step 1 cannot see
   -- a job that another transaction enqueued, and a worker claimed, after
   -- step 1 ran; the dedup would then hand back that RUNNING job, which read
   -- the old value. The row returned here is either this transaction's own
@@ -484,6 +527,11 @@ COMMENT ON FUNCTION public.set_departed_key_history_inclusion(uuid, text) IS
   'till the day that the key was deleted." Writes api_keys.history_inclusion '
   'for the CALLER''s departed key (disconnected or revoked) and enqueues '
   'derive_allocator_equity for the caller (the job id is RAISEd as a NOTICE). '
+  'It never queues a pending twin of a failed_retry recompose: when a '
+  'failed_retry row is the caller''s only recompose row it is reused, its '
+  'next_attempt_at moved to now() so a worker takes it promptly (attempts '
+  'untouched), and its id is the one RAISEd; a pending or '
+  'done_pending_children row is reused through the enqueue''s own dedup. '
   'Clients map by SQLSTATE: 42501 when unauthenticated or not the owner; '
   '22023 HISTORY_INCLUSION_INVALID on a value other than include / exclude / '
   'NULL (NULL resets to the default rule); 55000 KEY_NOT_DEPARTED on a live, '
