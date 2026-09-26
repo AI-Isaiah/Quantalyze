@@ -89,9 +89,43 @@
 -- ══════════════════════════════════════════════════════════════════════════
 -- VAC-04 ACKNOWLEDGEMENT — the PROD bodies these CREATE OR REPLACEs overwrite
 -- ══════════════════════════════════════════════════════════════════════════
--- (The two `-- prod-body-ack:` lines, one per changed function, are written
--- here by Phase 164.5.2 plan 02, from the `live` column of
--- `node scripts/sql-body-normalize.mjs --diff-bodies`, EARNED and not pasted.)
+-- The gate compares the COMMITTED SNAPSHOT (supabase/schema/functions/) against
+-- PROD's live body. On a function-changing migration PR the two necessarily
+-- disagree: `snapshot-drift` requires the snapshot to carry the body the
+-- MIGRATIONS produce (the new one), while VAC-04 requires it to match what PROD
+-- has TODAY (the old one). The pragma means "I read PROD's body and intend to
+-- overwrite it". This migration changes TWO functions, so it carries TWO
+-- pragmas, one per function; VAC-04 greps the changed files once per drifting
+-- function, each matched by its own hash.
+--
+-- MEASURED 2026-09-26 UTC, reproduced LOCALLY with the gate's own normalizer,
+-- aiming its `live` argument at origin/main's snapshot rather than at PROD
+-- (origin/main = ea4167a3f82a03306f29dcd2a10cbdc38768117b), once per function:
+--
+--   git show origin/main:supabase/schema/functions/<fn>.sql > <scratch>
+--   node scripts/sql-body-normalize.mjs --diff-bodies \
+--     supabase/schema/functions/<fn>.sql <scratch>
+--
+-- ⭐ EACH ACKED HASH IS THE `live` COLUMN OF --diff-bodies FOR THAT FUNCTION'S
+-- DRIFT ROW, NOT `--hash` OF THE SNAPSHOT FILE (a whole-file digest no gate
+-- ever greps). Each row reported exactly one differing line: the new lock
+-- statement.
+--
+-- mark_compute_job_done (2 args), the DRIFT row's `live` column:
+-- prod-body-ack: d440576b7cbde00954e091d1e60136e79acdd43cf2c9471c3754cf9b27d3a6fb
+--
+-- mark_compute_job_failed (4 args), the DRIFT row's `live` column:
+-- prod-body-ack: ff74bc589774f1e7730b36879489f7d3c38b97bc3c6ba216ce0181f894716200
+--
+-- ⚠️ EACH ACK IS OF origin/main, WHICH STANDS IN FOR PROD. It is EARNED only if
+-- VAC-04 on the PR reports that SAME hash for PROD for that function. If it
+-- reports a different one, PROD drifted OUT OF BAND and the correct action is
+-- to FOLD the difference into this migration and re-derive — never to edit a
+-- pragma to match a gate log. It is EARNED, not pasted.
+-- ⚠️ VAC-08 (repo-vs-TEST body pairing) goes RED on the PR by construction:
+-- one DRIFT row per function (mark_compute_job_done/2 and
+-- mark_compute_job_failed/4), whose TEST hash is the pre-change hash above,
+-- until apply-on-merge brings TEST forward.
 --
 -- Transaction style: NO explicit BEGIN/COMMIT — Supabase wraps each migration
 -- in an implicit transaction. SET LOCAL lock_timeout applies to that wrap. This

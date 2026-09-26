@@ -2,10 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260603120000_compute_jobs_rpc_clear_error_and_gin_fanin.sql
--- ==========================================================================
--- STEP 2: mark_compute_job_done -- restore the GIN-supported set-based fan-in
--- ==========================================================================
+-- source migration: 20260926120000_mark_compute_job_bridge_advisory_lock.sql
+-- --------------------------------------------------------------------------
+-- mark_compute_job_done
+-- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION mark_compute_job_done(
   p_job_id     UUID,
   p_claim_token UUID DEFAULT NULL
@@ -100,6 +100,7 @@ BEGIN
 
   -- Phase 18: atomic UI bridge (preserved from mig 099).
   IF v_strategy_id IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));
     PERFORM sync_strategy_analytics_status(v_strategy_id);
   END IF;
 END;
