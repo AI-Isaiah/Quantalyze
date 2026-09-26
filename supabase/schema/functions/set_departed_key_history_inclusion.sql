@@ -21,6 +21,7 @@ DECLARE
   v_previous     text;
   v_job          uuid;
   v_job_status   text;
+  v_claimed_at   timestamptz;
 BEGIN
   IF v_uid IS NULL THEN
     RAISE EXCEPTION 'not_authenticated'
@@ -30,7 +31,7 @@ BEGIN
   -- Scoped to the caller, so another user's row is never even locked.
   SELECT user_id, disconnected_at, sync_status, history_inclusion
     INTO v_owner, v_disconnected, v_sync_status, v_previous
-    FROM api_keys
+    FROM public.api_keys
    WHERE id = p_api_key_id
      AND user_id = v_uid
      FOR UPDATE;
@@ -65,27 +66,49 @@ BEGIN
   -- _enqueue_compute_job_internal (20260924230827): p_idempotency_key is not
   -- part of the dedup, p_run_at only sets next_attempt_at, and a fan-in child
   -- (p_parent_job_ids) starts done_pending_children, which the same index
-  -- covers. So the only way to never report success over a stale curve,
-  -- without changing that contract for every other caller, is to refuse by
-  -- name and let the owner retry once the running compose ends. Nothing is
-  -- written. A PENDING job is locked FOR UPDATE here instead: the claim path
-  -- takes rows FOR UPDATE SKIP LOCKED, so no worker can claim it before this
-  -- transaction commits the new value, and when it runs it reads that value.
-  -- The same partial unique index guarantees at most one such row.
-  SELECT id, status INTO v_job, v_job_status
-    FROM compute_jobs
+  -- covers. Refusing by name, with nothing written, is therefore the option
+  -- that stays inside that contract for every other caller; the owner retries
+  -- once the running compose ends.
+  --
+  -- Step 1. Lock EVERY claimable or in-flight row for the caller's recompose.
+  -- Both claim functions take candidates with status IN ('pending',
+  -- 'failed_retry') through FOR UPDATE SKIP LOCKED, so a row locked here cannot
+  -- be claimed (and so cannot read the old value) before this transaction
+  -- commits. PERFORM, not SELECT INTO: a failed_retry row lies outside the
+  -- partial unique index and can coexist with a pending one, and a SELECT INTO
+  -- stops at the first row, locking only that one.
+  PERFORM 1
+     FROM public.compute_jobs
+    WHERE allocator_id = v_uid
+      AND kind = 'derive_allocator_equity'
+      AND status IN ('pending', 'failed_retry', 'running', 'done_pending_children')
+      FOR UPDATE;
+
+  -- Step 2. A running recompose is refused before anything is written. The
+  -- DETAIL carries how long it has run, so a busy recompose can be told from a
+  -- stuck one. The reclaim wording tracks analytics-service/main_worker.py:
+  -- watchdog_tick passes p_stale_threshold '10 minutes' to
+  -- reset_stalled_compute_jobs, which measures claimed_at, and
+  -- WATCHDOG_PER_KIND_OVERRIDES has no derive_allocator_equity entry. The
+  -- watchdog runs inside the worker process, so the reclaim happens only while
+  -- a worker is up. Change the HINT if either constant moves.
+  SELECT status, claimed_at INTO v_job_status, v_claimed_at
+    FROM public.compute_jobs
    WHERE allocator_id = v_uid
      AND kind = 'derive_allocator_equity'
-     AND status IN ('pending', 'running', 'done_pending_children')
-     FOR UPDATE;
+     AND status = 'running'
+   LIMIT 1;
 
   IF v_job_status = 'running' THEN
     RAISE EXCEPTION 'HISTORY_RECOMPOSE_IN_PROGRESS'
       USING ERRCODE = '55006',
-            DETAIL  = 'Your equity history is being recomputed right now. Try again when it finishes; nothing was changed.';
+            DETAIL  = format('A recompose of your equity history has been running for %s. Try again when it finishes; nothing was changed.',
+                             CASE WHEN v_claimed_at IS NULL THEN 'an unknown time'
+                                  ELSE floor(extract(epoch FROM now() - v_claimed_at) / 60)::int || ' minute(s)' END),
+            HINT    = 'If it does not finish, a running worker reclaims a recompose that has run for more than 10 minutes and queues it again. Retry after that.';
   END IF;
 
-  UPDATE api_keys
+  UPDATE public.api_keys
      SET history_inclusion = p_inclusion
    WHERE id = p_api_key_id
      AND user_id = v_uid;
@@ -98,6 +121,33 @@ BEGIN
     p_kind         := 'derive_allocator_equity',
     p_allocator_id := v_uid
   );
+
+  -- Step 3. Lock and re-check the job the enqueue returned. Step 1 cannot see
+  -- a job that another transaction enqueued, and a worker claimed, after
+  -- step 1 ran; the dedup would then hand back that RUNNING job, which read
+  -- the old value. The row returned here is either this transaction's own
+  -- uncommitted insert (invisible to every claimer) or an existing row that is
+  -- now locked (skipped by every claimer), so once this check passes no
+  -- worker can start the job before the new value commits. If a claimer holds
+  -- the row, this waits, re-reads the row as READ COMMITTED does, sees
+  -- running, and refuses; the refusal rolls the UPDATE above back.
+  -- REASONED, NOT MEASURED: steps 1 and 3 close races between TWO backends,
+  -- and the SQL gate corpus runs one session, so neither window has been
+  -- exercised. Step 3's refusal is gated (arm HIST-running) only in the
+  -- single-session shape where the job is already running.
+  SELECT status, claimed_at INTO v_job_status, v_claimed_at
+    FROM public.compute_jobs
+   WHERE id = v_job
+     FOR UPDATE;
+
+  IF v_job_status = 'running' THEN
+    RAISE EXCEPTION 'HISTORY_RECOMPOSE_IN_PROGRESS'
+      USING ERRCODE = '55006',
+            DETAIL  = format('A recompose of your equity history has been running for %s. Try again when it finishes; nothing was changed.',
+                             CASE WHEN v_claimed_at IS NULL THEN 'an unknown time'
+                                  ELSE floor(extract(epoch FROM now() - v_claimed_at) / 60)::int || ' minute(s)' END),
+            HINT    = 'If it does not finish, a running worker reclaims a recompose that has run for more than 10 minutes and queues it again. Retry after that.';
+  END IF;
 
   RAISE NOTICE 'set_departed_key_history_inclusion: recompose job % queued for the caller', v_job;
 

@@ -642,10 +642,15 @@ BEGIN
   -- unique index both cover running). Folding the toggle into it would return
   -- success over a stale curve, so the RPC refuses by name, writes nothing and
   -- queues nothing; the owner retries once it ends.
-  -- RED-UNDER: disable the running refusal (IF FALSE) in migration
+  -- The RPC tests for a running job twice: before its write (step 2) and on
+  -- the job its enqueue returns (step 3). In this single-session shape each
+  -- test alone refuses, so a mutation of one is masked by the other (MEASURED
+  -- 2026-09-26: either one-step mutation left this arm NO-RED). The twin
+  -- therefore disables both.
+  -- RED-UNDER: disable BOTH running refusals (IF FALSE) in migration
   --            20260925120000. The toggle is then stored and silently folded
   --            into the job that already read the old value.
-  -- RED-UNDER-M: {"arm":"HIST-running","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_job_status = 'running' THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"HIST-running","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_job_status = 'running' THEN","replace":"  IF FALSE THEN","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_job_status = 'running' THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   -- A worker claims the caller's pending recompose (the claim's own transition).
   UPDATE compute_jobs
      SET status = 'running', claimed_at = now(), claimed_by = 'acct-identity-test'

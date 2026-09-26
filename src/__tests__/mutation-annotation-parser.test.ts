@@ -1006,8 +1006,13 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // removes both ownership layers). MEASURED: this file's run read
     // `expected 483 to be 474` and then `expected 487 to be 477` at the pre-move
     // pins.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 2): `stepsSeen`
+    // 487 -> 488, `armsSeen` unmoved. HIST-running's twin gained a SECOND
+    // edit step: the RPC now tests for a running job twice, and a one-step
+    // twin on either test alone was MEASURED NO-RED on the pg-lane. MEASURED:
+    // this file's run read `expected 488 to be 487` at the pre-move pin.
     expect(armsSeen).toBe(483);
-    expect(stepsSeen).toBe(487);
+    expect(stepsSeen).toBe(488);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1892,7 +1897,10 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // fixes): 477 -> 487, moving WITH `stepsSeen`: ten new `edit` steps with a
     // `find` (nine new twins and HIST-owner's second step), one needle each.
     // RUN SEPARATELY: `expected 487 to be 477` at the pre-move pin.
-    expect(needles.length).toBe(487);
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 2): 487 -> 488,
+    // moving WITH `stepsSeen`: HIST-running's second `edit` step, one needle.
+    // RUN SEPARATELY: `expected 488 to be 487` at the pre-move pin.
+    expect(needles.length).toBe(488);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
