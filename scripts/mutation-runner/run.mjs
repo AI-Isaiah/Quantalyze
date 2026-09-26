@@ -2369,7 +2369,26 @@ export const FILES_FLOOR = 51;
 //    1.1s over 483 arm run(s)`, `✅ No defects. Every annotated arm bit its own
 //    arm first.`, exit 0. Per-file line: `test_api_keys_account_identity.sql:
 //    sections 33 / judged 33 / annotated 33 / waived 0 / biting 33`.
-export const ARMS_FLOOR = 483;
+//
+// ⭐ RE-DERIVED 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, PR B review round 2):
+//    483 -> 484. ONE new arm, HIST-lock, in the ALREADY-ANNOTATED
+//    supabase/tests/test_api_keys_account_identity.sql (33 -> 34): the recompose
+//    job set_departed_key_history_inclusion hands back is locked by it (xmax of
+//    the row it inserted is non-zero; its twin drops FOR UPDATE from the RPC's
+//    step 3 SELECT). HIST-running's twin also gained a second edit step (the RPC
+//    now tests for a running job twice), which moves steps, not arms. No file
+//    joined the annotated set, so FILES_FLOOR stays 51; WAIVED_CEILING stays 0.
+//    MEASURED first on a narrowed `--file` run: `arms: 34/34/0`, `biting: 34`,
+//    `No defects in the narrowed scope.` Then ONE full lane run with no file
+//    edited during it and this constant still at 483: `scope: FULL 51/51
+//    annotated files`, `coverage: files 51/78`, `arms: 484/484/0`, `biting:
+//    484`, `lane-invocations: 484` (plus 51 baseline / 51 restore legs),
+//    `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, `per-arm lane
+//    time: mean 1.2s over 484 arm run(s)`, `✅ No defects. Every annotated arm
+//    bit its own arm first.`, exit 0. Per-file line:
+//    `test_api_keys_account_identity.sql: sections 34 / judged 34 / annotated
+//    34 / waived 0 / biting 34`.
+export const ARMS_FLOOR = 484;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

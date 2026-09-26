@@ -537,6 +537,28 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (HIST-writes): set_departed_key_history_inclusion(disconnected key, ''exclude'') did not store it (SQLSTATE %, %; stored %, returned %).', v_err, v_msg, v_val, v_ret;
   END IF;
 
+  -- ----- HIST-lock: the recompose job the RPC hands back is LOCKED by it -----
+  -- The RPC's step 3 takes the job enqueue_compute_job returned FOR UPDATE, so
+  -- no worker (the claim functions take rows FOR UPDATE SKIP LOCKED) can start
+  -- it before the new value commits. This file runs one session, so it cannot
+  -- watch a claimer being skipped; it reads the row's xmax instead. The job was
+  -- inserted by the call above and nothing else has updated it, so a non-zero
+  -- xmax is the RPC's lock-only mark. This proves the RPC locked the row, NOT
+  -- the SKIP LOCKED behaviour, which rests on the claim functions. The call
+  -- above found no job at step 1, so step 3 is the only lock taken.
+  -- RED-UNDER: drop FOR UPDATE from the RPC's step 3 SELECT in migration
+  --            20260925120000. The returned job is then claimable while the
+  --            new value is still uncommitted.
+  -- RED-UNDER-M: {"arm":"HIST-lock","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"   WHERE id = v_job\n     FOR UPDATE;","replace":"   WHERE id = v_job;","occurrences":1}]}
+  -- Whether a job exists at all is HIST-enqueues' question (its twin deletes
+  -- the enqueue, leaving no row), so this arm judges only a row that exists.
+  SELECT count(*), max(xmax::text) INTO v_jobs, v_val
+    FROM compute_jobs
+   WHERE allocator_id = uid_a AND kind = 'derive_allocator_equity';
+  IF v_jobs = 1 AND (v_val IS NULL OR v_val = '0') THEN
+    RAISE EXCEPTION 'TEST FAILED (HIST-lock): the caller''s recompose job is not locked by set_departed_key_history_inclusion (jobs %, xmax %). A worker could claim it and read the old value before the toggle commits.', v_jobs, v_val;
+  END IF;
+
   -- ----- HIST-enqueues: the call asks for the caller's curve to be recomposed --
   -- Exactly ONE derive_allocator_equity job for the caller, even after a second
   -- call (the allocator-scoped in-flight dedup).
