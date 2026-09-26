@@ -1032,6 +1032,12 @@ call the research left to the plan.
   Task 2's rule). 169-02 then takes its three-part arm, and 169-08 Task 2 step 3 only verifies the KEY SHAPE pin
   and header line 169-02 wrote (no re-edit, no second header line, no red-first claim). The wave-1 gates print
   which timing held (`ORDER INFO 167.2.1-at-head`).
+- **Measured 2026-09-26 (plan-check round 3):** Phase 167.2.1 has merged to `origin/main` (PR #866, merge
+  commit `327bb9990`). The second timing is therefore the expected one: the phase-entry sync brings 167.2.1
+  in, 169-02 takes its three-part arm, and 169-08 Task 2 step 3 takes its verify-only three-part arm. The
+  gates that waited on 167.2.1 (169-07 Task 1, 169-08 Task 1, 169-06 step 0) keep their checks unchanged;
+  they now pass on that fact rather than wait for it. Both arms stay in the plans, because the arm taken is
+  read from the branch at execution, never from this note.
 
 ### D-43: Plan 169-01 builds on Phase 166.2's og-metrics (orchestrator, cross-phase note, 2026-09-26)
 - **Fact (from the orchestrator, Phase 166.2 executing):** 166.2 moves `computeOgHeadline`'s computed
