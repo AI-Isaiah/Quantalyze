@@ -57,7 +57,7 @@
  * ═══ ANTI-VACUITY — DEMONSTRATED, NOT ASSERTED ═══
  *
  * NEUTER-D, RUN 2026-08-28. The token page's payload fetch was temporarily
- * rewired through a `unstable_cache(..., ["factsheet-v2-payload-v6", id])`
+ * rewired through a `unstable_cache(..., ["factsheet-v2-payload-vN", id])`
  * wrapper — the exact poisoning D-01's structural argument prevents — and TWO
  * INDEPENDENT DETECTORS went red on the same tree:
  *
@@ -152,7 +152,7 @@ const GENERATION = 1;
 
 /** The shape-versioned key prefix, typed HERE by hand. Never imported from the
  *  page: an oracle read out of the module under test cannot fail. */
-const EXPECTED_KEY_PREFIX = "factsheet-v2-payload-v6";
+const EXPECTED_KEY_PREFIX = "factsheet-v2-payload-v7";
 
 const CASH_DAILY = [
   { date: "2025-08-01", value: 0.01 },
