@@ -781,7 +781,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date }) {
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 63;
+export const EXPECTED_ASSERTIONS = 71;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -1260,6 +1260,89 @@ function selfTest({ withGitleaks = false } = {}) {
       throws(() => compose({ repoRoot: repo, inDir: join(dir, "art2"), out: join(dir, "pr3"), runner: redRunner, emit, date: "2026-02-03" })) &&
         g(["rev-parse", "HEAD"]).trim() === head2,
       "a red child gate refuses and no commit is made",
+    );
+
+    console.log("=== SELF-TEST 4b/4: the MERGE-tree marker, the argument validators and D-10 idempotency");
+    // HEAD is now the bot commit, so `base` is a REAL commit that is not HEAD. With
+    // a format-valid but absent sha the arm above would refuse even without the
+    // equality check (`git show` fails); a real older commit refuses ONLY on it.
+    const notHead = capture(() =>
+      gateDump({ repoRoot: repo, dump: join(dir, "dump.sql"), merge: base, runId: "1", cliVersion: "2.98.2", out: join(dir, "nh"), emit, gitleaks: cleanGl() }),
+    );
+    ok(
+      notHead.threw !== null && /--merge/.test(notHead.threw.message) && /MERGE tree/.test(notHead.threw.message) &&
+        !notHead.text.includes(base.slice(0, 7)) && !notHead.text.includes(head2.slice(0, 7)) && !existsSync(join(dir, "nh")),
+      "a --merge that is a real commit but not HEAD refuses, naming --merge and the rule, echoing neither sha",
+    );
+    const argCases = [
+      ["--merge", { merge: "zz-rejected-merge-value" }, /--merge must be/],
+      ["--run-id", { runId: "12a-rejected-run-value" }, /--run-id must be/],
+      ["--cli-version", { cliVersion: "2.98.2-rejected-cli-value" }, /--cli-version must be/],
+    ];
+    for (const [flag, bad, re] of argCases) {
+      const value = Object.values(bad)[0];
+      const r = capture(() =>
+        gateDump({ repoRoot: repo, dump: dumpPath, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, "arg"), emit, gitleaks: cleanGl(), ...bad }),
+      );
+      ok(r.threw !== null && re.test(r.threw.message) && !r.text.includes(value), `a malformed ${flag} refuses by name without echoing the value`);
+    }
+    // Mirror of `check-baseline-currency.mjs` `SHA_LINE_RE` (not exported there; this
+    // plan does not edit that file).
+    const SHA_LINE_RE = /^baseline-sha256:[ \t]*(\S*)[ \t]*$/;
+    const committedMarkerNow = g(["show", `HEAD:${MARKER_REL}`]);
+    const shaLines = art.split("\n").filter((l) => SHA_LINE_RE.test(l));
+    ok(
+      markerHeaderLines(art).join("\n") === markerHeaderLines(committedMarkerNow).join("\n") &&
+        shaLines.length === 1 && SHA_LINE_RE.exec(shaLines[0])[1] === newSha,
+      "the regenerated marker's # header lines are byte-identical to the committed marker's, and its one sha line (SHA_LINE_RE) is the dump's sha256",
+    );
+    const committedDump = join(dir, "committed.sql");
+    writeFileSync(committedDump, g(["show", `HEAD:${BASELINE_SQL_REL}`], { encoding: "buffer" }));
+    outputs.length = 0;
+    const noop = capture(() =>
+      gateDump({ repoRoot: repo, dump: committedDump, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, "noop"), emit, gitleaks: cleanGl() }),
+    );
+    ok(
+      noop.threw === null && /^::notice::.*no PR$/m.test(noop.text) && outputs.join(",") === "changed=false" && !existsSync(join(dir, "noop")),
+      "a dump and marker byte-identical to HEAD's committed pair: changed=false, a ::notice::, and no out dir at all",
+    );
+    // $GITHUB_OUTPUT: exactly one `changed=` line per run when set; nothing when unset.
+    const ghOut = join(dir, "github-output.txt");
+    const savedGh = process.env.GITHUB_OUTPUT;
+    let ghLines;
+    let ghLinesAfterUnset;
+    try {
+      process.env.GITHUB_OUTPUT = ghOut;
+      capture(() =>
+        gateDump({ repoRoot: repo, dump: committedDump, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, "gh1"), emit: emitToGithubOutput, gitleaks: cleanGl() }),
+      );
+      ghLines = readFileSync(ghOut, "utf8").split("\n").filter((l) => l.startsWith("changed="));
+      delete process.env.GITHUB_OUTPUT;
+      capture(() =>
+        gateDump({ repoRoot: repo, dump: committedDump, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, "gh2"), emit: emitToGithubOutput, gitleaks: cleanGl() }),
+      );
+      ghLinesAfterUnset = readFileSync(ghOut, "utf8").split("\n").filter((l) => l.startsWith("changed="));
+    } finally {
+      if (savedGh === undefined) delete process.env.GITHUB_OUTPUT;
+      else process.env.GITHUB_OUTPUT = savedGh;
+    }
+    ok(
+      ghLines.join(",") === "changed=false" && ghLinesAfterUnset.join(",") === "changed=false",
+      "$GITHUB_OUTPUT receives exactly one changed= line when set, and nothing when unset",
+    );
+    // The committed dump UNCHANGED, but a NEW migration committed at the merge: the
+    // marker differs, so this is a change (D-09 + D-10).
+    g(["add", "--", `supabase/migrations/${M3}`]);
+    g(["commit", "-q", "-m", "a new migration at the merge"]);
+    const head3 = g(["rev-parse", "HEAD"]).trim();
+    outputs.length = 0;
+    const newMig = capture(() =>
+      gateDump({ repoRoot: repo, dump: committedDump, merge: head3, runId: "1", cliVersion: "2.98.2", out: join(dir, "art3"), emit, gitleaks: cleanGl() }),
+    );
+    ok(
+      newMig.threw === null && outputs.join(",") === "changed=true" &&
+        markerBasenames(readFileSync(join(dir, "art3/baseline-carried-migrations.txt"), "utf8")).includes(M3),
+      "an unchanged dump with a NEW committed migration at the merge is changed=true, and the marker carries it",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
