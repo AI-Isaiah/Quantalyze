@@ -1212,6 +1212,30 @@ async def _crawl_deribit_ledger(
             # (returns [] → recorded complete-empty below); a -32602 AFTER rows
             # were fetched escapes here and fails loud (F-3: never drop real rows).
             #
+            # Phase 168 (D-02 amended): an `assignment` is cash-bearing only when
+            # no same-instrument delivery/settlement exists, and that census is
+            # only sound over the instrument's WHOLE history. A since_ms-cropped
+            # batch could hold the assignment and miss its sibling, so refuse it
+            # here — HERE and not in build_deribit_native_ledger, because the USD
+            # twin (txn_rows_to_daily_records) runs inside this loop, and before
+            # the index fetch below so no network I/O is spent on the batch.
+            # Inert on every production path: all of them crawl with
+            # since_ms=None. Fires on any assignment regardless of change (a
+            # size rule would be a magnitude rule). Names scope and currency
+            # only — no row fields.
+            if since_ms is not None and any(
+                isinstance(r, Mapping) and str(r.get("type", "")) == "assignment"
+                for r in rows
+            ):
+                raise LedgerValuationError(
+                    "assignment classification requires a full-history crawl "
+                    "(since_ms=None): an assignment is cash-bearing only when no "
+                    "same-instrument delivery/settlement row exists, and a "
+                    "since_ms-cropped crawl cannot see the instrument's whole "
+                    f"history (scope={scope.label!r} currency={currency!r}) — "
+                    "refusing to classify it on a partial window"
+                )
+            #
             # P72: an INVERSE (coin-margined) currency may carry a quiet-day cash
             # row (e.g. a negative_balance_fee) on a day with no OWN same-day
             # index — supply the SAME-DAY settlement index (public/get_delivery_
