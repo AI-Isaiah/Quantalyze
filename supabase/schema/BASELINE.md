@@ -441,7 +441,7 @@ Read-only, from a checkout linked to production, DSN never committed or echoed:
 
 ```
 supabase db dump --linked -f supabase/schema/baseline.sql
-grep -anE 'postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase|\\connect|ALTER DATABASE|eyJ[A-Za-z0-9_-]{10,}|sb_secret_[A-Za-z0-9_-]{16,}|(^|[^_A-Za-z])[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]("? *(:=|=| ) *[Ee]?[^ -&(-~][!-&(-~]|"? *: *"[!#-~]|=[!-&(-~])' supabase/schema/baseline.sql
+grep -anE 'postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase|\\connect|ALTER DATABASE|eyJ[A-Za-z0-9_-]{10,}|sb_secret_[A-Za-z0-9_-]{16,}|(^|[^_A-Za-z])[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]("? *(:=|=| ) *[Ee]?[^ -&(-~][!-&(-~]|"? *: *"[!#-~]|=[!-&(-~]|=[^ -&(-~]{2}[!-&(-~])' supabase/schema/baseline.sql
 ```
 
 Any hit on the second command means **do not commit**.
@@ -478,7 +478,8 @@ job, `--compose`, `--check-bot-branch` and `--open-or-edit-pr` in the write-toke
 PROD credential and the write token never share a job. It REFUSES, and proposes nothing, on any
 of: a hit of the secret scan above (the five classes, a Supabase `sb_secret_` key, or a password
 in a credential form, in any case: a quoted string after the word, a JSON `"password":` member,
-or `password=` in a connection string, while `WHERE password = x` is not a hit; only the count and line numbers are printed, never the
+or `password=` in a connection string, a quoted value as pg_dump doubles it (`password=''…''`) included,
+while `WHERE password = x` and `password = ''` are not hits; only the count and line numbers are printed, never the
 line); a gitleaks finding over the dump (explicit `.gitleaks.toml`, redacted, inline allow
 comments ignored, a missing or empty dump refused rather than read as clean); a NUL byte, a
 `SET client_encoding` count other than one, or a home-directory path; zero tables or any data
