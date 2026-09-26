@@ -3008,6 +3008,13 @@ The wait grows with the number of open PRs, because every one of them contends f
 - Phase 164.4.2 moved `sql-tests` to `scripts/local-stack/run.sh`.
 - Phase 164.4.2.1 took `test-db-drift` off the key.
 
+⭐ **Orchestrator decision, 2026-09-26 (autonomous planning, pending founder ratification) — CONTEXT D-14.**
+The app's CSP `connect-src` in `next.config.ts` refuses a loopback Supabase origin (measured by the
+research), so `e2e-seeded` cannot leave the key without a fix. Taken: derive the configured
+`NEXT_PUBLIC_SUPABASE_URL` origin into `connect-src` only when no existing source already matches it,
+so the production header stays byte-identical. Rejected: `bypassCSP`, which would make the seeded
+suite unable to catch a CSP edit that breaks login.
+
 ## Success Criteria
 1. Neither job acquires advisory key `61616158`.
 2. Each job boots its own local-stack or pg-lane database, behind a loopback-DSN guard.
