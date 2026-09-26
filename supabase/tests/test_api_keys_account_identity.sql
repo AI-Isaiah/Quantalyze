@@ -555,8 +555,12 @@ BEGIN
   -- the SKIP LOCKED behaviour, which rests on the claim functions. The call
   -- above found no job at step 1, so step 3 is the only lock taken.
   -- RED-UNDER: drop FOR UPDATE from the RPC's step 3 SELECT in migration
-  --            20260925120000. The returned job is then claimable while the
-  --            new value is still uncommitted.
+  --            20260925120000. The job the RPC hands back is then no longer
+  --            locked by it (xmax stays 0). That is all this arm proves: the
+  --            lock on the returned row. The row here is the RPC's own
+  --            uncommitted insert, which no claimer can see either way, so the
+  --            window the lock closes (a row another backend committed) is
+  --            reasoned, not shown; step 1's FOR UPDATE is reasoned too.
   -- RED-UNDER-M: {"arm":"HIST-lock","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"     WHERE id = v_job\n       FOR UPDATE;","replace":"     WHERE id = v_job;","occurrences":1}]}
   -- Whether a job exists at all is HIST-enqueues' question (its twin deletes
   -- the enqueue, leaving no row), so this arm judges only a row that exists.
