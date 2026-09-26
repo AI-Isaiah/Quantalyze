@@ -1216,7 +1216,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 172;
+export const EXPECTED_ASSERTIONS = 186;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -1787,6 +1787,10 @@ function selfTest({ withGitleaks = false } = {}) {
       buildMarker({ headerLines: ["# fixture marker", "#", "# second header line"], sha: fixtureSha, basenames: [M1, M2] }),
     );
     g(["init", "-q"], { cwd: repo });
+    // Every D-10 no-op now asks `origin` for the bot branch (Open Question 3), so the
+    // fixture carries a local bare `origin`: no arm reaches a missing remote by accident.
+    g(["init", "-q", "--bare", join(dir, "origin.git")], { cwd: dir });
+    g(["remote", "add", "origin", join(dir, "origin.git")]);
     g(["add", "-A"]);
     g(["commit", "-q", "-m", "fixture"]);
     // D-09 failing direction: a migration present in the working tree but NOT in the merge.
@@ -2290,8 +2294,9 @@ function selfTest({ withGitleaks = false } = {}) {
       gateDump({ repoRoot: repo, dump: committedDump, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, "noop"), emit, gitleaks: cleanGl() }),
     );
     ok(
-      noop.threw === null && /^::notice::.*no PR$/m.test(noop.text) && outputs.join(",") === "changed=false" && !existsSync(join(dir, "noop")),
-      "a dump and marker byte-identical to HEAD's committed pair: changed=false, a ::notice::, and no out dir at all",
+      noop.threw === null && /^::notice::baseline-redump: dump and marker are byte-identical to the committed pair — no PR; bot branch absent$/m.test(noop.text) &&
+        outputs.join(",") === "changed=false" && !existsSync(join(dir, "noop")),
+      "a dump and marker byte-identical to HEAD's committed pair: changed=false, a ::notice:: that also says the bot branch is absent, and no out dir at all",
     );
     // $GITHUB_OUTPUT: exactly one `changed=` line per run when set; nothing when unset.
     const ghOut = join(dir, "github-output.txt");
@@ -2330,6 +2335,161 @@ function selfTest({ withGitleaks = false } = {}) {
       newMig.threw === null && outputs.join(",") === "changed=true" &&
         markerBasenames(readFileSync(join(dir, "art3/baseline-carried-migrations.txt"), "utf8")).includes(M3),
       "an unchanged dump with a NEW committed migration at the merge is changed=true, and the marker carries it",
+    );
+
+    console.log("=== SELF-TEST 4c/4: --check-bot-branch and the bot-PR status of the D-10 no-op (D-11, D-24, Open Question 3)");
+    // A helper that does not exist yet (or throws) reads as a FAIL, never a crash.
+    const fp = (text, sha) => {
+      try {
+        const r = findPullRefsForSha(text, sha);
+        return Array.isArray(r) ? r.join(",") : null;
+      } catch {
+        return null;
+      }
+    };
+    const shaA = "a".repeat(40);
+    const lsFixture = [
+      `${shaA}\trefs/heads/${BOT_BRANCH}`,
+      `${shaA}\trefs/pull/12/head`,
+      `${shaA}\trefs/pull/12/merge`,
+      `${shaA}\trefs/pull/100/head`,
+      `${shaA}\trefs/pull/7/head`,
+      `${shaA}\trefs/pull/30/merge`,
+      `${"b".repeat(40)}\trefs/pull/9/head`,
+      `${shaA}\trefs/pull/8/head/extra`,
+      "",
+    ].join("\n");
+    ok(
+      fp(lsFixture, shaA) === "7,12,100",
+      "findPullRefsForSha returns the refs/pull/<n>/head refs at the sha in NUMERIC ascending order, ignoring /merge refs, other shas and other refs",
+    );
+    ok(fp(lsFixture, "c".repeat(40)) === "" && fp("", shaA) === "", "findPullRefsForSha returns an empty list when no /head ref carries the sha");
+
+    // A local bare "remote": `main` at repo's HEAD and, unless absent, the bot branch
+    // over it, optionally with a human commit and a refs/pull/7/head at its tip. The
+    // mode runs in a clone of `repo` whose `origin` is that bare repository.
+    const foreignMessage = ["self-test", "distinctive", "foreign", "message", randomBytes(4).toString("hex")].join("-");
+    let bareN = 0;
+    const botRemote = ({ branch = true, foreign = false, pull7 = false } = {}) => {
+      bareN += 1;
+      const bare = join(dir, `bot-remote-${bareN}.git`);
+      const work = join(dir, `bot-work-${bareN}`);
+      const checkout = join(dir, `bot-checkout-${bareN}`);
+      g(["init", "-q", "--bare", bare], { cwd: dir });
+      g(["clone", "-q", repo, work], { cwd: dir });
+      g(["push", "-q", bare, "HEAD:refs/heads/main"], { cwd: work });
+      let tip = null;
+      if (branch) {
+        g(["commit", "-q", "--allow-empty", "--author", `${BOT_NAME} <${BOT_EMAIL}>`, "-m", "bot re-dump"], { cwd: work });
+        if (foreign) g(["commit", "-q", "--allow-empty", "-m", foreignMessage], { cwd: work });
+        tip = g(["rev-parse", "HEAD"], { cwd: work }).trim();
+        g(["push", "-q", bare, `HEAD:refs/heads/${BOT_BRANCH}`], { cwd: work });
+        if (pull7) g(["push", "-q", bare, `${tip}:refs/pull/7/head`], { cwd: work });
+      }
+      g(["clone", "-q", repo, checkout], { cwd: dir });
+      g(["remote", "set-url", "origin", bare], { cwd: checkout });
+      return { bare, checkout, tip };
+    };
+    const botRun = (scenario, remote = "origin", extra = {}) => {
+      outputs.length = 0;
+      const r = capture(() => checkBotBranch({ repoRoot: scenario.checkout, remote, emit, ...extra }));
+      return { ...r, outputs: [...outputs] };
+    };
+    const absentScenario = botRemote({ branch: false });
+    const absentRun = botRun(absentScenario);
+    ok(
+      absentRun.threw === null && absentRun.outputs.join(",") === "lease=" && /^baseline-redump bot-branch: absent$/m.test(absentRun.text),
+      "an absent bot branch emits an EMPTY lease (the push's 'must not exist') and prints 'bot-branch: absent'",
+    );
+    const allBot = botRemote();
+    const allBotRun = botRun(allBot);
+    ok(
+      allBotRun.threw === null && allBotRun.outputs.join(",") === `lease=${allBot.tip}` &&
+        allBotRun.text.includes(`baseline-redump bot-branch: present tip=${short(allBot.tip)} prs=none`),
+      "a bot branch whose commits over main are all bot-authored emits lease=<its tip sha> and prs=none",
+    );
+    const present7 = botRemote({ pull7: true });
+    const present7Run = botRun(present7);
+    ok(
+      present7Run.threw === null && present7Run.outputs.join(",") === `lease=${present7.tip}` &&
+        present7Run.text.includes(`baseline-redump bot-branch: present tip=${short(present7.tip)} prs=#7`),
+      "an all-bot branch whose tip refs/pull/7/head points at prints prs=#7 beside its lease",
+    );
+    const foreign7 = botRemote({ foreign: true, pull7: true });
+    const foreign7Run = botRun(foreign7);
+    ok(
+      foreign7Run.threw !== null && /^::error::/m.test(foreign7Run.text) && foreign7Run.text.includes(BOT_BRANCH) &&
+        /\b1 of 2 commit/.test(foreign7Run.text) && /#7\b/.test(foreign7Run.text) && foreign7Run.outputs.length === 0,
+      "a commit on the bot branch authored by anyone but the bot REFUSES (D-24), naming the branch, a foreign count of 1 and pull request #7, and emits no lease",
+    );
+    ok(
+      foreign7Run.threw !== null && foreign7Run.text.includes(BOT_BRANCH) && /\b1 of 2 commit/.test(foreign7Run.text) &&
+        !foreign7Run.text.includes(foreignMessage) && !foreign7Run.text.includes("self-test@invalid"),
+      "the refusal never prints the foreign commit's message or its author's email",
+    );
+    const foreignNone = botRemote({ foreign: true });
+    const foreignNoneRun = botRun(foreignNone);
+    ok(
+      foreignNoneRun.threw !== null && foreignNoneRun.text.includes(`No pull request's head points at tip ${short(foreignNone.tip)}`) &&
+        !/#[0-9]/.test(foreignNoneRun.text) && foreignNoneRun.outputs.length === 0,
+      "the same foreign commit with NO pull ref at its tip refuses and states, as a measured negative, that no pull request's head points at the tip",
+    );
+    const missingScenario = botRemote({ branch: false });
+    g(["remote", "set-url", "origin", join(dir, "no-such-remote.git")], { cwd: missingScenario.checkout });
+    const missingRun = botRun(missingScenario);
+    ok(
+      missingRun.threw !== null && /MEASURE_FAIL/.test(missingRun.threw.message) && /git ls-remote exit [0-9]+/.test(missingRun.threw.message) &&
+        missingRun.outputs.length === 0,
+      "an ls-remote that fails (a remote path that does not exist) is MEASURE_FAIL and never emits a lease",
+    );
+    const badRemote = botRun(allBot, ["--upload", "-pack=x"].join(""));
+    ok(
+      badRemote.threw !== null && /--remote/.test(badRemote.threw.message) && badRemote.outputs.length === 0,
+      "a --remote value that is not a plain remote name (here an option) refuses before git is spawned",
+    );
+    const moved = botRun(allBot, "origin", { lsRemote: () => ({ status: 0, stdout: `${"e".repeat(40)}\trefs/heads/${BOT_BRANCH}\n` }) });
+    ok(
+      moved.threw !== null && /MEASURE_FAIL/.test(moved.threw.message) && /moved/.test(moved.threw.message) && moved.outputs.length === 0,
+      "a bot branch whose fetched tip differs from the ls-remote tip is MEASURE_FAIL: the lease must be the sha whose commits were judged",
+    );
+
+    // The D-10 no-op notice (Open Question 3): a clone detached at head2, where the
+    // committed dump is a no-op, with one remote per state of the bot branch.
+    const noopClone = join(dir, "noop-clone");
+    g(["clone", "-q", repo, noopClone], { cwd: dir });
+    g(["checkout", "-q", head2], { cwd: noopClone });
+    g(["remote", "add", "botpr", present7.bare], { cwd: noopClone });
+    g(["remote", "add", "botnopr", allBot.bare], { cwd: noopClone });
+    g(["remote", "add", "missing", join(dir, "no-such-remote.git")], { cwd: noopClone });
+    const noopNotice = (remote) => {
+      outputs.length = 0;
+      const r = capture(() =>
+        gateDump({
+          repoRoot: noopClone, dump: committedDump, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, `noop-${remote}`), emit,
+          gitleaks: cleanGl(), remote,
+        }),
+      );
+      return { ...r, outputs: [...outputs] };
+    };
+    const noticeLead = "::notice::baseline-redump: dump and marker are byte-identical to the committed pair — no PR; ";
+    const nPresent = noopNotice("botpr");
+    ok(
+      nPresent.threw === null && nPresent.outputs.join(",") === "changed=false" &&
+        nPresent.text.split("\n").includes(`${noticeLead}bot branch at ${short(present7.tip)}; pull request(s) #7 point at it (not closed automatically)`),
+      "the no-op notice names the bot branch's tip and pull request #7, and says it is not closed automatically (D-13)",
+    );
+    const nNoPr = noopNotice("botnopr");
+    ok(
+      nNoPr.threw === null && nNoPr.outputs.join(",") === "changed=false" &&
+        nNoPr.text.split("\n").includes(`${noticeLead}bot branch at ${short(allBot.tip)}; no pull request points at it`),
+      "the no-op notice says so when the bot branch exists and no pull request points at its tip",
+    );
+    const nMissing = noopNotice("missing");
+    ok(
+      nMissing.threw === null && nMissing.outputs.join(",") === "changed=false" &&
+        /^::warning::baseline-redump: bot-PR status not measured \(git ls-remote exit [0-9]+\)$/m.test(nMissing.text) &&
+        nMissing.text.split("\n").some((l) => l.startsWith(noticeLead)),
+      "a failed bot-PR lookup is a ::warning:: naming the ls-remote exit code, and the legitimate no-op still prints changed=false and does not throw",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
