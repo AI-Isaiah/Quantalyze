@@ -36,6 +36,9 @@
 --   * HIST-tenant is judged before HIST-retry on the same call: under its twin
 --     user A's own row stays failed_retry, which HIST-retry would otherwise
 --     report first;
+--   * HIST-requeued runs LAST in $hist$: it installs a test-local trigger on
+--     compute_jobs for one call and drops it before any assertion, so no
+--     other arm ever runs with the trigger in place;
 --   * HIST-writes leaves the RPC's HISTORY_RECOMPOSE_NOT_QUEUED refusal to
 --     HIST-enqueues, whose twin (no enqueue) makes the FIRST call raise it;
 --   * every action whose success an arm asserts is captured, never left to
@@ -499,6 +502,7 @@ DECLARE
   v_jobs     int;
   v_retry_id uuid;                        -- user A's failed_retry recompose
   v_b_job    uuid;                        -- user B's failed_retry recompose
+  v_due      timestamptz;                 -- HIST-requeued: the row's recorded due time
 BEGIN
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid_a, '00000000-0000-0000-0000-000000000000', 'test-acct-identity-ha-' || v_run || '@quantalyze.test', now(), now()),
@@ -806,7 +810,71 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (HIST-retry): a toggle beside the caller''s failed_retry recompose did not reuse it (SQLSTATE %, %; stored %, in-flight-or-retry rows %, expected exactly 1: the original row %, back to pending and due now with claimed_at, claimed_by and claim_token NULL, with no failed_retry row and no twin).', v_err, v_msg, v_val, v_jobs, v_retry_id;
   END IF;
 
-  RAISE NOTICE 'PASS (HIST behavioural): bad value refused by CHECK; exclude stored on a disconnected key with exactly one recompose job; NULL resets; revoked key accepted; live key refused 55000 KEY_NOT_DEPARTED; bad value refused 22023; cross-tenant refused 42501 with nothing written; a toggle while the recompose runs refused 55006 with nothing written or queued; a toggle beside a failed_retry recompose puts that same row back to pending, due now, with no twin; another tenant''s failed_retry row is left untouched.';
+  -- ----- HIST-requeued: a pending twin inserted under the flip is REFUSED by name
+  -- The 23505 handler around the reuse's flip covers the one sibling the NOT
+  -- EXISTS lookup cannot see: an in-flight row for the caller that another
+  -- transaction inserts after the lookup ran. This file runs one session, so
+  -- the second transaction is stood in for by a test-local BEFORE UPDATE
+  -- trigger on compute_jobs: when the caller's failed_retry recompose is being
+  -- put back to pending, it inserts a pending derive_allocator_equity row for
+  -- the same allocator first. The flip's new tuple then collides with it on
+  -- compute_jobs_one_inflight_per_kind_allocator, which is the collision the
+  -- handler exists for. The trigger is created here and dropped right after
+  -- the call, before any assertion. The RPC must answer 55006
+  -- HISTORY_RECOMPOSE_REQUEUED (retry now) and write nothing: the key keeps its
+  -- stored value, the failed_retry row keeps its status and due time, and the
+  -- twin rolls back with the refusal.
+  -- WHAT THIS DOES NOT SHOW: a real second backend commits its row while the
+  -- flip's unique check waits on it, and only then collides. That wait is
+  -- reasoned; the trigger reproduces the collision and the handler's answer.
+  -- RED-UNDER: take away the RPC's unique_violation handler around the flip
+  --            in migration 20260925120000 (it then catches division_by_zero
+  --            instead). The raw 23505 reaches the caller with no name.
+  -- RED-UNDER-M: {"arm":"HIST-requeued","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"      EXCEPTION WHEN unique_violation THEN","replace":"      EXCEPTION WHEN division_by_zero THEN","occurrences":1}]}
+  v_due := date_trunc('second', now()) + interval '20 minutes';
+  UPDATE compute_jobs
+     SET status = 'failed_retry', next_attempt_at = v_due
+   WHERE id = v_retry_id;
+
+  CREATE FUNCTION public._acct_requeue_twin() RETURNS trigger
+  LANGUAGE plpgsql AS $f$
+  BEGIN
+    IF OLD.status = 'failed_retry' AND NEW.status = 'pending'
+       AND NEW.kind = 'derive_allocator_equity' THEN
+      INSERT INTO public.compute_jobs (allocator_id, kind, status)
+      VALUES (NEW.allocator_id, NEW.kind, 'pending');
+    END IF;
+    RETURN NEW;
+  END $f$;
+  CREATE TRIGGER _acct_requeue_twin BEFORE UPDATE ON public.compute_jobs
+    FOR EACH ROW EXECUTE FUNCTION public._acct_requeue_twin();
+
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
+  v_err := NULL; v_msg := NULL; v_ret := NULL;
+  BEGIN
+    v_ret := public.set_departed_key_history_inclusion(k_gone, 'include');
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  PERFORM set_config('request.jwt.claims', '', true);
+
+  DROP TRIGGER _acct_requeue_twin ON public.compute_jobs;
+  DROP FUNCTION public._acct_requeue_twin();
+
+  SELECT history_inclusion INTO v_val FROM api_keys WHERE id = k_gone;
+  SELECT count(*) INTO v_jobs
+    FROM compute_jobs
+   WHERE allocator_id = uid_a AND kind = 'derive_allocator_equity';
+  IF v_err IS DISTINCT FROM '55006' OR v_msg IS DISTINCT FROM 'HISTORY_RECOMPOSE_REQUEUED'
+     OR v_val IS DISTINCT FROM 'exclude' OR v_jobs <> 1
+     OR NOT EXISTS (SELECT 1 FROM compute_jobs
+                     WHERE id = v_retry_id
+                       AND status = 'failed_retry' AND next_attempt_at = v_due) THEN
+    RAISE EXCEPTION 'TEST FAILED (HIST-requeued): a pending recompose inserted for the caller under the reuse''s flip was not refused with 55006 HISTORY_RECOMPOSE_REQUEUED, or something was written (SQLSTATE %, message %, returned %; stored %, expected exclude; caller''s recompose rows %, expected 1: the failed_retry row %, unchanged and due at %).', v_err, v_msg, v_ret, v_val, v_jobs, v_retry_id, v_due;
+  END IF;
+
+  RAISE NOTICE 'PASS (HIST behavioural): bad value refused by CHECK; exclude stored on a disconnected key with exactly one recompose job; NULL resets; revoked key accepted; live key refused 55000 KEY_NOT_DEPARTED; bad value refused 22023; cross-tenant refused 42501 with nothing written; a toggle while the recompose runs refused 55006 with nothing written or queued; a toggle beside a failed_retry recompose puts that same row back to pending, due now, with no twin; another tenant''s failed_retry row is left untouched; a pending twin inserted under the reuse''s flip is refused 55006 HISTORY_RECOMPOSE_REQUEUED with nothing written.';
 
   DELETE FROM compute_jobs WHERE allocator_id IN (uid_a, uid_b);
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);

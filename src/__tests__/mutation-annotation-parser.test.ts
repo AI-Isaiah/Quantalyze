@@ -1020,8 +1020,11 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 4), HIST-tenant: `armsSeen`
     // 485 -> 486 and `stepsSeen` 490 -> 491 (one new arm with one `edit` step).
     // MEASURED: this file's run read `expected 486 to be 485` at the pre-move pin.
-    expect(armsSeen).toBe(486);
-    expect(stepsSeen).toBe(491);
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round-4 fixes), HIST-requeued:
+    // `armsSeen` 486 -> 487 and `stepsSeen` 491 -> 492 (one new arm with one `edit`
+    // step). MEASURED: this file's run read `expected 487 to be 486` at the pre-move pin.
+    expect(armsSeen).toBe(487);
+    expect(stepsSeen).toBe(492);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1915,7 +1918,9 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // one new `edit` step, one needle. RUN SEPARATELY: `expected 490 to be 489`.
     // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 4), HIST-tenant: 490 -> 491,
     // one new `edit` step, one needle. RUN SEPARATELY: `expected 491 to be 490`.
-    expect(needles.length).toBe(491);
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round-4 fixes), HIST-requeued:
+    // 491 -> 492, one new `edit` step, one needle. MEASURED: `expected 492 to be 491`.
+    expect(needles.length).toBe(492);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

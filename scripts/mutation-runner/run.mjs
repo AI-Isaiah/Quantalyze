@@ -2427,7 +2427,29 @@ export const FILES_FLOOR = 51;
 //    annotated arm bit its own arm first.`, exit 0. Per-file line:
 //    `test_api_keys_account_identity.sql: sections 36 / judged 36 / annotated
 //    36 / waived 0 / biting 36`.
-export const ARMS_FLOOR = 486;
+//
+// ⭐ RE-DERIVED 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, PR B review round 4
+//    fixes): 486 -> 487. ONE new arm, HIST-requeued, in the ALREADY-ANNOTATED
+//    supabase/tests/test_api_keys_account_identity.sql (36 -> 37): a
+//    test-local BEFORE UPDATE trigger inserts a pending twin under the RPC's
+//    failed_retry reuse, so the flip collides on
+//    compute_jobs_one_inflight_per_kind_allocator; the RPC must answer 55006
+//    HISTORY_RECOMPOSE_REQUEUED with nothing written. Its twin makes the
+//    flip's handler catch division_by_zero instead of unique_violation, so the
+//    raw 23505 reaches the caller. HIST-enqueues' find string moved with the
+//    enqueue's new serialization_failure wrapper, which moves no arm or step.
+//    No file joined the annotated set, so FILES_FLOOR stays 51;
+//    WAIVED_CEILING stays 0. MEASURED first on a narrowed `--file` run:
+//    `arms: 37/37/0`, `biting: 37`, `No defects in the narrowed scope.` Then
+//    ONE full lane run with no file edited during it, and this constant still
+//    at 486: `scope: FULL 51/51 annotated files`, `coverage: files 51/78`,
+//    `arms: 487/487/0`, `biting: 487`, `lane-invocations: 487` (plus 51
+//    baseline / 51 restore legs), `lane-blocked: 0 file(s)`, `lane-probe:
+//    pg_cron AVAILABLE`, `per-arm lane time: mean 1.7s over 487 arm run(s)`,
+//    `✅ No defects. Every annotated arm bit its own arm first.`, exit 0.
+//    Per-file line: `test_api_keys_account_identity.sql: sections 37 / judged
+//    37 / annotated 37 / waived 0 / biting 37`.
+export const ARMS_FLOOR = 487;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
