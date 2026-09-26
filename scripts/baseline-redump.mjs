@@ -1000,7 +1000,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 133;
+export const EXPECTED_ASSERTIONS = 158;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -1374,6 +1374,70 @@ function selfTest({ withGitleaks = false } = {}) {
     "the fixed templates (entry, commit message, PR title, regenerated section, PR body) carry no CI skip token (D-14)",
   );
 
+  console.log("=== SELF-TEST 1d/4: each child gate is judged by its VERDICT line's content, not only its exit code (D-09)");
+  /** A judge that is missing or throws reads back as null, so its arm is a FAIL rather than a crash. */
+  const jg = (fn) => {
+    try {
+      const r = fn();
+      return r && typeof r === "object" && typeof r.verdict === "string" ? r : null;
+    } catch {
+      return null;
+    }
+  };
+  const CUR_GREEN = "baseline-currency: carried=277 replay=0 marker-sha=match defects=0";
+  // The measured `--check-currency` shape: the verdict line among lines with other prefixes.
+  const curOut = (...lines) =>
+    ["[local-stack] a preceding line", ...lines, "baseline-replay: 0 migration(s) newer than the dump (none)", ""].join("\n");
+  const cg = jg(() => judgeCurrencyLine(curOut(CUR_GREEN)));
+  ok(cg?.verdict === "pass" && cg.line === CUR_GREEN, "judgeCurrencyLine passes the one 'marker-sha=match defects=0' line among other prefixes, returning it verbatim");
+  ok(jg(() => judgeCurrencyLine(curOut(CUR_GREEN.replace("marker-sha=match", "marker-sha=mismatch"))))?.verdict === "refuse", "judgeCurrencyLine refuses marker-sha=mismatch");
+  ok(jg(() => judgeCurrencyLine(curOut(CUR_GREEN.replace("defects=0", "defects=1"))))?.verdict === "refuse", "judgeCurrencyLine refuses defects=1");
+  ok(
+    jg(() => judgeCurrencyLine(curOut(CUR_GREEN.replace("defects=0", "defects=01"))))?.verdict === "refuse",
+    "judgeCurrencyLine refuses defects=01 (each token is anchored, never a substring match)",
+  );
+  ok(jg(() => judgeCurrencyLine(curOut(CUR_GREEN, CUR_GREEN)))?.verdict === "measure_fail", "judgeCurrencyLine: two 'baseline-currency:' lines are MEASURE_FAIL");
+  ok(
+    jg(() => judgeCurrencyLine(curOut()))?.verdict === "measure_fail" && jg(() => judgeCurrencyLine(""))?.verdict === "measure_fail",
+    "judgeCurrencyLine: no 'baseline-currency:' line, or no output at all, is MEASURE_FAIL and never a pass",
+  );
+  /**
+   * The REAL five-line shape of `baseline-content-drift-check.mjs` (measured), with
+   * `findingsLines` in the fourth position. The SCOPE line is synthetic prose that
+   * CONTAINS the word "findings", so a judge reading the first line, or any line
+   * mentioning findings, fails the green arm below.
+   */
+  const driftOut = (findingsLines) =>
+    [
+      "baseline-content-drift: chain files 121 (supabase/schema/functions/*.sql, sorted)",
+      "baseline-content-drift: functions compared 123 — MATCH 120, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0",
+      "baseline-content-drift: allowlisted rows 3 — fixture_a/1, fixture_b/0, fixture_c/0",
+      ...findingsLines,
+      "baseline-content-drift: SCOPE — this gate compares FUNCTION BODIES ONLY; its findings count says nothing about tables or policies",
+      "",
+    ].join("\n");
+  const FINDINGS_0 = "baseline-content-drift: findings 0";
+  const dg = jg(() => judgeDriftLine(driftOut([FINDINGS_0])));
+  ok(
+    dg?.verdict === "pass" && dg.line === FINDINGS_0,
+    "judgeDriftLine passes the REAL five-line shape on its 'findings 0' line only (a first-line or any-'findings' judge fails here)",
+  );
+  const d2 = jg(() => judgeDriftLine(driftOut(["baseline-content-drift: findings 2"])));
+  ok(
+    d2?.verdict === "refuse" &&
+      d2.detail.includes("main holds a migration that has not applied to PROD yet; the queued apply run will produce the right dump"),
+    "judgeDriftLine refuses 'findings 2', naming the likely cause: a migration on main that has not applied to PROD yet",
+  );
+  ok(
+    jg(() => judgeDriftLine(driftOut([])))?.verdict === "measure_fail",
+    "judgeDriftLine: no findings line (only the SCOPE prose mentions 'findings') is MEASURE_FAIL, never a pass",
+  );
+  ok(jg(() => judgeDriftLine(driftOut([FINDINGS_0, FINDINGS_0])))?.verdict === "measure_fail", "judgeDriftLine: two findings lines are MEASURE_FAIL");
+  ok(
+    jg(() => judgeDriftLine(driftOut([`${FINDINGS_0} — trailing text`])))?.verdict === "measure_fail",
+    "judgeDriftLine: a findings line with trailing text does not match '^…findings \\d+$' and is MEASURE_FAIL",
+  );
+
   ok(judgeGitleaksReport({ rc: 0, reportText: "[]" }).verdict === "clean", "judgeGitleaksReport: exit 0 with an empty array is the one clean");
   const oneFinding = judgeGitleaksReport({ rc: 1, reportText: JSON.stringify([{ RuleID: "jwt", StartLine: 2, Secret: "REDACTED", Match: "REDACTED" }]) });
   ok(
@@ -1491,6 +1555,57 @@ function selfTest({ withGitleaks = false } = {}) {
       mj.schema === 1 && mj.dump_sha256 === newSha && mj.run_id === "4242" && mj.merge === base && mj.carried_count === 2 &&
         mj.shapes.tables > 0 && mj.shapes.data_statements === 0,
       "measured.json carries the schema-1 measured values",
+    );
+    // judgeMeasured (D-21): the write job trusts nothing in measured.json it has not re-checked.
+    const jm = (text) => {
+      try {
+        const r = judgeMeasured(text);
+        return r && typeof r === "object" && Array.isArray(r.defects) ? r : null;
+      } catch {
+        return null;
+      }
+    };
+    const mjText = readFileSync(join(dir, "art/measured.json"), "utf8");
+    const mOk = jm(mjText);
+    ok(mOk !== null && mOk.defects.length === 0 && mOk.measured?.dump_sha256 === newSha, "judgeMeasured accepts the measured.json --gate-dump just wrote");
+    const keyPaths = [
+      "schema", "run_id", "merge", "cli_version", "dump_sha256", "dump_bytes", "shapes", "shapes.tables", "shapes.policies",
+      "shapes.function_statements", "shapes.distinct_functions", "shapes.data_statements", "marker_sha256", "carried_count",
+      "gitleaks", "gitleaks_version", "secret_scan_hits", "integrity", "integrity.nul", "integrity.client_encoding", "integrity.home_path",
+    ];
+    const withoutKey = (path) => {
+      const o = JSON.parse(mjText);
+      const [a, b] = path.split(".");
+      if (b) delete o[a][b];
+      else delete o[a];
+      return JSON.stringify(o);
+    };
+    const refusedNaming = (text, key) => {
+      const r = jm(text);
+      return r !== null && r.measured === null && r.defects.some((d) => d.detail.includes(`'${key}'`));
+    };
+    const notRefused = keyPaths.filter((p) => !refusedNaming(withoutKey(p), p));
+    ok(
+      notRefused.length === 0,
+      `judgeMeasured refuses a measured.json missing any one of the ${keyPaths.length} schema-1 keys, naming it (not refused: ${notRefused.join(",") || "none"})`,
+    );
+    const tampered = (patch) => JSON.stringify({ ...JSON.parse(mjText), ...patch });
+    ok(refusedNaming(tampered({ gitleaks: "findings" }), "gitleaks"), "judgeMeasured refuses gitleaks other than 'clean'");
+    ok(refusedNaming(tampered({ secret_scan_hits: 1 }), "secret_scan_hits"), "judgeMeasured refuses secret_scan_hits other than 0");
+    ok(
+      refusedNaming(tampered({ merge: "zz-tampered-merge-value" }), "merge") && refusedNaming(tampered({ run_id: "12a-tampered-run-value" }), "run_id") &&
+        !JSON.stringify(jm(tampered({ merge: "zz-tampered-merge-value", run_id: "12a-tampered-run-value" }))).includes("tampered"),
+      "judgeMeasured refuses a merge or run_id failing the plan-02 validators, naming the key and never echoing the value",
+    );
+    ok(refusedNaming(tampered({ schema: 2 }), "schema"), "judgeMeasured refuses a schema other than 1");
+    ok(
+      refusedNaming(tampered({ integrity: { nul: 1, client_encoding: 1, home_path: 0 } }), "integrity.nul"),
+      "judgeMeasured refuses an integrity record other than {nul 0, client_encoding 1, home_path 0}",
+    );
+    const partial = jm(mjText.slice(0, Math.floor(mjText.length / 2)));
+    ok(
+      partial !== null && partial.measured === null && partial.defects.some((d) => d.kind === "measured-unparseable"),
+      "judgeMeasured refuses a PARTIAL measured.json (truncated, so not JSON) by kind",
     );
     ok(
       throws(() => gateDump({ repoRoot: repo, dump: dumpPath, merge: "d".repeat(40), runId: "1", cliVersion: "2.98.2", out: join(dir, "x"), emit, gitleaks: cleanGl() })),
@@ -1658,12 +1773,7 @@ function selfTest({ withGitleaks = false } = {}) {
       calls.push([cmd, ...args].join(" "));
       if (args.includes("--check-currency")) return { status: 0, stdout: "baseline-currency: carried=2 replay=0 marker-sha=match defects=0\n", stderr: "" };
       if (args[0] === "scripts/baseline-content-drift-check.mjs" && args.length === 1) {
-        return {
-          status: 0,
-          stdout:
-            "baseline-content-drift: functions compared 1 — MATCH 1, DRIFT 0\nbaseline-content-drift: findings 0\nbaseline-content-drift: SCOPE — long line\n",
-          stderr: "",
-        };
+        return { status: 0, stdout: driftOut([FINDINGS_0]), stderr: "" };
       }
       return { status: 0, stdout: "", stderr: "" };
     };
@@ -1707,7 +1817,8 @@ function selfTest({ withGitleaks = false } = {}) {
       prBody.includes(`gh api "repos/fixture-owner/fixture-repo/actions/runs?head_sha=${botHead}"`) && !guardRe.test(prBody),
       "--compose writes <out>/pr-body.md beside pr-title.txt, carrying the repo and the bot commit's own head sha, and no skip token",
     );
-    const fakeCompared = "`baseline-content-drift: functions compared 1 — MATCH 1, DRIFT 0`";
+    const fakeCompared =
+      "`baseline-content-drift: functions compared 123 — MATCH 120, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`";
     ok(
       cl.includes(fakeCompared) && md.includes(fakeCompared) && !cl.includes("SCOPE —") && !md.includes("SCOPE —"),
       "the captured drift lines reach the entry and the section verbatim, and the SCOPE line the gate also printed reaches neither",
@@ -1748,6 +1859,94 @@ function selfTest({ withGitleaks = false } = {}) {
         g(["status", "--porcelain", "--", "VERSION", "package.json", "CHANGELOG.md", BASELINE_MD_REL], { cwd: repo3 }).trim() === "" &&
         g(["rev-parse", "HEAD"], { cwd: repo3 }).trim() === head3pre && !existsSync(join(dir, "pr4")),
       "a writer defect in --compose prints ::error:: with its kind and refuses before VERSION, package.json, CHANGELOG or BASELINE.md is written or anything is staged",
+    );
+
+    console.log("=== SELF-TEST 4a/4: --compose re-judges the artifact, then judges each gate's verdict line (D-06, D-08, D-09, D-21)");
+    // Each arm composes in a FRESH clone of `repo` at head2 (4b needs `repo` itself untouched).
+    let cloneN = 0;
+    const freshClone = () => {
+      cloneN += 1;
+      const p = join(dir, `compose-clone-${cloneN}`);
+      g(["clone", "-q", repo, p], { cwd: dir });
+      return p;
+    };
+    const artVariant = (name, { dump, measuredPatch } = {}) => {
+      const p = join(dir, name);
+      mkdirSync(p, { recursive: true });
+      for (const f of ["baseline.sql", "baseline-carried-migrations.txt", "measured.json"]) {
+        writeFileSync(join(p, f), readFileSync(join(dir, "art2", f)));
+      }
+      const mm = JSON.parse(readFileSync(join(p, "measured.json"), "utf8"));
+      if (dump) {
+        // The hash is made to AGREE with the tampered dump, so only a re-scan can catch it.
+        writeFileSync(join(p, "baseline.sql"), dump);
+        mm.dump_sha256 = sha256(dump);
+        mm.dump_bytes = dump.length;
+      }
+      writeFileSync(join(p, "measured.json"), JSON.stringify({ ...mm, ...(measuredPatch ?? {}) }, null, 2) + "\n");
+      return p;
+    };
+    /** Compose in a fresh clone; report the refusal text and whether the clone was left exactly as `main` has it. */
+    const composeIn = (inDir, runner = fakeRunner, extra = {}) => {
+      const c = freshClone();
+      const headBefore = g(["rev-parse", "HEAD"], { cwd: c }).trim();
+      const prOut = `${c}-pr`;
+      const r = capture(() => compose({ repoRoot: c, inDir, out: prOut, runner, emit, date: "2026-02-03", ...extra }));
+      return {
+        ...r,
+        clone: c,
+        headBefore,
+        noCommit: g(["rev-parse", "HEAD"], { cwd: c }).trim() === headBefore,
+        nothingStaged: g(["diff", "--cached", "--name-only"], { cwd: c }).trim() === "",
+        untouched: g(["status", "--porcelain", "--", ...STAGED_PATHS], { cwd: c }).trim() === "",
+        noPr: !existsSync(prOut),
+      };
+    };
+    const art2Dump = readFileSync(join(dir, "art2/baseline.sql"));
+    const rescanSecret = composeIn(artVariant("art-rescan-secret", { dump: Buffer.concat([art2Dump, Buffer.from(`-- ${jwtValue}\n`)]) }));
+    ok(
+      rescanSecret.threw !== null && /re-scan/.test(rescanSecret.threw.message) && /1 hit/.test(rescanSecret.text) &&
+        !rescanSecret.text.includes(jwtValue) && rescanSecret.noCommit && rescanSecret.untouched && rescanSecret.noPr,
+      "compose re-runs the five-class scan on the artifact dump: a hit measured.json does not admit refuses before any file is copied, printing no line text",
+    );
+    const rescanNul = composeIn(artVariant("art-rescan-nul", { dump: Buffer.concat([art2Dump, Buffer.from([0])]) }));
+    ok(
+      rescanNul.threw !== null && /re-scan/.test(rescanNul.threw.message) && /NUL byte/.test(rescanNul.threw.message) &&
+        rescanNul.noCommit && rescanNul.untouched && rescanNul.noPr,
+      "compose re-runs the integrity judge on the artifact dump: an appended NUL byte refuses before any file is copied",
+    );
+    const badMeasured = composeIn(artVariant("art-bad-measured", { measuredPatch: { gitleaks: "findings" } }));
+    ok(
+      badMeasured.threw !== null && /^::error::.*measured-value/m.test(badMeasured.text) && badMeasured.noCommit && badMeasured.untouched && badMeasured.noPr,
+      "compose runs judgeMeasured first: a measured.json whose gitleaks is not 'clean' refuses by kind before anything is copied",
+    );
+    const runnerWith = ({ currency, drift }) => (cmd, args) => {
+      if (currency && args.includes("--check-currency")) return currency;
+      if (drift && args[0] === "scripts/baseline-content-drift-check.mjs" && args.length === 1) return drift;
+      return fakeRunner(cmd, args);
+    };
+    const curRed = composeIn(
+      join(dir, "art2"),
+      runnerWith({ currency: { status: 0, stdout: "baseline-currency: carried=2 replay=0 marker-sha=mismatch defects=1\n", stderr: "" } }),
+    );
+    ok(
+      curRed.threw !== null && /currency/.test(curRed.threw.message) && curRed.noCommit && curRed.nothingStaged && curRed.noPr,
+      "a currency gate that exits 0 but prints marker-sha=mismatch refuses (content, not exit code), and no commit is made",
+    );
+    const driftRed = composeIn(
+      join(dir, "art2"),
+      runnerWith({ drift: { status: 0, stdout: driftOut(["baseline-content-drift: findings 2"]), stderr: "" } }),
+    );
+    ok(
+      driftRed.threw !== null &&
+        driftRed.threw.message.includes("main holds a migration that has not applied to PROD yet; the queued apply run will produce the right dump") &&
+        driftRed.noCommit && driftRed.nothingStaged && driftRed.noPr,
+      "a content-drift gate that exits 0 but prints 'findings 2' refuses, naming the likely cause (D-09), and no commit is made",
+    );
+    const driftSilent = composeIn(join(dir, "art2"), runnerWith({ drift: { status: 0, stdout: "", stderr: "" } }));
+    ok(
+      driftSilent.threw !== null && /MEASURE_FAIL/.test(driftSilent.threw.message) && driftSilent.noCommit && driftSilent.nothingStaged && driftSilent.noPr,
+      "a content-drift gate that exits 0 and prints nothing is MEASURE_FAIL: a gate that printed nothing is not a green gate",
     );
 
     console.log("=== SELF-TEST 4b/4: the MERGE-tree marker, the argument validators and D-10 idempotency");
