@@ -4,9 +4,9 @@ fixed_at: 2026-09-26T13:51:02Z
 review_path: .planning/phases/168-drboptions-a-deribit-options-account-can-be-ingested-end-to/168-REVIEW.md
 iteration: 1
 findings_in_scope: 13
-fixed: 11
+fixed: 12
 skipped: 0
-recorded: 2
+recorded: 1
 status: all_fixed
 ---
 
@@ -19,7 +19,8 @@ status: all_fixed
 **Summary:**
 - Findings in scope: 13. WR-01 and SFH-01 are the same defect and share one fix.
 - Fixed: 11 (WR-01/SFH-01, WR-02, SFH-02, SFH-03, SFH-04, SFH-05, SFH-06, IN-01, IN-02, INFO-1).
-- Recorded, not changed: INFO-2 (convention), INFO-3 (investigated and measured, outside the diff).
+- Recorded, not changed: INFO-2 (convention).
+- INFO-3 was first recorded, then fixed under founder decision D6 (see "Founder decision D6" below).
 - Skipped: 0.
 
 Every new test was seen RED before its fix, or under a neuter restored from a byte backup and
@@ -106,8 +107,8 @@ cash still ships. The smoothed third pass has no reason column and already logs 
 it is unchanged.
 **Frontend note:** the UI's reason union is open. The new value renders the default copy ("Mark-to-market
 unavailable for this strategy.") in the steady tone, which is correct because a missing field does not
-heal on the next refresh. No frontend file changed. If the founder wants specific copy, it is a one-case
-addition to `mtmDisabledReasonCopy`.
+heal on the next refresh. No frontend file changed in this commit; founder decision D6 added the specific
+copy afterwards (see below).
 **RED:** `AssertionError: assert 'mtm_summary_...ge_incomplete' == 'mtm_option_row_field_missing'` (worker
 test). The two unit tests raised the base `LedgerValuationError` instead of the subclass.
 
@@ -162,9 +163,52 @@ harness (`_run_options_ledger`, `smoothed_mtm`). There was no broker or network 
   is written, but the smoothed basis stays unavailable for any options account that let an option expire
   OTM and then traded again.
 
-This is outside the phase diff. `expiry` is still unclassified by design (no census exists), and the
-founder freeze forbids starting new work. It is recorded here so the owner of the smoothed basis can route
-it; no fix was attempted.
+This was first recorded as outside the phase diff, with no fix attempted. Founder decision D6 then chose to
+fix it inside Phase 168; see the next section.
+
+## Founder decision D6 (2026-09-26): "Fix inside 168"
+
+Recorded as scope amendment D-09 in `168-CONTEXT.md` and in the ROADMAP's Phase 168 section.
+
+### INFO-3 fixed: the smoothed replay closes an option at its expiry row
+
+**Files modified:** `analytics-service/services/deribit_txn.py`, `analytics-service/tests/test_deribit_assignment.py`, `analytics-service/docs/deribit-ingestion-design.md`
+**Commit:** 66604bbcb
+**Applied fix:** `replay_option_positions` sets an option's position to 0 at a zero-cash `expiry` row
+(`_OPTION_BOOK_CLOSE_TYPES`). An `expiry` row with no `position` field is accepted; whether Deribit's row
+carries one is unmeasured, and the close does not depend on it. `expiry` stays out of the cash-bearing set
+(an import-time assert pins it), so both twins are unchanged: a zero-cash `expiry` adds nothing, and one
+carrying cash still refuses through the unknown-type guard.
+**ITM variant: chosen to REFUSE.** The replay refuses three shapes rather than guess: an `expiry` row
+carrying cash, an `expiry` row with a nonzero position, and any `exercise` row on an option. `exercise` is
+the documented label for the in-the-money long side, and no census has measured its row shape. (The short
+side's `assignment` was already replayed.)
+**RED:** the pure replay close (`assert {'2026-01-15': -1.0} == {...'2026-01-17': 0.0}`). The real
+smoothed-harness run (an OTM short expires, then a later put trades) raised `option daily-MTM hole:
+instrument=BTC-17JAN26-50000-P carries a nonzero position on 2026-01-18`. Both unobserved-shape refusals
+and the exercise refusal gave `DID NOT RAISE`. After the fix, the smoothed total equals the cash total, and
+the expired put has no book entry after its expiry day. `test_d09_both_twins_agree_on_an_expiry_row` pins
+existing behaviour. It was seen RED under a neuter that made `expiry` informational (`DID NOT RAISE` on
+both twins), then restored and compared with `cmp`.
+
+### SFH-04 UI copy
+
+**Files modified:** `src/app/factsheet/[id]/v2/basis-context.tsx`, `src/app/factsheet/[id]/v2/basis-context.test.tsx`
+**Commit:** b418e0805
+**Applied fix:** `mtmDisabledReasonCopy` gains a case for `mtm_option_row_field_missing`: "Mark-to-market
+unavailable: an options entry in the venue ledger is missing its fee or position, so a mark-to-market series
+cannot be reconstructed." `mtmReasonTone` keeps it steady, and a test pins the tone.
+**RED:** `Expected: "Mark-to-market unavailable: an options entry ..." Received: "Mark-to-market unavailable
+for this strategy."`
+
+### Planning records
+
+**Commit:** e8103fc40. D-09 is in `168-CONTEXT.md`, and the dated scope amendment is in the ROADMAP's Phase
+168 section. A note in `168-03-PLAN.md` says the founder retry now also exercises the expiry close, but only
+when the smoothed pass runs. That pass is gated on `SMOOTHED_MTM_ENABLED`, and its production value was not
+measured. `verify-plan-anchors` on plan 03: `OK: 1 plan file(s), no stale claims.`
+
+WR-02's logic review is deferred to round 2, as instructed.
 
 ## Verification
 
@@ -184,6 +228,15 @@ The planning-hygiene check ran after every `git add` and reported OK each time.
   `Found 172 errors.` after the last. Per touched file, before (at 47bdc17e3) and after: deribit_txn 0/0,
   deribit_ingest 0/0, stitch_composite 0/0, test_deribit_assignment 0/0, job_worker 5/5,
   test_mtm_single_key 1/1. No new findings.
+- After the D6 work (same worktree, same interpreter):
+  - pytest: `6427 passed, 90 skipped, 470 warnings in 131.34s (0:02:11)`. Exit 0. That is 7 new tests
+    and the same 90 skips.
+  - mypy: `Success: no issues found in 96 source files`.
+  - ruff: `Found 172 errors.` (unchanged), with deribit_txn 0 and test_deribit_assignment 0.
+  - vitest `src/app/factsheet/[id]/v2/basis-context.test.tsx`: `Test Files  1 passed (1)`,
+    `Tests  17 passed (17)`. Before commit, the whole `v2/` directory gave `Test Files  40 passed (40)`,
+    `Tests  396 passed (396)`. eslint on both files was clean. vitest ran through a temporary
+    `node_modules` symlink to the main checkout, removed before each commit.
 
 ---
 
