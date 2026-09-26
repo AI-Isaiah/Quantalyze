@@ -3203,7 +3203,7 @@ Plans:
 Plans:
 
 **Wave 1**
-- [ ] 168-01-PLAN.md — `assignment` classified cash-bearing on both twins in the census shape; co-occurring `delivery`/`settlement` and unnamed-instrument shapes refuse; windowed-crawl backstop; one option-book event constant across the six literal sites in the same commit; evidence file (counts only); evidence tests re-pointed
+- [x] 168-01-PLAN.md — `assignment` classified cash-bearing on both twins in the census shape; co-occurring `delivery`/`settlement` and unnamed-instrument shapes refuse; windowed-crawl backstop; one option-book event constant across the six literal sites in the same commit; evidence file (counts only); evidence tests re-pointed
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 168-02-PLAN.md — per-site pins for every option-book reader (incl. mark_to_market and smoothed_mtm end to end, and the acceptance script's eligibility check), refusal whitelist gains `commission`/`position`, prose sweep, full suite
@@ -3327,7 +3327,7 @@ The three without one are named in their rows; none is unfinished work.
 | 164.10 BODYDRIFT (PROD runs an EARLIER revision of three function bodies) | 0/? | Queued (created 2026-09-11) | - |
 | 166. QSTATS-TRUTH | 0/? | Queued (re-ordered ahead of 165, 2026-09-05) | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 0/? | Queued | - |
-| 168. DRBOPTIONS (a Deribit options account ingests end to end) | 0/? | Queued — Alpha Centauri is blocked by a `native_nav` inception reconciliation breach (`breach_ratio=436`), NOT by `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` | - |
+| 168. DRBOPTIONS (a Deribit options account ingests end to end) | 1/3 | In progress (plan 01 done 2026-09-26) — Alpha Centauri is blocked by a `native_nav` inception reconciliation breach (`breach_ratio=436`), NOT by `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` | - |
 | 165. DEPS dependabot campaign | 0/? | Queued LAST (after 166 — dependency churn lands last) | - |
 
 ### Requirement Coverage (v1.20)
