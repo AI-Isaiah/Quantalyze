@@ -93,6 +93,13 @@ export const STAGED_PATHS = [
   "supabase/schema/baseline-carried-migrations.txt",
   "supabase/schema/baseline.sql",
 ];
+/**
+ * The repository the PR body's SHA-bound `gh api` command names. `redump-pr` reads
+ * `GITHUB_REPOSITORY`, which Actions always sets; a local run outside Actions
+ * (the plan-03 scratch-clone verify) has none and falls back to this.
+ */
+export const DEFAULT_REPO = "AI-Isaiah/Quantalyze";
+const REPO_SLUG_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 /** Must equal `ci.yml`'s `secret-scan` job `GITLEAKS_VERSION:` (D-26; plan 09 pins the equality). */
 export const GITLEAKS_VERSION = "8.30.1";
 
@@ -456,31 +463,135 @@ function shapeProse(s) {
 
 const short = (sha, n = 8) => String(sha).slice(0, n);
 
+/*
+ * ── The composers (D-14, D-16, D-23) ──
+ * Each takes the measured object `--compose` assembles (the run id, the merge,
+ * the old and new sha256 and shapes, the newly carried basenames, the captured
+ * gate lines) and nothing else: no composer reads a file or re-measures, so every
+ * figure it writes is one a gate or a hash produced. The templates are fixed and
+ * name none of the CI skip tokens, not even to deny one, and carry no
+ * credential-shaped literal.
+ */
+
+/** Old → new for every counted shape but data statements, which the section gives its own row. */
+function shapeDelta(o, n) {
+  return (
+    `tables ${o.tables} → ${n.tables}, policies ${o.policies} → ${n.policies}, ` +
+    `function statements ${o.function_statements} → ${n.function_statements}, ` +
+    `distinct function names ${o.distinct_functions} → ${n.distinct_functions}`
+  );
+}
+
+/** A measured statement, never an omission, when the marker diff added nothing. */
+const NONE_CARRIED = "none — the marker diff added no migration basename";
+
 /**
- * ONE fixed template (D-14: it names none of the CI skip tokens, not even to deny
- * one, and carries no credential-shaped literal). Plan 07 completes the entry
- * with every remaining D-16 value behind this same function name.
+ * The CHANGELOG entry (D-16), in this repo's vocabulary: `### Changed` for what
+ * the six paths now say, `### Notes` for provenance and the judgment left to the
+ * reviewer. The drift gate's `SCOPE —` line is never carried: only the two
+ * captured lines (`functions compared …`, `findings …`) reach it.
  */
 export function composeChangelogEntry(m) {
+  const carried = m.newlyCarried.length === 0 ? NONE_CARRIED : m.newlyCarried.map((b) => `\`${b}\``).join(", ");
   return [
     `## [${m.newVersion}] - ${m.date} — BASELINE: automated re-dump after the PROD apply of ${short(m.merge)}`,
     "",
     "### Changed",
     `- \`supabase/schema/baseline.sql\` re-dumped from PRODUCTION by Supabase Migrate run \`${m.runId}\`, ` +
       `after the PROD apply of merge \`${short(m.merge)}\`: sha256 \`${short(m.oldSha)}…\` → \`${short(m.newSha)}…\`.`,
+    `- Shape, old → new: ${shapeDelta(m.oldShapes, m.shapes)}, ` +
+      `data statements ${m.oldShapes.data_statements} → ${m.shapes.data_statements}.`,
+    `- Migrations the dump newly carries, from the marker diff: ${carried}.`,
+    `- \`supabase/schema/BASELINE.md\` gets the new \`## Provenance\` capture rows and a dated \`### Regenerated ${m.date}\` ` +
+      `section; \`baseline-carried-migrations.txt\` is regenerated from the merge tree; VERSION and package.json ` +
+      `${m.oldVersion} → ${m.newVersion}.`,
+    `- The gates on the composed tree, verbatim: \`${m.currencyLine}\`, \`${m.driftComparedLine}\`, \`${m.driftFindingsLine}\`.`,
+    "",
+    "### Notes",
+    `- The dump was taken read-only by the \`redump-dump\` job after the \`apply\` job of Supabase Migrate run ` +
+      `\`${m.runId}\` succeeded, and this entry was composed by the \`redump-pr\` job. Run \`${m.runId}\` is the provenance anchor.`,
+    '- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. ' +
+      "Every figure above is measured.",
   ].join("\n");
 }
 
 /**
  * The dated `### Regenerated` section `rewriteBaselineMd` inserts above the newest
- * one (D-16). Plan 07 Task 2 carries every measured value here.
+ * one (D-16), shaped like the hand-written ones minus their "what it adds" column,
+ * which is a human judgment. ⛔ sha256 stays in PREFIX form: a second full-64-hex
+ * row would make `check-baseline-staleness.mjs` read an ambiguous provenance
+ * table (IN-03).
  */
 export function composeRegeneratedSection(m) {
+  const carried = m.newlyCarried.length === 0 ? [`- ${NONE_CARRIED}`] : m.newlyCarried.map((b) => `- \`${b}\``);
   return [
     `### Regenerated ${m.date} — automated re-dump after Supabase Migrate run ${m.runId}`,
     "",
-    `Taken read-only by the \`redump-dump\` job of Supabase Migrate run \`${m.runId}\` after the PROD apply of merge ` +
-      `\`${short(m.merge)}\`, and composed onto \`main\` by the \`redump-pr\` job.`,
+    `Taken read-only by the \`redump-dump\` job of Supabase Migrate run \`${m.runId}\`, after that run's \`apply\` job ` +
+      `applied merge \`${short(m.merge)}\` to PRODUCTION, and composed onto \`main\` by the \`redump-pr\` job. Every value ` +
+      "below is measured.",
+    "",
+    "**Which migrations the new dump now carries** — from the marker diff:",
+    "",
+    ...carried,
+    "",
+    "**MEASURED:**",
+    "",
+    "| | |",
+    "|---|---|",
+    `| Taken | ${m.date} |`,
+    `| Supabase CLI | ${m.cliVersion} |`,
+    `| Shape | ${shapeDelta(m.oldShapes, m.shapes)} |`,
+    `| Data statements | ${m.oldShapes.data_statements} → ${m.shapes.data_statements} |`,
+    `| sha256 | \`${short(m.oldSha)}…\` → \`${short(m.newSha)}…\` |`,
+    `| Currency gate | \`${m.currencyLine}\` |`,
+    `| Body drift | \`${m.driftComparedLine}\`; \`${m.driftFindingsLine}\` |`,
+  ].join("\n");
+}
+
+/**
+ * The PR body (D-12 as amended by D-23, D-13, D-16). GitHub holds a
+ * `GITHUB_TOKEN` PR's `pull_request` runs for approval, and branch protection is
+ * off, so without these instructions the PR can be merged with no check ever
+ * run. `m.repo` and `m.headSha` are the repository and the bot commit's own sha.
+ */
+export function composePrBody(m) {
+  const carried = m.newlyCarried.length === 0 ? NONE_CARRIED : m.newlyCarried.map((b) => `\`${b}\``).join(", ");
+  return [
+    `Automated baseline re-dump after Supabase Migrate run \`${m.runId}\`, which applied merge \`${short(m.merge)}\` to ` +
+      `PRODUCTION. sha256 \`${short(m.oldSha)}…\` → \`${short(m.newSha)}…\`, VERSION \`${m.oldVersion}\` → \`${m.newVersion}\`.`,
+    "",
+    "This PR is never auto-merged. A human reviews it and merges it, or closes it.",
+    "",
+    "## Before you review: CI has not run yet",
+    "",
+    "1. GitHub creates the CI runs of a PR opened or updated by the workflow token in an approval-required state. " +
+      "Click **Approve workflows to run** in the merge box first.",
+    "2. Branch protection is off, so this PR can be merged with zero completed checks. A merge box with nothing red is not a verdict.",
+    "3. Read the conclusion of every run bound to the head sha, not only how many there are. " +
+      "A run waiting for approval is already listed:",
+    "",
+    "   ```",
+    `   gh api "repos/${m.repo}/actions/runs?head_sha=${m.headSha}" -q '.workflow_runs[] | [.name, .status, .conclusion] | @tsv'`,
+    "   ```",
+    "",
+    "   Every run must read `completed` with the conclusion `success`.",
+    "4. Fallback only, if the approve button does not appear: close and reopen the PR, then repeat steps 1 to 3.",
+    "",
+    "## What the bot did not write",
+    "",
+    `Newly carried migrations: ${carried}.`,
+    "",
+    `The bot writes measured values only. Add the "what it adds" column for each newly carried migration to the ` +
+      `\`### Regenerated ${m.date}\` section of \`supabase/schema/BASELINE.md\`, as a commit on this branch. A later ` +
+      "re-dump refuses to force-push over a commit that is not the bot's, and names this PR instead.",
+    "",
+    `## If \`main\` has moved, or VERSION \`${m.newVersion}\` collides`,
+    "",
+    `Do not rebase or hand-edit this branch. If \`main\` has moved since this PR was composed, or VERSION \`${m.newVersion}\` ` +
+      "collides with another PR's version, re-dispatch `supabase-migrate.yml` on `main` " +
+      "(`gh workflow run supabase-migrate.yml --ref main`). The bot recomposes onto the current `main` and updates this branch.",
+    "",
   ].join("\n");
 }
 
@@ -746,7 +857,8 @@ function captureLine(stdout, prefix, gateName) {
  * --compose. Run from the repo root of a checkout of `main`. Returns
  * `{committed, staged, measured}`. Throws on any refusal.
  */
-export function compose({ repoRoot, inDir, out, runner, emit, date }) {
+export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAULT_REPO }) {
+  if (!REPO_SLUG_RE.test(repo)) throw new Error("the repository slug is not <owner>/<name>; refusing to compose a PR body around it");
   const measured = JSON.parse(readFileSync(join(inDir, "measured.json"), "utf8"));
   if (measured.schema !== 1) throw new Error(`measured.json schema is ${measured.schema}, expected 1`);
   if (!/^[0-9]+$/.test(String(measured.run_id))) throw new Error("measured.json run_id is not digits");
@@ -871,6 +983,8 @@ export function compose({ repoRoot, inDir, out, runner, emit, date }) {
 
   mkdirSync(out, { recursive: true });
   writeFileSync(join(out, "pr-title.txt"), composePrTitle(m) + "\n");
+  // The head sha exists only now, after the bot commit: it is the sha the PR's runs bind to.
+  writeFileSync(join(out, "pr-body.md"), composePrBody({ ...m, repo, headSha: git(repoRoot, ["rev-parse", "HEAD"]).trim() }));
   console.log(
     `baseline-redump compose: VERSION ${oldVersion} -> ${newVersion} sha256=${short(oldSha)}… -> ${short(m.newSha)}… ` +
       `newly-carried=${newlyCarried.length} staged=${staged.length}`,
@@ -1835,6 +1949,7 @@ function main(argv) {
         runner: realRunner,
         emit: emitToGithubOutput,
         date: new Date().toISOString().slice(0, 10),
+        repo: process.env.GITHUB_REPOSITORY || DEFAULT_REPO,
       });
       return 0;
     }
