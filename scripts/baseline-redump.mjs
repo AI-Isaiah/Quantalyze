@@ -650,7 +650,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date }) {
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 47;
+export const EXPECTED_ASSERTIONS = 54;
 
 function selfTest() {
   let pass = true;
@@ -691,6 +691,21 @@ function selfTest() {
     }
     return { threw, text: lines.join("\n") };
   };
+
+  /**
+   * A fake gitleaks runner that counts its calls. Plain `--self-test` needs no
+   * binary (vitest in CI and the write job have none), so every `gateDump` arm
+   * gets one of these unless it is a real-binary arm under `--with-gitleaks`.
+   */
+  const fakeGitleaks = (result) => {
+    const f = () => {
+      f.calls += 1;
+      return result;
+    };
+    f.calls = 0;
+    return f;
+  };
+  const cleanGl = () => fakeGitleaks({ rc: 0, reportText: "[]", version: "self-test-fake" });
 
   console.log("=== SELF-TEST 1/4: pure functions");
   const docGrep = /grep -anE '([^']+)' supabase\/schema\/baseline\.sql/.exec(readFileSync(join(REPO_ROOT, BASELINE_MD_REL), "utf8"));
@@ -805,7 +820,7 @@ function selfTest() {
 
     const same = gateDump({
       repoRoot: repo, dump: join(repo, BASELINE_SQL_REL), merge: base, runId: "1", cliVersion: "2.98.2",
-      out: join(dir, "art0"), emit,
+      out: join(dir, "art0"), emit, gitleaks: cleanGl(),
     });
     ok(
       same.changed === false && outputs.join(",") === "changed=false" && throws(() => readFileSync(join(dir, "art0/baseline.sql"))),
@@ -816,7 +831,7 @@ function selfTest() {
     writeFileSync(dumpPath, Buffer.concat([realDump, Buffer.from("\n")]));
     const newSha = sha256(readFileSync(dumpPath));
     outputs.length = 0;
-    const gd = gateDump({ repoRoot: repo, dump: dumpPath, merge: base, runId: "4242", cliVersion: "2.98.2", out: join(dir, "art"), emit });
+    const gd = gateDump({ repoRoot: repo, dump: dumpPath, merge: base, runId: "4242", cliVersion: "2.98.2", out: join(dir, "art"), emit, gitleaks: cleanGl() });
     ok(gd.changed === true && outputs.join(",") === "changed=true", "a changed dump emits changed=true");
     const art = readFileSync(join(dir, "art/baseline-carried-migrations.txt"), "utf8");
     ok(markerBasenames(art).join(",") === [M1, M2].join(","), "the marker lists exactly the two committed basenames");
@@ -833,7 +848,7 @@ function selfTest() {
       "measured.json carries the schema-1 measured values",
     );
     ok(
-      throws(() => gateDump({ repoRoot: repo, dump: dumpPath, merge: "d".repeat(40), runId: "1", cliVersion: "2.98.2", out: join(dir, "x"), emit })),
+      throws(() => gateDump({ repoRoot: repo, dump: dumpPath, merge: "d".repeat(40), runId: "1", cliVersion: "2.98.2", out: join(dir, "x"), emit, gitleaks: cleanGl() })),
       "a --merge that is not HEAD is refused",
     );
 
@@ -847,14 +862,14 @@ function selfTest() {
     const appendedLine = dumpText.split("\n").length; // 1-based number of a line appended after the last "\n"
     const withLine = (line) => Buffer.concat([realDump, Buffer.from(line + "\n", "latin1")]);
     let redN = 0;
-    const redGate = (bytes) => {
+    const redGate = (bytes, gitleaks = cleanGl()) => {
       redN += 1;
       const p = join(dir, `red-${redN}.sql`);
       const outDir = join(dir, `red-out-${redN}`);
-      writeFileSync(p, bytes);
+      if (bytes !== null) writeFileSync(p, bytes);
       outputs.length = 0;
       const r = capture(() =>
-        gateDump({ repoRoot: repo, dump: p, merge: base, runId: "1", cliVersion: "2.98.2", out: outDir, emit }),
+        gateDump({ repoRoot: repo, dump: p, merge: base, runId: "1", cliVersion: "2.98.2", out: outDir, emit, gitleaks }),
       );
       return { ...r, wroteNothing: !existsSync(outDir) && outputs.length === 0 };
     };
@@ -912,7 +927,7 @@ function selfTest() {
     const badName = capture(() =>
       gateDump({
         repoRoot: repo2, dump: join(repo2, BASELINE_SQL_REL), merge: g(["rev-parse", "HEAD"], { cwd: repo2 }).trim(),
-        runId: "1", cliVersion: "2.98.2", out: join(dir, "bad-out"), emit,
+        runId: "1", cliVersion: "2.98.2", out: join(dir, "bad-out"), emit, gitleaks: cleanGl(),
       }),
     );
     // Position 3: `git ls-tree` lists in byte order, and `_` (0x5f) sorts after every digit.
@@ -936,6 +951,45 @@ function selfTest() {
         judgeShapeCounts(countShapes(realDump.toString("utf8"))).length === 0,
       "the committed dump passes the pure secret-scan, integrity and shape judges (the green fixture)",
     );
+
+    console.log("=== SELF-TEST 2c/4: the gitleaks gate inside --gate-dump (fake runner; the real binary is --with-gitleaks)");
+    const missingGl = cleanGl();
+    const missing = redGate(null, missingGl);
+    ok(
+      missing.threw !== null && /does not exist/.test(missing.threw.message) && missingGl.calls === 0 && missing.wroteNothing,
+      "a MISSING dump is refused before gitleaks is spawned (gitleaks exits 0 on a missing target)",
+    );
+    const emptyGl = cleanGl();
+    const empty = redGate(Buffer.alloc(0), emptyGl);
+    ok(
+      empty.threw !== null && /EMPTY/.test(empty.threw.message) && emptyGl.calls === 0 && empty.wroteNothing,
+      "an EMPTY dump is refused before gitleaks is spawned (gitleaks exits 0 on an empty target)",
+    );
+    const fakeSecret = ["fake", "-secret-", "value"].join("");
+    const finding = JSON.stringify([{ RuleID: "jwt", StartLine: 7, Secret: fakeSecret, Match: fakeSecret }]);
+    const found = redGate(realDump, fakeGitleaks({ rc: 1, reportText: finding, version: "self-test-fake" }));
+    ok(
+      found.threw !== null && /gitleaks refused/.test(found.threw.message) && found.text.includes("baseline-redump gitleaks: 1 finding(s)") &&
+        found.text.includes("RuleID=jwt line=7") && !found.text.includes(fakeSecret) && found.wroteNothing,
+      "a gitleaks finding refuses, printing RuleID and line only, never the Secret/Match field",
+    );
+    const firstGl = fakeGitleaks({ rc: 1, reportText: finding, version: "self-test-fake" });
+    const first = redGate(withLine(`-- ${jwtValue}`), firstGl);
+    ok(
+      first.threw !== null && /gitleaks refused/.test(first.threw.message) && firstGl.calls === 1 && !first.text.includes("secret-scan:"),
+      "gitleaks runs BEFORE the five-class scan (D-26 order: target assertion, gitleaks, then the scan)",
+    );
+    const brokenGl = fakeGitleaks({ rc: 2, reportText: "", version: "self-test-fake" });
+    const broken = redGate(realDump, brokenGl);
+    ok(
+      broken.threw !== null && /MEASURE_FAIL/.test(broken.threw.message) && broken.wroteNothing,
+      "a gitleaks run that could not complete (exit 2, no report) is MEASURE_FAIL and refuses",
+    );
+    const noRunner = capture(() =>
+      gateDump({ repoRoot: repo, dump: join(repo, BASELINE_SQL_REL), merge: base, runId: "1", cliVersion: "2.98.2", out: join(dir, "nr"), emit }),
+    );
+    ok(noRunner.threw !== null && /gitleaks runner/.test(noRunner.threw.message), "a gateDump call with no gitleaks runner refuses, never skips the gate");
+    ok(mj.gitleaks === "clean" && mj.gitleaks_version === "self-test-fake", "measured.json records gitleaks 'clean' and the version the runner reported");
 
     console.log("=== SELF-TEST 3/4: --compose in the same scratch repo, with the child gates injected");
     const calls = [];
@@ -997,7 +1051,7 @@ function selfTest() {
     ok(again.committed === false && outputs.join(",") === "committed=false", "composing the already-committed pair is a no-op: committed=false");
     writeFileSync(dumpPath, Buffer.concat([realDump, Buffer.from("\n\n")]));
     const head2 = g(["rev-parse", "HEAD"]).trim();
-    gateDump({ repoRoot: repo, dump: dumpPath, merge: head2, runId: "5", cliVersion: "2.98.2", out: join(dir, "art2"), emit });
+    gateDump({ repoRoot: repo, dump: dumpPath, merge: head2, runId: "5", cliVersion: "2.98.2", out: join(dir, "art2"), emit, gitleaks: cleanGl() });
     const redRunner = (cmd, args) => (args.includes("--check-currency") ? { status: 1, stdout: "", stderr: "" } : fakeRunner(cmd, args));
     ok(
       throws(() => compose({ repoRoot: repo, inDir: join(dir, "art2"), out: join(dir, "pr3"), runner: redRunner, emit, date: "2026-02-03" })) &&
