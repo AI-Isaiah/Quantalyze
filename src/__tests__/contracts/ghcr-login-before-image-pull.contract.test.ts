@@ -44,6 +44,8 @@ const PULLING_JOBS: Record<string, string> = {
     "VAC-04 runs `supabase db dump`, which pulls supabase/postgres (measured: run 35911761546)",
   "test-restore-from-baseline.yml:restore":
     "the TEST backup runs `supabase db dump`, the same image pull as VAC-04",
+  "supabase-migrate.yml:redump-dump":
+    "the Phase 164.9.5 re-dump runs `supabase db dump --linked`, the VAC-04 image pull (run 36229959793 pulled the remote's postgres image)",
 };
 
 /**
