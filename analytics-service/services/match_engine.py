@@ -32,6 +32,7 @@ import pandas as pd
 # Import existing private helpers without extracting them. Aliased below
 # (compute_sharpe / avg_corr / max_drawdown) so the regression test can import
 # them from this module too.
+from services.dispersion import pairwise_correlation_or_none
 from services.match_defaults import merge_with_defaults
 from services.portfolio_optimizer import (
     _avg_corr,
@@ -289,7 +290,9 @@ def _compute_corr_with_portfolio(
     ).dropna()
     if len(aligned) < min_overlap_days:
         return None
-    corr = aligned["port"].corr(aligned["cand"])
+    # Phase 166.1 (C5, D-02): None when either leg does not disperse, as for an
+    # all-zero leg; pandas divides a constant yield's residue std instead.
+    corr = pairwise_correlation_or_none(aligned["port"], aligned["cand"])
     return _safe_float(corr)
 
 

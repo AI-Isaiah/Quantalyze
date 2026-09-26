@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from datetime import date as _date
 from typing import Any, Optional
-from services.dispersion import dispersion_is_residue
+from services.dispersion import dispersion_is_real, dispersion_is_residue, pairwise_correlation_or_none
 from services.metrics import _safe_float
 
 logger = logging.getLogger("quantalyze.analytics.portfolio_optimizer")
@@ -99,7 +99,11 @@ def find_improvement_candidates(
         current_sharpe = _compute_sharpe(port_baseline)
         current_avg_corr = _avg_corr(port_cols_aligned)
         current_max_dd = _max_drawdown(port_baseline)
-        corr_with_portfolio = float(port_baseline.corr(aligned[cid])) if len(aligned) > 10 else 0
+        # Phase 166.1 (C3, D-02): None when the baseline does not disperse (a
+        # portfolio of one constant-yield strategy), as for an all-zero one.
+        corr_with_portfolio = (
+            pairwise_correlation_or_none(port_baseline, aligned[cid]) if len(aligned) > 10 else 0
+        )
         # A None metric on EITHER side of a delta means that axis has no
         # comparable baseline (uniform across candidates), so it contributes 0.
         sharpe_lift = (new_sharpe - current_sharpe) if current_sharpe is not None else 0
@@ -271,6 +275,11 @@ def _compute_sharpe(returns: pd.Series, rf: float = 0) -> Optional[float]:
 
 def _avg_corr(df: pd.DataFrame) -> Optional[float]:
     if df.shape[1] < 2:
+        return None
+    # Phase 166.1 (C4, D-02): a column that does not disperse has no
+    # correlation, so the average is undefined: None, as an all-zero column's
+    # NaN row already makes it. pandas gives a residue column a noise value.
+    if not all(dispersion_is_real(float(df[c].std()), float(df[c].mean())) for c in df.columns):
         return None
     corr = df.corr()
     n = len(corr)

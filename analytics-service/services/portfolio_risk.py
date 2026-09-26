@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from typing import Any, Optional
-from services.dispersion import dispersion_is_real, dispersion_is_residue
+from services.dispersion import dispersion_is_real, dispersion_is_residue, residue_floor
 from services.metrics import _safe_float
 
 # Rolling correlation is O(n²) in strategy count; skip beyond this threshold.
@@ -39,7 +39,13 @@ def compute_rolling_correlation(strategy_returns: dict[str, pd.Series], window: 
     pairs = []
     for i, s1 in enumerate(ids):
         for s2 in ids[i + 1:]:
-            rolling = df[s1].rolling(window).corr(df[s2]).dropna()
+            # Phase 166.1 (C2, D-02): the both_move mask of metrics
+            # _rolling_correlation. A window where either leg's dispersion is
+            # residue defines no correlation, so it is NaN and dropped, as an
+            # all-zero leg's windows are; pandas divides by the residue std.
+            r1, r2 = df[s1].rolling(window), df[s2].rolling(window)
+            both_move = (r1.std() > residue_floor(r1.mean())) & (r2.std() > residue_floor(r2.mean()))
+            rolling = r1.corr(df[s2]).where(both_move).dropna()
             avg_corr = abs(float(rolling.mean())) if len(rolling) > 0 else 0
             pairs.append((f"{s1}:{s2}", rolling, avg_corr))
     # M-0704: cap on the number of PAIRS, not the strategy count. The constant

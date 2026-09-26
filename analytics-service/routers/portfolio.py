@@ -26,6 +26,7 @@ from models.schemas import (
 from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
 from services.db import chunked_in_query, get_supabase, one, rows
+from services.dispersion import pairwise_correlation_or_none
 # PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
 # PYAPIFIX2-01 — the FLAT venue-transient shape. C7 (the verify-strategy verdict
@@ -988,7 +989,10 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                 aligned = portfolio_returns_series.reindex(benchmark_rets.index).dropna()
                 b_aligned = benchmark_rets.reindex(aligned.index).dropna()
                 if len(aligned) >= 30:
-                    corr = _safe_float(float(aligned.corr(b_aligned)))
+                    # Phase 166.1 (C6, D-02): no correlation when either leg
+                    # does not disperse (a constant-yield portfolio), as for
+                    # an all-zero one; pandas divides by the residue std.
+                    corr = _safe_float(pairwise_correlation_or_none(aligned, b_aligned))
                     btc_twr = total_return_from_equity((1 + b_aligned).cumprod())
                     benchmark_comparison = {
                         "symbol": "BTC",
