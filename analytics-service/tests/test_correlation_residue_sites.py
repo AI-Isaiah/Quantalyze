@@ -397,10 +397,14 @@ def _c6_correlation(strategy_returns: pd.Series, btc: pd.Series) -> object:
     prior = sys.modules.get("routers.portfolio")
     sys.modules["routers.portfolio"] = portfolio_mod
     try:
-        portfolio_mod._compute_semaphore = asyncio.Semaphore(3)
-        with patch.object(portfolio_mod, "get_supabase", return_value=sb), \
-             patch.object(portfolio_mod, "get_benchmark_returns", side_effect=_btc):
-            asyncio.run(portfolio_mod._compute_portfolio_analytics("portfolio-1"))
+        # Round-1 IN-06: the fresh semaphore (asyncio.run gets a new loop) is
+        # scoped to this call and the module global is restored on exit, so no
+        # loop-bound semaphore is left behind for later tests.
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(portfolio_mod, "_compute_semaphore", asyncio.Semaphore(3))
+            with patch.object(portfolio_mod, "get_supabase", return_value=sb), \
+                 patch.object(portfolio_mod, "get_benchmark_returns", side_effect=_btc):
+                asyncio.run(portfolio_mod._compute_portfolio_analytics("portfolio-1"))
     finally:
         if prior is None:
             sys.modules.pop("routers.portfolio", None)
@@ -421,6 +425,18 @@ def test_c6_benchmark_correlation_of_a_constant_yield_portfolio_equals_the_all_z
     with_zero = _c6_correlation(_zeros_like(const), btc)
     assert with_zero is None, "D-07 reference: an all-zero portfolio has no BTC correlation today"
     assert _c6_correlation(const, btc) == with_zero
+
+
+def test_c6_leaves_the_module_semaphore_as_it_found_it() -> None:
+    """Round-1 IN-06: the helper used to assign a new semaphore to the module
+    global and never restore it."""
+    from routers import portfolio as portfolio_mod
+
+    before = portfolio_mod._compute_semaphore
+    idx = nav_constant_yield(1e-4).index
+    btc = _noise(idx, seed=64, scale=0.03)
+    _c6_correlation(0.3 * btc + _noise(idx, seed=65), btc)
+    assert portfolio_mod._compute_semaphore is before
 
 
 def test_c6_a_noisy_portfolio_keeps_its_benchmark_correlation() -> None:
