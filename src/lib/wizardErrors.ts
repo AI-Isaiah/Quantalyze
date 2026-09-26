@@ -108,6 +108,20 @@ export type WizardErrorCode =
   //     fix is the server string shown in the MT5 terminal login window.
   | "KEY_MT5_MASTER_PASSWORD"
   | "KEY_MT5_WRONG_SERVER"
+  // Phase 164.6.5 / criterion 5 (D-12/D-13) — the THIRD MT5-specific sibling,
+  // and the one whose subject is OUR terminal, not the user's credential and
+  // not their broker server. MEASURED 2026-09-21: the shipped copy at the
+  // wire code this replaces (`KEY_NETWORK_TIMEOUT`) told a client this was "a
+  // temporary exchange issue or a network blip" and to "Try again in a
+  // moment" — FALSE across two retries 45s and 55s apart, one with CORRECT
+  // credentials, against a terminal that stayed wedged for 1h39m. The server
+  // already classifies this server-side (an IPC transport fault — our own
+  // terminal bridge, D-13); this code carries that classification through
+  // rather than re-deriving it from message text.
+  // ⛔ `KEY_NETWORK_TIMEOUT` is NEITHER deleted NOR widened (D-12) — it stays
+  // correct for a genuine transport failure, where a retry really can
+  // succeed. This is a DISTINCT arm for a fault where it cannot.
+  | "KEY_MT5_TERMINAL_UNRESPONSIVE"
   // Phase 142.2 / MT5-04 (D-05) — THE FOUR CAUSES `KEY_INVALID_FORMAT` USED TO
   // SWALLOW. The two wizard connect routes (`strategies/create-with-key` and
   // `strategies/composite/add-key`) answered ONE code at TWELVE guards each —
@@ -1808,6 +1822,73 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#readonly-key",
     actions: ["clear_and_retry", "request_call"],
+  },
+
+  // Phase 164.6.5 / criterion 5 (D-12/D-13) — the wedged-terminal arm.
+  //
+  // ⭐ WHAT THIS REPLACES. MEASURED 2026-09-21: an MT5 validate against a
+  // wedged gateway terminal fell through to `KEY_NETWORK_TIMEOUT`, whose copy
+  // says "a temporary exchange issue or a network blip" and "Try again in a
+  // moment" — false on both halves here, across two retries 45s and 55s
+  // apart, one with CORRECT credentials, against a terminal that stayed
+  // wedged for 1h39m. The server already knows this is an IPC transport
+  // fault (our own terminal bridge, not the exchange) — D-13 says carry that
+  // classification through rather than re-deriving it, and this is the
+  // wizard-side half of that chain (the Python-side mint is
+  // `analytics-service/routers/exchange.py`'s `_validate_mt5_key_probe`).
+  //
+  // ⛔ NOT a widened `KEY_NETWORK_TIMEOUT` (D-12) — that code stays exactly as
+  // it is for a genuine transport failure, where a retry really can succeed.
+  // This arm exists because THIS failure is a different fact: the terminal
+  // itself stopped answering, and no retry from the wizard can make it
+  // answer again.
+  //
+  // NOT recoverable, on the same mechanism `KEY_SCOPE_CHECK_UNAVAILABLE`
+  // uses directly above: `actions` holds no member of `RECOVERABLE_ACTIONS`
+  // (src/lib/envelope.ts), so `buildEnvelope` derives `recoverable: false`
+  // and `ErrorEnvelope` renders NO Retry control. That is the entire fix —
+  // never a component-level condition. A Retry button that can only fail
+  // again is worse than no button (this reasoning is shared verbatim with
+  // the sibling copy above).
+  //
+  // ⛔ Does NOT promise a self-heal. D-05's supervision/self-heal work is a
+  // separate, concurrent plan and may not have shipped when this renders —
+  // copy that promises an automatic recovery which has not shipped is the
+  // same class of false statement `KEY_NETWORK_TIMEOUT`'s "try again" was,
+  // pointed the other way.
+  //
+  // ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1 / WR-05) — the copy used
+  // to state PERMANENCE ("it will not clear on a retry", "nothing you do from
+  // this screen can clear it"), and that was false in the other direction.
+  // The arm fires for BOTH -10004 and -10005. -10004 is the bridge not
+  // attached, which a gateway redeploy clears; -10005 is what this phase's
+  // own heal recycles; and the recycle itself opens a window in which every
+  // validate reads one of the two while the terminal relaunches. A user told
+  // "nothing will help, contact support" in that window would have succeeded
+  // a few minutes later. The copy now says NOT NOW and OURS, and that a later
+  // attempt can succeed, without asserting when or promising the heal (it
+  // does not cure every cause: a persisted modal dialog needs an operator).
+  //
+  // ⚠️ THE DRAFT SENTENCE IS GATED to the connect step. The same code reaches
+  // `UpdateMt5SecretDialog` (D-17, rotate-secret), which has no draft, and
+  // absence of a surface SUPPRESSES a `surface` requirement — so the dialog,
+  // which names none, never reads a claim about a draft it does not have.
+  // "nothing was stored" is true on both: a failed validate stores no key on
+  // the wizard routes and changes no password on the rotate route.
+  KEY_MT5_TERMINAL_UNRESPONSIVE: {
+    title: "Our MetaTrader terminal stopped answering.",
+    cause:
+      "The terminal we use to check MT5 keys is not responding. This is ours to fix — not your key, your password, or your broker server — and nothing was stored. It can come back without anything from you, but not fast enough for an immediate retry to help.",
+    fix: [
+      "Come back to this in a little while. A later attempt can succeed once the terminal is answering again.",
+      "If it is still failing then, tell us and we will fix it.",
+      "Your draft is saved.",
+    ],
+    // Index-aligned to `fix`. Slot 2 is a claim about the wizard draft behind
+    // the panel — see the ⚠️ note above.
+    fixRequires: [null, null, REQUIRES_CONNECT_SURFACE],
+    docsHref: "/security#readonly-key",
+    actions: ["request_call"],
   },
 
   // ── Phase 142.2 / MT5-04 (D-05) — the four honest causes ──────────────────
@@ -4702,6 +4783,17 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   // `SERVICE_UNREACHABLE` and `KEY_PROBE_FAILED` are already in both.
   ["MT5_GATEWAY_UNCONFIGURED", { code: "SEAM_INTERNAL_FAULT", status: 500 }],
   ["MT5_GATEWAY_UNREACHABLE", { code: "SERVICE_UNREACHABLE", status: 503 }],
+  // 164.6.5 / criterion 5 (D-12/D-13) — minted by `_validate_mt5_key_probe`'s
+  // `Mt5ClientError` handler when the client error's code is one of MT5's IPC
+  // transport codes (our own terminal bridge, never the exchange). 500,
+  // `retryable=False`, `dependency="mt5-gateway"` — the SAME status this new
+  // wizard code's copy entry declares, written down there so the two cannot
+  // silently disagree. ⛔ NOT `SERVICE_UNREACHABLE`/`MT5_GATEWAY_UNREACHABLE`'s
+  // row above: that pair is a genuine 503 TRANSIENT bridge-connect fault where
+  // a retry can win. This is the terminal ITSELF not answering once a session
+  // is established — permanent from the wizard's vantage point, because
+  // nothing the user does from this screen can clear it.
+  ["MT5_TERMINAL_UNRESPONSIVE", { code: "KEY_MT5_TERMINAL_UNRESPONSIVE", status: 500 }],
   ["EGRESS_PROXY_MISCONFIGURED", { code: "SEAM_MISCONFIGURED", status: 500 }],
   ["SERVICE_KEY_UNCONFIGURED", { code: "SEAM_MISCONFIGURED", status: 500 }],
   ["KEK_UNAVAILABLE", { code: "SEAM_MISCONFIGURED", status: 500 }],
@@ -5385,6 +5477,11 @@ export function classifyKeyValidationError(error: unknown): {
  * byte-identical twins at this arm, and fixing one path of that pair is this
  * milestone's most repeated mistake. A route-local literal would drift on the
  * next edit; this import cannot.
+ *
+ * ⛔ CORRECTED 2026-09-25 (Phase 164.6.5 round 2): there are now THREE key
+ * routes on this set — `keys/[id]/rotate-secret` joined `create-with-key` and
+ * `composite/add-key`, so "both key routes" / "BOTH ROUTES" above read as
+ * "every key route". The sentences are kept as lineage.
  */
 export const OUR_DEFECT_KEY_ERROR_CODES: ReadonlySet<WizardErrorCode> =
   new Set<WizardErrorCode>([
@@ -5395,6 +5492,17 @@ export const OUR_DEFECT_KEY_ERROR_CODES: ReadonlySet<WizardErrorCode> =
     // operator configuration. All three are worth a page and none is the
     // caller's doing.
     "SEAM_INTERNAL_FAULT",
+    // 164.6.5 review round 1 / WR-06 + SFH-08. The gateway terminal every MT5
+    // client validates against has stopped answering on its IPC transport.
+    // That terminal is infrastructure WE run, so it meets the rule above, and
+    // the card tells the user to "tell us" — a promise nothing kept while this
+    // verdict paged nobody. Before 164.6.5 the same fault was the unpaged
+    // `KEY_NETWORK_TIMEOUT`; minting an honest code was not a reason to stay
+    // quiet about it (the WR-02 lesson this set exists for).
+    // ⚠️ It IS an IPC timeout at the protocol level, and the rule above
+    // excludes timeouts. That exclusion is for an upstream WE DO NOT own being
+    // slow; this is our own terminal, and one wedge takes down every client.
+    "KEY_MT5_TERMINAL_UNRESPONSIVE",
   ]);
 
 /**
@@ -5722,6 +5830,15 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       // recoverable — and the founder gets a Retry control for a fault the
       // emitter marked `recoverable=False`.
       "KEY_SIGN_IN_FAILED",
+      // 164.6.5 / D-17 (review round 1 / CR-02) — the wedged-terminal verdict,
+      // on the same footing as the row above. `_validate_mt5_key_probe` mints
+      // wire `MT5_TERMINAL_UNRESPONSIVE` when the gateway terminal's IPC
+      // transport has stopped answering, and `rotate_key_secret` runs that
+      // probe, so the code reaches this route through `seamCode`. Omit this
+      // line and the dialog renders `UNKNOWN`, whose copy tells the owner to
+      // try the last action again: the Retry that 167's D-08 names as the
+      // harmful action against a terminal that will not answer.
+      "KEY_MT5_TERMINAL_UNRESPONSIVE",
     ]),
   ],
 ]);

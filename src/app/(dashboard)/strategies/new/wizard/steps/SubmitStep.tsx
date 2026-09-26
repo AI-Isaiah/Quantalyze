@@ -188,6 +188,23 @@ export function SubmitStep({
     string | null
   >(null);
   /**
+   * 164.6.5-07 / D-14 — the id of THIS attempt, captured off the wizardFetch
+   * call itself (task 1's `onCorrelationId`). MEASURED in production: two
+   * retries 45s and 55s apart rendered the IDENTICAL id, because the fallback
+   * below used to be the page-load `correlationId` alone — a value stable for
+   * the whole page load, not per attempt. Preferred over the page-load id
+   * (the upstream id still wins when the wire carried one), so a second
+   * failed attempt renders a DIFFERENT id than the first.
+   *
+   * PER-FAILURE on the same terms as `upstreamCorrelationId` beside it: reset
+   * on every fresh submit, so a stale value never renders under a new
+   * attempt's failure (TRAP-3). In practice it is overwritten synchronously
+   * when `wizardFetch` is called, before this attempt's response can arrive.
+   */
+  const [requestCorrelationId, setRequestCorrelationId] = useState<
+    string | null
+  >(null);
+  /**
    * 140.5-03 / SEAMPROSE-02 — the wait the failing response ADVERTISED, in
    * seconds, or `null` when it advertised none.
    *
@@ -235,46 +252,59 @@ export function SubmitStep({
     // let a retry render the PREVIOUS failure's id, which is worse than
     // rendering none: it points support at the wrong request.
     setUpstreamCorrelationId(null);
+    // 164.6.5-07 / D-14 — cleared with the code it belongs to, for the same
+    // reason: a retry rendering attempt 1's id is the exact defect D-14
+    // closes.
+    setRequestCorrelationId(null);
     // 140.5-03 — same reasoning, same reset point: the wait belongs to the
     // failure, so it dies with it.
     setRetryAfterSeconds(null);
     setSubmitting(true);
 
     try {
-      const res = await wizardFetch("/api/strategies/finalize-wizard", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          strategy_id: strategyId,
-          name: metadata.name,
-          description: metadata.description,
-          category_id: metadata.categoryId,
-          strategy_types: metadata.strategyTypes,
-          subtypes: metadata.subtypes,
-          markets: metadata.markets,
-          supported_exchanges: metadata.supportedExchanges,
-          leverage_range: metadata.leverageRange || null,
-          aum: metadata.aum ? Number(metadata.aum) : null,
-          max_capacity: metadata.maxCapacity ? Number(metadata.maxCapacity) : null,
-          // #597 — asset class drives Sharpe/Sortino/vol annualization basis.
-          asset_class: metadata.assetClass,
-          // Phase 110 / CONTRIB-02 — routing hint the finalize RPC branches on:
-          // "contribution" finalizes status='private' (owner-only), "manager"
-          // finalizes status='pending_review'. This is a HINT only — neither
-          // value can publish; the RPC terminal-status guard (plan 110-01
-          // T-110-02) is the real enforcement (client field can't be trusted).
-          entry_context: entryContext,
-          // Phase 150 / OWN-03 — the capital mark rides the SAME body as
-          // entry_context. Spread-in only when the metadata step actually
-          // asked the question, so a path that never asked sends an ABSENT
-          // field rather than `null`: the route writes nothing, the column
-          // stays NULL, and an unmarked strategy is non-allocatable. Never
-          // assert a mark on the user's behalf.
-          ...(metadata.capitalOwnership
-            ? { capital_ownership: metadata.capitalOwnership }
-            : {}),
-        }),
-      });
+      const res = await wizardFetch(
+        "/api/strategies/finalize-wizard",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            strategy_id: strategyId,
+            name: metadata.name,
+            description: metadata.description,
+            category_id: metadata.categoryId,
+            strategy_types: metadata.strategyTypes,
+            subtypes: metadata.subtypes,
+            markets: metadata.markets,
+            supported_exchanges: metadata.supportedExchanges,
+            leverage_range: metadata.leverageRange || null,
+            aum: metadata.aum ? Number(metadata.aum) : null,
+            max_capacity: metadata.maxCapacity
+              ? Number(metadata.maxCapacity)
+              : null,
+            // #597 — asset class drives Sharpe/Sortino/vol annualization basis.
+            asset_class: metadata.assetClass,
+            // Phase 110 / CONTRIB-02 — routing hint the finalize RPC branches on:
+            // "contribution" finalizes status='private' (owner-only), "manager"
+            // finalizes status='pending_review'. This is a HINT only — neither
+            // value can publish; the RPC terminal-status guard (plan 110-01
+            // T-110-02) is the real enforcement (client field can't be trusted).
+            entry_context: entryContext,
+            // Phase 150 / OWN-03 — the capital mark rides the SAME body as
+            // entry_context. Spread-in only when the metadata step actually
+            // asked the question, so a path that never asked sends an ABSENT
+            // field rather than `null`: the route writes nothing, the column
+            // stays NULL, and an unmarked strategy is non-allocatable. Never
+            // assert a mark on the user's behalf.
+            ...(metadata.capitalOwnership
+              ? { capital_ownership: metadata.capitalOwnership }
+              : {}),
+          }),
+        },
+        // 164.6.5-07 / D-14 — capture the id THIS request put on the wire, so
+        // a failed attempt's envelope renders the id of the attempt, not the
+        // page-load id.
+        { onCorrelationId: setRequestCorrelationId },
+      );
 
       const data = (await res.json().catch(() => ({}))) as {
         strategy_id?: string;
@@ -654,63 +684,74 @@ export function SubmitStep({
 
   // 140.3-15 / TS-20 — ONE id field, the one `ErrorEnvelope` already renders and
   // `buildDiagBlock` already copies into the QUANTALYZE_DIAG payload. The
-  // upstream id WINS when the wire carried a usable one, and today's browser-
-  // minted id remains the fallback, so nothing that previously rendered an id
-  // stops doing so. No second field was added: the render slot expects exactly
-  // one value, and two ids in a diagnostics block is a support ticket asking
-  // which one to search.
+  // upstream id WINS when the wire carried a usable one, so nothing that
+  // previously rendered an id stops doing so. No second field was added: the
+  // render slot expects exactly one value, and two ids in a diagnostics block
+  // is a support ticket asking which one to search.
+  //
+  // 164.6.5-07 / D-14 — THE FALLBACK CHAIN GREW A MIDDLE LINK. When the wire
+  // carried no upstream id, this used to fall straight to the page-load
+  // `correlationId` — the exact defect MEASURED in production (two retries
+  // minutes apart rendering the identical id). `requestCorrelationId` (task
+  // 1's captured per-request id) now sits between the two: it wins whenever
+  // this component actually sent a request, and the page-load id remains the
+  // fallback ONLY for the brief window before any request has been made.
   const errorEnvelope = errorCode
-    ? buildEnvelope(errorCode, upstreamCorrelationId ?? correlationId, {
-        // 140.3-10's rule, inherited: `?? undefined` because ABSENCE IS NOT
-        // ZERO. `null` would reach the envelope slot, and a `0` there is a wait
-        // we were never told about.
-        retryAfterSeconds: retryAfterSeconds ?? undefined,
-        /**
-         * 153.2-05 / WIZFORM-03 / D-17 — ⭐ THE VENUE, NAMED AT LAST.
-         *
-         * 153.1-03 landed the `fixRequires` class filter and its three
-         * venue-conditional entries, and it is correct — but venue-ABSENCE
-         * deliberately preserves incumbent ccxt copy, and ZERO of the fourteen
-         * `buildEnvelope` call sites passed a venue. So the mechanism worked
-         * and changed nothing: an MT5 user went on reading "switch to a
-         * different exchange" for an account that IS the venue, with no other
-         * venue to switch to. This one line is what turns the filter on for
-         * this surface.
-         *
-         * ⚠️ Read ONLY as a lookup key into the closed capability record — it
-         * is never interpolated into copy, a log line, a URL or a breaker key,
-         * so no server-supplied string can reach the envelope through it. The
-         * source is the sync snapshot's own exchange, i.e. the venue of the key
-         * this strategy is built on. `?? undefined` because absence must answer
-         * the predicate's default, not the empty string.
-         */
-        venue: snapshot.exchange ?? undefined,
-        /**
-         * 153.2-05 / UI-SPEC Gate B — WHICH STEP THIS IS. `SERVICE_UNREACHABLE`
-         * carries a "open /strategies before retrying" bullet that is TRUE on
-         * exactly this surface and pointless on the connect step, so 153.1-03
-         * gated it on the surface being named. Nothing named it, so the bullet
-         * rendered nowhere ("fail toward saying less" — deliberate and
-         * temporary). This restores it where it is true.
-         */
-        surface: "submit",
-        /**
-         * 153.2-05 / TRAP-3 — the user's OWN character count, for the two
-         * description-bound codes.
-         *
-         * ⚠️ Reachable only on the fallback path: a description code normally
-         * routes to the field above and never builds an envelope at all. It is
-         * passed anyway because the fallback is a real path (a caller with no
-         * `onFieldLevelError`), and a refusal that states the rule without the
-         * count is the weaker of the two sentences.
-         *
-         * It is the length of the string THIS component POSTed, so the number
-         * in the sentence is the number the server measured — never a count we
-         * were not in a position to know. `formatKeyError` appends the tail
-         * only for those two codes, so it is inert everywhere else.
-         */
-        charCount: metadata.description.length,
-      })
+    ? buildEnvelope(
+        errorCode,
+        upstreamCorrelationId ?? requestCorrelationId ?? correlationId,
+        {
+          // 140.3-10's rule, inherited: `?? undefined` because ABSENCE IS NOT
+          // ZERO. `null` would reach the envelope slot, and a `0` there is a wait
+          // we were never told about.
+          retryAfterSeconds: retryAfterSeconds ?? undefined,
+          /**
+           * 153.2-05 / WIZFORM-03 / D-17 — ⭐ THE VENUE, NAMED AT LAST.
+           *
+           * 153.1-03 landed the `fixRequires` class filter and its three
+           * venue-conditional entries, and it is correct — but venue-ABSENCE
+           * deliberately preserves incumbent ccxt copy, and ZERO of the fourteen
+           * `buildEnvelope` call sites passed a venue. So the mechanism worked
+           * and changed nothing: an MT5 user went on reading "switch to a
+           * different exchange" for an account that IS the venue, with no other
+           * venue to switch to. This one line is what turns the filter on for
+           * this surface.
+           *
+           * ⚠️ Read ONLY as a lookup key into the closed capability record — it
+           * is never interpolated into copy, a log line, a URL or a breaker key,
+           * so no server-supplied string can reach the envelope through it. The
+           * source is the sync snapshot's own exchange, i.e. the venue of the key
+           * this strategy is built on. `?? undefined` because absence must answer
+           * the predicate's default, not the empty string.
+           */
+          venue: snapshot.exchange ?? undefined,
+          /**
+           * 153.2-05 / UI-SPEC Gate B — WHICH STEP THIS IS. `SERVICE_UNREACHABLE`
+           * carries a "open /strategies before retrying" bullet that is TRUE on
+           * exactly this surface and pointless on the connect step, so 153.1-03
+           * gated it on the surface being named. Nothing named it, so the bullet
+           * rendered nowhere ("fail toward saying less" — deliberate and
+           * temporary). This restores it where it is true.
+           */
+          surface: "submit",
+          /**
+           * 153.2-05 / TRAP-3 — the user's OWN character count, for the two
+           * description-bound codes.
+           *
+           * ⚠️ Reachable only on the fallback path: a description code normally
+           * routes to the field above and never builds an envelope at all. It is
+           * passed anyway because the fallback is a real path (a caller with no
+           * `onFieldLevelError`), and a refusal that states the rule without the
+           * count is the weaker of the two sentences.
+           *
+           * It is the length of the string THIS component POSTed, so the number
+           * in the sentence is the number the server measured — never a count we
+           * were not in a position to know. `formatKeyError` appends the tail
+           * only for those two codes, so it is inert everywhere else.
+           */
+          charCount: metadata.description.length,
+        },
+      )
     : null;
 
   const summaryMetrics: FactsheetPreviewMetric[] = snapshot.metrics;

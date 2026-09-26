@@ -205,6 +205,111 @@ KIND_GATEWAY_NOT_CONFIGURED: Final[str] = "gateway_not_configured"
 #: `close_is_measured: false`, and a successor computing lifetimes filters it out.
 KIND_SUPERSEDED: Final[str] = "superseded"
 
+# --------------------------------------------------------------------------- #
+# ⭐ THE IPC-FAULT ESCALATION's OUTCOMES (164.6.5 plan 05, D-08).
+#
+# `KIND_IPC_FAULT` REPORTS a terminal whose bridge answered and whose terminal
+# did not; since plan 05 the heal also ACTS on the `-10005` half of it, by
+# recycling the terminal PROCESS (never by re-sending a credential). These kinds
+# name what that action came to. ⛔ They are SIBLINGS of `KIND_IPC_FAULT` and
+# cannot reuse it: `KIND_IPC_FAULT` names the FAULT the first probe read, and it
+# stays byte-identical in the verdict string downstream keys off. The kinds below
+# name a RESPONSE to that fault, which is a different fact about a different
+# moment.
+#
+# ⭐ SEPARATE KINDS, NOT ONE KIND WITH A CODE, because the REMEDIES differ — the
+# lesson IN-07 (round 2) above recorded when two operator faults shared one class
+# and broke the class-to-log pin:
+#
+#   * recycled                -> nothing for anyone to do; the terminal is back,
+#                                the detector found an authorized session, and
+#                                the post-relaunch check VERIFIED it is the house
+#                                account, connected, on the environment's server.
+#   * recycled_degraded       -> the terminal is back and authorized, and the
+#                                post-relaunch check MEASURED it is not the house
+#                                session: disconnected, on another login, or on
+#                                another broker server (164.6.5 review round 2,
+#                                WR-04 / SFH-08). The next probe reads
+#                                `already_authorized` whichever account is up, so
+#                                this kind is the only record of it.
+#   * recycled_unverified     -> the terminal is back and authorized, and the
+#                                post-relaunch check could NOT complete: not read
+#                                (budget), a read failed, or a field was not
+#                                captured (SFH-08). ⚠️ Under the honest per-field
+#                                charge (WR-03) the check never fits the budget,
+#                                so this is what a working recycle reports today.
+#   * recycled_no_account     -> the terminal is back and ANSWERING, with no
+#                                account signed in yet (`-6`). The ordinary heal
+#                                owns that on the next reading; the escalation
+#                                itself never sends a credential (D-08).
+#   * recycled_still_faulted  -> the recycle ran and the terminal still does not
+#                                answer after the WHOLE relaunch settle window was
+#                                watched. A HUMAN is needed; a second automatic
+#                                recycle is exactly what the debounce refuses.
+#   * recycled_relaunch_pending -> the recycle ran and the heal budget ran out
+#                                BEFORE the settle window did (164.6.5 review
+#                                round 1, WR-02 / SFH-02). "Not yet known", never
+#                                "still faulted": a cold relaunch was MEASURED at
+#                                ~86 s kill-to-authorized, and the next reading
+#                                decides.
+#   * recycle_failed          -> the recycle verb itself raised (the channel, the
+#                                seam, the snapshot, or counts it could not read).
+#                                Whether the process was ended is not known from
+#                                the verb. ⭐ Since review round 2 (R2-SFH-04) one
+#                                budget-gated, credential-free reading follows,
+#                                which relaunches a terminal the failed call may
+#                                have ended; the line says whether it answered.
+#   * recycle_not_landed      -> the verb RAN and reported that it did not end
+#                                every terminal it matched (`terminated <
+#                                matched`), or matched none at all (164.6.5
+#                                review round 1, WR-03 / SFH-01). Nothing, or
+#                                not everything, was recycled, so neither
+#                                "recycled" nor "still faulted after a recycle"
+#                                is true — the recycle VERB needs a human, since
+#                                the Wine-side terminate has never run live.
+#                                ⭐ IN-02 (review round 2): `matched=0` with an
+#                                ANSWERING relaunch is WARNING, qualified
+#                                `no_process_matched_relaunch_answered`, because
+#                                the relaunch may have launched a terminal that
+#                                was not running at all; the rest stay ERROR.
+#   * recycle_capped          -> the escalation RAN and DECLINED: the recycle
+#                                already ran `IPC_FAULT_RECYCLE_CAP` times in the
+#                                rolling window, each after the terminal had
+#                                answered, and the wedge came back (164.6.5
+#                                review round 2, CR-01). A wedge that RECURS
+#                                after working recycles is the Cause B signal
+#                                (`MT5-SWITCH-WEDGE-CAUSE-01`); a human is
+#                                needed, and recycling the shared terminal every
+#                                tick is not a recovery.
+#   * recycle_skipped_budget  -> the escalation RAN and DECLINED: the heal
+#                                budget left could not cover the recycle and its
+#                                relaunch probe, so nothing was started and the
+#                                attempt was not spent (164.6.5 review round 2,
+#                                SFH-09 / WR-01). Reachable only when
+#                                `MT5_RELOGIN_BUDGET_S` is set below its derived
+#                                default, which is a SERVER misconfiguration.
+#
+# ⚠️ NONE OF THEM IS PASSED TO `classify_reading` BY THE HEAL, and if one ever is
+# it DEGRADES TO `not_measured` — none is a positive class and none carries
+# `-6` — which is the honest default: the recycle ACTS on the terminal, it is
+# not the instrument measuring the session. The escalation's evidence is its own
+# log line and `HealOutcome.escalation_kind`, never an episode row.
+# --------------------------------------------------------------------------- #
+KIND_IPC_FAULT_RECYCLED: Final[str] = "ipc_fault_recycled"
+KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT: Final[str] = "ipc_fault_recycled_no_account"
+KIND_IPC_FAULT_RECYCLED_DEGRADED: Final[str] = "ipc_fault_recycled_degraded"
+KIND_IPC_FAULT_RECYCLED_UNVERIFIED: Final[str] = "ipc_fault_recycled_unverified"
+KIND_IPC_FAULT_RECYCLED_STILL_FAULTED: Final[str] = (
+    "ipc_fault_recycled_still_faulted"
+)
+KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING: Final[str] = (
+    "ipc_fault_recycled_relaunch_pending"
+)
+KIND_IPC_FAULT_RECYCLE_FAILED: Final[str] = "ipc_fault_recycle_failed"
+KIND_IPC_FAULT_RECYCLE_NOT_LANDED: Final[str] = "ipc_fault_recycle_not_landed"
+KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET: Final[str] = "ipc_fault_recycle_skipped_budget"
+KIND_IPC_FAULT_RECYCLE_CAPPED: Final[str] = "ipc_fault_recycle_capped"
+
 #: The MT5 code meaning "the bridge ANSWERED and NO ACCOUNT IS AUTHORIZED" — the
 #: ONE code that establishes darkness. Re-spelled here rather than imported from
 #: `mt5_relogin` so this module has no import edge back to its own caller.
@@ -266,6 +371,17 @@ class HealOutcome(NamedTuple):
     post-heal re-probe's, and is ``None`` when no credentialed call ran — which
     is what makes "a tick that finds the session healthy produces ZERO rows"
     structural rather than incidental.
+
+    ``escalation_kind`` (164.6.5 plan 05) is one of the ``KIND_IPC_FAULT_RECYCLE*``
+    kinds when the ``ipc_fault`` escalation RAN, and ``None`` when it did not —
+    the ``final_kind`` precedent: ``None`` means this step never ran. ⭐ 164.6.5
+    review round 2 (SFH-09): an escalation that ran and DECLINED (the budget
+    could not cover the recycle) carries its own kind, never ``None``. ⚠️
+    ``None`` still also covers a code the recycle cannot reach and a reading
+    debounced within a run: in both the recycle step was not entered. ⛔ APPENDED
+    and DEFAULTED, so every construction site that predates it stays valid and no
+    positional construction is silently reordered. ⛔ The recorder does not read
+    it: an escalation acts on the terminal, it does not measure the session.
     """
 
     verdict: str
@@ -273,6 +389,7 @@ class HealOutcome(NamedTuple):
     first_code: int | None
     final_kind: str | None
     final_code: int | None
+    escalation_kind: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -397,6 +514,280 @@ def _clear_blind_run() -> None:
     _CONSECUTIVE_NOT_MEASURED_READINGS = 0
 
 
+# --------------------------------------------------------------------------- #
+# ⭐ THE IPC-FAULT ESCALATION's ONCE-PER-RUN GATE (164.6.5 plan 05, D-08).
+#
+# The heal recycles the terminal process on the escalating fault class. The
+# session monitor calls the heal on a cadence, and a wedge outlives many ticks —
+# production read `not_healed:ipc_fault` FIVE consecutive times on 2026-09-21. So
+# the recycle is debounced to ONE attempt per run of consecutive escalating
+# readings: the gate is ARMED at the start of a run, DISARMED the moment the
+# escalation fires, and RE-ARMED when the terminal is MEASURED ANSWERING. Five
+# readings of one wedge, one recovery attempt.
+#
+# ⛔ WHAT RE-ARMS IT, AND WHAT DELIBERATELY DOES NOT (164.6.5 review round 1,
+# WR-08 / SFH-05 / CR-01). It used to be "any first-probe reading that is not the
+# escalating class", which was wrong in both directions:
+#
+#   * too EAGER — the `0` sentinel is `_raise_last`'s "last_error() itself failed
+#     or answered malformed", which measured NOTHING about the session, and
+#     `-10003` / `-10004` are IPC faults too. A bridge that intermittently timed
+#     out `last_error()` during a wedge (-10005, 0, -10005, 0 ...) re-armed the
+#     gate every other tick and recycled the shared terminal every 20 minutes,
+#     which is the periodic outage the debounce exists to prevent. These readings
+#     are now NEUTRAL: they neither arm nor disarm.
+#   * too NARROW — only the heal's own first probe could re-arm it. A recycle
+#     whose relaunch MEASURED the terminal answering (CR-01), and a recovery only
+#     the job path saw while every monitor tick was a busy skip (SFH-05), both
+#     left it disarmed, so the NEXT wedge was debounced as if it were the old one.
+#
+# So the run ends when the terminal answers: an authorized reading or `-6` from
+# any heal probe (first probe, re-probe, relaunch), OR any bare `initialize()`
+# in this process returning truthy since the claim — the job path's `login()`
+# included (`mt5_client.mt5_terminal_answer_count`).
+#
+# ⛔ The alternative is not a noisier log, it is an outage: at a ten-minute
+# cadence an un-debounced escalation recycles the ONE shared terminal every ten
+# minutes for as long as the recycle does not help, and each recycle drops the
+# IPC for every other caller.
+#
+# ⚠️ IN-PROCESS, AND THIS GATE's OWN TRADEOFF — not the blind-run counter's,
+# whose acceptance above explicitly does not generalise. A deploy re-arms the
+# gate, so a wedge that spans a deploy gets at most ONE more recycle attempt per
+# deploy. That is the whole cost, it is bounded by the deploy rate rather than by
+# the cadence, and it is cheap against a second durable write path whose own
+# failure would have to be handled inside a heal that must never raise.
+# --------------------------------------------------------------------------- #
+# ⚠️ 164.6.6 CONSTRAINT (recorded 2026-09-25, 164.6.5 review round 1, IN-06):
+# this gate — and the persistence alarm below — is PROCESS-GLOBAL, not keyed by
+# terminal. That is correct while v1 runs ONE shared terminal (the answered-count
+# it reads is already per `terminal_key`). Under per-client terminals (Phase
+# 164.6.6, MT5TERMINALISOLATION) one terminal's wedge would debounce another's
+# recycle; key the gate by `terminal_key` before a second terminal ships.
+_IPC_FAULT_ESCALATION_ARMED: bool = True
+
+
+def ipc_fault_escalation_armed() -> bool:
+    """Whether the heal may recycle now. It does NOT claim the attempt.
+
+    ⭐ A PEEK, SEPARATE FROM THE CLAIM (WR-01). The claim used to be the FIRST
+    act of the escalation, ahead of the evidence capture and ahead of the
+    recycle verb's own fence, so an escalation abandoned there spent the run's
+    one attempt with no process ended. The heal now peeks, captures, and claims
+    only immediately before the recycle crosses.
+
+    ⭐ 164.6.5 review round 2 (WR-02 / R2-SFH-03) — IT TAKES NO ANSWERED-COUNT
+    ANY MORE. The count is compared ONCE per reading, by
+    ``note_ipc_fault_reading`` / ``end_ipc_fault_run_if_answered``, against the
+    count the RUN started at, and a moved count ends the whole run (gate AND
+    alarm), not only the gate. Checking it here as well re-armed the gate while
+    leaving the alarm's run open, which is the defect round 2 named.
+
+    It cannot raise.
+    """
+    return _IPC_FAULT_ESCALATION_ARMED
+
+
+def claim_ipc_fault_escalation(now: float, window_s: float) -> int:
+    """DISARM the gate for the rest of this run: the recycle is about to cross.
+    Record it in the rolling recycle window and return how many recycles that
+    window now holds, this one included (CR-01, round 2).
+
+    Called only after ``ipc_fault_escalation_armed`` said yes, and only after
+    ``note_ipc_fault_reading`` opened the run, so the run's answered-count is the
+    baseline a later answer is measured against. It cannot raise.
+    """
+    global _IPC_FAULT_ESCALATION_ARMED
+    global _IPC_FAULT_RECYCLED_AT, _IPC_FAULT_RECYCLED_BEFORE_AT
+    _IPC_FAULT_ESCALATION_ARMED = False
+    _IPC_FAULT_RECYCLED_BEFORE_AT = _IPC_FAULT_RECYCLED_AT
+    _IPC_FAULT_RECYCLED_AT = now
+    return ipc_fault_recycles_in_window(now, window_s)
+
+
+def restore_ipc_fault_attempt() -> None:
+    """UNDO THE CLAIM, and nothing else: the recycle did not cross.
+
+    ⛔ 164.6.5 review round 2 (WR-02). Two different events used to share one
+    function. This one is the recycle verb's own fence refusing BEFORE anything
+    crossed, which happens in a ZOMBIE thread after the ``wait_for`` fired. It
+    measured NOTHING about the terminal, so it gives the attempt back and leaves
+    the persistence alarm's run exactly as it was. Ending the run here erased
+    the alarm's memory of a fault that was still there.
+
+    It also takes back the recycle-window entry the claim recorded: nothing was
+    recycled. The entry before it moves back into place; the one before THAT is
+    dropped, which is harmless because the claim is only ever made with at most
+    one recycle in the window (see ``IPC_FAULT_RECYCLE_CAP``).
+    """
+    global _IPC_FAULT_ESCALATION_ARMED
+    global _IPC_FAULT_RECYCLED_AT, _IPC_FAULT_RECYCLED_BEFORE_AT
+    _IPC_FAULT_ESCALATION_ARMED = True
+    _IPC_FAULT_RECYCLED_AT = _IPC_FAULT_RECYCLED_BEFORE_AT
+    _IPC_FAULT_RECYCLED_BEFORE_AT = None
+
+
+def end_ipc_fault_run() -> None:
+    """The terminal was MEASURED answering, so the run of faults is over.
+
+    ⭐ Called for an authorized reading or ``-6`` from any heal probe, and by
+    ``end_ipc_fault_run_if_answered`` when a bare ``initialize()`` anywhere in
+    this process answered since the run started. It re-arms the gate AND ends
+    the persistence alarm's run (SFH-03): both stamps go, so the next fault's
+    elapsed time is measured from ITS first reading and its first alarm is an
+    interval away. ⛔ NEVER for the ``0`` sentinel, ``-10003`` or ``-10004``:
+    those measured no answer, and re-arming on them is what let a flaky bridge
+    recycle the terminal every other tick (WR-08).
+    """
+    global _IPC_FAULT_ESCALATION_ARMED, _IPC_FAULT_RUN_ANSWERS
+    global _IPC_FAULT_RUN_SINCE, _IPC_FAULT_LAST_ALARM_AT
+    _IPC_FAULT_ESCALATION_ARMED = True
+    _IPC_FAULT_RUN_ANSWERS = None
+    _IPC_FAULT_RUN_SINCE = None
+    _IPC_FAULT_LAST_ALARM_AT = None
+
+
+def end_ipc_fault_run_if_answered(answer_count: int) -> bool:
+    """End the open run if the terminal answered since it started. Returns
+    whether it did.
+
+    ``answer_count`` is ``mt5_client.mt5_terminal_answer_count`` NOW. ⭐ This is
+    the check SFH-05 put on the gate alone; round 2 (WR-02 / R2-SFH-03) moved it
+    to the RUN, and the heal makes it for EVERY first-probe code, the ``0``
+    sentinel included. A recovery only the job path saw (every monitor tick a
+    busy skip) otherwise left the run and its last-alarm stamp open, so a
+    transient ``-10004`` hours later paged on its first reading with an elapsed
+    time spanning the recovery. It cannot raise.
+    """
+    if _IPC_FAULT_RUN_ANSWERS is not None and answer_count != _IPC_FAULT_RUN_ANSWERS:
+        end_ipc_fault_run()
+        return True
+    return False
+
+
+# --------------------------------------------------------------------------- #
+# ⭐ THE PERSISTENCE ALARM (164.6.5 review round 1, SFH-03) — the debounce is on
+# the ACTION, never on the ALARM.
+#
+# After the one recycle, a wedge that persists went back to the pre-phase shape:
+# WARNING `not_healed:ipc_fault`, a blind-run WARNING and an INFO "already
+# attempted". A four-day wedge the recycle cannot cure (Cause A, the persisted
+# modal dialog) was ONE ERROR at hour 0 and then nothing for 96 hours — and
+# `-10004` / `-10003`, which are never escalated, produced no ERROR at all. These
+# two monotonic stamps let the heal re-raise a persisting IPC fault at ERROR at
+# most once per alarm interval, with its elapsed time. They are ended only by the
+# terminal being MEASURED answering (`end_ipc_fault_run`); the `0` sentinel
+# neither starts nor ends a run by itself.
+# --------------------------------------------------------------------------- #
+_IPC_FAULT_RUN_SINCE: float | None = None
+_IPC_FAULT_LAST_ALARM_AT: float | None = None
+
+#: The terminal's answered-count (``mt5_client.mt5_terminal_answer_count``) when
+#: the current run STARTED, ``None`` while no run is open. A count that has moved
+#: since means the terminal answered in between, so the run is over (WR-02).
+_IPC_FAULT_RUN_ANSWERS: int | None = None
+
+
+def note_ipc_fault_reading(now: float, answer_count: int) -> float:
+    """Record an IPC-fault reading; return when this run of them STARTED.
+
+    A run the terminal answered in the middle of is ended first
+    (``end_ipc_fault_run_if_answered``), so this reading starts a new one.
+    """
+    global _IPC_FAULT_RUN_SINCE, _IPC_FAULT_RUN_ANSWERS
+    end_ipc_fault_run_if_answered(answer_count)
+    if _IPC_FAULT_RUN_SINCE is None:
+        _IPC_FAULT_RUN_SINCE = now
+        _IPC_FAULT_RUN_ANSWERS = answer_count
+    return _IPC_FAULT_RUN_SINCE
+
+
+def ipc_fault_alarm_due(now: float, interval_s: float, *, attempted: bool) -> bool:
+    """Whether a persisting IPC fault must be re-raised at ERROR now.
+
+    ``attempted`` — the run's one recycle was already made. Then the first
+    persisting reading after an attempt that did NOT itself alarm (a WARNING
+    ``relaunch_pending``, say) is due at once: the next reading has decided, and
+    it is still wedged. Otherwise, and for the never-escalated codes, it is due
+    once ``interval_s`` has passed since the run started or since the last alarm.
+    """
+    if _IPC_FAULT_LAST_ALARM_AT is not None:
+        return now - _IPC_FAULT_LAST_ALARM_AT >= interval_s
+    if attempted:
+        return True
+    return _IPC_FAULT_RUN_SINCE is not None and now - _IPC_FAULT_RUN_SINCE >= interval_s
+
+
+def mark_ipc_fault_alarm(now: float) -> None:
+    """An ERROR about this run was just logged."""
+    global _IPC_FAULT_LAST_ALARM_AT
+    _IPC_FAULT_LAST_ALARM_AT = now
+
+
+# --------------------------------------------------------------------------- #
+# ⭐ THE RECYCLE CAP (164.6.5 review round 2, CR-01) — the memory the run does
+# NOT have.
+#
+# Round 1's CR-01 made a recycle whose relaunch MEASURED the terminal answering
+# end the run, so the NEXT wedge earns its own attempt. That is right for the
+# action, but the run is also what the persistence alarm measures, so a wedge
+# that returns every tick after a working recycle recycled the ONE shared
+# terminal every tick, unbounded, each at INFO, and never reached ERROR. That
+# pattern is Cause B (`MT5-SWITCH-WEDGE-CAUSE-01`): a client validation's
+# account switch re-wedging the terminal. Nothing emitted it.
+#
+# ⭐ ORCHESTRATOR DECISION 2026-09-25 (founder standing rule: no clients, take
+# decisions; recorded in the phase CONTEXT.md): a ROLLING window caps recycles
+# at `IPC_FAULT_RECYCLE_CAP`. The window's length is the caller's (one hour in
+# `mt5_relogin`). The cap'th recycle inside it is an ERROR naming the Cause B
+# signal; once capped, nothing is recycled until the oldest recycle leaves the
+# window, and the cap is re-raised at ERROR at most once per alarm interval.
+# ⛔ `end_ipc_fault_run` NEVER clears this window: that is the whole point.
+#
+# ⚠️ TWO STAMPS, NOT A LIST. The cap is 2, so the window needs only the last two
+# recycle times; a list here would be the unbounded module state the closed-set
+# assertion in `tests/test_mt5_session_episodes.py` forbids. ⛔ Raising the cap
+# means widening this storage too; the pin beside the cap names that.
+# --------------------------------------------------------------------------- #
+IPC_FAULT_RECYCLE_CAP: Final[int] = 2
+
+_IPC_FAULT_RECYCLED_AT: float | None = None
+_IPC_FAULT_RECYCLED_BEFORE_AT: float | None = None
+
+#: When the cap was last raised at ERROR (the cap'th recycle, or a capped reading).
+_IPC_FAULT_CAP_ALARM_AT: float | None = None
+
+
+def ipc_fault_recycles_in_window(now: float, window_s: float) -> int:
+    """How many recycles were made less than ``window_s`` before ``now``."""
+    return sum(
+        1
+        for stamp in (_IPC_FAULT_RECYCLED_AT, _IPC_FAULT_RECYCLED_BEFORE_AT)
+        if stamp is not None and now - stamp < window_s
+    )
+
+
+def ipc_fault_cap_alarm_due(now: float, interval_s: float) -> bool:
+    """Whether the recycle cap must be raised at ERROR now."""
+    return _IPC_FAULT_CAP_ALARM_AT is None or now - _IPC_FAULT_CAP_ALARM_AT >= interval_s
+
+
+def mark_ipc_fault_cap_alarm(now: float) -> None:
+    """An ERROR about the recycle cap was just logged."""
+    global _IPC_FAULT_CAP_ALARM_AT
+    _IPC_FAULT_CAP_ALARM_AT = now
+
+
+def _clear_ipc_fault_recycle_window() -> None:
+    """Forget every recycle. ⛔ Test-only, via
+    ``_reset_session_episode_state_for_tests``; production never clears it."""
+    global _IPC_FAULT_RECYCLED_AT, _IPC_FAULT_RECYCLED_BEFORE_AT
+    global _IPC_FAULT_CAP_ALARM_AT
+    _IPC_FAULT_RECYCLED_AT = None
+    _IPC_FAULT_RECYCLED_BEFORE_AT = None
+    _IPC_FAULT_CAP_ALARM_AT = None
+
+
 def _reset_session_episode_state_for_tests() -> None:
     """Clear the previous-reading stamp and the consecutive-blind counter.
 
@@ -406,10 +797,16 @@ def _reset_session_episode_state_for_tests() -> None:
     Production never calls it — the stamp is what makes
     ``first_reading_after_boot`` honest, and a blind run that survived into the
     next test would make "it escalated" and "it stayed quiet" indistinguishable.
+
+    ⭐ It also RE-ARMS the ipc_fault escalation gate (164.6.5 plan 05): a gate
+    disarmed by one test would make the next test's "it fired once" pass or fail
+    on test ORDER, which is the vacuous fires-once gate in its purest form.
     """
     global _LAST_MEASURED_READING_MONOTONIC
     _LAST_MEASURED_READING_MONOTONIC = None
     _clear_blind_run()
+    end_ipc_fault_run()
+    _clear_ipc_fault_recycle_window()
 
 
 def _stamp_reading_and_measure_gap() -> tuple[float | None, bool]:

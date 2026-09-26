@@ -332,11 +332,15 @@ def test_validate_terminal_trade_disabled_never_returns_readonly(monkeypatch) ->
     # test — an oracle that reads its expectation out of the thing it tests
     # asserts copy(X) == copy(X) and cannot fail.
     msg = str(exc.value)
+    # ⛔ 164.6.5-06 (2026-09-25): the recurrence clause ("switches it off again
+    # whenever it changes users") was removed — false at HEAD, since the re-clear
+    # is gated by an option founder-read UNCHECKED 2026-09-24.
     assert msg == (
         "The MT5 gateway has 'Allow algorithmic trading' switched off, so "
-        "read-only capability cannot be proven. The gateway switches it off "
-        "again whenever it changes users, so turning it back on needs an "
-        "operator, not a retry — see docs/runbooks/mt5-go-live.md."
+        "read-only capability cannot be proven. Turning it back on needs an "
+        "operator, not a retry, and the gateway's 'Disable algorithmic trading "
+        "when the account has been changed' option must stay unticked, because "
+        "every key check changes the account — see docs/runbooks/mt5-go-live.md."
     )
     # ...and it is a member of the curated family, so the raise site cannot have
     # invented a sentence outside the fence.

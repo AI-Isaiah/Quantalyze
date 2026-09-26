@@ -6,16 +6,22 @@ import {
 } from "./wizard-correlation";
 
 /**
- * UX-02 (#30) — client-safe wizard correlation id.
+ * UX-02 (#30) → 164.6.5-07 / D-14 — client-safe wizard correlation ids.
  *
- * The contract this module upholds: one id per wizard session, of a shape the
- * server allowlist accepts (`wizard:<uuid>`), sent on every wizard fetch so the
- * DISPLAYED id and the SENT header are the SAME value (client↔server log join).
+ * Two ids ride every wizard request:
+ *   - `X-Correlation-Id`: a FRESH id minted PER REQUEST (or the caller's own
+ *     supplied value, if any) — this is what makes two failed attempts
+ *     distinguishable in support, MEASURED identical across attempts hours
+ *     apart before this change.
+ *   - `X-Wizard-Page-Load-Id`: the STABLE per-page-load id
+ *     (`getWizardCorrelationId()`), unchanged in meaning and behaviour, so
+ *     existing funnel telemetry keeps joining on it (D-14, KEEP-ALONGSIDE).
  */
 
 // The server allowlist (correlation-id.ts CORRELATION_ID_SHAPE) that any inbound
 // header must pass, or the server discards it for a fresh UUID (breaking the join).
 const CORRELATION_ID_SHAPE = /^[A-Za-z0-9._:-]{1,128}$/;
+const WIZARD_ID_RE = /^wizard:[0-9a-f-]{36}$/;
 
 describe("wizard-correlation — getWizardCorrelationId", () => {
   beforeEach(() => {
@@ -24,7 +30,7 @@ describe("wizard-correlation — getWizardCorrelationId", () => {
 
   it("returns a wizard:<uuid-v4> id", () => {
     const id = getWizardCorrelationId();
-    expect(id).toMatch(/^wizard:[0-9a-f-]{36}$/);
+    expect(id).toMatch(WIZARD_ID_RE);
   });
 
   it("stays inside the server allowlist and ≤128 chars", () => {
@@ -33,7 +39,7 @@ describe("wizard-correlation — getWizardCorrelationId", () => {
     expect(CORRELATION_ID_SHAPE.test(id)).toBe(true);
   });
 
-  it("returns the SAME id on repeated calls (one id per session)", () => {
+  it("returns the SAME id on repeated calls (one id per page load)", () => {
     const first = getWizardCorrelationId();
     const second = getWizardCorrelationId();
     expect(second).toBe(first);
@@ -60,26 +66,30 @@ describe("wizard-correlation — wizardFetch", () => {
     vi.unstubAllGlobals();
   });
 
-  function sentHeaders(): Headers {
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
+  function sentHeaders(callIndex = 0): Headers {
+    const init = fetchMock.mock.calls[callIndex][1] as RequestInit;
     return new Headers(init.headers);
   }
 
-  it("stamps X-Correlation-Id equal to the session id", async () => {
+  it("stamps X-Correlation-Id with a per-request id in the canonical shape", async () => {
     await wizardFetch("/api/thing");
-    expect(sentHeaders().get("X-Correlation-Id")).toBe(getWizardCorrelationId());
+    expect(sentHeaders().get("X-Correlation-Id")).toMatch(WIZARD_ID_RE);
   });
 
-  it("sends the same header on every call (stable across the session)", async () => {
+  it("mints two DIFFERENT correlation values across two calls (the uniqueness gate)", async () => {
     await wizardFetch("/api/one");
     await wizardFetch("/api/two");
-    const first = new Headers(
-      (fetchMock.mock.calls[0][1] as RequestInit).headers,
-    ).get("X-Correlation-Id");
-    const second = new Headers(
-      (fetchMock.mock.calls[1][1] as RequestInit).headers,
-    ).get("X-Correlation-Id");
-    expect(second).toBe(first);
+    const first = sentHeaders(0).get("X-Correlation-Id");
+    const second = sentHeaders(1).get("X-Correlation-Id");
+    expect(second).not.toBe(first);
+  });
+
+  it("stamps X-Wizard-Page-Load-Id with the SAME value on every call, equal to the page-load id (the session-header-carriage gate)", async () => {
+    await wizardFetch("/api/one");
+    await wizardFetch("/api/two");
+    const pageLoadId = getWizardCorrelationId();
+    expect(sentHeaders(0).get("X-Wizard-Page-Load-Id")).toBe(pageLoadId);
+    expect(sentHeaders(1).get("X-Wizard-Page-Load-Id")).toBe(pageLoadId);
   });
 
   it("preserves method and body", async () => {
@@ -106,12 +116,71 @@ describe("wizard-correlation — wizardFetch", () => {
     expect(sentHeaders().get("Content-Type")).toBe("application/json");
   });
 
-  it("the session id wins over a caller-supplied X-Correlation-Id (not silently dropped)", async () => {
+  it("respects a caller-supplied X-Correlation-Id rather than overwriting it", async () => {
     await wizardFetch("/api/thing", {
-      headers: { "X-Correlation-Id": "attacker:override" },
+      headers: { "X-Correlation-Id": "caller:override" },
     });
-    // Deterministic: the session id wins (single stable id is the contract).
-    expect(sentHeaders().get("X-Correlation-Id")).toBe(getWizardCorrelationId());
-    expect(sentHeaders().get("X-Correlation-Id")).not.toBe("attacker:override");
+    expect(sentHeaders().get("X-Correlation-Id")).toBe("caller:override");
+  });
+
+  it("still stamps the page-load header even when the caller supplies its own correlation value", async () => {
+    await wizardFetch("/api/thing", {
+      headers: { "X-Correlation-Id": "caller:override" },
+    });
+    expect(sentHeaders().get("X-Wizard-Page-Load-Id")).toBe(
+      getWizardCorrelationId(),
+    );
+  });
+
+  it("the optional capture callback receives exactly the id that went on the wire (the capture-path gate)", async () => {
+    let captured: string | null = null;
+    await wizardFetch("/api/thing", undefined, {
+      onCorrelationId: (id) => {
+        captured = id;
+      },
+    });
+    expect(captured).toBe(sentHeaders().get("X-Correlation-Id"));
+  });
+
+  it("the capture callback receives a caller-supplied id verbatim", async () => {
+    let captured: string | null = null;
+    await wizardFetch(
+      "/api/thing",
+      { headers: { "X-Correlation-Id": "caller:override" } },
+      {
+        onCorrelationId: (id) => {
+          captured = id;
+        },
+      },
+    );
+    expect(captured).toBe("caller:override");
+  });
+
+  // 164.6.5 review round 1 / IN-08. `Headers.get` answers "" (not null) for an
+  // empty value, and it trims surrounding whitespace to "" too. A `??` let that
+  // "" through: it went on the wire, the server fell back to a fresh UUID the
+  // client never saw, and the envelope displayed an EMPTY id — nothing support
+  // could match. An empty caller value is treated as absent.
+  it.each([
+    ["empty", ""],
+    ["whitespace-only", "   "],
+  ])("a %s caller-supplied X-Correlation-Id is treated as absent — a fresh id is minted and reported", async (_label, value) => {
+    let captured: string | null = null;
+    await wizardFetch(
+      "/api/thing",
+      { headers: { "X-Correlation-Id": value } },
+      {
+        onCorrelationId: (id) => {
+          captured = id;
+        },
+      },
+    );
+    const sent = sentHeaders().get("X-Correlation-Id");
+    expect(sent).toMatch(WIZARD_ID_RE);
+    expect(captured).toBe(sent);
+  });
+
+  it("wizardFetch remains callable with only (input) — backward-compatible signature", async () => {
+    await expect(wizardFetch("/api/thing")).resolves.toBeInstanceOf(Response);
   });
 });
