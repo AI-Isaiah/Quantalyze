@@ -969,6 +969,14 @@ _ASSIGNMENT_UNNAMED_PHRASE: str = (
     "assignment row names no instrument, so its same-instrument sibling "
     "census cannot be computed"
 )
+# WR-01 / SFH-01 (Phase 168 review): the non-option refusal's own phrase. The
+# census licence is one observation, an assignment on an expired OPTION, so an
+# assignment naming a perpetual, a dated future, a spot pair or an unclassifiable
+# name is an unobserved shape. Unique in this module, imported by the tests.
+_ASSIGNMENT_NON_OPTION_PHRASE: str = (
+    "assignment row names a non-option instrument, and the assignment "
+    "classification is licensed only for an option expiry"
+)
 
 
 def assert_assignment_uncontested(
@@ -1006,6 +1014,17 @@ def assert_assignment_uncontested(
             "the assignment classification is licensed only for the census shape "
             "in docs/evidence/drb-assignment-census-2026-09.json; refusing to sum "
             "or skip it. " + describe_unclassified_row(row, rows)
+        )
+    # WR-01 / SFH-01: the licence is an OPTION expiry. Checked here, in the shared
+    # guard, so both twins refuse the same shapes (the native twin's own
+    # non-derivative arm used to be the only refusal for a spot/unknown name, and
+    # nothing refused a perpetual or a dated future).
+    if classify_instrument(instrument) != "option":
+        raise LedgerValuationError(
+            f"Deribit {_ASSIGNMENT_NON_OPTION_PHRASE} (row id={row.get('id')!r}) "
+            "— the census in docs/evidence/drb-assignment-census-2026-09.json "
+            "observed only an option; refusing to sum or skip it. "
+            + describe_unclassified_row(row, rows)
         )
     for other in rows:
         if other is row or not isinstance(other, Mapping):

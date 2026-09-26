@@ -29,6 +29,10 @@ What these tests pin, and why each can fail:
     `test_site<N>_*` pin here, each seen red when only that site is reverted to
     the old trade/delivery pair; the mark_to_market and smoothed_mtm end-to-end
     runs (`*_mtm_e2e_*`, `test_smoothed_e2e_*`) pin them through the adapter.
+    Round-1 review (WR-01) amended site 6: the shared guard now refuses every
+    non-option assignment on both twins before the non-derivative arm is
+    reached, so `test_site6_*` pins that arm on `delivery` and the assignment
+    case is `test_wr01_*`.
 
 Synthetic identifiers only. No broker call: the end-to-end case runs through the
 monkeypatched crawl harness in tests/test_smoothed_mtm_core.py.
@@ -44,6 +48,7 @@ import pytest
 
 from services.deribit_txn import (
     _ASSIGNMENT_CONTESTED_PHRASE,
+    _ASSIGNMENT_NON_OPTION_PHRASE,
     _ASSIGNMENT_UNNAMED_PHRASE,
     _NATIVE_OPTIONS_SUMMARY_TYPES,
     _OPTION_BOOK_EVENT_TYPES,
@@ -674,21 +679,25 @@ _NON_DERIVATIVE_WORDING = "names an unclassifiable or spot instrument yet carrie
 
 
 @pytest.mark.parametrize("instrument", ["BTC_USDC", "BTC"], ids=["spot", "unknown"])
-def test_site6_spot_named_assignment_refuses(instrument: str) -> None:
-    """SITE6-SPOT-NAMED-REFUSES (the option arm's non-derivative guard): an
-    expiry event always names an expiring derivative, so an assignment naming a
-    spot pair or an unclassifiable name with nonzero cash refuses rather than
-    being booked on a guessed channel. The instrument is NON-BLANK, so plan 01's
-    unnamed-instrument refusal cannot fire first; the message is the
-    non-derivative guard's and nothing else, and names the row by type and id
-    only (never its change)."""
-    rows = [_assignment(DAY_EXPIRY, instrument=instrument)]
+def test_site6_spot_named_delivery_refuses(instrument: str) -> None:
+    """SITE6-SPOT-NAMED-REFUSES (the option arm's non-derivative guard, read
+    through ``_OPTION_EXPIRY_TYPES``): an expiry event always names an expiring
+    derivative, so a delivery naming a spot pair or an unclassifiable name with
+    nonzero cash refuses rather than being booked on a guessed channel. The
+    message is the non-derivative guard's, and names the row by type and id only
+    (never its change).
+
+    Round-1 review (WR-01): this pinned an ASSIGNMENT until the shared guard
+    began refusing every non-option assignment on both twins, which now fires
+    first. The assignment case moved to
+    ``test_wr01_a_non_option_assignment_refuses_on_both_twins``; this test stays
+    the pin for the pre-existing non-derivative arm on ``delivery``."""
+    rows = [dict(_assignment(DAY_EXPIRY, instrument=instrument), type="delivery")]
     with pytest.raises(LedgerValuationError) as exc:
         txn_rows_to_native_daily(rows)
     msg = str(exc.value)
-    assert _ASSIGNMENT_UNNAMED_PHRASE not in msg, msg
     assert _NON_DERIVATIVE_WORDING in msg, msg
-    assert "Deribit assignment row id=2" in msg, msg
+    assert "Deribit delivery row id=2" in msg, msg
     assert repr(ASSIGNED) not in msg, msg
 
 
@@ -891,3 +900,32 @@ def test_sfh03_the_contested_refusal_names_the_contesting_row(
     msg = str(exc.value)
     assert f"contesting row id=77 type={sibling_type!r}" in msg, f"{twin_name}: {msg}"
     assert "0.0123" not in msg, msg
+
+
+_NON_OPTION_INSTRUMENTS = {
+    "perpetual": "BTC-PERPETUAL",
+    "dated_future": "BTC-27SEP24",
+    "spot_pair": "BTC_USDC",
+    "bare_coin": "BTC",
+}
+
+
+@pytest.mark.parametrize("twin_name,twin", TWINS, ids=[t[0] for t in TWINS])
+@pytest.mark.parametrize("kind", sorted(_NON_OPTION_INSTRUMENTS))
+def test_wr01_a_non_option_assignment_refuses_on_both_twins(
+    kind: str, twin_name: str, twin: Callable[[list[dict[str, Any]]], Any]
+) -> None:
+    """WR-01 / SFH-01: the census licence is ONE observation, an assignment on an
+    expired option put. An assignment naming a perpetual or a dated future was
+    summed as cash on both twins, and one naming a spot pair or a bare coin was
+    summed silently by the USD twin while the native twin refused (a twin
+    disagreement). Every non-option name must refuse on BOTH twins with the
+    shared guard's own phrase, never the native-only non-derivative wording."""
+    instrument = _NON_OPTION_INSTRUMENTS[kind]
+    rows = _indexed([_assignment(DAY_EXPIRY, instrument=instrument)])
+    with pytest.raises(LedgerValuationError) as exc:
+        twin(rows)
+    msg = str(exc.value)
+    assert _ASSIGNMENT_NON_OPTION_PHRASE in msg, f"{twin_name}/{kind}: {msg}"
+    assert _NON_DERIVATIVE_WORDING not in msg, msg
+    assert repr(ASSIGNED) not in msg.split("OBSERVED SHAPE:")[0], msg
