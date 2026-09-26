@@ -3433,7 +3433,7 @@ Plans:
 Plans:
 
 - [x] 169.3-01-PLAN.md — /admin compute jobs list reads the admin view; a failed load says so (SC1) (was 169-01)
-- [ ] 169.3-02-PLAN.md — recommendations: mandate wording and no self-recommendation (SC8) (was 169-03)
+- [x] 169.3-02-PLAN.md — recommendations: mandate wording and no self-recommendation (SC8) (was 169-03)
 - [ ] 169.3-03-PLAN.md — Exchanges counts live keys only, no repeated balance (SC7) (was 169-09)
 - [ ] 169.3-04-PLAN.md — one mandate rule across recommendations and allocations (SC8) (was 169-10)
 - [ ] 169.3-05-PLAN.md — integration run + post-deploy browser re-check (SC9; this phase's items from old 05b's Task 4 and old 12, verbatim)

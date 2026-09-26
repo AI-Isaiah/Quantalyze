@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "169.3"
 current_phase_name: SMALLFIXES
 status: executing
-stopped_at: Completed 169.3-01-PLAN.md
-last_updated: "2026-09-26T14:08:00.000Z"
+stopped_at: Completed 169.3-02-PLAN.md
+last_updated: "2026-09-26T14:22:00.000Z"
 last_activity: 2026-09-26
-last_activity_desc: Plan 169.3-01 complete (admin compute-jobs list reads compute_jobs_admin; a failed load is not an empty queue)
+last_activity_desc: Plan 169.3-02 complete (/recommendations one mandate branch, track-record age on every card; match engine excludes authored strategies)
 state_head: 5975939eb9e902364d7187aea5f573f9caeb8e11
 progress:
   total_phases: 54
   completed_phases: 35
   total_plans: 310
-  completed_plans: 300
+  completed_plans: 301
   percent: 65
 ---
 
@@ -180,7 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 169.3 (SMALLFIXES) — EXECUTING
-Plan: 2 of 5 (1 of 5 DONE: `169.3-01-SUMMARY.md`, SC1: GET /api/admin/compute-jobs reads the compute_jobs_admin view with the service-role client after isAdminUser, 21 explicit columns, no migration; ComputeJobsTable shows no empty row on a failed load; SC9 neuter RED/GREEN recorded for both fixes)
+Plan: 3 of 5 (2 of 5 DONE: `169.3-01-SUMMARY.md`, SC1: GET /api/admin/compute-jobs reads the compute_jobs_admin view with the service-role client after isAdminUser, 21 explicit columns, no migration; ComputeJobsTable shows no empty row on a failed load; SC9 neuter RED/GREEN recorded for both fixes; `169.3-02-SUMMARY.md`, SC8: /recommendations reads one mandateSet branch for header and list and withholds the list with no mandate, each card carries a SyncBadge from the bounded series_end read, the match engine hard-excludes an allocator's authored strategy as owned/authored; SC9 neuter RED/GREEN recorded for all three fixes)
 Phase: 164.6 (gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers) — EXECUTING
 Plan: 5 of 5 DONE (`164.6-01-SUMMARY.md`, OPS-08-TS: a 40001 is retried once at csv-finalize and holdings sync; `164.6-02-SUMMARY.md`, 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker; `164.6-03-SUMMARY.md`, OPS-08-F2 SQL layer: migration 20260924120000 makes both fan-outs write one counted cron_runs row naming failed candidates, arm N in both ledger gates, 36 twins re-pointed; `164.6-04-SUMMARY.md`, OPS-08-F2 pins: ARMS_FLOOR 428 from a full lane run with no defects, parser/floors/registry censuses at 428 arms and 443 steps/needles, ci.yml sentinel rows 16/19 and ARMS_FLOOR 215; `164.6-05-SUMMARY.md`, runbooks read the candidate_enqueue_failed row counts-only and carry the BLOCKING precondition [164.6-COMPOSITE-CLAIMTIME-SNAPSHOT] owned by Phase 164.6.7, phase-level vitest/typecheck/lint/anchors green)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
