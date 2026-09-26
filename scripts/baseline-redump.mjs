@@ -1401,7 +1401,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 186;
+export const EXPECTED_ASSERTIONS = 198;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -2675,6 +2675,124 @@ function selfTest({ withGitleaks = false } = {}) {
         /^::warning::baseline-redump: bot-PR status not measured \(git ls-remote exit [0-9]+\)$/m.test(nMissing.text) &&
         nMissing.text.split("\n").some((l) => l.startsWith(noticeLead)),
       "a failed bot-PR lookup is a ::warning:: naming the ls-remote exit code, and the legitimate no-op still prints changed=false and does not throw",
+    );
+
+    console.log("=== SELF-TEST 4d/4: --open-or-edit-pr creates or edits the one PR and can never merge (D-11, D-13, D-14)");
+    const prTitle = "BASELINE: fixture re-dump";
+    const titleFile = join(dir, "pr-title.txt");
+    const bodyFile = join(dir, "pr-body.md");
+    writeFileSync(titleFile, `${prTitle}\n`);
+    writeFileSync(bodyFile, "fixture body\n");
+    const fixtureRepo = "fixture-owner/fixture-repo";
+    const argvOf = (args) => {
+      try {
+        const r = buildPrArgv(args);
+        return Array.isArray(r) ? r : null;
+      } catch {
+        return null;
+      }
+    };
+    const createArgv = argvOf({ existing: null, title: prTitle, bodyFile, repo: fixtureRepo });
+    const editArgv = argvOf({ existing: 41, title: prTitle, bodyFile, repo: fixtureRepo });
+    const pairIn = (a, flag, value) => a.indexOf(flag) !== -1 && a[a.indexOf(flag) + 1] === value;
+    ok(
+      createArgv !== null && createArgv.slice(0, 2).join(" ") === "pr create" && pairIn(createArgv, "--base", "main") &&
+        pairIn(createArgv, "--head", BOT_BRANCH) && pairIn(createArgv, "--repo", fixtureRepo) &&
+        createArgv.includes(`--title=${prTitle}`) && createArgv.includes(`--body-file=${bodyFile}`),
+      "buildPrArgv with no open PR is 'pr create --base main --head automation/baseline-redump', the title and the body file bound to their flags",
+    );
+    ok(
+      editArgv !== null && editArgv.slice(0, 3).join(" ") === "pr edit 41" && pairIn(editArgv, "--repo", fixtureRepo) &&
+        editArgv.includes(`--title=${prTitle}`) && editArgv.includes(`--body-file=${bodyFile}`) &&
+        ["41", -1, 1.5, 0].every((bad) => argvOf({ existing: bad, title: prTitle, bodyFile, repo: fixtureRepo }) === null),
+      "buildPrArgv with one open PR is 'pr edit <n>', and it refuses a PR number that is not a positive integer",
+    );
+    // D-13, assembled from fragments so this file spells no merge command.
+    const forbidden = [["mer", "ge"].join(""), ["--au", "to"].join(""), ["rev", "iew"].join(""), ["--app", "rove"].join("")];
+    ok(
+      createArgv !== null && editArgv !== null &&
+        [createArgv, editArgv].every((a) => a.every((el) => !forbidden.some((t) => String(el) === t || String(el).startsWith(`${t}=`)))),
+      "neither argv carries the merge subcommand, the auto flag, a review or an approval (D-13)",
+    );
+    const fakeGh = ({ list = "[]", listStatus = 0, mutateStatus = 0, url = `https://github.com/${fixtureRepo}/pull/41` } = {}) => {
+      const f = (argv) => {
+        f.calls.push(argv.join(" "));
+        if (argv[1] === "list") return { status: listStatus, stdout: list };
+        return { status: mutateStatus, stdout: `${url}\n` };
+      };
+      f.calls = [];
+      return f;
+    };
+    const prRun = (gh, over = {}) => {
+      outputs.length = 0;
+      const r = capture(() => openOrEditPr({ titleFile, bodyFile, repo: fixtureRepo, token: "fixture-token", gh, emit, ...over }));
+      return { ...r, outputs: [...outputs] };
+    };
+    const gh0 = fakeGh();
+    const run0 = prRun(gh0);
+    ok(
+      run0.threw === null && gh0.calls.length === 2 && gh0.calls[0].startsWith("pr list ") && gh0.calls[0].includes(`--head ${BOT_BRANCH}`) &&
+        gh0.calls[0].includes("--state open") && gh0.calls[1].startsWith("pr create ") && run0.outputs.join(",") === "pr_number=41" &&
+        run0.text.includes(`https://github.com/${fixtureRepo}/pull/41`),
+      "no open PR on the bot branch: one list, one create, pr_number from the URL gh printed",
+    );
+    const gh1 = fakeGh({ list: '[{"number":12}]', url: `https://github.com/${fixtureRepo}/pull/12` });
+    const run1 = prRun(gh1);
+    ok(
+      run1.threw === null && gh1.calls.length === 2 && gh1.calls[1].startsWith("pr edit 12 ") && run1.outputs.join(",") === "pr_number=12",
+      "exactly one open PR: it is edited in place (D-11), and pr_number is that PR",
+    );
+    const gh2 = fakeGh({ list: '[{"number":13},{"number":12}]' });
+    const run2 = prRun(gh2);
+    ok(
+      run2.threw !== null && /#12, #13/.test(run2.threw.message) && gh2.calls.length === 1 && run2.outputs.length === 0,
+      "two open PRs on the bot branch refuse, naming both in ascending order, and nothing is created or edited",
+    );
+    const ghTok = fakeGh();
+    const tokenTitle = join(dir, "pr-title-token.txt");
+    writeFileSync(tokenTitle, ["BASELINE ", "[", "skip", " ", "ci", "]"].join("") + "\n");
+    const tokenBody = join(dir, "pr-body-token.md");
+    writeFileSync(tokenBody, ["body\n", "skip", "-checks", ": true\n"].join(""));
+    const runTokT = prRun(ghTok, { titleFile: tokenTitle });
+    const runTokB = prRun(ghTok, { bodyFile: tokenBody });
+    ok(
+      runTokT.threw !== null && /skip-token class 1 of 6/.test(runTokT.threw.message) && runTokB.threw !== null &&
+        /skip-token class 6 of 6/.test(runTokB.threw.message) && ghTok.calls.length === 0,
+      "judgeSkipTokens re-runs over the title and body: a hit in either refuses by class index before gh is called at all (D-14)",
+    );
+    const ghListFail = fakeGh({ listStatus: 1 });
+    const runListFail = prRun(ghListFail);
+    ok(
+      runListFail.threw !== null && /MEASURE_FAIL/.test(runListFail.threw.message) && ghListFail.calls.length === 1 && runListFail.outputs.length === 0,
+      "a failing 'gh pr list' is MEASURE_FAIL: nothing is created or edited on an unmeasured count",
+    );
+    const ghBadJson = fakeGh({ list: "not json" });
+    const runBadJson = prRun(ghBadJson);
+    ok(
+      runBadJson.threw !== null && /MEASURE_FAIL/.test(runBadJson.threw.message) && ghBadJson.calls.length === 1,
+      "a 'gh pr list' answer that is not an array of PR numbers is MEASURE_FAIL",
+    );
+    const ghMutFail = fakeGh({ mutateStatus: 1 });
+    const runMutFail = prRun(ghMutFail);
+    ok(
+      runMutFail.threw !== null && /MEASURE_FAIL/.test(runMutFail.threw.message) && ghMutFail.calls.length === 2 && runMutFail.outputs.length === 0,
+      "a failing 'gh pr create' is MEASURE_FAIL, exit 1, and no pr_number is emitted",
+    );
+    const ghMissing = fakeGh();
+    const runNoTitle = prRun(ghMissing, { titleFile: join(dir, "absent-title.txt") });
+    const runNoBody = prRun(ghMissing, { bodyFile: join(dir, "absent-body.md") });
+    ok(
+      runNoTitle.threw !== null && /--title-file/.test(runNoTitle.threw.message) && runNoBody.threw !== null &&
+        /--body-file/.test(runNoBody.threw.message) && ghMissing.calls.length === 0,
+      "a missing title or body file refuses with ::error:: before any gh call",
+    );
+    const ghEnv = fakeGh();
+    const runNoToken = prRun(ghEnv, { token: "" });
+    const runBadRepo = prRun(ghEnv, { repo: "not a slug" });
+    ok(
+      runNoToken.threw !== null && /GH_TOKEN/.test(runNoToken.threw.message) && runBadRepo.threw !== null &&
+        /GITHUB_REPOSITORY/.test(runBadRepo.threw.message) && ghEnv.calls.length === 0,
+      "no GH_TOKEN, or a GITHUB_REPOSITORY that is not <owner>/<name>, refuses before any gh call (a local keyring login is never used)",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
