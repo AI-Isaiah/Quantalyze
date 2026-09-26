@@ -664,3 +664,68 @@ async def test_an_unloggable_state_in_the_mtm_stamp_is_not_restamped_by_f5() -> 
         p for t, p, _c in fake.upserts
         if t == "strategy_analytics" and isinstance(p, dict) and "computation_error" in p
     ], "a stamp landed although the logger refused the state"
+
+
+@pytest.mark.asyncio
+async def test_a_non_object_flags_value_is_stamped_once_not_restamped_by_f5() -> None:
+    """SFH-R5-05: ``data_quality_flags`` is ``jsonb``, so a non-object value is
+    storable. ``dict()`` on it used to raise ``ValueError`` after the status read
+    and before any write. At the degenerate-length MTM stamp that raise sits
+    inside the MTM ``try``, whose F-5 ``except ValueError`` called
+    ``_stamp_failed`` AGAIN under the chain-break cause. Now the value is
+    dropped with a WARNING and the FIRST stamp lands, once, under its own cause.
+
+    Neuter to redden: restore ``dict(existing_row.get("data_quality_flags") or
+    {})`` in the composite ``_stamp_failed``. No stamp lands."""
+    import pandas as pd
+
+    from tests.test_stitch_composite_job import _member, _returns
+
+    fake = _FakeSupabase(
+        members=[_member(1, "2024-01-01", "2024-02-01"), _member(2, "2024-02-01", None)],
+        existing_status=None,
+    )
+    real_read = _jw.db_read_with_retry
+    status_reads: list[int] = []
+
+    async def _read_with_a_non_object_flags_value(fn: Any) -> Any:
+        # The fake serves a dict copy of its flags, so the malformed jsonb value
+        # is put on the stamp's status-read answer here.
+        row = await real_read(fn)
+        if isinstance(row, dict) and "data_quality_flags" in row:
+            status_reads.append(1)
+            row = {**row, "data_quality_flags": "not-an-object"}
+        return row
+
+    cash_m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    cash_m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    mtm_m1 = _returns([("2024-01-01", 0.10)])
+    mtm_m2 = pd.Series(
+        [float("nan")], index=pd.DatetimeIndex(["2024-02-01"]).as_unit("us"),
+        dtype="float64",
+    )
+    log = MagicMock()
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(cash_m1, {}), (cash_m2, {}), (mtm_m1, {}), (mtm_m2, {})],
+        has_option_activity=False,
+    )), patch("services.job_worker.logger", log), \
+         patch.object(_jw, "db_read_with_retry", _read_with_a_non_object_flags_value), \
+         patch("services.job_worker.sentry_sdk"):
+        result = await _jw.dispatch(
+            {"id": _JOB_ID, "kind": "stitch_composite", "strategy_id": _COMPOSITE_STRATEGY_ID}
+        )
+    stamps = [
+        p for t, p, _c in fake.upserts
+        if t == "strategy_analytics" and isinstance(p, dict) and "computation_error" in p
+    ]
+    assert len(status_reads) == 1, (
+        f"_stamp_failed ran {len(status_reads)} times: the F-5 arm re-stamped"
+    )
+    assert len(stamps) == 1, (result, stamps)
+    assert stamps[0]["data_quality_flags"] == {"csv_source": True, "composite": True}
+    assert result.error_kind == "permanent", result
+    assert any(
+        c.args and "non-object data_quality_flags" in str(c.args[0])
+        for c in log.warning.call_args_list
+    ), log.warning.call_args_list

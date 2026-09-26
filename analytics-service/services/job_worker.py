@@ -6810,7 +6810,22 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             op=_STAMP_OP_STATUS_READ,
             **_stamp_io_args,
         )
-        existing_flags = dict(existing_row.get("data_quality_flags") or {})
+        # SFH-R5-05 (round 5): ``data_quality_flags`` is ``jsonb``, so a
+        # non-object value is storable. ``dict()`` on it raised AFTER the read
+        # and BEFORE any write: a ``ValueError`` from inside the composite MTM
+        # ``try`` was caught by F-5's ``except ValueError`` and stamped a second
+        # time under the chain-break cause. So only an object is merged; any
+        # other value is dropped with a WARNING and the stamp lands once.
+        _raw_flags = existing_row.get("data_quality_flags")
+        existing_flags: dict[str, Any] = (
+            dict(_raw_flags) if isinstance(_raw_flags, dict) else {}
+        )
+        if _raw_flags is not None and not isinstance(_raw_flags, dict):
+            logger.warning(
+                "stitch_composite: strategy %s has a non-object data_quality_flags "
+                "(%s); the failed stamp writes the composite markers without it.",
+                strategy_id, type(_raw_flags).__name__,
+            )
         _existing_status = existing_row.get("computation_status")
         existing_status: str | None = (
             _existing_status if isinstance(_existing_status, str) else None
