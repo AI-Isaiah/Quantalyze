@@ -329,7 +329,8 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
         expect(probe).toEqual({ buildable: true });
       } else {
         expect(payload).toBeNull();
-        expect(probe).toEqual({ buildable: false, reason: f.reason });
+        // The detail keys (code, gate, source) have their own cases below.
+        expect(probe).toMatchObject({ buildable: false, reason: f.reason });
       }
       // The invariant the probe's doc comment states.
       expect(probe.buildable).toBe(payload !== null);
@@ -373,20 +374,37 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
     }
   });
 
-  it("SFH M-2 READ-ERROR CAPTURE: a failed admin read is captured once per resolve, with its code, on the build and the probe alike", async () => {
+  // 167.2.1-REVIEW-R2 WR-01 / SFH-R2 N-1 — the stage captures for a BUILD
+  // only. A probe runs once per computed row on every /strategies load, so a
+  // capture per probe was N events per navigation for as long as the rows
+  // (or the pool) stayed that way; the probe returns the facts instead, and
+  // `StrategiesPage` sends one event per page load.
+  it("SFH M-2 READ-ERROR CAPTURE: a failed admin read is captured once by a build, with its code; a probe returns the code and captures nothing", async () => {
     const outage = PARITY.find((f) => f.reason === "read_error")!;
-    for (const [caller, run] of [
-      ["build", () => fetchAndBuildPayload(STRATEGY_ID, ownerVisibility)],
-      ["probe", () => probeFactsheetBuildable(STRATEGY_ID, ownerVisibility)],
-    ] as const) {
-      seed(outage.row, [], outage.error);
-      vi.mocked(captureToSentry).mockClear();
-      await run();
-      expect(vi.mocked(captureToSentry), caller).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({
-        tags: { stage: "factsheet-resolve", caller, reason: "read_error", code: "XX000" },
-      });
-    }
+    seed(outage.row, [], outage.error);
+    vi.mocked(captureToSentry).mockClear();
+    await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({
+      tags: { stage: "factsheet-resolve", caller: "build", reason: "read_error", code: "XX000" },
+    });
+
+    seed(outage.row, [], outage.error);
+    vi.mocked(captureToSentry).mockClear();
+    expect(await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility)).toEqual({
+      buildable: false,
+      reason: "read_error",
+      code: "XX000",
+    });
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+    // An error with no code carries the "none" the build would have tagged.
+    seed(null, [], { message: "synthetic outage, no code" });
+    expect(await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility)).toEqual({
+      buildable: false,
+      reason: "read_error",
+      code: "none",
+    });
+
     // A row that is simply not visible is not an outage, and is not captured.
     seed(null);
     vi.mocked(captureToSentry).mockClear();
@@ -394,14 +412,7 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
     expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
   });
 
-  it("SFH H-1 COMPOSITE CAPTURE: every composite refusal is captured once at warning, naming its gate; a short single-key series is not", async () => {
-    const expectCapture = (caller: string, gate: string) => {
-      expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({
-        level: "warning",
-        tags: { stage: "factsheet-resolve-composite", caller, gate },
-      });
-    };
+  it("SFH H-1 COMPOSITE CAPTURE: every composite refusal a build reaches is captured once at warning, naming its gate; a probe returns the gate and captures nothing", async () => {
     const cases: Array<[string, string]> = [
       ["composite, metrics_json_by_basis null", "headline"],
       ["composite, valid headline, empty csv read", "empty_series"],
@@ -411,55 +422,67 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
       const f = PARITY.find((x) => x.name === name)!;
       seed(f.row, f.csv ?? []);
       vi.mocked(captureToSentry).mockClear();
-      await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
-      expectCapture("probe", gate);
+      expect(await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility), name).toEqual({
+        buildable: false,
+        reason: "composite_unbuildable",
+        gate,
+      });
+      expect(vi.mocked(captureToSentry), name).not.toHaveBeenCalled();
       seed(f.row, f.csv ?? []);
       vi.mocked(captureToSentry).mockClear();
       await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
-      expectCapture("build", gate);
+      expect(vi.mocked(captureToSentry), name).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(captureToSentry).mock.calls[0][1], name).toEqual({
+        level: "warning",
+        tags: { stage: "factsheet-resolve-composite", caller: "build", gate },
+      });
     }
     // The case the finding is about: a csv read OUTAGE folds into an empty
-    // series, and support now has an event to look up.
+    // series, and support has an event to look up when the factsheet is built.
     seed(composite({ metrics_json_by_basis: { cash_settlement: FULL_CASH } }));
     fake.csvError = { message: "synthetic csv outage", code: "57014" };
     vi.mocked(captureToSentry).mockClear();
-    expect(await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility)).toEqual({
-      buildable: false,
-      reason: "composite_unbuildable",
+    expect(await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility)).toBeNull();
+    expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(captureToSentry).mock.calls[0][1]).toMatchObject({
+      tags: { caller: "build", gate: "empty_series" },
     });
-    expectCapture("probe", "empty_series");
     // A single-key series that is genuinely short is a data fact: no event.
     seed(single({ daily_returns: [{ date: "2024-01-02", value: 0.01 }] }));
     fake.csvError = null;
     vi.mocked(captureToSentry).mockClear();
-    await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
+    await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
     expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
   });
 
-  it("SFH M-3 MALFORMED CAPTURE: a malformed stored series is captured with its counts; a genuinely short one is not", async () => {
+  it("SFH M-3 MALFORMED CAPTURE: a malformed stored series is captured by a build with its counts; a probe returns gate and source; a genuinely short one is neither", async () => {
     for (const f of PARITY.filter((x) => x.reason === "malformed_series")) {
+      // SFH-R2 N-5: the counted column, which is the one the builder reads.
+      const source = f.name.includes("returns_series-only") ? "returns_series" : "daily_returns";
       seed(f.row);
       vi.mocked(captureToSentry).mockClear();
-      await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
+      const probe = await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
+      expect(probe, f.name).toMatchObject({ buildable: false, reason: "malformed_series", source });
+      expect(vi.mocked(captureToSentry), f.name).not.toHaveBeenCalled();
+
+      seed(f.row);
+      await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
       expect(vi.mocked(captureToSentry), f.name).toHaveBeenCalledTimes(1);
       const ctx = vi.mocked(captureToSentry).mock.calls[0][1] as {
         tags: Record<string, string>;
         extra: { storedReturns: number; resolvedEntries: number };
       };
       expect(ctx.tags.stage, f.name).toBe("factsheet-resolve-malformed");
-      expect(ctx.tags.caller, f.name).toBe("probe");
-      // SFH-R2 N-5: the capture names the column that was counted, which is
-      // the one the builder reads.
-      expect(ctx.tags.source, f.name).toBe(
-        f.name.includes("returns_series-only") ? "returns_series" : "daily_returns",
-      );
+      expect(ctx.tags.caller, f.name).toBe("build");
+      expect(ctx.tags.gate, f.name).toBe((probe as { gate?: string }).gate);
+      expect(ctx.tags.source, f.name).toBe(source);
       expect(ctx.extra.storedReturns, f.name).toBeGreaterThanOrEqual(2);
       expect(ctx.extra.resolvedEntries, f.name).toBeLessThan(2);
     }
     for (const f of PARITY.filter((x) => x.reason === "too_few_points")) {
       seed(f.row);
       vi.mocked(captureToSentry).mockClear();
-      await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
+      await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
       expect(vi.mocked(captureToSentry), f.name).not.toHaveBeenCalled();
     }
   });

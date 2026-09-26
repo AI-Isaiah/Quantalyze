@@ -79,21 +79,53 @@ export type NotBuildableReason =
   | "too_few_points"
   | "malformed_series";
 
+/**
+ * 167.2.1-REVIEW-R2 WR-01 / SFH-R2 N-1 — the facts behind a refusal, carried
+ * OUT of the resolve stage instead of captured in it when the caller is a
+ * probe. `code` is the PostgREST / SQLSTATE code of a `read_error` ("none"
+ * when the error had none). `gate` names the check that refused a
+ * `composite_unbuildable` or `malformed_series`. `source` names the stored
+ * column a `malformed_series` count was taken from (SFH-R2 N-5). Each is
+ * present only on the reasons it describes. None of them identifies anyone.
+ */
+export type NotBuildableDetail = {
+  code?: string;
+  gate?: "headline" | "empty_series" | "short_series";
+  source?: "daily_returns" | "returns_series";
+};
+
 /** The probe's answer: buildable, or not buildable with a typed reason. */
 export type FactsheetBuildability =
   | { buildable: true }
-  | { buildable: false; reason: NotBuildableReason };
+  | ({ buildable: false; reason: NotBuildableReason } & NotBuildableDetail);
 
 /**
  * 167.2.1-REVIEW-SFH M-1 — who ran the resolve stage. Every resolve log line
  * carries it, in its prefix and its payload, so a probe on /strategies never
  * reads in the logs as a factsheet build that did not happen.
+ *
+ * 167.2.1-REVIEW-R2 WR-01 — it also decides who CAPTURES. The stage sends a
+ * Sentry event only for `"build"`: a factsheet somebody opened. A `"probe"`
+ * runs once per computed row on every /strategies load, so a per-row capture
+ * there sent N events per navigation for as long as a row stayed unbuildable
+ * (or a pool stayed saturated). The probe returns the facts
+ * (`NotBuildableDetail`) and `StrategiesPage` sends one event per page load.
  */
 type ResolveCaller = "build" | "probe";
 
-/** A failed resolve: the builder returns null, the probe returns this reason. */
-function notBuildable(reason: NotBuildableReason): { ok: false; reason: NotBuildableReason } {
-  return { ok: false, reason };
+type NotBuildable = { ok: false; reason: NotBuildableReason } & NotBuildableDetail;
+
+/**
+ * A failed resolve: the builder returns null, the probe returns this reason
+ * and its detail. Only the detail keys that are set are copied, so a reason
+ * with none compares equal to `{ ok: false, reason }`.
+ */
+function notBuildable(reason: NotBuildableReason, detail: NotBuildableDetail = {}): NotBuildable {
+  const out: NotBuildable = { ok: false, reason };
+  if (detail.code !== undefined) out.code = detail.code;
+  if (detail.gate !== undefined) out.gate = detail.gate;
+  if (detail.source !== undefined) out.source = detail.source;
+  return out;
 }
 
 /**
@@ -165,35 +197,42 @@ function singleKeyUnbuildable(
   dailyRaw: unknown,
   returnsSeriesRaw: unknown,
   resolvedEntries: number,
-): { ok: false; reason: NotBuildableReason } {
+): NotBuildable {
   const { source, storedReturns } = countedSeriesColumn(dailyRaw, returnsSeriesRaw);
   if (storedReturns < MIN_FACTSHEET_SERIES_POINTS) return notBuildable("too_few_points");
-  captureToSentry(new Error(`factsheet resolve: stored single-key series is malformed (${gate})`), {
-    tags: { stage: "factsheet-resolve-malformed", caller, gate, source },
-    extra: { storedReturns, resolvedEntries },
-  });
-  return notBuildable("malformed_series");
+  // WR-01: captured for a build only; a probe carries gate and source out.
+  if (caller === "build") {
+    captureToSentry(new Error(`factsheet resolve: stored single-key series is malformed (${gate})`), {
+      tags: { stage: "factsheet-resolve-malformed", caller, gate, source },
+      extra: { storedReturns, resolvedEntries },
+    });
+  }
+  return notBuildable("malformed_series", { gate, source });
 }
 
 /**
- * 167.2.1-REVIEW-SFH H-1 — every `composite_unbuildable` answer is CAPTURED,
- * at level warning, with tags only. D-07 folds a failed `csv_daily_returns`
- * read into this reason (`readCompositeFactsheet` turns the error into an
- * empty series and only console-logs it, which never reaches Sentry here), and
- * the copy then sends the owner to support. The event is not proof of an
- * outage; it is what makes "contact support" answerable. `gate` names which
- * check refused: the helper (a missing or untrusted headline, `headline`), an
- * empty series (`empty_series`) or a short one (`short_series`).
+ * 167.2.1-REVIEW-SFH H-1 — every `composite_unbuildable` answer a BUILD
+ * reaches is CAPTURED, at level warning, with tags only. D-07 folds a failed
+ * `csv_daily_returns` read into this reason (`readCompositeFactsheet` turns
+ * the error into an empty series and only console-logs it, which never reaches
+ * Sentry here), and the copy then sends the owner to support. The event is not
+ * proof of an outage; it is what makes "contact support" answerable. `gate`
+ * names which check refused: the helper (a missing or untrusted headline,
+ * `headline`), an empty series (`empty_series`) or a short one
+ * (`short_series`). 167.2.1-REVIEW-R2 WR-01: a probe carries `gate` out and
+ * `StrategiesPage` counts it into its one event per page load.
  */
 function compositeUnbuildable(
   caller: ResolveCaller,
   gate: "headline" | "empty_series" | "short_series",
-): { ok: false; reason: NotBuildableReason } {
-  captureToSentry(new Error(`factsheet resolve: composite cannot build (${gate})`), {
-    level: "warning",
-    tags: { stage: "factsheet-resolve-composite", caller, gate },
-  });
-  return notBuildable("composite_unbuildable");
+): NotBuildable {
+  if (caller === "build") {
+    captureToSentry(new Error(`factsheet resolve: composite cannot build (${gate})`), {
+      level: "warning",
+      tags: { stage: "factsheet-resolve-composite", caller, gate },
+    });
+  }
+  return notBuildable("composite_unbuildable", { gate });
 }
 
 /**
@@ -234,6 +273,10 @@ async function resolveFactsheetInputs(
     // covers every lane: the public and token builders used to render the
     // placeholder for it with no event at all, and the probe callers captured
     // a fixed message with no code.
+    // 167.2.1-REVIEW-R2 WR-01: captured here for a BUILD only. Pool
+    // saturation reaches this line as a returned `{ error }`, never a throw,
+    // so capturing it per probe sent one event per computed row per
+    // /strategies load. A probe returns the code, and the page counts it.
     const code = error.code || "none";
     console.error(`[factsheet] resolve(${caller}) — admin strategy read failed`, {
       id,
@@ -241,10 +284,12 @@ async function resolveFactsheetInputs(
       errorMessage: error.message,
       errorCode: code,
     });
-    captureToSentry(new Error(`factsheet resolve: admin strategy read failed (${code})`), {
-      tags: { stage: "factsheet-resolve", caller, reason: "read_error", code },
-    });
-    return notBuildable("read_error");
+    if (caller === "build") {
+      captureToSentry(new Error(`factsheet resolve: admin strategy read failed (${code})`), {
+        tags: { stage: "factsheet-resolve", caller, reason: "read_error", code },
+      });
+    }
+    return notBuildable("read_error", { code });
   }
   if (!strategy) {
     console.warn(`[factsheet] resolve(${caller}) — admin read returned no strategy`, {
@@ -642,6 +687,10 @@ export async function probeFactsheetBuildable(
 ): Promise<FactsheetBuildability> {
   const supabase = createAdminClient();
   const resolved = await resolveFactsheetInputs(supabase, id, visibility, "probe");
-  if (!resolved.ok) return { buildable: false, reason: resolved.reason };
+  if (!resolved.ok) {
+    // WR-01: the reason and its detail, never captured here (see ResolveCaller).
+    const { ok: _ok, ...refusal } = resolved;
+    return { buildable: false, ...refusal };
+  }
   return { buildable: true };
 }

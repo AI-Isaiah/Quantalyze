@@ -223,6 +223,83 @@ function concurrencyLimiter(limit: number) {
   };
 }
 
+/**
+ * 167.2.1-REVIEW-R2 WR-01 / SFH-R2 N-1 — the probe answers Sentry should hear
+ * about, counted over one page load. The resolve stage no longer captures for
+ * a probe (it captures for a factsheet BUILD only), because pool saturation
+ * arrives as a returned `read_error`, one per computed row, and durable data
+ * states (`composite_unbuildable`, `malformed_series`) recur on every
+ * navigation. The page sends ONE event carrying the counts instead.
+ * `not_visible`, `not_computed` and `too_few_points` are not counted: the
+ * first two are races logged at warn, the last is an honest data fact.
+ */
+const COUNTED_PROBE_REASONS = ["read_error", "composite_unbuildable", "malformed_series"] as const;
+type CountedProbeReason = (typeof COUNTED_PROBE_REASONS)[number];
+
+interface ProbeOutcomeTally {
+  counts: Record<CountedProbeReason, number>;
+  /** read_error rows per PostgREST / SQLSTATE code. */
+  readErrorCodes: Map<string, number>;
+  /** composite_unbuildable and malformed_series rows per `reason:gate`. */
+  gates: Map<string, number>;
+  /** malformed_series rows per counted column (SFH-R2 N-5). */
+  sources: Map<string, number>;
+}
+
+function newProbeOutcomeTally(): ProbeOutcomeTally {
+  return {
+    counts: { read_error: 0, composite_unbuildable: 0, malformed_series: 0 },
+    readErrorCodes: new Map(),
+    gates: new Map(),
+    sources: new Map(),
+  };
+}
+
+function bump(map: Map<string, number>, key: string): void {
+  map.set(key, (map.get(key) ?? 0) + 1);
+}
+
+/**
+ * `key:count` pairs, largest first, as one tag value. A code is a short
+ * PostgREST / SQLSTATE token; anything else is reduced to that shape, and the
+ * list is capped, so the tag stays inside Sentry's value limit.
+ */
+function formatCounts(map: ReadonlyMap<string, number>, cap = 10): string {
+  return [...map]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, cap)
+    .map(([k, n]) => `${k.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 16)}:${n}`)
+    .join(",");
+}
+
+/** One event for the page load, or none when nothing was counted. */
+function captureProbeOutcomes(tally: ProbeOutcomeTally): void {
+  const total = COUNTED_PROBE_REASONS.reduce((sum, r) => sum + tally.counts[r], 0);
+  if (total === 0) return;
+  const tags: Record<string, string> = {
+    route: "strategies/page",
+    stage: "factsheet-probe-outcomes",
+    counted_rows: String(total),
+  };
+  for (const reason of COUNTED_PROBE_REASONS) tags[reason] = String(tally.counts[reason]);
+  if (tally.readErrorCodes.size > 0) tags.read_error_codes = formatCounts(tally.readErrorCodes);
+  // A composite refusal alone is a warning, as the build's own capture is. An
+  // outage or a writer defect is an error.
+  const level =
+    tally.counts.read_error > 0 || tally.counts.malformed_series > 0 ? "error" : "warning";
+  captureToSentry(
+    new Error("factsheet probe: computed rows could not be confirmed buildable on one page load"),
+    {
+      level,
+      tags,
+      extra: {
+        gates: Object.fromEntries(tally.gates),
+        malformedSources: Object.fromEntries(tally.sources),
+      },
+    },
+  );
+}
+
 export default async function StrategiesPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -421,6 +498,9 @@ export default async function StrategiesPage() {
   // throw, and N events per page load hid the one fact that mattered.
   const runProbe = concurrencyLimiter(PROBE_CONCURRENCY);
   const probeThrows: unknown[] = [];
+  // 167.2.1-REVIEW-R2 WR-01: the RETURNED failures, counted, and captured
+  // once after the fan-out (`captureProbeOutcomes`).
+  const probeOutcomes = newProbeOutcomeTally();
 
   const shareNotes = new Map<string, string>(
     (
@@ -469,12 +549,17 @@ export default async function StrategiesPage() {
           // outside this note's domain too: such a row shows no note here and
           // its recipient gets the error boundary.
           if (probe.buildable) return [s.id, null] as const;
+          if (probe.reason === "read_error" || probe.reason === "composite_unbuildable" || probe.reason === "malformed_series") {
+            probeOutcomes.counts[probe.reason] += 1;
+            if (probe.code !== undefined) bump(probeOutcomes.readErrorCodes, probe.code);
+            if (probe.gate !== undefined) bump(probeOutcomes.gates, `${probe.reason}:${probe.gate}`);
+            if (probe.source !== undefined) bump(probeOutcomes.sources, probe.source);
+          }
           if (probe.reason === "read_error") {
             // D-05: the probe could not read the row, so what the recipient
-            // sees is not known. 167.2.1-REVIEW-SFH M-2: the resolve stage
-            // already logged this read and captured it ONCE, with its code
-            // (`stage: "factsheet-resolve"`, `caller: "probe"`), so the page
-            // does not capture it a second time.
+            // sees is not known. The resolve stage logged this read with its
+            // id and code (`resolve(probe)`). 167.2.1-REVIEW-R2 WR-01: it no
+            // longer captures it; the count above does, once per page load.
             return [s.id, probeUnreadableShareNote(mode)] as const;
           }
           if (probe.reason === "not_visible") {
@@ -509,6 +594,7 @@ export default async function StrategiesPage() {
       )
     ).filter((entry): entry is readonly [string, string] => entry[1] !== null),
   );
+  captureProbeOutcomes(probeOutcomes);
   if (probeThrows.length > 0) {
     // WR-01: one event per page load. The first error is the payload (the
     // per-row console lines above carry every row's message and id); the

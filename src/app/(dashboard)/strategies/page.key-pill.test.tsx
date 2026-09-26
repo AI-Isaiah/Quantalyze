@@ -139,7 +139,7 @@ const state = vi.hoisted(() => ({
    * series, so every other describe's computed rows stay buildable and render
    * as they did before the list probed them.
    */
-  adminRows: {} as Record<string, { data: unknown; error: { message: string } | null }>,
+  adminRows: {} as Record<string, { data: unknown; error: { message: string; code?: string } | null }>,
   /** 167.2.1 D-05: the admin factory itself throws. */
   adminThrow: false,
   /** Every `from(table)` the admin client was asked for. */
@@ -672,6 +672,8 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     error: null,
   });
   const PROBE_TAGS = { tags: { route: "strategies/page", stage: "factsheet-probe" } };
+  // 167.2.1-REVIEW-R2 WR-01: the page's one event for the returned failures.
+  const OUTCOME_TAGS = { route: "strategies/page", stage: "factsheet-probe-outcomes" };
   // 167.2.1-REVIEW-SFH H-2 — typed out, never imported. The buildability
   // check failed, so what a recipient sees is not known.
   const PROBE_UNREADABLE =
@@ -757,7 +759,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(JSON.stringify(ctx)).not.toContain("s-1");
   });
 
-  it("PROBE-READ-ERROR (D-05, SFH M-2, H-2): an admin read error says the check failed and is captured ONCE, by the resolve stage, with tags only", async () => {
+  it("PROBE-READ-ERROR (D-05, SFH M-2, H-2): an admin read error says the check failed and is counted into the page's ONE event, with tags only", async () => {
     state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
     state.adminRows = { "s-1": { data: null, error: { message: "synthetic admin read failure" } } };
 
@@ -769,11 +771,21 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
       "[factsheet] resolve(probe) — admin strategy read failed",
       expect.objectContaining({ id: "s-1", caller: "probe" }),
     );
-    // One event, from the stage; the page adds none of its own. The fixture
-    // error carries no code, so the stage tags "none".
+    // One event, the page's count (167.2.1-REVIEW-R2 WR-01): the stage no
+    // longer captures for a probe. The fixture error carries no code, so the
+    // stage reports "none".
     expect(captureToSentryMock).toHaveBeenCalledTimes(1);
     expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
-      tags: { stage: "factsheet-resolve", caller: "probe", reason: "read_error", code: "none" },
+      level: "error",
+      tags: {
+        ...OUTCOME_TAGS,
+        counted_rows: "1",
+        read_error: "1",
+        composite_unbuildable: "0",
+        malformed_series: "0",
+        read_error_codes: "none:1",
+      },
+      extra: { gates: {}, malformedSources: {} },
     });
     const [err, ctx] = captureToSentryMock.mock.calls[0] as [Error, unknown];
     expect(err.message).not.toContain("s-1");
@@ -870,6 +882,76 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(captureToSentryMock).toHaveBeenCalledTimes(1);
     expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
       tags: { ...PROBE_TAGS.tags, probe_failures: "6" },
+    });
+  });
+
+  it("WR01-OUTCOMES-ONE-EVENT (167.2.1-REVIEW-R2 WR-01, SFH-R2 N-1): six read errors and two unbuildable composites on one page load are ONE Sentry event carrying the counts and the codes", async () => {
+    // Pool saturation arrives as a RETURNED error, one per row, not a throw.
+    // The resolve stage used to capture each one (and each composite refusal)
+    // for the probe: eight events per load, on every navigation.
+    const errIds = Array.from({ length: 6 }, (_, i) => `e-${i}`);
+    const compIds = ["c-0", "c-1"];
+    state.strategies = [...errIds, ...compIds].map((id) =>
+      row(id, { status: "draft", strategy_analytics: { computation_status: "complete" } }),
+    );
+    state.adminRows = Object.fromEntries([
+      ...errIds.map((id, i) => [
+        id,
+        { data: null, error: i < 4 ? { message: "synthetic statement timeout", code: "57014" } : { message: "synthetic fetch failure" } },
+      ]),
+      ...compIds.map((id) => [
+        id,
+        { data: adminStrategy(id, { data_quality_flags: { composite: true }, metrics_json_by_basis: null }), error: null },
+      ]),
+    ]);
+    state.jobs = Object.fromEntries(
+      compIds.map((id) => [id, [{ kind: "stitch_composite", status: "done", created_at: "2026-02-01T00:00:00.000Z" }]]),
+    );
+
+    const container = await renderPage();
+
+    for (const id of errIds) expect(noteOf(container, `Strategy ${id}`)).toBe(PROBE_UNREADABLE);
+    for (const id of compIds) expect(noteOf(container, `Strategy ${id}`)).toBe(UNBUILDABLE_COMPOSITE);
+    // Every failed read is still in the server log, with its id.
+    expect(
+      consoleError.mock.calls.filter((call: unknown[]) => call[0] === "[factsheet] resolve(probe) — admin strategy read failed"),
+    ).toHaveLength(6);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      level: "error",
+      tags: {
+        ...OUTCOME_TAGS,
+        counted_rows: "8",
+        read_error: "6",
+        composite_unbuildable: "2",
+        malformed_series: "0",
+        read_error_codes: "57014:4,none:2",
+      },
+      extra: { gates: { "composite_unbuildable:headline": 2 }, malformedSources: {} },
+    });
+    // Tags only: no strategy id reaches the event.
+    const [err, ctx] = captureToSentryMock.mock.calls[0] as [Error, unknown];
+    for (const id of [...errIds, ...compIds]) {
+      expect(err.message).not.toContain(id);
+      expect(JSON.stringify(ctx)).not.toContain(id);
+    }
+  });
+
+  it("WR01-COMPOSITE-ONLY-WARNING: an unbuildable composite alone is one event at warning, as the build's own capture is", async () => {
+    state.strategies = [row("c-pre86", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = {
+      "c-pre86": {
+        data: adminStrategy("c-pre86", { data_quality_flags: { composite: true }, metrics_json_by_basis: null }),
+        error: null,
+      },
+    };
+
+    await renderPage();
+
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock.mock.calls[0][1]).toMatchObject({
+      level: "warning",
+      tags: { ...OUTCOME_TAGS, composite_unbuildable: "1", read_error: "0" },
     });
   });
 
