@@ -3173,7 +3173,7 @@ Plans:
 **Goal:** After a migration applies to PROD, the committed baseline is re-dumped and proposed automatically, so main never sits red on baseline-content-drift waiting for a manual dump.
 **Requirements**: TODOS `[164.9.5-MANUAL-BASELINE-REDUMP]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 9 plans
+**Plans:** 1/9 plans executed
 
 ⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
 
@@ -3196,7 +3196,7 @@ Plans:
 
 **Wave 1**
 
-- [ ] 164.9.5-01-PLAN.md — wave 1: base sync onto #864 (D-29), then the thin end-to-end tracer: `scripts/baseline-redump.mjs` with its frozen CLI, one dump through `--gate-dump` and `--compose` to six staged paths and a bot commit
+- [x] 164.9.5-01-PLAN.md — wave 1: base sync onto #864 (D-29), then the thin end-to-end tracer: `scripts/baseline-redump.mjs` with its frozen CLI, one dump through `--gate-dump` and `--compose` to six staged paths and a bot commit
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
