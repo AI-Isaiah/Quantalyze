@@ -16,6 +16,11 @@ import { CONSTANT_YIELDS, navConstantYield } from "@/__tests__/fixtures/dispersi
  * EXACTLY as it renders for an all-zero leg (text, background and text colour,
  * and the accessible label), because no dispersion means no correlation. The
  * pair of two noisy legs is the control and must not move.
+ *
+ * What both render (founder decision D7, 2026-09-26; review round 1 WR-02 /
+ * SFH-H2): "—" on the neutral background, titled "Insufficient data", as the
+ * /compare matrix renders the same null. This file used to pin "0.00" there,
+ * which made the misleading "uncorrelated" reading a requirement.
  */
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
@@ -50,7 +55,7 @@ function row(id: string, returns: number[]) {
   };
 }
 
-type Cell = { text: string; bg: string; color: string; label: string | null };
+type Cell = { text: string; bg: string; color: string; label: string | null; title: string | null };
 
 /** Every rendered cell, row-major, of the computed-arm matrix. */
 function cells(legs: Array<ReturnType<typeof row>>): Cell[] {
@@ -61,6 +66,7 @@ function cells(legs: Array<ReturnType<typeof row>>): Cell[] {
       bg: td.style.backgroundColor,
       color: td.style.color,
       label: td.getAttribute("aria-label"),
+      title: td.getAttribute("title"),
     }),
   );
   unmount();
@@ -68,13 +74,32 @@ function cells(legs: Array<ReturnType<typeof row>>): Cell[] {
 }
 
 describe("T7 CorrelationMatrix widget: a constant-yield leg renders as an all-zero leg", () => {
-  it("reference: the all-zero leg's pair cells read 0.00 in the neutral colour", () => {
+  it("reference: the all-zero leg's pair cells read '—' (insufficient data) in the neutral colour, never 0.00", () => {
     const ref = cells([row("Flat", ZERO), row("NoisyA", noisy(0)), row("NoisyB", noisy(0.9))]);
     expect(ref).toHaveLength(9);
-    // Row 0 (the flat leg) against columns 1 and 2.
-    expect(ref[1].text).toBe("0.00");
-    expect(ref[2].text).toBe("0.00");
-    expect(ref[1].bg).toBe("rgb(255, 255, 255)");
+    // Row 0 (the flat leg) against columns 1 and 2, and the mirror cells.
+    for (const k of [1, 2, 3, 6]) {
+      expect(ref[k].text).toBe("—");
+      expect(ref[k].title).toBe("Insufficient data");
+      expect(ref[k].bg).toBe("rgb(255, 255, 255)");
+      expect(ref[k].label).toMatch(/: no data$/);
+    }
+    expect(ref.map((c) => c.text)).not.toContain("0.00");
+  });
+
+  it("a precomputed matrix with a missing cell renders that cell as '—', not 0.00", () => {
+    const { container, unmount } = render(
+      <CorrelationMatrix
+        data={{
+          strategies: [row("A", noisy(0)), row("B", noisy(0.9))],
+          analytics: { correlation_matrix: { A: { A: 1, B: 0.42 }, B: { B: 1 } } },
+        }}
+        {...base}
+      />,
+    );
+    const texts = Array.from(container.querySelectorAll('[data-testid="corr-cell"]')).map((td) => td.textContent);
+    unmount();
+    expect(texts).toEqual(["1.00", "0.42", "—", "1.00"]);
   });
 
   it.each(Object.entries(CONSTANT_YIELDS))(
