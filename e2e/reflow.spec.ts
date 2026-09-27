@@ -2,12 +2,17 @@ import { expect, test } from "@playwright/test";
 import { assertNoReflow } from "./helpers/reflow";
 
 /**
- * Phase 44-04 / A11Y-02 — Reflow gate (WCAG 1.4.10) at 320px CSS width.
+ * Phase 44-04 / A11Y-02 — Reflow gate (WCAG 1.4.10) at the 390px floor.
  *
  * Asserts the public `/security` route does not overflow horizontally
- * (`scrollWidth - clientWidth <= 1px`) at the WCAG-mandated 320px reflow
- * width, anchored on the visible "Security practices" H1 so a blank/404 /
- * unhydrated page fails LOUD instead of false-greening (see assertNoReflow).
+ * (`scrollWidth - clientWidth <= 1px`) at 390px, anchored on the visible
+ * "Security practices" H1 so a blank/404 / unhydrated page fails LOUD
+ * instead of false-greening (see assertNoReflow).
+ *
+ * Founder decision 2026-09-27: 390px (iPhone 12) is the narrowest supported
+ * width; 320px and 400% zoom are deliberately not required. The corrected
+ * helper measures `#main-content`, so a 320px run would demand 320-only
+ * fixes nobody asked for.
  *
  * UNSEEDED spec — runs against the placeholder-env build on a public route,
  * with NO `HAS_SEED_ENV` / `test.skip(!process.env.TEST_SUPABASE_*)` guard.
@@ -21,11 +26,12 @@ import { assertNoReflow } from "./helpers/reflow";
  * so phases 45-48 reuse it app-wide.
  */
 
-test.describe("reflow gate (WCAG 1.4.10) @ 320px", () => {
-  test("/security does not overflow horizontally at 320px", async ({
+test.describe("reflow gate (WCAG 1.4.10) @ 390px", () => {
+  test("/security does not overflow horizontally at 390px", async ({
     page,
   }) => {
-    await page.setViewportSize({ width: 320, height: 800 });
+    // Founder decision 2026-09-27: 390px floor, not 320px.
+    await page.setViewportSize({ width: 390, height: 800 });
     const res = await page.goto("/security");
     // Sanity: the route resolved (the visible-anchor check in assertNoReflow
     // is the real fail-loud guard, this just surfaces an outright 5xx early).
