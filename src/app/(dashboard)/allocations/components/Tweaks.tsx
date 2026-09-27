@@ -54,18 +54,16 @@ export function Tweaks() {
       ref={panelRef}
       role="dialog"
       aria-label="Tweaks"
+      // Phase 170 / N-TWEAKS — position, offsets, width, max height and
+      // overflow are classes so below md the panel opens above the nav
+      // (bottom-20) and at md+ sits in the corner (md:bottom-5). Visual
+      // styles stay inline, unchanged.
+      className="fixed z-50 right-4 left-4 bottom-20 max-h-[calc(100dvh-10rem)] overflow-y-auto sm:left-auto sm:w-[300px] md:right-5 md:bottom-5"
       style={{
-        position: "fixed",
-        bottom: 20,
-        right: 20,
-        width: 300,
-        maxHeight: "80vh",
-        overflowY: "auto",
         background: "var(--color-surface)",
         border: "1px solid var(--color-border)",
         borderRadius: 10,
         boxShadow: "0 12px 32px rgba(15, 23, 42, 0.12), 0 2px 6px rgba(15, 23, 42, 0.06)",
-        zIndex: 50,
         padding: 16,
         fontFamily: "var(--font-sans)",
       }}

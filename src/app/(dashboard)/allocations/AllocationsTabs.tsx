@@ -917,6 +917,10 @@ export function AllocationsTabs(
             </svg>
             <span>Export</span>
           </button>
+          {/* Phase 170 / AD-05 — inline at every width, between Export and
+              + Allocation. The root-level mount is removed so exactly one
+              toggle renders. <Tweaks /> stays at the dashboard root. */}
+          <TweaksToggle />
           {/* Phase 116 / ADDALLOC-01/02/03 — primary context-aware header
               button. Its label, action, and aria-label are derived from
               activeTab: on Scenario it reads "+ Strategy" and opens the
@@ -1028,11 +1032,8 @@ export function AllocationsTabs(
             />
           ))}
       </div>
-      {/* PR3 (HANDOFF G5) — Floating Tweaks chip + panel mounted at the
-          dashboard root so they stay visible across all tabs (Overview
-          / Holdings / Outcomes / Mandate / Risk / Scenario) and float
-          bottom-right per the truth screenshot. */}
-      <TweaksToggle />
+      {/* Phase 170 / AD-05 — the toggle lives in the header action row.
+          The panel stays mounted here so it is available on every tab. */}
       <Tweaks />
       {/* Phase 116 / ADDALLOC-02 — tab-agnostic host for the "+ Allocation"
           onboarding wizard. Rendered unconditionally (null while closed) so the
