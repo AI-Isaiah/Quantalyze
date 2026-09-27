@@ -354,3 +354,12 @@ line is kept for the record of how the numbers were maintained by hand until now
 # running `state.update-progress`, which derives from THIS checkout and is blind to the
 # `-pr`-filtered phases by construction.
 ```
+
+## 2026-09-27 — `progress:` re-derived at `a4cd9b32`
+
+Moved from 54/35/310/299/65% to **69/40/353/347/58%**. The measurement:
+
+- **Phases:** 73 v1.20 phases have a roadmap section. 165, 165.1 and 165.2 were retired by the founder, and 164.10 was closed by decision, so 69 count. 40 of those have `VERIFICATION.md` `status: passed`.
+- **Plans:** the PLAN and SUMMARY files for phases 158 and later under `.planning/phases/` on main.
+
+The percent went DOWN because about 20 phases were added since the last reading, not because work was undone. A phase whose verification is `human_needed` is not counted as complete. The full table is `### v1.20 Progress` in ROADMAP.md.
