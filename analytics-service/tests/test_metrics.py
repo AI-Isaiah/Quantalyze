@@ -3439,12 +3439,11 @@ def _q166_benchmark_trigger() -> tuple[pd.Series, pd.Series]:
 def _q166_calendar_mismatch() -> tuple[pd.Series, pd.Series]:
     """(weekday strategy, 7-day benchmark) over DIFFERENT calendars.
 
-    The strategy trades business days only (160 rows). The benchmark trades
-    every calendar day and starts earlier and ends later. `set(period) !=
-    set(benchmark.index)`, so quantstats' `_prepare_benchmark` takes its
-    reindex/bfill branch. Production hits that branch on every benchmarked
-    strategy: `compute_qstats_scalars` receives the unaligned ~1000-day BTC
-    series (research Q3, Pitfall 3). Both legs are benign.
+    The strategy trades business days only (160 rows, from a Thursday). The
+    benchmark trades every calendar day and starts earlier and ends later. It
+    is the SC3 weekday-vs-7-day pair of 166.4 D-A: each Monday return is paired
+    with the benchmark's compounded Friday-to-Monday move, not its
+    Sunday-to-Monday daily move. Both legs are benign.
     """
     s_idx = pd.bdate_range("2024-02-01", periods=160)
     strategy = pd.Series(
@@ -3510,11 +3509,10 @@ def test_q166_benchmark_r_squared_is_pair_permutation_invariant():
     )
 
 
-_Q166_R_SQUARED_PARITY_PAIRS = (
-    "golden_with_benchmark",
-    "calendar_mismatch",
-    "golden_with_nan_days_and_benchmark",
-)
+# 166.4 D-06: live quantstats parity is kept only where both legs share one
+# calendar and carry no NaN; the other two cases are re-anchored below on the
+# squared correlation of the shared pair.
+_Q166_R_SQUARED_PARITY_PAIRS = ("golden_with_benchmark",)
 
 
 def _q166_benchmark_pair(
@@ -3534,10 +3532,7 @@ def _q166_benchmark_pair(
 @pytest.mark.parametrize("pair_name", _Q166_R_SQUARED_PARITY_PAIRS)
 def test_q166_parity_r_squared_matches_live_quantstats(pair_name, request):
     """BENIGN PARITY (D-08), one collected case per pair. Neither leg can trip
-    the guess, so the mirror must equal live 0.0.81 `r_squared` to rel 1e-12.
-    `calendar_mismatch` exercises the reindex/bfill branch of
-    `_prepare_benchmark`: a mirror that aligned on the inner join instead would
-    move r_squared for every benchmarked strategy (Pitfall 3)."""
+    the guess, so the mirror must equal live 0.0.81 `r_squared` to rel 1e-12."""
     strategy, benchmark = _q166_benchmark_pair(pair_name, request)
     for leg in (strategy, benchmark):
         assert not bool(leg.min() >= 0 and leg.max() > 1), "fixture would trip the guess"
@@ -3546,6 +3541,31 @@ def test_q166_parity_r_squared_matches_live_quantstats(pair_name, request):
     assert expected is not None
     assert actual == pytest.approx(expected, rel=1e-12, abs=0.0), (
         f"r_squared on {pair_name} drifted from live quantstats 0.0.81: {actual} vs {expected}"
+    )
+
+
+@pytest.mark.parametrize(
+    "pair_name", ("calendar_mismatch", "golden_with_nan_days_and_benchmark")
+)
+def test_q166_r_squared_equals_shared_pair_correlation_squared(pair_name, request):
+    """166.4 D-06 (2026-09-27, ratified by the founder 2026-09-27): r_squared is the squared correlation of the shared pair.
+
+    These two cases pinned live quantstats 0.0.81 `r_squared` until 166.4. On
+    unequal calendars quantstats back-fills the benchmark onto the strategy's
+    dates and zero-fills the first return, and on NaN strategy days it
+    zero-fills them for r_squared only, so its value is not the squared
+    correlation of any pair a benchmark metric reads. Under 166.4 D-A r_squared
+    reads the ONE interval pair, pairwise-complete, so it moves by
+    construction. Measured moves: calendar_mismatch 0.0005305518445182663 ->
+    0.0004969133053590204; golden_with_nan_days_and_benchmark
+    0.0011742485146902892 -> 0.0011740012121330516.
+    """
+    strategy, benchmark = _q166_benchmark_pair(pair_name, request)
+    mj = compute_all_metrics(strategy, benchmark)["metrics_json"]
+    assert mj["r_squared_status"] == "ok", mj["r_squared_status"]
+    assert mj["correlation"] is not None
+    assert mj["r_squared"] == pytest.approx(mj["correlation"] ** 2, rel=1e-12, abs=0.0), (
+        f"r_squared on {pair_name}={mj['r_squared']}; squared correlation is {mj['correlation'] ** 2}"
     )
 
 
@@ -3784,8 +3804,12 @@ _Q166_ROLLING_PARITY_PAIRS = ("golden_with_benchmark", "calendar_mismatch")
 def _q166_rolling_pair(
     name: str, request: pytest.FixtureRequest
 ) -> tuple[pd.Series, pd.Series]:
-    """The pair inner-joined exactly as `_rolling_alpha_beta` joins it before
-    the rolling pass."""
+    """The pair inner-joined on the date intersection, both legs on one index.
+
+    It is a direct math pin of `_rolling_greeks` against live 0.0.81
+    `rolling_greeks` on equal-index input. It is not the pair production
+    passes: since 166.4 D-A `_rolling_alpha_beta` hands `_rolling_greeks` the
+    interval pair from `_benchmark_pair`."""
     strategy, benchmark = (
         _q166_benchmark_trigger()
         if name == "benchmark_trigger"
@@ -3800,8 +3824,9 @@ def test_q166_parity_rolling_beta_matches_live_quantstats(pair_name, request):
     rolling beta point must equal live 0.0.81 `rolling_greeks` at rel 1e-12,
     before any rounding, and the undefined (warm-up) points must sit on the
     same dates. `calendar_mismatch` is a weekday strategy against a 7-day
-    benchmark; after the inner join the two calendars agree, which is the
-    shape production passes."""
+    benchmark; after the inner join the two calendars agree, so this is a
+    direct math pin of `_rolling_greeks` on equal-index input, not the pair
+    production passes (that is `_benchmark_pair`'s interval pair, 166.4 D-A)."""
     r, b = _q166_rolling_pair(pair_name, request)
     for leg in (r, b):
         assert not bool(leg.min() >= 0 and leg.max() > 1), "fixture would trip the guess"

@@ -39,6 +39,7 @@ from services.metrics import (
     _benchmark_pair,
     _rolling_alpha_beta,
     compute_all_metrics,
+    strategy_calendar_is_sparse,
 )
 from tests.test_metrics import (
     _Q166_ROLLING_WINDOW,
@@ -373,3 +374,32 @@ def test_benchalign_zone_mismatch_degrades_through_compute_all_metrics(caplog):
     assert result.sibling_kinds["rolling_alpha"] == []
     assert result.sibling_kinds["rolling_beta"] == []
     assert mj["r_squared"] is None and mj["r_squared_status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# SC7 / 166.4 D-03: the engine's definition of a sparse calendar, which
+# Phase 166.3 cites by name to widen its recompute set.
+# ---------------------------------------------------------------------------
+
+
+def test_benchalign_sparse_predicate_true_on_weekday_calendar():
+    """SC7 (166.4 D-03): a business-day calendar is sparse (a Friday-to-Monday step is three days)."""
+    strategy, _ = _q166_calendar_mismatch()
+    assert strategy_calendar_is_sparse(strategy.index) is True
+
+
+def test_benchalign_sparse_predicate_false_on_dense_calendar():
+    """SC7 (166.4 D-03): a daily calendar is dense, with or without NaN guard days; empty and single-date indexes are not sparse.
+
+    NaN values do not remove dates: a broker series with NaN guard days keeps
+    every calendar day in its index, so against a contiguous benchmark its
+    interval pair equals the daily inner join.
+    """
+    daily = _dense_daily("2023-01-01", 400, 16654)
+    assert strategy_calendar_is_sparse(daily.index) is False
+    with_nan = daily.copy()
+    with_nan.iloc[[10, 200, 399]] = np.nan
+    assert int(with_nan.isna().sum()) == 3
+    assert strategy_calendar_is_sparse(with_nan.index) is False
+    assert strategy_calendar_is_sparse(pd.DatetimeIndex([])) is False
+    assert strategy_calendar_is_sparse(daily.index[:1]) is False
