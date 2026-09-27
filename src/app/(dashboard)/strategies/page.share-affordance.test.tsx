@@ -51,7 +51,7 @@ vi.mock("@/components/strategy/PendingIntros", () => ({
  * page ask the wrong question while this file stayed green.
  */
 const shareProps = vi.hoisted(
-  () => [] as Array<{ strategyId: string; published: boolean }>,
+  () => [] as Array<{ strategyId: string; published: boolean; size?: "sm" | "md" }>,
 );
 vi.mock("@/components/strategy/ShareableLink", async () => {
   const actual = await vi.importActual<
@@ -59,8 +59,16 @@ vi.mock("@/components/strategy/ShareableLink", async () => {
   >("@/components/strategy/ShareableLink");
   return {
     ...actual,
-    ShareableLink: (props: { strategyId: string; published: boolean }) => {
-      shareProps.push({ strategyId: props.strategyId, published: props.published });
+    ShareableLink: (props: {
+      strategyId: string;
+      published: boolean;
+      size?: "sm" | "md";
+    }) => {
+      shareProps.push({
+        strategyId: props.strategyId,
+        published: props.published,
+        size: props.size,
+      });
       return React.createElement(
         "span",
         { "data-testid": `share-${props.strategyId}` },
@@ -301,6 +309,20 @@ describe("StrategiesPage — N-STRAT row layout (170-05)", () => {
     const group = rowEl.lastElementChild as HTMLElement;
     expect(group.className).toContain("flex-wrap");
     expect(group.className).toContain("sm:shrink-0");
+  });
+});
+
+describe("StrategiesPage — private-link control is a small secondary peer (170-05)", () => {
+  it("passes size=sm through to ShareableLink", async () => {
+    // WHY: at V390 the md private-link button overlapped the strategy name.
+    // /strategies asks for the sm peer; the discovery page must not, so this
+    // is the only call site that may pass the prop.
+    state.strategies = [row("s-sm", "draft")];
+
+    await renderPage();
+
+    expect(shareProps).toHaveLength(1);
+    expect(shareProps[0].size).toBe("sm");
   });
 });
 
