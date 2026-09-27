@@ -3643,6 +3643,7 @@ Plans:
 - **Cumulative read as daily (inferred, not yet measured).** The `TODOS.md` entry `[169-PORTFOLIO-ANALYTICS-COLUMNS]` (booked by Phase 169 D-53 on `feat/169-pagetruth`) infers that the compute reads `returns_series` as daily returns while `analytics-service/services/metrics.py` writes it as a cumulative series.
 - **Is it called at all?** The analytics service logs show 0 lines of `Portfolio analytics computation failed` between 2026-09-13 and 2026-09-27. With a select that should fail, that silence means either the endpoint is not being called, or its failure is not reaching that log line. The phase's research answers this FIRST, before any fix is planned.
 - **Related:** Phase 169's RISKUNIT plan (169-09, D-49) fixes the risk-attribution display's double percent; its browser item records an empty `/portfolios/[id]` panel as this defect, not as evidence against the unit fix (169 D-53).
+- **Routed 2026-09-27, from the 166.4 BENCHALIGN research:** the `benchmark_comparison` block in `_compute_portfolio_analytics` (`analytics-service/routers/portfolio.py`) pairs the portfolio with BTC by an inner-join correlation, and BTC's own TWR there is compounded over the joined dates only, so it drops weekend moves. It must use the founder's D-A interval-matched pairing (166.4 D-A in its ROADMAP entry; D-04, D-05 and D-07 are recorded in `166.4-CONTEXT.md` on `feat/166.4-benchalign`). Found by 166.4's research as a same-class site outside 166.4's locked scope.
 
 ## Success Criteria
 
@@ -3651,6 +3652,7 @@ Plans:
 3. **Cumulative vs daily is measured and fixed.** Whether the stored series the compute reads is cumulative or daily is measured against what `metrics.py` writes, and the compute converts it correctly; a test on a known cumulative fixture fails on the old handling.
 4. **A failed compute is loud.** A failed compute surfaces as an error the caller and the logs can see (never an empty or stale result that reads as success); a test fails on the old silent path.
 5. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and `/portfolios/[id]` is re-checked in the logged-in browser after deploy (desktop, 390px and desktop 200% zoom).
+6. **The BTC comparison uses the D-A pairing (added 2026-09-27).** `benchmark_comparison`'s correlation pairs each portfolio return with the BTC return over the same interval (166.4 D-A, D-04, D-05, D-07), and its BTC TWR includes the weekend moves the inner join drops. A test written first for each (the correlation, and the BTC TWR) fails on the old code.
 
 Plans:
 
