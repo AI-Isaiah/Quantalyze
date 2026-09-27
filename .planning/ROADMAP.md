@@ -2651,7 +2651,7 @@ the former 4 is renumbered 3 below, text unchanged.
 (dated 2026-09-25, from 164.6.5 plan 01) here. Both close only on the next live wedge captured before
 any restart or heal, which is 164.6.8's evidence, so both `**Owns**` lines now live under Phase
 164.6.8, carried verbatim. This phase owns neither.
-**Plans:** 0 plans
+**Plans:** 8 plans
 
 ⛔ **SAME INCIDENT AS 164.6.5, DIFFERENT DEFECT.** 164.6.5 makes validation stop breaking the
 terminal; this phase makes the terminal stop being a shared mutable resource. 164.6.5 is
@@ -2675,7 +2675,14 @@ independently shippable; this is the architecture.
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.6.6 to break down)
+- [ ] 164.6.6-01-PLAN.md — handover record: every job-terminal switch recorded against the displaced holder (wave 2, after the founder decision in plan 02)
+- [ ] 164.6.6-02-PLAN.md — FOUNDER decisions D-01..D-07 (eviction scope, isolation option, 164.6.5 D-07 reversal, scrub cadence, H3) recorded in CONTEXT.md and here (wave 1, gates every other plan)
+- [ ] 164.6.6-03-PLAN.md — validation-gateway runbook + FOUNDER stand-up and scrub spike S-01..S-08
+- [ ] 164.6.6-04-PLAN.md — both validate sites routed to the validation terminal, fail loud when unset
+- [ ] 164.6.6-05-PLAN.md — narrow terminate-and-scrub verb over rpyc, gated like the recycle verb
+- [ ] 164.6.6-06-PLAN.md — validation terminal scrubbed inside the lease after every validation
+- [ ] 164.6.6-07-PLAN.md — job terminal scrubbed on every ipc_fault recovery, credentialed relaunch within budget
+- [ ] 164.6.6-08-PLAN.md — live-check runbook + FOUNDER post-deploy verification L1..L7
 
 ### Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button (INSERTED)
 
