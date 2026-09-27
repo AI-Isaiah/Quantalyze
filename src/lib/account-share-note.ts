@@ -8,16 +8,17 @@
  * disconnected or deleted for it (D-01): the card names the holder and points
  * at the Disconnect / Delete controls that already sit beside the note.
  *
- * Reader rule, from COMMENT ON COLUMN api_keys.account_share_kind (migration
- * 20260925120000): a marked key reads through its holder only while the
- * holder is WORKING, `disconnected_at IS NULL AND sync_status <> 'revoked'`.
- * The marker is not cleared when the holder departs, so once the holder has
- * been disconnected or revoked the marked key counts on its own and the note
- * says nothing. A NULL `sync_status` counts as working, as in the Python
- * reader `_counted_through_holder` (equity_reconstruction.py), so the two
- * surfaces agree on the same row. ⚠️ That definition of "working" is
- * PROVISIONAL in the COMMENT: a founder decision on it is still owed, and this
- * function, `_counted_through_holder` and the derive gate move together.
+ * Reader rule, D-18 (founder, 2026-09-27), stated in COMMENT ON COLUMN
+ * api_keys.account_share_kind (migration 20260927180000): a marked key reads
+ * through its holder only while the holder is WORKING, i.e. `is_active` is
+ * true, `disconnected_at` is null and `sync_status` is null or not one of
+ * 'revoked', 'sign_in_failed', 'error'. A NULL `sync_status` (a key that has
+ * not synced yet) counts as working, as in the allocator's eligible-key
+ * predicate. The marker is not cleared when the holder departs or starts
+ * failing, so once the holder is inactive or failing the marked key counts on
+ * its own and the note says nothing: the account is counted by the healthy
+ * key instead of by nobody. This function and the KEY_NOT_DEPARTED test in
+ * set_departed_key_history_inclusion move together.
  *
  * `'composite_member'` (D-04, a key rotation inside one composite strategy) is
  * legitimate and shows nothing.
@@ -33,6 +34,7 @@ export interface AccountShareNoteKey {
   id: string;
   exchange: string;
   label: string;
+  is_active: boolean;
   sync_status: string | null;
   disconnected_at: string | null;
   account_shared_with_api_key_id: string | null;
@@ -42,11 +44,22 @@ export interface AccountShareNoteKey {
 /** Named in the note when the holder row is not in the caller's key list. */
 export const ACCOUNT_SHARE_HOLDER_FALLBACK_LABEL = "another of your keys";
 
+/** Last-sync statuses that make a holder NOT working (D-18). */
+const NOT_WORKING_SYNC_STATUSES: ReadonlySet<string> = new Set([
+  "revoked",
+  "sign_in_failed",
+  "error",
+]);
+
 /** The reader rule's "working holder" (see the module docstring). */
 export function isWorkingHolder(
-  holder: Pick<AccountShareNoteKey, "disconnected_at" | "sync_status">,
+  holder: Pick<AccountShareNoteKey, "is_active" | "disconnected_at" | "sync_status">,
 ): boolean {
-  return holder.disconnected_at === null && holder.sync_status !== "revoked";
+  return (
+    holder.is_active === true &&
+    holder.disconnected_at === null &&
+    (holder.sync_status === null || !NOT_WORKING_SYNC_STATUSES.has(holder.sync_status))
+  );
 }
 
 function holderLabel(holder: AccountShareNoteKey): string {

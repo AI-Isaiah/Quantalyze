@@ -54,7 +54,7 @@
 -- Usage:
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/test_api_keys_account_identity.sql
 --
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260922120000_api_keys_sync_status_sign_in_failed.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql","supabase/migrations/20260927180000_working_holder_rule_d18.sql"]}
 
 -- Reap fixtures orphaned by a crashed earlier run. Age-scoped so it can never
 -- touch a concurrent run's users.
@@ -494,6 +494,7 @@ DECLARE
   k_live     uuid := gen_random_uuid();   -- user A, live
   k_gone     uuid := gen_random_uuid();   -- user A, soft-disconnected
   k_rev      uuid := gen_random_uuid();   -- user A, revoked, never disconnected
+  k_signin   uuid := gen_random_uuid();   -- user A, connected, active, sign_in_failed (D-18)
   v_err      text;
   v_msg      text;
   v_con      text;
@@ -514,7 +515,8 @@ BEGIN
   INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, disconnected_at, sync_status)
   VALUES (k_live, uid_a, 'okx',     'hist live',    'enc', true, NULL,  'idle'),
          (k_gone, uid_a, 'bybit',   'hist gone',    'enc', true, now(), 'idle'),
-         (k_rev,  uid_a, 'binance', 'hist revoked', 'enc', true, NULL,  'revoked');
+         (k_rev,  uid_a, 'binance', 'hist revoked', 'enc', true, NULL,  'revoked'),
+         (k_signin, uid_a, 'deribit', 'hist signin', 'enc', true, NULL, 'sign_in_failed');
 
   -- ----- HIST-check: history_inclusion outside the set is REFUSED -------------
   -- RED-UNDER: drop api_keys_history_inclusion_valid on the LIVE database.
@@ -534,8 +536,8 @@ BEGIN
 
   -- ----- HIST-writes: 'exclude' on the caller's disconnected key is STORED -----
   -- RED-UNDER: make the RPC's UPDATE write the column back to itself in
-  --            migration 20260925120000, so the owner's choice is dropped.
-  -- RED-UNDER-M: {"arm":"HIST-writes","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"     SET history_inclusion = p_inclusion","replace":"     SET history_inclusion = history_inclusion","occurrences":1}]}
+  --            migration 20260927180000, so the owner's choice is dropped.
+  -- RED-UNDER-M: {"arm":"HIST-writes","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"     SET history_inclusion = p_inclusion","replace":"     SET history_inclusion = history_inclusion","occurrences":1}]}
   v_err := NULL;
   BEGIN
     v_ret := public.set_departed_key_history_inclusion(k_gone, 'exclude');
@@ -563,13 +565,13 @@ BEGIN
   -- the SKIP LOCKED behaviour, which rests on the claim functions. The call
   -- above found no job at step 1, so step 3 is the only lock taken.
   -- RED-UNDER: drop FOR UPDATE from the RPC's step 3 SELECT in migration
-  --            20260925120000. The job the RPC hands back is then no longer
+  --            20260927180000. The job the RPC hands back is then no longer
   --            locked by it (xmax stays 0). That is all this arm proves: the
   --            lock on the returned row. The row here is the RPC's own
   --            uncommitted insert, which no claimer can see either way, so the
   --            window the lock closes (a row another backend committed) is
   --            reasoned, not shown; step 1's FOR UPDATE is reasoned too.
-  -- RED-UNDER-M: {"arm":"HIST-lock","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"     WHERE id = v_job\n       FOR UPDATE;","replace":"     WHERE id = v_job;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"HIST-lock","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"     WHERE id = v_job\n       FOR UPDATE;","replace":"     WHERE id = v_job;","occurrences":1}]}
   -- Whether a job exists at all is HIST-enqueues' question (its twin deletes
   -- the enqueue, leaving no row), so this arm judges only a row that exists.
   SELECT count(*), max(xmax::text) INTO v_jobs, v_val
@@ -583,10 +585,10 @@ BEGIN
   -- Exactly ONE derive_allocator_equity job for the caller, even after a second
   -- call (the allocator-scoped in-flight dedup).
   -- RED-UNDER: delete the enqueue_compute_job call from the RPC in migration
-  --            20260925120000. The toggle would be stored and never shown;
+  --            20260927180000. The toggle would be stored and never shown;
   --            the RPC now refuses a NULL job id by name, so this arm sees
   --            that refusal on its call.
-  -- RED-UNDER-M: {"arm":"HIST-enqueues","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"        v_job := enqueue_compute_job(\n          p_strategy_id  := NULL,\n          p_kind         := 'derive_allocator_equity',\n          p_allocator_id := v_uid\n        );","replace":"        v_job := NULL;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"HIST-enqueues","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"        v_job := enqueue_compute_job(\n          p_strategy_id  := NULL,\n          p_kind         := 'derive_allocator_equity',\n          p_allocator_id := v_uid\n        );","replace":"        v_job := NULL;","occurrences":1}]}
   v_err := NULL;
   BEGIN
     v_ret := public.set_departed_key_history_inclusion(k_gone, 'exclude');
@@ -603,9 +605,9 @@ BEGIN
 
   -- ----- HIST-reset: NULL resets to the default rule ---------------------------
   -- RED-UNDER: make the RPC's UPDATE ignore a NULL (COALESCE onto the stored
-  --            value) in migration 20260925120000. The owner could never go back
+  --            value) in migration 20260927180000. The owner could never go back
   --            to the default rule.
-  -- RED-UNDER-M: {"arm":"HIST-reset","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"     SET history_inclusion = p_inclusion","replace":"     SET history_inclusion = COALESCE(p_inclusion, history_inclusion)","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"HIST-reset","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"     SET history_inclusion = p_inclusion","replace":"     SET history_inclusion = COALESCE(p_inclusion, history_inclusion)","occurrences":1}]}
   v_err := NULL;
   BEGIN
     v_ret := public.set_departed_key_history_inclusion(k_gone, NULL);
@@ -619,9 +621,9 @@ BEGIN
   END IF;
 
   -- ----- HIST-revoked: a REVOKED (never disconnected) key is departed too ----
-  -- RED-UNDER: drop the revoked leg from the RPC's departed test in migration
-  --            20260925120000, so only a disconnected key counts as departed.
-  -- RED-UNDER-M: {"arm":"HIST-revoked","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_disconnected IS NULL AND v_sync_status IS DISTINCT FROM 'revoked' THEN","replace":"  IF v_disconnected IS NULL THEN","occurrences":1}]}
+  -- RED-UNDER: drop 'revoked' from the departed test's failing-status list in
+  --            migration 20260927180000, so a revoked key is refused as working.
+  -- RED-UNDER-M: {"arm":"HIST-revoked","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"v_sync_status NOT IN ('revoked', 'sign_in_failed', 'error')","replace":"v_sync_status NOT IN ('sign_in_failed', 'error')","occurrences":1}]}
   v_err := NULL;
   BEGIN
     v_ret := public.set_departed_key_history_inclusion(k_rev, 'include');
@@ -634,11 +636,12 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (HIST-revoked): a credential-revoked key was not accepted as departed (SQLSTATE %, %; stored %). D-09: revoked keys get the toggle too.', v_err, v_msg, v_val;
   END IF;
 
-  -- ----- HIST-live: a LIVE, non-revoked key is REFUSED by name, nothing written
+  -- ----- HIST-live: a WORKING key (D-18) is REFUSED by name, nothing written --
   -- 55000 (object_not_in_prerequisite_state), DISTINCT from the 22023 of
   -- HIST-value, so the client maps the two refusals by code.
-  -- RED-UNDER: disable the departed test in migration 20260925120000 (IF FALSE).
-  -- RED-UNDER-M: {"arm":"HIST-live","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_disconnected IS NULL AND v_sync_status IS DISTINCT FROM 'revoked' THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER: disable the departed test in migration 20260927180000 (IF FALSE
+  --            on its first line).
+  -- RED-UNDER-M: {"arm":"HIST-live","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"  IF v_is_active AND v_disconnected IS NULL","replace":"  IF FALSE AND v_disconnected IS NULL","occurrences":1}]}
   v_err := NULL; v_msg := NULL;
   BEGIN
     v_ret := public.set_departed_key_history_inclusion(k_live, 'exclude');
@@ -650,11 +653,30 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (HIST-live): a LIVE key was not refused with 55000 KEY_NOT_DEPARTED, or a value was written (SQLSTATE %, message %, stored %). A live key always counts.', v_err, v_msg, v_val;
   END IF;
 
+  -- ----- HIST-signin: a connected, ACTIVE, sign_in_failed key is departed (D-18)
+  -- D-18 (founder, 2026-09-27): a WORKING key is active, connected and its last
+  -- sync is not revoked, sign_in_failed or error. A key whose sign-in fails is
+  -- not working, so its owner has a history choice for it.
+  -- RED-UNDER: drop 'sign_in_failed' from the departed test's failing-status
+  --            list in migration 20260927180000, so a sign_in_failed key is
+  --            refused as working.
+  -- RED-UNDER-M: {"arm":"HIST-signin","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"v_sync_status NOT IN ('revoked', 'sign_in_failed', 'error')","replace":"v_sync_status NOT IN ('revoked', 'error')","occurrences":1}]}
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    v_ret := public.set_departed_key_history_inclusion(k_signin, 'exclude');
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  SELECT history_inclusion INTO v_val FROM api_keys WHERE id = k_signin;
+  IF v_err IS NOT NULL OR v_val IS DISTINCT FROM 'exclude' THEN
+    RAISE EXCEPTION 'TEST FAILED (HIST-signin): a connected, active key whose last sync was sign_in_failed was not accepted as departed (SQLSTATE %, message %, stored %). D-18: a failing key is not a working key.', v_err, v_msg, v_val;
+  END IF;
+
   -- ----- HIST-value: a value outside include / exclude / NULL is REFUSED 22023 -
-  -- RED-UNDER: disable the RPC's value test in migration 20260925120000
+  -- RED-UNDER: disable the RPC's value test in migration 20260927180000
   --            (IF FALSE); the table CHECK then answers 23514 instead of the
   --            named 22023 the client maps.
-  -- RED-UNDER-M: {"arm":"HIST-value","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF p_inclusion IS NOT NULL AND p_inclusion NOT IN ('include', 'exclude') THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"HIST-value","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"  IF p_inclusion IS NOT NULL AND p_inclusion NOT IN ('include', 'exclude') THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   v_err := NULL; v_msg := NULL;
   BEGIN
     v_ret := public.set_departed_key_history_inclusion(k_gone, 'maybe');
@@ -668,9 +690,9 @@ BEGIN
   -- ----- HIST-owner: another user's key is REFUSED 42501, nothing written -----
   -- T-167.1.2-04. Two layers: the row lookup is scoped to the caller (so a
   -- foreign row is never even locked) AND the owner test refuses a mismatch.
-  -- RED-UNDER: remove BOTH layers in migration 20260925120000 — the lookup's
+  -- RED-UNDER: remove BOTH layers in migration 20260927180000 — the lookup's
   --            `AND user_id = v_uid` scope and the `v_owner <> v_uid` leg.
-  -- RED-UNDER-M: {"arm":"HIST-owner","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"   WHERE id = p_api_key_id\n     AND user_id = v_uid\n     FOR UPDATE;","replace":"   WHERE id = p_api_key_id\n     FOR UPDATE;","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_owner IS NULL OR v_owner <> v_uid THEN\n    RAISE EXCEPTION 'set_departed_key_history_inclusion: caller","replace":"  IF v_owner IS NULL THEN\n    RAISE EXCEPTION 'set_departed_key_history_inclusion: caller","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"HIST-owner","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"   WHERE id = p_api_key_id\n     AND user_id = v_uid\n     FOR UPDATE;","replace":"   WHERE id = p_api_key_id\n     FOR UPDATE;","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"  IF v_owner IS NULL OR v_owner <> v_uid THEN\n    RAISE EXCEPTION 'set_departed_key_history_inclusion: caller","replace":"  IF v_owner IS NULL THEN\n    RAISE EXCEPTION 'set_departed_key_history_inclusion: caller","occurrences":1}]}
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
   v_err := NULL;
@@ -700,9 +722,9 @@ BEGIN
   -- 2026-09-26: either one-step mutation left this arm NO-RED). The twin
   -- therefore disables both.
   -- RED-UNDER: disable BOTH running refusals (IF FALSE) in migration
-  --            20260925120000. The toggle is then stored and silently folded
+  --            20260927180000. The toggle is then stored and silently folded
   --            into the job that already read the old value.
-  -- RED-UNDER-M: {"arm":"HIST-running","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_job_status = 'running' THEN","replace":"  IF FALSE THEN","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_job_status = 'running' THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"HIST-running","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"  IF v_job_status = 'running' THEN","replace":"  IF FALSE THEN","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"  IF v_job_status = 'running' THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   -- A worker claims the caller's pending recompose (the claim's own transition,
   -- claim_token included).
   UPDATE compute_jobs
@@ -743,9 +765,9 @@ BEGIN
   -- claimed_at, claimed_by and claim_token as the claim wrote them, and the
   -- reuse must clear all three, as reset_stalled_compute_jobs does.
   -- RED-UNDER: make the RPC's failed_retry lookup find nothing (AND FALSE) in
-  --            migration 20260925120000. The enqueue then queues a pending
+  --            migration 20260927180000. The enqueue then queues a pending
   --            twin beside the failed_retry row.
-  -- RED-UNDER-M: {"arm":"HIST-retry","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"     AND cj.status = 'failed_retry'","replace":"     AND FALSE","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"HIST-retry","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"     AND cj.status = 'failed_retry'","replace":"     AND FALSE","occurrences":1}]}
   -- The worker's attempt failed and backed off (mark_compute_job_failed's move:
   -- status, last_error, error_kind and next_attempt_at; the claim columns are
   -- left as the claim wrote them).
@@ -762,9 +784,9 @@ BEGIN
   -- reuse lookup would take if its allocator filter were gone. A's toggle must
   -- leave it exactly as it was: still failed_retry, still -infinity.
   -- RED-UNDER: drop the allocator filter from the RPC's failed_retry lookup in
-  --            migration 20260925120000 (WHERE TRUE). A's toggle then reuses
+  --            migration 20260927180000 (WHERE TRUE). A's toggle then reuses
   --            B's row, putting another tenant's job back to pending.
-  -- RED-UNDER-M: {"arm":"HIST-tenant","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"     WHERE cj.allocator_id = v_uid","replace":"     WHERE TRUE","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"HIST-tenant","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"     WHERE cj.allocator_id = v_uid","replace":"     WHERE TRUE","occurrences":1}]}
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
   v_b_job := public.enqueue_compute_job(
@@ -828,9 +850,9 @@ BEGIN
   -- flip's unique check waits on it, and only then collides. That wait is
   -- reasoned; the trigger reproduces the collision and the handler's answer.
   -- RED-UNDER: take away the RPC's unique_violation handler around the flip
-  --            in migration 20260925120000 (it then catches division_by_zero
+  --            in migration 20260927180000 (it then catches division_by_zero
   --            instead). The raw 23505 reaches the caller with no name.
-  -- RED-UNDER-M: {"arm":"HIST-requeued","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"      EXCEPTION WHEN unique_violation THEN","replace":"      EXCEPTION WHEN division_by_zero THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"HIST-requeued","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"      EXCEPTION WHEN unique_violation THEN","replace":"      EXCEPTION WHEN division_by_zero THEN","occurrences":1}]}
   v_due := date_trunc('second', now()) + interval '20 minutes';
   UPDATE compute_jobs
      SET status = 'failed_retry', next_attempt_at = v_due
