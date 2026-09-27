@@ -2591,25 +2591,41 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     });
 
     // NEGATIVE CONTROLS (Rule 12): a membership read that FAULTED has observed
-    // nothing, so it establishes neither "a composite holds it"
-    // nor "nothing does". Neither refusal that asserts one of those may fire.
-    it.each([
-      ["strategy_keys", () => keyMembershipLookupMock],
-    ])("a faulted %s read answers neither KEY_ORPHANED nor KEY_VENUE_ALREADY_CONNECTED", async (_table, mock) => {
+    // nothing, so it establishes neither "a composite holds it" nor "nothing
+    // does". Neither refusal that asserts one of those may fire.
+    //
+    // 167.1.2 REVIEW-R2 IN-01 / SF2-L2 — AND WHAT IT DOES ANSWER IS PINNED, as
+    // is the log line. `unresolved` falls through to the byte-identical
+    // DRAFT_ALREADY_EXISTS 409, the accepted 154.1 posture for a dark read,
+    // recorded rather than fixed. Asserting only what the answer is NOT let a
+    // future 500, or any other code, pass unnoticed; and a fault that answers
+    // the fall-through without its `console.error` is a dark read nobody sees.
+    // Moving either is now a deliberate edit to this case.
+    it("a faulted strategy_keys read falls through to DRAFT_ALREADY_EXISTS and logs the fault", async () => {
       collideOnVenueIdentity();
       venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
-      mock().mockResolvedValue({
+      keyMembershipLookupMock.mockResolvedValue({
         data: null,
         error: { code: "PGRST301", message: "holder read failed" },
       });
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
 
       const POST = await importPost();
       const res = await POST(makeReq(OKX_RECONNECT_BODY));
 
       expect(res.status).toBe(409);
       const code = JSON.parse(await res.text()).code;
-      expect(code).not.toBe("KEY_ORPHANED");
-      expect(code).not.toBe("KEY_VENUE_ALREADY_CONNECTED");
+      expect(code).toBe("DRAFT_ALREADY_EXISTS");
+      // The route also logs "RPC error" on this request, so find the line by
+      // its label rather than by call index.
+      const faultLine = consoleErr.mock.calls.find(
+        (call) =>
+          call[0] ===
+          "[strategies/create-with-key] venue-identity strategy_keys resolve failed:",
+      );
+      expect(faultLine, "the faulted strategy_keys read was not logged").toBeDefined();
+      expect(faultLine?.[2]).toBe("PGRST301");
+      expect(JSON.stringify(consoleErr.mock.calls)).not.toContain(OKX_UID);
     });
 
     it("the RPC error line is scrubbed of the uid Postgres echoes in its DETAIL", async () => {
