@@ -27,6 +27,7 @@ import {
   seedAllocatorBook,
   seedStrategyWithHistory,
   seedTestAllocator,
+  seedWizardDraft,
 } from "./helpers/seed-test-project";
 
 const HAS_SEED_ENV =
@@ -376,4 +377,250 @@ test.describe("/profile — SC2-PROFILE", () => {
       }
     });
   }
+});
+
+const WRITE_CONTROLS = [
+  "Recompute now",
+  "Edit preferences",
+  "Send intro",
+  "KEEP",
+  "SKIP",
+] as const;
+
+test.describe("/strategies — N-STRAT", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+
+  for (const vp of VIEWPORTS) {
+    test(`${vp.id}: name and control group do not intersect, name is whole, tags are one line`, async ({
+      page,
+    }) => {
+      test.setTimeout(90_000);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      const manager = await seedTestAllocator({ role: "manager" });
+      // Several words plus one hyphenated word. Synthetic; own prefix.
+      // seedWizardDraft mints the row; the name is rewritten on THIS id only.
+      const seededName = `${NAME_PREFIX} Long-Short Momentum Sleeve`;
+      const draft = await seedWizardDraft({
+        ownerUserId: manager.userId,
+        namePrefix: NAME_PREFIX + " ",
+      });
+      const { createClient } = await import("@supabase/supabase-js");
+      const admin = createClient(
+        process.env.TEST_SUPABASE_URL!,
+        process.env.TEST_SUPABASE_SERVICE_ROLE_KEY!,
+        { auth: { autoRefreshToken: false, persistSession: false } },
+      );
+      // The page hides wizard drafts. Publishing THIS row is what makes the
+      // card render; the tag is what the one-line chip assertion measures.
+      const { error } = await admin
+        .from("strategies")
+        .update({
+          name: seededName,
+          strategy_types: ["spot", "trend following"],
+          status: "published",
+          source: "admin_import",
+        })
+        .eq("id", draft.strategyId);
+      if (error) throw new Error(`N-STRAT row update failed: ${error.message}`);
+
+      await loginViaForm(page, manager.email, manager.password);
+      // Anchor by testid, not the h1: /my-strategies shares "My Strategies".
+      await page.goto("/strategies");
+      const row = page.locator('[data-testid="strategy-row"]').filter({ hasText: seededName });
+      await expect(row, `${vp.id}: seeded strategy row missing`).toBeVisible({
+        timeout: 15_000,
+      });
+      await assertNoReflow(page, '[data-testid="strategy-row"]');
+
+      const nameLink = row.getByRole("link", { name: seededName, exact: true });
+      await expect(nameLink).toHaveText(seededName);
+      const controls = nameLink.locator("xpath=../following-sibling::div[1]");
+      const nameBox = await boxOf(nameLink, `${vp.id} strategy name`);
+      const controlBox = await boxOf(controls, `${vp.id} control group`);
+      expect(
+        rectsIntersect(nameBox, controlBox),
+        `${vp.id}: name rect intersects the control group`,
+      ).toBe(false);
+
+      if (vp.id === "V390") {
+        const chips = row.locator("span", { hasText: /^(spot|trend following)$/ });
+        expect(await chips.count(), "expected a tag chip on the seeded row").toBeGreaterThan(0);
+        const heights = await chips.evaluateAll((els) =>
+          els.map((el) => (el as HTMLElement).getBoundingClientRect().height),
+        );
+        const line = Math.min(...heights);
+        for (const h of heights) {
+          expect(
+            h,
+            `${vp.id}: a tag chip is taller than one line (${h} > ${line})`,
+          ).toBeLessThanOrEqual(line + 1);
+        }
+      } else {
+        const nameBlock = nameLink.locator("xpath=..");
+        const block = await boxOf(nameBlock, `${vp.id} name block`);
+        expect(block.width, `${vp.id}: name block narrower than 160px`).toBeGreaterThanOrEqual(160);
+      }
+    });
+  }
+});
+
+test.describe("/my-strategies — N-TABLE", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+
+  for (const vp of VIEWPORTS) {
+    test(`${vp.id}: each Sort select is the hit target after the header passes the filter bar`, async ({
+      page,
+    }) => {
+      test.setTimeout(120_000);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      const owner = await seedTestAllocator({ role: "both" });
+      // Enough owned rows that the table header can pass the filter bar.
+      for (let i = 0; i < 12; i++) {
+        await seedWizardDraft({
+          ownerUserId: owner.userId,
+          namePrefix: `${NAME_PREFIX} table-${i}-`,
+        });
+      }
+      await loginViaForm(page, owner.email, owner.password);
+      // Href, not the shared "My Strategies" h1 (DEF-149-B).
+      await page.goto("/my-strategies");
+      await expect(page.locator('a[href="/my-strategies"]').first()).toBeVisible({
+        timeout: 15_000,
+      });
+      const table = page.locator("[data-strategy-table]");
+      await expect(table, `${vp.id}: strategy table missing`).toBeVisible({ timeout: 15_000 });
+
+      const header = table.locator("thead").first();
+      const filter = page.locator(".sticky").filter({ has: page.getByLabel("Sort by") }).first();
+      await page.locator("#main-content").evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+      });
+      // Scroll until the sticky header has passed the filter bar, or the
+      // scroller is exhausted. Either way the Sort selects are then checked.
+      await page.locator("#main-content").evaluate((main) => {
+        const headerEl = document.querySelector("[data-strategy-table] thead");
+        const filterEl = document.querySelector('[aria-label="Sort by"]')?.closest(".sticky");
+        if (!headerEl || !filterEl) return;
+        const filterBottom = filterEl.getBoundingClientRect().bottom;
+        for (let i = 0; i < 40; i++) {
+          const top = headerEl.getBoundingClientRect().top;
+          if (top <= filterBottom) return;
+          main.scrollTop += 80;
+        }
+      });
+      void header;
+      void filter;
+
+      for (const label of ["Sort by", "Sort direction"]) {
+        const select = page.getByLabel(label);
+        await expect(select, `${vp.id}: ${label} missing`).toBeVisible();
+        await assertNotCovered(page, select, `${vp.id} ${label}`);
+      }
+    });
+  }
+});
+
+test.describe("/admin/match — N-MATCH", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+
+  // No match-batch seed exists in this repo. The queue page for the seeded
+  // allocator still renders the header action bar (Recompute now, Edit
+  // preferences) from the profile card. Send intro / KEEP / SKIP render only
+  // when a candidate is selected, which this seed cannot produce.
+  test("V390: no write control is visible and the banner names 768px or wider", async ({
+    page,
+  }) => {
+    test.setTimeout(90_000);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const admin = await seedTestAllocator({ role: "both", isAdmin: true });
+    const allocator = await seedTestAllocator({ role: "allocator" });
+    await loginViaForm(page, admin.email, admin.password);
+    await page.goto(`/admin/match/${allocator.userId}`);
+    await expect(page.getByRole("heading", { level: 1 })).toBeVisible({ timeout: 15_000 });
+
+    // Contract literal (N-MATCH). HEAD still says "1024px+", so this is RED
+    // until plan 170-06. Asserting the old string would stay green forever.
+    await expect(
+      page.getByText(/768px or wider/),
+    ).toBeVisible();
+    for (const label of WRITE_CONTROLS) {
+      await expect(
+        page.getByRole("button", { name: label, exact: true }),
+        `V390: ${label} is visible`,
+      ).toHaveCount(0);
+    }
+  });
+
+  test("V960: at least one write control is visible", async ({ page }) => {
+    test.setTimeout(90_000);
+    await page.setViewportSize({ width: 960, height: 540 });
+    const admin = await seedTestAllocator({ role: "both", isAdmin: true });
+    const allocator = await seedTestAllocator({ role: "allocator" });
+    await loginViaForm(page, admin.email, admin.password);
+    await page.goto(`/admin/match/${allocator.userId}`);
+    await expect(page.getByRole("heading", { level: 1 })).toBeVisible({ timeout: 15_000 });
+
+    let visible = 0;
+    const rendered: string[] = [];
+    for (const label of WRITE_CONTROLS) {
+      const count = await page.getByRole("button", { name: label, exact: true }).count();
+      if (count > 0) {
+        visible += count;
+        rendered.push(label);
+      }
+    }
+    console.log(`N-MATCH V960 rendered write controls: ${rendered.join(", ") || "<none>"}`);
+    expect(visible, "V960 positive control: no write control is visible").toBeGreaterThan(0);
+  });
+});
+
+test.describe("/compare — N-CMP", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+
+  test("V390: empty compare has no checkboxes wording and keeps the heading", async ({
+    page,
+  }) => {
+    test.setTimeout(90_000);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const allocator = await seedTestAllocator();
+    await loginViaForm(page, allocator.email, allocator.password);
+    await page.goto("/compare");
+    await expect(page.locator('h1:has-text("Compare Strategies")')).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByText(/checkboxes/i)).toHaveCount(0);
+    await assertNoReflow(page, 'h1:has-text("Compare Strategies")');
+  });
+
+  test("V390: one id shows the one-strategy note", async ({ page }) => {
+    test.setTimeout(90_000);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const fixtureName = `${NAME_PREFIX} compare ${Math.random().toString(36).slice(2, 8)}`;
+    const fixtureId = await seedStrategyWithHistory({
+      days: 30,
+      name: fixtureName,
+      codename: fixtureName,
+    });
+    const allocator = await seedTestAllocator();
+    await loginViaForm(page, allocator.email, allocator.password);
+    await page.goto(`/compare?ids=${fixtureId}`);
+    await expect(
+      page.getByText(
+        "One strategy selected. Adding a second strategy from this page is not available yet.",
+      ),
+    ).toBeVisible({ timeout: 15_000 });
+    await assertNoReflow(page, "h1");
+  });
 });
