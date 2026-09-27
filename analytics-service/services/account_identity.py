@@ -42,7 +42,7 @@ import ccxt
 import httpx
 from postgrest.exceptions import APIError
 
-from services.db import db_execute
+from services.db import _is_gateway_timeout, db_execute
 from services.redact import scrub_freeform_string
 from services.stitch_composite import MemberWindow, windows_overlap
 
@@ -170,8 +170,16 @@ async def read_venue_account_id(exchange: Any, venue: str) -> str | None:
 
 
 def _error_code(exc: BaseException) -> str | None:
+    """The error's SQLSTATE or gateway code as a string, or ``None``.
+
+    Review round 2 (WR-01): a Supabase gateway 504 can carry an int ``code``
+    (``services.db._is_gateway_timeout`` checks both types), and a str-only
+    read logged it as ``code=None``. ``bool`` is an ``int`` and is refused.
+    """
     code = getattr(exc, "code", None)
-    return code if isinstance(code, str) else None
+    if isinstance(code, bool) or not isinstance(code, (str, int)):
+        return None
+    return str(code)
 
 
 def _names_identity_index(exc: BaseException) -> bool:
@@ -446,10 +454,12 @@ class _MarkerNotWritten(Exception):
 
 
 # Failures the next poll can clear: logged at WARNING (SF-M3). Everything else
-# at the boundary is ERROR. asyncio's TimeoutError is the builtin on 3.11+.
-# ccxt.NetworkError covers RequestTimeout, ExchangeNotAvailable, DDoSProtection
-# and RateLimitExceeded; httpx.TransportError and ConnectionError cover a
-# database blip, as services.audit._is_transient_network_error treats them.
+# at the boundary is ERROR. :func:`_is_retryable` is the one classifier.
+#
+# By class: asyncio's TimeoutError is the builtin on 3.11+. ccxt.NetworkError
+# covers RequestTimeout, ExchangeNotAvailable, DDoSProtection and
+# RateLimitExceeded; httpx.TransportError and ConnectionError cover a database
+# blip, as services.audit._is_transient_network_error treats them.
 _RETRYABLE_FAILURES: Final = (
     TimeoutError,
     ccxt.NetworkError,
@@ -458,6 +468,32 @@ _RETRYABLE_FAILURES: Final = (
     _HolderVanished,
     _MarkerNotWritten,
 )
+
+# Review round 2 (WR-01 / SF2-L3): the same failures, when they reach the
+# client as a PostgREST APIError. A statement timeout, a serialization failure
+# and a deadlock clear on a retry by nature.
+_RETRYABLE_SQLSTATES: Final = frozenset({"57014", "40001", "40P01"})
+
+# The two same-owner trigger refusals (migration 20260925120000) that mean the
+# holder left between _find_live_holder and the marker UPDATE: the next poll
+# stamps instead (the self-heal). Matched against the whole MESSAGE, which is
+# the bare token, never against the bare SQLSTATE: another 23503 or 55000 is
+# not this race. The trigger's other refusals (NOT_SAME_OWNER, IS_MARKED,
+# KEY_IS_A_HOLDER) do not clear on a retry and stay ERROR.
+_RETRYABLE_TRIGGER_TOKENS: Final = frozenset(
+    {"ACCOUNT_SHARE_HOLDER_NOT_LIVE", "ACCOUNT_SHARE_HOLDER_NOT_FOUND"}
+)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Whether the next poll can be expected to clear ``exc`` (WARNING)."""
+    if isinstance(exc, _RETRYABLE_FAILURES):
+        return True
+    if _is_gateway_timeout(exc):
+        return True
+    if _error_code(exc) in _RETRYABLE_SQLSTATES:
+        return True
+    return isinstance(exc, APIError) and exc.message in _RETRYABLE_TRIGGER_TOKENS
 
 
 async def stamp_account_identity(
@@ -480,14 +516,19 @@ async def stamp_account_identity(
     Review round 1 (SF-M3 / SF-M4): the log level says whether anyone must act.
     Sentry events at ERROR and keeps WARNING as a breadcrumb.
 
-    - A failure the next poll can clear (:data:`_RETRYABLE_FAILURES`: the
-      budget running out, a venue network error or rate limit, a transport
-      error to the database, a holder or key that moved mid-step) is WARNING.
-    - Anything else (a renamed ccxt method, a trigger refusal, a schema-cache
-      miss, a CHECK violation) repeats every day and hides the duplicate it
-      would have found, so it is ERROR, with the class, the SQLSTATE and the
-      error's scrubbed MESSAGE (:func:`_safe_message`). The DETAIL, which
-      echoes the row and the account id, is never read.
+    - A failure the next poll can clear (:func:`_is_retryable`: the budget
+      running out, a venue network error or rate limit, a transport error to
+      the database, a gateway 504, a statement timeout, a serialization
+      failure or a deadlock, a holder or key that moved mid-step, including
+      the trigger's ``ACCOUNT_SHARE_HOLDER_NOT_LIVE`` and
+      ``ACCOUNT_SHARE_HOLDER_NOT_FOUND`` refusals) is WARNING.
+    - Anything else (a renamed ccxt method, the trigger's other refusals, a
+      schema-cache miss, a CHECK violation) is not a known transient failure,
+      is likely to repeat every day and hides the duplicate it would have
+      found, so it is ERROR, with the class, the SQLSTATE and the error's
+      scrubbed MESSAGE (:func:`_safe_message`). The DETAIL, which echoes the
+      row and the account id, is never read. The line does not claim a retry
+      cannot clear it (review round 2, WR-01): unrecognised is not permanent.
     - ``no_id`` is venue schema drift, as the validator treats it, and
       ``skipped_no_budget`` means this key's polls leave no time to check it
       for a duplicate, so both are WARNING. The routine outcomes stay INFO.
@@ -501,20 +542,22 @@ async def stamp_account_identity(
             outcome = await asyncio.wait_for(
                 _stamp(supabase, key_row, exchange), timeout=timeout_s
             )
-    except _RETRYABLE_FAILURES as exc:
-        logger.warning(
-            "account_identity: stamp failed for api_key %s (venue %s): "
-            "outcome=error class=%s code=%s — the next poll retries",
-            key_id, venue, type(exc).__name__, _error_code(exc),
-        )
-        return "error"
     except Exception as exc:  # noqa: BLE001 — the never-raising boundary
-        logger.error(
-            "account_identity: stamp failed for api_key %s (venue %s): "
-            "outcome=error class=%s code=%s message=%s — a retry will not clear "
-            "this, so the key is not checked for a duplicate until it is fixed",
-            key_id, venue, type(exc).__name__, _error_code(exc), _safe_message(exc),
-        )
+        if _is_retryable(exc):
+            logger.warning(
+                "account_identity: stamp failed for api_key %s (venue %s): "
+                "outcome=error class=%s code=%s — the next poll retries",
+                key_id, venue, type(exc).__name__, _error_code(exc),
+            )
+        else:
+            logger.error(
+                "account_identity: stamp failed for api_key %s (venue %s): "
+                "outcome=error class=%s code=%s message=%s — not a known "
+                "transient failure; while it recurs, the key is not checked "
+                "for a duplicate",
+                key_id, venue, type(exc).__name__, _error_code(exc),
+                _safe_message(exc),
+            )
         return "error"
     if outcome == "skipped_no_budget":
         logger.warning(

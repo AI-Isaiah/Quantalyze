@@ -676,8 +676,10 @@ _READ_FAILURES = [
 ]
 
 # The same-owner trigger refuses a marker write with its own SQLSTATE per case
-# (migration 20260925120000). The stamper classifies these by code into
-# 'error'; it never parses the message.
+# (migration 20260925120000). Every one of them is the outcome token 'error'.
+# Only the log LEVEL reads the message, and only for the two holder-race tokens
+# (review round 2 WR-01, pinned in test_a_database_failure_the_next_poll_can_
+# clear_is_a_warning); the outcome never depends on it.
 _MARKER_REFUSALS = [
     pytest.param("23503", "ACCOUNT_SHARE_HOLDER_NOT_FOUND", id="marker-23503"),
     pytest.param("42501", "ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER", id="marker-42501"),
@@ -854,7 +856,8 @@ async def test_a_revoked_holder_does_not_self_heal_its_duplicate(audit_mock: Mag
 #
 # Sentry's logging integration turns ERROR into an event and leaves WARNING as
 # a breadcrumb. A stamp failure that the next poll cannot outgrow (a ccxt
-# method rename, a trigger refusal, a schema-cache miss) repeats every day, and
+# method rename, a trigger refusal other than the two holder-race tokens, a
+# schema-cache miss) repeats every day, and
 # at WARNING the duplicate it hides is never found. So the level is chosen by
 # class: what a retry can clear stays WARNING, everything else is ERROR with
 # the class, the SQLSTATE and the error's scrubbed MESSAGE. The DETAIL echoes
@@ -969,6 +972,89 @@ async def test_a_stamp_that_runs_out_of_budget_is_a_warning(
     assert "class=TimeoutError" in rec.getMessage()
 
 
+def _retryable_database_cases() -> list[Any]:
+    """Review round 2 WR-01 / SF2-L3: database failures the next poll clears.
+
+    The holder can leave between ``_find_live_holder`` and the marker UPDATE,
+    and the same-owner trigger then refuses with one of two tokens; the next
+    poll stamps instead (the self-heal). A gateway 504, a statement timeout, a
+    serialization failure and a deadlock are transient by nature. Each reaches
+    the client as an ``APIError``, and each used to land at ERROR claiming
+    "a retry will not clear this".
+    """
+    return [
+        pytest.param(
+            FakeSupabase(_marker_raises(_api_error("55000", "ACCOUNT_SHARE_HOLDER_NOT_LIVE"))),
+            "55000", id="marker-holder-not-live",
+        ),
+        pytest.param(
+            FakeSupabase(_marker_raises(_api_error("23503", "ACCOUNT_SHARE_HOLDER_NOT_FOUND"))),
+            "23503", id="marker-holder-not-found",
+        ),
+        # The gateway's code arrives as an int (services.db._is_gateway_timeout
+        # checks both types); it must still be logged, as its string.
+        pytest.param(
+            FakeSupabase(_write_raises(APIError({
+                "code": 504, "message": "upstream request timeout",
+                "details": f"Failing row contains ({ACCOUNT_ID}).", "hint": None,
+            }))),
+            "504", id="gateway-504-int",
+        ),
+        pytest.param(
+            FakeSupabase(_write_raises(_api_error(
+                "57014", "canceling statement due to statement timeout"))),
+            "57014", id="statement-timeout",
+        ),
+        pytest.param(
+            FakeSupabase(_write_raises(_api_error(
+                "40001", "could not serialize access due to concurrent update"))),
+            "40001", id="serialization-failure",
+        ),
+        pytest.param(
+            FakeSupabase(_write_raises(_api_error("40P01", "deadlock detected"))),
+            "40P01", id="deadlock",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(("sb", "code"), _retryable_database_cases())
+async def test_a_database_failure_the_next_poll_can_clear_is_a_warning(
+    sb: FakeSupabase, code: str,
+    caplog: pytest.LogCaptureFixture, audit_mock: MagicMock,
+) -> None:
+    caplog.set_level("DEBUG")
+
+    outcome = await _stamp(sb, _key_row(), _okx_exchange())
+
+    assert outcome == "error"
+    rec = _stamp_failure_record(caplog)
+    assert rec.levelname == "WARNING"
+    line = rec.getMessage()
+    assert "class=APIError" in line
+    assert f"code={code}" in line
+    assert ACCOUNT_ID not in caplog.text
+    assert "Failing row contains" not in caplog.text
+    audit_mock.assert_not_called()
+
+
+async def test_a_foreign_key_failure_without_the_trigger_token_stays_an_error(
+    caplog: pytest.LogCaptureFixture, audit_mock: MagicMock,
+) -> None:
+    # The retryable set is the two trigger TOKENS, not the bare SQLSTATEs
+    # 23503 and 55000: another foreign-key failure is not the holder race,
+    # and a retry does not clear it.
+    caplog.set_level("DEBUG")
+    sb = FakeSupabase(_marker_raises(_api_error(
+        "23503", 'insert or update on table "api_keys" violates foreign key constraint')))
+
+    outcome = await _stamp(sb, _key_row(), _okx_exchange())
+
+    assert outcome == "error"
+    rec = _stamp_failure_record(caplog)
+    assert rec.levelname == "ERROR"
+    assert "code=23503" in rec.getMessage()
+
+
 def _persistent_cases() -> list[Any]:
     return [
         pytest.param(FakeSupabase(), _read_raises(AttributeError("private_get_account_config")),
@@ -1012,6 +1098,9 @@ async def test_a_failure_a_retry_cannot_clear_is_an_error_without_the_detail(
     line = rec.getMessage()
     assert f"class={cls}" in line
     assert f"code={code}" in line
+    # Review round 2 WR-01: the line classifies, it does not promise
+    # permanence. An unrecognised failure is not proof a retry cannot clear it.
+    assert "a retry will not clear" not in line
     if fragment is not None:
         # The MESSAGE names the constraint or the refusal token: it is logged.
         assert fragment in line
