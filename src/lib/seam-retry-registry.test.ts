@@ -126,14 +126,17 @@ type RouteBudgetKey =
   | "process-key-unified-dormant";
 
 /**
- * The ten analytics-seam wrapper budget keys (Class E, PATTERNS).
+ * The eleven analytics-seam wrapper budget keys (Class E, PATTERNS).
  *
  * SORTED, because the union assertion below compares sorted arrays. Phase 153.4
  * / D-26 added `validate-key-serialized`, which sorts immediately AFTER
  * `validate-key` (a prefix sorts first). It is an analytics-wrapper budget, not
  * a route budget, so it joins THIS list and not `RouteBudgetKey`.
+ * Phase 169.2 / D-08 added `benchmark-refresh` (`refreshBenchmark`, the daily
+ * BTC refresh), an analytics wrapper with a NO verdict; it sorts first.
  */
 const EXPECTED_ALL_ANALYTICS_KEYS = [
+  "benchmark-refresh",
   "bridge",
   "encrypt-key",
   "match-eval",
@@ -200,7 +203,7 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
       ].sort();
       expect(union).toEqual(EXPECTED_ALL_FLOW_KEYS);
     });
-    it("YES∪NO analytics keys cover ALL ten wrappers", () => {
+    it("YES∪NO analytics keys cover ALL eleven wrappers", () => {
       const union = [
         ...Object.keys(RETRY_SAFE_ANALYTICS),
         ...Object.keys(RETRY_AUDIT_NO_ANALYTICS),
@@ -453,7 +456,7 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
   const EXPECTED_FLOW_YES_EVIDENCE = 1; // onboard (resync withdrawn, 141.2/D-03)
   const EXPECTED_ANALYTICS_YES_EVIDENCE = 4; // bridge, simulator, portfolio-optimizer, optimize-weights
   const EXPECTED_FLOW_NO_EVIDENCE = 3; // teaser, csv, resync
-  const EXPECTED_ANALYTICS_NO_EVIDENCE = 6; // validate-key, validate-key-serialized, encrypt-key, match-recompute, portfolio-analytics, match-eval
+  const EXPECTED_ANALYTICS_NO_EVIDENCE = 7; // validate-key, validate-key-serialized, encrypt-key, match-recompute, portfolio-analytics, match-eval, benchmark-refresh (169.2)
   const EXPECTED_EVIDENCE_STRING_COUNT =
     EXPECTED_FLOW_YES_EVIDENCE +
     EXPECTED_ANALYTICS_YES_EVIDENCE +
@@ -515,7 +518,7 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
       },
     );
 
-    it("scans 13 non-empty evidence strings in total (the four maps, summed)", () => {
+    it("scans 15 non-empty evidence strings in total (the four maps, summed)", () => {
       // The total is DERIVED from the four per-map literals above, so it cannot
       // disagree with them; it is kept because it is the number the citation
       // guard below actually inspects, and a shape the flattener mishandles

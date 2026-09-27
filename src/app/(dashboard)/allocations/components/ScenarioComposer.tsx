@@ -2155,8 +2155,8 @@ export function ScenarioComposer({
   }, []);
 
   // BENCH-01 — fetch the shared BTC daily-returns series once on mount. The
-  // route returns `[{date,value}]` (raw daily returns) and degrades to `[]` on
-  // its own read errors, so any non-2xx / non-array / empty / thrown result
+  // route returns `[{date,value}]` (raw daily returns) and answers a no-store
+  // 503 on its own read errors (Phase 169.2), so any non-2xx / non-array / empty / thrown result
   // leaves `btcAvailable=false` → the benchmark section shows the honest empty
   // state and the overlay is hidden (never a red alert).
   useEffect(() => {

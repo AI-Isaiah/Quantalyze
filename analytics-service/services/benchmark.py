@@ -162,6 +162,17 @@ class _CacheUnavailable(Exception):
     """Internal: the cache client is not configured (already logged)."""
 
 
+class BenchmarkCacheWriteError(Exception):
+    """The fresh prices could not be written to ``benchmark_prices``.
+
+    Raised ONLY by ``get_benchmark_returns(..., require_persist=True)``, the
+    mode the scheduled refresh uses (``routers.cron.benchmark_refresh``,
+    review-fix round 2, REVIEW WR-02). The original error is chained as
+    ``__cause__``. The message carries its type only, because an upstream or
+    PostgREST message can carry URLs or response fragments.
+    """
+
+
 def _cache_miss_reason(
     cached_dates: list[date], *, days: int, yesterday: date
 ) -> str | None:
@@ -189,12 +200,20 @@ def prices_to_returns(prices: pd.Series) -> pd.Series:
 
 
 async def get_benchmark_returns(
-    symbol: str = "BTC", days: int = 1000
+    symbol: str = "BTC", days: int = 1000, *, require_persist: bool = False
 ) -> tuple[pd.Series | None, bool]:
     """Get benchmark daily returns, using cache if available.
 
     Returns (returns_series, is_stale) where is_stale=True means benchmark data
     could not be refreshed and should be flagged in data_quality_flags.
+
+    ``require_persist`` (review-fix round 2, REVIEW WR-02): by default a failed
+    cache write after a fresh fetch is logged at warning level and the fresh
+    series is still returned, because an analytics compute can use it either
+    way. The scheduled refresh exists to MAKE the write, so it passes
+    ``require_persist=True``, and then a failed write (including an
+    unconfigured client) raises ``BenchmarkCacheWriteError`` instead of being
+    swallowed. A cache HIT writes nothing and is unaffected by the flag.
     """
     if symbol != "BTC":
         raise ValueError(f"Unsupported benchmark: {symbol}")
@@ -266,9 +285,17 @@ async def get_benchmark_returns(
             ]
             await db_execute(lambda: supabase.table("benchmark_prices").upsert(cache_rows).execute())
         except Exception as e:
+            if require_persist:
+                raise BenchmarkCacheWriteError(
+                    f"Benchmark cache write failed: {type(e).__name__}"
+                ) from e
             logger.warning("Benchmark cache write failed: %s", str(e))
 
         return returns, False
+    except BenchmarkCacheWriteError:
+        # Not a source failure: the fetch succeeded. Must not fall into the
+        # stale-cache fallback below, which would hide the lost write.
+        raise
     except Exception as e:
         # Round-2 review (reviewer #4) — never None while a recent enough
         # completed-day cache is in hand: serve it, flagged stale.
