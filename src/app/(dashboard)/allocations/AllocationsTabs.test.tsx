@@ -232,6 +232,91 @@ async function expectOnlyVisibleBodyAsync(
   }
 }
 
+describe("AllocationsTabs — Phase 170 item (a) narrow header strip", () => {
+  beforeEach(() => {
+    resetRouterMocks();
+  });
+
+  // WHY (Rule 9): below sm the tablist must be its own full-width scroller.
+  // A flex item's default min-width is auto, so without min-w-0 + basis-full
+  // the NAV-02 overflow never engages and the 682px tab bar widens the page
+  // (2026-09-27 PROD measurement, 235px #main-content overflow).
+  it("[SC2-(a)] the Allocation surfaces tablist is a full-width horizontal scroller", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const tablist = screen.getByRole("tablist", { name: "Allocation surfaces" });
+    for (const token of [
+      "min-w-0",
+      "basis-full",
+      "sm:basis-auto",
+      "overflow-x-auto",
+      "flex-nowrap",
+    ]) {
+      expect(tablist.className.split(/\s+/)).toContain(token);
+    }
+  });
+
+  // WHY: JOURNEY-03 / axe aria-required-children. Re-nesting the tabs under
+  // a scroll wrapper is a critical violation; the scroller IS the tablist.
+  it("[JOURNEY-03] the tablist's direct children are the role=tab buttons", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const tablist = screen.getByRole("tablist", { name: "Allocation surfaces" });
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs.length).toBeGreaterThan(0);
+    for (const tab of tabs) {
+      expect(tab.parentElement).toBe(tablist);
+    }
+    for (const child of Array.from(tablist.children)) {
+      expect(child.getAttribute("role")).toBe("tab");
+    }
+  });
+
+  // WHY: the action row must be allowed to shrink and wrap so Export and
+  // + Allocation drop to their own right-aligned row instead of widening
+  // the page. justify-end keeps that wrapped row right-aligned.
+  it("[SC2-(a)] the action wrapper shrinks, wraps, and right-aligns", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const tablist = screen.getByRole("tablist", { name: "Allocation surfaces" });
+    const wrapper = tablist.parentElement;
+    expect(wrapper).not.toBeNull();
+    const classes = wrapper!.className.split(/\s+/);
+    for (const token of [
+      "min-w-0",
+      "max-w-full",
+      "flex-wrap",
+      "justify-end",
+      "sm:flex-nowrap",
+    ]) {
+      expect(classes).toContain(token);
+    }
+  });
+
+  // WHY: below sm the hairline separator would sit on the action row with
+  // no tabs beside it; hidden until sm. shrink-0 keeps Export and
+  // + Allocation from compressing when the row is tight.
+  it("[SC2-(a)] the separator hides below sm and the action buttons do not shrink", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const tablist = screen.getByRole("tablist", { name: "Allocation surfaces" });
+    const separator = Array.from(tablist.parentElement?.children ?? []).find(
+      (el) => el.getAttribute("aria-hidden") === "true" && el.tagName === "SPAN",
+    );
+    expect(separator).toBeTruthy();
+    const sepClasses = separator!.className.split(/\s+/);
+    expect(sepClasses).toContain("hidden");
+    expect(sepClasses).toContain("sm:inline-block");
+
+    const exportBtn = screen.getByRole("button", { name: "Export" });
+    expect(exportBtn.className.split(/\s+/)).toContain("shrink-0");
+    const addBtn = screen.getByRole("button", {
+      name: /Add allocation|Add strategy/i,
+    });
+    expect(addBtn.className.split(/\s+/)).toContain("shrink-0");
+  });
+});
+
 describe("AllocationsTabs — Phase 117 / UIFIX-02 clip-proof tab focus ring", () => {
   beforeEach(() => {
     resetRouterMocks();
