@@ -5,7 +5,7 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 170
 current_phase_name: LAYOUT — page layout reads clean and holds on every page
 status: executing
-stopped_at: Completed 170-02-PLAN.md
+stopped_at: Completed 170-03-PLAN.md
 last_updated: "2026-09-27T20:48:37.179Z"
 last_activity: 2026-09-27
 last_activity_desc: Phase 170 execution started
@@ -14,7 +14,7 @@ progress:
   total_phases: 80
   completed_phases: 41
   total_plans: 370
-  completed_plans: 349
+  completed_plans: 350
   percent: 51
 ---
 
@@ -180,7 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — EXECUTING
-Plan: 2 of 14
+Plan: 3 of 14
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
 Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
@@ -1184,6 +1184,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.6.5 P08 | ~40 min | 2 tasks | 11 modified |
 | Phase 166.1 P09 | ~20 min | 3 tasks | 5 modified |
 | Phase 170 P02 | 8 min | 3 tasks | 4 files |
+| Phase 170 P03 | 5 min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -1191,6 +1192,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Contract-first geometry spec stays RED at HEAD; assertions are not weakened to pass today.
 - N-STRAT name and tag update goes through getAdmin() via setSeededStrategyNameAndTags.
 - N-MATCH has no match-batch seed; the V960 positive control is the header action bar.
+
+### Phase 170 decisions (plan 03)
+- Active-tab scroll stays horizontal-only through computeTabStripScroll; scrollIntoView with block nearest is not reintroduced.
+- Pressed Tweaks tint is aria-pressed:bg-accent/10, the nearest existing accent utility. No new colour.
 
 ### Roadmap Evolution
 
@@ -2410,7 +2415,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-09-27T20:48:35.233Z
-**Stopped At:** Completed 170-02-PLAN.md
+**Stopped At:** Completed 170-03-PLAN.md
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
