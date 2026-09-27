@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.109.0.1] - 2026-09-27 — BASELINE: automated re-dump after the PROD apply of 5ce71a98
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `36340841055`, after the PROD apply of merge `5ce71a98`: sha256 `5a32d248…` → `6ea5065a…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20260927120000_claim_pair_pre_rank_exclusion.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-09-27` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.109.0.0 → 0.109.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=280 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `36340841055` succeeded, and this entry was composed by the `redump-pr` job. Run `36340841055` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.109.0.0] - 2026-09-27 — CLAIMPAIR: a failed_retry job beside a pending twin no longer makes every claim raise 23505
 
 ⭐ **What changed for whoever reads this next.** A `failed_retry` compute job and a `pending` twin
