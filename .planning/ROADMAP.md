@@ -3618,6 +3618,15 @@ Plans:
    - A tab switch on /allocations does not re-run the whole server render.
 6. **Recompute on PROD.** Affected rows are recomputed after the merge, behind a read-only census first.
 
+**⭐ FOLDED IN 2026-09-27 (founder, via AskUserQuestion: "Fold into 167.1.2 PR C" for both; found in the 2026-09-27 browser pass, root-caused read-only):**
+
+7. **A book with zero equity snapshots never gets a daily row.** `enqueue_refresh_allocator_equity_for_all` enqueues only keys whose allocator already has an `allocator_equity_snapshots` row. `reconstruct_allocator_history` is enqueued only by a user-initiated sync. So a book at 0 stays at 0. PR C must:
+   - enqueue for any eligible key, or enqueue a reconstruct for a key that has never had one;
+   - refuse a sole-key `replace_equity_snapshots` with empty rows when snapshots already exist;
+   - make the Overview empty state choose its copy by `equityHistoryState`, not by count. The "appear once at least two days…" line promises a timer that the D-02 `"rebuilding"` hold never honours.
+   Each gets a test that fails on today's code. What emptied one book's history after 2026-09-25 is still being read on PROD (founder, one read-only query).
+8. **Open Positions shows closed positions as open.** The `allocator_holdings` read feeding `holdingsSummary` in `derivePhase07Fields` has no `asof` filter, and it keeps the newest row per venue:symbol:type across every date. A position closed the day before survives, as 5 symbols did on 2026-09-27. Keep each key's latest `asof` before de-duplicating, matching `getLatestExposureSnapshot`, with a test that fails today.
+
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1.2 to break down)
