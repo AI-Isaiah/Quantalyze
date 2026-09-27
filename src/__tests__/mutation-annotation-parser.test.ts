@@ -1041,8 +1041,12 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // self-verify anchor stood down), so the two pins move by different amounts.
     // MEASURED: this file's own run read `expected 506 to be 491`, and the needle
     // census below read `expected 534 to be 504`.
-    expect(armsSeen).toBe(506);
-    expect(stepsSeen).toBe(534);
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 1, WR-01): `armsSeen`
+    // 506 -> 507 and `stepsSeen` 534 -> 536: ONE new arm, W-LOWTWIN, in the same gate
+    // file, with one layered twin of two `find` steps. MEASURED: this file's own run read
+    // `expected 507 to be 506`, and the needle census below read `expected 536 to be 534`.
+    expect(armsSeen).toBe(507);
+    expect(stepsSeen).toBe(536);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1947,7 +1951,9 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 504 -> 534, moving WITH
     // `stepsSeen`: thirty new `find`-bearing steps (two per CLAIMPAIR twin), one
     // needle each. MEASURED: `expected 534 to be 504` at the pre-move pin.
-    expect(needles.length).toBe(534);
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 1, WR-01): 534 -> 536, one
+    // new twin of two steps. MEASURED: `expected 536 to be 534` at the pre-move pin.
+    expect(needles.length).toBe(536);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

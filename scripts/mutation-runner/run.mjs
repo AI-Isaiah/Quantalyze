@@ -2592,7 +2592,29 @@ export const FILES_FLOOR = 53;
 //      ARMS_FLOOR is 505.`;
 //    - measured, the constant at 506: exit 0, `✅ No defects`.
 //    WAIVED_CEILING stays 0 — no waiver was added.
-export const ARMS_FLOOR = 506;
+//
+// ⭐ RE-DERIVED 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 1, WR-01):
+//    506 -> 507, ONE new arm, W-LOWTWIN, in the ALREADY-ANNOTATED
+//    supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql
+//    (15 -> 16), so FILES_FLOOR stays 53. Its layered twin makes the 5-arg
+//    CLAIMPAIR PROBE EXCLUSION block of migration 20260927120000 always false
+//    and stands down v_p5_probe_anchored. MEASURED via ONE full lane run with
+//    no file edited during it, the constant still at 506: `scope: FULL 53/53
+//    annotated files`, `coverage: files 53/80`, `arms: 507/507/0`, `biting:
+//    507`, `lane-invocations: 507` (the two independent tallies AGREE, plus 53
+//    baseline / 53 restore legs), `lane-blocked: 0 file(s)`, `lane-probe:
+//    pg_cron AVAILABLE`, `unreachable: 27 file(s)`, `per-arm lane time: mean
+//    1.2s over 507 arm run(s)`, `✅ No defects. Every annotated arm bit its own
+//    arm first.`, exit 0. Per-file line:
+//    `test_claim_compute_jobs_failed_retry_pending_pair.sql: sections 10 /
+//    judged 16 / annotated 16 / waived 0 / biting 16`.
+//    Stale-low direction OBSERVED at 506: src/__tests__/mutation-runner-floors.test.ts
+//    FAILS with `The corpus declares 507 twin(s) of which 0 are waivers, so a
+//    green run bites 507. ARMS_FLOOR is 506.` The too-high direction was NOT
+//    re-run at 508: the runner's own `bitingArms < armsFloor` comparison is
+//    unchanged and was separated at 507 against 506 in plan 05.
+//    WAIVED_CEILING stays 0 — no waiver was added.
+export const ARMS_FLOOR = 507;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
