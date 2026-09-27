@@ -1328,6 +1328,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 166.4 BENCHALIGN inserted after Phase 166 on 2026-09-27 (via `/gsd-phase --insert`; founder decision D-B, "New phase under 166"): a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric (founder decision D-A). Data integrity, ahead of features. Phase 166.3 RECOMPUTE is halted until it ships.
 - Phase 170 edited: edited fields: goal, success_criteria (390px decision; narrow-width findings 2026-09-27)
 - Phase 170.1 edited: edited fields: success_criteria (390px decision; scenario copy findings 2026-09-27)
+- Phase 170 edited: edited fields: success_criteria (profile exchanges tab row and Disconnect clipped, 2026-09-27)
 
 ### Decisions
 
