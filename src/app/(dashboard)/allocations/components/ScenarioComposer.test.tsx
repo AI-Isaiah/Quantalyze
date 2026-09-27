@@ -5423,6 +5423,43 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
         screen.queryByRole("group", { name: "Data sources" }),
       ).not.toBeInTheDocument();
     });
+
+    // Phase 170 (2026-09-27, N-SCN item (d)): the fixed-anatomy member rows
+    // scroll inside one labelled focusable region instead of widening the page.
+    // RED at HEAD — the ul has no ResponsiveTable ancestor.
+    it("wraps the constituent list in a focusable region named Strategies and weights", () => {
+      renderPerKey(makePerKeyPayload());
+      const list = screen.getByTestId("scenario-constituent-list");
+      const region = screen.getByRole("region", {
+        name: /^Strategies and weights/,
+      });
+      expect(region).toContainElement(list);
+      expect(region.tabIndex).toBe(0);
+      expect(list.className).toContain("min-w-max");
+      expect(list.className).toContain("grid");
+      expect(list.className).toContain("gap-2");
+    });
+
+    it("keeps both column-header strips inside the same list as the rows", () => {
+      renderPerKey(
+        makePerKeyPayload({
+          strategies: [bookStratWithProvenance("hdr-added", "Hdr Added", {})],
+        }),
+      );
+      addStrategy({
+        id: "hdr-added",
+        name: "Hdr Added",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      });
+      const list = screen.getByTestId("scenario-constituent-list");
+      expect(list).toContainElement(
+        screen.getByTestId("scenario-perkey-header"),
+      );
+      expect(list).toContainElement(
+        screen.getByTestId("scenario-added-header"),
+      );
+    });
   });
 
   describe("provenance badge", () => {
