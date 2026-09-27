@@ -3189,7 +3189,7 @@ Plans:
 **Goal:** A due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim.
 **Requirements**: TODOS `[164.9.3-CLAIM-PAIR-23505]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 4/6 plans executed
+**Plans:** 5/6 plans executed
 
 ⭐ **Inserted 2026-09-26 by orchestrator decision** (routed from the Phase 167.1.2 PR B review). It is a separate topic from 164.9.1 JOBRPCTRUTH and 164.9.2 REFDATAUPDATES.
 
@@ -3237,7 +3237,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 164.9.3-05-PLAN.md — census pins moved by grep of one full mutation run (D-06)
+- [x] 164.9.3-05-PLAN.md — census pins moved by grep of one full mutation run (D-06)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 

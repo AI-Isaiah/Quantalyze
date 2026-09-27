@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.9.3
 current_phase_name: CLAIMPAIR
 status: executing
-stopped_at: Completed 164.9.3-04-PLAN.md
-last_updated: "2026-09-27T13:52:00.000Z"
+stopped_at: Completed 164.9.3-05-PLAN.md
+last_updated: "2026-09-27T14:55:00.000Z"
 last_activity: 2026-09-27
 last_activity_desc: Phase 164.9.3 execution started
-state_head: 86e2aa26d2b981f061d87bee15f4f2ba9f642db6
+state_head: fded5c9b624c72d9ff7c19d9b109ab80ed4b3a24
 progress:
   total_phases: 73
   completed_phases: 41
@@ -180,7 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 164.9.3 (CLAIMPAIR) — EXECUTING
-Plan: 5 of 6 (01 done: the CLAIMPAIR gate, pre-fix census 14 arms RED with 23505, W-INTRO GREEN; 02 done: the pre-rank exclusion migration, all 15 arms GREEN on the replayed local-stack lane; 03 done: D-09 lane proof, corpus 78 of 78 on the replayed local-stack lane, the gate green on the pg-lane from its own SETUP list; 04 done: all 15 arms bite on the pg-lane through layered twins, runner biting 15; snapshots regenerated; three VAC-04 acks earned)
+Plan: 6 of 6 (01 done: the CLAIMPAIR gate, pre-fix census 14 arms RED with 23505, W-INTRO GREEN; 02 done: the pre-rank exclusion migration, all 15 arms GREEN on the replayed local-stack lane; 03 done: D-09 lane proof, corpus 78 of 78 on the replayed local-stack lane, the gate green on the pg-lane from its own SETUP list; 04 done: all 15 arms bite on the pg-lane through layered twins, runner biting 15; snapshots regenerated; three VAC-04 acks earned; 05 done: FILES_FLOOR 52 -> 53 and ARMS_FLOOR 491 -> 506 from one full run, coverage 53/80, separated in both directions, every census pin moved to its measured value)
 Phase: 169.2 (BENCHFRESH) — EXECUTING
 Plan: 1 of 3
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
@@ -1189,6 +1189,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.9.3 P02 | 15 min | 2 tasks | 1 files |
 | Phase 164.9.3 P03 | 6 min | 2 tasks | 1 files |
 | Phase 164.9.3 P04 | 25 min | 2 tasks | 4 files |
+| Phase 164.9.3 P05 | 57 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -1706,6 +1707,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.9.3]: 164.9.3-02: the migration's verify anchors pin PLACEMENT as well as text (each pre-rank clause must match between the ranked CTE opening and the deduped opening; the 2-arg C39 port between deduped and the batch UPDATE), so a later edit moving the guard post-rank, the rejected option (a), refuses at apply
 - [Phase 164.9.3]: 164.9.3-03: the CLAIMPAIR gate's pg-lane SETUP list is the enqueue dedupe gate's list plus fixtures 29 and 36-fixture-compute-jobs-claim-token.sql, with the migration last; the template entries were kept because the lane run showed no need to drop any
 - [Phase 164.9.3]: 164.9.3-04: each CLAIMPAIR twin mutates ONE body and ONE partition (OR TRUE inserted before the pre-rank NOT EXISTS, body chosen by measured nth) and stands down only that body-by-partition anchor; the VAC-04 acks are derived locally from --diff-bodies against origin/main and were cross-checked read-only against the PR's VAC-04 PROD MATCH hashes
+- [Phase 164.9.3]: 164.9.3-05: the mutation runner and pg-lane run WITHOUT the shared lane lock (coordinator correction: the lock guards only the local-stack lane); both floors were pushed to measured+1 in ONE full run, whose two defects named each floor
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -2410,8 +2412,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-27T13:52:00.000Z
-**Stopped At:** Completed 164.9.3-04-PLAN.md
+**Last Date:** 2026-09-27T14:55:00.000Z
+**Stopped At:** Completed 164.9.3-05-PLAN.md
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
