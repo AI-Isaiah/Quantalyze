@@ -76,7 +76,7 @@ red. Each must be listed in the owning plan, or the plan ships a red suite.
 | `src/app/factsheet/[id]/v2/page.tsx` | mod | 02, 03, 07 | route (RSC) | request-response + cache | itself: `buildFactsheetPayloadCached`, `FactsheetReadError` | exact |
 | `src/app/factsheet/[id]/v2/page.public-cache-key.test.tsx` | mod | 02 | test | cache | itself (`cacheStore` / `cacheKeys` double) | exact |
 | `src/app/factsheet-share/[token]/page.cache-isolation.test.tsx` | mod | 02 | test | cache | itself (`EXPECTED_KEY_PREFIX`) | exact |
-| `src/__tests__/phase-148-owner-lane-cache-isolation.test.ts` | mod | 02 | test | cache | itself | exact |
+| `src/__tests__/phase-148-owner-lane-cache-isolation.test.ts` | run only (not modified; 169-02 Task 3 runs it) | 02 | test | cache | itself | exact |
 | `src/app/factsheet/[id]/v2/page.composite-read-error.test.tsx` | NEW | 07 | test | cache | `page.public-cache-key.test.tsx` `it("READ-ERROR-NOT-CACHED …")` | exact |
 | `src/app/factsheet/[id]/v2/basis-context.tsx` | mod | 01, 03 | provider/hook | transform | itself: the `strategyMetrics` IIFE re-pin arm in `useBasisSeriesView` | exact |
 | `src/app/factsheet/[id]/v2/basis-context.cash-leverage-repin.test.tsx` | NEW | 01 | test | hook | `basis-context.leverage.test.tsx` (`renderHook` + `BasisProvider` + `LeverageProvider`) | exact |
