@@ -28,6 +28,7 @@ import {
   seedStrategyWithHistory,
   seedTestAllocator,
   seedWizardDraft,
+  setSeededStrategyNameAndTags,
 } from "./helpers/seed-test-project";
 
 const HAS_SEED_ENV =
@@ -407,24 +408,13 @@ test.describe("/strategies — N-STRAT", () => {
         ownerUserId: manager.userId,
         namePrefix: NAME_PREFIX + " ",
       });
-      const { createClient } = await import("@supabase/supabase-js");
-      const admin = createClient(
-        process.env.TEST_SUPABASE_URL!,
-        process.env.TEST_SUPABASE_SERVICE_ROLE_KEY!,
-        { auth: { autoRefreshToken: false, persistSession: false } },
-      );
-      // The page hides wizard drafts. Publishing THIS row is what makes the
-      // card render; the tag is what the one-line chip assertion measures.
-      const { error } = await admin
-        .from("strategies")
-        .update({
-          name: seededName,
-          strategy_types: ["spot", "trend following"],
-          status: "published",
-          source: "admin_import",
-        })
-        .eq("id", draft.strategyId);
-      if (error) throw new Error(`N-STRAT row update failed: ${error.message}`);
+      // The helper publishes THIS id only and sets the multi-word tag the
+      // one-line chip assertion measures. It goes through getAdmin().
+      await setSeededStrategyNameAndTags({
+        strategyId: draft.strategyId,
+        name: seededName,
+        strategyTypes: ["spot", "trend following"],
+      });
 
       await loginViaForm(page, manager.email, manager.password);
       // Anchor by testid, not the h1: /my-strategies shares "My Strategies".
