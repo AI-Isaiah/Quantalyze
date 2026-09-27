@@ -14,6 +14,10 @@ name: Shared-test-db mutex probe
 # across each job's DB-touching span. Waiters block inside the lock instead of
 # being evicted. This probe is what proved that mechanism works from real
 # runners BEFORE ci.yml adopted it, and it must keep working afterwards.
+# (2026-09-26, Phase 164.9.4: the ci.yml jobs named above no longer take the
+# key, and no ci.yml job holds it. The remaining takers are supabase-migrate.yml
+# `apply-test` and test-restore-from-baseline.yml `restore`. This probe is
+# unchanged.)
 #
 # ⛔ NEVER add `main` — or any branch outside `ci-probe/**` — to the push
 # trigger. This probe CAN fail by design (that is the entire point). A red check

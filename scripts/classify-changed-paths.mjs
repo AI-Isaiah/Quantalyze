@@ -13,6 +13,7 @@
  * undercount at two — `python` is the forgotten taker. Corrected here and in
  * the ledger by this phase; if you are counting mutex acquires in a run log,
  * count to three.
+ * (2026-09-26, Phase 164.9.4: no ci.yml job takes the lock; the docs-only filter no longer changes any key take.)
  *
  * ⛔ AND PR #750 ITSELF WOULD NOT BE FILTERED BY THIS GATE. Measured
  * 2026-09-12 from its own file list: alongside four `.planning/` paths it
