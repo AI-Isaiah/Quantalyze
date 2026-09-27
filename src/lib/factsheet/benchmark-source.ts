@@ -42,14 +42,22 @@ import type { DailyPrice } from "./types";
  * a return, so it is left out of `prices`, and its date is reported in
  * `dropped` (169.2 review WR-04 / MD-03) so the corrupt row stays visible.
  *
- * ⛔ Returns come from `pricesToDailyReturns` ONLY (169.2 round-2 review WR-03).
- * It emits a return only for two closes exactly one UTC day apart. BTC trades
- * every day, so ANY gap between two stored closes is a hole, whether the row
- * is missing or was dropped as corrupt: bridging it would hand the caller
- * `close(D+1) / close(D-1) - 1` as a ONE-day return. This is the same rule the
- * Python side applies (`_cache_miss_reason` treats any calendar gap as a
- * defect). Because the rule is about dates, a consumer does not need `dropped`
- * to build returns correctly.
+ * ⛔ Returns come from `pricesToDailyReturns(prices, dropped)` ONLY. Its rule
+ * (169.2 round 3, narrowing round-2 WR-03):
+ *   - a MISSING stored day is BRIDGED: adjacent stored closes give one return
+ *     at the later date, as before 169.2 and as `benchmark.py`
+ *     `prices_to_returns` (`pct_change().dropna()`) does. The cumulative BTC
+ *     overlay compounds these returns, so bridging keeps it on BTC's real
+ *     level across a missing row;
+ *   - a DROPPED (corrupt) close is NOT bridged: a pair whose span contains a
+ *     `dropped` date yields no return, so a bad close at D gives no return at
+ *     the next stored day (169.2 review WR-04 / MD-03). A consumer therefore
+ *     MUST pass the reader's `dropped` through.
+ * Known limit: a bridged multi-day move is stamped at the later date as if it
+ * were one day, so daily-return metrics see it as one observation.
+ * The Python CACHE check (`_cache_miss_reason`) refuses to serve a gapped
+ * cache, but Python's own `prices_to_returns` bridges any gap too; neither
+ * side has a one-day rule.
  *
  * ⛔ A read error is an ERROR (D-09). It is never replaced by the bundled
  * fixture: a stale fixture served in place of a failed read is the stale
@@ -82,7 +90,8 @@ export type BenchmarkReadResult =
       /**
        * Ascending dates of stored rows whose close could not price a return
        * (non-numeric, non-finite or non-positive). They are NOT in `prices`.
-       * Carried for visibility (the btc route reports them) and for
+       * Carried for visibility (the btc route reports them), for
+       * `pricesToDailyReturns`, which must not bridge a dropped date, and for
        * `mergeWithFixture`, which must not let the fixture fill a stored date.
        */
       dropped: string[];
@@ -191,32 +200,43 @@ export interface BenchmarkReturnPoint {
   value: number;
 }
 
-const DAY_MS = 86_400_000;
-
 /**
  * Daily returns from ascending closes, mirroring `benchmark.py`
  * `prices_to_returns` (`pct_change().dropna()`): each value is
  * `close / prevClose - 1`, stamped at the current close's date, and the first
  * close yields nothing.
  *
- * One rule on top (169.2 round-2 review WR-03): a return is emitted ONLY when
- * the two closes are exactly one UTC day apart. A gap of any cause (a missing
- * row, a dropped corrupt close, the seam between the fixture and the DB) yields
- * no return at the later date, never a multi-day move stamped as one day.
+ * A MISSING day is bridged: two adjacent closes give one return at the later
+ * date whatever the calendar distance, so a compounded overlay keeps BTC's
+ * real level. Known limit: that bridged multi-day move is stamped at the later
+ * date as one observation. The same holds at a `mergeWithFixture` seam: when
+ * the fixture's last date and the DB's first date are not consecutive and no
+ * `dropped` date lies between them, one return is bridged from a fixture close
+ * to a DB close, stamped at the DB's first date.
+ *
+ * A DROPPED close is not bridged (169.2 review WR-04 / MD-03): when any
+ * `dropped` date d has `prev.date < d < cur.date`, the pair yields no return,
+ * so a corrupt close at D gives no return at D and none at the next stored
+ * day. `dropped` is the reader's ascending list (`BenchmarkReadResult.dropped`,
+ * or `mergeWithFixture`'s pass-through).
+ *
  * Every close is expected to be finite and positive (`readBenchmarkPrices`
  * guarantees it); the `Number.isFinite` check catches a float overflow of an
  * extreme ratio.
  */
 export function pricesToDailyReturns(
   prices: DailyPrice[],
+  dropped: readonly string[],
 ): BenchmarkReturnPoint[] {
   const out: BenchmarkReturnPoint[] = [];
+  // Both lists are ascending ISO dates, so one forward pointer over `dropped`
+  // finds the first dropped date after each `prev`.
+  let d = 0;
   for (let i = 1; i < prices.length; i += 1) {
     const prev = prices[i - 1];
     const cur = prices[i];
-    const gap =
-      Date.parse(`${cur.date}T00:00:00Z`) - Date.parse(`${prev.date}T00:00:00Z`);
-    if (gap !== DAY_MS) continue;
+    while (d < dropped.length && dropped[d] <= prev.date) d += 1;
+    if (d < dropped.length && dropped[d] < cur.date) continue;
     const value = cur.close / prev.close - 1;
     if (!Number.isFinite(value)) continue;
     out.push({ date: cur.date, value });
@@ -233,9 +253,12 @@ export function pricesToDailyReturns(
  * dropped date inside the DB window, a fixture/DB seam day the D-09 rule
  * forbids. So a fixture row on or after the first stored date never appears,
  * and a dropped date stays a hole, which `pricesToDailyReturns` then refuses
- * to bridge. `dropped` is passed through so the consumer can still report it.
+ * to bridge. `dropped` is passed through so the consumer can report it and
+ * hand it to `pricesToDailyReturns(merged.prices, merged.dropped)`.
  *
- * `through` is the last REAL price date in the merged series, or null.
+ * `through` is the last date in the merged series, or null when it is empty.
+ * It is NOT a DB-freshness signal: when the DB holds no valid close (empty,
+ * or every stored row dropped), it is a bundled FIXTURE date.
  */
 export function mergeWithFixture(
   db: { prices: DailyPrice[]; dropped: string[] },

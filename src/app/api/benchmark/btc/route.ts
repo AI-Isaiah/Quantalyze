@@ -188,13 +188,14 @@ export async function GET(req?: Request): Promise<NextResponse> {
     return emptyResponse();
   }
 
-  // Daily returns through the ONE shared rule (169.2 round-2 review WR-03):
-  // pct-change as in benchmark.py `prices_to_returns`, emitted only for two
-  // closes exactly one UTC day apart. Validity is owned by the reader, gaps by
-  // `pricesToDailyReturns`: a missing row and a dropped corrupt close both
-  // leave a gap, and neither is bridged into a multi-day move stamped as one
-  // day. The Python side treats any calendar gap as a defect too.
-  const series = pricesToDailyReturns(prices);
+  // Daily returns through the ONE shared rule, `pricesToDailyReturns`:
+  // pct-change as in benchmark.py `prices_to_returns`. A MISSING stored day is
+  // bridged (one return at the later stored date), so the consumers' compounded
+  // BTC overlay stays on BTC's real level. A DROPPED corrupt close is NOT
+  // bridged: passing `read.dropped` makes the pair spanning it yield no return
+  // (169.2 review WR-04 / MD-03). Known limit: a bridged multi-day move is
+  // stamped at the later date as one daily observation.
+  const series = pricesToDailyReturns(prices, read.dropped);
 
   return NextResponse.json(series, {
     status: 200,

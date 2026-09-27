@@ -494,6 +494,8 @@ def test_too_few_rows_refetch_with_failed_upsert_answers_500(client, monkeypatch
 
     assert resp.status_code == 500, resp.text
     assert resp.status_code != 503
+    # Tied to its cause (SFH LW-R3-03): the lost write, not any other 500.
+    assert "BenchmarkCacheWriteError" in resp.text
     assert table.newest() == _yesterday().isoformat()
 
 

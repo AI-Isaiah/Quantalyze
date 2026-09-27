@@ -394,12 +394,13 @@ describe("GET /api/benchmark/btc", () => {
     );
   });
 
-  it("never bridges a MISSING day: no return at the day after the gap (review round 2 WR-03)", async () => {
-    // BTC trades every day, so a missing row is a hole exactly like a dropped
-    // close. 2024-01-03 is absent: 121/110 − 1 stamped at 2024-01-04 would be
-    // a TWO-day move presented as a one-day return and would feed TE/IR/beta.
-    // The Python side (`_cache_miss_reason`) treats any calendar gap as a
-    // defect; this route must not disagree with it.
+  it("BRIDGES a MISSING day: the move across it is one return at the next stored date (review round 3 WR-01, narrowing round-2 WR-03)", async () => {
+    // The scenario composer and the scenario-share page compound these returns
+    // into the BTC wealth overlay. Skipping the move across a missing row would
+    // leave that overlay off BTC's real level for every later date, so a
+    // missing row is bridged, as before 169.2 and as Python `prices_to_returns`
+    // does. (Contrast the dropped-close test above: a CORRUPT close is not
+    // bridged.) Known limit: the two-day move is stamped at 2024-01-04.
     setRows([
       { date: "2024-01-01", close_price: 100 },
       { date: "2024-01-02", close_price: 110 },
@@ -411,9 +412,17 @@ describe("GET /api/benchmark/btc", () => {
     const res = await GET();
     const body = (await res.json()) as Array<{ date: string; value: number }>;
 
-    expect(body.map((r) => r.date)).toEqual(["2024-01-02", "2024-01-05"]);
+    expect(body.map((r) => r.date)).toEqual([
+      "2024-01-02",
+      "2024-01-04",
+      "2024-01-05",
+    ]);
     expect(body[0].value).toBeCloseTo(0.1, 10); // 110/100 − 1
-    expect(body[1].value).toBeCloseTo(0.1, 10); // 133.1/121 − 1
+    expect(body[1].value).toBeCloseTo(0.1, 10); // 121/110 − 1, bridged
+    expect(body[2].value).toBeCloseTo(0.1, 10); // 133.1/121 − 1
+    // Compounding the served returns lands on BTC's real level: 133.1/100.
+    const level = body.reduce((c, r) => c * (1 + r.value), 1);
+    expect(level).toBeCloseTo(1.331, 10);
   });
 
   it("captures a persisting corrupt row ONCE per window, not once per request, with a stable message (review round 2 WR-01)", async () => {

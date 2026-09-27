@@ -382,10 +382,11 @@ describe("mergeWithFixture", () => {
       through: "2024-01-04",
       dropped: ["2024-01-02"],
     });
-    // And the hole it leaves is never bridged into a one-day return.
-    expect(pricesToDailyReturns(merged.prices).map((r) => r.date)).toEqual([
-      "2024-01-04",
-    ]);
+    // And the hole a DROPPED row leaves is never bridged into a one-day return
+    // once the consumer passes `merged.dropped` through.
+    expect(
+      pricesToDailyReturns(merged.prices, merged.dropped).map((r) => r.date),
+    ).toEqual(["2024-01-04"]);
   });
 
   it("an all-corrupt DB still cuts the fixture at its first stored date", () => {
@@ -406,31 +407,63 @@ describe("mergeWithFixture", () => {
 
 describe("pricesToDailyReturns", () => {
   it("emits close/prevClose − 1 at the later date for consecutive UTC days; the first close yields nothing", () => {
-    const out = pricesToDailyReturns([
-      { date: "2024-02-28", close: 100 },
-      { date: "2024-02-29", close: 110 }, // leap day: still one day apart
-      { date: "2024-03-01", close: 99 },
-    ]);
+    const out = pricesToDailyReturns(
+      [
+        { date: "2024-02-28", close: 100 },
+        { date: "2024-02-29", close: 110 }, // leap day: still one day apart
+        { date: "2024-03-01", close: 99 },
+      ],
+      [],
+    );
     expect(out.map((r) => r.date)).toEqual(["2024-02-29", "2024-03-01"]);
     expect(out[0].value).toBeCloseTo(0.1, 10);
     expect(out[1].value).toBeCloseTo(-0.1, 10);
   });
 
-  it("emits NO return across a gap of any cause: a missing row is not bridged into a multi-day move (review round 2 WR-03)", () => {
-    const out = pricesToDailyReturns([
+  it("BRIDGES a MISSING row: adjacent stored closes give one return at the later date, so a compounded overlay keeps BTC's level (review round 3 WR-01, narrowing round-2 WR-03)", () => {
+    const out = pricesToDailyReturns(
+      [
+        { date: "2024-01-01", close: 100 },
+        { date: "2024-01-02", close: 110 },
+        { date: "2024-01-04", close: 121 }, // 2024-01-03 absent, not dropped
+        { date: "2024-01-05", close: 133.1 },
+      ],
+      [],
+    );
+    expect(out.map((r) => r.date)).toEqual([
+      "2024-01-02",
+      "2024-01-04",
+      "2024-01-05",
+    ]);
+    expect(out[1].value).toBeCloseTo(0.1, 10); // 121/110 − 1, bridged
+  });
+
+  it("does NOT bridge a DROPPED close: the pair whose span holds a dropped date yields no return (review WR-04 / MD-03)", () => {
+    const prices = [
       { date: "2024-01-01", close: 100 },
       { date: "2024-01-02", close: 110 },
-      { date: "2024-01-04", close: 121 }, // 2024-01-03 absent
+      // 2024-01-03 stored but corrupt → in `dropped`, not in `prices`
+      { date: "2024-01-04", close: 121 },
       { date: "2024-01-05", close: 133.1 },
+      // 2024-01-06 missing (not dropped) → still bridged
+      { date: "2024-01-07", close: 146.41 },
+    ];
+    const out = pricesToDailyReturns(prices, ["2024-01-03"]);
+    expect(out.map((r) => r.date)).toEqual([
+      "2024-01-02",
+      "2024-01-05",
+      "2024-01-07",
     ]);
-    expect(out.map((r) => r.date)).toEqual(["2024-01-02", "2024-01-05"]);
   });
 
   it("skips a ratio that overflows to a non-finite value", () => {
-    const out = pricesToDailyReturns([
-      { date: "2024-01-01", close: Number.MIN_VALUE },
-      { date: "2024-01-02", close: Number.MAX_VALUE },
-    ]);
+    const out = pricesToDailyReturns(
+      [
+        { date: "2024-01-01", close: Number.MIN_VALUE },
+        { date: "2024-01-02", close: Number.MAX_VALUE },
+      ],
+      [],
+    );
     expect(out).toEqual([]);
   });
 });
