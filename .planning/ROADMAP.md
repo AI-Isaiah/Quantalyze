@@ -4130,11 +4130,24 @@ Plans:
    *Evidence, measured 2026-09-27 on PROD `/allocations?tab=scenario` at a 367 CSS px viewport (narrower than the 390 px floor), named offenders to fix under this criterion:* (a) the page overflows horizontally by 235 px: the allocations tab bar (`<div className="ml-auto flex items-center gap-1">` in `src/app/(dashboard)/allocations/AllocationsTabs.tsx`) is 682 px wide and neither scrolls in its own strip nor wraps; (b) the Stress / Streaks / Metrics sub-tabs overflow; (c) a chart container (class `flex-1 relative pointer-coarse:min-h-[44px]`, in `src/app/factsheet/[id]/v2/HeatmapPanels.tsx`) is 770 px wide and does not shrink; (d) the scenario member rows (weight / mode / leverage / notional) are fixed at 573 px; (e) the drawdown table (~389 px) and one other table (~378 px) overflow. *Second instance of (a)'s root cause, measured the same day on PROD `/profile?tab=exchanges` at narrow width:* the tab row (Exchanges / Security / Organizations / Account) runs past the viewport, and each key card's "Disconnect" button sits about 420 px from the left edge, past 390 px; both are clipped, not scrollable, so they cannot be reached.
 3. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom in the logged-in browser after deploy, by the orchestrator, and shows no horizontal page scroll and no clipped primary action *(was "at 320 px and 200% zoom"; edited 2026-09-27, founder decision above)*.
 
-**Plans:** 0 plans
+**Plans:** 14 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 170 to break down)
+- [ ] 170-01: main-aware reflow helper and the three supported viewports (wave 1)
+- [ ] 170-02: seeded narrow-layout spec, wired into CI (wave 1)
+- [ ] 170-03: allocations tab strip and the Tweaks control (wave 2)
+- [ ] 170-04: scenario footer and constituent rows (wave 2)
+- [ ] 170-05: strategies row, private link, whole-word names (wave 2)
+- [ ] 170-06: admin match read-only below md, owner line, intro count (wave 2)
+- [ ] 170-07: signed-in marketing header and the compare pointer (wave 2)
+- [ ] 170-08: shared tab strip on profile and admin (wave 3)
+- [ ] 170-09: blend-window panel; the scenario strip stops stacking (wave 3)
+- [ ] 170-10: strategy table sticky header, tags, and chip contrast (wave 3)
+- [ ] 170-11: factsheet KPI ladder, after 169 is on main (wave 4)
+- [ ] 170-12: factsheet ControlBar voice and private-link placement (wave 4)
+- [ ] 170-13: residual factsheet offenders and the final-month label (wave 5)
+- [ ] 170-14: post-deploy browser pass at 390 px and 200% zoom (wave 6)
 
 **⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy 320px check of 167.2.1, measured in the logged-in browser):** on /strategies at 320px the "Get private link" button overlaps the strategy name in the row header and cuts it to two letters. At 640px (200% zoom) the row is clean. Success: at 320px the name, the button, the status pill and the date never overlap, and the name is readable or ellipsised.
 Same pass, same width: on /allocations the floating "Tweaks" button overlaps the bottom navigation's "Strategies" and "Profile" labels. Success: no floating control covers the bottom navigation at 320px. Evidence: `.planning/uat/2026-09-26-browser-pass.md`.
