@@ -116,6 +116,13 @@ Three rounds of code review and silent-failure review, all findings fixed or dis
   00:30 UTC in `vercel.json`.
 - The refresh deadline cannot recall a database call already handed to a worker thread, so a write
   may still land after a 500. The next run's read-back sees it.
+## [0.106.0.2] - 2026-09-27 — record the TEST restore and re-dump evidence; 164.9.2 and 164.5.2 close
+
+### Notes
+- **TEST restored from the new baseline.** The preflight (run `36297240593`) rolled back byte-for-byte and printed no `42501`. The restore (run `36298217485`) reported 63 tables, 155 policies, 123 functions and 279 ledger rows. Both named TEST, not PROD. This closes 164.9.1 FC-3 and both of 164.9.2's items.
+- **The automatic re-dump (164.9.5) ran for real.** The D-18 dispatch (run `36299280127`) dumped PROD on a runner. Every gate passed, and the dump was byte-identical to the one merged in #877 (`changed=false`, no PR). That verifies 164.9.5's runner-dump and no-change criteria. The one open item is approving the workflows on the first bot PR.
+- **164.5.2 closes.** Its last item wanted review WR-02 (a pre-existing fan-in "lost release" in `mark_compute_job_done`) routed in both places. `TODOS.md` `[164.9.3.1-FANIN-GRAPH-RESIDUALS]` now lists it as clause (4), beside its ROADMAP routing under 164.9.3.1 FANINGRAPH.
+- **Phases passed and ticked:** 164.9.2 and 164.5.2. 164.9.1 and 164.9.5 each keep one open item.
 
 ## [0.106.0.1] - 2026-09-27 — baseline re-dump after the #870 and #873 PROD applies
 

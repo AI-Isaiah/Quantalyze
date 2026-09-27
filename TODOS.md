@@ -1552,7 +1552,7 @@ true for 146 and half of 142–145, and **false for 141**.
       164.5.2 ROADMAP section as lineage. **Owner: Phase 164.9.3 CLAIMPAIR**, whose criterion 4
       now covers all four partitions (api_key_id, portfolio, strategy, allocator).
 
-- [ ] **`[164.9.3.1-FANIN-GRAPH-RESIDUALS]` Three latent or loud defects on the fan-in graph and
+- [ ] **`[164.9.3.1-FANIN-GRAPH-RESIDUALS]` Four latent or loud defects on the fan-in graph and
       the bridge's decision cascade (booked 2026-09-26; routed 2026-09-25 from the Phase 164.9.1
       review round 1 to Phase 164.5.2, re-routed 2026-09-26 by founder decision).**
       (1) **Stranded child:** a fan-in child whose parent is still open at enqueue and later
@@ -1565,6 +1565,11 @@ true for 146 and half of 142–145, and **false for 141**.
       (40P01) against `mark_compute_job_done` when a child's parents include another waiting
       child. Latent. Whoever first passes parents must treat 40P01 as retryable on both the
       enqueue and the worker's mark path.
+      (4) **Lost release:** a concurrent fan-in "lost release" in `mark_compute_job_done` can
+      strand a two-parent child in `done_pending_children`. It is pre-existing: the body is
+      carried byte-for-byte from 20260603120000. Found by the Phase 164.5.2 round-1 review as
+      WR-02, and routed here 2026-09-26 (ROADMAP `### Phase 164.9.3.1`, "ROUTED IN 2026-09-26").
+      Its success test is a two-backend lane arm that fails on today's body.
       (1) and (3) are recorded in the header of M1, `20260924230827_fanin_initial_status_10param.sql`.
       ✅ **Destination: Phase 164.9.3.1 FANINGRAPH**, inserted 2026-09-26 via `/gsd-phase --insert`
       and booked under the new-phase freeze, NOT started. The ROADMAP section holds one success
