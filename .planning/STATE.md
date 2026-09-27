@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 170
 current_phase_name: LAYOUT — page layout reads clean and holds on every page
 status: executing
-stopped_at: Completed 170-09-PLAN.md
-last_updated: "2026-09-27T23:09:41.000Z"
+stopped_at: Completed 170-10-PLAN.md
+last_updated: "2026-09-27T23:26:18.000Z"
 last_activity: 2026-09-27
-last_activity_desc: Completed 170-09-PLAN.md
-state_head: 5ee9d01d16fdb6b5f496f32fe73218b1336595cf
+last_activity_desc: Completed 170-10-PLAN.md
+state_head: 85c46849c7c9a2f9778feb5832c788b1db72c605
 progress:
   total_phases: 80
   completed_phases: 41
   total_plans: 370
-  completed_plans: 356
+  completed_plans: 357
   percent: 51
 ---
 
@@ -512,7 +512,7 @@ Status: Executing Phase 170
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-27 — Completed 170-09-PLAN.md
+Last activity: 2026-09-27 — Completed 170-10-PLAN.md
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1191,6 +1191,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 170 P07 | 12 min | 3 tasks | 8 files |
 | Phase 170 P08 | 9 min | 2 tasks | 4 files |
 | Phase 170 P09 | 18 min | 3 tasks | 6 files |
+| Phase 170 P10 | 13 min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -1242,6 +1243,14 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - The eyebrow is "Scenario blend" in every state. No comparison wording was added.
 - composer-blend-detail stays closed. The composer axe spec opens it before the card checks.
 - SC1-LAYERS stays open. Plan 170-12 also declares it, and REQUIREMENTS.md has no checkbox for it.
+
+### Phase 170 decisions (plan 10)
+
+- The table wrapper carries isolate. The sticky th z-20 and z-30 classes were not changed.
+- The filter bar is top-12 md:top-0 so it sits under the 48 px mobile top bar. The drawer header's bare top-0 was left alone.
+- Strategy names use NowrapWords from plan 170-05. The tag row is flex flex-wrap gap-1 and each tag badge is whitespace-nowrap.
+- The four grey chip sites use text-text-secondary on bg-track. globals.css was not edited.
+- SC2-NOSCROLL stays open. Plans 170-11 and 170-13 also declare it. (k), (l) and CHIP have no later plan and no REQUIREMENTS.md checkbox.
 
 ### Roadmap Evolution
 
