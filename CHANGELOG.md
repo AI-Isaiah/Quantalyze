@@ -43,10 +43,24 @@ review it BEFORE the merge. Their verdicts are recorded in the phase's
   from the candidates. Beside a `low` pending twin that claimed neither row, on every tick, and
   throttled every due `low` job queue-wide, with no error. Measured: 0 of 3 rows claimed. Each
   probe now carries a marked `CLAIMPAIR PROBE EXCLUSION` block that drops such a retry from the
-  count, on the same four partitions and with the same `compute_intro_snapshot` carve-out. It is
-  still claim-side and before ranking, so the ratified D-08 stands; D-04 now reads "no bytes
-  outside the marked CLAIMPAIR blocks". Latent today: no writer sets `priority='low'` yet, but the
-  column comment names `low` as the post-deploy backfill class.
+  count, on the same four partitions as the pre-rank clause and with its `compute_intro_snapshot`
+  carve-out on the pending sibling only. It is still claim-side and before ranking, so the
+  ratified D-08 stands; D-04 now reads "no bytes outside the marked CLAIMPAIR blocks". Latent
+  today: no writer sets `priority='low'` yet, but the column comment names `low` as the
+  post-deploy backfill class.
+- **The throttle also skips a retry the C39 guard holds back** (review round 3, founder decision
+  D-11). The probe still counted a due `normal`/`high` `failed_retry` beside a `running` or
+  `done_pending_children` row of the same `(kind, partition)`, which C39 drops in `deduped`, so
+  every due `low` job was throttled while nothing claimed the retry. Beside a fan-in
+  `done_pending_children` row whose parent is `low`, the throttle held that parent too, so the
+  hold never ended. Inside the marked probe blocks of both overloads, the portfolio, allocator and
+  api_key sibling tests now read `p.status IN ('pending', 'running', 'done_pending_children')`.
+  The strategy test takes a split form: a `running` or `done_pending_children` sibling excludes
+  regardless of kind, as C39's strategy clause does, and the `compute_intro_snapshot` carve-out
+  gates the `pending` sibling only. So the probe skips exactly the rows no claim body takes this
+  tick. Widening the strategy test literally would have left an intro retry beside a running
+  intro sibling counted; the arm W-C39INTRO tells the two forms apart. The apply-time anchor pins
+  the new shape, and its failure text no longer names a single cause.
 - **An apply-time `DO $verify$` block that reads catalogs only.** It pins each pre-rank clause
   between the `ranked` CTE and `deduped`, so a clause moved post-rank fails at apply, and pins the
   probe block inside each throttle probe. It also pins the C39 guard on all four partitions, in
@@ -68,26 +82,32 @@ review it BEFORE the merge. Their verdicts are recorded in the phase's
   exist on PROD, and folding a new request into an older job can lose its payload.
 
 ### Tests
-- **A red-first 16-arm gate, `supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql`**
-  (plan 01, plus one arm from review round 1). It has 12 partition arms (4 partitions x 3 entry
-  points), W-LOST (three ticks, no lost work), P2-C39 (a second tick beside a running twin), the
-  regression arm W-INTRO and W-LOWTWIN (a `normal` retry beside a `low` twin). The first 15 arms
-  were written and run BEFORE the migration existed: on the pre-fix lane, 14 arms were RED, all
-  14 with SQLSTATE 23505, and W-INTRO was GREEN. W-LOWTWIN was written and run before the probe
-  fix: RED with no error and 0 of its 3 rows claimed. After the fix, all 16 arms are green in CI
-  mode. Each partition arm also fails if the unrelated job is not claimed or the retry is claimed
+- **A red-first 18-arm gate, `supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql`**
+  (plan 01, plus one arm from review round 1 and two from review round 3). It has 12 partition
+  arms (4 partitions x 3 entry points), W-LOST (three ticks, no lost work), P2-C39 (a second tick
+  beside a running twin), the regression arm W-INTRO, W-LOWTWIN (a `normal` retry beside a `low`
+  twin), W-C39SIB (a `normal` retry beside a `done_pending_children` sibling) and W-C39INTRO (an
+  intro retry beside a `running` intro sibling). The first 15 arms were written and run BEFORE the
+  migration existed: on the pre-fix lane, 14 arms were RED, all 14 with SQLSTATE 23505, and
+  W-INTRO was GREEN. W-LOWTWIN was written and run before the probe fix: RED with no error and 0
+  of its 3 rows claimed. W-C39SIB and W-C39INTRO were written and run before the round-3 widening:
+  each RED with no error, the unrelated `low` job and the retry each claimed 0 times. After the
+  fixes, all 18 arms are green in CI mode. Each partition arm also fails if the unrelated job is not claimed or the retry is claimed
   in that tick, so a silent-wedge "fix" still reads red. Parents are seeded as real rows, because
   the claim's own UPDATE re-checks the foreign keys of rows inserted in the same transaction.
 - **D-09 lane proof, with no remote database touched** (plan 03). A fresh local-stack lane
   replayed the migration on top of the dump, and the whole non-LANE-ONLY `supabase/tests` corpus
   passed on it (78 of 78, with all six claim gates green). The gate also got its single pg-lane
   `RED-UNDER-SETUP` apply list, ending with the migration, and exits 0 there.
-- **A layered mutation twin for every arm** (plan 04). Each twin neuters one body's clause for one
-  partition and stands that body's apply-time anchor down, so it can redden only its own arm. The
-  narrowed runner reported all 16 arms biting their own arm first, with 0 waived.
-- **Floors and census pins moved by measurement** (plan 05). `FILES_FLOOR` and `ARMS_FLOOR` rise
-  to the values one full runner pass printed with no defects, and each floor was shown to bite in
-  both directions. `WAIVED_CEILING` stays 0. The annotation-parser, floors, `lint-sql-gates` and
+- **A layered mutation twin for every arm** (plan 04, then review rounds 1 and 3). Each twin
+  neuters one body's clause for one partition and stands that body's apply-time anchor down, so it
+  can redden only its own arm. W-C39INTRO's twin is the literal-widening form of the strategy
+  test. The narrowed runner reported all 18 arms biting their own arm first, with 0 waived.
+- **Floors and census pins moved by measurement** (plan 05, then review rounds 1 and 3).
+  `FILES_FLOOR` and `ARMS_FLOOR` rise to the values a full runner pass printed with no defects.
+  Plan 05 showed each floor biting in both directions. For the review-round `ARMS_FLOOR` moves,
+  only the stale-low direction was observed; the too-high direction was not re-run (see the
+  comment beside the constant). `WAIVED_CEILING` stays 0. The annotation-parser, floors, `lint-sql-gates` and
   `gate-family-meta` census pins move with them, and every calibration pin keeps its offset. Read
   the floors by symbol from `scripts/mutation-runner/run.mjs`, never from here.
 
@@ -103,10 +123,16 @@ review it BEFORE the merge. Their verdicts are recorded in the phase's
 
 ### Notes
 - ⚠️ **Two residuals are recorded in the migration header, not fixed; a third was closed.**
-  (i) CLOSED in review round 1: the priority throttle counted a held-back retry. The first draft
-  of this entry called that a bounded hold. It was a silent permanent wedge beside a `low` twin
-  (see Fixed). The probe now skips such a retry, so neither the far-future-twin hold nor the
-  low-twin wedge remains, and W-LOWTWIN pins it. (ii) A retry waits for a not-yet-due twin to run
+  (i) CLOSED in review rounds 1 and 3: the priority throttle counted a held-back retry. The first
+  draft of this entry called that a bounded hold. It was a silent permanent wedge beside a `low`
+  twin (see Fixed). The probe now skips a retry held back beside a `pending` twin (round 1) and one
+  the C39 guard holds back beside a `running` or `done_pending_children` sibling (round 3). So the
+  far-future-twin hold, the low-twin wedge and the C39-sibling hold are all gone, and W-LOWTWIN,
+  W-C39SIB and W-C39INTRO pin them. What stays: the probe block covers `failed_retry` rows only,
+  so a due `pending` `compute_intro_snapshot` row that C39 drops beside a running or
+  `done_pending_children` intro sibling is still counted (review IN-11). Only that kind can sit
+  pending beside an in-flight row. It predates this phase and is latent while no writer sets
+  `low`. (ii) A retry waits for a not-yet-due twin to run
   first: delay, not loss. (iii) A claim racing a concurrent enqueue of the twin can still raise
   23505 for one tick. That one is reasoned, not measured, and C39 has the same window today.
 - **No overlap with Phase 164.9.3.2 DEFER40001 (D-05).** The migration edits none of

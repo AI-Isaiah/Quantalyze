@@ -1561,15 +1561,23 @@ true for 146 and half of 142–145, and **false for 141**.
       `compute_jobs_one_inflight_per_kind_*` index predicate (D-02). The 2-arg is re-based, not
       dropped, and also gains the C39 running / done_pending_children guard. The enqueue side is
       unchanged. Gate `supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql`,
-      16 arms (12 partition arms, W-LOST, P2-C39, regression arm W-INTRO, and W-LOWTWIN from
-      review round 1), each with a mutation twin. Red-first census on the pre-fix lane: 14 RED,
-      all 14 with SQLSTATE 23505, W-INTRO GREEN; W-LOWTWIN RED before the probe fix (no error,
-      0 of 3 rows claimed). After the fix: 16 of 16 green on the local-stack and pg-lanes.
-      Residual (i) is CLOSED in review round 1 (WR-01): the priority throttle probe counted a
+      18 arms (12 partition arms, W-LOST, P2-C39, regression arm W-INTRO, W-LOWTWIN from review
+      round 1, and W-C39SIB and W-C39INTRO from review round 3), each with a mutation twin.
+      Red-first census on the pre-fix lane: 14 RED, all 14 with SQLSTATE 23505, W-INTRO GREEN;
+      W-LOWTWIN RED before the probe fix (no error, 0 of 3 rows claimed); W-C39SIB and
+      W-C39INTRO RED before the round-3 widening (no error, the unrelated `low` job and the retry
+      each claimed 0 times). After the fixes: 18 of 18 green on the pg-lane.
+      Residual (i) is CLOSED in review rounds 1 and 3: the priority throttle probe counted a
       held-back retry, which beside a `low` pending twin claimed neither row and throttled every
       due `low` job with no error, on every tick. Both priority overloads now skip such a retry
-      in the probe (a marked `CLAIMPAIR PROBE EXCLUSION` block), so neither the far-future-twin
-      hold nor the low-twin wedge remains. ⚠️ Two residuals are recorded in the migration
+      in the probe (a marked `CLAIMPAIR PROBE EXCLUSION` block). Round 3 (founder decision D-11)
+      widened the block to the C39 half: a retry the C39 guard holds back beside a `running` or
+      `done_pending_children` sibling is skipped too, with the intro carve-out on the `pending`
+      sibling only. So the far-future-twin hold, the low-twin wedge and the C39-sibling hold are
+      all gone. What stays (review IN-11): the block covers `failed_retry` rows only, so a due
+      `pending` `compute_intro_snapshot` row that C39 drops beside an in-flight intro sibling is
+      still counted; it predates this phase and is latent while no writer sets `low`.
+      ⚠️ Two residuals are recorded in the migration
       header, not fixed: (ii) a retry waits for a not-yet-due twin to run first (delay, not
       loss); (iii) a claim racing a concurrent enqueue of the twin can still raise 23505 for one
       tick (reasoned, not measured). The ROADMAP-booked option (a), adding `pending` to the
