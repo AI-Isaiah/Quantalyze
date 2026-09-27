@@ -2768,6 +2768,14 @@ then both `**Owns**` lines move here, both `TODOS.md` `Owner:` lines point at Ph
 name 164.6.8, and the two `**Owns**` lines #863 wrote under Phase 164.6.6 are carried here verbatim:
 - *(as #863 wrote it, 2026-09-26, from 164.6.5 plan 08)* `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01` — Phase 164.6.5 D-11, OPEN: the prod-prober's `-10005` classification (`mt5-ipc-timeout`) has never been calibrated against a REAL wedge; its fixture was constructed, not captured. Trigger: the next live `-10005`, captured BEFORE the heal recycles the terminal (a founder-supervised induced wedge also qualifies). Gate: a scrubbed real-wedge transcript committed under `scripts/prod-prober/fixtures/mt5/`, registered for the kind it actually produced, self-test and wiring suite green. ⛔ A hand-written fixture is not a close. ⚠️ 164.6.5's own heal can recycle a wedge before a scheduled prober run reads it.
 - *(as #863 wrote it, 2026-09-25, from 164.6.5 plan 01)* `TODOS.md` `MT5-SWITCH-WEDGE-CAUSE-01` — why some account switches on the shared terminal wedge it (`-10005`, Journal silent after `disconnected`) and others do not. Verdicts so far: same-vs-different account REJECTED, terminal self-update and same-vs-different broker server UNDECIDED. Closes only on evidence captured at the next wedge BEFORE any restart; a restart clearing the symptom is not a close.
+**Owns (routed 2026-09-27 from Phase 164.6.6 D-06, founder decision):** `TODOS.md`
+`MT5-VALIDATION-TERMINAL-COVERAGE-01` — (a) the validation terminal's MONITORING GAP: the session
+monitor, boot heal, `ipc_fault` recycle and the prod-prober MT5 arm all read the single
+`MT5_GATEWAY_HOST` / `MT5_GATEWAY_PORT` pair, so the second (validation-only) gateway Phase 164.6.6
+stands up is dark to all four; (b) the READER of skipped-cleanup rows: every non-`scrubbed`
+`mt5_terminal_scrub` row Phase 164.6.6.1 writes (skipped for budget, refused, partial, failed,
+relaunch failed) is recorded and read by nothing. This phase is frozen; the item waits here. Until it
+lands, a wedged or logged-out validation terminal is noticed only when a validation fails.
 **Plans:** 0 plans
 
 **Success criteria (to be derived properly at planning):**
