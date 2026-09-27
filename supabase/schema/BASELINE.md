@@ -84,17 +84,47 @@ replay it, and boot green on a schema missing it. A full list cannot make that m
 
 | | |
 |---|---|
-| Taken | 2026-09-26 |
+| Taken | 2026-09-27 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
 | Supabase CLI | 2.84.2 (CI pins 2.98.2 — see the caveat below) |
-| sha256 | `22cce9c0241f01090ff9d46208391654660c49233945364c9ba96db28a69d076` |
-| Shape | 63 tables, 155 policies, 123 function statements (121 distinct names), **0 data statements** |
+| sha256 | `5a32d248b240cc1141d4ce15b15d39d8577944a3b1d23f66d686deaa93f52211` |
+| Shape | 63 tables, 155 policies, 125 function statements (123 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
 `scripts/local-stack/REPLAY-SPIKE.md`: no DSN, no `\connect`, no `ALTER DATABASE`, no JWT,
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-09-27 — the #870 and #873 applies, two migrations, two new functions
+
+⛔ **A SEPARATE REVIEWED ACT, taken by the founder** with a read-only `supabase db dump --linked`
+(CLI 2.84.2); this checkout runs no database command against a remote. Taken AFTER both
+migrations had applied to PRODUCTION: Supabase Migrate run `36266617140` on merge commit
+`74f9b5cd2` (#870) and run `36274235531` on merge commit `37e6e6f7a` (#873), `apply-test` and
+`apply` success on each. `37e6e6f7a` is the `MERGE` used to regenerate the marker. The next merge,
+`8c0871735` (#869), touches no file under `supabase/migrations/**`.
+
+**Which migrations the new dump now carries** — measured from the marker diff, the complete set
+added since the 2026-09-26 capture:
+
+| migration | what it adds | expected shape delta |
+|---|---|---|
+| `20260925120000_api_keys_account_identity.sql` | three `api_keys` columns and their constraints, `enforce_api_keys_account_share_same_owner` + its trigger, `set_departed_key_history_inclusion`, index `api_keys_account_shared_with_idx`, a re-based `reconnect_allocator_api_key`, column SELECT grants, re-stated COMMENTs | +2 function statements, +2 distinct names, +1 trigger, +1 index |
+| `20260926120000_mark_compute_job_bridge_advisory_lock.sql` | `CREATE OR REPLACE` of `mark_compute_job_done` and `mark_compute_job_failed` | none of the counted shapes (body replacement of existing functions) |
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Shape | 63 tables, 155 policies, 123 → **125** function statements (121 → **123** distinct names), 35 → 36 triggers, 126 → 127 indexes |
+| Data statements | **0** — unchanged |
+| sha256 | `22cce9c0…` → `5a32d248…` |
+| Secret scan (all five classes) | **0** matches, `grep -a` |
+| Home path / local username / project ref | 0 matches |
+| File integrity | single `SET client_encoding`, no NUL bytes |
+| Currency gate | `baseline-currency: carried=279 replay=0 marker-sha=match defects=0` |
+| Body drift | `baseline-content-drift`: compared 125 — MATCH 122, DRIFT 3 (the three allowlisted `[DRIFT-06]` rows), findings **0**. The pre-dump reading was findings on 5 functions: `enforce_api_keys_account_share_same_owner`, `set_departed_key_history_inclusion`, `reconnect_allocator_api_key`, `mark_compute_job_done`, `mark_compute_job_failed`. |
 
 ### Regenerated 2026-09-26 — the Phase 164.9.1 apply, three migrations, no shape change
 

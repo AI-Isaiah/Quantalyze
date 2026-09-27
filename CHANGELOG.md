@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.106.0.1] - 2026-09-27 — baseline re-dump after the #870 and #873 PROD applies
+
+Same shape as v0.93.0.2: a read-only re-dump taken after migrations reached PRODUCTION, so the
+local-stack lane loads a dump that already carries them and the body-drift gate reads clean.
+
+### Changed
+- **`supabase/schema/baseline.sql` regenerated from PROD**, read-only `supabase db dump --linked`
+  (Supabase CLI 2.84.2) taken manually by the founder AFTER Supabase Migrate applied
+  `20260925120000_api_keys_account_identity.sql` (run `36266617140`, merge `74f9b5cd2`, #870) and
+  `20260926120000_mark_compute_job_bridge_advisory_lock.sql` (run `36274235531`, merge
+  `37e6e6f7a`, #873). sha256 `22cce9c0…` → `5a32d248…`, recorded in `BASELINE.md` with a dated
+  section of what was measured. Shape: 63 tables and 155 policies unchanged, function statements
+  123 → 125 (121 → 123 distinct names), **0** data statements.
+- **`supabase/schema/baseline-carried-migrations.txt` regenerated in the same commit** (DECISION F)
+  from the tree of `37e6e6f7a`: two migrations added, sha line rebound.
+  `baseline-currency: carried=279 replay=0 marker-sha=match defects=0`.
+- **`NAME_SET_RATCHET` in `scripts/dump-sql-functions.ts` shrinks to empty.** Phase 167.1.2 added
+  two `snapshot-only` rows (`enforce_api_keys_account_share_same_owner`,
+  `set_departed_key_history_inclusion`) whose `clearedBy` named exactly this regeneration. On the
+  new dump the gate reported both `ratchet-stale` ("present on BOTH sides") and exited 1, so they
+  are deleted. The list only ever shrinks; this is the shrink.
+
+### Fixed
+- **`baseline-content-drift` reads findings 0 again.** Before the dump it reported findings on
+  5 functions whose PROD bodies the committed dump predated: `enforce_api_keys_account_share_same_owner`,
+  `set_departed_key_history_inclusion`, `reconnect_allocator_api_key`, `mark_compute_job_done` and
+  `mark_compute_job_failed`. It now reads compared 125, MATCH 122, DRIFT 3 (the three allowlisted
+  `[DRIFT-06]` rows), findings **0**.
+
+### Notes
+- **Secret-scanned before commit** with all five classes from `BASELINE.md`'s own command under
+  `grep -a`: **0** matches; no home path, local username or project ref; one
+  `SET client_encoding`, no NUL bytes.
+- `#869` (`8c0871735`) merged between the dump and this commit and touches no migration, so the
+  marker's merge stays `37e6e6f7a`.
+
 ## [0.106.0.0] - 2026-09-26 — AUTOREDUMP: after a PROD migration apply, the committed baseline is re-dumped, gated and proposed as one bot PR that is never auto-merged
 
 ⭐ **What changed for whoever reads this next.** Until now every PROD migration apply left `main`
