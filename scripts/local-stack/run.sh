@@ -62,6 +62,10 @@
 #                                                      # exactly as `up` does (--replay-set:
 #                                                      # names the migrations it would replay);
 #                                                      # exit = its verdict
+#   scripts/local-stack/run.sh --assert-local-handoff [FILE]
+#                                                      # assert the handoff (default: the
+#                                                      # lane's .stack-env) is loopback:
+#                                                      # API_URL and DB_URL; prints no value
 #
 # Environment seams (defaults = the repo paths; each resolved value is logged):
 #   LANE_MIGRATIONS_DIR     the migrations directory the gate classifies and the replay applies
@@ -265,6 +269,36 @@ write_env_handoff() {
   mv "$tmp" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   log "env handoff written: ${ENV_FILE} (gitignored, mode 600)"
+}
+
+# --- handoff loopback assertion (Phase 164.9.4 D-04) -----------------------------
+# A job that CONSUMES the handoff asserts it is local before it exports anything.
+# ⛔ No guard of its own: API_URL goes through `assert_local` above, DB_URL through
+# the WR-08 parse-based probe, called exactly as `load_baseline` calls it. The probe
+# needs a postgres: scheme, so it cannot judge API_URL; that is why both are reused.
+# ⛔ Prints no URL, DSN or key: its output lands in a public Actions log.
+assert_local_handoff() {
+  local handoff="$1" api_url db_url
+  if [ ! -f "$handoff" ] || [ ! -r "$handoff" ]; then
+    echo "FATAL: lane handoff file missing or unreadable: ${handoff}" >&2
+    exit 1
+  fi
+  api_url="$(sed -n 's/^API_URL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$handoff" | head -1)"
+  if [ -z "$api_url" ]; then
+    echo "FATAL: the lane handoff carries no API_URL line: ${handoff}" >&2
+    exit 1
+  fi
+  assert_local "$api_url"
+  db_url="$(sed -n 's/^DB_URL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$handoff" | head -1)"
+  if [ -z "$db_url" ]; then
+    echo "FATAL: the lane handoff carries no DB_URL line: ${handoff}" >&2
+    exit 1
+  fi
+  if ! LOOPBACK_DSN="$db_url" node "${LANE_DIR}/capability-probe.mjs" --refuse-nonlocal-dsn >/dev/null; then
+    echo "FATAL: the lane handoff names a non-local database. Refusing to continue (value not printed)." >&2
+    exit 1
+  fi
+  log "handoff is loopback (API_URL and DB_URL), values not printed"
 }
 
 # --- schema -------------------------------------------------------------------
@@ -954,5 +988,12 @@ case "${1:-}" in
   # "unwired". No daemon, no stack — it reads the marker, the dump's sha256 and
   # the migrations directory, and names the replay set (DECISION F).
   --check-currency) check_baseline_currency ;;
+  # Asserts the lane HANDOFF (default: this lane's own .stack-env) is loopback,
+  # and exits 1 on any other answer. Same argument as the seams above, applied to
+  # D-04 (Phase 164.9.4): the `python` and `e2e-seeded` lane-handoff steps call it
+  # FIRST, before any $GITHUB_ENV write, so they REUSE `assert_local` and the WR-08
+  # probe instead of carrying a third loopback check. No daemon, no stack, no value
+  # printed.
+  --assert-local-handoff) shift; assert_local_handoff "${1:-$ENV_FILE}" ;;
   *)           usage; exit 2 ;;
 esac

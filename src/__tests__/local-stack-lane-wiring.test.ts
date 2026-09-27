@@ -1182,6 +1182,51 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
       ).toBe(true);
     }
   });
+
+  // Phase 164.9.4 D-04: the `python` and `e2e-seeded` jobs consume the lane handoff
+  // and must assert it is loopback BEFORE they export anything. `assert_local` is
+  // internal to run.sh and the probe above accepts only postgres URLs, so the seam
+  // `--assert-local-handoff` is how a CI step reuses BOTH guards instead of carrying
+  // a third. EXECUTED here: a refusal that is only grepped for can be dead code.
+  it("run.sh --assert-local-handoff refuses a non-loopback handoff and never echoes it (Phase 164.9.4 D-04)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "lane-handoff-"));
+    try {
+      const LOOPBACK_DB = "postgresql://nonecho_marker_user@127.0.0.1:54422/postgres";
+      const assertHandoff = (name: string, lines: string[] | null) => {
+        // ABSOLUTE path: run.sh resolves everything from its own location.
+        const p = join(dir, `${name}.env`);
+        if (lines !== null) writeFileSync(p, lines.join("\n") + "\n");
+        const r = spawnSync("bash", [RUN_SH, "--assert-local-handoff", p], {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+        });
+        return { status: r.status, out: `${r.stdout}${r.stderr}` };
+      };
+      const noEcho = (name: string, out: string) => {
+        expect(out, `${name}: the handoff's userinfo marker was echoed`).not.toContain("nonecho_marker_user");
+        expect(out, `${name}: the handoff's API host marker was echoed`).not.toContain("nonecho-marker");
+        expect(out, `${name}: a remote host was echoed`).not.toContain("example.invalid");
+        expect(out, `${name}: a port from the handoff was echoed`).not.toContain("54421");
+      };
+
+      // A remote API_URL is refused by assert_local, and the refusal names no value.
+      const remoteApi = assertHandoff("remote-api", [
+        'API_URL="https://nonecho-marker.example.invalid"',
+        `DB_URL="${LOOPBACK_DB}"`,
+      ]);
+      expect(remoteApi.status, `a remote API_URL was accepted:\n${remoteApi.out}`).toBe(1);
+      expect(remoteApi.out, "AIM: a refusal was printed, so the no-echo checks read real output").toContain("FATAL");
+      noEcho("remote-api", remoteApi.out);
+
+      // A loopback handoff passes, and the success line prints no value either.
+      const local = assertHandoff("local", ['API_URL="http://127.0.0.1:54421"', `DB_URL="${LOOPBACK_DB}"`]);
+      expect(local.status, `a loopback handoff was refused:\n${local.out}`).toBe(0);
+      expect(local.out).toContain("handoff is loopback (API_URL and DB_URL), values not printed");
+      noEcho("local", local.out);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── Review 164.4.2 WR-09: the image-pin check, EXECUTED against a stubbed docker. ──
