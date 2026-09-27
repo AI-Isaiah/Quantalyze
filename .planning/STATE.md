@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 170
 current_phase_name: LAYOUT — page layout reads clean and holds on every page
 status: executing
-stopped_at: Completed 170-08-PLAN.md
-last_updated: "2026-09-27T22:52:00.000Z"
+stopped_at: Completed 170-09-PLAN.md
+last_updated: "2026-09-27T23:09:41.000Z"
 last_activity: 2026-09-27
-last_activity_desc: Completed 170-08-PLAN.md
-state_head: df831285bc3d3f0dce236df1cd2cf2451e4d2f4f
+last_activity_desc: Completed 170-09-PLAN.md
+state_head: 5ee9d01d16fdb6b5f496f32fe73218b1336595cf
 progress:
   total_phases: 80
   completed_phases: 41
   total_plans: 370
-  completed_plans: 355
+  completed_plans: 356
   percent: 51
 ---
 
@@ -512,7 +512,7 @@ Status: Executing Phase 170
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-27 — Completed 170-08-PLAN.md
+Last activity: 2026-09-27 — Completed 170-09-PLAN.md
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1190,6 +1190,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 170 P06 | 18 min | 2 tasks | 8 files |
 | Phase 170 P07 | 12 min | 3 tasks | 8 files |
 | Phase 170 P08 | 9 min | 2 tasks | 4 files |
+| Phase 170 P09 | 18 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -1233,6 +1234,14 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - The inset focus ring is on the underline trigger only. The segmented arm keeps the HEAD class strings.
 - The active underline tab is scrolled with computeTabStripScroll from offsetLeft, offsetWidth, scrollLeft and clientWidth. The element scroll-into-view API is not used.
 - A disconnected key row has Reconnect, not Disconnect. That row's action group wraps the buttons it actually renders.
+
+### Phase 170 decisions (plan 09)
+
+- KpiPanel variant defaults to cards. Only the scenario composer passes panel.
+- Panel hairlines are right and top borders, cleared on the last column and the first row with container nth-child, so two columns and four columns do not double the outer edge.
+- The eyebrow is "Scenario blend" in every state. No comparison wording was added.
+- composer-blend-detail stays closed. The composer axe spec opens it before the card checks.
+- SC1-LAYERS stays open. Plan 170-12 also declares it, and REQUIREMENTS.md has no checkbox for it.
 
 ### Roadmap Evolution
 
