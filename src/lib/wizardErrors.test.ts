@@ -4640,6 +4640,31 @@ describe("[154.1 / WIZCONT-02] VENUE_ALREADY_CONNECTED — the honest refusal", 
 });
 
 /**
+ * [167.1.2 / D-01] The two venue-identity refusals are VENUE-NEUTRAL.
+ *
+ * Until 167.1.2 only an MT5 login could reach them, so "login" and "broker
+ * account" were true. Now the validator stamps an OKX, Bybit, Binance or
+ * Deribit account id too, and a second key on one of those accounts reaches
+ * exactly these entries. Telling an OKX user to use "a different login on the
+ * same broker" sends them looking for a thing their exchange does not have.
+ */
+describe("[167.1.2 / D-01] the venue-identity refusals name no login and no broker account", () => {
+  it.each(["KEY_VENUE_ALREADY_CONNECTED", "VENUE_ALREADY_CONNECTED"] as const)(
+    "%s copy fits every venue that can reach it",
+    (code) => {
+      const copy = WIZARD_ERROR_COPY[code];
+      const haystack = [copy.title, copy.cause, ...copy.fix].join("   ");
+      expect(haystack, `${code} still speaks MT5-only language`).not.toMatch(
+        /login|broker account/i,
+      );
+      // The refusal still says what happened and what to do — neutrality is
+      // not deletion. An exchange account is what every one of these venues has.
+      expect(haystack.toLowerCase()).toContain("exchange account");
+    },
+  );
+});
+
+/**
  * [161-05 / WIZERR-03] KEY_ORPHANED — THE REFUSAL, AND THE ONE PROPERTY THAT
  * MAKES IT AN IMPROVEMENT RATHER THAN A RENAME.
  *

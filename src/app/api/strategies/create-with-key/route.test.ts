@@ -1802,8 +1802,9 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
   });
 
   it("NON-MT5 venues leave the arm INERT: no api_keys read, no p_venue_account_id on the wire", async () => {
-    // The ccxt adapter's ValidationResult carries no account-identity field, so
-    // there is nothing to stamp and the whole arm must be a no-op for them.
+    // A ccxt validation that carried no `venue_account_id` has nothing to
+    // stamp, so the whole arm must be a no-op for it. (167.1.2: a ccxt
+    // validation that DOES carry one is pinned in the [167.1.2 / D-01] block.)
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
 
@@ -2392,6 +2393,130 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
 
       expect(validateKeyMock).toHaveBeenCalled();
       expect(rpcMock).toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * 167.1.2 (D-01) — a ccxt venue now has an identity too, read by the
+   * validator from THIS credential and returned as `venue_account_id`. It is
+   * what lets the venue-identity index refuse a second live key on one
+   * exchange account in the wizard, the same way the MT5 login does. No new
+   * code: the collision resolves through the existing race arm, and each of
+   * its three outcomes is pinned here for a ccxt venue. "100000001" is a
+   * synthetic OKX uid; it must appear in no response body.
+   */
+  describe("[167.1.2 / D-01] a ccxt (okx) key stamps its account id, and a collision resolves through the race arm", () => {
+    const OKX_UID = "100000001";
+    const OKX_RECONNECT_BODY = { ...VALID_BODY, wizard_session_id: OTHER_SESSION_ID };
+
+    beforeEach(() => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      validateKeyMock.mockResolvedValue({
+        valid: true,
+        read_only: true,
+        venue_account_id: OKX_UID,
+      });
+    });
+
+    function collideOnVenueIdentity() {
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+          details: `Key (user_id, exchange, venue_account_id)=(x, okx, ${OKX_UID}) already exists.`,
+        },
+      });
+    }
+
+    it("threads the validator's id into the RPC as p_venue_account_id", async () => {
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      const [, rpcArgs] = rpcMock.mock.calls[0];
+      expect((rpcArgs as Record<string, unknown>).p_venue_account_id).toBe(OKX_UID);
+      // The ccxt id is only known AFTER validation, so there is no pre-RPC
+      // fence read for it: the index is the refusal, the race arm the answer.
+      expect(venueKeyLookupMock).not.toHaveBeenCalled();
+      expect(await res.text()).not.toContain(OKX_UID);
+    });
+
+    it("an own DRAFT on the same account → 200 deduped with the EXISTING ids", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      venueStrategyLookupMock.mockResolvedValue({ data: { id: EXISTING_STRATEGY_ID }, error: null });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({
+        ok: true,
+        strategy_id: EXISTING_STRATEGY_ID,
+        api_key_id: EXISTING_KEY_ID,
+        deduped: true,
+      });
+      expect(text).not.toContain(OKX_UID);
+      // The re-read is keyed on the ccxt venue and the validator's id.
+      const keyRead = capturedSelects.find((c) => c.table === "api_keys");
+      expect(keyRead?.filters).toMatchObject({ exchange: "okx", venue_account_id: OKX_UID });
+    });
+
+    it("a CONNECTED strategy on the same account → 409 VENUE_ALREADY_CONNECTED", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: "Existing Strategy" },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("VENUE_ALREADY_CONNECTED");
+      expect(text).not.toContain(OKX_UID);
+    });
+
+    it("an ORPHANED key on the same account → 409 KEY_ORPHANED", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("KEY_ORPHANED");
+      expect(text).not.toContain(OKX_UID);
+    });
+
+    it("the RPC error line is scrubbed of the uid Postgres echoes in its DETAIL", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const POST = await importPost();
+      await POST(makeReq(OKX_RECONNECT_BODY));
+
+      const logged = JSON.stringify(consoleErr.mock.calls);
+      expect(logged).toContain("RPC error");
+      expect(logged).not.toContain(OKX_UID);
+    });
+
+    it("a ccxt validation WITHOUT an id omits p_venue_account_id and the create still succeeds", async () => {
+      validateKeyMock.mockResolvedValue({ valid: true, read_only: true });
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      const [, rpcArgs] = rpcMock.mock.calls[0];
+      expect(rpcArgs as Record<string, unknown>).not.toHaveProperty("p_venue_account_id");
     });
   });
 });
