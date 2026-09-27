@@ -10,9 +10,10 @@
 --     reconstruct-alloc-<key>-initial) for every QUALIFYING key on a book with
 --     zero snapshots that has no reconstruct job in flight (pending, running,
 --     done_pending_children, failed_retry) or done, taking whole books under a
---     per-run cap; qualifying = active, not revoked, not disconnected, not
---     linked to one of its owner's non-archived strategies, and not Deribit.
---     A failed_final reconstruct therefore does not count, and is retried;
+--     per-run cap; qualifying = active, not revoked, sync_status not
+--     sign_in_failed or error, not disconnected, not linked to one of its
+--     owner's non-archived strategies, and not Deribit. A failed_final
+--     reconstruct therefore does not count, and is retried;
 --   * THEN enqueue the daily refresh for an eligible key whose owner has
 --     snapshots (as before, minus revoked keys), or for an unlinked key on a
 --     zero-snapshot book once every qualifying key on that book has a
@@ -54,20 +55,21 @@
 -- creates, and nothing that can RAISE precedes arm Z1. On migration 075's body
 -- the full file must fail with arm Z1 first; with Z1's marked block deleted it
 -- must fail with arm Z2. Keep Z1 and Z2 the FIRST TWO assertions in the file.
--- On 075's body R, N3c, N4, N4d, N6, C, S, X1, X3 and G can also
+-- On 075's body R, N3c, N4, N4d, N6, N7, C, S, X1, X3 and G can also
 -- fail, so none of them may move ahead of Z1 or between Z1 and Z2. Every
 -- later group seeds its own fixtures and makes its own call(s) after Z2,
 -- never before.
 --
 -- ⭐ ORDER IS LOAD-BEARING. Each arm must be the FIRST failure under its own
 -- mutation (scripts/mutation-runner). File order, fixed:
---   Z1, Z2, N1, R, N2, N3, N3b, N3c, N4, N4d, N5, N6, E, B, F, C, S, X1, X2,
---   X3, G.
--- MATCHED PAIRS: every negative-control key (N1, R, N2, N3, N3b, N3c, N6)
--- differs from a qualifying key in exactly ONE attribute, the one its arm's
--- mutation removes; everything else is active, not revoked, not disconnected,
--- not Deribit and unlinked. A revoked key seeded inactive, or a disconnected
--- key also revoked, would leave its mutation inert.
+--   Z1, Z2, N1, R, N2, N3, N3b, N3c, N4, N4d, N5, N6, E, N7, B, F, C, S, X1,
+--   X2, X3, G.
+-- MATCHED PAIRS: every negative-control key (N1, R, N2, N3, N3b, N3c, N6,
+-- N7) differs from a qualifying key in exactly ONE attribute, the one its
+-- arm's mutation removes; everything else is active, not revoked, sync_status
+-- idle, not disconnected, not Deribit and unlinked. A revoked key seeded
+-- inactive, or a disconnected key also revoked, would leave its mutation
+-- inert.
 -- Each mutation names ONE copy of the predicate by its table alias (book
 -- selection bq*, per-key selection rk*, refresh loop ak*/aes, bootstrapped
 -- subquery bk*), so an edit of one copy is never inert because another copy
@@ -97,7 +99,8 @@
 --   N6   Z to N5: no earlier Deribit key.
 --   E    Z to N6: no earlier linked key on a snapshot book; N5's key is
 --        unlinked.
---   B    Z to E: every earlier zero-snapshot book is bootstrapped or holds no
+--   N7   Z to E: every earlier key's sync_status is idle or revoked.
+--   B    Z to N7: every earlier zero-snapshot book is bootstrapped or holds no
 --        eligible unlinked key, so dropping the conjunct adds no refresh there.
 --   F    Z to B: the only earlier failed_final row is N4's, and N4's key
 --        also holds its pending retry, so its book is bootstrapped under
@@ -124,7 +127,7 @@
 -- Usage:
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/test_refresh_fanout_zero_snapshot_bootstrap.sql
 --
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql","supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260922120000_api_keys_sync_status_sign_in_failed.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql","supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql"]}
 
 BEGIN;
 
@@ -619,6 +622,56 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (E): a strategy-linked key on a book WITH snapshots got % refresh_allocator_equity_daily job(s), expected 1. The population migration 075 refreshed must be unchanged apart from revoked keys.', v_n;
   END IF;
 END $grpe$;
+
+-- ==========================================================================
+-- GROUP N7 — a SIGN_IN_FAILED key on one zero-snapshot book and an ERROR key
+-- on another: no reconstruct (the exchange refused the credential, so it
+-- would fail permanently and spend a cap slot every day), and each still gets
+-- its refresh, as on 075 (their books are bootstrapped vacuously). Review
+-- SFH-04.
+-- ==========================================================================
+DO $grpn7$
+DECLARE
+  v_run  text := replace(gen_random_uuid()::text, '-', '');
+  v_base timestamptz := now() + INTERVAL '100 years' + INTERVAL '11 days';
+  uid_s  uuid := gen_random_uuid();
+  uid_e  uuid := gen_random_uuid();
+  k_s    uuid := gen_random_uuid();
+  k_e    uuid := gen_random_uuid();
+  v_rec  int;
+  v_ref  int;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid_s, '00000000-0000-0000-0000-000000000000', 'test-fanout-boot-n7s-' || v_run || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email)
+  VALUES (uid_s, 'fanout boot N7 sign-in', 'test-fanout-boot-n7s-' || v_run || '@quantalyze.test')
+  ON CONFLICT (id) DO NOTHING;
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid_e, '00000000-0000-0000-0000-000000000000', 'test-fanout-boot-n7e-' || v_run || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email)
+  VALUES (uid_e, 'fanout boot N7 error', 'test-fanout-boot-n7e-' || v_run || '@quantalyze.test')
+  ON CONFLICT (id) DO NOTHING;
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, sync_status, created_at)
+  VALUES (k_s, uid_s, 'okx', 'fanout boot N7 sign-in', 'enc', true, 'sign_in_failed', v_base + INTERVAL '1 hour'),
+         (k_e, uid_e, 'okx', 'fanout boot N7 error',   'enc', true, 'error',          v_base);
+
+  PERFORM public.enqueue_refresh_allocator_equity_for_all();
+
+  -- ----- N7: a refused credential is refreshed but never reconstructed -----
+  -- RED-UNDER: drop the sign_in_failed/error conjunct from BOTH
+  --            reconstruct-loop copies (bq and rk) in migration 20260927120000.
+  --            An edit of one copy alone is inert while the other still
+  --            filters the key.
+  -- RED-UNDER-M: {"arm": "N7", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "coalesce(bq.sync_status, '') NOT IN ('sign_in_failed', 'error')", "replace": "TRUE", "occurrences": 1}, {"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "coalesce(rk.sync_status, '') NOT IN ('sign_in_failed', 'error')", "replace": "TRUE", "occurrences": 1}]}
+  SELECT count(*) FILTER (WHERE kind = 'reconstruct_allocator_history'),
+         count(*) FILTER (WHERE kind = 'refresh_allocator_equity_daily')
+    INTO v_rec, v_ref
+    FROM compute_jobs
+   WHERE api_key_id IN (k_s, k_e);
+  IF v_rec <> 0 OR v_ref <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (N7): a sign_in_failed key and an error key, each alone on a zero-snapshot book, got % reconstruct and % refresh job(s) together, expected 0 and 2. A reconstruct against a refused credential fails permanently and spends a cap slot every day; the refresh population is 075''s.', v_rec, v_ref;
+  END IF;
+END $grpn7$;
 
 -- ==========================================================================
 -- GROUP B — a zero-snapshot book BEYOND the cap gets no job of either kind in

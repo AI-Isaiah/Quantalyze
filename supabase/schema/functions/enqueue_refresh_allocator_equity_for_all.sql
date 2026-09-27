@@ -45,6 +45,7 @@ BEGIN
         FROM api_keys bq
         WHERE bq.is_active = TRUE
           AND bq.sync_status IS DISTINCT FROM 'revoked'
+          AND coalesce(bq.sync_status, '') NOT IN ('sign_in_failed', 'error')
           AND bq.disconnected_at IS NULL
           AND lower(bq.exchange) <> 'deribit'
           AND NOT EXISTS (SELECT 1 FROM strategies bqs WHERE bqs.api_key_id = bq.id AND bqs.user_id = bq.user_id AND bqs.status <> 'archived')
@@ -61,6 +62,7 @@ BEGIN
           WHERE rk.user_id = v_book.owner_id
             AND rk.is_active = TRUE
             AND rk.sync_status IS DISTINCT FROM 'revoked'
+            AND coalesce(rk.sync_status, '') NOT IN ('sign_in_failed', 'error')
             AND rk.disconnected_at IS NULL
             AND lower(rk.exchange) <> 'deribit'
             AND NOT EXISTS (SELECT 1 FROM strategies rks WHERE rks.api_key_id = rk.id AND rks.user_id = rk.user_id AND rks.status <> 'archived')
@@ -114,6 +116,7 @@ BEGIN
               WHERE bk.user_id = ak.user_id
                 AND bk.is_active = TRUE
                 AND bk.sync_status IS DISTINCT FROM 'revoked'
+                AND coalesce(bk.sync_status, '') NOT IN ('sign_in_failed', 'error')
                 AND bk.disconnected_at IS NULL
                 AND lower(bk.exchange) <> 'deribit'
                 AND NOT EXISTS (SELECT 1 FROM strategies bks WHERE bks.api_key_id = bk.id AND bks.user_id = bk.user_id AND bks.status <> 'archived')

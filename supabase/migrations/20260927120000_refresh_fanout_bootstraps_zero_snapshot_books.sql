@@ -106,6 +106,12 @@
 --     zero snapshots (the refresh writes no row for a book with no holdings).
 --   * A zero-snapshot book whose done reconstruct wrote no rows is
 --     re-enqueued once that done row is reaped (after 30 days), under the cap.
+--   * A key whose sync_status is sign_in_failed or error is NOT qualifying: a
+--     reconstruct against a credential the exchange refused fails permanently
+--     and would spend a cap slot every day (review SFH-04). It stays in the
+--     refresh population, as on 075, and the owner's re-sign-in goes through
+--     request_allocator_holdings_sync, which enqueues its reconstruct.
+--     rate_limited stays qualifying: it is transient.
 -- ⚠️ RESIDUAL, recorded (T-167.1.2-58): the refresh is enqueued in the SAME
 -- run as the reconstruct it waits for, because an in-flight row counts. If
 -- holdings exist, the refresh writes today's row before the 30-minute
@@ -118,8 +124,8 @@
 --
 -- THREATS, as this file mitigates them:
 --   T-167.1.2-42 (worker flood): the per-run cap, soft at book granularity;
---     the zero-snapshot gate; the in-flight-or-done job gate; Deribit keys
---     excluded.
+--     the zero-snapshot gate; the in-flight-or-done job gate; Deribit,
+--     sign_in_failed and error keys excluded.
 --   T-167.1.2-58 (a qualifying key stranded at zero): the reconstruct loop
 --     runs first and never splits a book, and the refresh waits until every
 --     qualifying key has a reconstruct row in flight or done, so no first
@@ -138,11 +144,13 @@
 --   (1) The refresh loop's key predicate becomes the canonical eligible
 --       predicate: active, sync_status not revoked, not disconnected.
 --   Definitions used by (2) and (3). STRATEGY-LINKED: see the discriminator
---   above. QUALIFYING: eligible per (1), not strategy-linked, and not a
---   Deribit key (the worker refuses Deribit reconstruction permanently).
---   BOOTSTRAPPED book: no qualifying key of its owner lacks a compute_jobs row
---   of kind reconstruct_allocator_history in flight or done (a book whose only
---   unlinked keys are Deribit is bootstrapped vacuously).
+--   above. QUALIFYING: eligible per (1), sync_status not sign_in_failed or
+--   error, not strategy-linked, and not a Deribit key (the worker refuses
+--   Deribit reconstruction permanently). BOOTSTRAPPED book: no qualifying key
+--   of its owner lacks a compute_jobs row of kind
+--   reconstruct_allocator_history in flight or done (a book whose only
+--   unlinked keys are Deribit, sign_in_failed or error is bootstrapped
+--   vacuously).
 --   (3) A NEW reconstruct loop, placed BEFORE the refresh loop inside the same
 --       lock and the same exception wrapper. It iterates zero-snapshot books
 --       (owners with no allocator_equity_snapshots row and at least one
@@ -171,8 +179,8 @@
 --   Every copy of the eligible predicate, the discriminator and the
 --   qualifying test uses table aliases unique to that copy (book selection,
 --   per-key selection, refresh loop, bootstrapped subquery), so a mutation can
---   name one copy exactly. Every copy of the QUALIFYING test carries the
---   same in-flight-or-done status list.
+--   name one copy exactly. Every copy of the QUALIFYING test carries the same
+--   sync_status exclusion and the same in-flight-or-done status list.
 -- The lock key, the refresh idempotency key, RETURNS VOID, SECURITY DEFINER and
 -- the search_path pin are 075's. The CREATE is now schema-qualified.
 --
@@ -248,6 +256,7 @@ BEGIN
         FROM api_keys bq
         WHERE bq.is_active = TRUE
           AND bq.sync_status IS DISTINCT FROM 'revoked'
+          AND coalesce(bq.sync_status, '') NOT IN ('sign_in_failed', 'error')
           AND bq.disconnected_at IS NULL
           AND lower(bq.exchange) <> 'deribit'
           AND NOT EXISTS (SELECT 1 FROM strategies bqs WHERE bqs.api_key_id = bq.id AND bqs.user_id = bq.user_id AND bqs.status <> 'archived')
@@ -264,6 +273,7 @@ BEGIN
           WHERE rk.user_id = v_book.owner_id
             AND rk.is_active = TRUE
             AND rk.sync_status IS DISTINCT FROM 'revoked'
+            AND coalesce(rk.sync_status, '') NOT IN ('sign_in_failed', 'error')
             AND rk.disconnected_at IS NULL
             AND lower(rk.exchange) <> 'deribit'
             AND NOT EXISTS (SELECT 1 FROM strategies rks WHERE rks.api_key_id = rk.id AND rks.user_id = rk.user_id AND rks.status <> 'archived')
@@ -317,6 +327,7 @@ BEGIN
               WHERE bk.user_id = ak.user_id
                 AND bk.is_active = TRUE
                 AND bk.sync_status IS DISTINCT FROM 'revoked'
+                AND coalesce(bk.sync_status, '') NOT IN ('sign_in_failed', 'error')
                 AND bk.disconnected_at IS NULL
                 AND lower(bk.exchange) <> 'deribit'
                 AND NOT EXISTS (SELECT 1 FROM strategies bks WHERE bks.api_key_id = bk.id AND bks.user_id = bk.user_id AND bks.status <> 'archived')
@@ -350,7 +361,7 @@ REVOKE ALL ON FUNCTION public.enqueue_refresh_allocator_equity_for_all() FROM PU
 GRANT ALL ON FUNCTION public.enqueue_refresh_allocator_equity_for_all() TO service_role;
 
 COMMENT ON FUNCTION public.enqueue_refresh_allocator_equity_for_all() IS
-  'Daily cron fan-out for the per-allocator legacy equity store. Two arms, inside one advisory lock. (1) Bootstrap, first, in its own sub-block (an error there is logged as a WARNING, rolls back every bootstrap enqueue of the run and never cancels the refresh): for an owner with ZERO allocator_equity_snapshots rows, one reconstruct_allocator_history job (idempotency key reconstruct-alloc-<key>-initial, the one request_allocator_holdings_sync uses) for every qualifying key with no reconstruct job in flight (pending, running, done_pending_children, failed_retry) or done, so a failed_final reconstruct is retried; qualifying = active, not revoked, not disconnected, not linked to one of its owner''s non-archived strategies (strategies.api_key_id or strategy_keys, mirroring deriveStrategyLinkedKeyIds) and not Deribit. Whole books, newest key first, stopping before a new book once 25 keys (v_bootstrap_cap) were enqueued this call. (2) Refresh: one refresh_allocator_equity_daily job per eligible key (active, not revoked, not disconnected) whose owner has a snapshot row, or which is unlinked on a book where every qualifying key has a reconstruct job in flight or done. A lost enqueue race (serialization_failure) skips one key with a WARNING. Phase 167.1.2 D-17; re-based on migration 075.';
+  'Daily cron fan-out for the per-allocator legacy equity store. Two arms, inside one advisory lock. (1) Bootstrap, first, in its own sub-block (an error there is logged as a WARNING, rolls back every bootstrap enqueue of the run and never cancels the refresh): for an owner with ZERO allocator_equity_snapshots rows, one reconstruct_allocator_history job (idempotency key reconstruct-alloc-<key>-initial, the one request_allocator_holdings_sync uses) for every qualifying key with no reconstruct job in flight (pending, running, done_pending_children, failed_retry) or done, so a failed_final reconstruct is retried; qualifying = active, not revoked, sync_status not sign_in_failed or error, not disconnected, not linked to one of its owner''s non-archived strategies (strategies.api_key_id or strategy_keys, mirroring deriveStrategyLinkedKeyIds) and not Deribit. Whole books, newest key first, stopping before a new book once 25 keys (v_bootstrap_cap) were enqueued this call. (2) Refresh: one refresh_allocator_equity_daily job per eligible key (active, not revoked, not disconnected) whose owner has a snapshot row, or which is unlinked on a book where every qualifying key has a reconstruct job in flight or done. A lost enqueue race (serialization_failure) skips one key with a WARNING. Phase 167.1.2 D-17; re-based on migration 075.';
 
 -- --------------------------------------------------------------------------
 -- Self-verify. CATALOGUE-ONLY: to_regprocedure, pg_get_functiondef,
