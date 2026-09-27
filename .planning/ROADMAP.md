@@ -3893,7 +3893,7 @@ Plans:
 - [-] ~~169-03-PLAN.md~~ — MOVED 2026-09-27 to Phase 169.5 as 169.5-02 (D-61; the round-3 fix applied there): payload-carried BTC prices and dropped list, chart gap, rolling series on the comparator basis (SC3, SC9) — ⚠️ round-3 blocker open: rolling beta over paired intervals (D-60)
 - [ ] 169-04-PLAN.md — freshness chip date line and calendar return windows (SC5, SC6) (was 169-06)
 - [ ] 169-05-PLAN.md — record length stated one way; 3 Year / 5 Year AND 6 Month / 1 Year rows not shown on a shorter record, in both panels and on the scenario mount (SC5, SC6, D-57); gated on 167.1.2 C3; may edit only C3's length assertion (D-51); wave 2, before 169.5-03 edits MandatePanels.tsx (D-61)
-- [ ] 169-07-PLAN.md — a composite's transient series read error is surfaced and never cached as a null payload (SC4, SC9, D-41; routed from 167.2.1 D-07)
+- [ ] 169-07-PLAN.md — a composite's transient series read error is surfaced and never cached as a null payload (SC4, SC9, D-41; routed from 167.2.1 D-07); plus the factsheet cache key v7 -> v8 in its Task 3 (D-62, 2026-09-27)
 - [-] ~~169-08-PLAN.md — the wave-4 rebase~~ — DROPPED 2026-09-27 (D-47): the branch already contains origin/main with 167.2.1 and the three-part v7 key; syncs are orchestrator merges.
 - [ ] 169-09-PLAN.md — risk attribution shows the producer's percent once, unsigned (R1, D-49)
 - [ ] 169-10-PLAN.md — sub-dollar prices keep their precision; a zero-rounded money value has no sign (R2, D-50)
