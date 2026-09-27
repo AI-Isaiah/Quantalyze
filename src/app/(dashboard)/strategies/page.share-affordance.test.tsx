@@ -266,6 +266,44 @@ describe("StrategiesPage — the share control is always present (SHARE-04)", ()
   });
 });
 
+describe("StrategiesPage — N-STRAT row layout (170-05)", () => {
+  it("stacks below sm, wraps tags whole, and keeps the name link textContent equal to the name", async () => {
+    // WHY: at V390 the private-link control overlapped the name, and a
+    // hyphenated word broke at its hyphen. The row stacks below sm; each
+    // word and each tag stays whole. textContent must equal the name
+    // exactly — noteOf() matches a.textContent === strategyName (PC-5).
+    state.strategies = [
+      {
+        ...row("s-layout", "draft"),
+        name: "Alpha Long-Short Beta",
+        strategy_types: ["Long-Short", "Market Neutral"],
+      },
+    ];
+
+    const container = await renderPage();
+    const rowEl = container.querySelector('[data-testid="strategy-row"]')!
+      .firstElementChild as HTMLElement;
+    expect(rowEl.className).toContain("flex-col");
+    expect(rowEl.className).toContain("sm:flex-row");
+
+    const link = container.querySelector("a")!;
+    expect(link.textContent).toBe("Alpha Long-Short Beta");
+
+    const tagRow = link.nextElementSibling as HTMLElement;
+    expect(tagRow.className).toContain("flex-wrap");
+    expect(tagRow.className).toContain("gap-1");
+    const chips = [...tagRow.querySelectorAll("span")];
+    expect(chips.length).toBeGreaterThanOrEqual(2);
+    for (const chip of chips) {
+      expect(chip.className).toContain("whitespace-nowrap");
+    }
+
+    const group = rowEl.lastElementChild as HTMLElement;
+    expect(group.className).toContain("flex-wrap");
+    expect(group.className).toContain("sm:shrink-0");
+  });
+});
+
 describe("one predicate, three sites — the drift pin", () => {
   const ROOT = join(__dirname, "..", "..", "..", "..");
   const readSrc = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
