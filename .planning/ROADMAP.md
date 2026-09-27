@@ -2633,6 +2633,8 @@ so a `-10005` at the sign-in step stays `SIGN_IN_FAILED`. Other IPC faults move 
 424 to the non-retryable `MT5_TERMINAL_UNRESPONSIVE` 500. `KEY_MT5_TERMINAL_UNRESPONSIVE` joins
 `DASHBOARD_DIALOG_ROUTE_CODES` (in scope).
 
+**Founder decision 2026-09-27 (recorded via `/gsd-phase --edit`):** the narrowest supported viewport is 390 px (iPhone 12) plus desktop at 200% zoom, so this phase's "320px" verification check is replaced by a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser (full decision under Phase 170 LAYOUT).
+
 ### Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session (INSERTED)
 
 **Goal:** A client's key validation cannot evict, disturb or expose another client's broker session
@@ -3688,6 +3690,8 @@ Plans:
 
 - [x] 167.1-06-PLAN.md — WINDOWS 66 closed, final byte-identity gate, and the ONE release commit carrying the D-06 outcome (D-14: the last plan releases) (wave 5) — DONE 2026-09-24 (`3bba699b1` docs, `7c0e57f7a` chore(release) v0.89.0.0; `167.1-06-SUMMARY.md`). Phase stays human_needed until the three browser checks
 
+**Founder decision 2026-09-27 (recorded via `/gsd-phase --edit`):** the narrowest supported viewport is 390 px (iPhone 12) plus desktop at 200% zoom, so this phase's "320px" verification check is replaced by a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser (full decision under Phase 170 LAYOUT).
+
 ### Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding (INSERTED)
 
 **Goal:** Every holdings consumer keeps two keys' positions apart. `holdingScopeKey` (`holding:venue:symbol:type`) carries no `api_key_id`, so the latest-as-of holdings collapse in `src/lib/queries.ts` merges two accounts on the same venue holding the same asset into one row, and one key's position silently vanishes from the headline AUM, the Open Positions total and Phase 167.1's untrusted-key marker. Found by Phase 167.1's silent-failure-hunter (founder queue item 11); the defect predates 167.1. **Data-integrity.** Inserted 2026-09-24 under the founder's authorization to add phases.
@@ -3794,6 +3798,8 @@ Plans:
 
 - [x] 167.2-06-PLAN.md — a composite's key card offers no link control; a withheld success is retired at the applied re-read (KCS-23/04)
 
+**Founder decision 2026-09-27 (recorded via `/gsd-phase --edit`):** the narrowest supported viewport is 390 px (iPhone 12) plus desktop at 200% zoom, so this phase's "320px" verification check is replaced by a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser (full decision under Phase 170 LAYOUT).
+
 ### Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build (INSERTED)
 
 **Goal:** The owner's `/strategies` list and every "has a factsheet" signal agree with what a share-link recipient actually sees. Today a strategy whose `strategy_analytics.computation_status` reads computed, but whose series cannot build (`fetchAndBuildPayload` in `src/lib/factsheet/fetch-and-build-payload.ts` returns no payload), is shown on the list as having a factsheet with no share note, while its recipient lands on the pending page. Only the service-role builder can decide buildability (the series sit behind deny-all RLS) and no owner-readable field records the outcome, so Phase 167.2 could not fix it without a migration or an admin read (167.2 review WR-02, recorded UNFIXABLE-IN-PHASE 2026-09-24). **User-facing.** Inserted 2026-09-24 under the founder's authorization to add phases.
@@ -3809,6 +3815,8 @@ Plans:
 - [ ] 167.2.1-02-PLAN.md — MEMBERSGUARD: GET /api/keys/[id]/memberships on the service role after an explicit owner check; the key card fails closed to KCS-DELETE-UNCHECKED (wave 1)
 - [ ] 167.2.1-03-PLAN.md — LISTTRUTH: /strategies probes computed rows and shows the D-02 unbuildable note, RED first (wave 2)
 - [ ] 167.2.1-04-PLAN.md — OWNERNOTE: the owner factsheet's S7 note uses the same derivation, and the D-03 TODOS entry (wave 3)
+
+**Founder decision 2026-09-27 (recorded via `/gsd-phase --edit`):** the narrowest supported viewport is 390 px (iPhone 12) plus desktop at 200% zoom, so this phase's "320px" verification check is replaced by a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser (full decision under Phase 170 LAYOUT).
 
 ### Phase 168: DRBOPTIONS — a Deribit options account ingests end to end
 
@@ -3862,6 +3870,7 @@ Plans:
 4. A strategy's CAGR and Sharpe are identical on discovery, recommendations, my-strategies and its factsheet (one computation, one stored value), or a surface that must differ says why.
 5. A factsheet's header date, its "track record through" date and its stated record length agree, and record length is stated one way.
 6. 3-year and 5-year rows are not shown for a record shorter than that period.
+   *Widened 2026-09-27 by `/gsd-phase --edit` (measured by the orchestrator and the founder in the logged-in browser on PROD, main at `320fba4e`/`e6c196d5`):* the scenario "Cumulative return metrics" panel on `/allocations?tab=scenario`, for a record shorter than six months, shows 6 Month = Year-to-date = 1 Year = the same value (the since-inception figure relabelled). The period-row gating this criterion asks for must cover the 6-month and 1-year rows too, not only 3Y and 5Y.
 9. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and each page is re-checked in the logged-in browser after deploy.
 
 *(Criteria 1, 2, 7, 8 and 10 moved on 2026-09-26 to Phases 169.3, 169.4 and 169.1, verbatim with their numbers; criteria 3, 4 and 9 are also served by other phases of the split.)*
@@ -4043,7 +4052,9 @@ Plans:
 
 ### Phase 170: LAYOUT — page layout reads clean and holds on every page
 
-**Goal:** Pages read as a finished product: no stacked look-alike panels, and the layout holds at 320 px and 200% zoom.
+**Goal:** Pages read as a finished product: no stacked look-alike panels, and the layout holds at 390 px (iPhone 12) and at desktop 200% zoom.
+**Edited 2026-09-27 by `/gsd-phase --edit` (founder decision below); the goal before read:** "the layout holds at 320 px and 200% zoom."
+**Founder decision, 2026-09-27 (AskUserQuestion, "390px + 200% zoom (Recommended)"; founder: "The oldest phone that will use it is an iphone 12, or desktop"):** the narrowest supported viewport is 390 px (iPhone 12), plus desktop at 200% zoom. Every "320 px" check in this phase, including the 2026-09-26 routed item below, is now a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser. The 400%-zoom WCAG 1.4.10 reflow check is deliberately not required.
 **Founder decision, 2026-09-25 (AskUserQuestion):** the second of the two QA phases; ships after Phase 169 PAGETRUTH.
 **Evidence:** the founder's 2026-09-24 layout notes ("too many similar layers stacked", the "get private link" control too dominant and overlapping) and the 2026-09-25 QA sweep (4 user-facing broken, 14 cosmetic findings). Counts only here.
 **Requirements**: TBD (phase-local SC ids)
@@ -4054,8 +4065,9 @@ Plans:
 ## Success Criteria
 
 1. Factsheet and Allocations panels no longer stack as near-identical layers; the private-link control is secondary and never overlaps content.
-2. `/security` and the legal pages show the signed-in header when signed in; the floating tweaks control never covers the bottom navigation; `/compare` does not point to controls that do not exist; `/admin/match` on mobile is read-only in fact, not only in words; no page scrolls horizontally at 320 px.
-3. Each page is re-checked at 320 px and 200% zoom in the logged-in browser after deploy.
+2. `/security` and the legal pages show the signed-in header when signed in; the floating tweaks control never covers the bottom navigation; `/compare` does not point to controls that do not exist; `/admin/match` on mobile is read-only in fact, not only in words; no page scrolls horizontally at 390 px (iPhone 12) or at desktop 200% zoom *(was "at 320 px"; edited 2026-09-27, founder decision above)*.
+   *Evidence, measured 2026-09-27 on PROD `/allocations?tab=scenario` at a 367 CSS px viewport (narrower than the 390 px floor), named offenders to fix under this criterion:* (a) the page overflows horizontally by 235 px: the allocations tab bar (`<div className="ml-auto flex items-center gap-1">` in `src/app/(dashboard)/allocations/AllocationsTabs.tsx`) is 682 px wide and neither scrolls in its own strip nor wraps; (b) the Stress / Streaks / Metrics sub-tabs overflow; (c) a chart container (class `flex-1 relative pointer-coarse:min-h-[44px]`, in `src/app/factsheet/[id]/v2/HeatmapPanels.tsx`) is 770 px wide and does not shrink; (d) the scenario member rows (weight / mode / leverage / notional) are fixed at 573 px; (e) the drawdown table (~389 px) and one other table (~378 px) overflow. *Second instance of (a)'s root cause, measured the same day on PROD `/profile?tab=exchanges` at narrow width:* the tab row (Exchanges / Security / Organizations / Account) runs past the viewport, and each key card's "Disconnect" button sits about 420 px from the left edge, past 390 px; both are clipped, not scrollable, so they cannot be reached.
+3. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom in the logged-in browser after deploy, by the orchestrator, and shows no horizontal page scroll and no clipped primary action *(was "at 320 px and 200% zoom"; edited 2026-09-27, founder decision above)*.
 
 **Plans:** 0 plans
 
@@ -4065,8 +4077,18 @@ Plans:
 
 **⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy 320px check of 167.2.1, measured in the logged-in browser):** on /strategies at 320px the "Get private link" button overlaps the strategy name in the row header and cuts it to two letters. At 640px (200% zoom) the row is clean. Success: at 320px the name, the button, the status pill and the date never overlap, and the name is readable or ellipsised.
 Same pass, same width: on /allocations the floating "Tweaks" button overlaps the bottom navigation's "Strategies" and "Profile" labels. Success: no floating control covers the bottom navigation at 320px. Evidence: `.planning/uat/2026-09-26-browser-pass.md`.
+*Re-confirmed 2026-09-27 at a 367 CSS px viewport on PROD: the floating "Tweaks" button (`TweaksToggle` in `src/app/(dashboard)/allocations/components/TweaksToggle.tsx`) still overlaps the mobile bottom navigation; still open. Both checks in this item now run at 390 px + desktop 200% zoom (founder decision 2026-09-27 above).*
 
 **⭐ OWNED HERE 2026-09-27 (founder, AskUserQuestion, "Book into 170 LAYOUT"; found by the Phase 164.9.4 e2e-seeded axe run):** the grey chip token pair fails WCAG AA, 4.34:1 against the 4.5:1 floor at 11px. It is used by the `CHIP` map entries `no-series` and `manually-excluded` in `src/app/(dashboard)/allocations/components/CoverageStateChip.tsx`, and by `DATA_STATE_CHIP` in `src/components/strategy/StrategyTable.tsx`. Success: each pair reaches at least 4.5:1. The gate is the 164.9.4 e2e-seeded axe check.
+
+**⭐ OWNED HERE 2026-09-27 — narrow-width defects measured 2026-09-27 (iPhone 12 = 390 px floor, founder decision above).** Measured by the orchestrator and the founder in the logged-in browser on PROD (main at `320fba4e`/`e6c196d5`) at a 367 CSS px viewport. Findings (a)–(e) and the Tweaks overlap are recorded under criterion 2 and the 2026-09-26 item above; these are new:
+(f) on `/allocations?tab=scenario` the sticky scenario commit bar (`ScenarioFooter` in `src/app/(dashboard)/allocations/components/ScenarioFooter.tsx`) overlaps the "Distribution of daily returns" section heading;
+(g) the commit bar's "Commit scenario" button (`ScenarioFooter`) is pushed past the right edge, so the primary action is unreachable at phone width;
+(h) "No changes yet" renders twice, in two fonts, in the commit bar (`ScenarioFooter`: the diff-count chip `countLabel` and the delta-summary slot `summaryText` both print it at zero diffs);
+(j) the scenario KPI tiles break values mid-number (a signed decimal wraps one character group per line) and truncate their labels ("SOR…", "CAL…", "MAX…");
+(k) on `/strategies` the sticky "# / STRATEGY" table header overlaps the Sort controls, cutting off the Sharpe and High-to-low selects;
+(l) on `/strategies` strategy names and tags break mid-word at a hyphen (measured on a "Long-/Short" tag).
+Success: at 390 px and at desktop 200% zoom the commit bar never covers a heading, "Commit scenario" is fully visible and tappable, the empty-state text appears once, KPI values never break inside a number and labels are readable, the `/strategies` header never covers the Sort controls, and names and tags wrap only between words.
 
 ### Phase 170.1: COPY — page copy reads clean on every page (INSERTED)
 
@@ -4083,7 +4105,7 @@ Same pass, same width: on /allocations the floating "Tweaks" button overlaps the
 2. No production page carries QA, test or internal-phase text, including strategy descriptions and the placeholder Referral page.
 3. The recorded typos are fixed and pages that share a title are distinguished.
 4. The wizard's post-Submit copy says "submitted" on success, not "already submitted".
-5. Each page is re-checked at 320 px and 200% zoom in the logged-in browser after deploy.
+5. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom in the logged-in browser after deploy, by the orchestrator *(was "at 320 px and 200% zoom"; edited 2026-09-27 by `/gsd-phase --edit` on the founder decision of 2026-09-27: the narrowest supported viewport is 390 px plus desktop 200% zoom, recorded in full under Phase 170 LAYOUT)*.
 
 **Plans:** 0 plans
 
@@ -4098,6 +4120,10 @@ Plans:
 **⭐ ROUTED IN 2026-09-27 (founder, from the Phase 167.2 copy read-through, UAT 2026-09-27):** the 167.2 locked strings pass with these notes, owned here. (1) Two unbounded timing phrases: "Try again in a moment" in `PANEL_STOP_COPY.chain_unreadable` (`src/components/strategy/key-card-copy.ts`) and "Try again later" in `SHARE_CARD_COPY.in_progress` (`src/lib/status-surface-copy.ts`). (2) "Large accounts can take longer" in `SYNC_SLOW_NOTE` (`key-card-copy.ts`). (3) Six passive "could not be …" strings across `key-card-copy.ts` and `status-surface-copy.ts` (measured 2026-09-27: "could not be read" ×2, "could not be re-read", "could not be built", "could not be loaded", "could not be checked"). Success: each is rewritten in active voice with no timing promise the code cannot defend, per DESIGN.md Voice.
 
 **⭐ ROUTED IN 2026-09-27 (found uploading a daily-returns file with the Trade list format selected):** the CSV wizard's missing-column error shows raw pandera rule names to the user: "Failed rule 'column_in_dataframe'." repeated, one per missing column. Success: the user reads which column is missing, in plain words.
+
+**⭐ ROUTED IN 2026-09-27 (measured by the orchestrator and the founder in the logged-in browser on PROD `/allocations?tab=scenario`, main at `320fba4e`/`e6c196d5`):**
+(a) With no benchmark selected, the scenario Returns chart subtitle reads "vs None". Root cause: `src/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload.ts` builds the `none` comparator with `inertComparatorBlock("None", "None")`, and `subtitleFor` in `src/app/factsheet/[id]/v2/TimeSeriesChart.tsx` prints `vs ${cmpName}` whenever the chart config has a `comparatorField`. Success: with no benchmark chosen the subtitle is empty or says "no benchmark".
+(b) The scenario KPI tiles show an unlabelled delta line (e.g. "+0.00") under each value. Success: the delta says what it is compared against (e.g. "vs current book").
 
 ### Phase 165: ACTIONSDEPS — the four GitHub Actions dependabot PRs land first, in the verified order
 
