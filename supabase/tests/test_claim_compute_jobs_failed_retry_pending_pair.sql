@@ -106,9 +106,9 @@
 -- the mutation runner). It is test_enqueue_compute_job_dedupe_non_terminal.sql's
 -- list (the compute_jobs base 20260411144407, fixture 04, the
 -- one-in-flight index sources, the kind CHECK and coherence CHECK sources),
--- plus fixture 29 (compute_jobs.priority, read by the 2-arg body) and fixture
--- 36-fixture-compute-jobs-claim-token.sql (compute_jobs.claim_token, written
--- by claim_compute_jobs and the 5-arg), with the phase migration LAST: it
+-- plus fixture 29 (compute_jobs.priority, read by both priority overloads) and
+-- fixture 36-fixture-compute-jobs-claim-token.sql (compute_jobs.claim_token,
+-- written by claim_compute_jobs and the 5-arg), with the phase migration LAST: it
 -- CREATE OR REPLACEs all three claim bodies, so no older claim migration is
 -- applied, and every twin mutates the body this file then calls.
 -- ⛔ 20260515114555_compute_jobs_claim_token_fencing.sql is deliberately
