@@ -463,7 +463,7 @@ export type AuditAction =
   // AuditAction parity test stays green (test_action_literal_matches_ts_union
   // in test_audit.py).
   | "api_key.rotate_secret"
-  // Phase 167.1.2 / D-01 + D-11: the daily poll-s identity stamper marked this
+  // Phase 167.1.2 / D-01 + D-11: the daily poll's identity stamper marked this
   // key as reading the same exchange account as a live key of the same owner.
   // Python-only call site (analytics-service services.account_identity) --
   // kept here so the TS and Python AuditAction taxonomies stay in sync.
