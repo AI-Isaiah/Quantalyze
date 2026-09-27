@@ -28,8 +28,14 @@ const WORKFLOW_DIR = ".github/workflows";
 // own "for each of the three workflow files" framing (not a dynamic glob:
 // the corpus this gate polices is exactly these three, per the ROADMAP/
 // CONTEXT record of where the shared-test-db mutex's holders live).
+// 2026-09-27, Phase 164.9.4 CIOFFMUTEX (D-06): the corpus is now TWO files.
+// ci.yml LEFT this list because it has no release step any more: `python` and
+// `e2e-seeded`, its last two holders, run on local-stack lanes private to their
+// runners and take no key. Kept, ci.yml would red Tests 1, 4 and 6 on a file
+// with nothing to pair. A re-acquire in ci.yml is not unguarded: the
+// exactly-empty holder-set pin in critical-regressions.test.ts (driven by
+// measureHolders) fails on it. The "three" framing above is lineage.
 const TARGET_FILES = [
-  `${WORKFLOW_DIR}/ci.yml`,
   `${WORKFLOW_DIR}/supabase-migrate.yml`,
   `${WORKFLOW_DIR}/test-restore-from-baseline.yml`,
 ];
@@ -198,8 +204,18 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
   // ci.yml 1 (`e2e-seeded`), supabase-migrate.yml 1,
   // test-restore-from-baseline.yml 1 — total 3, so the floor has ZERO slack
   // and losing any single witness fails this test.
+  // 2026-09-27, Phase 164.9.4 CIOFFMUTEX D-06: the floor went 3 -> 2 because
+  // the last ci.yml holder LEFT — `e2e-seeded` no longer takes the
+  // shared-test-db key (it seeds, builds and runs its specs on a local-stack
+  // lane private to its runner), so its release step and dead-holder
+  // annotation went with it, and ci.yml left TARGET_FILES. The floor follows
+  // the measured corpus; this is not a relaxation.
+  // Measured per file, 2026-09-27, by `grep -c` on the annotation text:
+  // supabase-migrate.yml 1, test-restore-from-baseline.yml 1 (and ci.yml 0,
+  // no longer a target) — total 2, so the floor has ZERO slack and losing
+  // either witness fails this test.
   // ─────────────────────────────────────────────────────────────────────
-  it("Test 2: at least 3 dead-holder annotations exist across the three files (anti-vacuity floor)", () => {
+  it("Test 2: at least 2 dead-holder annotations exist across the two files (anti-vacuity floor)", () => {
     let total = 0;
     for (const rel of TARGET_FILES) {
       const src = readText(rel);
@@ -208,9 +224,9 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
     }
     expect(
       total,
-      `aggregate dead-holder annotation count across the three files is ${total} — expected at least 3. ` +
+      `aggregate dead-holder annotation count across the two files is ${total} — expected at least 2. ` +
         `A corpus that shrank to zero would make Test 1 pass vacuously.`,
-    ).toBeGreaterThanOrEqual(3);
+    ).toBeGreaterThanOrEqual(2);
   });
 
   // ─────────────────────────────────────────────────────────────────────

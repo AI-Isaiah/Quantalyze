@@ -747,6 +747,14 @@ describe("Critical regression guards", () => {
       // rm -rf wipe — there are no placeholder chunks to leak through),
       // (d) the inline-URL verify step still proves the real env landed
       // in the bundle.
+      // 2026-09-27, Phase 164.9.4 CIOFFMUTEX (D-06 / D-08): "(b) builds with
+      // the REAL secrets in env" is lineage. From Phase 164.9.4, (b) builds
+      // with the LANE values: the job boots a local-stack lane private to its
+      // runner, asserts the handoff is loopback, and exports the URL and keys
+      // through $GITHUB_ENV, so the job carries no `secrets.TEST_SUPABASE_*`
+      // at all (a step `env:` secret would shadow the export). (a), (c) and
+      // (d) are unchanged; (d)'s step is retargeted to the lane URL, not
+      // renamed (D-09).
       it("ci.yml e2e-seeded job has the required shape (contract for C-0293(c) Path 2)", () => {
         const src = readText(".github/workflows/ci.yml");
         const job = findOrFail(
@@ -760,17 +768,17 @@ describe("Critical regression guards", () => {
           /\n {4}if:[^\n]*vars\.E2E_TEST_DB_CONFIGURED\s*==\s*'true'/,
           "e2e-seeded job lost its vars.E2E_TEST_DB_CONFIGURED == 'true' job-level gate",
         );
-        // (b) builds with REAL secrets in env
+        // (b) builds with the lane values from the handoff (Phase 164.9.4)
         expectMatch(job, /npm run build/, "e2e-seeded job no longer runs `npm run build`");
-        expectMatch(
+        expectNoMatch(
           job,
-          /NEXT_PUBLIC_SUPABASE_URL:\s*\$\{\{\s*secrets\.TEST_SUPABASE_URL\s*\}\}/,
-          "e2e-seeded build env no longer wires secrets.TEST_SUPABASE_URL — seeded specs would run against a placeholder bundle",
+          /secrets\.TEST_SUPABASE_/,
+          "e2e-seeded job names a secrets.TEST_SUPABASE_* value — a step `env:` secret would shadow the lane handoff exported through $GITHUB_ENV and send the seeded suite (and the URL the build inlines) to shared TEST, with no key held (Phase 164.9.4 D-08)",
         );
         expectMatch(
           job,
-          /NEXT_PUBLIC_SUPABASE_ANON_KEY:\s*\$\{\{\s*secrets\.TEST_SUPABASE_ANON_KEY\s*\}\}/,
-          "e2e-seeded build env no longer wires secrets.TEST_SUPABASE_ANON_KEY",
+          /- name: Lane handoff - assert loopback, then export the URL and keys to later steps\n[\s\S]*?\n {10}bash scripts\/local-stack\/run\.sh --assert-local-handoff\n/,
+          "e2e-seeded job lost its `Lane handoff - assert loopback, then export the URL and keys to later steps` step or that step's `bash scripts/local-stack/run.sh --assert-local-handoff` line — the build would inline a URL nothing asserted is loopback (Phase 164.9.4 D-04)",
         );
         // (c) clean workspace: the placeholder artifact is never downloaded
         // here (downloading it would reintroduce the placeholder-chunk
@@ -1491,8 +1499,17 @@ describe("Critical regression guards", () => {
     // because MUTEX_HOLDERS keeps 3 subjects (`e2e-seeded` plus the two
     // CROSS_FILE_HOLDERS). The holder-set pin below still asserts the set
     // EXACTLY, so `python` re-acquiring fails it.
+    //
+    // Re-subjected again by Phase 164.9.4 CIOFFMUTEX (D-01 / D-02 / D-06),
+    // 2026-09-27. `e2e-seeded` left the key too: it seeds, builds and runs its
+    // specs against a local-stack lane private to its own runner. Both ci.yml
+    // holders have now LEFT, so DB_JOBS is EMPTY. That is not a relaxation:
+    // the holder-set pin below asserts the set is EXACTLY empty, so any ci.yml
+    // job that re-acquires or names the key fails it, and MUTEX_HOLDERS keeps
+    // the absolute protocol pins on `apply-test` and `restore` (the two
+    // CROSS_FILE_HOLDERS), which still take the key.
     describe("shared-test-db serialization via the advisory-lock mutex (D-05 / Phase 158)", () => {
-      const DB_JOBS = ["e2e-seeded"] as const;
+      const DB_JOBS: readonly string[] = [];
       // Same job-slicing idiom as the supabase-migrate describes above:
       // anchor on the start-of-line job key, stop at the next top-level one.
       // A key line may carry a trailing comment, and the next key may start with
@@ -1940,16 +1957,20 @@ describe("Critical regression guards", () => {
           "measureHolders counted a private-lane drill (a throwaway 127.0.0.1 cluster on the runner) as a shared-TEST holder",
         ).toBe(false);
       });
-      it("the set of jobs holding the shared-test-db key is EXACTLY DB_JOBS, and sql-tests is not among them", () => {
+      // Retitled 2026-09-27 (Phase 164.9.4 CIOFFMUTEX, SC-1 / D-06). Lineage
+      // title: "the set of jobs holding the shared-test-db key is EXACTLY
+      // DB_JOBS, and sql-tests is not among them". With both ci.yml holders
+      // gone the set is pinned EXACTLY EMPTY, which also covers the old
+      // `sql-tests` negative (any holder, `sql-tests` included, fails it), so
+      // that second expect was folded into this message rather than kept as an
+      // arm that could never fail on its own. measureHolders is the detector;
+      // its calibration `it` above proves it sees every spelling of a take.
+      it("no ci.yml job holds or names the shared-test-db key: the holder set is EXACTLY empty (Phase 164.9.4 SC-1)", () => {
         const holders = measureHolders(readText(".github/workflows/ci.yml"));
         expect(
           holders,
-          `ci.yml: the jobs that hold (or name) shared-test-db key 61616158 are [${holders.join(", ")}], but DB_JOBS pins [${[...DB_JOBS].sort().join(", ")}]. A holder missing from DB_JOBS runs a mutex protocol no pin below inspects; a DB_JOBS entry that no longer holds means the list describes a mechanism that moved. Update DB_JOBS in the same commit as the ci.yml change, with its reason (D-05 / Phase 164.4.2 DECISION B)`,
-        ).toEqual([...DB_JOBS].sort());
-        expect(
-          holders.includes("sql-tests"),
-          "ci.yml sql-tests acquires (or names) shared-test-db key 61616158 again — Phase 164.4.2 DECISION B moved its corpus onto a database private to its own runner precisely so it would wait on no key; re-acquiring re-serializes the tracer behind every other holder and silently erases the measured win (8.02 min of waiting for 0.78 min of work)",
-        ).toBe(false);
+          `ci.yml: the jobs that hold (or name) shared-test-db key 61616158 are [${holders.join(", ")}], but the set must be EXACTLY empty. Phase 164.9.4 took the last two holders off the key — \`python\` (pytest) and \`e2e-seeded\` (seed, build, seeded specs) each run against a local-stack lane private to their own runner — and Phase 164.4.2 DECISION B had already taken \`sql-tests\` off it. A ci.yml job that re-acquires the key re-serializes behind every other run's holds on shared TEST, the 28-of-36-minute queue this phase removed. If a ci.yml job genuinely must hold the key again, that is a decision: restore DB_JOBS and the protocol pins with it, in the same commit and with the reason (D-05 / D-06)`,
+        ).toEqual([]);
       });
 
       // Phase 164.4.2.1 D-02, in its OWN `it`: vitest reports only the first
@@ -1987,6 +2008,32 @@ describe("Critical regression guards", () => {
           body,
           /^\s+TEST_SUPABASE_DB_URL=/m,
           "ci.yml python exports TEST_SUPABASE_DB_URL — that is the shared-TEST secret's name, and exporting the lane DSN under it silently un-skips 20+ psycopg modules this phase does not scope in (RESEARCH Anti-Patterns, Phase 164.9.4)",
+        );
+      });
+
+      // Phase 164.9.4 D-08, 2026-09-27, the `e2e-seeded` twin of the `it` above
+      // and in its OWN `it` for the same reason. The seed, `npm run build`
+      // (which INLINES the NEXT_PUBLIC_* values) and the seeded specs read the
+      // lane's URL and keys from $GITHUB_ENV. A step `env:` entry beats that
+      // file, so ONE `secrets.TEST_SUPABASE_*` entry left on any of those steps
+      // would silently send the seeded suite back to shared TEST, unserialized
+      // now that the job holds no key.
+      it("e2e-seeded reads no shared-TEST secret and runs no TEST ordering wait (Phase 164.9.4 D-08)", () => {
+        const body = jobSlice(readText(".github/workflows/ci.yml"), "e2e-seeded");
+        expectNoMatch(
+          body,
+          /secrets\.TEST_SUPABASE_/,
+          "ci.yml e2e-seeded reads a `secrets.TEST_SUPABASE_*` value again — a step `env:` secret shadows the lane handoff exported through $GITHUB_ENV, so the seed, the build's inlined URL and the seeded specs would silently run against shared TEST with no key held (Phase 164.9.4 D-08)",
+        );
+        expectNoMatch(
+          body,
+          /- name: Wait for the TEST schema apply/,
+          "ci.yml e2e-seeded runs the TEST schema-apply ordering wait again — it orders shared-TEST work, and since Phase 164.9.4 this job does none; it only costs every merge push (D-08)",
+        );
+        expectNoMatch(
+          body,
+          /TEST_SUPABASE_DB_URL=/,
+          "ci.yml e2e-seeded exports TEST_SUPABASE_DB_URL — that is the shared-TEST secret's name, and nothing in this job reads a DSN (Phase 164.9.4 D-08)",
         );
       });
 
