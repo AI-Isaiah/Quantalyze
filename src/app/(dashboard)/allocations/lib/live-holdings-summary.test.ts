@@ -649,3 +649,232 @@ describe("buildKeyTrustClause — D-06 (b) excludes $Y from keys needing attenti
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 SC-4 — no trusted dollar disappears from the live-holdings total
+// ---------------------------------------------------------------------------
+//
+// WHY: inside the modelled-book narrowing, a holding whose key is TRUSTED,
+// present in the status map, not contributing and not manager-side fell
+// through every branch to `continue`: it was in neither the total nor any
+// excluded part, so the composer said nothing about it. On the founder's book
+// that is exactly where the shared account's dollars sat (attributed to a key
+// with no return history yet). Every toggled-on dollar must now be either in
+// the total or in a NAMED excluded part. A manager-side key's dollars get their
+// own part too: still undisclosed in copy (D-20: not the allocator's book), but
+// counted, so the conservation invariant below can be stated over every dollar.
+
+describe("summarizeLiveHoldings — [167.1.2 SC-4] excludedTrusted and excludedManagerSide", () => {
+  it("a trusted key outside a non-empty contributing set lands in excludedTrusted (today: in no part at all)", () => {
+    const s = summarize({
+      holdings: [H_TRUSTED, H_SIGN_IN_FAILED],
+      contributing: [KEY_SIGN_IN_FAILED],
+    });
+    // The total is the contributing book only, unchanged by this plan.
+    expect(s.total).toBe(12_345);
+    expect(s.excludedTrusted).toEqual({ amount: 480_000, count: 1, unavailable: 0 });
+    expect(s.excludedUntrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
+    expect(s.excludedUnknownStatus).toEqual({ amount: 0, count: 0, unavailable: 0 });
+    expect(s.excludedManagerSide).toEqual({ amount: 0, count: 0, unavailable: 0 });
+  });
+
+  it("a status the REAL predicate calls trusted (`error`) is excludedTrusted too, not excludedUntrusted", () => {
+    const s = summarize({
+      holdings: [H_TRUSTED, H_ERROR],
+      contributing: [KEY_TRUSTED],
+    });
+    expect(s.total).toBe(480_000);
+    expect(s.excludedTrusted).toEqual({ amount: 7_000, count: 1, unavailable: 0 });
+    expect(s.excludedUntrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
+  });
+
+  it("a manager-side key's dropped holdings land in excludedManagerSide, trusted and untrusted alike — never in a disclosed excluded part", () => {
+    const s = summarize({
+      holdings: [H_TRUSTED, H_SIGN_IN_FAILED, H_ERROR],
+      contributing: [KEY_TRUSTED],
+      managerSide: [KEY_SIGN_IN_FAILED, KEY_ERROR],
+    });
+    expect(s.total).toBe(480_000);
+    // Hand-listed: 12,345 (sign_in_failed) + 7,000 (error, trusted) = 19,345.
+    expect(s.excludedManagerSide).toEqual({ amount: 19_345, count: 2, unavailable: 0 });
+    expect(s.excludedTrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
+    expect(s.excludedUntrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
+  });
+
+  it("an unreported trusted excluded holding is COUNTED as unavailable (WR-03 rule, same addTo)", () => {
+    const H_TRUSTED_NO_PNL = buildHolding({
+      venue: "venue-i",
+      symbol: "AUMTRUST-I-PERP",
+      holding_type: "derivative",
+      value_usd: 700_000,
+      unrealized_pnl_usd: null,
+      side: "long",
+      entry_price: 100,
+      api_key_id: KEY_TRUSTED,
+    });
+    const s = summarize({
+      holdings: [H_TRUSTED_NO_PNL, H_SIGN_IN_FAILED],
+      contributing: [KEY_SIGN_IN_FAILED],
+    });
+    expect(s.excludedTrusted).toEqual({ amount: 0, count: 1, unavailable: 1 });
+  });
+
+  it("the degrade branch (EMPTY contributing set) sums the whole book, so nothing is excluded", () => {
+    const s = summarize({ holdings: ALL_HOLDINGS, contributing: [] });
+    expect(s.excludedTrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
+    expect(s.excludedManagerSide).toEqual({ amount: 0, count: 0, unavailable: 0 });
+  });
+});
+
+describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated books", () => {
+  // A seeded LCG, so a failure names a reproducible case. 256 cases mixing
+  // every status the fixture knows (trusted, untrusted, absent from the status
+  // map), contributing / manager-side / neither, spot and derivative holdings,
+  // unreported values, negative P&L, toggles on and off, stray refs that are
+  // not in holdingByRef and non-holding refs, and the empty-contributing
+  // degrade branch.
+  function lcg(seed: number) {
+    let x = seed >>> 0;
+    return () => {
+      x = (Math.imul(x, 1664525) + 1013904223) >>> 0;
+      return x / 0x1_0000_0000;
+    };
+  }
+  const KEYS = [
+    KEY_TRUSTED,
+    KEY_SIGN_IN_FAILED,
+    KEY_REVOKED,
+    KEY_ERROR,
+    KEY_MISSING_FROM_API_KEYS,
+    "conservation-key-x",
+  ];
+  const partAmount = (p: { amount: number } | undefined) => p?.amount ?? 0;
+
+  it("for every generated book: Σ toggled-on equity = total + excludedUntrusted + excludedUnknownStatus + excludedTrusted + excludedManagerSide", () => {
+    const rand = lcg(1672);
+    const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(rand() * xs.length)];
+    let casesWithTrustedExclusion = 0;
+    for (let c = 0; c < 256; c += 1) {
+      const nHoldings = 1 + Math.floor(rand() * 8);
+      const holdings: DashboardHolding[] = [];
+      for (let i = 0; i < nHoldings; i += 1) {
+        const deriv = rand() < 0.4;
+        const missing = rand() < 0.15;
+        holdings.push(
+          buildHolding({
+            venue: `gen-venue-${c}-${i}`,
+            symbol: `GEN-${i}`,
+            holding_type: deriv ? "derivative" : "spot",
+            value_usd: missing && !deriv ? Number.NaN : Math.round(rand() * 100_000),
+            unrealized_pnl_usd: deriv
+              ? missing
+                ? null
+                : Math.round((rand() - 0.5) * 20_000)
+              : null,
+            api_key_id: pick(KEYS),
+          }),
+        );
+      }
+      const toggles: Record<string, boolean> = {};
+      for (const h of holdings) toggles[ref(h)] = rand() < 0.8;
+      // Stray refs the loop must ignore: one not in holdingByRef, one not a
+      // holding ref at all.
+      toggles[`holding:stray-${c}:X:spot`] = true;
+      toggles[`strategy-${c}`] = true;
+      const contributing =
+        rand() < 0.15 ? [] : KEYS.filter(() => rand() < 0.4);
+      const managerSide = KEYS.filter(
+        (k) => !contributing.includes(k) && rand() < 0.25,
+      );
+      const s = summarizeLiveHoldings({
+        toggleByScopeRef: toggles,
+        holdingByRef: buildHoldingByRef(holdings),
+        contributingApiKeyIds: contributing,
+        managerSideApiKeyIds: managerSide,
+        statusByKeyId: STATUS_BY_KEY_ID,
+      });
+      // The oracle is the plain sum of the equity of every toggled-on holding,
+      // with the equity definition the total itself uses.
+      let expected = 0;
+      for (const h of holdings) {
+        if (toggles[ref(h)]) expected += holdingEquityContributionLocal(h);
+      }
+      const accounted =
+        s.total +
+        partAmount(s.excludedUntrusted) +
+        partAmount(s.excludedUnknownStatus) +
+        partAmount((s as { excludedTrusted?: { amount: number } }).excludedTrusted) +
+        partAmount(
+          (s as { excludedManagerSide?: { amount: number } }).excludedManagerSide,
+        );
+      expect(
+        accounted,
+        `case ${c}: ${JSON.stringify({ contributing, managerSide })}`,
+      ).toBeCloseTo(expected, 6);
+      if (
+        holdings.some(
+          (h) =>
+            toggles[ref(h)] &&
+            contributing.length > 0 &&
+            !contributing.includes(h.api_key_id) &&
+            !managerSide.includes(h.api_key_id) &&
+            (h.api_key_id === KEY_TRUSTED || h.api_key_id === KEY_ERROR) &&
+            holdingEquityContributionLocal(h) !== 0,
+        )
+      ) {
+        casesWithTrustedExclusion += 1;
+      }
+    }
+    // Non-vacuity: the generator really produced the case this plan closes.
+    expect(casesWithTrustedExclusion).toBeGreaterThan(20);
+  });
+});
+
+describe("buildKeyTrustClause — [167.1.2 SC-4] the excludedTrusted part", () => {
+  const RENDER = {
+    amount: (n: number) => `$${n}`,
+    missing: "value",
+    unit: ["holding", "holdings"] as const,
+  };
+  const part = (amount: number, count: number, unavailable = 0) => ({
+    amount,
+    count,
+    unavailable,
+  });
+  const NONE = part(0, 0);
+
+  it("excludedTrusted only → 'excludes $X from connected keys with no return history yet'", () => {
+    expect(
+      buildKeyTrustClause(NONE, NONE, RENDER, NONE, NONE, part(480_000, 1)),
+    ).toBe("excludes $480000 from connected keys with no return history yet");
+  });
+
+  it("the shared-noun form must not swallow it: includes + excluded untrusted + excluded trusted names all three", () => {
+    expect(
+      buildKeyTrustClause(
+        part(12_345, 1),
+        NONE,
+        RENDER,
+        part(8_000, 1),
+        NONE,
+        part(5_000, 1),
+      ),
+    ).toBe(
+      "includes $12345 from keys needing attention, and excludes $8000 from keys needing attention and $5000 from connected keys with no return history yet",
+    );
+  });
+
+  it("it comes after the other excluded parts, and says when its value was not reported", () => {
+    expect(
+      buildKeyTrustClause(NONE, NONE, RENDER, NONE, part(4_444, 1), part(0, 2, 2)),
+    ).toBe(
+      "excludes $4444 from keys with an unknown sync status and $0 from connected keys with no return history yet (value unavailable for 2 holdings)",
+    );
+  });
+
+  it("a zero-count excludedTrusted adds nothing: the clause is byte-identical to before", () => {
+    expect(
+      buildKeyTrustClause(part(12_345, 1), NONE, RENDER, part(8_000, 2), NONE, NONE),
+    ).toBe("includes $12345 and excludes $8000 from keys needing attention");
+  });
+});

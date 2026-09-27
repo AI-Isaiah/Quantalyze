@@ -16652,6 +16652,90 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
       "Excludes $0 from keys with an unknown sync status.",
     );
   });
+
+  // ── Phase 167.1.2 SC-4 — a trusted key with no return history ──────────────
+  //   trusted  (key-a, spot, contributing)                37,655  ← the field
+  //   trusted  (key-e, spot, eligible, NOT contributing)   12,345  ← excluded
+  // Before 167.1.2 key-e's dollars were in neither the total nor any excluded
+  // part, so the composer said nothing about them. That is where the founder's
+  // shared-account dollars sat. They are now named, and the field is unchanged.
+  const AT_KEY_NO_HISTORY = "aumtrust-key-e";
+  it("167.1.2 SC-4: a trusted key with no return history yet is named — 'Excludes $12,345 from connected keys with no return history yet.' — and the field is unchanged", () => {
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_NO_HISTORY,
+        status: null,
+        venue: "okx",
+        symbol: "AUMTRUST-E",
+        spotUsd: 12_345,
+        contributing: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    // Fixture self-proof: the key is allocator-eligible, trusted (null status)
+    // and NOT contributing, so only the new part can carry its dollars.
+    expect(payload.allocatorEligibleApiKeyIds).toContain(AT_KEY_NO_HISTORY);
+    expect(payload.contributingApiKeyIds).not.toContain(AT_KEY_NO_HISTORY);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_TRUSTED_USD));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $12,345 from connected keys with no return history yet.",
+    );
+  });
+
+  it("167.1.2 SC-4: beside includes and excluded untrusted parts, the trusted exclusion is still named, never swallowed by the shared-noun form", () => {
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: "sign_in_failed",
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: AT_B_UNTRUSTED_USD,
+      },
+      {
+        id: AT_KEY_REVOKED,
+        status: "revoked",
+        venue: "kraken",
+        symbol: "AUMTRUST-D",
+        spotUsd: 8_000,
+        eligible: false,
+      },
+      {
+        id: AT_KEY_NO_HISTORY,
+        status: null,
+        venue: "bybit",
+        symbol: "AUMTRUST-E",
+        spotUsd: 5_000,
+        contributing: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Includes $12,345 from keys needing attention, and excludes $8,000 from keys needing attention and $5,000 from connected keys with no return history yet.",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
