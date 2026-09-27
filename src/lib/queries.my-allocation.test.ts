@@ -4028,3 +4028,43 @@ describe("getMyAllocationDashboard — own-capital keys stay in the allocator's 
     expect(result.bookEntryGateSatisfied).toBe(false);
   });
 });
+
+// Phase 167.1.2 SC-4 caller walk (read-only for `queries.ts`, which this plan
+// does not edit): the SSR live-book blend feeds per-key equity as the weight.
+// When every key's holdings are worth 0 the blend has no weight mass, and the
+// engine now returns its honest empty shape. The helper's existing
+// `liveCM.n === 0 || equity_curve.length === 0 → emptyDefault` guard must turn
+// that into null KPIs and no curve, never a flat 1.0 wealth line at +0.00%.
+describe("liveBaselineMetricsFromPerKeyDailies — [167.1.2 SC-4] zero weight mass", () => {
+  it("every key's holdings worth 0 → null KPIs and an empty equity series (today: a flat line at +0.00%)", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    const dates = Array.from(
+      { length: 20 },
+      (_, i) => `2026-05-${String(i + 1).padStart(2, "0")}`,
+    );
+    const holdings = [
+      {
+        api_key_id: "key-A",
+        holding_type: "spot",
+        value_usd: 0,
+        unrealized_pnl_usd: null,
+      },
+      {
+        api_key_id: "key-B",
+        holding_type: "spot",
+        value_usd: 0,
+        unrealized_pnl_usd: null,
+      },
+    ] as unknown as Parameters<typeof liveBaselineMetricsFromPerKeyDailies>[0];
+    const out = liveBaselineMetricsFromPerKeyDailies(holdings, {
+      "key-A": dates.map((date, i) => ({ date, value: i % 2 ? 0.01 : -0.004 })),
+      "key-B": dates.map((date, i) => ({ date, value: i % 2 ? -0.02 : 0.015 })),
+    });
+    expect(out.ytdTwr).toBeNull();
+    expect(out.sharpe).toBeNull();
+    expect(out.maxDd).toBeNull();
+    expect(out.equity).toEqual([]);
+    expect(out.drawdown).toEqual([]);
+    expect(out.aum).toBe(0);
+  });
+});

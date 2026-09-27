@@ -16887,3 +16887,129 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 SC-4 — a book whose every contributing key has weight 0 shows
+// "no result", never a flat +0.00% line.
+//
+// The founder's book: the shared account's holdings were attributed to a key
+// that does not contribute, so every CONTRIBUTING key's equity (its per-key
+// weight) was 0, and the engine drew 100 days of +0.00%. The engine now returns
+// its honest empty shape on zero weight mass; this pins that the composer
+// passes that shape through (null KPIs, no chart series) instead of drawing it.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — 167.1.2 SC-4 zero weight mass renders no result", () => {
+  const ZM_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-06-${String(i + 1).padStart(2, "0")}`,
+  );
+  const ZM_SERIES_A = ZM_DATES.map((date, i) => ({
+    date,
+    value: [0.004, -0.001, 0.002, 0.0005][i % 4],
+  }));
+  const ZM_SERIES_B = ZM_DATES.map((date, i) => ({
+    date,
+    value: [-0.012, 0.021, -0.006, 0.017][i % 4],
+  }));
+  // Synthetic identifiers only — the repo and `.planning/` are public.
+  const ZM_KEY_A = "zeromass-key-a";
+  const ZM_KEY_B = "zeromass-key-b";
+
+  /** Two contributing keys, each with one spot holding worth `usd`. A spot
+   *  holding's equity IS its `value_usd`, so `usd = 0` is weight 0 per key. */
+  function zmBook(usdA: number, usdB: number): MyAllocationDashboardPayload {
+    const keys = [ZM_KEY_A, ZM_KEY_B];
+    return makePayload({
+      apiKeys: keys.map((id) => ({ ...winApiKey(id), sync_status: null })),
+      holdingsSummary: [
+        {
+          ...HOLDING_BTC,
+          venue: "binance",
+          symbol: "ZEROMASS-A",
+          holding_type: "spot" as const,
+          value_usd: usdA,
+          api_key_id: ZM_KEY_A,
+        },
+        {
+          ...HOLDING_BTC,
+          venue: "okx",
+          symbol: "ZEROMASS-B",
+          holding_type: "spot" as const,
+          value_usd: usdB,
+          api_key_id: ZM_KEY_B,
+        },
+      ],
+      perKeyReturnsByApiKeyId: {
+        [ZM_KEY_A]: ZM_SERIES_A,
+        [ZM_KEY_B]: ZM_SERIES_B,
+      },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: [...keys],
+      allocatorEligibleApiKeyIds: [...keys],
+      contributingApiKeyIds: [...keys],
+      bookEntryGateSatisfied: true,
+    });
+  }
+
+  type ZmMetrics = {
+    n: number;
+    twr: number | null;
+    sharpe: number | null;
+    equity_curve: Array<{ date: string; value: number }>;
+    member_count?: number;
+  };
+  const lastKpiScenario = (): ZmMetrics =>
+    vi.mocked(KpiStrip).mock.calls.at(-1)![0]
+      .scenarioMetrics as unknown as ZmMetrics;
+  const lastChartSeries = (): Array<{ date: string; value: number }> =>
+    (
+      vi.mocked(ScenarioFactsheetChart).mock.calls.at(-1)![0] as {
+        scenarioSeries: Array<{ date: string; value: number }>;
+      }
+    ).scenarioSeries;
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    cleanup();
+  });
+
+  function renderZm(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  it("control: the same book with real weight blends both keys into a curve (the fixture reaches the engine)", () => {
+    renderZm(zmBook(40_000, 10_000));
+    const sc = lastKpiScenario();
+    expect(sc.n).toBeGreaterThan(0);
+    expect(sc.twr).not.toBeNull();
+    expect(lastChartSeries().length).toBeGreaterThan(0);
+  });
+
+  it("every contributing key at weight 0 → the KPI strip gets null metrics and the chart gets NO scenario series (today: a flat +0.00% curve)", () => {
+    renderZm(zmBook(0, 0));
+    const sc = lastKpiScenario();
+    expect(sc.n).toBe(0);
+    expect(sc.twr).toBeNull();
+    expect(sc.sharpe).toBeNull();
+    expect(sc.equity_curve).toEqual([]);
+    // The members did exist: the composer's coverage cross-check reads them.
+    expect(sc.member_count).toBe(2);
+    // No flat line reaches the chart: an empty series, not 14 points at 1.0.
+    expect(lastChartSeries()).toEqual([]);
+    // No "+0.00%" anywhere on the surface (the fabricated figure).
+    expect(document.body.textContent ?? "").not.toContain("+0.00%");
+    // The blend header must not claim a mean over a window it does not have.
+    const header = screen.queryByTestId("scenario-blend-header");
+    if (header) {
+      expect(header.textContent ?? "").not.toMatch(/Mean of/);
+      expect(header.textContent ?? "").not.toMatch(/·\s*–\s*$/);
+    }
+  });
+});
