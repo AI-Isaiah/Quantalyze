@@ -125,6 +125,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD** (INSERTED)
 - [ ] **Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim** (INSERTED) — not yet verified
 - [ ] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — not yet verified
+- [ ] **Phase 164.9.3.2: DEFER40001 — a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end** (INSERTED) — not yet verified
 - [ ] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — not yet verified
 - [ ] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [x] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -3243,6 +3244,34 @@ Plans:
 
 **⭐ ROUTED IN 2026-09-26 (founder, "164.9.3.1 FANINGRAPH"; found by the 164.5.2 round-1 code review, WR-02, pre-existing):** a fan-in lost release. When two parents of one `done_pending_children` child mark done at the same time, the fan-in UPDATE in `mark_compute_job_done` (carried unchanged from `20260603120000`) lets each parent see the other as still running, so neither releases the child, and no sweep recovers it. This is the concurrent-parents twin of this phase's parent-fails strand. The 164.5.2 advisory lock is taken after the fan-in by design and does not change this. Success: two parents marking done concurrently always release the child exactly once, proven by a two-backend lane arm that fails on today's body.
 
+### Phase 164.9.3.2: DEFER40001 — a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end (INSERTED)
+
+**Goal:** A compute-job RPC called through PostgREST never raises SQLSTATE 40001, so PostgREST never re-runs the call in a loop. A preempted worker's `defer_compute_job` (and any sibling RPC with the same errcode) fails once, with an error the caller can read.
+**Requirements**: TODOS-style id `[164.9.4-DEFER-40001-RETRY-HANG]` (owned here)
+**Depends on:** none in code. ⭐ It is a BLOCKER in the ratified 2026-09-27 order: it sits in the blockers group beside Phase 164.9.3, and Phase 164.9.4's SC-3 cannot pass until it lands.
+**Plans:** 0 plans
+
+⭐ **Founder decision, 2026-09-27 (AskUserQuestion, "New blocker phase (Recommended)"):** the 40001 retry loop gets its own blocker phase, not a fold into 164.9.4.
+
+**Evidence, measured 2026-09-27 on the local lane** by the 164.9.4 measurement-run diagnosis (run `36304648008`, head `89c5ef3d`):
+- One call to a throwaway function that raises 40001 made PostgREST re-run it about 27k times in about 9 s on postgrest v14.5. That is the version the linked PROD project reports in `supabase/.temp/rest-version`.
+- The same call re-ran about 29k times on v14.7, the lane image. On v14.7 the loop outlived the client disconnect.
+- Hosted PROD is UNMEASURED.
+
+**Risk:** a preempted worker's `defer_compute_job` call through PostgREST can pin a pool connection in a busy loop. `mark_compute_job_done` and `mark_compute_job_failed` likely share the defect; the plan must measure each, not assume.
+
+**Test consequence:** analytics-service's `test_defer_compute_job_token_fence` was always a SKIP on shared TEST. It raced a 60 s timeout, and its skip matches only 'timed out', which Kong's 504 text does not match. On 164.9.4's private lane it is a FAIL. ⛔ Widening the skip match or raising Kong's timeout is forbidden: both hide the bug.
+
+## Success Criteria
+1. A migration changes the raised errcode in every affected compute-job RPC. Each function is re-based on its LATEST definition across ALL migrations before `CREATE OR REPLACE`.
+2. A test that fails on today's code proves the call returns once, with the new errcode, through PostgREST. `test_defer_compute_job_token_fence` passes on the private lane without a skip.
+3. If PROD behaviour matters to the fix, the founder gets one read-only PROD census question. No agent queries PROD.
+4. Three migration reviewers run before merge: migration-reviewer, rls-policy-auditor and silent-failure-hunter. ⚠️ Merging `supabase/migrations/**` auto-applies to TEST, then to PROD, with no reviewer gate.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.9.3.2 to break down)
+
 ### Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner (INSERTED)
 
 **Goal:** `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner.
@@ -3267,6 +3296,11 @@ The wait grows with the number of open PRs, because every one of them contends f
 - Phase 164.4.2.1 took `test-db-drift` off the key.
 
 ⭐ **ROUTED HERE 2026-09-27 (founder, "Pass it, route SC-3 to 164.9.4"; Phase 164.4.2.1 CONTEXT D-11):** Phase 164.4.2.1's SC-3 speed claim measured FAIL on clauses (a) and (c) on five graded merge-push runs (`36228159891`, `36242744753`, `36247495409`, `36251087509`, `36262210635`; run-totals 20m51s–25m42s against 18m50s; `python` + `e2e-seeded` acquire-wait 8m56s–14m00s against 8m25s). `test-db-drift` is off the key and off the critical path; the residual is `e2e-seeded` waiting while `python` holds the key (python's pytest step 9m00s–13m56s). Taking both jobs off the key is this phase's goal, so 164.4.2.1's residual is owned here. Re-grade against `164.4.2.1-MEASUREMENT.md` `## Verdict rule` when this phase lands.
+
+⭐ **ROUTED 2026-09-27 (founder, AskUserQuestion): the first measurement run's two reds are real defects outside this phase.**
+- `python`: `test_defer_compute_job_token_fence` fails. It is owned by Phase 164.9.3.2 DEFER40001 (F1, "New blocker phase").
+- `e2e-seeded`: the axe `color-contrast` check fails on the `No data` chip, #64748b on #f1f5f9 = 4.34:1, under the 4.5:1 AA floor at 11px. It is owned by Phase 170 LAYOUT (F2, "Book into 170 LAYOUT").
+- SC-3 cannot pass until both land. There is no waiver.
 
 ## Success Criteria
 1. Neither job acquires advisory key `61616158`.
@@ -3988,6 +4022,7 @@ kept verbatim.
 | 164.9.2 REFDATAUPDATES | 5/5 | Complete | v0.93.0.1 · #862 |
 | 164.9.3 CLAIMPAIR | 0/? | Queued — blocker | - |
 | 164.9.3.1 FANINGRAPH | 0/? | Queued — blocker, after 164.9.3 | - |
+| 164.9.3.2 DEFER40001 | 0/? | Queued — blocker, beside 164.9.3 (founder 2026-09-27) | - |
 | 164.9.4 CIOFFMUTEX | planned, not on main | In progress — draft PR #880 (measurement run) | - |
 | 164.9.5 AUTOREDUMP | 9/9 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.106.0.0 · #875 |
 | 164.10 BODYDRIFT | - | Closed by decision (c): the drift is real, measured and deliberately left | v0.79.1.1 · #824 |

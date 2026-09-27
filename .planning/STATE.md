@@ -11,11 +11,11 @@ last_activity: 2026-09-26
 last_activity_desc: Phase 164.9.5 verified (human_needed, 4/6; 2 live-only) and shipped as a PR
 state_head: 78d9a9a26b944ccda947a4bb776fc70880133bfb
 progress:
-  total_phases: 72
+  total_phases: 73
   completed_phases: 40
   total_plans: 353
   completed_plans: 347
-  percent: 56
+  percent: 55
 ---
 
 ## ⭐ STATE lineage
@@ -964,7 +964,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [██████░░░░] 56%
+Progress: [██████░░░░] 55%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1319,6 +1319,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 166.1 SPLIT into three on 2026-09-26 (founder decision: too large to review as one PR after five plan-check rounds; 166.1-CONTEXT D-23). Phase 166.1 edited (via `/gsd-phase --edit 166.1`) to ENGINEFLOOR, the Python half: plans 01, 01b, 03 and a new release plan 09.
 - Phase 166.2 COMPUTEONCE inserted after Phase 166.1 on 2026-09-26 (via `/gsd-phase --insert`, `--sibling` allocation): the TypeScript half, old 166.1 plans 04-08 moved as 166.2-01..07; does not depend on 166.1.
 - Phase 166.3 RECOMPUTE inserted after Phase 166.2 on 2026-09-26 (via `/gsd-phase --insert`, `--sibling` allocation): the founder PROD recompute, old 166.1 plan 02 moved as 166.3-01; depends only on the Phase 166 deploy.
+- Phase 164.9.3.2 DEFER40001 inserted after Phase 164.9.3 on 2026-09-27 (via `/gsd-phase --insert`; founder decision F1, "New blocker phase"): a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end. A blocker, beside 164.9.3.
 
 ### Decisions
 
