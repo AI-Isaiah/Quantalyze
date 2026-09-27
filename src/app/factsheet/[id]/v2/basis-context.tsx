@@ -334,7 +334,8 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     // B-1 (Phase 107 Fable red team): the invariance holds ONLY for L > 0. At L=0
     // (a reachable, intended state — input min="0", sanitizeLeverage keeps 0 valid)
     // the returns are all-zeros (r→0·r), so `mean·√P/sd` is 0/0 and the derive
-    // honestly yields sharpe=0 / sortino=0 / ann_vol=0 with flat charts. Pinning the
+    // honestly yields sharpe "—" (NaN, no dispersion; founder decision D7,
+    // 2026-09-26) / sortino "—" (NaN, no losing day) / ann_vol=0 with flat charts. Pinning the
     // persisted non-zero Sharpe/Sortino there would render e.g. "Sharpe 1.85" next to
     // "Cum 0.0% / Ann. Vol 0.0%" and flat charts — a fresh dishonesty. So apply the
     // pin only when L > 0; at L=0 let the honest derived zeros stand.
@@ -566,6 +567,13 @@ export function mtmDisabledReasonCopy(reason?: string): string {
       // "mtm_anchor_race" string literal is the cross-language contract — both
       // plans pin the same literal.
       return "Mark-to-market temporarily unavailable: the account changed during reconstruction; it will be recomputed on the next data refresh.";
+    case "mtm_option_row_field_missing":
+      // Phase 168 (SFH-04): stamped by the single-key MTM second pass when an
+      // options ledger row lacks its commission or position
+      // (`OptionRowFieldMissingError`; the constant is `MTM_REASON_OPTION_ROW_FIELD`
+      // in stitch_composite.py, the vocabulary owner). Steady tone: a missing
+      // field does not heal on the next refresh.
+      return "Mark-to-market unavailable: an options entry in the venue ledger is missing its fee or position, so a mark-to-market series cannot be reconstructed.";
     default:
       return "Mark-to-market unavailable for this strategy.";
   }

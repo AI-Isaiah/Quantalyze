@@ -1,0 +1,466 @@
+"""Phase 166.1: every ratio-over-standard-deviation VARIANCE site reads Phase 166's floor.
+
+A series that does not vary (a stablecoin-lending yield, a paused strategy) has a
+standard deviation of about 1e-16 when it is derived from a compounding NAV,
+never exactly 0. A site that tests ``== 0`` then divides by that residue and
+shows a fabricated number (a Sharpe of 1.28e13, a CSV error printing a Sharpe of
+2.3e15, a 48.6% / 51.4% split of a zero risk).
+
+Invariant under test (D-07): a compounding-NAV constant yield produces EXACTLY the
+output an exactly constant series of the same length produces at that site. No
+dispersion means no ratio. That is economics, not the implementation: nothing
+below asserts a value the code under test computed. A cent-rounded NAV (real
+quantisation dispersion, sd about 4e-9) is the control on the other side of the
+floor, so widening the floor goes red.
+
+Each site's tests were written first, observed RED against the unedited site,
+and every site was then neuter-drilled (the drill table is in 166.1-01-SUMMARY).
+"""
+
+import math
+import re
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from services.allocated_capital import _annualised_sharpe
+from services.analytics_runner import _compute_derived_trade_metrics
+from services.csv_validator import validate_csv
+from services.dispersion import residue_floor
+from services.equity_reconstruction import EquityCurveBuilder
+from services.optimizer import optimize_weights
+from services.portfolio_optimizer import _compute_sharpe, find_improvement_candidates
+from services.portfolio_risk import compute_risk_decomposition
+from tests.dispersion_fixtures import CONSTANT_YIELDS, apy, nav_constant_yield
+
+_YIELD_PARAMS = pytest.mark.parametrize(
+    "daily_yield", list(CONSTANT_YIELDS.values()), ids=list(CONSTANT_YIELDS)
+)
+
+
+def _residue_yield(daily_yield: float) -> pd.Series:
+    """A compounding-NAV constant yield, with its precondition asserted.
+
+    Round-1 SFH LOW-3: every S-site test that feeds a constant yield must
+    exercise the RESIDUE branch, ``0 < std <= residue_floor(mean)``. If a numpy
+    or platform change ever returned an exact 0.0 std, the old ``== 0`` guards
+    would pass these tests too, and they would stop proving the floor.
+    """
+    r = nav_constant_yield(daily_yield)
+    sd, mean = float(r.std()), float(r.mean())
+    assert 0.0 < sd <= residue_floor(mean), (
+        f"fixture precondition: {daily_yield} must be residue, not exact zero (sd={sd})"
+    )
+    return r
+
+
+def _exact_constant_like(r: pd.Series) -> pd.Series:
+    """An exactly constant (all-zero) series of the same length and index: the
+    D-07 reference input, whose std is exactly 0.0."""
+    return pd.Series(0.0, index=r.index, name=r.name)
+
+
+def _cent_rounded_1pct_apy() -> pd.Series:
+    """Real dispersion: a 1% APY NAV rounded to cents (sd about 4e-9)."""
+    return nav_constant_yield(apy(0.01), cents=True)
+
+
+# ---------------------------------------------------------------------------
+# S1: portfolio_optimizer._compute_sharpe
+# ---------------------------------------------------------------------------
+
+
+@_YIELD_PARAMS
+def test_s1_compute_sharpe_constant_yield_is_undefined(daily_yield):
+    """A constant yield has no dispersion, so its Sharpe does not exist. Today's
+    ``== 0`` guard lets the ~1e-16 residue through and returns ~1e13."""
+    r = _residue_yield(daily_yield)
+    assert _compute_sharpe(r) is None
+
+
+@_YIELD_PARAMS
+def test_s1_compute_sharpe_constant_yield_matches_exact_constant(daily_yield):
+    """D-07: the constant yield answers exactly what an exactly constant series
+    of the same length answers."""
+    r = _residue_yield(daily_yield)
+    control = _exact_constant_like(r)
+    assert _compute_sharpe(control) is None
+    assert _compute_sharpe(r) == _compute_sharpe(control)
+
+
+def test_s1_compute_sharpe_real_quantisation_dispersion_is_finite():
+    """The other side of the floor: cent-rounding noise is real dispersion, so a
+    Sharpe exists. A floor widened past it would hide real data."""
+    out = _compute_sharpe(_cent_rounded_1pct_apy())
+    assert out is not None and math.isfinite(out)
+
+
+def test_s1_compute_sharpe_one_row_is_none():
+    """One row has a NaN std: no Sharpe, the same as before the floor moved."""
+    r = pd.Series([0.01], index=pd.date_range("2024-01-01", periods=1, freq="D"))
+    assert _compute_sharpe(r) is None
+
+
+# ---------------------------------------------------------------------------
+# S2: portfolio_optimizer.find_improvement_candidates, the M-0701 exclusion
+# ---------------------------------------------------------------------------
+
+
+def _noisy(index: pd.Index, seed: int, mu: float = 0.001, sd: float = 0.02) -> pd.Series:
+    rng = np.random.default_rng(seed)
+    return pd.Series(rng.normal(mu, sd, len(index)), index=index)
+
+
+def _s2_portfolio(index: pd.Index) -> dict[str, pd.Series]:
+    return {"s1": _noisy(index, 1661), "s2": _noisy(index, 1662)}
+
+
+@_YIELD_PARAMS
+def test_s2_constant_yield_candidate_is_dropped_noisy_candidate_kept(daily_yield):
+    """M-0701 drops a candidate whose own returns do not vary: its correlation
+    and diversification signal are undefined. A constant yield is such a
+    candidate, whether its std is exactly 0 or the ~1e-16 residue of a
+    compounding NAV. Today the residue passes the ``== 0.0`` test and the
+    candidate is scored on a residue correlation."""
+    const = _residue_yield(daily_yield)
+    index = const.index
+    candidates = {"const": const, "noisy": _noisy(index, 1663)}
+    ids = [c["strategy_id"] for c in find_improvement_candidates(
+        _s2_portfolio(index), candidates, {"s1": 0.5, "s2": 0.5}
+    )]
+    assert "noisy" in ids
+    assert "const" not in ids
+
+
+def test_s2_exact_constant_candidate_is_dropped():
+    """D-07 reference: an exactly constant candidate (std exactly 0.0) is
+    dropped, which is what the constant-yield candidate above must match."""
+    index = nav_constant_yield(1e-4).index
+    candidates = {"const": pd.Series(0.0, index=index), "noisy": _noisy(index, 1663)}
+    ids = [c["strategy_id"] for c in find_improvement_candidates(
+        _s2_portfolio(index), candidates, {"s1": 0.5, "s2": 0.5}
+    )]
+    assert ids == ["noisy"]
+
+
+# ---------------------------------------------------------------------------
+# S3: csv_validator._check_sharpe_sentinel (D-04: keep the verdict, drop the number)
+# ---------------------------------------------------------------------------
+
+
+def _returns_csv(values: pd.Series) -> bytes:
+    df = pd.DataFrame({
+        "date": pd.date_range("2024-01-02", periods=len(values), freq="D").strftime("%Y-%m-%d"),
+        "daily_return": list(values),
+    })
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def _sentinel_errors(result: dict) -> list[dict]:
+    """Errors from EITHER branch of `_check_sharpe_sentinel`."""
+    return [
+        e for e in result["errors"]
+        if e["rule"] in ("daily_sharpe_sentinel", "daily_returns_constant")
+    ]
+
+
+def _constant_errors(result: dict) -> list[dict]:
+    """The residue branch. Round-1 WR-01 gave it its own rule key: the Sharpe
+    sentinel's label claims a Sharpe above 10, and a residue series has none."""
+    errors = _sentinel_errors(result)
+    assert all(e["rule"] == "daily_returns_constant" for e in errors), errors
+    return errors
+
+
+def _assert_residue(values: pd.Series) -> None:
+    """Fixture precondition: the series is residue, not exact zero and not real
+    dispersion, or the test would silently exercise another branch."""
+    sd = float(values.std(ddof=1))
+    assert 0.0 < sd <= residue_floor(float(values.mean())), sd
+
+
+def _assert_names_no_fabricated_number(message: str) -> None:
+    assert not re.search(r"\d{7,}", message), message
+    assert "e+" not in message.lower(), message
+
+
+def test_s3_repeated_positive_return_rejected_without_a_fabricated_number():
+    """120 days of a repeated 0.001 is residue (std ~4e-19). A constant positive
+    return has an unbounded Sharpe, so the upload stays REJECTED (D-04), but the
+    message used to print 'Daily Sharpe 2296215230173376.50'."""
+    values = pd.Series([0.001] * 120)
+    _assert_residue(values)
+    errors = _constant_errors(validate_csv(_returns_csv(values), "daily_returns"))
+    assert len(errors) == 1
+    _assert_names_no_fabricated_number(errors[0]["message"])
+
+
+@_YIELD_PARAMS
+def test_s3_nav_constant_yield_rejected_without_a_fabricated_number(daily_yield):
+    values = _residue_yield(daily_yield)
+    _assert_residue(values)
+    errors = _constant_errors(validate_csv(_returns_csv(values), "daily_returns"))
+    assert len(errors) == 1
+    _assert_names_no_fabricated_number(errors[0]["message"])
+
+
+def test_s3_all_zero_returns_pass():
+    """A constant return at the risk-free rate (0) has no excess, so no Sharpe
+    to be unrealistic about: accepted today and still accepted."""
+    values = pd.Series([0.0] * 120)
+    assert _sentinel_errors(validate_csv(_returns_csv(values), "daily_returns")) == []
+
+
+def test_s3_constant_negative_yield_passes():
+    """A residue series below the risk-free rate gets no sentinel error."""
+    values = nav_constant_yield(-1e-4)
+    _assert_residue(values)
+    assert _sentinel_errors(validate_csv(_returns_csv(values), "daily_returns")) == []
+
+
+def test_s3_real_quantisation_dispersion_still_reports_a_finite_sharpe():
+    """Cent-rounded 1% APY: real dispersion takes today's branch unchanged, so the
+    error still names the Sharpe, and that number is finite."""
+    values = _cent_rounded_1pct_apy()
+    errors = _sentinel_errors(validate_csv(_returns_csv(values), "daily_returns"))
+    assert len(errors) == 1
+    assert errors[0]["rule"] == "daily_sharpe_sentinel", "real dispersion keeps the Sharpe rule"
+    m = re.search(r"Daily Sharpe (\S+) exceeds", errors[0]["message"])
+    assert m is not None, errors[0]["message"]
+    assert math.isfinite(float(m.group(1)))
+    _assert_names_no_fabricated_number(errors[0]["message"])
+
+
+# ---------------------------------------------------------------------------
+# S4: allocated_capital._annualised_sharpe
+# ---------------------------------------------------------------------------
+
+
+@_YIELD_PARAMS
+def test_s4_annualised_sharpe_constant_yield_is_nan(daily_yield):
+    r = _residue_yield(daily_yield)
+    assert math.isnan(_annualised_sharpe(_exact_constant_like(r)))
+    assert math.isnan(_annualised_sharpe(r))
+
+
+def test_s4_annualised_sharpe_real_quantisation_dispersion_is_finite():
+    assert math.isfinite(_annualised_sharpe(_cent_rounded_1pct_apy()))
+
+
+# ---------------------------------------------------------------------------
+# S5: EquityCurveBuilder.compute_sharpe
+# ---------------------------------------------------------------------------
+
+
+def _builder_over(daily_return: pd.Series) -> EquityCurveBuilder:
+    """A builder whose reconstructed curve is ``daily_return`` (no open PnL);
+    ``compute_sharpe`` reads nothing else."""
+    df = pd.DataFrame({"daily_return": daily_return.to_numpy(), "unrealized_pnl": 0.0})
+    builder = EquityCurveBuilder.__new__(EquityCurveBuilder)
+    builder.to_equity_curve_daily = lambda: df  # type: ignore[method-assign]
+    return builder
+
+
+@_YIELD_PARAMS
+def test_s5_equity_curve_sharpe_constant_yield_is_none(daily_yield):
+    r = _residue_yield(daily_yield)
+    assert _builder_over(_exact_constant_like(r)).compute_sharpe() is None
+    assert _builder_over(r).compute_sharpe() is None
+
+
+def test_s5_equity_curve_sharpe_real_quantisation_dispersion_is_finite():
+    out = _builder_over(_cent_rounded_1pct_apy()).compute_sharpe()
+    assert out is not None and math.isfinite(out)
+
+
+# ---------------------------------------------------------------------------
+# S6: optimizer.optimize_weights constant-column gate. A PIN, not a red test:
+# the old absolute ``<= 1e-12`` equals the shared floor for any |mean| <= 1, so
+# this cannot go red against the old guard (D-06, RESEARCH Pitfall 1).
+# ---------------------------------------------------------------------------
+
+
+def _as_pairs(s: pd.Series) -> list[tuple[str, float]]:
+    return [(d.strftime("%Y-%m-%d"), float(v)) for d, v in s.items()]
+
+
+@_YIELD_PARAMS
+def test_s6_optimizer_constant_yield_column_is_constant_series(daily_yield):
+    const = _residue_yield(daily_yield)
+    series = {"const": _as_pairs(const), "noisy": _as_pairs(_noisy(const.index, 1664))}
+    out = optimize_weights(series)
+    assert out.ok is False
+    assert out.reason == "constant-series"
+    assert out.weights is None
+
+
+# ---------------------------------------------------------------------------
+# S7: portfolio_risk.compute_risk_decomposition (D-05)
+# ---------------------------------------------------------------------------
+
+
+@_YIELD_PARAMS
+def test_s7_risk_decomposition_of_constant_yields_splits_no_risk(daily_yield):
+    """Two strategies that do not move carry no risk, so there is no share of it
+    to apportion. Before 166.1 the ~1e-32 residue covariance split it 48.6% /
+    51.4%. The share is undefined, so it is None (round-1 SFH MEDIUM-2, founder
+    decision D7 2026-09-26), not the 0 that made the rows sum to 0%. The
+    all-zero book reads the same (D7)."""
+    a = _residue_yield(daily_yield)
+    b = nav_constant_yield(daily_yield / 2)
+    for sd, mean in ((float(a.std()), float(a.mean())), (float(b.std()), float(b.mean()))):
+        assert 0.0 < sd <= residue_floor(mean), "precondition: residue, not an exact zero"
+    cov = pd.DataFrame({"a": a, "b": b}).cov().to_numpy()
+    zero_cov = pd.DataFrame({"a": a * 0.0, "b": b * 0.0}).cov().to_numpy()
+    for matrix in (cov, zero_cov):
+        out = compute_risk_decomposition([0.5, 0.5], matrix)
+        assert [row["marginal_risk_pct"] for row in out] == [None, None]
+        assert [row["component_var"] for row in out] == [None, None]
+        assert all(row["standalone_vol"] is not None for row in out)
+
+
+def test_s7_narrative_skips_a_risk_split_that_does_not_exist():
+    """generate_narrative took max() over marginal_risk_pct; None rows must not
+    raise and must not produce a concentration sentence."""
+    from services.portfolio_optimizer import generate_narrative
+
+    text = generate_narrative({
+        "risk_decomposition": [
+            {"strategy_name": "A", "marginal_risk_pct": None, "weight_pct": 50},
+            {"strategy_name": "B", "marginal_risk_pct": None, "weight_pct": 50},
+        ],
+    })
+    assert "Risk is concentrated" not in text
+
+
+def test_s7_risk_decomposition_of_real_risk_still_splits():
+    """The other side: a real covariance still gets a split that sums to 100%."""
+    index = nav_constant_yield(1e-4).index
+    cov = pd.DataFrame({"a": _noisy(index, 1665), "b": _noisy(index, 1666)}).cov().to_numpy()
+    out = compute_risk_decomposition([0.5, 0.5], cov)
+    assert sum(row["marginal_risk_pct"] for row in out) == pytest.approx(100.0)
+
+
+# ---------------------------------------------------------------------------
+# S8: analytics_runner._compute_derived_trade_metrics, the SQN block (D-16)
+#
+# SQN is mean(R) / std(R) * sqrt(min(N, 100)) over per-trade R-multiples,
+# R = realized_pnl / |avg_losing_trade|. A book of identical losses has no
+# dispersion, so it has no SQN. With a loss of 7.7 the float mean is not exact,
+# the R-multiples are not all exactly -1.0, and today's ``std_r > 0`` guard lets
+# the ~1e-16 residue through: SQN -4.03e16 (21 trades), -5.40e16 (37 trades).
+# A loss of 1.0 has an exact mean and gives None today: the D-07 reference.
+#
+# The function has no production caller since Phase 106 (D-21 W1), so this
+# corrects the formula for any future caller and moves no stored value.
+# ---------------------------------------------------------------------------
+
+_S8_OTHER_KEYS = (
+    "expectancy",
+    "risk_reward_ratio",
+    "weighted_risk_reward_ratio",
+    "profit_factor_long",
+    "profit_factor_short",
+)
+
+
+def _s8_losses(n: int, loss: float) -> list[float]:
+    return [-loss] * n
+
+
+def _s8_alternating_losses() -> list[float]:
+    """Real dispersion: 20 losses alternating 7.7 / 7.71, plus one 7.7."""
+    return [-7.7 if i % 2 == 0 else -7.71 for i in range(20)] + [-7.7]
+
+
+def _s8_positions(losses: list[float]) -> dict[str, object]:
+    """An all-loser book. ``avg_losing_trade`` is the float mean of the losses,
+    computed the way ``reconstruct_positions`` aggregates (sum / count)."""
+    return {
+        "win_rate": 0,
+        "avg_winning_trade": 0,
+        "avg_losing_trade": sum(losses) / len(losses),
+        "winners_count": 0,
+        "losers_count": len(losses),
+        "realized_pnl_per_trade": [{"realized_pnl": p, "side": "long"} for p in losses],
+    }
+
+
+def _s8_r_std_and_mean(losses: list[float]) -> tuple[float, float]:
+    """The R-multiple sample std and mean, as the SQN block forms them."""
+    risk_unit = abs(sum(losses) / len(losses))
+    r = [p / risk_unit for p in losses]
+    mean_r = sum(r) / len(r)
+    var_r = sum((x - mean_r) ** 2 for x in r) / (len(r) - 1)
+    return math.sqrt(var_r), mean_r
+
+
+def _s8_sqn(losses: list[float]) -> object:
+    return _compute_derived_trade_metrics({}, _s8_positions(losses))["sqn"]
+
+
+@pytest.mark.parametrize("n", [21, 37])
+def test_s8_sqn_identical_losses_of_7_7_is_undefined(n):
+    """Identical losses have no dispersion, so no SQN. Today: about -4.03e16 (21)
+    and -5.40e16 (37), from a float-residue std."""
+    losses = _s8_losses(n, 7.7)
+    std_r, mean_r = _s8_r_std_and_mean(losses)
+    # Precondition: the residue branch, not the exact-zero one the 1.0 control covers.
+    assert 0.0 < std_r <= residue_floor(mean_r)
+    assert _s8_sqn(losses) is None
+
+
+def test_s8_sqn_identical_losses_of_1_0_is_undefined_the_d07_reference():
+    """An exactly representable mean gives an exactly zero std: None today and after."""
+    losses = _s8_losses(21, 1.0)
+    std_r, _ = _s8_r_std_and_mean(losses)
+    assert std_r == 0.0
+    assert _s8_sqn(losses) is None
+
+
+def test_s8_sqn_residue_equals_the_exact_constant_answer():
+    """D-07: the residue book answers exactly what the exactly constant book answers."""
+    assert _s8_sqn(_s8_losses(21, 7.7)) == _s8_sqn(_s8_losses(21, 1.0))
+
+
+def test_s8_sqn_zero_std_never_divides_even_when_the_floor_answers_false(monkeypatch):
+    """Round-1 IN-01. The old ``std_r > 0`` guard made a zero divisor impossible.
+    The floor predicate alone does not: with a NaN ``mean_r`` the floor is NaN,
+    ``0.0 <= NaN`` is False, and ``mean_r / 0.0`` raises ZeroDivisionError. The
+    predicate is forced to answer False here, the way a NaN floor answers, on an
+    exactly zero std (21 losses of 1.0), so only the structural guard stands
+    between the block and the division."""
+    import services.analytics_runner as runner
+
+    monkeypatch.setattr(runner, "dispersion_is_residue", lambda sd, mean: False)
+    assert _s8_sqn(_s8_losses(21, 1.0)) is None
+
+
+def test_s8_sqn_real_dispersion_is_finite():
+    """The other side of the floor: 7.7 / 7.71 is real dispersion, so SQN exists."""
+    losses = _s8_alternating_losses()
+    std_r, mean_r = _s8_r_std_and_mean(losses)
+    assert std_r > residue_floor(mean_r)
+    sqn = _s8_sqn(losses)
+    assert isinstance(sqn, float) and math.isfinite(sqn)
+
+
+def test_s8_sqn_floor_changes_no_other_key(monkeypatch):
+    """Only ``sqn`` moves. The unedited function is reproduced by patching the
+    floor seam back to the old ``std_r > 0`` guard (residue iff ``std_r <= 0``),
+    and every other key must match on all three inputs."""
+    inputs = [_s8_losses(21, 7.7), _s8_losses(21, 1.0), _s8_alternating_losses()]
+    edited = [_compute_derived_trade_metrics({}, _s8_positions(x)) for x in inputs]
+    monkeypatch.setattr(
+        "services.analytics_runner.dispersion_is_residue", lambda sd, mean: sd <= 0.0
+    )
+    unedited = [_compute_derived_trade_metrics({}, _s8_positions(x)) for x in inputs]
+    # The patch really reproduces the old function: the residue book's fabricated SQN.
+    sqn_old = unedited[0]["sqn"]
+    assert isinstance(sqn_old, float) and abs(sqn_old) > 1e15
+    for before, after in zip(unedited, edited):
+        assert set(before) == set(after)
+        assert {k: before[k] for k in _S8_OTHER_KEYS} == {k: after[k] for k in _S8_OTHER_KEYS}
+    # The real-dispersion SQN does not move either.
+    assert unedited[2]["sqn"] == edited[2]["sqn"]

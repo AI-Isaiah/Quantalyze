@@ -1455,9 +1455,14 @@ export interface AttributionRow {
 export interface RiskDecompositionRow {
   strategy_id: string;
   strategy_name: string;
-  marginal_risk_pct: number;
+  /**
+   * null = the portfolio carries no risk, so no share of it exists to
+   * apportion (166.1 D7, founder 2026-09-26; round-1 SFH MEDIUM-2). Never 0.
+   */
+  marginal_risk_pct: number | null;
   standalone_vol: number;
-  component_var: number;
+  /** null for the same reason as `marginal_risk_pct`. */
+  component_var: number | null;
   weight_pct: number;
 }
 
@@ -1472,8 +1477,13 @@ export interface BenchmarkComparison {
 export interface OptimizerSuggestionRow {
   strategy_id: string;
   strategy_name: string;
-  corr_with_portfolio: number;
-  sharpe_lift: number;
+  /**
+   * null = the correlation does not exist (the portfolio or the candidate
+   * does not disperse). Never read as 0 (166.1 D7, founder 2026-09-26).
+   */
+  corr_with_portfolio: number | null;
+  /** null = the portfolio has no Sharpe, so a lift over it does not exist (166.1 D7). */
+  sharpe_lift: number | null;
   dd_improvement: number;
   score: number;
 }
@@ -1526,10 +1536,14 @@ export interface BridgeCandidate {
    * corr_delta (correlation reduced), and dd_delta (shallower drawdown) are
    * each >= 0 when the candidate improves that axis. Use
    * `asImprovement(raw, "higher-better")` before rendering.
+   *
+   * null = the delta does not exist: one side's metric is undefined because a
+   * leg's returns do not vary. Rendered as "—", never as 0 (166.1 D7, founder
+   * 2026-09-26).
    */
-  sharpe_delta: number;
-  dd_delta: number;
-  corr_delta: number;
+  sharpe_delta: number | null;
+  dd_delta: number | null;
+  corr_delta: number | null;
   composite_score: number;
   fit_label: BridgeFitLabel;
 }

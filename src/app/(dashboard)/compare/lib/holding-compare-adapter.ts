@@ -15,6 +15,7 @@
  * same cumulative-product semantics.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { dispersion, sharpe as returnStatsSharpe } from "@/lib/return-stats";
 
 export type ParsedHoldingCompareId = {
   venue: string;
@@ -111,9 +112,13 @@ export class HoldingCompareLoadError extends Error {
  * - Drop absent/zero days (RESEARCH Pitfall 2 — no forward-fill)
  * - pct_change semantics: return[i] = value[i] / value[i-1] - 1
  * - cumulative_return = product(1 + r) - 1
- * - sharpe = mean(returns) / std(returns) * sqrt(365) [population std]
+ * - sharpe = `return-stats` `sharpe(returns, { periodsPerYear: 365, ddof: 0 })`
+ *   [population std], the ONE TS Sharpe (Phase 166.1 D-17): null when the
+ *   returns have no dispersion, including the float residue of a compounding
+ *   constant yield, exactly as for a flat NAV (D-07)
  * - max_drawdown via cumulative-product running-peak
- * - vol = std(returns) * sqrt(365)
+ * - vol = `return-stats` `dispersion(returns, 0).sd * sqrt(365)` (a residue sd
+ *   reads as 0, the flat-NAV value)
  * Returns null metrics when fewer than 2 symbol-present data points exist.
  *
  * @internal Exported for unit testing only (Phase 167.1.2 / D-13): while the
@@ -144,16 +149,12 @@ export function reconstructAndAnalyze(
     return { cumulative_return: null, sharpe: null, max_drawdown: null, vol: null };
   }
 
-  const n = returns.length;
-  const mean = returns.reduce((a, b) => a + b, 0) / n;
-  // Population variance (matches numpy ddof=0 default)
-  const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / n;
-  const std = Math.sqrt(variance);
   const ANNUAL = 365;
 
   const cumulative_return = returns.reduce((acc, r) => acc * (1 + r), 1) - 1;
-  const vol = std * Math.sqrt(ANNUAL);
-  const sharpe = std > 0 ? (mean / std) * Math.sqrt(ANNUAL) : null;
+  // Population sd (numpy ddof=0 default).
+  const vol = dispersion(returns, 0).sd * Math.sqrt(ANNUAL);
+  const sharpe = returnStatsSharpe(returns, { periodsPerYear: ANNUAL, ddof: 0 });
 
   // Max drawdown via running peak on the raw value series
   let peak = values[0];

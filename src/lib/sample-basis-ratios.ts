@@ -1,25 +1,27 @@
 /**
  * Sample-basis risk-corrected ratios (default 252; #597 parameterizes
- * periodsPerYear) — a STANDALONE replica of the frozen
- * scenario engine's metric math (Phase 42, PEER-05).
+ * periodsPerYear) for the OWN-BOOK series beside the scenario composer
+ * (Phase 42, PEER-05).
  *
- * ⛔ WHY A STANDALONE FILE (not an extraction from `scenario.ts`):
- * `src/lib/scenario.ts` is the FROZEN projection engine (SCENARIO-05). The v1.2
- * frozen-spine exit guards (`src/__tests__/phase-29..32-frozen-spine-guards.test.ts`)
- * assert it is ZERO-DIFF vs the phase baseline — any edit, even a pure
- * refactor that "extracts" the math, fails CI. So this module REPLICATES the
- * engine's Sharpe / Sortino / max-drawdown math rather than importing a shared
- * helper out of the engine. The replica is pinned to the engine by a
- * PARITY golden test (`scenario-sample-ratios.test.ts`): for the same daily-return
- * series this function's output must EQUAL `computeScenario`'s rounded
- * sharpe/sortino/max_drawdown (parity-by-construction). A drift in either the
- * engine OR this replica fails that test.
+ * WHY A STANDALONE FILE, AND WHY IT NO LONGER HOLDS A SHARPE OF ITS OWN.
+ * This file began as a REPLICA of the scenario engine's metric math, because
+ * `src/lib/scenario.ts` was then frozen (SCENARIO-05) and could not export a
+ * shared helper. That freeze is RETIRED (v1.5 ADR-001; the phase-29 to phase-32
+ * frozen-spine guards say so). Since Phase 166.1 D-17 (carried into Phase 166.2)
+ * the Sharpe here and the Sharpe in `computeScenario` are ONE function,
+ * `sharpe` in `src/lib/return-stats.ts`, so the replica's copy of the formula is
+ * gone and so is its residue defect (a compounding constant yield reported a
+ * Sharpe of 1e12 to 1e14 behind a `volatility > 0` guard). The PARITY golden
+ * (`scenario-sample-ratios.test.ts`) now proves the two callers pass the same
+ * basis (sample, the same periodsPerYear) rather than that two copies agree.
+ * The Sortino and max drawdown are not dispersion ratios and stay local.
  *
  * THE BASIS (verbatim, copied from `scenario.ts:335-378`, the cohort/quantstats
  * convention pinned by `scenario.peer-basis.test.ts`; the `252` below is the
  * DEFAULT periodsPerYear — #597 makes it a per-call argument, e.g. 365 crypto):
  *   - SAMPLE variance: `Σ(r−mean)² / (n−1)` (ddof=1, NOT population /n).
- *   - Sharpe: `(mean·252) / (√sampleVar · √252)`, rf=0. Null when vol == 0.
+ *   - Sharpe: `(mean·252) / (√sampleVar · √252)`, rf=0, computed by
+ *     `return-stats` `sharpe`. Null when the sample sd is 0 or float residue.
  *   - Sortino: downside RMS over TOTAL n × √252, rf=0 — `(mean·252) /
  *     (√(Σ(r<0 ? r² : 0)/n) · √252)`. Null when there are no down days
  *     (downsideVol == 0) — the engine returns null (not `sharpe ?? 0`) so the
@@ -39,10 +41,11 @@
  * OWN-BOOK daily returns (derived from the live equity levels) which can be
  * short, so it guards independently.
  */
+import { sharpe } from "@/lib/return-stats";
 
 /** Risk-corrected ratios on the cohort's sample basis (default 252; #597 parameterizes periodsPerYear). Null = insufficient data. */
 export interface SampleBasisRatios {
-  /** Sample(ddof=1)×√N Sharpe (periodsPerYear, default 252), rf=0. Null when annualized vol is 0 or n<2. */
+  /** Sample(ddof=1)×√N Sharpe (periodsPerYear, default 252), rf=0. Null when the sample sd is 0 or float residue, or n<2. */
   sharpe: number | null;
   /** Downside-RMS/n × √N Sortino (periodsPerYear, default 252), rf=0. Null when there are no down days or n<2. */
   sortino: number | null;
@@ -52,7 +55,7 @@ export interface SampleBasisRatios {
 
 /**
  * Compute Sharpe / Sortino / max-drawdown for a daily-RETURN series on the
- * SAMPLE / N basis — identical math to the frozen `computeScenario` engine
+ * SAMPLE / N basis — the same `return-stats` Sharpe as `computeScenario`
  * (proven by the parity golden test). Pure, deterministic, no Date/PRNG.
  *
  * @param dailyReturns decimal daily returns (e.g. 0.012 = +1.2%).
@@ -73,13 +76,10 @@ export function sampleBasisRatios(
     return { sharpe: null, sortino: null, max_drawdown: null };
   }
 
-  // Sample mean + SAMPLE variance (÷(n−1)) — the cohort/quantstats basis.
+  // SAMPLE (ddof=1) Sharpe, the cohort/quantstats basis: the ONE TS Sharpe,
+  // shared with computeScenario (Phase 166.1 D-17).
+  const sharpeRaw = sharpe(dailyReturns, { periodsPerYear, ddof: 1 });
   const meanR = dailyReturns.reduce((s, r) => s + r, 0) / n;
-  const variance =
-    dailyReturns.reduce((s, r) => s + (r - meanR) * (r - meanR), 0) / (n - 1);
-  const volDaily = Math.sqrt(variance);
-  const volatility = volDaily * Math.sqrt(periodsPerYear);
-  const sharpeRaw = volatility > 0 ? (meanR * periodsPerYear) / volatility : null;
 
   // Sortino: downside RMS divides by TOTAL observations (n), not the count of
   // negative days. Null when there are no down days (downsideVol == 0) so the UI

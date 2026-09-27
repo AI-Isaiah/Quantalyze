@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
  * their OWN unpublished strategy. The effective unstable_cache key on this
  * route is id-ONLY — the `::computedAt` suffix the page passes is split off and
  * DISCARDED, and Next derives the entry from the callback source text plus
- * `["factsheet-v2-payload-v6", id]`. So an entry populated under an
+ * `["factsheet-v2-payload-vN", id]`. So an entry populated under an
  * owner-inclusive predicate would be handed to every subsequent reader of that
  * id — anonymous ones included — for the full 3600s TTL. That is a disclosure
  * bug, not a staleness bug.

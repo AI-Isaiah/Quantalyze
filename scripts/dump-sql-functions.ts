@@ -394,6 +394,12 @@ export interface NameSetRatchetRow {
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
   // EMPTY, and that is a MEASURED state, not an unused feature.
   //
+  // ⭐ 2026-09-27: the two Phase 167.1.2 PR B rows (`enforce_api_keys_account_
+  // share_same_owner`, `set_departed_key_history_inclusion`, both
+  // `snapshot-only`, captured 2026-09-25) were DELETED on the re-dump taken
+  // after 20260925120000 applied to PROD — the exact clearing condition each
+  // row carried, and the same act that retired the 164.1.1 row below.
+  //
   // ⭐ It was briefly non-empty: Phase 164.1.1 added a `snapshot-only` row for
   // `prod_prober_cadence_check` on 2026-09-18, because the function landed in a
   // forward migration while supabase/schema/baseline.sql still predated it. That

@@ -8,7 +8,8 @@ interface RiskAttributionProps {
   data: {
     strategy_id: string;
     strategy_name: string;
-    marginal_risk_pct: number;
+    /** null = no risk share exists (the portfolio carries no risk); shown "—". */
+    marginal_risk_pct: number | null;
     weight_pct: number;
     standalone_vol: number;
   }[] | null;
@@ -23,9 +24,12 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
     );
   }
 
+  // 166.1 D7: a null risk share is left out of the stacked bar (a gap), never
+  // plotted as a 0-width segment that reads as "no risk".
   const chartData = [
     data.reduce(
-      (acc, d) => ({ ...acc, [d.strategy_name]: d.marginal_risk_pct }),
+      (acc, d) =>
+        d.marginal_risk_pct === null ? acc : { ...acc, [d.strategy_name]: d.marginal_risk_pct },
       { label: "Risk %" } as Record<string, string | number>,
     ),
   ];
@@ -59,7 +63,11 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
           </thead>
           <tbody>
             {data.map((d, i) => {
-              const overweight = d.marginal_risk_pct > d.weight_pct * 1.3;
+              // 166.1 D7 (founder 2026-09-26): with no risk share there is no
+              // assessment either — "Balanced" would be a claim about a split
+              // that does not exist. The cell is a colorless "—".
+              const share = d.marginal_risk_pct;
+              const overweight = share !== null && share > d.weight_pct * 1.3;
               return (
                 <tr key={d.strategy_id} className="border-b border-border/50 hover:bg-page/50 transition-colors">
                   <td className="py-2 pr-4 flex items-center gap-2">
@@ -70,9 +78,13 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
                   <td className="py-2 pr-4 text-right font-metric">{formatPercent(d.marginal_risk_pct)}</td>
                   <td className="py-2 pr-4 text-right font-metric">{formatPercent(d.standalone_vol)}</td>
                   <td className="py-2 text-right">
-                    <span className={`text-caption font-medium ${overweight ? "text-negative" : "text-positive"}`}>
-                      {overweight ? "Overweight risk" : "Balanced"}
-                    </span>
+                    {share === null ? (
+                      <span className="text-caption text-text-muted">—</span>
+                    ) : (
+                      <span className={`text-caption font-medium ${overweight ? "text-negative" : "text-positive"}`}>
+                        {overweight ? "Overweight risk" : "Balanced"}
+                      </span>
+                    )}
                   </td>
                 </tr>
               );

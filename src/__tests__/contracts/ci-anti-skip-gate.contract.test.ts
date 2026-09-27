@@ -688,6 +688,17 @@ const LANE_ONLY_ANCHOR = "-- LANE-ONLY:";
 /** The set of files, declared object and declared fixture the corpus carries today. */
 const LANE_ONLY_SITES: readonly { file: string; object: string; fixture: string; why: string }[] = [
   {
+    file: "test_mark_rpc_bridge_advisory_lock.sql",
+    object: "dblink",
+    fixture: "scripts/pg-lane/fixtures/36-fixture-dblink.sql",
+    why:
+      "Every arm opens two dblink sessions back into the database it runs in, to hold one " +
+      "terminal mark uncommitted while a second waits on the per-strategy advisory lock. That " +
+      "needs COMMITTED seed rows and a trust-auth superuser loopback connection, which the local " +
+      "Supabase stack behind sql-tests does not give without a password in a committed file, and " +
+      "the dblink extension is not in the schema of record (Phase 164.5.2).",
+  },
+  {
     file: "test_prod_prober_cadence.sql",
     object: "net._lane_posts",
     fixture: "scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql",

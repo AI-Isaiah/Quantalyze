@@ -327,7 +327,7 @@ function num(v: number | null | undefined): string {
 
 /**
  * Rolling 6-month metrics summarised across the entire warm-window history:
- * current value (most recent non-null), min, max, average. Lets a reader judge
+ * current value (the latest window, "—" when it has none), min, max, average. Lets a reader judge
  * how stable each rolling stat has been over the strategy's life.
  */
 function RollingMetricsPanel() {
@@ -480,7 +480,11 @@ function rollingStats(arr: Array<number | null>): {
   max: number | null;
   avg: number | null;
 } {
-  let current: number | null = null;
+  // "Now" is the CURRENT window: the last element, "—" when it has no value.
+  // Phase 166.2 SFH-R2-H1: under D7 a flat trailing window is null, and walking
+  // back to the last non-null value would print a months-old window as current.
+  const last = arr.length > 0 ? arr[arr.length - 1] : null;
+  const current = last != null && Number.isFinite(last) ? last : null;
   let min = Infinity;
   let max = -Infinity;
   let sum = 0;
@@ -488,7 +492,6 @@ function rollingStats(arr: Array<number | null>): {
   for (let i = arr.length - 1; i >= 0; i--) {
     const v = arr[i];
     if (v == null || !Number.isFinite(v)) continue;
-    if (current == null) current = v;
     if (v < min) min = v;
     if (v > max) max = v;
     sum += v;

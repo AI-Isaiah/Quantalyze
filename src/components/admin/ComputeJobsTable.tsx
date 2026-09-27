@@ -295,7 +295,8 @@ export function ComputeJobsTable() {
               );
             })}
 
-            {jobs.length === 0 && !loading && (
+            {/* 169.3 SC1: error ≠ empty. A failed load never claims the queue is empty. */}
+            {jobs.length === 0 && !loading && !error && (
               <TableRow className="hover:bg-transparent">
                 <TableCell
                   colSpan={6}
