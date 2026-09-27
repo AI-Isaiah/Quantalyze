@@ -202,7 +202,7 @@ BEGIN
   END;
 
   IF v_err IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (C-KEY): SQLSTATE % from claim_compute_jobs on a due failed_retry job beside a pending twin of the same (kind, api_key_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another api_key_id was claimed.', v_err, v_msg;
+    RAISE EXCEPTION 'TEST FAILED (C-KEY): SQLSTATE % from claim_compute_jobs on a due failed_retry job beside a pending twin of the same (kind, api_key_id) (%); the batch aborted.', v_err, v_msg;
   END IF;
   IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (C-KEY): claim_compute_jobs raised nothing but the api_key_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
@@ -263,7 +263,7 @@ BEGIN
   END;
 
   IF v_err IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (C-PF): SQLSTATE % from claim_compute_jobs on a due failed_retry job beside a pending twin of the same (kind, portfolio_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another portfolio_id was claimed.', v_err, v_msg;
+    RAISE EXCEPTION 'TEST FAILED (C-PF): SQLSTATE % from claim_compute_jobs on a due failed_retry job beside a pending twin of the same (kind, portfolio_id) (%); the batch aborted.', v_err, v_msg;
   END IF;
   IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (C-PF): claim_compute_jobs raised nothing but the portfolio_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
@@ -324,7 +324,7 @@ BEGIN
   END;
 
   IF v_err IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (C-ST): SQLSTATE % from claim_compute_jobs on a due failed_retry job beside a pending twin of the same (kind, strategy_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another strategy_id was claimed.', v_err, v_msg;
+    RAISE EXCEPTION 'TEST FAILED (C-ST): SQLSTATE % from claim_compute_jobs on a due failed_retry job beside a pending twin of the same (kind, strategy_id) (%); the batch aborted.', v_err, v_msg;
   END IF;
   IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (C-ST): claim_compute_jobs raised nothing but the strategy_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
@@ -384,7 +384,7 @@ BEGIN
   END;
 
   IF v_err IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (C-AL): SQLSTATE % from claim_compute_jobs on a due failed_retry job beside a pending twin of the same (kind, allocator_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another allocator_id was claimed.', v_err, v_msg;
+    RAISE EXCEPTION 'TEST FAILED (C-AL): SQLSTATE % from claim_compute_jobs on a due failed_retry job beside a pending twin of the same (kind, allocator_id) (%); the batch aborted.', v_err, v_msg;
   END IF;
   IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (C-AL): claim_compute_jobs raised nothing but the allocator_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
@@ -445,7 +445,7 @@ BEGIN
   END;
 
   IF v_err IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (P5-KEY): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a pending twin of the same (kind, api_key_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another api_key_id was claimed.', v_err, v_msg;
+    RAISE EXCEPTION 'TEST FAILED (P5-KEY): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a pending twin of the same (kind, api_key_id) (%); the batch aborted.', v_err, v_msg;
   END IF;
   IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (P5-KEY): the 5-arg claim_compute_jobs_with_priority raised nothing but the api_key_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
@@ -506,7 +506,7 @@ BEGIN
   END;
 
   IF v_err IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (P5-PF): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a pending twin of the same (kind, portfolio_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another portfolio_id was claimed.', v_err, v_msg;
+    RAISE EXCEPTION 'TEST FAILED (P5-PF): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a pending twin of the same (kind, portfolio_id) (%); the batch aborted.', v_err, v_msg;
   END IF;
   IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (P5-PF): the 5-arg claim_compute_jobs_with_priority raised nothing but the portfolio_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
@@ -567,7 +567,7 @@ BEGIN
   END;
 
   IF v_err IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (P5-ST): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a pending twin of the same (kind, strategy_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another strategy_id was claimed.', v_err, v_msg;
+    RAISE EXCEPTION 'TEST FAILED (P5-ST): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a pending twin of the same (kind, strategy_id) (%); the batch aborted.', v_err, v_msg;
   END IF;
   IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (P5-ST): the 5-arg claim_compute_jobs_with_priority raised nothing but the strategy_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
@@ -627,7 +627,7 @@ BEGIN
   END;
 
   IF v_err IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (P5-AL): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a pending twin of the same (kind, allocator_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another allocator_id was claimed.', v_err, v_msg;
+    RAISE EXCEPTION 'TEST FAILED (P5-AL): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a pending twin of the same (kind, allocator_id) (%); the batch aborted.', v_err, v_msg;
   END IF;
   IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (P5-AL): the 5-arg claim_compute_jobs_with_priority raised nothing but the allocator_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
@@ -688,7 +688,7 @@ BEGIN
   END;
 
   IF v_err IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (W-LOST): SQLSTATE % at tick 1 from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a not-yet-due pending twin of the same (kind, allocator_id) (%). The whole batch aborted, so the unrelated due job on another allocator_id was not claimed.', v_err, v_msg;
+    RAISE EXCEPTION 'TEST FAILED (W-LOST): SQLSTATE % at tick 1 from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a not-yet-due pending twin of the same (kind, allocator_id) (%); the batch aborted.', v_err, v_msg;
   END IF;
   IF n_other <> 1 OR n_retry <> 0 OR n_twin <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (W-LOST): tick 1 claimed the unrelated due job % time(s), the failed_retry % time(s) and the not-yet-due twin % time(s); expected 1, 0 and 0.', n_other, n_retry, n_twin;
@@ -921,7 +921,7 @@ BEGIN
   END;
 
   IF v_err IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (P2-KEY): SQLSTATE % from the 2-arg claim_compute_jobs_with_priority (the 5-arg overload dropped inside this transaction) on a due failed_retry job beside a pending twin of the same (kind, api_key_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another api_key_id was claimed.', v_err, v_msg;
+    RAISE EXCEPTION 'TEST FAILED (P2-KEY): SQLSTATE % from the 2-arg claim_compute_jobs_with_priority (the 5-arg overload dropped inside this transaction) on a due failed_retry job beside a pending twin of the same (kind, api_key_id) (%); the batch aborted.', v_err, v_msg;
   END IF;
   IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (P2-KEY): the 2-arg claim_compute_jobs_with_priority raised nothing but the api_key_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
@@ -983,7 +983,7 @@ BEGIN
   END;
 
   IF v_err IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (P2-PF): SQLSTATE % from the 2-arg claim_compute_jobs_with_priority (the 5-arg overload dropped inside this transaction) on a due failed_retry job beside a pending twin of the same (kind, portfolio_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another portfolio_id was claimed.', v_err, v_msg;
+    RAISE EXCEPTION 'TEST FAILED (P2-PF): SQLSTATE % from the 2-arg claim_compute_jobs_with_priority (the 5-arg overload dropped inside this transaction) on a due failed_retry job beside a pending twin of the same (kind, portfolio_id) (%); the batch aborted.', v_err, v_msg;
   END IF;
   IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (P2-PF): the 2-arg claim_compute_jobs_with_priority raised nothing but the portfolio_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
@@ -1045,7 +1045,7 @@ BEGIN
   END;
 
   IF v_err IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (P2-ST): SQLSTATE % from the 2-arg claim_compute_jobs_with_priority (the 5-arg overload dropped inside this transaction) on a due failed_retry job beside a pending twin of the same (kind, strategy_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another strategy_id was claimed.', v_err, v_msg;
+    RAISE EXCEPTION 'TEST FAILED (P2-ST): SQLSTATE % from the 2-arg claim_compute_jobs_with_priority (the 5-arg overload dropped inside this transaction) on a due failed_retry job beside a pending twin of the same (kind, strategy_id) (%); the batch aborted.', v_err, v_msg;
   END IF;
   IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (P2-ST): the 2-arg claim_compute_jobs_with_priority raised nothing but the strategy_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
@@ -1106,7 +1106,7 @@ BEGIN
   END;
 
   IF v_err IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (P2-AL): SQLSTATE % from the 2-arg claim_compute_jobs_with_priority (the 5-arg overload dropped inside this transaction) on a due failed_retry job beside a pending twin of the same (kind, allocator_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another allocator_id was claimed.', v_err, v_msg;
+    RAISE EXCEPTION 'TEST FAILED (P2-AL): SQLSTATE % from the 2-arg claim_compute_jobs_with_priority (the 5-arg overload dropped inside this transaction) on a due failed_retry job beside a pending twin of the same (kind, allocator_id) (%); the batch aborted.', v_err, v_msg;
   END IF;
   IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (P2-AL): the 2-arg claim_compute_jobs_with_priority raised nothing but the allocator_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
