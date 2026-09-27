@@ -3974,11 +3974,13 @@ Plans:
 
 Plans:
 
-- [ ] 169.3-01-PLAN.md — /admin compute jobs list reads the admin view; a failed load says so (SC1) (was 169-01)
+- [x] 169.3-01-PLAN.md — /admin compute jobs list reads the admin view; a failed load says so (SC1) (was 169-01) — shipped separately 2026-09-26 (D11), v0.97.0.1 · #868
 - [ ] 169.3-02-PLAN.md — recommendations: mandate wording and no self-recommendation (SC8) (was 169-03)
 - [ ] 169.3-03-PLAN.md — Exchanges counts live keys only, no repeated balance (SC7) (was 169-09)
 - [ ] 169.3-04-PLAN.md — one mandate rule across recommendations and allocations (SC8) (was 169-10)
 - [ ] 169.3-05-PLAN.md — integration run + post-deploy browser re-check (SC9; this phase's items from old 05b's Task 4 and old 12, verbatim)
+
+**⭐ ROUTED IN 2026-09-27 (seen in the logged-in browser):** the `/profile` Exchanges "Connect exchange" dialog's API Key and API Secret inputs accept the browser's saved-login autofill. A saved site login was filled into both fields. Success: both fields opt out of autocomplete, so a password manager never fills a site login into a key field. No values are recorded here.
 
 ### Phase 169.4: ALLOCTRUTH — the Allocations Risk tab and alpha/beta read the book series and the live BTC feed (INSERTED)
 
@@ -4031,24 +4033,6 @@ Plans:
 **⚠️ REBASE NOTE 2026-09-26 (from 166.2 D-29):** 166.2 edited `src/app/factsheet/[id]/v2/types.ts` and `fetch-and-build-payload.ts` (NaN/null statistic fields, the optional `n_valid`, the v7 payload cache key). 169's plans must re-read both at HEAD before editing.
 
 **⭐ ROUTED IN 2026-09-27 (founder, UAT 2026-09-27):** /allocations Open Positions shows entry/mark prices under $1 as $0, and unrealized P&L as −$0 / +$0 (price formatter rounds to whole dollars). Success: a sub-dollar price and a sub-dollar P&L render with their real precision, and a zero-rounded value never shows a sign.
-
-### Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers (INSERTED)
-
-**Goal:** Four self-contained page fixes: the `/admin` compute-jobs list loads and a failed load says so; `/recommendations` states the mandate truthfully and never recommends a viewer's own strategy; `/profile` Exchanges counts only live keys and never repeats a balance; `/recommendations` and `/allocations` use one mandate rule.
-**Shipped separately, 2026-09-26 (founder decision D11):** plan 01 shipped separately by founder decision D11; 02–05 follow once 167.1.2 PR C lands. This section is the minimal slice plan 01 needs; the full phase section, split note and remaining plans arrive with plans 02–05.
-**Depends on:** none in code for plan 01. 167.1.2 PR C on `origin/main` gates plans 169.3-03 and 169.3-04.
-
-## Success Criteria
-
-1. `/admin` Compute Jobs: the list request no longer returns HTTP 500, and the tab never says "No compute jobs found" while the header counts a job in progress. A failed load says it failed.
-
-**Plans:** 5 plans; plan 01 shipped here (D11), 02–05 follow once 167.1.2 PR C lands. Decisions carried in `169.3-CONTEXT.md`; no migration.
-
-Plans:
-
-- [x] 169.3-01-PLAN.md — /admin compute jobs list reads the admin view; a failed load says so (SC1) (was 169-01)
-
-**⭐ ROUTED IN 2026-09-27 (seen in the logged-in browser):** the `/profile` Exchanges "Connect exchange" dialog's API Key and API Secret inputs accept the browser's saved-login autofill. A saved site login was filled into both fields. Success: both fields opt out of autocomplete, so a password manager never fills a site login into a key field. No values are recorded here.
 
 ### Phase 170: LAYOUT — page layout reads clean and holds on every page
 
