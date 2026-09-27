@@ -57,6 +57,57 @@ class TestOkx:
         assert venue_account_id_from("okx", {"data": [{"mainUid": "100000000"}]}) is None
 
 
+class TestBybit:
+    def test_integer_user_id_is_returned_as_its_string(self) -> None:
+        # Bybit documents userID as an integer.
+        raw = {"retCode": 0, "result": {"userID": 100000001, "parentUid": "100000000", "isMaster": False}}
+        assert venue_account_id_from("bybit", raw) == SYNTHETIC_UID
+
+    def test_string_user_id_is_returned(self) -> None:
+        assert venue_account_id_from("bybit", {"result": {"userID": SYNTHETIC_UID}}) == SYNTHETIC_UID
+
+    def test_parent_uid_is_never_read_as_the_identity(self) -> None:
+        # A sub-account has its own userID; parentUid is the master's ("0" on a master).
+        assert venue_account_id_from("bybit", {"result": {"parentUid": "100000000"}}) is None
+
+    def test_blank_user_id_is_none(self) -> None:
+        assert venue_account_id_from("bybit", {"result": {"userID": " "}}) is None
+
+    def test_missing_result_is_none(self) -> None:
+        assert venue_account_id_from("bybit", {"retCode": 0}) is None
+
+    def test_non_mapping_result_is_none(self) -> None:
+        assert venue_account_id_from("bybit", {"result": [SYNTHETIC_UID]}) is None
+
+
+class TestBinance:
+    """``raw`` is the ``info`` of a spot ``fetch_balance()`` (GET /api/v3/account)."""
+
+    def test_integer_uid_is_returned_as_its_string(self) -> None:
+        raw = {"accountType": "SPOT", "balances": [], "uid": 100000001}
+        assert venue_account_id_from("binance", raw) == SYNTHETIC_UID
+
+    def test_blank_uid_is_none(self) -> None:
+        assert venue_account_id_from("binance", {"uid": ""}) is None
+
+    def test_missing_uid_is_none(self) -> None:
+        assert venue_account_id_from("binance", {"accountType": "SPOT"}) is None
+
+
+class TestDeribit:
+    """``raw`` is the ``info`` of ``fetch_balance({"extended": True})``, the
+    ``result`` dict of private/get_account_summaries."""
+
+    def test_integer_id_is_returned_as_its_string(self) -> None:
+        assert venue_account_id_from("deribit", {"id": 100000001, "summaries": []}) == SYNTHETIC_UID
+
+    def test_without_extended_the_id_is_absent_and_the_result_is_none(self) -> None:
+        assert venue_account_id_from("deribit", {"summaries": []}) is None
+
+    def test_whitespace_id_is_none(self) -> None:
+        assert venue_account_id_from("deribit", {"id": "\t "}) is None
+
+
 @pytest.mark.parametrize(
     "raw",
     [

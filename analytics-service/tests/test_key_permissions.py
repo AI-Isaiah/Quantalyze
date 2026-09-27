@@ -268,6 +268,46 @@ class TestBybitParser:
             "probe_error": True,
         }
 
+    # Phase 167.1.2 (D-01): the account id rides on the SAME query-api response
+    # the permission probe already fetched. userID, never parentUid: a
+    # sub-account has its own userID and parentUid is its master's.
+    @pytest.mark.asyncio
+    async def test_carries_user_id_from_the_same_response(self):
+        ex = AsyncMock()
+        ex.id = "bybit"
+        ex.private_get_v5_user_query_api = AsyncMock(return_value={
+            "result": {"readOnly": "1", "permissions": {}, "userID": 100000001, "parentUid": "100000000"},
+        })
+        result = await detect_bybit_permissions(ex)
+        assert result == {
+            "read": True,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+            "account_id": "100000001",
+        }
+        assert ex.private_get_v5_user_query_api.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_carries_user_id_on_the_permissions_arrays_path_too(self):
+        ex = AsyncMock()
+        ex.id = "bybit"
+        ex.private_get_v5_user_query_api = AsyncMock(return_value={
+            "result": {"readOnly": "0", "permissions": {}, "userID": "100000001"},
+        })
+        result = await detect_bybit_permissions(ex)
+        assert result["account_id"] == "100000001"
+
+    @pytest.mark.asyncio
+    async def test_parent_uid_alone_adds_no_account_id(self):
+        ex = AsyncMock()
+        ex.id = "bybit"
+        ex.private_get_v5_user_query_api = AsyncMock(return_value={
+            "result": {"readOnly": "1", "permissions": {}, "parentUid": "100000000"},
+        })
+        result = await detect_bybit_permissions(ex)
+        assert "account_id" not in result
+
     @pytest.mark.asyncio
     async def test_read_only_flag_supersedes_permissions_array(self):
         # Regression: 2026-05-05. A real Bybit V5 read-only key
