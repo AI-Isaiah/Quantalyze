@@ -45,29 +45,35 @@ BEGIN
      -- pending row) is not claimable this tick, so it must not trip the
      -- throttle either. Counted, it held back a `low` pending twin and every
      -- other due `low` job while never being claimed itself: a silent,
-     -- permanent wedge. Same four partitions and the same strategy carve-out
-     -- as the pre-rank block, written as one negated disjunction.
+     -- permanent wedge. Review round 3 (founder decision D-11): the same
+     -- holds for a failed_retry the C39 guard in `deduped` holds back beside
+     -- a running or done_pending_children row of the same (kind, partition),
+     -- so every sibling test also names those two statuses. Four partitions,
+     -- one negated disjunction. The intro carve-out gates the pending sibling
+     -- only, as in the pre-rank block; C39's strategy clause has none, so a
+     -- running or done_pending_children sibling holds an intro retry too.
      AND NOT (status = 'failed_retry' AND (
            (portfolio_id IS NOT NULL AND EXISTS (
              SELECT 1 FROM compute_jobs p
               WHERE p.kind         = compute_jobs.kind
                 AND p.portfolio_id = compute_jobs.portfolio_id
-                AND p.status       = 'pending'))
-        OR (strategy_id IS NOT NULL AND kind <> 'compute_intro_snapshot' AND EXISTS (
+                AND p.status       IN ('pending', 'running', 'done_pending_children')))
+        OR (strategy_id IS NOT NULL AND EXISTS (
              SELECT 1 FROM compute_jobs p
               WHERE p.kind        = compute_jobs.kind
                 AND p.strategy_id = compute_jobs.strategy_id
-                AND p.status      = 'pending'))
+                AND (p.status IN ('running', 'done_pending_children')
+                     OR (p.status = 'pending' AND compute_jobs.kind <> 'compute_intro_snapshot'))))
         OR (allocator_id IS NOT NULL AND EXISTS (
              SELECT 1 FROM compute_jobs p
               WHERE p.kind         = compute_jobs.kind
                 AND p.allocator_id = compute_jobs.allocator_id
-                AND p.status       = 'pending'))
+                AND p.status       IN ('pending', 'running', 'done_pending_children')))
         OR (api_key_id IS NOT NULL AND EXISTS (
              SELECT 1 FROM compute_jobs p
               WHERE p.kind       = compute_jobs.kind
                 AND p.api_key_id = compute_jobs.api_key_id
-                AND p.status     = 'pending'))))
+                AND p.status     IN ('pending', 'running', 'done_pending_children')))))
      -- CLAIMPAIR PROBE EXCLUSION END
      AND next_attempt_at <= now();
 
@@ -240,29 +246,35 @@ BEGIN
        -- pending row) is not claimable this tick, so it must not trip the
        -- throttle either. Counted, it held back a `low` pending twin and every
        -- other due `low` job while never being claimed itself: a silent,
-       -- permanent wedge. Same four partitions and the same strategy carve-out
-       -- as the pre-rank block, written as one negated disjunction.
+       -- permanent wedge. Review round 3 (founder decision D-11): the same
+       -- holds for a failed_retry the C39 guard in `deduped` holds back beside
+       -- a running or done_pending_children row of the same (kind, partition),
+       -- so every sibling test also names those two statuses. Four partitions,
+       -- one negated disjunction. The intro carve-out gates the pending sibling
+       -- only, as in the pre-rank block; C39's strategy clause has none, so a
+       -- running or done_pending_children sibling holds an intro retry too.
        AND NOT (status = 'failed_retry' AND (
              (portfolio_id IS NOT NULL AND EXISTS (
                SELECT 1 FROM compute_jobs p
                 WHERE p.kind         = compute_jobs.kind
                   AND p.portfolio_id = compute_jobs.portfolio_id
-                  AND p.status       = 'pending'))
-          OR (strategy_id IS NOT NULL AND kind <> 'compute_intro_snapshot' AND EXISTS (
+                  AND p.status       IN ('pending', 'running', 'done_pending_children')))
+          OR (strategy_id IS NOT NULL AND EXISTS (
                SELECT 1 FROM compute_jobs p
                 WHERE p.kind        = compute_jobs.kind
                   AND p.strategy_id = compute_jobs.strategy_id
-                  AND p.status      = 'pending'))
+                  AND (p.status IN ('running', 'done_pending_children')
+                       OR (p.status = 'pending' AND compute_jobs.kind <> 'compute_intro_snapshot'))))
           OR (allocator_id IS NOT NULL AND EXISTS (
                SELECT 1 FROM compute_jobs p
                 WHERE p.kind         = compute_jobs.kind
                   AND p.allocator_id = compute_jobs.allocator_id
-                  AND p.status       = 'pending'))
+                  AND p.status       IN ('pending', 'running', 'done_pending_children')))
           OR (api_key_id IS NOT NULL AND EXISTS (
                SELECT 1 FROM compute_jobs p
                 WHERE p.kind       = compute_jobs.kind
                   AND p.api_key_id = compute_jobs.api_key_id
-                  AND p.status     = 'pending'))))
+                  AND p.status     IN ('pending', 'running', 'done_pending_children')))))
        -- CLAIMPAIR PROBE EXCLUSION END
        AND next_attempt_at <= now()
        AND (p_kind_include IS NULL OR kind = ANY(p_kind_include))
