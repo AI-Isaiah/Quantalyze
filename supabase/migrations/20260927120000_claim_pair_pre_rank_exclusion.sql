@@ -84,7 +84,55 @@
 -- where two overloads exist). No function comment is re-issued and no
 -- function is dropped: CREATE OR REPLACE keeps the existing comment and ACL.
 --
--- VAC-04 ACKNOWLEDGEMENT: placeholder, filled by plan 164.9.3-04.
+-- VAC-04 ACKNOWLEDGEMENT — the PROD bodies these CREATE OR REPLACEs overwrite
+-- The gate compares the COMMITTED SNAPSHOT (supabase/schema/functions/) against
+-- PROD's live body. On a function-changing migration PR the two necessarily
+-- disagree: `snapshot-drift` requires the snapshot to carry the body the
+-- MIGRATIONS produce (the new one), while VAC-04 requires it to match what PROD
+-- has TODAY (the old one). The pragma means "I read PROD's body and intend to
+-- overwrite it". This migration changes THREE function bodies, so it carries
+-- THREE pragmas, one per function key; VAC-04 greps the changed files once per
+-- drifting function, each matched by its own hash.
+--
+-- MEASURED 2026-09-27 UTC, reproduced LOCALLY with the gate's own normalizer,
+-- aiming its `live` argument at origin/main's snapshot rather than at PROD
+-- (origin/main = 8eafe105724e1700cf39b740558b5e1c16719362, whose two snapshot
+-- files are byte-equal to this branch's pre-change copies), once per file:
+--
+--   git show origin/main:supabase/schema/functions/<fn>.sql > <scratch>
+--   node scripts/sql-body-normalize.mjs --diff-bodies \
+--     supabase/schema/functions/<fn>.sql <scratch>
+--
+-- ⭐ EACH ACKED HASH IS THE `live` COLUMN OF --diff-bodies FOR THAT FUNCTION'S
+-- DRIFT ROW, NOT `--hash` OF THE SNAPSHOT FILE (a whole-file digest no gate
+-- ever greps). claim_compute_jobs.sql reported one DRIFT row;
+-- claim_compute_jobs_with_priority.sql holds BOTH overloads and reported two.
+-- The differing lines are the marked pre-rank block (all three bodies) and the
+-- marked C39 port (2-arg only).
+--
+-- claim_compute_jobs (2 args), the DRIFT row's `live` column:
+-- prod-body-ack: 8bdcac70bce0c9921d1e693209d3fb355c9018e6708699b1a029adb5d02edea1
+--
+-- claim_compute_jobs_with_priority (2 args), the DRIFT row's `live` column:
+-- prod-body-ack: c95251fc049f24345a0cdf352b3adfff8120a3c29085da1626cc19e8ff203ae8
+--
+-- claim_compute_jobs_with_priority (5 args), the DRIFT row's `live` column:
+-- prod-body-ack: 7e8cc4c1937f8274bcf1fca762576559dea0d371dc0be11b979e01e31d01a73a
+--
+-- ⚠️ EACH ACK IS OF origin/main, WHICH STANDS IN FOR PROD. It is EARNED only if
+-- VAC-04 on the PR reports that SAME hash for PROD for that function. If it
+-- reports a different one, PROD drifted OUT OF BAND and the correct action is
+-- to FOLD the difference into this migration and re-derive — never to edit a
+-- pragma to match a gate log. It is EARNED, not pasted.
+-- Cross-check, read AFTER the local derivation: VAC-04 in Migration Drift
+-- Check run 36322639565 (PR head 1ece52797, before the snapshots were
+-- regenerated, so the committed snapshot still held origin/main's bodies)
+-- reported MATCH against PROD for all three keys at exactly these hashes.
+-- ⚠️ VAC-08 (repo-vs-TEST body pairing, the `test-db-drift` job) goes RED on
+-- the PR by construction: one DRIFT row per function key
+-- (claim_compute_jobs/2, claim_compute_jobs_with_priority/2 and
+-- claim_compute_jobs_with_priority/5), whose TEST hash is the pre-change hash
+-- above, until apply-on-merge brings TEST forward.
 --
 -- Transaction style: NO explicit BEGIN/COMMIT (Supabase wraps each migration
 -- in an implicit transaction; SET LOCAL lock_timeout applies to that wrap).
