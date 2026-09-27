@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.9.3
 current_phase_name: CLAIMPAIR
 status: executing
-stopped_at: Completed 164.9.3-01-PLAN.md
-last_updated: "2026-09-27T13:08:09.920Z"
+stopped_at: Completed 164.9.3-02-PLAN.md
+last_updated: "2026-09-27T13:25:09.337Z"
 last_activity: 2026-09-27
 last_activity_desc: Phase 164.9.3 execution started
-state_head: 56e11500dc7bcb117b9ab9bcce4114d8bab7d005
+state_head: 95e8f0788f446f6c29550982144d84d575f228d3
 progress:
   total_phases: 72
   completed_phases: 40
@@ -180,7 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 164.9.3 (CLAIMPAIR) — EXECUTING
-Plan: 2 of 6 (01 done: the CLAIMPAIR gate, pre-fix census 14 arms RED with 23505, W-INTRO GREEN)
+Plan: 3 of 6 (01 done: the CLAIMPAIR gate, pre-fix census 14 arms RED with 23505, W-INTRO GREEN; 02 done: the pre-rank exclusion migration, all 15 arms GREEN on the replayed local-stack lane)
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
 Plan: 1 of 7
 Phase: 166.1 (ENGINEFLOOR) — EXECUTING
@@ -1182,6 +1182,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.6.5 P08 | ~40 min | 2 tasks | 11 modified |
 | Phase 166.1 P09 | ~20 min | 3 tasks | 5 modified |
 | Phase 164.9.3 P01 | 20 min | 2 tasks | 1 files |
+| Phase 164.9.3 P02 | 15 min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -1678,6 +1679,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.1.1.1]: 164.1.1.1-01 MEASURED (re-confirms the pattern above, a fourth time): `state.add-decision` and `state.update-progress` both clobber the `progress:` block downward again this session (`completed_phases` 20→18, `total_plans` 201→203, `percent` 44→40, plus stray blank-line insertions at ~L252-255). Reverted both calls; kept only the decision text, applied by hand.
 - [Phase 164.1.1.1]: 164.1.1.1-01: the static-accounting contract-test scenario counts occurrences of "completion sentinel OK: ALL 7 ARMS EXECUTED" rather than bare presence/absence, because test_sync_status_curated_sentence_survives.sql independently declares the identical "ALL 7 ARMS EXECUTED" text and a presence check could not distinguish the excluded file's line from that other file's.
 - [Phase 164.9.3]: 164.9.3-01: CLAIMPAIR gate seeds a real parent row per partition id under the replica role; replica-only seeding fails at the claim with 23503 (same-transaction FK re-check) — Measured on the local-stack lane: W-INTRO red with 23503 on the strategy foreign key until parents were seeded
+- [Phase 164.9.3]: 164.9.3-02: the migration's verify anchors pin PLACEMENT as well as text (each pre-rank clause must match between the ranked CTE opening and the deduped opening; the 2-arg C39 port between deduped and the batch UPDATE), so a later edit moving the guard post-rank, the rejected option (a), refuses at apply
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -2382,8 +2384,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-27T13:07:17.394Z
-**Stopped At:** Completed 164.9.3-01-PLAN.md
+**Last Date:** 2026-09-27T13:25:07.482Z
+**Stopped At:** Completed 164.9.3-02-PLAN.md
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
