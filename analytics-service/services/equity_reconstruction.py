@@ -30,6 +30,7 @@ import logging
 import math
 import os
 from bisect import bisect_right
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -1732,6 +1733,37 @@ class _LatestHoldings:
     rows: list[dict[str, Any]]
     eligible_keys: int
     carried_keys: int
+    excluded_shared_keys: int
+
+
+def _counted_through_holder(
+    key_row: Mapping[str, Any], key_rows_by_id: Mapping[Any, Mapping[str, Any]]
+) -> bool:
+    """True when ``key_row`` reads an exchange account that its HOLDER already
+    brings into this sum, so summing ``key_row`` too would count the account
+    twice (Phase 167.1.2 D-01, D-04, D-11).
+
+    * ``'duplicate'``: excluded only while the holder is WORKING, i.e.
+      ``disconnected_at IS NULL AND sync_status <> 'revoked'``. That is the
+      reader contract in COMMENT ON COLUMN api_keys.account_share_kind
+      (migration 20260925120000). The marker is not cleared when the holder
+      departs, and a departed holder contributes nothing here, so dropping
+      every 'duplicate' unconditionally would count the account through nobody.
+    * ``'composite_member'``: excluded only while the holder passes
+      ``eligible_key_predicate`` (D-04, the rotation inside a composite).
+    * A holder that is not among the allocator's own keys, or any other value,
+      leaves the key counted as if unmarked: an unresolvable marker never
+      removes dollars.
+    """
+    kind = key_row.get("account_share_kind")
+    holder = key_rows_by_id.get(key_row.get("account_shared_with_api_key_id"))
+    if kind is None or holder is None:
+        return False
+    if kind == "duplicate":
+        return holder.get("disconnected_at") is None and holder.get("sync_status") != "revoked"
+    if kind == "composite_member":
+        return eligible_key_predicate(holder)
+    return False
 
 
 async def _fetch_latest_holdings_per_eligible_key(
@@ -1747,6 +1779,9 @@ async def _fetch_latest_holdings_per_eligible_key(
     keys the first job saw. There is no staleness horizon: a key is carried
     for as long as ``eligible_key_predicate`` admits it, and drops out the day
     it is revoked or disconnected.
+
+    A key that reads an account its holder already brings in is left out
+    (``_counted_through_holder``), so one exchange account is counted once.
 
     Grain: per key, two reads. First the key's latest ``asof`` (the reduction
     is ``max()`` in Python, so correctness never rests on the order a read
@@ -1772,14 +1807,16 @@ async def _fetch_latest_holdings_per_eligible_key(
     key_rows: list[dict[str, Any]] = list(
         getattr(await db_execute(_sel_keys), "data", None) or []
     )
+    key_rows_by_id = {r.get("id"): r for r in key_rows}
     eligible = sorted(
         (r for r in key_rows if eligible_key_predicate(r)),
         key=lambda r: str(r.get("id")),
     )
+    counted = [r for r in eligible if not _counted_through_holder(r, key_rows_by_id)]
 
     rows: list[dict[str, Any]] = []
     carried = 0
-    for key_row in eligible:
+    for key_row in counted:
         key_id = key_row["id"]
 
         def _sel_latest_asof(key_id: Any = key_id) -> Any:
@@ -1815,7 +1852,12 @@ async def _fetch_latest_holdings_per_eligible_key(
         if latest < today_iso:
             carried += 1
 
-    return _LatestHoldings(rows=rows, eligible_keys=len(eligible), carried_keys=carried)
+    return _LatestHoldings(
+        rows=rows,
+        eligible_keys=len(eligible),
+        carried_keys=carried,
+        excluded_shared_keys=len(eligible) - len(counted),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3332,6 +3374,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                     "venue": venue,
                     "eligible_keys": latest.eligible_keys,
                     "carried_keys": latest.carried_keys,
+                    "excluded_shared_keys": latest.excluded_shared_keys,
                 },
             )
             return DispatchResult(outcome=DispatchOutcome.DONE)
@@ -3367,13 +3410,15 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 # D-07 / T-167.1.2-32: counts only, never a USD figure.
                 "eligible_keys": latest.eligible_keys,
                 "carried_keys": latest.carried_keys,
+                "excluded_shared_keys": latest.excluded_shared_keys,
             },
         )
         logger.info(
             "refresh_allocator_equity_daily: upserted %d row for allocator=%s "
-            "(key=%s, venue=%s, eligible_keys=%d, carried_keys=%d)",
+            "(key=%s, venue=%s, eligible_keys=%d, carried_keys=%d, "
+            "excluded_shared_keys=%d)",
             count, allocator_id, api_key_id, venue,
-            latest.eligible_keys, latest.carried_keys,
+            latest.eligible_keys, latest.carried_keys, latest.excluded_shared_keys,
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
     except ccxt.RateLimitExceeded as exc:
