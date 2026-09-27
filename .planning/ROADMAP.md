@@ -4096,7 +4096,7 @@ Success: at 390 px and at desktop 200% zoom the commit bar never covers a headin
 2. No production page carries QA, test or internal-phase text, including strategy descriptions and the placeholder Referral page.
 3. The recorded typos are fixed and pages that share a title are distinguished.
 4. The wizard's post-Submit copy says "submitted" on success, not "already submitted".
-5. Each page is re-checked at 320 px and 200% zoom in the logged-in browser after deploy.
+5. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom in the logged-in browser after deploy, by the orchestrator *(was "at 320 px and 200% zoom"; edited 2026-09-27 by `/gsd-phase --edit` on the founder decision of 2026-09-27: the narrowest supported viewport is 390 px plus desktop 200% zoom, recorded in full under Phase 170 LAYOUT)*.
 
 **Plans:** 0 plans
 
@@ -4111,6 +4111,10 @@ Plans:
 **⭐ ROUTED IN 2026-09-27 (founder, from the Phase 167.2 copy read-through, UAT 2026-09-27):** the 167.2 locked strings pass with these notes, owned here. (1) Two unbounded timing phrases: "Try again in a moment" in `PANEL_STOP_COPY.chain_unreadable` (`src/components/strategy/key-card-copy.ts`) and "Try again later" in `SHARE_CARD_COPY.in_progress` (`src/lib/status-surface-copy.ts`). (2) "Large accounts can take longer" in `SYNC_SLOW_NOTE` (`key-card-copy.ts`). (3) Six passive "could not be …" strings across `key-card-copy.ts` and `status-surface-copy.ts` (measured 2026-09-27: "could not be read" ×2, "could not be re-read", "could not be built", "could not be loaded", "could not be checked"). Success: each is rewritten in active voice with no timing promise the code cannot defend, per DESIGN.md Voice.
 
 **⭐ ROUTED IN 2026-09-27 (found uploading a daily-returns file with the Trade list format selected):** the CSV wizard's missing-column error shows raw pandera rule names to the user: "Failed rule 'column_in_dataframe'." repeated, one per missing column. Success: the user reads which column is missing, in plain words.
+
+**⭐ ROUTED IN 2026-09-27 (measured by the orchestrator and the founder in the logged-in browser on PROD `/allocations?tab=scenario`, main at `320fba4e`/`e6c196d5`):**
+(a) With no benchmark selected, the scenario Returns chart subtitle reads "vs None". Root cause: `src/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload.ts` builds the `none` comparator with `inertComparatorBlock("None", "None")`, and `subtitleFor` in `src/app/factsheet/[id]/v2/TimeSeriesChart.tsx` prints `vs ${cmpName}` whenever the chart config has a `comparatorField`. Success: with no benchmark chosen the subtitle is empty or says "no benchmark".
+(b) The scenario KPI tiles show an unlabelled delta line (e.g. "+0.00") under each value. Success: the delta says what it is compared against (e.g. "vs current book").
 
 ### Phase 165: ACTIONSDEPS — the four GitHub Actions dependabot PRs land first, in the verified order
 
