@@ -3305,6 +3305,14 @@ The wait grows with the number of open PRs, because every one of them contends f
 - `e2e-seeded`: the axe `color-contrast` check fails on the `No data` chip, #64748b on #f1f5f9 = 4.34:1, under the 4.5:1 AA floor at 11px. It is owned by Phase 170 LAYOUT (F2, "Book into 170 LAYOUT").
 - SC-3 cannot pass until both land. There is no waiver.
 
+⭐ **ROUTED IN 2026-09-27 (founder, AskUserQuestion "Yes, add to 164.9.4"): a docs-only push to `main` runs the full corpus.** The docs-only short path (Phase 164.6.3: the `changed-paths` job and `scripts/classify-changed-paths.mjs`) applies to `pull_request` events only. For a push, `changed-paths` hard-codes a code verdict, so every push to `main` runs the full corpus, including `python` and `e2e-seeded` on the shared-TEST key.
+- **Measured 2026-09-27:** five roadmap-only merges to `main` each ran `python` and `e2e-seeded` on push. Runs `36311440078` and `36311239974` (push, `main`) failed with `timed out after 3600s waiting for the shared-test-db advisory lock (key 61616158)`, with 8 and 7 jobs waiting.
+- **Success:**
+  - A push to `main` whose diff against its first parent is docs-only takes the short path. It still produces a recorded green CI run that Railway can wait on.
+  - A push that touches any code path runs the full corpus.
+  - A test fails on the old behaviour (a docs-only push classified as code), and a second test proves that a code-touching push is not filtered.
+  - The existing rule that `changed-paths` itself carries no `if:` is kept. The job still runs on every event, because a skipped `needs:` job skips its dependents.
+
 ## Success Criteria
 1. Neither job acquires advisory key `61616158`.
 2. Each job boots its own local-stack or pg-lane database, behind a loopback-DSN guard.
@@ -3624,6 +3632,33 @@ Plans:
 - [ ] 166.4-03-PLAN.md — W3 gap tests and the neuters, tests only (SC1, SC2)
 - [ ] 166.4-04-PLAN.md — W4 the Phase 166.3 handoff paragraph and the release entry naming M1 (SC5, SC6, SC7)
 
+### Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly (INSERTED)
+
+**Goal:** The `/portfolios/[id]` analytics compute reads only `strategy_analytics` columns that exist, treats each strategy's stored series as what it is (cumulative or daily, measured, not assumed), and fails loudly when it cannot compute, so the portfolio's risk decomposition and other analytics are real numbers or an honest failure.
+**Priority:** data integrity (founder priority rule, 2026-09-27: data integrity ahead of features). Registered through `/gsd-phase --insert 166.4`; gsd-tools numbered it 166.4.1 and the number is kept. It is independent of 166.4 BENCHALIGN in code; 166.4 is only its anchor in the list.
+**Requirements**: TBD (criteria below)
+**Depends on:** nothing.
+**Plans:** 0 plans
+
+**Evidence (verified by the orchestrator, 2026-09-27; counts and verdicts only):**
+
+- **Missing columns.** `_compute_portfolio_analytics` in `analytics-service/routers/portfolio.py` selects `strategy_id, returns_series, equity_curve, total_aum` from `strategy_analytics`. `supabase/schema/baseline.sql` has neither `equity_curve` nor `total_aum` on that table (0 matches in its `CREATE TABLE`). A select naming a column that does not exist fails the whole read.
+- **Cumulative read as daily (inferred, not yet measured).** The `TODOS.md` entry `[169-PORTFOLIO-ANALYTICS-COLUMNS]` (booked by Phase 169 D-53 on `feat/169-pagetruth`) infers that the compute reads `returns_series` as daily returns while `analytics-service/services/metrics.py` writes it as a cumulative series.
+- **Is it called at all?** The analytics service logs show 0 lines of `Portfolio analytics computation failed` between 2026-09-13 and 2026-09-27. With a select that should fail, that silence means either the endpoint is not being called, or its failure is not reaching that log line. The phase's research answers this FIRST, before any fix is planned.
+- **Related:** Phase 169's RISKUNIT plan (169-09, D-49) fixes the risk-attribution display's double percent; its browser item records an empty `/portfolios/[id]` panel as this defect, not as evidence against the unit fix (169 D-53).
+
+## Success Criteria
+
+1. **Called or not, measured first.** The research states, from logs and code (no remote database command by an agent), whether and from where the `/portfolios/[id]` analytics compute is called, and why no failure line was logged between 2026-09-13 and 2026-09-27.
+2. **The reader selects only existing columns.** The `strategy_analytics` read selects only columns that exist in `supabase/schema/baseline.sql`, and every value it needed from `equity_curve` and `total_aum` comes from a real source or is dropped with its consumer; a test fails on the old select.
+3. **Cumulative vs daily is measured and fixed.** Whether the stored series the compute reads is cumulative or daily is measured against what `metrics.py` writes, and the compute converts it correctly; a test on a known cumulative fixture fails on the old handling.
+4. **A failed compute is loud.** A failed compute surfaces as an error the caller and the logs can see (never an empty or stale result that reads as success); a test fails on the old silent path.
+5. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and `/portfolios/[id]` is re-checked in the logged-in browser after deploy (desktop, 390px and desktop 200% zoom).
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 166.4.1 to break down)
+
 ### Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine (INSERTED)
 
 **Goal:** Every "drawdown improvement" number means shallower-is-positive, and ranking rewards a shallower drawdown, never a deeper one.
@@ -3704,6 +3739,13 @@ Plans:
 ⚠️ **2026-09-24 correction (read-only root-cause trace at `96b5db4c`):** the collapse also lives in the analytics-side unique index `(allocator_id, venue, symbol, asof)` on `allocator_holdings`, and for ONE account behind several keys it merges CORRECTLY but attributes the row to whichever key polled last. Adding `api_key_id` to the key as framed above would triple-count that case. Phase 167.1.2 ACCOUNTTRUTH decides account identity first (founder: refuse a second key on the same account); re-scope this phase against it before planning.
 **Plans:** 0 plans
 
+⭐ **ROUTED IN 2026-09-27 (from the 167.1.2 PR C executor): three holdings readers still read allocator-wide instead of per key.**
+- **R-15-1:** the scenario commit route, `src/app/api/allocator/scenario/commit/route.ts` (its `allocator_holdings` lookup for the audit recompute).
+- **R-15-2:** `_load_holding_portfolio_context` in `analytics-service/routers/match.py`.
+- **R-15-3:** `getLatestExposureSnapshot` in `src/lib/portfolio-exposure.ts`.
+
+After 167.1.2 PR C ships, Open Positions (per key, latest asof) and the exposure panel will disagree about a quiet key until these three move. Success: each reads per key, with a test that fails on the allocator-wide read. Each symbol was verified at `origin/main` `c052ab4d` on 2026-09-27.
+
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1.1 to break down)
@@ -3763,6 +3805,34 @@ Plans:
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1.2 to break down)
+
+### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
+
+**Goal:** Each API key's equity-history reconstruct state is recorded durably, per key, so no key's history is skipped, wiped or left unreconstructed. Today that state is inferred from allocator-wide snapshot counts.
+**Priority:** data integrity (founder priority rule, 2026-09-27: data integrity ahead of features). Registered through `/gsd-phase --insert 167.1.2`; gsd-tools numbered it 167.1.2.1 and the number is kept.
+**Requirements**: TBD (criteria below)
+**Depends on:** Phase 167.1.2 (PR C: its history rebuild changes `replace_equity_snapshots` and the per-key reconstruct path this phase builds on).
+**Plans:** 0 plans
+
+**Evidence (routed 2026-09-27 from the 167.1.2 PR C executor; one class of defect; symbols verified at `origin/main` `c052ab4d` unless noted):**
+
+- **R-12-1: a key whose first sync collided never gets a backfill.** Nothing records that a key still owes its reconstruct, so the missed backfill is never retried.
+- **R-13-1: a non-empty sole-key replace wipes sibling keys' history.** In `replace_equity_snapshots` (`analytics-service/services/equity_reconstruction.py`), a non-empty replace for one key wipes the history of disconnected sibling keys. PR C changes this function, so the symbol is cited by name only.
+- **Two-key sibling path:** when one key's reconstruct succeeds and another's fails, the allocator-wide snapshot count reads as "reconstructed", and the failed key's history is skipped.
+- **`public.request_allocator_holdings_sync(uuid)`:** its in-flight status lists (`'pending', 'running', 'done_pending_children'`, plus `'done'` in the second check) omit `failed_retry`, unlike the cron. So a key whose job sits in `failed_retry` is treated as not in flight.
+
+## Success Criteria
+
+1. **Per-key durable state.** A key's reconstruct state ("history reconstructed") is stored per key and read from there. It is never inferred from allocator-wide snapshot counts.
+2. **R-12-1:** a key whose first sync collided gets its backfill. A test fails on the old behaviour.
+3. **R-13-1:** a sole-key replace never deletes another key's snapshots, including a disconnected sibling's. A test fails on the old behaviour.
+4. **Two-key sibling path:** when one key succeeds and a sibling fails, the failed key is still recorded as owing its reconstruct and is retried. A test fails on the old behaviour.
+5. **`failed_retry` is counted:** `request_allocator_holdings_sync`'s status list includes `failed_retry`, as the cron's does. A test fails on the old list.
+6. **Migration review before merge.** Any migration this phase writes is reviewed by migration-reviewer, rls-policy-auditor and silent-failure-hunter, because a merge of `supabase/migrations/**` auto-applies to PROD.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 167.1.2.1 to break down)
 
 ### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
 
@@ -4182,7 +4252,7 @@ phase's newest plans live only on an open branch, the count says "on main". The 
 table (measured at `733a55f5`, 33 rows) is superseded by this one; its still-accurate rows are
 kept verbatim.
 
-**Totals: 41 of 79 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).** Recounted 2026-09-27 from this table's own rows after adding the 169 split (169.1, 169.2, 169.4, 169.4.1) and 164.9.1's close; the earlier "40 of 73" was taken before those rows existed.
+**Totals: 41 of 81 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).** Recounted 2026-09-27 from this table's own rows after adding the 169 split (169.1, 169.2, 169.4, 169.4.1) and 164.9.1's close; the earlier "40 of 73" was taken before those rows existed. 81 counts 166.4.1 PORTFOLIOANALYTICS and 167.1.2.1 RECONMARKER, both added 2026-09-27.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -4250,10 +4320,12 @@ kept verbatim.
 | 166.2 COMPUTEONCE | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.102.0.0 · #874 |
 | 166.3 RECOMPUTE | 0/1 | HALTED 2026-09-27 at Task 3 — resumes after 166.4 ships | - |
 | 166.4 BENCHALIGN | 0/4 | Planned — data integrity | - |
+| 166.4.1 PORTFOLIOANALYTICS | 0/? | Queued — data integrity | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.89.0.0 · #852 |
 | 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
 | 167.1.2 ACCOUNTTRUTH | PR A + PR B shipped | In progress — PR A v0.92.0.0 (#859), PR B v0.103.0.0 (#870); PR C executing | - |
+| 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
 | 167.2 KEYCARDSYNC | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.88.0.0 · #851 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | #866 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 03 is the founder's live retry | v0.97.0.0 · #867 |
