@@ -82,6 +82,48 @@ function jobsWithWorkingDirectory(src: string): Array<{ start: number; end: numb
   }
   return jobs;
 }
+
+/**
+ * Test 3b's scan, factored out so it can be calibrated on in-memory workflow
+ * text as well as run over the real files (2026-09-26, Phase 164.9.4).
+ *
+ * For every step named VERDICT_STEP_NAME, take the step's own `run:` line (the
+ * next one before any further `- name:`), find the owning job through
+ * jobsWithWorkingDirectory, and — only when that job pins a working directory —
+ * count it as checked and report a violation unless the trimmed `run:` line is
+ * VERDICT_INVOCATION_ROOTED. A verdict step with no `run:` line at all is a
+ * violation wherever it sits.
+ */
+function scanVerdictSteps(src: string): { checked: number; violations: string[] } {
+  const lines = src.split("\n");
+  const wdJobs = jobsWithWorkingDirectory(src);
+  const stepRe = new RegExp(`^\\s*-\\s*name:\\s*${VERDICT_STEP_NAME}\\s*$`);
+  let checked = 0;
+  const violations: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!stepRe.test(lines[i])) continue;
+    // the run: line belongs to this step — the next one before any further `- name:`
+    let runIdx = -1;
+    for (let j = i + 1; j < lines.length; j++) {
+      if (/^\s*-\s*name:/.test(lines[j])) break;
+      if (/^\s*run:/.test(lines[j])) { runIdx = j; break; }
+    }
+    if (runIdx === -1) {
+      violations.push(`verdict step at line ${i + 1} has no run: line`);
+      continue;
+    }
+    const owner = wdJobs.find((j) => runIdx >= j.start && runIdx < j.end);
+    if (!owner) continue; // job pins no working directory; the bare form resolves
+    checked++;
+    const runLine = lines[runIdx].trim();
+    if (runLine !== VERDICT_INVOCATION_ROOTED) {
+      violations.push(
+        `line ${runIdx + 1}, job "${owner.name}": ${runLine} (expected ${VERDICT_INVOCATION_ROOTED})`,
+      );
+    }
+  }
+  return { checked, violations };
+}
 const NEVER_REDDEN_INVARIANT = "must never redden a job whose real work passed";
 
 /**
@@ -201,31 +243,15 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
   describe("Test 3b: a verdict step inside a working-directory job is workspace-rooted", () => {
     for (const rel of TARGET_FILES) {
       it(`${rel} — no verdict step can exit 127 on a bare relative path`, () => {
-        const src = readText(rel);
-        const lines = src.split("\n");
-        const wdJobs = jobsWithWorkingDirectory(src);
-        let checked = 0;
-        for (let i = 0; i < lines.length; i++) {
-          if (!new RegExp(`^\\s*-\\s*name:\\s*${VERDICT_STEP_NAME}\\s*$`).test(lines[i])) continue;
-          // the run: line belongs to this step — the next one before any further `- name:`
-          let runIdx = -1;
-          for (let j = i + 1; j < lines.length; j++) {
-            if (/^\s*-\s*name:/.test(lines[j])) break;
-            if (/^\s*run:/.test(lines[j])) { runIdx = j; break; }
-          }
-          expect(runIdx, `${rel}: verdict step at line ${i + 1} has no run: line`).toBeGreaterThan(-1);
-          const owner = wdJobs.find((j) => runIdx >= j.start && runIdx < j.end);
-          if (!owner) continue; // job pins no working directory; the bare form resolves
-          checked++;
-          expect(
-            lines[runIdx].trim(),
-            `${rel}: the "${VERDICT_STEP_NAME}" step in job "${owner.name}" uses a BARE relative ` +
-              `script path, but that job pins defaults.run.working-directory — the path resolves ` +
-              `against the working directory, not the repo root, so this step exits 127 ` +
-              `("No such file or directory") on EVERY run instead of ever reporting a dead holder. ` +
-              `Use the workspace-rooted form.`,
-          ).toBe(VERDICT_INVOCATION_ROOTED);
-        }
+        const { checked, violations } = scanVerdictSteps(readText(rel));
+        expect(
+          violations,
+          `${rel}: a "${VERDICT_STEP_NAME}" step inside a job that pins ` +
+            `defaults.run.working-directory uses a BARE relative script path (or has no run: line) — ` +
+            `the path resolves against the working directory, not the repo root, so this step exits 127 ` +
+            `("No such file or directory") on EVERY run instead of ever reporting a dead holder. ` +
+            `Use the workspace-rooted form. Violations:\n${violations.join("\n")}`,
+        ).toEqual([]);
         // Anti-vacuity: ci.yml MUST exercise this arm — the `python` job is the
         // measured case. A zero here means the scan stopped finding the steps,
         // not that the corpus got safer.
@@ -238,6 +264,42 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
         }
       });
     }
+
+    // 2026-09-26, Phase 164.9.4: this calibration carries Test 3b's anti-vacuity
+    // once no ci.yml job is a working-directory holder. It is added BEFORE the
+    // ci.yml arm above is removed (plan 07), so the scan is never unmeasured: it
+    // proves on in-memory text, independent of any workflow file, that the scan
+    // flags the bare spelling and accepts the workspace-rooted one.
+    it("Test 3b CALIBRATION: the scan flags a bare verdict run: inside a working-directory job and accepts the rooted form (Phase 164.9.4)", () => {
+      const workflow = (runLine: string) =>
+        [
+          "jobs:",
+          "  calib:",
+          "    runs-on: ubuntu-latest",
+          "    defaults:",
+          "      run:",
+          "        working-directory: analytics-service",
+          "    steps:",
+          `      - name: ${VERDICT_STEP_NAME}`,
+          "        if: always()",
+          `        ${runLine}`,
+          "",
+        ].join("\n");
+
+      const bare = scanVerdictSteps(workflow(VERDICT_INVOCATION));
+      expect(bare.checked, "bare case: the scan did not see the verdict step inside the working-directory job").toBe(1);
+      expect(
+        bare.violations.length,
+        `bare case: the scan accepted "${VERDICT_INVOCATION}" inside a working-directory job — the exact 127 it exists to catch. Violations: ${JSON.stringify(bare.violations)}`,
+      ).toBe(1);
+
+      const rooted = scanVerdictSteps(workflow(VERDICT_INVOCATION_ROOTED));
+      expect(rooted.checked, "rooted case: the scan did not see the verdict step inside the working-directory job").toBe(1);
+      expect(
+        rooted.violations,
+        "rooted case: the scan flagged the workspace-rooted form, which resolves from any working directory",
+      ).toEqual([]);
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────────
