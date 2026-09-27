@@ -424,6 +424,16 @@ export type WizardErrorCode =
   // the same thing every other row on that roster buys. The field is still
   // authored honestly rather than left to whatever `actions` happened to
   // default to.
+  //
+  // ⭐ 167.1.2 REVIEW WR-04 — A SECOND EMITTER, AND THE FIRST CLIENT THAT READS
+  // THE CODE. `strategies/create-with-key`'s venue-identity race arm answers
+  // this code when the colliding live key has no strategy row but a composite
+  // (`strategy_keys`) or the allocator Exchanges page (`allocator_holdings`)
+  // uses it; `KEY_ORPHANED`'s "nothing uses it" is false there. ConnectKeyStep
+  // renders it from `KNOWN_CREATE_WITH_KEY_CODES`. The copy holds on that arm
+  // clause for clause: the colliding key is the caller's own and connected, and
+  // the wizard's INSERT was refused and rolled back, so "your new key was not
+  // saved" is measured, not assumed.
   | "KEY_VENUE_ALREADY_CONNECTED"
   // 164.5.4-02 / D-03 — THE STORED CREDENTIAL CANNOT BE READ BACK, so no
   // action taken against that stored copy can succeed until it is replaced.

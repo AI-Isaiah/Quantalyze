@@ -332,6 +332,13 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // roster too` describe in the same invariant file derives the 409 emitters
     // as their own population and reds when this row is missing (observed).
     "KEY_ORPHANED",
+    // 167.1.2 REVIEW WR-04 — the race arm's answer when the live key on this
+    // account has no strategy row but a composite (`strategy_keys`) or the
+    // allocator Exchanges page (`allocator_holdings`) uses it, where
+    // `KEY_ORPHANED`'s "nothing uses it" is false. Admitted HERE IN THE SAME
+    // COMMIT the route starts emitting it, for the reason the rows above state;
+    // the 409 describe in `wizardErrors.invariant.test.ts` gained it too.
+    "KEY_VENUE_ALREADY_CONNECTED",
     // 162-05 / D-162-3 — the use-existing-key arm's refusal when no LIVE key of
     // the caller's matches the `reuse_api_key_id` it was sent. Admitted HERE IN
     // THE SAME COMMIT the route starts emitting it, for the reason the two rows

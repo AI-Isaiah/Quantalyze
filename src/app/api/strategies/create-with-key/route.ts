@@ -167,6 +167,13 @@ function pickPlaceholderCodename(): string {
  *   · `orphaned`   — 161-05 / WIZERR-03. The live key exists and NOTHING hangs
  *                    off it: both strategy reads succeeded and both came back
  *                    empty. Refusable, with its own honest code.
+ *   · `held`       — 167.1.2 REVIEW WR-04. No strategy row points at the live
+ *                    key, but it is not an orphan either: a composite links it
+ *                    through `strategy_keys`, or the allocator Exchanges page
+ *                    connected it and its positions are in
+ *                    `allocator_holdings`. Returned by `resolveByVenueIdentity`
+ *                    only (the reuse arm's resolver never produces it).
+ *                    Refused with the venue-neutral KEY_VENUE_ALREADY_CONNECTED.
  *   · `unresolved` — genuinely nothing to say: no live key, a read fault, or no
  *                    service-role credential. Fall through.
  *
@@ -189,12 +196,16 @@ type VenueIdentityResolution =
   | { kind: "unresolved" }
   | { kind: "draft"; strategy_id: string; api_key_id: string }
   | { kind: "connected"; strategyName: string | null }
+  | { kind: "held" }
   | { kind: "orphaned" };
 
 const UNRESOLVED: VenueIdentityResolution = { kind: "unresolved" };
 
 /** 161-05 / WIZERR-03 — the payload-free orphan answer, held once like UNRESOLVED. */
 const ORPHANED: VenueIdentityResolution = { kind: "orphaned" };
+
+/** 167.1.2 REVIEW WR-04 — the payload-free "another use holds it" answer. */
+const HELD: VenueIdentityResolution = { kind: "held" };
 
 async function resolveByVenueIdentity(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -245,7 +256,81 @@ async function resolveByVenueIdentity(
 
   if (!liveKeyId) return UNRESOLVED;
 
-  return resolveStrategiesForKey(supabase, userId, liveKeyId, secrets, "venue-identity");
+  const byStrategy = await resolveStrategiesForKey(
+    supabase,
+    userId,
+    liveKeyId,
+    secrets,
+    "venue-identity",
+  );
+  if (byStrategy.kind !== "orphaned") return byStrategy;
+  return resolveOtherKeyUse(supabase, userId, liveKeyId, secrets);
+}
+
+/**
+ * 167.1.2 REVIEW WR-04 — "NO STRATEGY ROW" IS NOT "NOTHING USES IT".
+ *
+ * `resolveStrategiesForKey` reads `strategies.api_key_id` only. Two kinds of
+ * live key legitimately have no such row: a composite member, linked through
+ * `strategy_keys`, and a key the allocator Exchanges page connected, which
+ * never writes `strategies` at all. Until 167.1.2 only an MT5 login reached
+ * this fence; now every ccxt venue that reports an account id does, so a
+ * manager whose own composite member or allocator key already reads the
+ * account was told KEY_ORPHANED ("nothing uses it … its draft was deleted").
+ *
+ * Two reads on the user-scoped client (RLS plus the explicit owner filter, the
+ * posture `resolveStrategiesForKey` states for its own reads):
+ *   · `strategy_keys` — any composite membership of the key;
+ *   · `allocator_holdings` — positions the allocator poll wrote for the key.
+ * Either row → `held`. Both empty → `orphaned`, as before. ⛔ Either read
+ * faulting → `unresolved`: a failed read establishes neither claim (Rule 12).
+ *
+ * ⚠️ WHAT THIS CANNOT SEE, recorded rather than guessed: an allocator key
+ * connected so recently that no poll has written holdings yet is
+ * indistinguishable here from a true orphan, and still answers `orphaned`.
+ * `compute_jobs` would show its poll, but it is deny-all to `authenticated`.
+ */
+async function resolveOtherKeyUse(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+  liveKeyId: string,
+  secrets: readonly unknown[],
+): Promise<VenueIdentityResolution> {
+  const { data: member, error: memberErr } = await supabase
+    .from("strategy_keys")
+    .select("api_key_id")
+    .eq("owner_id", userId)
+    .eq("api_key_id", liveKeyId)
+    .limit(1)
+    .maybeSingle();
+  if (memberErr) {
+    console.error(
+      "[strategies/create-with-key] venue-identity strategy_keys resolve failed:",
+      scrubSeamError(memberErr, secrets),
+      memberErr.code,
+    );
+    return UNRESOLVED;
+  }
+  if (member) return HELD;
+
+  const { data: holding, error: holdingErr } = await supabase
+    .from("allocator_holdings")
+    .select("api_key_id")
+    .eq("allocator_id", userId)
+    .eq("api_key_id", liveKeyId)
+    .limit(1)
+    .maybeSingle();
+  if (holdingErr) {
+    console.error(
+      "[strategies/create-with-key] venue-identity allocator_holdings resolve failed:",
+      scrubSeamError(holdingErr, secrets),
+      holdingErr.code,
+    );
+    return UNRESOLVED;
+  }
+  if (holding) return HELD;
+
+  return ORPHANED;
 }
 
 /**
@@ -1199,6 +1284,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // must not first burn a Railway probe and the venue's validate quota.
       return venueAlreadyConnectedResponse(venueMatch.strategyName);
     }
+    // 167.1.2 REVIEW WR-04: `held` falls through here on the same reasoning as
+    // `orphaned` below, and is answered by the race arm's own `held` branch.
     // 161-05 / WIZERR-03 — `orphaned` DELIBERATELY DOES NOT SHORT-CIRCUIT HERE,
     // unlike the two arms above, and the asymmetry is a decision rather than an
     // oversight. Both of those answer a fact about the user's OWN existing
@@ -1513,6 +1600,24 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             // in this code's copy holds on this arm too — and on stronger ground
             // than on the pre-RPC one.
             return venueAlreadyConnectedResponse(venueMatch.strategyName);
+          }
+          if (venueMatch.kind === "held") {
+            // 167.1.2 REVIEW WR-04 — the live key on this account has no
+            // strategy row but IS used: a composite member or an allocator key
+            // (`resolveOtherKeyUse`). KEY_ORPHANED's "nothing uses it … its
+            // draft was deleted" is false for it. KEY_VENUE_ALREADY_CONNECTED
+            // is the venue-neutral refusal whose copy holds for any holder:
+            // another connected key of yours already reads this account, and
+            // the new key was not saved (the INSERT above was refused and
+            // rolled back). Same body `keys/validate-and-encrypt` answers.
+            return NextResponse.json(
+              {
+                code: "KEY_VENUE_ALREADY_CONNECTED",
+                error:
+                  "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
+              },
+              { status: 409, headers: NO_STORE_HEADERS },
+            );
           }
           if (venueMatch.kind === "orphaned") {
             // 161-05 / WIZERR-03 — THE ORPHAN, DISCRIMINATED BEFORE THE PINNED

@@ -198,6 +198,30 @@ const venueOwnerLookupMock = vi.fn(async () => ({ data: null, error: null }) as 
 });
 
 /**
+ * 167.1.2 REVIEW WR-04 — the two OTHER holders of a live key, read only when
+ * both `strategies` reads came back empty (the would-be orphan). A key linked
+ * to a composite through `strategy_keys`, or one the allocator Exchanges page
+ * connected and whose positions are in `allocator_holdings`, has no
+ * `strategies.api_key_id` row and is NOT an orphan; KEY_ORPHANED ("nothing
+ * uses it … its draft was deleted") is false for it.
+ *
+ * ⚠️ Routed by TABLE in `makeSelectBuilder`. Before these branches every
+ * unknown table fell to `draftLookupMock`, so a new read would have been
+ * answered with the session fence's canned row. Both DEFAULT TO NOTHING, which
+ * keeps every pre-existing orphan pin on its orphan.
+ */
+type HolderReadResult = {
+  data: { api_key_id: string } | null;
+  error: { code?: string; message?: string } | null;
+};
+const keyMembershipLookupMock = vi.fn(
+  async (): Promise<HolderReadResult> => ({ data: null, error: null }),
+);
+const keyHoldingsLookupMock = vi.fn(
+  async (): Promise<HolderReadResult> => ({ data: null, error: null }),
+);
+
+/**
  * 164.2-04 / criterion 5 — the reuse arm's POST-23505 read of the draft it
  * actually collided with.
  *
@@ -387,6 +411,8 @@ function makeSelectBuilder(
     order: () => node,
     limit: () => node,
     maybeSingle: () => {
+      if (table === "strategy_keys") return keyMembershipLookupMock();
+      if (table === "allocator_holdings") return keyHoldingsLookupMock();
       if (table === "api_keys") {
         // ⭐ 162-05 — `api_keys` IS NOW READ BY TWO DIFFERENT QUESTIONS, and the
         // `id` filter is what tells them apart. The venue-identity fence asks
@@ -1573,6 +1599,8 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     venueKeyLookupMock.mockReset();
     venueStrategyLookupMock.mockReset();
     venueOwnerLookupMock.mockReset();
+    keyMembershipLookupMock.mockReset();
+    keyHoldingsLookupMock.mockReset();
     assetClassUpdateMock.mockClear();
 
     // No draft for THIS session — the token-less re-entry the fence must catch.
@@ -1581,6 +1609,8 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     venueKeyLookupMock.mockResolvedValue({ data: null, error: null });
     venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
     venueOwnerLookupMock.mockResolvedValue({ data: null, error: null });
+    keyMembershipLookupMock.mockResolvedValue({ data: null, error: null });
+    keyHoldingsLookupMock.mockResolvedValue({ data: null, error: null });
 
     validateKeyMock.mockResolvedValue({
       valid: true,
@@ -2494,6 +2524,89 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       const text = await res.text();
       expect(JSON.parse(text).code).toBe("KEY_ORPHANED");
       expect(text).not.toContain(OKX_UID);
+    });
+
+    /**
+     * 167.1.2 REVIEW WR-04 — a live key with no `strategies` row is not
+     * necessarily an orphan. Before this PR only MT5 reached this arm; now
+     * every ccxt venue does, and a manager whose own allocator key or
+     * composite member already reads the account was told "nothing uses it …
+     * its draft was deleted", which is false, and pointed at a "Finish setup"
+     * path built for orphans. Such a key answers the venue-neutral
+     * KEY_VENUE_ALREADY_CONNECTED instead, whose copy is true for any holder:
+     * another connected key of yours already reads this account, and the new
+     * key was not saved (the INSERT was refused and rolled back).
+     */
+    it("a COMPOSITE-MEMBER key on the same account (strategy_keys) → 409 KEY_VENUE_ALREADY_CONNECTED, not KEY_ORPHANED", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      keyMembershipLookupMock.mockResolvedValue({
+        data: { api_key_id: EXISTING_KEY_ID },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("KEY_VENUE_ALREADY_CONNECTED");
+      expect(text).not.toContain(OKX_UID);
+      expect(text).not.toContain(EXISTING_KEY_ID);
+      // The membership read is the caller's own, through RLS, keyed on the
+      // colliding key and the session uid.
+      const membershipRead = capturedSelects.find((c) => c.table === "strategy_keys");
+      expect(membershipRead?.client).toBe("user-scoped");
+      expect(membershipRead?.filters).toMatchObject({
+        owner_id: MOCK_USER.id,
+        api_key_id: EXISTING_KEY_ID,
+      });
+    });
+
+    it("an ALLOCATOR key on the same account (allocator_holdings) → 409 KEY_VENUE_ALREADY_CONNECTED, not KEY_ORPHANED", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      keyHoldingsLookupMock.mockResolvedValue({
+        data: { api_key_id: EXISTING_KEY_ID },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("KEY_VENUE_ALREADY_CONNECTED");
+      expect(text).not.toContain(OKX_UID);
+      const holdingsRead = capturedSelects.find((c) => c.table === "allocator_holdings");
+      expect(holdingsRead?.client).toBe("user-scoped");
+      expect(holdingsRead?.filters).toMatchObject({
+        allocator_id: MOCK_USER.id,
+        api_key_id: EXISTING_KEY_ID,
+      });
+    });
+
+    // NEGATIVE CONTROLS (Rule 12): a membership read that FAULTED has observed
+    // nothing, so it establishes neither "a composite or allocator holds it"
+    // nor "nothing does". Neither refusal that asserts one of those may fire.
+    it.each([
+      ["strategy_keys", () => keyMembershipLookupMock],
+      ["allocator_holdings", () => keyHoldingsLookupMock],
+    ])("a faulted %s read answers neither KEY_ORPHANED nor KEY_VENUE_ALREADY_CONNECTED", async (_table, mock) => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      mock().mockResolvedValue({
+        data: null,
+        error: { code: "PGRST301", message: "holder read failed" },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const code = JSON.parse(await res.text()).code;
+      expect(code).not.toBe("KEY_ORPHANED");
+      expect(code).not.toBe("KEY_VENUE_ALREADY_CONNECTED");
     });
 
     it("the RPC error line is scrubbed of the uid Postgres echoes in its DETAIL", async () => {
