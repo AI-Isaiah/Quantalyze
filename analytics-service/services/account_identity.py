@@ -40,6 +40,7 @@ from typing import Any, Final, Literal
 
 import ccxt
 import httpx
+from postgrest.exceptions import APIError
 
 from services.db import db_execute
 from services.redact import scrub_freeform_string
@@ -277,8 +278,13 @@ def _safe_message(exc: BaseException) -> str | None:
     embed the API key in its signature text (``routers/portfolio.py`` redacts it
     for that reason) and can echo a venue body, so the class name and the code
     carry the diagnosis instead. What is returned is scrubbed and bounded.
+
+    Review round 2 (SF2-L4): the class is checked, not the attribute. Other
+    SDKs set ``.message`` too, to text that can echo a request or a body.
     """
-    message = getattr(exc, "message", None)
+    if not isinstance(exc, APIError):
+        return None
+    message = exc.message
     if not isinstance(message, str) or not message:
         return None
     scrubbed = scrub_freeform_string(message)

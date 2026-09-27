@@ -1020,6 +1020,40 @@ async def test_a_failure_a_retry_cannot_clear_is_an_error_without_the_detail(
     assert "Failing row contains" not in caplog.text
 
 
+class _ForeignErrorWithMessage(Exception):
+    """Not a PostgREST ``APIError``, yet it carries a ``.message`` attribute.
+
+    Some venue SDKs and HTTP clients set ``.message`` to text that echoes a
+    request or a response body, which can carry a key or an account id.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+_FOREIGN_MESSAGE_SENTINEL = "SENTINEL-FOREIGN-MESSAGE-apiKey=abc123"
+
+
+async def test_only_a_postgrest_api_error_message_is_ever_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Review round 2 SF2-L4: `_safe_message` promised "only the message of a
+    # PostgREST APIError" and read `.message` off ANY exception. A foreign
+    # class with a `.message` would have put its text on an ERROR line.
+    caplog.set_level("DEBUG")
+    ex = _read_raises(_ForeignErrorWithMessage(_FOREIGN_MESSAGE_SENTINEL))
+
+    outcome = await _stamp(FakeSupabase(), _key_row(), ex)
+
+    assert outcome == "error"
+    rec = _stamp_failure_record(caplog)
+    assert rec.levelname == "ERROR"
+    assert "class=_ForeignErrorWithMessage" in rec.getMessage()
+    assert "message=None" in rec.getMessage()
+    assert "SENTINEL-FOREIGN-MESSAGE" not in caplog.text
+
+
 async def test_a_venue_answer_without_an_id_is_a_warning_naming_the_venue(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
