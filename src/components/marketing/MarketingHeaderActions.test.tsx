@@ -7,10 +7,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import React from "react";
 import { createClient } from "@/lib/supabase/server";
+import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
 import { MarketingHeaderActions } from "./MarketingHeaderActions";
-
-// The literal `src/proxy.ts` names today. Task 1's module owns it; the
-// signed-in assertion below is updated to import that constant once it exists.
 
 const SIGN_IN_CLASS =
   "inline-flex min-h-[44px] items-center rounded-md px-3 py-2 text-sm font-medium text-text-secondary transition-colors hover:bg-page hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
@@ -89,7 +87,8 @@ describe("MarketingHeaderActions", () => {
     const links = screen.getAllByRole("link");
     expect(links).toHaveLength(1);
     expect(links[0]).toHaveAccessibleName("Go to app");
-    expect(links[0]).toHaveAttribute("href", "/discovery/crypto-sma");
+    expect(DEFAULT_AUTHENTICATED_ROUTE).toBe("/discovery/crypto-sma");
+    expect(links[0]).toHaveAttribute("href", DEFAULT_AUTHENTICATED_ROUTE);
     expect(links[0].getAttribute("class")).toBe(SIGN_UP_CLASS);
     expect(screen.queryByRole("link", { name: "Sign in" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Sign up" })).toBeNull();
