@@ -3982,6 +3982,8 @@ Plans:
 
 **⭐ ROUTED IN 2026-09-27 (seen in the logged-in browser):** the `/profile` Exchanges "Connect exchange" dialog's API Key and API Secret inputs accept the browser's saved-login autofill. A saved site login was filled into both fields. Success: both fields opt out of autocomplete, so a password manager never fills a site login into a key field. No values are recorded here.
 
+**⭐ ROUTED IN 2026-09-27 (founder, UAT):** pasting a Client ID or Client Secret copied from a spreadsheet cell leaves leading whitespace in the field (the founder saw two leading spaces via "show Client Secret"). The server already trims (`trimCredential` in `src/lib/analytics-client.ts`, used by validate and encrypt), so the stored value is correct, but the field shows something other than what is sent and invites a false "my key is wrong" conclusion. Success: the api-key and api-secret inputs in the wizard connect steps (`ConnectKeyStep`, `MultiKeyConnectStep`) and the profile Connect-exchange dialog (`src/components/exchanges/AllocatorExchangeManager.tsx`) strip leading/trailing whitespace, including line breaks and zero-width characters (U+200B, U+FEFF), on paste/change; the OKX passphrase is NOT trimmed (user-chosen, may carry significant whitespace, as `trimCredential`'s docblock records); a test that fails on the old behaviour.
+
 ### Phase 169.4: ALLOCTRUTH — the Allocations Risk tab and alpha/beta read the book series and the live BTC feed (INSERTED)
 
 **Goal:** The Allocations Risk tab reads VaR, correlation and alpha/beta from the same book series as the Overview and Scenario tabs, and the allocator's BTC comparator and alpha/beta widget read the live BTC feed through the factsheet's shared functions.
