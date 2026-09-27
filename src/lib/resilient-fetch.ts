@@ -824,10 +824,11 @@ export const SEAM_BUDGETS: Record<
     // `limit: 1000`, and on failure `_fetch_from_coingecko` issues 1 more on
     // the same 30 s client. That is 90 s of per-request read bound, plus the
     // cache read and the upsert through `db_execute`, which carry no timeout of
-    // their own; 10 s is left for those two. ⚠️ The service has NO TOTAL bound
-    // today, so this is the realistic worst case, not a proven one; an
-    // `asyncio.wait_for` around the fetch in `benchmark_refresh` would make it
-    // exact.
+    // their own; 10 s is left for those two. The service now bounds the whole
+    // refresh itself: `routers/cron.py` `benchmark_refresh` runs it under
+    // `asyncio.wait_for` with `_BENCHMARK_REFRESH_DEADLINE_S` (80 s, review
+    // round 2 IN-01), and `test_deadline_sits_below_the_typescript_seam_budget`
+    // pins that deadline at least 10 s under this row's `timeoutMs`.
     //
     // THE CEILING IT MUST FIT (SC-4b in `seam-budgets.invariant.test.ts`):
     // 100 000 + the failing-state breaker-store worst case (3 commands x
