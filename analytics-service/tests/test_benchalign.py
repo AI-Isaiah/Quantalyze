@@ -50,6 +50,11 @@ btc_rolling_correlation_90d or rolling alpha/beta value moves. r_squared moves
 index 0 zero-filled. One behaviour changes on these paths beyond r_squared:
 when BTC itself has a gap (the stale-cache fallback), the day after the gap is
 now unpaired instead of being paired with a two-day BTC move.
+
+SC2 (166.4-03): a benchmark gap is skipped, never filled; an absent or
+non-finite interior close d unpairs BOTH intervals it bounds, d and d + 1 day
+(``test_benchalign_gap_absent_close_unpairs_both_adjacent_intervals``,
+``test_benchalign_gap_non_finite_return_is_no_close``).
 """
 
 from __future__ import annotations
@@ -699,3 +704,86 @@ def test_benchalign_dense_r_squared_moves_by_construction(case, caplog):
     assert mj["r_squared"] != pytest.approx(old, rel=1e-9, abs=0.0), (
         f"r_squared={mj['r_squared']!r} did not move from the base-measured {old!r} on {case}"
     )
+
+
+# ---------------------------------------------------------------------------
+# SC2 / 166.4 D-A (166.4-03): a benchmark gap is skipped, never filled.
+# ---------------------------------------------------------------------------
+
+_GAP_LENGTH = 30
+_GAP_POSITION = 12
+_ONE_DAY = pd.Timedelta(days=1)
+
+
+def _gap_fixture() -> tuple[pd.Series, pd.Series, pd.Timestamp]:
+    """A dense 7-day strategy, a contiguous 7-day benchmark on the same dates, and an interior date d."""
+    strategy = _dense_daily("2024-04-01", _GAP_LENGTH, 16649)
+    benchmark = _dense_daily("2024-04-01", _GAP_LENGTH, 16650)
+    d = benchmark.index[_GAP_POSITION]
+    # Preconditions: the strategy is dense and NaN-free, the benchmark is
+    # contiguous before any edit, the two share t_0 (so D-05 pairs index 0 and
+    # index 0 plays no part in the gap), and d is interior with d + 1 day on
+    # both legs, so both intervals d bounds exist.
+    assert (strategy.index[1:] - strategy.index[:-1] == _ONE_DAY).all()
+    assert strategy.notna().all()
+    assert (benchmark.index[1:] - benchmark.index[:-1] == _ONE_DAY).all()
+    assert strategy.index[0] == benchmark.index[0]
+    assert benchmark.index[0] < d < benchmark.index[-1]
+    assert d + _ONE_DAY in strategy.index and d + _ONE_DAY in benchmark.index
+    return strategy, benchmark, d
+
+
+def test_benchalign_gap_absent_close_unpairs_both_adjacent_intervals():
+    """SC2 (166.4 D-A): an absent interior benchmark close d unpairs (d - 1, d] AND (d, d + 1], and fills nothing.
+
+    With d missing, the interval ending at d has no close at its right end and
+    the interval ending at d + 1 has none at its left end, so both leave the
+    pair. The daily inner join would drop d only and pair d + 1 with BTC's
+    one-day return dated d + 1, which is not the move over (d, d + 1] because
+    no close at d exists to measure it from. The expected unpaired set is
+    written from that definition, never read off the helper under test.
+    """
+    strategy, benchmark, d = _gap_fixture()
+    gapped = benchmark.drop(d)
+    # Precondition: d really is absent, and it is the ONLY gap: every other
+    # consecutive step is one day, and the one two-day step spans d.
+    assert d not in gapped.index
+    steps = gapped.index[1:] - gapped.index[:-1]
+    assert int((steps != _ONE_DAY).sum()) == 1
+    assert gapped.index[1:][steps != _ONE_DAY][0] == d + _ONE_DAY
+
+    expected_unpaired = pd.DatetimeIndex([d, d + _ONE_DAY])
+    inner_join = strategy.index.intersection(gapped.index)
+
+    r, b = _benchmark_pair(strategy, gapped)
+    assert r.index.equals(b.index)
+    unpaired = strategy.index.difference(r.index)
+    assert unpaired.equals(expected_unpaired), (list(unpaired), list(expected_unpaired))
+    assert len(r) == len(inner_join) - 1, (len(r), len(inner_join))
+    # No fill and no compounding across the gap: every paired benchmark value
+    # is the benchmark's own return on that date, and the strategy is untouched.
+    assert (b.to_numpy() == gapped.loc[b.index].to_numpy()).all()
+    assert (r.to_numpy() == strategy.loc[r.index].to_numpy()).all()
+
+
+@pytest.mark.parametrize("bad_value", (np.nan, np.inf), ids=("nan", "pos_inf"))
+def test_benchalign_gap_non_finite_return_is_no_close(bad_value):
+    """SC2 (166.4 D-A): a non-finite benchmark return dated d is no close at d, so it unpairs the same two intervals as an absent d."""
+    strategy, benchmark, d = _gap_fixture()
+    corrupted = benchmark.copy()
+    corrupted[d] = bad_value
+    # Precondition: the date is present, its value is non-finite, and it is the
+    # only non-finite value in an otherwise contiguous series.
+    assert d in corrupted.index and not np.isfinite(corrupted[d])
+    assert int((~np.isfinite(corrupted.to_numpy())).sum()) == 1
+    assert (corrupted.index[1:] - corrupted.index[:-1] == _ONE_DAY).all()
+
+    expected_unpaired = pd.DatetimeIndex([d, d + _ONE_DAY])
+
+    r, b = _benchmark_pair(strategy, corrupted)
+    assert r.index.equals(b.index)
+    unpaired = strategy.index.difference(r.index)
+    assert unpaired.equals(expected_unpaired), (list(unpaired), list(expected_unpaired))
+    assert np.isfinite(b.to_numpy()).all()
+    assert (b.to_numpy() == corrupted.loc[b.index].to_numpy()).all()
+    assert (r.to_numpy() == strategy.loc[r.index].to_numpy()).all()
