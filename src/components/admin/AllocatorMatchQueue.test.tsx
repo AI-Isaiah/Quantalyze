@@ -1002,8 +1002,12 @@ describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
 
     const shortlist = screen.getByText("Shortlist").parentElement;
     expect(shortlist).not.toBeNull();
-    const nestedSend = within(shortlist!).getByRole("button", { name: /Send intro/i });
-    expect(nestedSend.tagName).toBe("BUTTON");
+    // The card itself is role="button" and its name includes "Send intro".
+    // The write control is the nested <button>.
+    const nestedSend = within(shortlist!)
+      .getAllByRole("button", { name: /Send intro/i })
+      .find((el) => el.tagName === "BUTTON");
+    expect(nestedSend).toBeTruthy();
     const sendClasses = nestedSend.className.split(/\s+/);
     expect(sendClasses).toContain("hidden");
     expect(sendClasses).toContain("md:inline-flex");

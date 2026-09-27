@@ -167,11 +167,16 @@ export function AllocatorMatchQueue({
   const [showShortcutHelp, setShowShortcutHelp] = useState(false);
 
   // Viewport classification.
-  //   lg+ (1024+): keyboard shortcuts on, two-pane layout, full write mode
-  //   below lg: single-column stacked layout (list on top, detail below)
-  //   below md (768): read-only banner rendered above the list; the action
-  //     buttons still exist but a visible warning discourages use.
+  //   lg+ (1024+): keyboard shortcuts on, two-pane layout.
+  //   below lg: single-column stacked layout (list on top, detail below).
+  //   below md (768): write controls are hidden by CSS (`hidden` + `md:*`)
+  //     and every write handler returns early. The old sentence — that the
+  //     buttons still exist and a warning merely discourages use — was the
+  //     recorded defect (2026-09-27). Visibility stays CSS because
+  //     useMediaQuery's server snapshot is false; `readOnly` is the guard.
   const isLg = useMediaQuery("(min-width: 1024px)");
+  const isMd = useMediaQuery("(min-width: 768px)");
+  const readOnly = forceReadOnly || !isMd;
 
   // Track in-flight load requests to prevent a stale response from overwriting
   // a newer one. Incremented on each load(); responses only apply if they match
@@ -227,6 +232,7 @@ export function AllocatorMatchQueue({
   const selectedCandidate = data?.candidates[selectedIdx] ?? null;
 
   const handleRecompute = useCallback(async () => {
+    if (readOnly) return;
     if (recomputeIdRef.current !== 0) return; // A recompute is already in flight
     const thisRecomputeId = ++recomputeIdRef.current;
     setRecomputing(true);
@@ -299,10 +305,11 @@ export function AllocatorMatchQueue({
         setRecomputing(false);
       }
     }
-  }, [allocatorId, load]);
+  }, [allocatorId, load, readOnly]);
 
   const handleDecision = useCallback(
     async (strategyId: string, decision: "thumbs_up" | "thumbs_down" | "snoozed", candidateId: string | null) => {
+      if (readOnly) return;
       // Optimistic: local refetch after write
       try {
         const res = await fetch("/api/admin/match/decisions", {
@@ -321,17 +328,17 @@ export function AllocatorMatchQueue({
         alert(`Failed to save decision: ${err instanceof Error ? err.message : "Unknown error"}`);
       }
     },
-    [allocatorId, load],
+    [allocatorId, load, readOnly],
   );
 
   // Keyboard shortcuts — only active at lg+ (1024+) per Sprint 4 T10.1.
-  // `forceReadOnly` is checked by the shared `guard` wrapper below.
+  // `readOnly` (forceReadOnly, or below md) is checked by `guard`.
   const guard = useCallback(
     (fn: () => void) => () => {
-      if (forceReadOnly) return;
+      if (readOnly) return;
       fn();
     },
-    [forceReadOnly],
+    [readOnly],
   );
 
   useKeyboardShortcuts([
@@ -462,8 +469,7 @@ export function AllocatorMatchQueue({
         <div className="md:hidden rounded-md border border-accent/30 bg-accent/5 px-4 py-3">
           <p className="text-small text-text-primary">
             <strong className="font-semibold">Read-only on mobile.</strong>{" "}
-            Open on a desktop or tablet (1024px+) to use keyboard shortcuts
-            and record KEEP / SKIP / Send Intro decisions.
+            Open on a tablet or desktop (768px or wider) to record KEEP / SKIP / Send Intro decisions.
           </p>
         </div>
       )}
@@ -512,13 +518,15 @@ export function AllocatorMatchQueue({
                 size="sm"
                 onClick={handleRecompute}
                 disabled={recomputing}
+                className="hidden md:inline-flex"
               >
                 {recomputing ? "Computing..." : "Recompute now"}
               </Button>
               <Button
                 variant="secondary"
                 size="sm"
-                onClick={() => setShowPreferencesPanel(true)}
+                onClick={guard(() => setShowPreferencesPanel(true))}
+                className="hidden md:inline-flex"
               >
                 Edit preferences
               </Button>
@@ -551,7 +559,13 @@ export function AllocatorMatchQueue({
             No candidates yet for this allocator.
           </p>
           {!forceReadOnly && (
-            <Button variant="primary" size="sm" onClick={handleRecompute} disabled={recomputing}>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleRecompute}
+              disabled={recomputing}
+              className="hidden md:inline-flex"
+            >
               {recomputing ? "Computing..." : "Recompute now"}
             </Button>
           )}
