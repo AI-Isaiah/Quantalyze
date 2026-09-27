@@ -137,3 +137,63 @@ def test_a_venue_with_no_known_id_source_is_none(venue: str) -> None:
     # venue's field. Venue ids are the lowercase ccxt ids; "OKX" is not one.
     raw = {"data": [{"uid": SYNTHETIC_UID}], "result": {"userID": SYNTHETIC_UID}, "uid": SYNTHETIC_UID, "id": SYNTHETIC_UID}
     assert venue_account_id_from(venue, raw) is None
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 SF2-M1 — the same 128-character cap as the Next seam
+# ---------------------------------------------------------------------------
+#
+# ``src/lib/analytics-schemas.ts`` (``ValidateKeyResponseSchema``) trims the id
+# and refuses one over 128 characters, so a key whose id is longer connects
+# UNSTAMPED and is never checked for a duplicate. The service must not send
+# what the seam refuses: over-long is ``None`` here, with a WARNING that names
+# the venue and never the value. zod measures a JS string, in UTF-16 code
+# units, so the service measures the same way.
+
+_CAP = 128
+_OVER_LONG_MARK = "OVERLONGID"
+
+
+def _okx(uid: object) -> dict[str, Any]:
+    return {"code": "0", "data": [{"uid": uid}]}
+
+
+class TestLengthCap:
+    def test_an_id_of_exactly_the_cap_is_kept(self) -> None:
+        uid = "7" * _CAP
+        assert venue_account_id_from("okx", _okx(uid)) == uid
+
+    def test_whitespace_is_trimmed_before_the_cap_is_measured(self) -> None:
+        uid = "7" * _CAP
+        assert venue_account_id_from("okx", _okx(f"  {uid}\n")) == uid
+
+    def test_one_over_the_cap_is_none_with_a_warning_naming_the_venue(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level("DEBUG")
+        uid = _OVER_LONG_MARK + "7" * (_CAP + 1 - len(_OVER_LONG_MARK))
+
+        assert venue_account_id_from("bybit", {"result": {"userID": uid}}) is None
+
+        (rec,) = [r for r in caplog.records if "venue_account_id" in r.getMessage()]
+        assert rec.levelname == "WARNING"
+        assert "bybit" in rec.getMessage()
+        # The value is an account identifier: never logged, not even a slice.
+        assert _OVER_LONG_MARK not in caplog.text
+        assert "7777777" not in caplog.text
+
+    def test_the_cap_counts_utf16_code_units_as_the_seam_does(self) -> None:
+        # U+1D7D9 is outside the BMP: one Python character, two UTF-16 units.
+        # 65 of them are 130 units, which zod's .max(128) refuses.
+        astral = "\U0001d7d9"
+        assert venue_account_id_from("okx", _okx(astral * 64)) == astral * 64
+        assert venue_account_id_from("okx", _okx(astral * 65)) is None
+
+    def test_an_over_long_integer_id_is_none(self) -> None:
+        assert venue_account_id_from("binance", {"uid": int("9" * (_CAP + 1))}) is None
+
+    def test_a_lone_surrogate_never_raises(self) -> None:
+        # json.loads turns "\ud800" into a lone surrogate, which a strict
+        # UTF-16 encode refuses. The extractor is total, so it must not raise.
+        assert venue_account_id_from("okx", _okx("\ud800" * (_CAP + 1))) is None
+        assert venue_account_id_from("okx", _okx("7\ud800")) == "7\ud800"

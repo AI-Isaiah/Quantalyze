@@ -17,8 +17,8 @@ Sources, one per venue, all from a call the validator already makes:
 
 Contract of :func:`venue_account_id_from`:
 
-- Pure and total. No I/O, and it never raises: a missing or wrongly typed
-  container yields ``None``.
+- Total, and no I/O beyond the one WARNING below. It never raises: a missing
+  or wrongly typed container yields ``None``.
 - Never returns ``''``. A blank or whitespace value is ``None``, because a blank
   identity is non-NULL to the partial unique index and would collapse two
   different accounts into one (the ``api_keys_venue_account_id_nonblank`` CHECK
@@ -26,6 +26,10 @@ Contract of :func:`venue_account_id_from`:
 - Never lowercases. Venue ids are numeric or opaque, and case is part of them.
 - Only a ``str`` or an ``int`` counts as an id. ``bool`` is an ``int`` subclass in
   Python and is refused explicitly, so a flag can never pass for an account.
+- Never returns an id over :data:`MAX_VENUE_ACCOUNT_ID_LENGTH` (128) UTF-16 code
+  units after trimming, the cap ``src/lib/analytics-schemas.ts`` enforces. An
+  over-long id is ``None`` and the one side effect is a WARNING naming the
+  venue, never the value (review round 2, SF2-M1).
 - ⛔ The value is an account identifier. Callers must never log it or put it in
   error copy. It leaves the service only as the ``venue_account_id`` field of
   the validate response.
@@ -50,6 +54,7 @@ __all__ = [
     "ACCOUNT_IDENTITY_UNIQUE_INDEX",
     "COMPOSITE_MEMBER_SHARED_ACCOUNT",
     "DUPLICATE_DETECTED_AUDIT_ACTION",
+    "MAX_VENUE_ACCOUNT_ID_LENGTH",
     "StampOutcome",
     "VENUES_WITH_ACCOUNT_ID",
     "read_venue_account_id",
@@ -65,10 +70,31 @@ logger = logging.getLogger("quantalyze.analytics")
 VENUES_WITH_ACCOUNT_ID: frozenset[str] = frozenset({"okx", "bybit", "binance", "deribit"})
 
 
-def _normalise(value: object) -> str | None:
+# The same cap as ``ValidateKeyResponseSchema.venue_account_id`` in
+# src/lib/analytics-schemas.ts (``.trim().min(1).max(128)``). An id the seam
+# refuses connects the key UNSTAMPED, so the service never sends one: it
+# answers None, as for a venue that reports no id. zod measures a JS string's
+# ``.length``, in UTF-16 code units, so this does too. Change both together.
+MAX_VENUE_ACCOUNT_ID_LENGTH: Final = 128
+
+
+def _utf16_length(text: str) -> int:
+    return len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+
+
+def _normalise(value: object, venue: str) -> str | None:
     if isinstance(value, bool) or not isinstance(value, (str, int)):
         return None
     text = str(value).strip()
+    if _utf16_length(text) > MAX_VENUE_ACCOUNT_ID_LENGTH:
+        # ⛔ The venue only. The value is an account identifier.
+        logger.warning(
+            "account_identity: venue %s answered a venue_account_id over %d "
+            "characters; treated as no id, so the key is not checked for a "
+            "duplicate",
+            venue, MAX_VENUE_ACCOUNT_ID_LENGTH,
+        )
+        return None
     return text or None
 
 
@@ -93,13 +119,13 @@ def venue_account_id_from(venue: str, raw: Mapping[str, Any]) -> str | None:
         data = raw.get("data")
         if not isinstance(data, list) or not data:
             return None
-        return _normalise(_child(data[0], "uid"))
+        return _normalise(_child(data[0], "uid"), venue)
     if venue == "bybit":
-        return _normalise(_child(raw.get("result"), "userID"))
+        return _normalise(_child(raw.get("result"), "userID"), venue)
     if venue == "binance":
-        return _normalise(raw.get("uid"))
+        return _normalise(raw.get("uid"), venue)
     if venue == "deribit":
-        return _normalise(raw.get("id"))
+        return _normalise(raw.get("id"), venue)
     return None
 
 
