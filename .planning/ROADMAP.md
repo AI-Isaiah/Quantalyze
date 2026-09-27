@@ -3640,7 +3640,7 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy
 **Goal:** For a strategy whose date index is sparser than BTC's 7-day calendar (for example weekday-only), every benchmark-relative metric pairs each strategy return with the BTC return over the SAME holding interval, so alpha, beta, correlation, information ratio, Treynor, r² and the rolling greeks and correlation describe the strategy's real co-movement with BTC, and r² equals correlation² again.
 **Requirements**: TBD (criteria below)
 **Depends on:** nothing. **Priority:** data integrity, ahead of features (founder priority rule, 2026-09-27).
-**Plans:** 3/4 plans executed in 4 waves, linear (planned 2026-09-27; plan-check 3 rounds, 0 blockers). Decisions in `166.4-CONTEXT.md`: D-A, D-B (founder), D-01 to D-07 (orchestrator; D-04 to D-07 were orchestrator readings, ratified by the founder 2026-09-27). No migration.
+**Plans:** 4/4 plans executed in 4 waves, linear (planned 2026-09-27; plan-check 3 rounds, 0 blockers). Decisions in `166.4-CONTEXT.md`: D-A, D-B (founder), D-01 to D-07 (orchestrator; D-04 to D-07 were orchestrator readings, ratified by the founder 2026-09-27). No migration.
 
 **Evidence (orchestrator, 2026-09-27; the reproduction was re-run locally against main-level code; counts and verdicts only):**
 
@@ -3671,7 +3671,7 @@ Plans:
 - [x] 166.4-01-PLAN.md — W1 engine: one interval-matched pair feeds every benchmark-relative metric; red-first Fri→Mon beta; r² on the shared pair; the fill arm retired; sparse-calendar predicate (SC1, SC2, SC3, SC7)
 - [x] 166.4-02-PLAN.md — W2 dense parity and the broker and stitch_composite trace, tests only (SC4, SC5)
 - [x] 166.4-03-PLAN.md — W3 gap tests and the neuters, tests only (SC1, SC2)
-- [ ] 166.4-04-PLAN.md — W4 the Phase 166.3 handoff paragraph and the release entry naming M1 (SC5, SC6, SC7)
+- [x] 166.4-04-PLAN.md — W4 the Phase 166.3 handoff paragraph and the release entry naming M1 (SC5, SC6, SC7)
 
 ### Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly (INSERTED)
 
@@ -4360,7 +4360,7 @@ kept verbatim.
 | 166.1.1 DDSIGN | 0/? | Queued — feature | - |
 | 166.2 COMPUTEONCE | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.102.0.0 · #874 |
 | 166.3 RECOMPUTE | 0/1 | HALTED 2026-09-27 at Task 3 — resumes after 166.4 ships | - |
-| 166.4 BENCHALIGN | 3/4 | In progress — data integrity | - |
+| 166.4 BENCHALIGN | 4/4 | Executed — review and verification pending | - |
 | 166.4.1 PORTFOLIOANALYTICS | 0/? | Queued — data integrity | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.89.0.0 · #852 |
