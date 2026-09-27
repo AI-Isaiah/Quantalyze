@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
+  ValidateKeyResponseSchema,
   EnqueueComputeJobResponseSchema,
   EncryptKeyResponseSchema,
   GetUserComputeJobsRowSchema,
@@ -644,5 +645,59 @@ describe("[140.3-03 / SEAMUX-07] KeyPermissionsPayloadSchema", () => {
     expect(KeyPermissionsPayloadSchema.safeParse(withoutStamp).success).toBe(
       false,
     );
+  });
+});
+
+/**
+ * 167.1.2 REVIEW IN-02 / SF-M6 — `venue_account_id` FAILS SOFT.
+ *
+ * WHY THIS MATTERS. The id is an optional enrichment of a successful
+ * validation: the service's contract is "a missing id is None and never fails
+ * validation". The field used to refuse a blank or over-128-character id by
+ * throwing, which failed the whole parse and so the whole connect, for a key
+ * that had just validated. Now an id the field cannot accept becomes null (the
+ * key connects unstamped, as for a venue that reports no id), the rest of the
+ * response is kept, and a warning names the issue code, never the value. A
+ * blank must still never be stored: it is non-NULL to the venue-identity
+ * unique index and would collapse two accounts into one, so blank becomes
+ * null, not "".
+ */
+describe("ValidateKeyResponseSchema.venue_account_id fails soft", () => {
+  const base = { valid: true, read_only: true };
+
+  it.each([
+    ["129 characters", "9".repeat(129)],
+    ["whitespace only", "   "],
+    ["empty", ""],
+  ])("an id that is %s becomes null and the validation still parses", (_name, id) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const parsed = ValidateKeyResponseSchema.parse({ ...base, venue_account_id: id });
+      expect(parsed.valid).toBe(true);
+      expect(parsed.read_only).toBe(true);
+      expect(parsed.venue_account_id).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(1);
+      if (id.trim() !== "") {
+        expect(JSON.stringify(warn.mock.calls)).not.toContain(id);
+      }
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps a well-formed id, trimmed, and warns nothing", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(
+        ValidateKeyResponseSchema.parse({ ...base, venue_account_id: " 100000001 " })
+          .venue_account_id,
+      ).toBe("100000001");
+      expect(ValidateKeyResponseSchema.parse({ ...base, venue_account_id: null }).venue_account_id)
+        .toBeNull();
+      expect(ValidateKeyResponseSchema.parse(base).venue_account_id).toBeUndefined();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

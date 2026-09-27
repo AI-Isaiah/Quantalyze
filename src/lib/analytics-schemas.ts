@@ -36,12 +36,34 @@ import { exchangeEnum } from "./closed-sets";
 // would collapse two accounts into one); the service already sends null
 // instead of blank. The passthrough REMAINDER is still never spread into a
 // write, which is what the sanctioned exception below covers.
+//
+// 167.1.2 REVIEW IN-02 / SF-M6 — the field FAILS SOFT. The id is an optional
+// enrichment of a validation that already succeeded ("a missing id is None and
+// never fails validation", services/exchange.py), so an id this field cannot
+// accept (blank, over 128 characters, not a string) becomes null: the key
+// connects unstamped, exactly as for a venue that reports no id, instead of the
+// whole parse and so the whole connect failing. A blank still never reaches the
+// write, because it becomes null rather than "". The warning names the issue
+// codes only, never the value, which is an account identifier.
 export const ValidateKeyResponseSchema = z.object({
   valid: z.boolean(),
   read_only: z.boolean(),
   exchange: z.string().optional(),
   permissions: z.array(z.string()).optional(),
-  venue_account_id: z.string().trim().min(1).max(128).nullable().optional(),
+  venue_account_id: z
+    .string()
+    .trim()
+    .min(1)
+    .max(128)
+    .nullable()
+    .optional()
+    .catch((ctx) => {
+      console.warn(
+        "[analytics-schemas] /api/validate-key venue_account_id refused, connecting unstamped:",
+        ctx.error.issues.map((issue) => issue.code).join(","),
+      );
+      return null;
+    }),
 }).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; only the named venue_account_id field is written (to api_keys), the passthrough remainder is never spread into a write
 
 // --- /api/encrypt-key ---
