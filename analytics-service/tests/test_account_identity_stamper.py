@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -142,6 +143,11 @@ def _okx_exchange(uid: str | None = ACCOUNT_ID) -> MagicMock:
     return ex
 
 
+def _created_days_ago(days: float) -> str:
+    """``api_keys.created_at`` as PostgREST returns it: ISO 8601 with offset."""
+    return (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+
 def _key_row(**overrides: Any) -> dict[str, Any]:
     row: dict[str, Any] = {
         "id": KEY_ID,
@@ -153,6 +159,9 @@ def _key_row(**overrides: Any) -> dict[str, Any]:
         "venue_account_id": None,
         "account_shared_with_api_key_id": None,
         "account_share_kind": None,
+        # A key connected just now: below the SF2-M2 escalation threshold, so
+        # every WARNING case in this file also pins the un-escalated side.
+        "created_at": _created_days_ago(0),
     }
     row.update(overrides)
     return row
@@ -1197,3 +1206,107 @@ async def test_routine_outcomes_stay_at_info(
     assert outcome == expected
     (rec,) = [r for r in caplog.records if f"outcome={expected}" in r.getMessage()]
     assert rec.levelname == "INFO"
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 SF2-M2 — a key that stays unstamped escalates to ERROR
+# ---------------------------------------------------------------------------
+#
+# A retryable failure or a skipped_no_budget is WARNING because the next poll
+# may clear it. When it recurs every day, the key is never stamped, so its
+# duplicate check never runs, and a WARNING never reaches Sentry. After
+# UNSTAMPED_ESCALATION_DAYS (3) since the key was created, the same line is an
+# ERROR saying so. Both sides of the threshold are pinned for both outcomes.
+
+_ESCALATION = "key unstamped for >3 days; duplicate check not running"
+
+
+def _escalation_records(caplog: pytest.LogCaptureFixture) -> list[Any]:
+    return [r for r in caplog.records if _ESCALATION in r.getMessage()]
+
+
+def test_the_escalation_threshold_is_three_days() -> None:
+    assert ai.UNSTAMPED_ESCALATION_DAYS == 3
+
+
+@pytest.mark.parametrize(
+    ("days", "level"),
+    [pytest.param(2, "WARNING", id="2-days-below"), pytest.param(4, "ERROR", id="4-days-above")],
+)
+async def test_a_retryable_failure_on_an_aged_unstamped_key_escalates(
+    days: int, level: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    import ccxt
+
+    caplog.set_level("DEBUG")
+    ex = _read_raises(ccxt.NetworkError("okx timed out"))
+
+    outcome = await _stamp(FakeSupabase(), _key_row(created_at=_created_days_ago(days)), ex)
+
+    assert outcome == "error"
+    rec = _stamp_failure_record(caplog)
+    assert rec.levelname == level
+    assert "class=NetworkError" in rec.getMessage()
+    assert (_ESCALATION in rec.getMessage()) is (level == "ERROR")
+    assert ACCOUNT_ID not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("days", "level"),
+    [pytest.param(2, "WARNING", id="2-days-below"), pytest.param(4, "ERROR", id="4-days-above")],
+)
+async def test_a_skipped_no_budget_on_an_aged_unstamped_key_escalates(
+    days: int, level: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("DEBUG")
+
+    outcome = await ai.stamp_account_identity(
+        FakeSupabase(), _key_row(created_at=_created_days_ago(days)), _okx_exchange(),
+        timeout_s=0.0,
+    )
+
+    assert outcome == "skipped_no_budget"
+    (rec,) = [r for r in caplog.records if "outcome=skipped_no_budget" in r.getMessage()]
+    assert rec.levelname == level
+    assert (_ESCALATION in rec.getMessage()) is (level == "ERROR")
+
+
+async def test_a_zulu_timestamp_is_read_as_utc(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("DEBUG")
+    aged = (datetime.now(UTC) - timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    await ai.stamp_account_identity(
+        FakeSupabase(), _key_row(created_at=aged), _okx_exchange(), timeout_s=0.0
+    )
+
+    assert len(_escalation_records(caplog)) == 1
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        # sFOX and MT5 are never stamped here (skipped_no_budget is decided
+        # before the venue check), so there is no check to be missing.
+        pytest.param({"exchange": "sfox"}, id="not-ccxt"),
+        pytest.param({"exchange": "mt5"}, id="mt5"),
+        # A stamped key's duplicate check has run; nothing is missing.
+        pytest.param({"venue_account_id": "70000002"}, id="already-stamped"),
+        # The column is NOT NULL and the poll loads select("*"), so an absent
+        # or unreadable value is a fixture artefact: no claim is made.
+        pytest.param({"created_at": None}, id="no-created-at"),
+        pytest.param({"created_at": "not a timestamp"}, id="unparseable"),
+    ],
+)
+async def test_no_escalation_where_no_duplicate_check_is_missing(
+    row: dict[str, Any], caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("DEBUG")
+    base = {"created_at": _created_days_ago(30)}
+    base.update(row)
+
+    await ai.stamp_account_identity(
+        FakeSupabase(), _key_row(**base), _okx_exchange(), timeout_s=0.0
+    )
+
+    assert _escalation_records(caplog) == []
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]

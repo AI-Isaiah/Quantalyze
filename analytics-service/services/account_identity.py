@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
 
 import ccxt
@@ -56,6 +57,7 @@ __all__ = [
     "DUPLICATE_DETECTED_AUDIT_ACTION",
     "MAX_VENUE_ACCOUNT_ID_LENGTH",
     "StampOutcome",
+    "UNSTAMPED_ESCALATION_DAYS",
     "VENUES_WITH_ACCOUNT_ID",
     "read_venue_account_id",
     "stamp_account_identity",
@@ -522,6 +524,48 @@ def _is_retryable(exc: BaseException) -> bool:
     return isinstance(exc, APIError) and exc.message in _RETRYABLE_TRIGGER_TOKENS
 
 
+# Review round 2 (SF2-M2): a retryable failure or ``skipped_no_budget`` is a
+# WARNING because the next poll may clear it. When it recurs every day, the key
+# is never stamped and its duplicate check never runs, and a WARNING never
+# reaches Sentry. So once a ccxt key is older than this many days and still
+# unstamped, the same line is logged at ERROR instead. Three daily polls is
+# long enough for a transient to have cleared.
+UNSTAMPED_ESCALATION_DAYS: Final = 3
+
+
+def _unstamped_for_too_long(key_row: Mapping[str, Any]) -> bool:
+    """Whether ``key_row`` should have been stamped by now and is not.
+
+    Only a venue this module stamps (:data:`VENUES_WITH_ACCOUNT_ID`) and only
+    while ``venue_account_id`` is NULL: for any other key no duplicate check is
+    missing. ``skipped_no_budget`` is decided before the venue check, which is
+    why the venue is checked here. ``created_at`` is ``NOT NULL`` on
+    ``api_keys`` and the poll loads the key with ``select("*")``
+    (``job_worker._allocator_key_preflight``), so an absent or unparseable
+    value is not a production state; it answers ``False``, making no claim.
+    A value without an offset is read as UTC.
+    """
+    if key_row.get("exchange") not in VENUES_WITH_ACCOUNT_ID:
+        return False
+    if key_row.get("venue_account_id") is not None:
+        return False
+    raw = key_row.get("created_at")
+    if not isinstance(raw, str):
+        return False
+    try:
+        created = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    return datetime.now(UTC) - created > timedelta(days=UNSTAMPED_ESCALATION_DAYS)
+
+
+_ESCALATION_NOTE: Final = (
+    f"key unstamped for >{UNSTAMPED_ESCALATION_DAYS} days; duplicate check not running"
+)
+
+
 async def stamp_account_identity(
     supabase: Any,
     key_row: Mapping[str, Any],
@@ -558,6 +602,10 @@ async def stamp_account_identity(
     - ``no_id`` is venue schema drift, as the validator treats it, and
       ``skipped_no_budget`` means this key's polls leave no time to check it
       for a duplicate, so both are WARNING. The routine outcomes stay INFO.
+    - Review round 2 (SF2-M2): a retryable failure or ``skipped_no_budget`` on
+      a ccxt key still unstamped more than :data:`UNSTAMPED_ESCALATION_DAYS`
+      after it was created is ERROR ("key unstamped for >N days; duplicate
+      check not running"): a WARNING that recurs daily never reaches Sentry.
     """
     key_id = key_row.get("id")
     venue = key_row.get("exchange")
@@ -570,11 +618,19 @@ async def stamp_account_identity(
             )
     except Exception as exc:  # noqa: BLE001 — the never-raising boundary
         if _is_retryable(exc):
-            logger.warning(
-                "account_identity: stamp failed for api_key %s (venue %s): "
-                "outcome=error class=%s code=%s — the next poll retries",
-                key_id, venue, type(exc).__name__, _error_code(exc),
-            )
+            if _unstamped_for_too_long(key_row):
+                logger.error(
+                    "account_identity: stamp failed for api_key %s (venue %s): "
+                    "outcome=error class=%s code=%s — %s",
+                    key_id, venue, type(exc).__name__, _error_code(exc),
+                    _ESCALATION_NOTE,
+                )
+            else:
+                logger.warning(
+                    "account_identity: stamp failed for api_key %s (venue %s): "
+                    "outcome=error class=%s code=%s — the next poll retries",
+                    key_id, venue, type(exc).__name__, _error_code(exc),
+                )
         else:
             logger.error(
                 "account_identity: stamp failed for api_key %s (venue %s): "
@@ -585,7 +641,13 @@ async def stamp_account_identity(
                 _safe_message(exc),
             )
         return "error"
-    if outcome == "skipped_no_budget":
+    if outcome == "skipped_no_budget" and _unstamped_for_too_long(key_row):
+        logger.error(
+            "account_identity: api_key %s (venue %s) outcome=%s budget_s=%.1f — "
+            "%s",
+            key_id, venue, outcome, timeout_s, _ESCALATION_NOTE,
+        )
+    elif outcome == "skipped_no_budget":
         logger.warning(
             "account_identity: api_key %s (venue %s) outcome=%s budget_s=%.1f — "
             "the poll used its handler time, so the key was not checked for a "
