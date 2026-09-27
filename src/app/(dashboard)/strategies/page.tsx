@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
+import { NowrapWords } from "@/components/ui/NowrapWords";
 import { Card } from "@/components/ui/Card";
 import { StrategyActions } from "@/components/strategy/StrategyActions";
 import { ShareableLink } from "@/components/strategy/ShareableLink";
@@ -770,14 +771,14 @@ export default async function StrategiesPage() {
             const shareNote = shareNotes.get(s.id);
             return (
               <Card key={s.id} data-testid="strategy-row">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex-1 min-w-0">
                     <Link href={`/strategies/${s.id}/edit`} className="font-medium text-text-primary hover:text-accent transition-colors">
-                      {s.name}
+                      <NowrapWords text={s.name} />
                     </Link>
-                    <div className="flex gap-1.5 mt-1">
+                    <div className="flex flex-wrap gap-1 mt-1">
                       {s.strategy_types.map((t: string) => (
-                        <Badge key={t} label={t} />
+                        <Badge key={t} label={t} className="whitespace-nowrap" />
                       ))}
                     </div>
                     {s.review_note && s.status === "draft" && (
@@ -786,7 +787,7 @@ export default async function StrategiesPage() {
                       </p>
                     )}
                   </div>
-                  <div className="flex items-center gap-3 ml-4">
+                  <div className="flex flex-wrap items-center gap-3 sm:ml-4 sm:shrink-0">
                     {/* Phase 164 (SHARE-04) — the status gate is GONE, and its
                         removal is the point, not a side effect. Hiding the control
                         for unpublished rows was the other half of the same
