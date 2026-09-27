@@ -38,6 +38,7 @@ import ccxt.async_support as ccxt
 import httpx
 import pandas as pd
 
+from services.allocator_equity_derive import eligible_key_predicate
 from services.ccxt_flow_fetch import _rate_limit_sleep, fetch_ccxt_transfers
 from services.closed_sets import (
     # A-03 — the MT5 go-dark gate. Added HERE, in the block this module already
@@ -1715,27 +1716,106 @@ async def _api_key_already_reconstructed(supabase: Any, api_key_id: str) -> bool
     return len(data) > 0
 
 
-async def _fetch_today_holdings(
+# The columns the refresh job reads from a holdings row. One list, so the
+# latest-asof read and the rows read cannot drift apart.
+_REFRESH_HOLDINGS_COLUMNS = (
+    "symbol, quantity, mark_price, value_usd, "
+    "unrealized_pnl_usd, venue, holding_type, api_key_id"
+)
+
+
+@dataclass(frozen=True)
+class _LatestHoldings:
+    """What ``_fetch_latest_holdings_per_eligible_key`` read. Counts only: no
+    USD figure and no key id leaves this object except inside ``rows``."""
+
+    rows: list[dict[str, Any]]
+    eligible_keys: int
+    carried_keys: int
+
+
+async def _fetch_latest_holdings_per_eligible_key(
     supabase: Any, allocator_id: str, today_iso: str
-) -> list[dict[str, Any]]:
-    def _sel() -> Any:
+) -> _LatestHoldings:
+    """Phase 167.1.2 D-07: every ELIGIBLE key's holdings at THAT key's own
+    latest ``asof`` on or before ``today_iso``.
+
+    Replaces the former ``_fetch_today_holdings``, which read only
+    ``asof = today``: a key that had not polled yet today contributed $0, so
+    the legacy snapshot showed the book losing that key's whole balance, and
+    first-writer-wins on (allocator_id, asof) then kept whichever patchwork of
+    keys the first job saw. There is no staleness horizon: a key is carried
+    for as long as ``eligible_key_predicate`` admits it, and drops out the day
+    it is revoked or disconnected.
+
+    Grain: per key, two reads. First the key's latest ``asof`` (the reduction
+    is ``max()`` in Python, so correctness never rests on the order a read
+    returns), then that key's rows at exactly that ``asof``.
+
+    A failed read RAISES. Swallowing it per key would persist a total missing
+    that key, and first-writer-wins would keep the short total for the day:
+    the $0 defect again. The job's own ``except`` turns the raise into a
+    FAILED job and a ``refresh_failed`` audit, and no row is written.
+    """
+
+    def _sel_keys() -> Any:
         return (
-            supabase.table("allocator_holdings")
+            supabase.table("api_keys")
             .select(
-                "symbol, quantity, mark_price, value_usd, "
-                "unrealized_pnl_usd, venue, holding_type, api_key_id"
+                "id, is_active, sync_status, disconnected_at, "
+                "account_share_kind, account_shared_with_api_key_id"
             )
-            .eq("allocator_id", allocator_id)
-            .eq("asof", today_iso)
+            .eq("user_id", allocator_id)
             .execute()
         )
 
-    try:
-        res = await db_execute(_sel)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("allocator_holdings read failed: %s", exc)
-        return []
-    return list(getattr(res, "data", None) or [])
+    key_rows: list[dict[str, Any]] = list(
+        getattr(await db_execute(_sel_keys), "data", None) or []
+    )
+    eligible = sorted(
+        (r for r in key_rows if eligible_key_predicate(r)),
+        key=lambda r: str(r.get("id")),
+    )
+
+    rows: list[dict[str, Any]] = []
+    carried = 0
+    for key_row in eligible:
+        key_id = key_row["id"]
+
+        def _sel_latest_asof(key_id: Any = key_id) -> Any:
+            return (
+                supabase.table("allocator_holdings")
+                .select("asof")
+                .eq("allocator_id", allocator_id)
+                .eq("api_key_id", key_id)
+                .lte("asof", today_iso)
+                .order("asof", desc=True)
+                .limit(1)
+                .execute()
+            )
+
+        asof_rows = getattr(await db_execute(_sel_latest_asof), "data", None) or []
+        asofs = [str(r["asof"]) for r in asof_rows if r.get("asof")]
+        if not asofs:
+            # Eligible but never polled: nothing to carry, and nothing to count.
+            continue
+        latest = max(asofs)
+
+        def _sel_rows(key_id: Any = key_id, latest: str = latest) -> Any:
+            return (
+                supabase.table("allocator_holdings")
+                .select(_REFRESH_HOLDINGS_COLUMNS)
+                .eq("allocator_id", allocator_id)
+                .eq("api_key_id", key_id)
+                .eq("asof", latest)
+                .execute()
+            )
+
+        rows.extend(getattr(await db_execute(_sel_rows), "data", None) or [])
+        if latest < today_iso:
+            carried += 1
+
+    return _LatestHoldings(rows=rows, eligible_keys=len(eligible), carried_keys=carried)
 
 
 # ---------------------------------------------------------------------------
@@ -3120,8 +3200,13 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
     today_iso = today.isoformat()
 
     try:
-        # Read today's holdings (populated by Phase 06 poll_allocator_positions)
-        holdings = await _fetch_today_holdings(ctx.supabase, allocator_id, today_iso)
+        # Phase 167.1.2 D-07: every eligible key at its own latest holdings
+        # (populated by Phase 06 poll_allocator_positions), so a key that has
+        # not polled yet today is carried, never counted as $0.
+        latest = await _fetch_latest_holdings_per_eligible_key(
+            ctx.supabase, allocator_id, today_iso
+        )
+        holdings = latest.rows
 
         # Compute single-day equity from holdings' value_usd fan-in.
         #
@@ -3158,8 +3243,8 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
             # Phase 71 (SC-3): Deribit equity is DEFERRED. reconstruct skips
             # venue=='deribit' (line ~2146); the daily refresh must too. A MIXED
             # allocator (e.g. OKX + Deribit) reaches refresh because OKX gave it
-            # equity snapshots, and _fetch_today_holdings returns ALL venues'
-            # rows — so without this guard the Deribit derivative uPnL would leak
+            # equity snapshots, and _fetch_latest_holdings_per_eligible_key
+            # returns ALL venues' rows — so without this guard the Deribit derivative uPnL would leak
             # into the equity curve (collateral-less: Deribit emits no spot rows,
             # only derivative uPnL, so folding it in is incoherent). The Deribit
             # positions still surface on the Holdings panel, which reads
@@ -3242,7 +3327,12 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
             _emit_audit(
                 allocator_id, api_key_id,
                 "allocator.equity.refresh_complete",
-                {"reason": "no_holdings_today", "venue": venue},
+                {
+                    "reason": "no_holdings_today",
+                    "venue": venue,
+                    "eligible_keys": latest.eligible_keys,
+                    "carried_keys": latest.carried_keys,
+                },
             )
             return DispatchResult(outcome=DispatchOutcome.DONE)
 
@@ -3274,11 +3364,16 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 "days_written": count,
                 "history_depth_months": depth_months,
                 "venue": venue,
+                # D-07 / T-167.1.2-32: counts only, never a USD figure.
+                "eligible_keys": latest.eligible_keys,
+                "carried_keys": latest.carried_keys,
             },
         )
         logger.info(
-            "refresh_allocator_equity_daily: upserted %d row for allocator=%s (key=%s, venue=%s)",
+            "refresh_allocator_equity_daily: upserted %d row for allocator=%s "
+            "(key=%s, venue=%s, eligible_keys=%d, carried_keys=%d)",
             count, allocator_id, api_key_id, venue,
+            latest.eligible_keys, latest.carried_keys,
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
     except ccxt.RateLimitExceeded as exc:
