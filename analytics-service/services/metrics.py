@@ -1334,9 +1334,15 @@ def _benchmark_pair(returns: pd.Series, benchmark: pd.Series) -> tuple[pd.Series
     pairs. Strategy NaN is RETAINED: each metric keeps its own existing NaN
     convention (pairwise drop for the scalars, the frame ``fillna(0)`` of
     ``_rolling_greeks``). An unpaired benchmark date never reaches any metric.
+
+    A strategy +-inf is read as NaN HERE, once (review WR-02), so every
+    benchmark-relative metric drops the same rows: correlation, beta and the
+    rest of the fan-out as well as r_squared. Before, only the two r_squared
+    helpers mapped it, and a strategy with one inf day persisted an ``ok``
+    r_squared beside a None correlation and beta.
     """
     _refuse_mismatched_day_labels(returns, benchmark)
-    r = _tz_naive_like_qs(returns).sort_index()
+    r = _tz_naive_like_qs(returns).sort_index().replace([np.inf, -np.inf], np.nan)
     b = _tz_naive_like_qs(benchmark)
     if r.index.has_duplicates or b.index.has_duplicates:
         raise ValueError(
@@ -1407,8 +1413,9 @@ def _r_squared(returns: pd.Series, benchmark: pd.Series) -> float:
     algebraically equal but not bit-identical to the golden, so it is not used.
 
     NaN CONVENTION (166.4 D-06): the strategy's +-inf is read as NaN (the part
-    of ``_prepared_returns_no_guess`` that is not a fill), and the regression
-    runs over pairwise-complete rows, the rows the persisted correlation uses.
+    of ``_prepared_returns_no_guess`` that is not a fill), once, inside
+    ``_benchmark_pair`` (review WR-02), and the regression runs over
+    pairwise-complete rows, the rows the persisted correlation uses.
     A strategy NaN day is dropped, no longer zero-filled for r_squared only.
 
     A pair whose legs label their days in different time zones is refused
@@ -1416,7 +1423,7 @@ def _r_squared(returns: pd.Series, benchmark: pd.Series) -> float:
     review round 2 IN-03).
     """
     r, b = _benchmark_pair(returns, benchmark)
-    pair = pd.concat([r.replace([np.inf, -np.inf], np.nan), b], axis=1).dropna()
+    pair = pd.concat([r, b], axis=1).dropna()
     _, _, r_val, _, _ = linregress(pair.iloc[:, 0], pair.iloc[:, 1])
     return float(r_val**2)
 
@@ -1447,7 +1454,7 @@ def _r_squared_pair_varies(returns: pd.Series, benchmark: pd.Series) -> bool:
       one-row pair reads "does not vary" and never "varies" (SFH R2-LOW-2).
     """
     r, b = _benchmark_pair(returns, benchmark)
-    pair = pd.concat([r.replace([np.inf, -np.inf], np.nan), b], axis=1).dropna()
+    pair = pd.concat([r, b], axis=1).dropna()
     p, b = pair.iloc[:, 0], pair.iloc[:, 1]
     return bool(
         len(p) >= 3

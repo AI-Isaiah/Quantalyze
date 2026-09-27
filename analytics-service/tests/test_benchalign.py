@@ -287,11 +287,27 @@ def _one_pairing_fixture(name: str) -> tuple[pd.Series, pd.Series]:
         strategy.iloc[[20, 71, 150]] = np.nan
         assert int(strategy.isna().sum()) == 3
         return strategy, benchmark
+    if name in ("dense_daily_with_pos_inf_day", "dense_daily_with_neg_inf_day"):
+        # Review WR-02: a strategy +-inf day is read as NaN ONCE, in
+        # ``_benchmark_pair``, so correlation, beta and r_squared all drop the
+        # same row. Before, r_squared dropped it while correlation and beta
+        # read the raw inf and came back None beside an "ok" r_squared.
+        strategy = strategy.copy()
+        strategy.iloc[97] = np.inf if name == "dense_daily_with_pos_inf_day" else -np.inf
+        assert int(np.isinf(strategy.to_numpy()).sum()) == 1 and strategy.notna().all()
+        return strategy, benchmark
     raise AssertionError(f"unknown fixture {name!r}")
 
 
 @pytest.mark.parametrize(
-    "fixture_name", ("sparse_weekday", "dense_daily", "dense_daily_with_nan_days")
+    "fixture_name",
+    (
+        "sparse_weekday",
+        "dense_daily",
+        "dense_daily_with_nan_days",
+        "dense_daily_with_pos_inf_day",
+        "dense_daily_with_neg_inf_day",
+    ),
 )
 def test_benchalign_one_pairing_r_squared_is_correlation_squared(fixture_name, caplog):
     """SC1 (166.4 D-A, D-06): the persisted r_squared is the square of the persisted correlation.
