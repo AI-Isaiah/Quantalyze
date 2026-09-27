@@ -19,9 +19,10 @@
 --     snapshots (as before, minus revoked keys), or for an unlinked key on a
 --     zero-snapshot book once every qualifying key on that book has a
 --     reconstruct job in flight or done (the book is BOOTSTRAPPED);
---   * run the bootstrap loop in its own sub-block, and catch a lost enqueue
---     race (serialization_failure) per key in both loops, so neither can
---     cancel the daily refresh of every allocator.
+--   * run the bootstrap loop in its own sub-block and each book in its own
+--     inner block, so an error enqueueing one book skips that book only, and
+--     catch a lost enqueue race (serialization_failure) per key in both loops,
+--     so neither can cancel the daily refresh of every allocator.
 --
 -- pgTAP is not set up in this project, so every assertion RAISEs
 -- `TEST FAILED (<arm>)` on failure and a clean run prints NOTICEs only.
@@ -125,7 +126,9 @@
 --   X1, X2, X3  all earlier: each mutation changes a handler, and only these
 --        groups install the fixture trigger that raises; each drops its
 --        trigger before its assertion. X1's 40001 is caught per key, so X2's
---        sub-block edit cannot touch it.
+--        per-book edit cannot touch it; under X1's own mutation the 40001
+--        reaches the per-book block and rolls back the refused key's SIBLING
+--        (k_a2), which is what X1 asserts.
 --   G    all: changes a grant only; no arm but G reads grants.
 -- A reviewer fix that adds an arm or changes a fixture adds its row here and
 -- re-walks the table before re-running.
@@ -134,7 +137,7 @@
 -- unique_violation half of the fan-out's per-key handlers or changing the
 -- refresh key is inert, and an arm whose every mutation is inert cannot bite.
 -- The serialization_failure half is NOT inert and is pinned by X1 (bootstrap
--- loop) and X3 (refresh loop); the bootstrap sub-block by X2.
+-- loop) and X3 (refresh loop); the per-book skip by X2.
 --
 -- Usage:
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/test_refresh_fanout_zero_snapshot_bootstrap.sql
@@ -187,7 +190,7 @@ BEGIN
   --            carries the correlation label request_allocator_holdings_sync
   --            writes. The label dedupes nothing: dedupe is the in-flight
   --            partial unique index and the in-flight-or-done NOT EXISTS.
-  -- RED-UNDER-M: {"arm":"Z2","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"              p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial',","replace":"              p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial-mutated',","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"Z2","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"                p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial',","replace":"                p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial-mutated',","occurrences":1}]}
   SELECT count(*) INTO v_n
     FROM compute_jobs
    WHERE api_key_id = k_z
@@ -1036,7 +1039,7 @@ BEGIN
   --            each book to before each key. The two-key book is then split:
   --            one key reconstructed, the sibling left for a run whose gate
   --            the first key's snapshot row has already closed.
-  -- RED-UNDER-M: {"arm":"S","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"        EXIT WHEN v_bootstrap_enqueued >= v_bootstrap_cap;\n        FOR v_rkey IN","replace":"        FOR v_rkey IN","occurrences":1},{"kind":"insert-after","file":"supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql","anchor":"          ORDER BY rk.created_at DESC, rk.id\n        LOOP","text":"\n          EXIT WHEN v_bootstrap_enqueued >= v_bootstrap_cap;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"        EXIT WHEN v_bootstrap_enqueued >= v_bootstrap_cap;\n","replace":"","occurrences":1},{"kind":"insert-after","file":"supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql","anchor":"            ORDER BY rk.created_at DESC, rk.id\n          LOOP","text":"\n            EXIT WHEN v_bootstrap_enqueued >= v_bootstrap_cap;","occurrences":1}]}
   SELECT count(*) FILTER (WHERE api_key_id = k_s1),
          count(*) FILTER (WHERE api_key_id = k_s2)
     INTO v_rec1, v_rec2
@@ -1049,10 +1052,13 @@ BEGIN
 END $grps$;
 
 -- ==========================================================================
--- GROUP X1 — a lost enqueue race in the BOOTSTRAP loop skips one key, not the
--- run (review SFH-02). A fixture trigger raises serialization_failure (40001,
--- the enqueue helper's lost-race signal) for one key's reconstruct; an older
--- book's key must still get its reconstruct in the same call.
+-- GROUP X1 — a lost enqueue race in the BOOTSTRAP loop skips one KEY, not its
+-- book and not the run (review SFH-02). A fixture trigger raises
+-- serialization_failure (40001, the enqueue helper's lost-race signal) for one
+-- key's reconstruct; the SIBLING key in the same book, enqueued after it, and
+-- an older book's key must still get their reconstructs in the same call.
+-- (Since review SFH-R2-03 an uncaught error skips only its own book, so the
+-- sibling is what tells a per-key catch from the per-book one.)
 -- ==========================================================================
 DO $grpx1$
 DECLARE
@@ -1061,7 +1067,9 @@ DECLARE
   uid_a  uuid := gen_random_uuid();
   uid_b  uuid := gen_random_uuid();
   k_refused uuid := gen_random_uuid();
+  k_a2   uuid := gen_random_uuid();
   k_b    uuid := gen_random_uuid();
+  v_rec_a2 int;
   v_rec_b int;
   v_ref_a int;
   v_err  text;
@@ -1077,8 +1085,9 @@ BEGIN
   VALUES (uid_b, 'fanout boot X1 other', 'test-fanout-boot-x1b-' || v_run || '@quantalyze.test')
   ON CONFLICT (id) DO NOTHING;
   INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, created_at)
-  VALUES (k_refused, uid_a, 'okx', 'fanout boot X1 refused', 'enc', true, v_base + INTERVAL '2 hours'),
-         (k_b,       uid_b, 'okx', 'fanout boot X1 other',   'enc', true, v_base + INTERVAL '1 hour');
+  VALUES (k_refused, uid_a, 'okx',   'fanout boot X1 refused', 'enc', true, v_base + INTERVAL '2 hours'),
+         (k_a2,      uid_a, 'bybit', 'fanout boot X1 sibling', 'enc', true, v_base + INTERVAL '90 minutes'),
+         (k_b,       uid_b, 'okx',   'fanout boot X1 other',   'enc', true, v_base + INTERVAL '1 hour');
   CREATE FUNCTION public._fanout_boot_refuse() RETURNS trigger
   LANGUAGE plpgsql AS $f$
   BEGIN
@@ -1099,49 +1108,55 @@ BEGIN
   -- ----- X1 ---
   -- RED-UNDER: catch unique_violation ONLY in the bootstrap loop's per-key
   --            handler in migration 20260927120000. The 40001 then reaches the
-  --            sub-block, which rolls back every bootstrap enqueue of the run,
-  --            so one lost race costs every book its reconstruct that day.
-  -- RED-UNDER-M: {"arm": "X1", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "EXCEPTION WHEN unique_violation OR serialization_failure THEN\n            RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: reconstruct enqueue skipped", "replace": "EXCEPTION WHEN unique_violation THEN\n            RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: reconstruct enqueue skipped", "occurrences": 1}]}
-  SELECT count(*) FILTER (WHERE api_key_id = k_b AND kind = 'reconstruct_allocator_history'),
+  --            per-book block, which rolls back the whole book, so one lost
+  --            race costs the refused key's SIBLING its reconstruct.
+  -- RED-UNDER-M: {"arm": "X1", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "EXCEPTION WHEN unique_violation OR serialization_failure THEN\n              RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: reconstruct enqueue skipped", "replace": "EXCEPTION WHEN unique_violation THEN\n              RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: reconstruct enqueue skipped", "occurrences": 1}]}
+  SELECT count(*) FILTER (WHERE api_key_id = k_a2 AND kind = 'reconstruct_allocator_history'),
+         count(*) FILTER (WHERE api_key_id = k_b AND kind = 'reconstruct_allocator_history'),
          count(*) FILTER (WHERE api_key_id = k_refused AND kind = 'refresh_allocator_equity_daily')
-    INTO v_rec_b, v_ref_a
+    INTO v_rec_a2, v_rec_b, v_ref_a
     FROM compute_jobs
-   WHERE api_key_id IN (k_refused, k_b);
-  IF v_err IS NOT NULL OR v_rec_b <> 1 OR v_ref_a <> 0 THEN
-    RAISE EXCEPTION 'TEST FAILED (X1): with one key''s reconstruct enqueue losing a race (40001), the call raised SQLSTATE % (expected none), another book''s key got % reconstruct job(s) (expected 1), and the refused key got % refresh job(s) (expected 0). One lost race must skip one key, not the whole bootstrap.', v_err, v_rec_b, v_ref_a;
+   WHERE api_key_id IN (k_refused, k_a2, k_b);
+  IF v_err IS NOT NULL OR v_rec_a2 <> 1 OR v_rec_b <> 1 OR v_ref_a <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (X1): with one key''s reconstruct enqueue losing a race (40001), the call raised SQLSTATE % (expected none), the refused key''s sibling in the same book got % reconstruct job(s) (expected 1), another book''s key got % (expected 1), and the refused key got % refresh job(s) (expected 0). One lost race must skip one key, not its book or the whole bootstrap.', v_err, v_rec_a2, v_rec_b, v_ref_a;
   END IF;
 END $grpx1$;
 
 -- ==========================================================================
--- GROUP X2 — an error in the BOOTSTRAP loop never cancels the refresh loop
--- (review SFH-02). A fixture trigger raises P0001 for one key's reconstruct;
--- a key on a book WITH snapshots must still get its refresh in the same call,
--- and the refused key's book, whose reconstruct was rolled back, must not.
+-- GROUP X2 — an error enqueueing ONE book skips that book only (review
+-- SFH-R2-03), and never cancels the refresh loop (review SFH-02). A fixture
+-- trigger raises P0001 for one key's reconstruct. An OLDER zero-snapshot
+-- book, taken after the refused one, must still get its reconstruct; a key on
+-- a book WITH snapshots must still get its refresh; and the refused key's
+-- book, whose enqueue was rolled back, must get no refresh.
 -- ==========================================================================
 DO $grpx2$
 DECLARE
   v_run  text := replace(gen_random_uuid()::text, '-', '');
   v_base timestamptz := now() + INTERVAL '100 years' + INTERVAL '51 days';
   uid_c  uuid := gen_random_uuid();
+  uid_b  uuid := gen_random_uuid();
   uid_d  uuid := gen_random_uuid();
   k_refused uuid := gen_random_uuid();
+  k_b    uuid := gen_random_uuid();
   k_d    uuid := gen_random_uuid();
+  v_rec_b int;
   v_ref_d int;
   v_ref_c int;
   v_err  text;
 BEGIN
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
-  VALUES (uid_c, '00000000-0000-0000-0000-000000000000', 'test-fanout-boot-x2c-' || v_run || '@quantalyze.test', now(), now());
+  VALUES (uid_c, '00000000-0000-0000-0000-000000000000', 'test-fanout-boot-x2c-' || v_run || '@quantalyze.test', now(), now()),
+         (uid_b, '00000000-0000-0000-0000-000000000000', 'test-fanout-boot-x2b-' || v_run || '@quantalyze.test', now(), now()),
+         (uid_d, '00000000-0000-0000-0000-000000000000', 'test-fanout-boot-x2d-' || v_run || '@quantalyze.test', now(), now());
   INSERT INTO profiles (id, display_name, email)
-  VALUES (uid_c, 'fanout boot X2 refused', 'test-fanout-boot-x2c-' || v_run || '@quantalyze.test')
-  ON CONFLICT (id) DO NOTHING;
-  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
-  VALUES (uid_d, '00000000-0000-0000-0000-000000000000', 'test-fanout-boot-x2d-' || v_run || '@quantalyze.test', now(), now());
-  INSERT INTO profiles (id, display_name, email)
-  VALUES (uid_d, 'fanout boot X2 snapshot', 'test-fanout-boot-x2d-' || v_run || '@quantalyze.test')
+  VALUES (uid_c, 'fanout boot X2 refused',  'test-fanout-boot-x2c-' || v_run || '@quantalyze.test'),
+         (uid_b, 'fanout boot X2 older',    'test-fanout-boot-x2b-' || v_run || '@quantalyze.test'),
+         (uid_d, 'fanout boot X2 snapshot', 'test-fanout-boot-x2d-' || v_run || '@quantalyze.test')
   ON CONFLICT (id) DO NOTHING;
   INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, created_at)
-  VALUES (k_refused, uid_c, 'okx', 'fanout boot X2 refused',  'enc', true, v_base + INTERVAL '2 hours'),
+  VALUES (k_refused, uid_c, 'okx', 'fanout boot X2 refused',  'enc', true, v_base + INTERVAL '3 hours'),
+         (k_b,       uid_b, 'okx', 'fanout boot X2 older',    'enc', true, v_base + INTERVAL '2 hours'),
          (k_d,       uid_d, 'okx', 'fanout boot X2 snapshot', 'enc', true, v_base + INTERVAL '1 hour');
   INSERT INTO allocator_equity_snapshots (allocator_id, asof, value_usd, source)
   VALUES (uid_d, DATE '2026-01-01', 100, 'exchange_primary');
@@ -1163,17 +1178,19 @@ BEGIN
   DROP FUNCTION public._fanout_boot_refuse();
 
   -- ----- X2 ---
-  -- RED-UNDER: make the bootstrap sub-block's WHEN OTHERS re-raise in
-  --            migration 20260927120000. The error then unwinds the whole
-  --            function, and no allocator gets its daily refresh that day.
-  -- RED-UNDER-M: {"arm": "X2", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "      RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap loop failed and was rolled back; the refresh loop still runs (SQLSTATE %: %)', SQLSTATE, SQLERRM;", "replace": "      RAISE;", "occurrences": 1}]}
-  SELECT count(*) FILTER (WHERE api_key_id = k_d AND kind = 'refresh_allocator_equity_daily'),
+  -- RED-UNDER: make the per-book block's WHEN OTHERS re-raise in migration
+  --            20260927120000. The P0001 then reaches the bootstrap
+  --            sub-block, which rolls back every bootstrap enqueue of the run,
+  --            so one refused book costs every later book its reconstruct.
+  -- RED-UNDER-M: {"arm": "X2", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "          RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap of one book was rolled back and skipped; the other books continue (api_key %, SQLSTATE %)', v_boot_key, SQLSTATE;", "replace": "          RAISE;", "occurrences": 1}]}
+  SELECT count(*) FILTER (WHERE api_key_id = k_b AND kind = 'reconstruct_allocator_history'),
+         count(*) FILTER (WHERE api_key_id = k_d AND kind = 'refresh_allocator_equity_daily'),
          count(*) FILTER (WHERE api_key_id = k_refused AND kind = 'refresh_allocator_equity_daily')
-    INTO v_ref_d, v_ref_c
+    INTO v_rec_b, v_ref_d, v_ref_c
     FROM compute_jobs
-   WHERE api_key_id IN (k_refused, k_d);
-  IF v_err IS NOT NULL OR v_ref_d <> 1 OR v_ref_c <> 0 THEN
-    RAISE EXCEPTION 'TEST FAILED (X2): with the bootstrap loop failing (P0001), the call raised SQLSTATE % (expected none), a key on a book WITH snapshots got % refresh job(s) (expected 1), and the refused zero-snapshot key got % (expected 0). A bootstrap error must never cancel the daily refresh of every allocator.', v_err, v_ref_d, v_ref_c;
+   WHERE api_key_id IN (k_refused, k_b, k_d);
+  IF v_err IS NOT NULL OR v_rec_b <> 1 OR v_ref_d <> 1 OR v_ref_c <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (X2): with one book''s reconstruct enqueue failing (P0001), the call raised SQLSTATE % (expected none), an older zero-snapshot book''s key got % reconstruct job(s) (expected 1), a key on a book WITH snapshots got % refresh job(s) (expected 1), and the refused key got % (expected 0). One failing book must skip that book only and never cancel the daily refresh.', v_err, v_rec_b, v_ref_d, v_ref_c;
   END IF;
 END $grpx2$;
 

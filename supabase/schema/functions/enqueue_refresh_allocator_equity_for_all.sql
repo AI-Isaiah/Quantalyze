@@ -24,6 +24,7 @@ DECLARE
   -- pg_cron calls once a day).
   v_bootstrap_cap CONSTANT integer := 25;
   v_bootstrap_enqueued integer := 0;
+  v_boot_key uuid;
 BEGIN
   IF NOT pg_try_advisory_lock(hashtext('daily_equity_refresh')) THEN
     RAISE NOTICE 'enqueue_refresh_allocator_equity_for_all: another run holds the lock; skipping';
@@ -34,11 +35,13 @@ BEGIN
     -- Phase 167.1.2 D-17: bootstrap a zero-snapshot book. Whole books, newest
     -- qualifying key first; never split a book across runs.
     -- ISOLATED (167.1.2-12 review SFH-02): this loop runs in its own
-    -- sub-block. Any error in it rolls back every bootstrap enqueue of this
-    -- run, logs a WARNING and falls through to the refresh loop, so a failure
-    -- here never cancels the daily refresh of every allocator. That is safe by
-    -- construction: a book whose reconstructs were rolled back is not
-    -- bootstrapped, so the refresh loop still withholds its refresh.
+    -- sub-block. An error that escapes the per-book block below (the
+    -- book-selection query itself, for one) rolls back every bootstrap
+    -- enqueue of this run, logs a WARNING and falls through to the refresh
+    -- loop, so a failure here never cancels the daily refresh of every
+    -- allocator. That is safe by construction: a book whose reconstructs were
+    -- rolled back is not bootstrapped, so the refresh loop still withholds its
+    -- refresh.
     BEGIN
       FOR v_book IN
         SELECT bq.user_id AS owner_id
@@ -56,36 +59,50 @@ BEGIN
         ORDER BY max(bq.created_at) DESC, bq.user_id
       LOOP
         EXIT WHEN v_bootstrap_enqueued >= v_bootstrap_cap;
-        FOR v_rkey IN
-          SELECT rk.id AS api_key_id
-          FROM api_keys rk
-          WHERE rk.user_id = v_book.owner_id
-            AND rk.is_active = TRUE
-            AND rk.sync_status IS DISTINCT FROM 'revoked'
-            AND coalesce(rk.sync_status, '') NOT IN ('sign_in_failed', 'error')
-            AND rk.disconnected_at IS NULL
-            AND lower(rk.exchange) <> 'deribit'
-            AND NOT EXISTS (SELECT 1 FROM strategies rks WHERE rks.api_key_id = rk.id AND rks.user_id = rk.user_id AND rks.status <> 'archived')
-            AND NOT EXISTS (SELECT 1 FROM strategy_keys rksk JOIN strategies rkks ON rkks.id = rksk.strategy_id WHERE rksk.api_key_id = rk.id AND rkks.user_id = rk.user_id AND rkks.status <> 'archived')
-            AND NOT EXISTS (SELECT 1 FROM compute_jobs rkj WHERE rkj.api_key_id = rk.id AND rkj.kind = 'reconstruct_allocator_history' AND rkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done'))
-          ORDER BY rk.created_at DESC, rk.id
-        LOOP
-          BEGIN
-            PERFORM enqueue_compute_job(
-              p_strategy_id     := NULL,
-              p_kind            := 'reconstruct_allocator_history',
-              p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial',
-              p_api_key_id      := v_rkey.api_key_id
-            );
-          -- serialization_failure is the enqueue helper's lost-race signal
-          -- (the winner already left the in-flight statuses). unique_violation
-          -- cannot fire today (the helper inserts ON CONFLICT DO NOTHING) and
-          -- is kept as belt. Either skips ONE key, never the run.
-          EXCEPTION WHEN unique_violation OR serialization_failure THEN
-            RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: reconstruct enqueue skipped for api_key % (SQLSTATE %)', v_rkey.api_key_id, SQLSTATE;
-          END;
-          v_bootstrap_enqueued := v_bootstrap_enqueued + 1;
-        END LOOP;
+        -- ONE BOOK AT A TIME (167.1.2-12 review SFH-R2-03): any other error
+        -- while enqueueing this book rolls back THIS book's enqueues only and
+        -- the loop moves on to the next book, so one key whose enqueue fails
+        -- every day cannot cancel every other book's bootstrap. The skipped
+        -- book has no in-flight-or-done reconstruct row, so the refresh loop
+        -- still withholds its refresh, and the next run takes it again.
+        v_boot_key := NULL;
+        BEGIN
+          FOR v_rkey IN
+            SELECT rk.id AS api_key_id
+            FROM api_keys rk
+            WHERE rk.user_id = v_book.owner_id
+              AND rk.is_active = TRUE
+              AND rk.sync_status IS DISTINCT FROM 'revoked'
+              AND coalesce(rk.sync_status, '') NOT IN ('sign_in_failed', 'error')
+              AND rk.disconnected_at IS NULL
+              AND lower(rk.exchange) <> 'deribit'
+              AND NOT EXISTS (SELECT 1 FROM strategies rks WHERE rks.api_key_id = rk.id AND rks.user_id = rk.user_id AND rks.status <> 'archived')
+              AND NOT EXISTS (SELECT 1 FROM strategy_keys rksk JOIN strategies rkks ON rkks.id = rksk.strategy_id WHERE rksk.api_key_id = rk.id AND rkks.user_id = rk.user_id AND rkks.status <> 'archived')
+              AND NOT EXISTS (SELECT 1 FROM compute_jobs rkj WHERE rkj.api_key_id = rk.id AND rkj.kind = 'reconstruct_allocator_history' AND rkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done'))
+            ORDER BY rk.created_at DESC, rk.id
+          LOOP
+            v_boot_key := v_rkey.api_key_id;
+            BEGIN
+              PERFORM enqueue_compute_job(
+                p_strategy_id     := NULL,
+                p_kind            := 'reconstruct_allocator_history',
+                p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial',
+                p_api_key_id      := v_rkey.api_key_id
+              );
+            -- serialization_failure is the enqueue helper's lost-race signal
+            -- (the winner already left the in-flight statuses). unique_violation
+            -- cannot fire today (the helper inserts ON CONFLICT DO NOTHING) and
+            -- is kept as belt. Either skips ONE key, never the run.
+            EXCEPTION WHEN unique_violation OR serialization_failure THEN
+              RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: reconstruct enqueue skipped for api_key % (SQLSTATE %)', v_rkey.api_key_id, SQLSTATE;
+            END;
+            v_bootstrap_enqueued := v_bootstrap_enqueued + 1;
+          END LOOP;
+        EXCEPTION WHEN OTHERS THEN
+          -- v_boot_key is the key being enqueued, or NULL when the per-key
+          -- query itself failed before the first key.
+          RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap of one book was rolled back and skipped; the other books continue (api_key %, SQLSTATE %)', v_boot_key, SQLSTATE;
+        END;
       END LOOP;
     EXCEPTION WHEN OTHERS THEN
       RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap loop failed and was rolled back; the refresh loop still runs (SQLSTATE %: %)', SQLSTATE, SQLERRM;
