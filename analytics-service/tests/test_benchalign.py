@@ -54,7 +54,10 @@ now unpaired instead of being paired with a two-day BTC move.
 SC2 (166.4-03): a benchmark gap is skipped, never filled; an absent or
 non-finite interior close d unpairs BOTH intervals it bounds, d and d + 1 day
 (``test_benchalign_gap_absent_close_unpairs_both_adjacent_intervals``,
-``test_benchalign_gap_non_finite_return_is_no_close``).
+``test_benchalign_gap_non_finite_return_is_no_close``). A benchmark date
+missing strictly INSIDE a multi-day interval unpairs that interval too
+(review WR-01,
+``test_benchalign_gap_missing_row_inside_a_weekday_interval_unpairs_it``).
 """
 
 from __future__ import annotations
@@ -787,3 +790,45 @@ def test_benchalign_gap_non_finite_return_is_no_close(bad_value):
     assert np.isfinite(b.to_numpy()).all()
     assert (b.to_numpy() == corrupted.loc[b.index].to_numpy()).all()
     assert (r.to_numpy() == strategy.loc[r.index].to_numpy()).all()
+
+
+def test_benchalign_gap_missing_row_inside_a_weekday_interval_unpairs_it():
+    """SC2 (166.4 D-A, review WR-01): a benchmark date missing STRICTLY INSIDE a weekday interval leaves that interval unpaired.
+
+    A weekday strategy's Monday interval is (Friday, Monday]. With the Saturday
+    RETURN row dropped from a contiguous 7-day benchmark, Friday and Monday are
+    both still closes, so the both-endpoints rule alone would pair the Monday
+    with Sunday and Monday compounded, silently reading Saturday's move as 0.
+    That is a fill across a gap. The helper takes returns, so it cannot tell a
+    missing return row from a missing price row, and it treats both as a gap:
+    the Monday is unpaired. Every other interval stays paired with the move
+    over its own interval, written from price ratios of the UNGAPPED benchmark
+    and never read off the helper under test.
+    """
+    benchmark = _contiguous_btc(16654)
+    idx = pd.bdate_range("2025-03-05", periods=60)
+    strategy = pd.Series(np.random.default_rng(16655).normal(0.0005, 0.01, len(idx)), index=idx)
+    s = strategy.index
+    saturday = s[s.dayofweek == 4][3] + pd.Timedelta(days=1)
+    monday = saturday + pd.Timedelta(days=2)
+    gapped = benchmark.drop(saturday)
+    # Preconditions: the strategy is a weekday calendar starting mid-week (so
+    # index 0 plays no part), it sits inside the benchmark's coverage, the
+    # benchmark was contiguous before the drop, the dropped date is a Saturday
+    # strictly inside the (Friday, Monday] interval, and both endpoints of that
+    # interval are still closes with finite returns.
+    assert strategy_calendar_is_sparse(s) is True
+    assert s[0].dayofweek == 2
+    assert s[0] > benchmark.index[0] and s[-1] < benchmark.index[-1]
+    assert (benchmark.index[1:] - benchmark.index[:-1] == _ONE_DAY).all()
+    assert saturday.dayofweek == 5 and saturday not in gapped.index and saturday not in s
+    assert monday in s and monday - pd.Timedelta(days=3) in s
+    assert np.isfinite(gapped[monday]) and np.isfinite(gapped[monday - pd.Timedelta(days=3)])
+
+    r, b = _benchmark_pair(strategy, gapped)
+    assert r.index.equals(b.index)
+    unpaired = s.difference(r.index)
+    assert unpaired.equals(pd.DatetimeIndex([monday])), list(unpaired)
+    assert (r.to_numpy() == strategy.loc[r.index].to_numpy()).all()
+    oracle = _price_ratio_interval_oracle(s, benchmark)
+    np.testing.assert_allclose(b.to_numpy(), oracle.loc[b.index].to_numpy(), rtol=1e-12, atol=0.0)

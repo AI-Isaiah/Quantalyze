@@ -1192,8 +1192,18 @@ def _interval_matched_benchmark(index: pd.DatetimeIndex, benchmark: pd.Series) -
     VALUE: exactly one benchmark return inside the interval is used VERBATIM
     (recomputing it as ``(1 + x) - 1`` breaks dense bit-identity at 1e-16); two
     or more are compounded, ``prod(1 + b) - 1``. When both endpoints are closes
-    this telescopes to ``price[t_k] / price[t_{k-1}] - 1`` even if BTC misses a
-    day strictly inside the interval.
+    and every date of the benchmark's own calendar inside the interval carries
+    a return, this telescopes to ``price[t_k] / price[t_{k-1}] - 1``.
+
+    INTERIOR GAPS (review WR-01): a date of the benchmark's own calendar
+    strictly inside the interval that carries no return UNPAIRS the interval.
+    A missing PRICE row would still telescope (``pct_change`` spans it), but a
+    missing RETURN row drops a move, and compounding past it reads that move
+    as 0, a fill across a gap. This helper receives returns, so it cannot tell
+    the two apart and treats both as a gap. The benchmark's calendar is the
+    set of weekdays it ever carries: seven for BTC, so a weekday strategy's
+    (Friday, Monday] interval needs Saturday and Sunday returns; five for a
+    business-day series, so the same interval needs the Monday return only.
 
     A CLOSE at date d exists iff d carries a finite benchmark return, or d is
     the base close (166.4 D-07 below). A NaN or +-inf benchmark return means no
@@ -1260,9 +1270,29 @@ def _interval_matched_benchmark(index: pd.DatetimeIndex, benchmark: pd.Series) -
     first[ks] = grouped["v"].first().to_numpy()
     compounded[ks] = grouped["growth"].prod().to_numpy() - 1.0
 
+    # [166.4 D-A, review WR-01] Every date of the benchmark's OWN calendar
+    # inside (t_{k-1}, t_k] must carry a return. The calendar is the set of
+    # weekdays the benchmark ever carries (all seven for BTC, Monday to Friday
+    # for a business-day series), so a weekend is a gap for BTC and not for a
+    # business-day benchmark. ``expected[k]`` counts those dates in the
+    # interval with a running count over the calendar days from t_0 to t_last;
+    # 1970-01-01 (day 0) is a Thursday, pandas ``dayofweek`` 3.
+    traded = np.zeros(7, dtype=bool)
+    traded[np.unique(np.asarray(b.index.dayofweek))] = True
+    day_num = (
+        np.asarray(index.values, dtype="datetime64[ns]").astype("datetime64[D]").astype("int64")
+    )
+    first_day = int(day_num[0])
+    calendar_days = np.arange(first_day, int(day_num[-1]) + 1, dtype="int64")
+    traded_to_date = np.cumsum(traded[(calendar_days + 3) % 7])
+    at_t = traded_to_date[day_num - first_day]
+    expected = np.zeros(n, dtype="int64")
+    expected[1:] = at_t[1:] - at_t[:-1]
+
     # [166.4 D-A] k >= 1 is paired iff t_k is a close, no benchmark value in the
-    # interval is non-finite, and the interval holds at least one return.
-    paired = is_close & ~any_nan & (count >= 1)
+    # interval is non-finite, the interval holds at least one return, and it
+    # holds a return for every date of the benchmark's calendar inside it.
+    paired = is_close & ~any_nan & (count >= 1) & (count == expected)
     # [166.4 D-04, ratified by the founder 2026-09-27] The t_{k-1} endpoint must
     # be a close too, WHICHEVER leg is sparser: a daily strategy's Monday
     # against a business-day benchmark has no close dated Sunday, so it is
