@@ -8,21 +8,22 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  *   - [{date, value}] shape, ascending by date, pct-change of close_price,
  *     first row dropped (no prior close) — mirrors benchmark.py prices_to_returns.
  *   - PUBLIC cacheable Cache-Control (shared market data) — NOT no-store/private.
- *   - Read error degrades to HTTP 200 with [] (honest empty state, never 500/red).
+ *   - An empty table is HTTP 200 with [] (honest empty state).
+ *   - A read error is 503 + no-store (Phase 169.2, SFH MD-05): never a cached 200 [].
  *   - NO tenant/user data — every object has exactly {date, value}.
  *
  * The supabase server client is mocked so the test is hermetic; the
- * `.from().select().eq().order()` chain (paged with `.range()` since Phase
- * 169.2) resolves against a per-test table.
+ * `.from().select().eq()[.lt()].order().limit()` chain (keyset-paged since
+ * Phase 169.2) resolves against a per-test table.
  */
 
-// The fake client mirrors PostgREST: `.from().select().eq()` then either an
-// UNRANGED terminal (`.order()` awaited directly) or a paged one
-// (`.order().range(a, b)`). EVERY read is capped at `table.cap` rows, the way
-// `max_rows` caps a real read, and answers 200 with a partial body. That cap is
-// what the pre-169.2 route fell to: an unranged ascending read of a table
-// larger than the cap returned the OLDEST rows and never the newest.
-const { table, mockOrder, mockEq, mockRange, mockFrom } = vi.hoisted(() => {
+// The fake client mirrors PostgREST: `.from().select().eq()`, an optional
+// keyset cursor `.lt("date", d)`, then `.order().limit(n)`. EVERY page is
+// capped at `table.cap` rows, the way `max_rows` caps a real read, and answers
+// 200 with a partial body. That cap is what the pre-169.2 route fell to: an
+// unranged ascending read of a table larger than the cap returned the OLDEST
+// rows and never the newest.
+const { table, mockOrder, mockEq, mockLimit, mockFrom } = vi.hoisted(() => {
   type Row = { date: string; close_price: unknown };
   const table: {
     rows: Row[] | null;
@@ -30,39 +31,46 @@ const { table, mockOrder, mockEq, mockRange, mockFrom } = vi.hoisted(() => {
     cap: number;
   } = { rows: [], error: null, cap: 1000 };
 
-  function answer(ascending: boolean, from: number, to: number) {
+  function answer(ascending: boolean, cursor: string | null, n: number) {
     if (table.error) return { data: null, error: table.error };
     if (table.rows === null) return { data: null, error: null };
-    const sorted = [...table.rows].sort((a, b) =>
-      ascending ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date),
-    );
-    const end = Math.min(to + 1, from + table.cap);
-    return { data: sorted.slice(from, end), error: null };
+    const sorted = table.rows
+      .filter((r) => cursor === null || r.date < cursor)
+      .sort((a, b) =>
+        ascending ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date),
+      );
+    return { data: sorted.slice(0, Math.min(n, table.cap)), error: null };
   }
 
-  const mockRange = vi.fn();
-  const mockOrder = vi.fn((_col: string, o: { ascending: boolean }) => {
-    const ascending = o?.ascending !== false;
-    return {
-      range: (from: number, to: number) => {
-        mockRange(from, to);
-        return Promise.resolve(answer(ascending, from, to));
+  const mockLimit = vi.fn();
+  const mockOrder = vi.fn();
+  const mockEq = vi.fn();
+  const mockFrom = vi.fn(() => {
+    let cursor: string | null = null;
+    const b = {
+      select: () => b,
+      eq: (col: string, val: unknown) => {
+        mockEq(col, val);
+        return b;
       },
-      // Unranged terminal: awaiting `.order(...)` directly.
-      then: (
-        resolve: (v: unknown) => unknown,
-        reject?: (e: unknown) => unknown,
-      ) =>
-        Promise.resolve(answer(ascending, 0, Number.MAX_SAFE_INTEGER)).then(
-          resolve,
-          reject,
-        ),
+      lt: (_col: string, val: string) => {
+        cursor = val;
+        return b;
+      },
+      order: (col: string, o: { ascending: boolean }) => {
+        mockOrder(col, o);
+        const ascending = o?.ascending !== false;
+        return {
+          limit: (n: number) => {
+            mockLimit(n);
+            return Promise.resolve(answer(ascending, cursor, n));
+          },
+        };
+      },
     };
+    return b;
   });
-  const mockEq = vi.fn(() => ({ order: mockOrder }));
-  const mockSelect = vi.fn(() => ({ eq: mockEq }));
-  const mockFrom = vi.fn(() => ({ select: mockSelect }));
-  return { table, mockOrder, mockEq, mockRange, mockSelect, mockFrom };
+  return { table, mockOrder, mockEq, mockLimit, mockFrom };
 });
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -156,11 +164,12 @@ describe("GET /api/benchmark/btc", () => {
     expect(body.some((r) => r.date === "2024-01-01")).toBe(false);
   });
 
-  it("queries benchmark_prices for symbol BTC newest-first, in .range() pages", async () => {
+  it("queries benchmark_prices for symbol BTC newest-first, in keyset .limit() pages", async () => {
     // Phase 169.2 (D-08): this case used to pin `{ ascending: true }` on an
     // unranged read, which was the defect itself — PostgREST caps that read at
     // max_rows and returns the OLDEST rows. The read is now newest-first and
-    // paged; the reader hands the route an ascending series for the pct-change loop.
+    // keyset-paged; the reader hands the route an ascending series for the
+    // pct-change loop.
     setRows([
       { date: "2024-01-01", close_price: 100 },
       { date: "2024-01-02", close_price: 110 },
@@ -171,7 +180,7 @@ describe("GET /api/benchmark/btc", () => {
     expect(mockFrom).toHaveBeenCalledWith("benchmark_prices");
     expect(mockEq).toHaveBeenCalledWith("symbol", "BTC");
     expect(mockOrder).toHaveBeenCalledWith("date", { ascending: false });
-    expect(mockRange).toHaveBeenCalledWith(0, 999);
+    expect(mockLimit).toHaveBeenCalledWith(1000);
   });
 
   it("returns the NEWEST stored BTC day when the table holds more rows than one capped read", async () => {
@@ -210,18 +219,26 @@ describe("GET /api/benchmark/btc", () => {
     expect(cc).not.toContain("private");
   });
 
-  it("degrades to HTTP 200 with [] on a read error (never 500) AND captures the error", async () => {
+  it("answers a read error with 503 + no-store (never a cached 200 []) AND captures the error", async () => {
+    // Phase 169.2 SFH MD-05: this case used to pin `200 []` with the PUBLIC
+    // s-maxage/SWR header, which pinned ONE transient PostgREST error at the
+    // CDN as "no benchmark" for up to an hour (a day stale). Both callers
+    // (ScenarioComposer, the scenario-share page) treat any non-2xx as the
+    // neutral "unavailable" state, so the UI is unchanged; what changes is that
+    // the next request retries the read.
     setError();
     const { GET } = await import("./route");
     const res = await GET();
 
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual([]);
-    // still cacheable on the degraded path
-    expect(res.headers.get("Cache-Control") ?? "").toContain("public");
+    expect(res.status).toBe(503);
+    const cc = res.headers.get("Cache-Control") ?? "";
+    expect(cc).toContain("no-store");
+    expect(cc).not.toContain("s-maxage");
+    expect(cc).not.toContain("public");
+    // Static body: the raw DB error never reaches the caller.
+    expect(await res.json()).toEqual({ error: "Benchmark temporarily unavailable" });
 
-    // The degrade path MUST stay observable — a refactor that drops the
+    // The error path MUST stay observable — a refactor that drops the
     // server-side capture would otherwise make this a true silent failure
     // with a green suite. Pin that captureToSentry fired with the route tag.
     const { captureToSentry } = await import("@/lib/sentry-capture");
@@ -233,13 +250,23 @@ describe("GET /api/benchmark/btc", () => {
     );
   });
 
-  it("returns [] for an empty / missing benchmark_prices result (200)", async () => {
-    table.rows = null;
-    table.error = null;
+  it("returns 200 [] (cacheable) for an EMPTY benchmark_prices table", async () => {
+    setRows([]);
     const { GET } = await import("./route");
     const res = await GET();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([]);
+    expect(res.headers.get("Cache-Control") ?? "").toContain("public");
+  });
+
+  it("treats a page with neither data nor an error as a READ ERROR (503), not an empty table", async () => {
+    // SFH LW-03: a null page used to end the read as if the table were empty.
+    table.rows = null;
+    table.error = null;
+    const { GET } = await import("./route");
+    const res = await GET();
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Cache-Control") ?? "").toContain("no-store");
   });
 
   it("exposes NO tenant data — every object has exactly {date, value}", async () => {
@@ -309,17 +336,18 @@ describe("GET /api/benchmark/btc", () => {
   it("skips a point with a non-positive CURRENT close (finite-but-corrupt return)", async () => {
     // A zero/negative `close` yields a finite return <= -1 (<= -100%/day) that
     // passes the Number.isFinite(value) check and would silently poison TE/IR/beta.
-    // The numerator must be guarded for positivity, not only finiteness.
     //
-    // Phase 169.2: the 0 close is now dropped by the shared reader
-    // (`readBenchmarkPrices`) before the pct-change loop, so it is treated
-    // exactly like a MISSING day — the same way the loop already bridges any
-    // gap in the stored dates. What this case protects is unchanged: no return
-    // built on a non-positive close reaches the response.
+    // Phase 169.2 (review WR-04 / SFH MD-03): the shared reader now leaves the
+    // 0 close out of `prices` and REPORTS its date in `dropped`. The route must
+    // not bridge that hole: 110/100 − 1 stamped at 2024-01-03 would be a
+    // TWO-day move presented as a one-day return. So, exactly as before 169.2,
+    // a bad close at D yields no return at D and none at the next stored day.
+    // (This expectation was briefly rewritten to accept the bridged return; it
+    // is restored here.)
     setRows([
       { date: "2024-01-01", close_price: 100 },
-      { date: "2024-01-02", close_price: 0 }, // close <= 0 → row dropped by the reader
-      { date: "2024-01-03", close_price: 110 }, // bridges the dropped day: 110/100 − 1
+      { date: "2024-01-02", close_price: 0 }, // close <= 0 → left out, date reported
+      { date: "2024-01-03", close_price: 110 }, // would bridge the hole → skipped
       { date: "2024-01-04", close_price: 121 },
     ]);
     const { GET } = await import("./route");
@@ -330,9 +358,17 @@ describe("GET /api/benchmark/btc", () => {
       expect(Number.isFinite(r.value)).toBe(true);
       expect(r.value).toBeGreaterThan(-1); // no <= -100%/day corruption leaks through
     }
-    // The 0-close day never appears, and no point is built on it.
-    expect(body.map((r) => r.date)).toEqual(["2024-01-03", "2024-01-04"]);
-    expect(body[0].value).toBeCloseTo(0.1, 10); // 110/100 − 1
-    expect(body[1].value).toBeCloseTo(0.1, 10); // 121/110 − 1
+    expect(body).toEqual([{ date: "2024-01-04", value: expect.any(Number) }]);
+    expect(body[0].value).toBeCloseTo(0.1, 10); // 121/110 − 1
+
+    // The corrupt row is made visible, not silently dropped.
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+    expect(captureToSentry).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tags: expect.objectContaining({ stage: "dropped-closes" }),
+        extra: { dropped: ["2024-01-02"] },
+      }),
+    );
   });
 });

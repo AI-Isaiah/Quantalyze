@@ -26,8 +26,17 @@ interface FakeOptions {
   cap?: number;
   /** Answer an error on this 1-based page number. */
   errorOnPage?: number;
-  /** Never answer an empty page (a server that ignores the offset). */
-  neverEmpty?: boolean;
+  /** Answer `{ data: null, error: null }` on this 1-based page number. */
+  nullOnPage?: number;
+  /** Ignore the keyset cursor (`.lt`) and the offset: always serve the first rows. */
+  ignoreCursor?: boolean;
+  /**
+   * An endless table: every page is fabricated as fresh rows strictly older
+   * than the cursor, so the server never answers an empty page.
+   */
+  endless?: boolean;
+  /** Called after each page is answered (1-based), e.g. to insert a row. */
+  afterPage?: (page: number, table: Row[]) => void;
 }
 
 function isoDay(offsetDays: number): string {
@@ -43,13 +52,57 @@ function btcRows(n: number): Row[] {
   }));
 }
 
+/**
+ * A PostgREST-shaped fake. It answers BOTH terminals a reader could use: a
+ * keyset page (`.lt("date", cursor)` then `.limit(n)`) and an offset page
+ * (`.range(from, to)`), each capped at `cap` rows. Supporting both is what lets
+ * the insert-between-pages case prove the OFFSET reader wrong.
+ */
 function makeClient(table: Row[], opts: FakeOptions = {}) {
   const cap = opts.cap ?? 1000;
-  const calls = { pages: 0, ranges: [] as Array<[number, number]>, gte: [] as string[], lte: [] as string[] };
+  const calls = {
+    pages: 0,
+    ranges: [] as Array<[number, number]>,
+    limits: [] as number[],
+    lt: [] as string[],
+    gte: [] as string[],
+    lte: [] as string[],
+  };
 
   function builder() {
     const filters: Array<(r: Row) => boolean> = [];
     let ascending = true;
+    let cursor: string | null = null;
+
+    function answer(start: number, size: number) {
+      calls.pages += 1;
+      const page = calls.pages;
+      if (opts.errorOnPage === page) {
+        return { data: null, error: { message: "boom", code: "PGRST500" } };
+      }
+      if (opts.nullOnPage === page) return { data: null, error: null };
+      let data: Array<{ date: string; close_price: number | string }>;
+      if (opts.endless) {
+        const oldest = cursor ?? isoDay(100_000);
+        const base = Date.parse(`${oldest}T00:00:00Z`);
+        data = Array.from({ length: Math.min(size, cap) }, (_, i) => ({
+          date: new Date(base - (i + 1) * 86_400_000).toISOString().slice(0, 10),
+          close_price: 1,
+        }));
+      } else {
+        const sorted = table
+          .filter((r) => filters.every((f) => f(r)))
+          .filter((r) => opts.ignoreCursor || cursor === null || r.date < cursor)
+          .sort((x, y) => (ascending ? x.date.localeCompare(y.date) : y.date.localeCompare(x.date)));
+        const from = opts.ignoreCursor ? 0 : start;
+        data = sorted
+          .slice(from, from + Math.min(size, cap))
+          .map((r) => ({ date: r.date, close_price: r.close_price }));
+      }
+      opts.afterPage?.(page, table);
+      return { data, error: null };
+    }
+
     const b = {
       select: () => b,
       eq: (col: keyof Row, val: string) => {
@@ -66,25 +119,22 @@ function makeClient(table: Row[], opts: FakeOptions = {}) {
         filters.push((r) => String(r[col]) <= val);
         return b;
       },
+      lt: (_col: string, val: string) => {
+        calls.lt.push(val);
+        cursor = val;
+        return b;
+      },
       order: (_col: string, o: { ascending: boolean }) => {
         ascending = o.ascending;
         return b;
       },
+      limit: async (n: number) => {
+        calls.limits.push(n);
+        return answer(0, n);
+      },
       range: async (from: number, to: number) => {
-        calls.pages += 1;
         calls.ranges.push([from, to]);
-        if (opts.errorOnPage === calls.pages) {
-          return { data: null, error: { message: "boom", code: "PGRST500" } };
-        }
-        const sorted = table
-          .filter((r) => filters.every((f) => f(r)))
-          .sort((x, y) => (ascending ? x.date.localeCompare(y.date) : y.date.localeCompare(x.date)));
-        const start = opts.neverEmpty ? 0 : from;
-        const end = Math.min(to + 1, start + cap);
-        return {
-          data: sorted.slice(start, end).map((r) => ({ date: r.date, close_price: r.close_price })),
-          error: null,
-        };
+        return answer(from, to - from + 1);
       },
     };
     return b;
@@ -111,6 +161,7 @@ describe("readBenchmarkPrices", () => {
     expect(dates).toEqual([...dates].sort());
     // Three full pages, then the EMPTY page that ends the loop.
     expect(calls.pages).toBe(4);
+    expect(calls.limits).toEqual([1000, 1000, 1000, 1000]);
   });
 
   it("advances by the rows actually received, so a server cap below the page size still reads everything", async () => {
@@ -127,7 +178,8 @@ describe("readBenchmarkPrices", () => {
     expect(res.prices).toHaveLength(1500);
     expect(new Set(res.prices.map((p) => p.date)).size).toBe(1500);
     expect(res.through).toBe(table[1499].date);
-    expect(calls.ranges.map(([from]) => from)).toEqual([0, 400, 800, 1200, 1500]);
+    // Each page after the first is keyed on the oldest date already read.
+    expect(calls.lt).toEqual([table[1100].date, table[700].date, table[300].date, table[0].date]);
   });
 
   it("requests only [from, to] and reports through = the newest row inside the bound", async () => {
@@ -156,7 +208,7 @@ describe("readBenchmarkPrices", () => {
     expect(res).not.toHaveProperty("prices");
   });
 
-  it("coerces numeric-STRING closes and drops non-finite or non-positive ones", async () => {
+  it("coerces numeric-STRING closes, leaves out non-finite or non-positive ones, and reports their dates", async () => {
     const table: Row[] = [
       { date: "2024-01-01", symbol: "BTC", close_price: "68000.50" },
       { date: "2024-01-02", symbol: "BTC", close_price: "0" },
@@ -175,21 +227,80 @@ describe("readBenchmarkPrices", () => {
         { date: "2024-01-05", close: 69000 },
       ],
       through: "2024-01-05",
+      // Every left-out close is REPORTED, ascending, so a consumer can refuse
+      // to build a return across the hole (169.2 review WR-04).
+      dropped: ["2024-01-02", "2024-01-03", "2024-01-04"],
     });
   });
 
   it("an empty table is ok with no prices and through = null", async () => {
     const { client } = makeClient([]);
-    expect(await readBenchmarkPrices(client, "BTC")).toEqual({ ok: true, prices: [], through: null });
+    expect(await readBenchmarkPrices(client, "BTC")).toEqual({
+      ok: true,
+      prices: [],
+      through: null,
+      dropped: [],
+    });
   });
 
   it("a server that never answers an empty page ends in an error at the page ceiling, not an endless loop", async () => {
-    const { client, calls } = makeClient(btcRows(10), { neverEmpty: true });
+    const { client, calls } = makeClient([], { endless: true });
 
     const res = await readBenchmarkPrices(client, "BTC");
 
     expect(res.ok).toBe(false);
     expect(calls.pages).toBe(BENCHMARK_MAX_PAGES);
+  });
+
+  it("a server that ignores the cursor is an error at the first repeated day, never a duplicated series", async () => {
+    const { client, calls } = makeClient(btcRows(10), { ignoreCursor: true });
+
+    const res = await readBenchmarkPrices(client, "BTC");
+
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(String(res.error)).toContain("not strictly older than");
+    expect(calls.pages).toBe(2);
+  });
+
+  it("a page with neither data nor an error is an ERROR, not the end of the table (SFH LW-03)", async () => {
+    // 2500 rows: page 1 is full, page 2 answers { data: null, error: null }.
+    // Reading that as "no more rows" would hand back 1000 of 2500 days as a
+    // complete series.
+    const { client } = makeClient(btcRows(2500), { nullOnPage: 2 });
+
+    const res = await readBenchmarkPrices(client, "BTC");
+
+    expect(res.ok).toBe(false);
+    expect(res).not.toHaveProperty("prices");
+  });
+
+  it("a NEW newest day upserted between two pages neither repeats nor skips a stored day (review WR-03 / SFH MD-04)", async () => {
+    // WHY: the daily refresh cron upserts a new newest BTC day, and a table of
+    // more than 1000 days is always read in at least two pages. Newest-first,
+    // an insert lands at the head: with OFFSET paging every row shifts down one
+    // place, page 2 re-reads page 1's last row, and the route stamps a spurious
+    // 0 return on a duplicated date that feeds beta / TE / IR. A keyset cursor
+    // anchored on a date is immune.
+    const table = btcRows(1500);
+    const original = table.map((r) => r.date);
+    const newest = isoDay(1500);
+    const { client } = makeClient(table, {
+      afterPage: (page, t) => {
+        if (page === 1) t.push({ date: newest, symbol: "BTC", close_price: 99_999 });
+      },
+    });
+
+    const res = await readBenchmarkPrices(client, "BTC");
+
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const dates = res.prices.map((p) => p.date);
+    expect(new Set(dates).size).toBe(dates.length);
+    // Exactly the days that were stored when the read began; the day inserted
+    // mid-read is above the cursor and is simply not part of this read.
+    expect(dates).toEqual(original);
+    expect(res.through).toBe(original[original.length - 1]);
   });
 });
 

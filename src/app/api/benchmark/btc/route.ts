@@ -43,10 +43,16 @@ import {
  * header instead. `benchmark.py` upserts on a ~daily cadence and rejects cache
  * older than 48h, so a 1h s-maxage with SWR is safely fresh.
  *
- * Honesty on failure: a read error OR an empty/missing result degrades to
- * HTTP 200 with `[]` (threat T-24-05 / Pitfall 5) so the composer renders the
- * neutral "Benchmark comparison unavailable" empty state — never a 500/red
- * alert. The raw DB error is logged + captured server-side, never surfaced.
+ * Honesty on failure: an empty/missing series (0 or 1 stored closes) is HTTP
+ * 200 with `[]` and the normal public cache, because "no data" is a fact about
+ * the table. A READ ERROR is different (169.2 SFH MD-05): it answers 503 with
+ * `Cache-Control: no-store`, so one transient PostgREST error is never pinned
+ * at the CDN as a cached `200 []` for the whole s-maxage/SWR window, and a
+ * caller can tell "unavailable" (D-09) from "no data". Both callers
+ * (`ScenarioComposer`'s mount fetch and the scenario-share page's
+ * `fetchBtcDaily`) already treat any non-2xx as the neutral "Benchmark
+ * comparison unavailable" empty state, never a red alert. The raw DB error is
+ * logged + captured server-side, never surfaced (static body).
  *
  * Security: no query params are accepted; the symbol is hard-coded 'BTC'
  * (V5 input-validation — no user input reaches SQL; CONTEXT locks BTC-only).
@@ -75,6 +81,10 @@ export interface BenchmarkReturnPoint {
 // stale-while-revalidate is appropriate — NOT private/no-store (the data is
 // identical for every caller and leaks nothing).
 const CACHE_CONTROL = "public, s-maxage=3600, stale-while-revalidate=86400";
+
+// A read error must not be cached anywhere (SFH MD-05): the next request has
+// to retry the read, not replay the failure.
+const ERROR_CACHE_CONTROL = "no-store";
 
 function emptyResponse(): NextResponse {
   return NextResponse.json([] as BenchmarkReturnPoint[], {
@@ -111,21 +121,43 @@ export async function GET(req?: Request): Promise<NextResponse> {
   // RLS `SELECT USING(true)` lets the anon SSR client read; it CANNOT write
   // (writes are service_role-only). The reader selects ONLY date + close_price,
   // so no other column can ever reach the response, coerces PostgREST's
-  // numeric-as-string closes, and drops a non-finite or non-positive close.
+  // numeric-as-string closes, and leaves out a non-finite or non-positive close,
+  // reporting its date in `read.dropped`.
   const read = await readBenchmarkPrices(supabase, "BTC");
 
   if (!read.ok) {
-    // Degrade to the honest empty state — never a 500/red envelope. The raw
-    // Postgres error (column names / SQLSTATE / schema detail) is logged +
-    // captured server-side only. D-09: a read error is never replaced by the
-    // bundled fixture.
+    // Non-2xx and never cached (SFH MD-05). The raw Postgres error (column
+    // names / SQLSTATE / schema detail) is logged + captured server-side only.
+    // D-09: a read error is never replaced by the bundled fixture.
     console.error("[api/benchmark/btc] select error:", read.error);
     captureToSentry(read.error, { tags: { route: "api/benchmark/btc" } });
-    return emptyResponse();
+    return NextResponse.json(
+      { error: "Benchmark temporarily unavailable" },
+      { status: 503, headers: { "Cache-Control": ERROR_CACHE_CONTROL } },
+    );
   }
 
-  const rows = read.prices.map((p) => ({ date: p.date, close_price: p.close }));
-  if (rows.length < 2) {
+  if (read.dropped.length > 0) {
+    // A stored close that cannot price a return is corrupt data in shared
+    // market prices. Make it visible instead of letting it vanish.
+    console.warn(
+      "[api/benchmark/btc] dropped unusable closes:",
+      read.dropped.length,
+    );
+    captureToSentry(
+      new Error(
+        `benchmark_prices holds ${read.dropped.length} unusable BTC close(s)`,
+      ),
+      {
+        tags: { route: "api/benchmark/btc", stage: "dropped-closes" },
+        level: "warning",
+        extra: { dropped: read.dropped },
+      },
+    );
+  }
+
+  const prices = read.prices;
+  if (prices.length < 2) {
     // 0 or 1 rows → no daily return can be derived (every return needs a prior
     // close). Honest empty series.
     return emptyResponse();
@@ -134,33 +166,29 @@ export async function GET(req?: Request): Promise<NextResponse> {
   // Daily returns via pct-change, mirroring benchmark.py `prices_to_returns`
   // (`pct_change().dropna()`): the first row is dropped (no prior close), and
   // each value = close / prevClose − 1, stamped at the current row's date.
+  //
+  // Validity is owned by the READER (169.2 review WR-04 / IN-02): every close
+  // in `prices` is already a finite positive number, so this loop does not
+  // re-check it. What the loop owns is the HOLE a dropped close leaves: a
+  // return whose two closes straddle a dropped date would be a multi-day move
+  // stamped as one day, so it is skipped. This is the pre-169.2 behaviour: a
+  // bad close at D produced no return at D and none at the next stored day.
+  // (A day with NO stored row at all is still bridged, as it was before 169.2.)
+  const dropped = read.dropped;
+  let d = 0;
   const series: BenchmarkReturnPoint[] = [];
-  for (let i = 1; i < rows.length; i += 1) {
-    // PostgREST serializes Postgres `numeric`/`DECIMAL` as JSON STRINGS to
-    // preserve precision (even though database.types.ts:459 types close_price
-    // as `number`), so the driver may yield either a string or a number.
-    // Coerce BOTH ends with Number(...) before the finite/positive guards
-    // (mirrors benchmark.py `.astype(float)` and the asNumber DB-numeric
-    // contract in portfolio-analytics-adapter.ts). The existing `<= 0` /
-    // non-finite guards still neutralize the empty/null cases —
-    // Number("") === 0 and Number(null) === 0 are caught by `prevClose <= 0`.
-    const prevClose = Number(rows[i - 1].close_price);
-    const close = Number(rows[i].close_price);
-    // Guard a null/zero/negative/non-finite close on EITHER end: skip the point
-    // rather than emit Infinity/NaN or a finite-but-corrupt return (a non-positive
-    // `close` yields value <= -1, i.e. <= -100%/day, which would silently poison
-    // TE/IR/beta downstream). A non-finite return would corrupt them too.
-    if (
-      !Number.isFinite(prevClose) ||
-      prevClose <= 0 ||
-      !Number.isFinite(close) ||
-      close <= 0
-    ) {
-      continue;
-    }
-    const value = close / prevClose - 1;
+  for (let i = 1; i < prices.length; i += 1) {
+    const prev = prices[i - 1];
+    const cur = prices[i];
+    // `dropped` and `prices` are both ascending: advance past every dropped
+    // date at or before `prev`, then any remaining one before `cur` sits in
+    // the gap between them.
+    while (d < dropped.length && dropped[d] <= prev.date) d += 1;
+    if (d < dropped.length && dropped[d] < cur.date) continue;
+    const value = cur.close / prev.close - 1;
+    // Reachable only on float overflow of an extreme ratio.
     if (!Number.isFinite(value)) continue;
-    series.push({ date: rows[i].date, value });
+    series.push({ date: cur.date, value });
   }
 
   return NextResponse.json(series, {

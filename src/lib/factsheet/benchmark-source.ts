@@ -15,15 +15,36 @@ import type { DailyPrice } from "./types";
  * The read here (D-08):
  *   - newest-first (`date` DESCENDING), so a truncation, if one ever happened,
  *     would drop the OLDEST days rather than the current ones;
- *   - `.range()` pages of BENCHMARK_PAGE_SIZE, looping until a page comes back
- *     EMPTY, advancing the offset by the rows ACTUALLY received. Stopping on a
- *     "short" page would be wrong: a server cap below the requested page size
- *     makes EVERY page short and would stop after the first one, which is the
- *     truncation this module exists to remove;
+ *   - KEYSET pages of BENCHMARK_PAGE_SIZE: each page after the first asks for
+ *     `date < <the oldest date already read>` with `.limit()`, looping until a
+ *     page comes back EMPTY. Stopping on a "short" page would be wrong: a
+ *     server cap below the requested page size makes EVERY page short and
+ *     would stop after the first one, which is the truncation this module
+ *     exists to remove;
+ *   - why keyset and not `.range()` offsets (169.2 review WR-03 / MD-04): the
+ *     daily refresh upserts a NEW NEWEST day, and newest-first an insert lands
+ *     at offset 0. An insert between two offset pages shifts every row down one
+ *     place, so the next page re-reads the previous page's last row and the
+ *     series carries the same date twice. A keyset cursor is anchored to a
+ *     DATE, so a row inserted above it is simply not read by this call;
  *   - `date` alone is a total order here: the primary key is `(date, symbol)`
- *     and `symbol` is filtered, so pages can neither skip nor repeat a row;
+ *     and `symbol` is filtered. The reader still CHECKS that the dates it
+ *     accumulates strictly decrease and returns an ERROR on a repeat or an
+ *     out-of-order row (a server that ignored the cursor), never a series
+ *     with a duplicated day;
  *   - a hard ceiling of BENCHMARK_MAX_PAGES returns an ERROR rather than
- *     looping forever against a server that never answers an empty page.
+ *     looping forever against a server that never answers an empty page;
+ *   - a page answering neither data nor an error is an ERROR, not the end of
+ *     the table (SFH LW-03): treating it as the end would return a partial
+ *     series as complete, the exact class this module exists to prevent.
+ *
+ * A stored close that is non-numeric, non-finite or non-positive cannot price
+ * a return, so it is left out of `prices`, and its date is reported in
+ * `dropped` (169.2 review WR-04 / MD-03). ⛔ A dropped date is a HOLE, not a
+ * missing day to bridge: a consumer that builds returns must not build one
+ * across it, or `close(D+1) / close(D-1) - 1` reaches the caller as a ONE-day
+ * return. `/api/benchmark/btc` is the enforcer for returns; any later consumer
+ * that derives returns from `prices` must honour `dropped` the same way.
  *
  * ⛔ A read error is an ERROR (D-09). It is never replaced by the bundled
  * fixture: a stale fixture served in place of a failed read is the stale
@@ -32,6 +53,13 @@ import type { DailyPrice } from "./types";
  * The reader takes an injected client and never creates one, so it carries no
  * `"use client"` directive and no request-scoped state; `mergeWithFixture` is a
  * pure function.
+ *
+ * `mergeWithFixture` has no production caller in THIS phase (169.2 review
+ * IN-01), deliberately: `/api/benchmark/btc` serves the DB series only. Its
+ * planned consumers are Phase 169 FACTSHEETTRUTH plan 169-02 (the factsheet's
+ * `fetchAndBuildPayload`), plan 169-03, and Phase 169.4 ALLOCTRUTH plan
+ * 169.4-02, which read BTC through `readBenchmarkPrices` and merge the bundled
+ * fixture strictly before the DB's first date (D-09).
  */
 
 export const BENCHMARK_PAGE_SIZE = 1000;
@@ -41,7 +69,17 @@ export const BENCHMARK_MAX_PAGES = 50;
 export type BenchmarkSymbol = "BTC";
 
 export type BenchmarkReadResult =
-  | { ok: true; prices: DailyPrice[]; through: string | null }
+  | {
+      ok: true;
+      prices: DailyPrice[];
+      through: string | null;
+      /**
+       * Ascending dates of stored rows whose close could not price a return
+       * (non-numeric, non-finite or non-positive). They are NOT in `prices`,
+       * and a consumer building returns must not bridge across one.
+       */
+      dropped: string[];
+    }
   | { ok: false; error: unknown };
 
 export interface BenchmarkReadOptions {
@@ -63,7 +101,9 @@ export async function readBenchmarkPrices(
   opts: BenchmarkReadOptions = {},
 ): Promise<BenchmarkReadResult> {
   const newestFirst: PriceRow[] = [];
-  let offset = 0;
+  // The keyset cursor: the oldest date read so far. The next page asks only
+  // for rows strictly older than it.
+  let before: string | null = null;
 
   for (let page = 0; ; page += 1) {
     if (page >= BENCHMARK_MAX_PAGES) {
@@ -81,28 +121,53 @@ export async function readBenchmarkPrices(
       .eq("symbol", symbol);
     if (opts.from) query = query.gte("date", opts.from);
     if (opts.to) query = query.lte("date", opts.to);
+    if (before !== null) query = query.lt("date", before);
 
     const { data, error } = await query
       .order("date", { ascending: false })
-      .range(offset, offset + BENCHMARK_PAGE_SIZE - 1);
+      .limit(BENCHMARK_PAGE_SIZE);
 
     if (error) return { ok: false, error };
+    if (data == null) {
+      return {
+        ok: false,
+        error: new Error("benchmark_prices page returned no data and no error"),
+      };
+    }
 
-    const rows = (data ?? []) as PriceRow[];
+    const rows = data as PriceRow[];
     if (rows.length === 0) break;
-    newestFirst.push(...rows);
-    offset += rows.length;
+    for (const row of rows) {
+      // Strictly decreasing, across pages too. A repeat or an out-of-order row
+      // means the server did not honour the cursor or the order; fail loud
+      // rather than hand back a series with a duplicated day.
+      if (before !== null && !(row.date < before)) {
+        return {
+          ok: false,
+          error: new Error(
+            `benchmark_prices page ${page + 1} returned ${row.date}, not strictly older than ${before}`,
+          ),
+        };
+      }
+      newestFirst.push(row);
+      before = row.date;
+    }
   }
 
   const prices: DailyPrice[] = [];
+  const dropped: string[] = [];
   for (let i = newestFirst.length - 1; i >= 0; i -= 1) {
     const row = newestFirst[i];
     // PostgREST serializes Postgres `numeric` as a JSON STRING to keep
-    // precision, so the close may arrive as a string. Coerce, then drop a
-    // non-finite or non-positive close: it cannot price a return, and a zero
-    // close would turn the next day's return into a division by zero.
+    // precision, so the close may arrive as a string. Coerce, then leave out a
+    // non-finite or non-positive close (it cannot price a return, and a zero
+    // close would turn the next day's return into a division by zero), and
+    // record its date so no consumer bridges the hole it leaves.
     const close = Number(row.close_price);
-    if (!Number.isFinite(close) || close <= 0) continue;
+    if (!Number.isFinite(close) || close <= 0) {
+      dropped.push(row.date);
+      continue;
+    }
     prices.push({ date: row.date, close });
   }
 
@@ -110,6 +175,7 @@ export async function readBenchmarkPrices(
     ok: true,
     prices,
     through: prices.length > 0 ? prices[prices.length - 1].date : null,
+    dropped,
   };
 }
 
