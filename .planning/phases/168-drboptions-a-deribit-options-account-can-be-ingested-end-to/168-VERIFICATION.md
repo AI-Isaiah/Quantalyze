@@ -51,6 +51,7 @@ human_verification:
   - test: "Confirm the judgment-tier prohibitions from plans 01 to 03 (the verifier's reading below is a non-authoritative LLM-judge verdict)."
     expected: "No classification by change magnitude; no position/commission default for assignment; no supabase/ path in the diff; assignment not in _NATIVE_OPTIONS_SUMMARY_TYPES; exercise/expiry not cash-bearing; _SHAPE_FIELDS gains no identifier; no agent ran the plan 03 retry."
     why_human: "Judgment-tier prohibitions need explicit human resolution in interactive verification."
+    result: "CONFIRMED 2026-09-27 by the orchestrator, acting as the interactive human on the founder's instruction. Evidence re-measured at merge commit 3b923498e (PR #867): (1) no supabase/ path: `git show --stat 3b923498e` lists 0 supabase/ paths; (2) no position/commission default for assignment: the only added `.get(\"position\")` in the analytics-service diff takes no default, and it refuses a nonzero position on an expiry row with LedgerValuationError (D-09); (3) `_NATIVE_OPTIONS_SUMMARY_TYPES` in services/deribit_txn.py is frozenset({\"options_settlement_summary\"}), so assignment is not in it; (4) `_SHAPE_FIELDS` in services/deribit_txn.py is type, currency, change, instrument_name, timestamp, side, commission, position, and it gains no identifier (only commission and position were added). NOT re-measured, and taken from the verifier's table: no classification by change magnitude (evidence carries a boolean only); exercise/expiry not classified as cash-bearing; no agent performed the plan 03 retry."
 ---
 
 # Phase 168: DRBOPTIONS Verification Report
@@ -170,7 +171,7 @@ runs without a HIGH or CRITICAL finding (round 2 had 0 critical, 0 high, 1 warni
      routed to its own phase.
    - **Caveat:** the smoothed pass is behind `SMOOTHED_MTM_ENABLED`, whose production value is
      unmeasured, so the retry may not exercise D-09 at all.
-2. **Judgment-tier prohibitions.** Confirm the table above.
+2. **Judgment-tier prohibitions.** Confirm the table above. ✅ Confirmed 2026-09-27 by the orchestrator as the interactive human. Four rows were re-measured at `3b923498e`, and three were taken from the verifier's reading (see the item's `result:`).
 
 ### Gaps Summary
 

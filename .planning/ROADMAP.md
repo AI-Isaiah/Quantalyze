@@ -92,10 +92,10 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites** (INSERTED)
 - [x] **Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral** (INSERTED)
 - [ ] **Phase 164.4.2: SUBSETSPLIT — `sql-mutation` runs only the CHANGED gate files on a PR, with a scheduled full-corpus run that still enforces the floors, because `timeout-minutes` has taken its ONE allowed raise and 20 is a declared CEILING. Owner of TODOS `[REDUNDER-SUBSET-SPLIT]`, booked 2026-09-05 by Phase 164.4.1 and unowned since. NOT hygiene: when `sql-mutation` times out the job dies and EVERY SQL gate stops being enforced — those gates pin RLS, tenant isolation and ledger correctness, so the failure mode is the controls silently stop firing, which is this milestone whole subject. MEASURED TREND moving the wrong way: run 33961609382 @ 1aa8bb70 = 363 arms / 451 legs / 567 s (9.45 min); run 33973362161 @ ab0d5644 = 361 arms / 449 legs / 646 s (10.8 min) — FEWER legs, SLOWER run, ~80 s of pure runner variance. Phase 164.1.1 then added arms twice more: plan 01 measured 491 legs / ~975 s and plan 02 measured 496 legs / ~1020 s locally, both flagged in ci.yml as closer to the ceiling than any prior reading. SCOPE: (1) a runner subset mode (--changed against a base ref) in scripts/mutation-runner/run.mjs; (2) the .github/workflows/ci.yml wiring that selects it on PRs; (3) a scheduled full-corpus job that still enforces FILES_FLOOR/ARMS_FLOOR, since the subset cannot. LOCKED (164.4-CONTEXT.md): 20 minutes is the CEILING — if a MEASURED ubuntu run reaches it, the answer is this phase, NEVER a third timeout-minutes value. The split MUST BE PRINTED on every run, never silent: a subset that does not say it is a subset is the same defect class as a gate reporting PASS having measured nothing.** (INSERTED) — verification: human_needed
-- [ ] **Phase 164.4.2.1: DRIFTOFFMUTEX — `test-db-drift` stops waiting on the shared-TEST advisory lock to do seconds of VAC-08 work, so a merge push's critical path falls back inside its BEFORE band** (INSERTED) — verification: human_needed
+- [x] **Phase 164.4.2.1: DRIFTOFFMUTEX — `test-db-drift` stops waiting on the shared-TEST advisory lock to do seconds of VAC-08 work, so a merge push's critical path falls back inside its BEFORE band** (INSERTED)
 - [x] **Phase 164.5: BASELINE-SNAPSHOT — the committed PROD schema baseline becomes the local stack's source and a gate, and the one production object no migration owns is dispositioned under review** (INSERTED)
 - [x] **Phase 164.5.1: CRONREPOINT — the live `match_engine_cron` row is repointed at the mechanism the repo actually describes, and the migration-vs-runbook rule is settled first** (INSERTED)
-- [ ] **Phase 164.5.1.1: FANOUTCOHORT — the ledger-refresh fan-out admits the `private` status, so it stops enqueuing nothing for every strategy that exists** (INSERTED) — verification: gaps_found
+- [x] **Phase 164.5.1.1: FANOUTCOHORT — the ledger-refresh fan-out admits the `private` status, so it stops enqueuing nothing for every strategy that exists** (INSERTED)
 - [x] **Phase 164.5.1.2: FANOUTSIBLINGS — the daily position poll never runs for a single real strategy, and the sync constant lets the cursor lie: measure, then decide** (INSERTED)
 - [x] **Phase 164.5.1.3: SYNCADMIT — admit the owner-only status to the trade-sync constant, or prove it must not be: 5 of 5 private keys are never synced and their trades are never stored** (INSERTED)
 - [x] **Phase 164.5.1.4: SYNCCURSOR — the sync cursor is per-KEY while stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies trade window** (INSERTED)
@@ -3263,6 +3263,8 @@ The wait grows with the number of open PRs, because every one of them contends f
 - Phase 164.4.2 moved `sql-tests` to `scripts/local-stack/run.sh`.
 - Phase 164.4.2.1 took `test-db-drift` off the key.
 
+⭐ **ROUTED HERE 2026-09-27 (founder, "Pass it, route SC-3 to 164.9.4"; Phase 164.4.2.1 CONTEXT D-11):** Phase 164.4.2.1's SC-3 speed claim measured FAIL on clauses (a) and (c) on five graded merge-push runs (`36228159891`, `36242744753`, `36247495409`, `36251087509`, `36262210635`; run-totals 20m51s–25m42s against 18m50s; `python` + `e2e-seeded` acquire-wait 8m56s–14m00s against 8m25s). `test-db-drift` is off the key and off the critical path; the residual is `e2e-seeded` waiting while `python` holds the key (python's pytest step 9m00s–13m56s). Taking both jobs off the key is this phase's goal, so 164.4.2.1's residual is owned here. Re-grade against `164.4.2.1-MEASUREMENT.md` `## Verdict rule` when this phase lands.
+
 ## Success Criteria
 1. Neither job acquires advisory key `61616158`.
 2. Each job boots its own local-stack or pg-lane database, behind a loopback-DSN guard.
@@ -3652,6 +3654,21 @@ Plans:
    - A tab switch on /allocations does not re-run the whole server render.
 6. **Recompute on PROD.** Affected rows are recomputed after the merge, behind a read-only census first.
 
+**⭐ FOLDED IN 2026-09-27 (founder, via AskUserQuestion: "Fold into 167.1.2 PR C" for both; found in the 2026-09-27 browser pass, root-caused read-only):**
+
+7. **A book with zero equity snapshots never gets a daily row.** `enqueue_refresh_allocator_equity_for_all` enqueues only keys whose allocator already has an `allocator_equity_snapshots` row. `reconstruct_allocator_history` is enqueued only by a user-initiated sync. So a book at 0 stays at 0. PR C must:
+   - enqueue for any eligible key, or enqueue a reconstruct for a key that has never had one;
+   - refuse a sole-key `replace_equity_snapshots` with empty rows when snapshots already exist;
+   - make the Overview empty state choose its copy by `equityHistoryState`, not by count. The "appear once at least two days…" line promises a timer that the D-02 `"rebuilding"` hold never honours.
+   Each gets a test that fails on today's code.
+   - **MEASURED 2026-09-27 on PROD** (founder, one read-only query, marker named PRODUCTION): **nothing emptied the history.**
+     - Since 2026-09-24 there have been 0 `reconstruct_allocator_history` jobs platform-wide, and no key-delete or revoke audit event.
+     - The 05:00 refresh ran 22 jobs a day, all `done`.
+   - **What happened instead:** a key connected on 2026-09-24 never had its history reconstructed, so that book held zero snapshots from its first day and the refresh skips it.
+   - The Overview values seen on 2026-09-25 came from the holdings-derived curve, which the D-02 `"rebuilding"` hold (#859) replaced that evening.
+   - PR C should also state which connect path is meant to enqueue the first reconstruct.
+8. **Open Positions shows closed positions as open.** The `allocator_holdings` read feeding `holdingsSummary` in `derivePhase07Fields` has no `asof` filter, and it keeps the newest row per venue:symbol:type across every date. A position closed the day before survives, as 5 symbols did on 2026-09-27. Keep each key's latest `asof` before de-duplicating, matching `getLatestExposureSnapshot`, with a test that fails today.
+
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1.2 to break down)
@@ -3920,6 +3937,8 @@ Plans:
 
 **⚠️ REBASE NOTE 2026-09-26 (from 166.2 D-29):** 166.2 edited `src/app/factsheet/[id]/v2/types.ts` and `fetch-and-build-payload.ts` (NaN/null statistic fields, the optional `n_valid`, the v7 payload cache key). 169's plans must re-read both at HEAD before editing.
 
+**⭐ ROUTED IN 2026-09-27 (founder, UAT 2026-09-27):** /allocations Open Positions shows entry/mark prices under $1 as $0, and unrealized P&L as −$0 / +$0 (price formatter rounds to whole dollars). Success: a sub-dollar price and a sub-dollar P&L render with their real precision, and a zero-rounded value never shows a sign.
+
 ### Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers (INSERTED)
 
 **Goal:** Four self-contained page fixes: the `/admin` compute-jobs list loads and a failed load says so; `/recommendations` states the mandate truthfully and never recommends a viewer's own strategy; `/profile` Exchanges counts only live keys and never repeats a balance; `/recommendations` and `/allocations` use one mandate rule.
@@ -3987,6 +4006,8 @@ Plans:
 ---
 
 **⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy copy check of 167.2.1):** for a strategy whose last computation finished but whose factsheet cannot be built, the /strategies note and the owner factsheet's banner say the numbers "appear there once a computation succeeds" (wait), while the factsheet body says the computation finished and to contact support (act). Success: the list note, the owner banner and the body give the owner the same instruction for this state.
+
+**⭐ ROUTED IN 2026-09-27 (founder, from the Phase 167.2 copy read-through, UAT 2026-09-27):** the 167.2 locked strings pass with these notes, owned here. (1) Two unbounded timing phrases: "Try again in a moment" in `PANEL_STOP_COPY.chain_unreadable` (`src/components/strategy/key-card-copy.ts`) and "Try again later" in `SHARE_CARD_COPY.in_progress` (`src/lib/status-surface-copy.ts`). (2) "Large accounts can take longer" in `SYNC_SLOW_NOTE` (`key-card-copy.ts`). (3) Six passive "could not be …" strings across `key-card-copy.ts` and `status-surface-copy.ts` (measured 2026-09-27: "could not be read" ×2, "could not be re-read", "could not be built", "could not be loaded", "could not be checked"). Success: each is rewritten in active voice with no timing promise the code cannot defend, per DESIGN.md Voice.
 
 ### Phase 165: ACTIONSDEPS — the four GitHub Actions dependabot PRs land first, in the verified order
 
