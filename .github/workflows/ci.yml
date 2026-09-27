@@ -1712,6 +1712,7 @@ jobs:
       # fail loudly: an unreadable probe answers a token that matches no case
       # arm, burns the full 900s budget, and then reddens three jobs with a
       # message blaming congestion rather than itself.
+      # (2026-09-26, Phase 164.9.4: python and e2e-seeded no longer run the wait; in ci.yml it orders test-db-drift only, and this self-test still guards it.)
       # ⚠️ Phase 164.9's review round grew it 12 checks → 46 precisely because
       # the original 12 injected BOTH probe seams and so certified the
       # dispatcher while executing NEITHER read. Those 34 new arms proved
@@ -3403,6 +3404,7 @@ jobs:
     # dependent. `sql-gate-lint` touches no shared resource, has no `if:`, and
     # runs on every event — it cannot skip a dependent and cannot queue behind
     # the mutex.
+    # (2026-09-26, Phase 164.9.4: ci.yml holds no shared-test-db key; the holders are supabase-migrate.yml apply-test and test-restore-from-baseline.yml restore, the probe is mutex-probe.yml, and analytics-deploy-verify.yml only names the key in issue text.)
     #
     # Phase 164.3 / VAC-01 (2026-08-29): `sql-mutation` is BLOCKING here, wired
     # into BOTH places below for the same reason as its siblings — either one
@@ -3422,6 +3424,7 @@ jobs:
     # their `if:` conditions diverge, so a chain edge can silently skip a
     # dependent. `sql-mutation` shares no resource, waits on no mutex, and
     # deliberately never touches the shared TEST database (D-07).
+    # (2026-09-26, Phase 164.9.4: ci.yml holds no shared-test-db key; the holders are supabase-migrate.yml apply-test and test-restore-from-baseline.yml restore, the probe is mutex-probe.yml, and analytics-deploy-verify.yml only names the key in issue text.)
     #
     # Phase 164.3 / VAC-05 (2026-08-29): `plan-anchor-verify` is BLOCKING here,
     # wired into BOTH places below — either one alone leaves it advisory, the
@@ -3468,6 +3471,7 @@ jobs:
     # advisory-lock mutex and their `if:` conditions diverge, so a chain edge can
     # silently skip a dependent. This job shares no resource and waits on no mutex.
     # The full argument, including the timeout derivation, is in the job's own header.
+    # (2026-09-26, Phase 164.9.4: ci.yml holds no shared-test-db key; the holders are supabase-migrate.yml apply-test and test-restore-from-baseline.yml restore, the probe is mutex-probe.yml, and analytics-deploy-verify.yml only names the key in issue text.)
     #
     # Phase 164.9 plan 08 / criterion 13 (2026-09-21): `frontend-live-db-lane` is
     # BLOCKING here, wired into BOTH places below — either one alone leaves it
@@ -3493,6 +3497,7 @@ jobs:
     # can silently skip a dependent. This job shares no resource and waits on no
     # mutex. Its only `needs:` edge is the docs-only detector, and this aggregator
     # carries `if: always()`, so an upstream skip arrives as a RESULT to judge.
+    # (2026-09-26, Phase 164.9.4: ci.yml holds no shared-test-db key; the holders are supabase-migrate.yml apply-test and test-restore-from-baseline.yml restore, the probe is mutex-probe.yml, and analytics-deploy-verify.yml only names the key in issue text.)
     # Wall clock is ACCEPTED: this aggregator now waits on a SECOND container-booting
     # job. The two are independent and run in parallel, so the cost is the slower of
     # the two rather than their sum, and it buys a previously ungated class a place
@@ -5252,6 +5257,7 @@ jobs:
     # LINEAGE. They stay in place because `python` and `e2e-seeded` reference the ⛔
     # block by name (D-08); inside this job the key is named, never numbered, because
     # the holder-set pin in critical-regressions.test.ts reads comments.
+    # (2026-09-26, Phase 164.9.4: ci.yml holds no shared-test-db key; the holders are supabase-migrate.yml apply-test and test-restore-from-baseline.yml restore, the probe is mutex-probe.yml, and analytics-deploy-verify.yml only names the key in issue text.)
     #
     # Phase 164.4.2 — VAC-08, IN A JOB OF ITS OWN. The repo-vs-shared-TEST ledger
     # and function-body drift check used to be a step of `sql-tests`. When
@@ -5286,6 +5292,7 @@ jobs:
     # 09's AFTER table must carry `test-db-drift` BY NAME: a wait that merely moved
     # from `sql-tests` into this job is not a win, and reading only `sql-tests`'s
     # timings would report one.
+    # (2026-09-26, Phase 164.9.4: ci.yml holds no shared-test-db key; the holders are supabase-migrate.yml apply-test and test-restore-from-baseline.yml restore, the probe is mutex-probe.yml, and analytics-deploy-verify.yml only names the key in issue text.)
     #
     # AGGREGATOR ROW: this job inherits the tolerance `sql-tests` carried, because
     # it inherits the reason for it — it consumes a secret and a repo variable a
@@ -5297,6 +5304,7 @@ jobs:
     # mutex mechanism and its ⛔ constraints, and those constraints still bind THEM.
     # The "Acquire" step and "this job" the block describes are now theirs; this job
     # holds no key and has no such step.)
+    # (2026-09-26, Phase 164.9.4: ci.yml holds no shared-test-db key; the holders are supabase-migrate.yml apply-test and test-restore-from-baseline.yml restore, the probe is mutex-probe.yml, and analytics-deploy-verify.yml only names the key in issue text.)
     # Phase 142.1 (D-05): this job must SERIALIZE against the `python` and
     # `e2e-seeded` jobs. These SQL files run against the ONE
     # shared Supabase test project (`secrets.TEST_SUPABASE_DB_URL`), and
@@ -5319,12 +5327,14 @@ jobs:
     # BLOCK inside the lock instead of queueing in GitHub's concurrency layer.
     # Proven from real runners before adoption by .github/workflows/mutex-probe.yml
     # (three simultaneous contenders, pairwise non-overlapping hold windows).
+    # (2026-09-26, Phase 164.9.4: ci.yml holds no shared-test-db key; the holders are supabase-migrate.yml apply-test and test-restore-from-baseline.yml restore, the probe is mutex-probe.yml, and analytics-deploy-verify.yml only names the key in issue text.)
     #
     # ⛔ Do NOT give this job its own private lock key — 142-REVIEW.md:286-291
     # proposed the equivalent (a private concurrency-group name), and it is the
     # wrong fix: a distinct key serializes this job only against itself and does
     # nothing about the `python`/`e2e-seeded` jobs writing the SAME project. All
     # three must take the shared-test-db key.
+    # (2026-09-26, Phase 164.9.4: ci.yml holds no shared-test-db key; the holders are supabase-migrate.yml apply-test and test-restore-from-baseline.yml restore, the probe is mutex-probe.yml, and analytics-deploy-verify.yml only names the key in issue text.)
     #
     # Costs wall-clock: this job queues behind `python` (~7m) and then waits on
     # the mutex rather than overlapping it — the same price `e2e-seeded` pays
@@ -5399,6 +5409,7 @@ jobs:
     # is left unchanged per D-04, since SC-4 forbids raising it and lowering it is out
     # of scope. The pg_sleep sentence above now applies to `python` and `e2e-seeded`
     # only.)
+    # (2026-09-26, Phase 164.9.4: ci.yml holds no shared-test-db key; the holders are supabase-migrate.yml apply-test and test-restore-from-baseline.yml restore, the probe is mutex-probe.yml, and analytics-deploy-verify.yml only names the key in issue text.)
     # ⭐ WHAT 90m NOW BOUNDS, since the mutex derivation above no longer applies here:
     # the `needs:` queue is outside this TTL (the timer starts when the job does), so
     # the job's own worst case is setup (checkout, psql install, setup-node: minutes),
@@ -5458,6 +5469,7 @@ jobs:
       # critical-regressions.test.ts holds it before VAC-08, enabled and fail-closed.
       # On a `pull_request` run this step does not run, so there VAC-08 has no
       # ordering control at all — see the ⚠️ in this job's CORRECTED header.)
+      # (2026-09-26, Phase 164.9.4: ci.yml holds no shared-test-db key; the holders are supabase-migrate.yml apply-test and test-restore-from-baseline.yml restore, the probe is mutex-probe.yml, and analytics-deploy-verify.yml only names the key in issue text.)
       #
       # ⛔ NO `needs:` EDGE WAS ADDED, AND NONE MAY BE. These three jobs' `if:`
       # conditions diverge and a skipped `needs:` job skips its dependents — the
