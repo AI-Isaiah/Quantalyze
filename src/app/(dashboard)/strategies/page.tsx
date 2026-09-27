@@ -801,6 +801,7 @@ export default async function StrategiesPage() {
                     <ShareableLink
                       strategyId={s.id}
                       published={isPublishedStatus(s.status)}
+                      size="sm"
                     />
                     <Badge label={s.status} type="status" />
                     <StrategyActions strategyId={s.id} status={s.status} hasApiKey={!!s.api_key_id} hasData={!!s.api_key_id} />
