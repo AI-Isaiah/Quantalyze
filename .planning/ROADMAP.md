@@ -3624,7 +3624,13 @@ Plans:
    - enqueue for any eligible key, or enqueue a reconstruct for a key that has never had one;
    - refuse a sole-key `replace_equity_snapshots` with empty rows when snapshots already exist;
    - make the Overview empty state choose its copy by `equityHistoryState`, not by count. The "appear once at least two days…" line promises a timer that the D-02 `"rebuilding"` hold never honours.
-   Each gets a test that fails on today's code. What emptied one book's history after 2026-09-25 is still being read on PROD (founder, one read-only query).
+   Each gets a test that fails on today's code.
+   - **MEASURED 2026-09-27 on PROD** (founder, one read-only query, marker named PRODUCTION): **nothing emptied the history.**
+     - Since 2026-09-24 there have been 0 `reconstruct_allocator_history` jobs platform-wide, and no key-delete or revoke audit event.
+     - The 05:00 refresh ran 22 jobs a day, all `done`.
+   - **What happened instead:** a key connected on 2026-09-24 never had its history reconstructed, so that book held zero snapshots from its first day and the refresh skips it.
+   - The Overview values seen on 2026-09-25 came from the holdings-derived curve, which the D-02 `"rebuilding"` hold (#859) replaced that evening.
+   - PR C should also state which connect path is meant to enqueue the first reconstruct.
 8. **Open Positions shows closed positions as open.** The `allocator_holdings` read feeding `holdingsSummary` in `derivePhase07Fields` has no `asof` filter, and it keeps the newest row per venue:symbol:type across every date. A position closed the day before survives, as 5 symbols did on 2026-09-27. Keep each key's latest `asof` before de-duplicating, matching `getLatestExposureSnapshot`, with a test that fails today.
 
 Plans:
