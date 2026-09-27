@@ -100,6 +100,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.5.1.3: SYNCADMIT — admit the owner-only status to the trade-sync constant, or prove it must not be: 5 of 5 private keys are never synced and their trades are never stored** (INSERTED)
 - [x] **Phase 164.5.1.4: SYNCCURSOR — the sync cursor is per-KEY while stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies trade window** (INSERTED)
 - [x] **Phase 164.5.2: BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required** (INSERTED)
+- [ ] **Phase 164.5.2.1: BRIDGERESIDUE — the two 164.6.7 bridge residues in sync_strategy_analytics_status** (INSERTED) — not yet planned
 - [ ] **Phase 164.5.3: MT5CREDS — show the MT5 account number on the key card and add a credential-update path** (INSERTED) — verification: human_needed
 - [x] **Phase 164.5.4: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently** (INSERTED)
 - [x] **Phase 164.6: GATE-HYGIENE — every gate-hygiene item that left 164.1: the OPS-08 residue, the composite-stamp twin, the reviewer execution-status rule, the RED-UNDER convention's discoverability and the audit allowlist** (INSERTED)
@@ -109,7 +110,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.4: MT5KEEPALIVE — nothing TRIGGERS a recovery, so the terminal sits dark for hours while recovery itself takes minutes** (INSERTED)
 - [ ] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verification: human_needed
 - [ ] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — not yet verified
-- [ ] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — not yet verified
+- [ ] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button** (INSERTED) — not yet verified
 - [x] **Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here** (INSERTED)
 - [x] **Phase 164.8: TESTPREPROD — TEST becomes a real pre-prod: every migration is proven on a real Postgres before it reaches a customer** (INSERTED)
@@ -125,13 +126,15 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim** (INSERTED) — not yet verified
 - [ ] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — not yet verified
 - [ ] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — not yet verified
-- [ ] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — not yet verified
-- [ ] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons
-- [ ] **Phase 165.1: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — not yet verified
-- [ ] **Phase 165.2: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — not yet verified
+- [ ] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
+- [x] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
+- [x] **Phase 165.1: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
+- [x] **Phase 165.2: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
 - [ ] **Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given** — verification: human_needed
-- [ ] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — not yet verified
+- [ ] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
+- [ ] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
+- [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — planned (1 plan); waits on the founder's recompute step
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [ ] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed
 - [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
@@ -4069,51 +4072,91 @@ Plans:
 
 ### v1.20 Progress
 
-⛔ **Regenerate, do not trust.** Every count below is derived from PLAN/SUMMARY artifacts
-across ALL REFS, not from this checkout — the `-pr` filter strips `.planning/phases/**`, so
-four complete phases (164.2, 164.5, 164.8.2, 164.8.5 — 29 finished plans) read `empty` on
-local disk and `gsd-tools query roadmap.analyze` under-reports them by construction. Measured
-2026-09-12 at `733a55f5`. A withdrawn plan is excluded from its phase's denominator and the
-withdrawal is named in the Status cell — a re-routed plan is not an unfinished one.
+⛔ **Regenerate, do not trust.** Re-derived 2026-09-27 at `a4cd9b32` (origin/main): plan and
+SUMMARY counts from `.planning/phases/<phase>/` on main, status from each phase's
+`VERIFICATION.md` `status:` (the repo's one completion rule: `passed` = Complete). A phase that
+shipped with `human_needed` is listed as shipped with checks pending, NOT as complete. Where a
+phase's newest plans live only on an open branch, the count says "on main". The 2026-09-12
+table (measured at `733a55f5`, 33 rows) is superseded by this one; its still-accurate rows are
+kept verbatim.
 
-**Totals: 19 of 33 phases fully executed; 160 of 163 live plans carry a SUMMARY.**
-The three without one are named in their rows; none is unfinished work.
+**Totals: 40 of 73 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).**
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 158. OPS-CI merge=deploy | 6/6 | Complete    | 2026-08-21 |
 | 159. RANK ranking integrity | 6/7 | Complete — plan 01 shipped its deliverable (`159-CENSUS.md` is on disk); its SUMMARY was never written. `159-VERIFICATION.md` closed 2026-09-12 (`status: passed`): its one open item, the concurrent same-session CAS race, is discharged by `src/__tests__/csv-finalize-concurrent-never-classified.test.ts` on the blocking `frontend-local-stack` lane — green in main run 34712535912 at `733a55f5` | v0.70.0.0 |
-| 160. PROVENANCE venue/annualization | 6/7 | 🟡 Arm proven, 1/3 surfaces. Plan 07 is `gap_closure: true` and writes `160-VERIFICATION.md`, which reads `status: passed` / `previous_status: gaps_found` — it ran; its SUMMARY was never written | Persist arm smoked via ApiKeyManager 2026-08-25; StrategyForm un-smoked, AllocatorExchangeManager unmounted |
-| 161. WIZERR honest errors | 10/10 | Complete | v0.72.0.0 |
+| 160. PROVENANCE venue/annualization | 6/7 | Complete — verification passed (closed with the v1.20 open items in #790); plan 07 was its `gap_closure` verification plan | v0.77.39.0 · #790 |
+| 161. WIZERR honest errors | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.72.0.0 |
 | 161.1 LEDGER-REFRESH (shipped dormant) | 5/5 | Complete | v0.73.0.0 |
 | 162. HONEST visible truth | 9/9 | Complete — plan 10 WITHDRAWN in `3fa26831` ("its premise was false, credentials ARE trimmed"), so the denominator is 9, not 10 | v0.74.0.0 |
 | 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
 | 164. SHARE revocable links | 7/7 | Complete | v0.76.0.0 |
 | 164.1 PROD-OBSERVABILITY (one prober: PYAPI-06, CRON-OBS-01, CRON-DRIFT-01, MT5-WEDGE-OBS-01) | 6/6 | Complete — PR #746 `42868a9b` + PR #748 `d679f638`; VERIFIED 2026-09-18, `passed` 5/5. ⚠️ The cadence residual is NOT closed: booked `[PROBER-CADENCE-UNDELIVERED-01]`, owner Phase 164.1.1 | v0.77.15.0 · 2026-09-18 |
+| 164.1.1 PROBERCADENCE | 5/6 | Complete — verification passed (plans 01–05; plan 06 is the post-merge cadence reading) | v0.77.51.0 · #815/#819 |
+| 164.1.1.1 LANEONLYGATES | 2/2 | Complete | #817 |
 | 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC both bucketers, HONEST-08-RESIDUAL, 161-ERRPREFIX) | 10/10 | Complete — PR #749 merged `05994f1d`, main CI green, PROD verified by effect. All 21 artifacts stripped from main by `22a5fe96` | v0.77.16.0 |
 | 164.2.1 SESSIONID-FENCE | 2/2 | Complete | v0.77.17.0 |
 | 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8 routed on, H-0001 routed on) | 9/10 | Complete — plan 07 (VAC-07) DEFERRED to 164.5 by founder decision 2026-08-29, stays unchecked | v0.77.0.0 |
 | 164.3.1 SOUND-PRIMITIVES (four cycling primitives) | 13/13 | Complete | v0.77.1.x |
 | 164.4 REDUNDER-BACKFILL (39 idiom files annotated; 5 pg_cron-blocked files handed to 164.4.1) | 12/12 | Complete — the phase was planned as 13 and replanned to 12 against the Plan 00 spike (`9b83b064`); plan 12 was dropped there, not left undone | v0.77.12.0 |
 | 164.4.1 PGCRON-LANE (pg_cron on the lane; 5 deferred gates annotated; lane-blocked 0; ARMS_FLOOR 361) | 6/6 | Complete — PR #744 merged `e01cc2e6`, ubuntu-measured | v0.77.13.0 |
+| 164.4.2 SUBSETSPLIT | 11/11 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.87.0.0 · #842 |
+| 164.4.2.1 DRIFTOFFMUTEX | 3/3 | Complete — SC-3 speed claim routed to 164.9.4 (founder 2026-09-27) | v0.93.0.1 · #861 |
 | 164.5 BASELINE-SNAPSHOT (baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05, VAC08-LEDGER, VAC-07) | 7/7 | Complete — DRIFT-04 applied and shipped 2026-09-08 in the two-PR sequence. Plan 08 was LIFTED into new Phase 164.5.2 BRIDGELOCK (`7910f614`), so the denominator is 7 | v0.77.21.0 |
 | 164.5.1 CRONREPOINT (the live `match_engine_cron` row repointed; migration-vs-runbook rule settled first) | 9/9 | Complete    | 2026-09-17 |
-| 164.5.2 BRIDGELOCK (the per-strategy advisory lock 161.1-D1 asked for) | 0/? | Queued — created 2026-09-08 by lifting 164.5 plan 08, as DEC-4 required | - |
-| 164.6 GATE-HYGIENE (OPS-08 residue, composite-stamp twin, PROC-02/03, H-0001, PHASEDIR-ORPHAN-GITKEEP) | 0/? | Queued (created 2026-09-05) | - |
+| 164.5.1.1 (ledger fan-out admits private) | 4/4 | Complete | #807 · #833 |
+| 164.5.1.2 FANOUTSIBLINGS | 3/3 | Complete | #827 |
+| 164.5.1.3 SYNCADMIT | 1/1 | Complete | v0.82.0.0 · #830 |
+| 164.5.1.4 SYNCCURSOR | 4/4 | Complete | v0.81.0.0 · #829 |
+| 164.5.2 BRIDGELOCK (the per-strategy advisory lock 161.1-D1 asked for) | 3/3 | Complete | v0.104.0.0 · #873 |
+| 164.5.2.1 BRIDGERESIDUE | 0/? | Queued — blocker, after 164.9.3.1 (ratified order 2026-09-27) | - |
+| 164.5.3 MT5CREDS | 5/5 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.82.1.0 · #831/#832 |
+| 164.5.4 MT5RECON-GAP | 6/6 | Complete | #835 |
+| 164.6 GATE-HYGIENE | 5/5 | Complete | v0.90.0.0 · #854 |
+| 164.6.1 MYPYSTRICT | 2/2 | Complete | v0.87.1.0 · #847 |
+| 164.6.2 MT5RELOGIN | 5/5 on main | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 06 not yet started | v0.77.43.x · #797/#799 |
+| 164.6.3 CIDOCSPATH | 5/5 | Complete | v0.77.40.0 · #791 |
+| 164.6.4 MT5KEEPALIVE | 5/5 | Complete | #800 |
+| 164.6.5 MT5VALIDATEWEDGE | 8/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.96.0.0 · #863 |
+| 164.6.6 MT5TERMINALISOLATION | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
+| 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.105.0.0 · #869 |
+| 164.6.8 OUTAGEALERT | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 7/7 | Complete — finalized v0.77.32.1; its 33 stranded artifacts restored to main by PR #785. Row said `0/? Queued 2nd` until 2026-09-12 | v0.77.32.1 |
 | 164.8 TESTPREPROD (TEST becomes a real pre-prod: apply on merge to TEST before PROD) | 6/6 | Complete. Row said `3/6 Queued 5th` until 2026-09-12 | v0.77.31.2 |
 | 164.8.1 REFDATA (a schema-only restore destroys migration-seeded reference data) | 4/4 | Complete — PR #767. ⚠️ `164.8.1-04-SUMMARY.md` is still stranded off main; local disk reads 4/3 | - |
 | 164.8.2 GATEHARDENING (the five code-review warnings 164.8 shipped) | 5/5 (+4 FIX) | Complete — four review rounds; residual deferrals routed to 164.8.4 | v0.77.32.0 |
 | 164.8.3 PROBERAUTH (MT5 `-6` named as "no authorized account", not the catch-all) | 4/4 | Complete    | 2026-09-13 |
-| 164.8.4 GATERESIDUE (164.8.2's four review rounds + the withdrawn `tokenMeasure` redesign) | 0/? | Queued (created 2026-09-10) | - |
+| 164.8.4 GATERESIDUE | 5/5 | Complete | v0.79.2.0 · #825 |
 | 164.8.5 PROBERPARSE (prober hygiene rules stop being dodgeable; the parser stops dropping rows) | 7/7 (+4 FIX) | Complete — PR #774 | - |
 | 164.8.6 VAULTTICKFIX (the forward migration Phase 164.7 earned) | 8/8 | Complete — PR #778, follow-ups #779/#781/#782. ⛔ Plan 08 WITHDRAWN not shipped (`tokenMeasure` fired the credential rule on credential-free prose); redesign routed to 164.8.4 | v0.77.34.0 |
-| 164.9 TESTISOLATION (per-run isolation replaces global truth on shared TEST) | 0/? | Queued — owns `[164.8-PUSH-RACE-VAC08]`, `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`, and writing the real `FANOUT-GLOBAL-01` entry | - |
-| 164.10 BODYDRIFT (PROD runs an EARLIER revision of three function bodies) | 0/? | Queued (created 2026-09-11) | - |
-| 166. QSTATS-TRUTH | 0/? | Queued (re-ordered ahead of 165, 2026-09-05) | - |
-| 167. CREDTRUST (an invalid venue credential is named to the customer) | 0/? | Queued | - |
-| 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | In progress (plans 01 and 02 done 2026-09-26; plan 03 is the founder post-deploy checkpoint) — Alpha Centauri is blocked by a `native_nav` inception reconciliation breach (`breach_ratio=436`), NOT by `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` | - |
-| 165. DEPS dependabot campaign | 0/? | Queued LAST (after 166 — dependency churn lands last) | - |
+| 164.9 TESTISOLATION | 11/11 | Complete | #837 |
+| 164.9.1 JOBRPCTRUTH | 14/14 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.93.0.0 · #860 |
+| 164.9.2 REFDATAUPDATES | 5/5 | Complete | v0.93.0.1 · #862 |
+| 164.9.3 CLAIMPAIR | 0/? | Queued — blocker | - |
+| 164.9.3.1 FANINGRAPH | 0/? | Queued — blocker, after 164.9.3 | - |
+| 164.9.4 CIOFFMUTEX | planned, not on main | In progress — draft PR #880 (measurement run) | - |
+| 164.9.5 AUTOREDUMP | 9/9 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.106.0.0 · #875 |
+| 164.10 BODYDRIFT | - | Closed by decision (c): the drift is real, measured and deliberately left | v0.79.1.1 · #824 |
+| 165. DEPS dependabot campaign | - | ⛔ RETIRED 2026-09-27 (founder) — not delivered as a phase; dependabot PRs land as maintenance | - |
+| 165.1 PIPDEPS | - | ⛔ RETIRED 2026-09-27 (founder), as 165 | - |
+| 165.2 NPMDEPS | - | ⛔ RETIRED 2026-09-27 (founder), as 165 | - |
+| 166. QSTATS-TRUTH | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.91.0.0 · #858 |
+| 166.1 ENGINEFLOOR | 4/4 on main | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.100.0.0 · #872 |
+| 166.1.1 DDSIGN | 0/? | Queued — feature | - |
+| 166.2 COMPUTEONCE | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.102.0.0 · #874 |
+| 166.3 RECOMPUTE | 0/1 | Planned — waits on the founder's recompute step | - |
+| 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
+| 167.1 AUMTRUST | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.89.0.0 · #852 |
+| 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
+| 167.1.2 ACCOUNTTRUTH | PR A + PR B shipped | In progress — PR A v0.92.0.0 (#859), PR B v0.103.0.0 (#870); PR C executing | - |
+| 167.2 KEYCARDSYNC | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.88.0.0 · #851 |
+| 167.2.1 FACTSHEETBUILDABLE | 4/4 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | #866 |
+| 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 03 is the founder's live retry | v0.97.0.0 · #867 |
+| 169. PAGETRUTH | 0/? | Queued — feature; needs a replan (cache-key anchor moved) | - |
+| 169.3 SMALLFIXES | 1/1 on main | In progress — plan 01 shipped (v0.97.0.1, #868); plans 02–05 next | - |
+| 170. LAYOUT | 0/? | Queued — feature | - |
+| 170.1 COPY | 0/? | Queued — feature, after 170 | - |
 
 ### Requirement Coverage (v1.20)
 
