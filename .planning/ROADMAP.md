@@ -3687,6 +3687,7 @@ Plans:
 - **Cumulative read as daily (inferred, not yet measured).** The `TODOS.md` entry `[169-PORTFOLIO-ANALYTICS-COLUMNS]` (booked by Phase 169 D-53 on `feat/169-pagetruth`) infers that the compute reads `returns_series` as daily returns while `analytics-service/services/metrics.py` writes it as a cumulative series.
 - **Is it called at all?** The analytics service logs show 0 lines of `Portfolio analytics computation failed` between 2026-09-13 and 2026-09-27. With a select that should fail, that silence means either the endpoint is not being called, or its failure is not reaching that log line. The phase's research answers this FIRST, before any fix is planned.
 - **Related:** Phase 169's RISKUNIT plan (169-09, D-49) fixes the risk-attribution display's double percent; its browser item records an empty `/portfolios/[id]` panel as this defect, not as evidence against the unit fix (169 D-53).
+- **Routed 2026-09-27, from the 166.4 BENCHALIGN research:** the `benchmark_comparison` block in `_compute_portfolio_analytics` (`analytics-service/routers/portfolio.py`) pairs the portfolio with BTC by an inner-join correlation, and BTC's own TWR there is compounded over the joined dates only, so it drops weekend moves. It must use the founder's D-A interval-matched pairing (166.4 D-A in its ROADMAP entry; D-04, D-05 and D-07 are recorded in `166.4-CONTEXT.md` on `feat/166.4-benchalign`). Found by 166.4's research as a same-class site outside 166.4's locked scope.
 
 ## Success Criteria
 
@@ -3695,6 +3696,7 @@ Plans:
 3. **Cumulative vs daily is measured and fixed.** Whether the stored series the compute reads is cumulative or daily is measured against what `metrics.py` writes, and the compute converts it correctly; a test on a known cumulative fixture fails on the old handling.
 4. **A failed compute is loud.** A failed compute surfaces as an error the caller and the logs can see (never an empty or stale result that reads as success); a test fails on the old silent path.
 5. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and `/portfolios/[id]` is re-checked in the logged-in browser after deploy (desktop, 390px and desktop 200% zoom).
+6. **The BTC comparison uses the D-A pairing (added 2026-09-27).** `benchmark_comparison`'s correlation pairs each portfolio return with the BTC return over the same interval (166.4 D-A, D-04, D-05, D-07), and its BTC TWR includes the weekend moves the inner join drops. A test written first for each (the correlation, and the BTC TWR) fails on the old code.
 
 Plans:
 
@@ -3861,6 +3863,7 @@ Plans:
 - **R-13-1: a non-empty sole-key replace wipes sibling keys' history.** In `replace_equity_snapshots` (`analytics-service/services/equity_reconstruction.py`), a non-empty replace for one key wipes the history of disconnected sibling keys. PR C changes this function, so the symbol is cited by name only.
 - **Two-key sibling path:** when one key's reconstruct succeeds and another's fails, the allocator-wide snapshot count reads as "reconstructed", and the failed key's history is skipped.
 - **`public.request_allocator_holdings_sync(uuid)`:** its in-flight status lists (`'pending', 'running', 'done_pending_children'`, plus `'done'` in the second check) omit `failed_retry`, unlike the cron. So a key whose job sits in `failed_retry` is treated as not in flight.
+- **The fast-fail race (routed 2026-09-27, 167.1.2-12 REVIEW-SFH-R3 M-1/M-2):** a zero-snapshot book's reconstruct reaches `failed_final` before the daily refresh (`run_refresh_allocator_equity_daily_job` in `analytics-service/services/equity_reconstruction.py`) is claimed. The refresh then sees nothing in flight, writes the book's first row, and the key's history is stranded. Claim order within one fan-out burst is by random uuid, 5 per batch, so the reconstruct and the refresh are usually claimed in different batches.
 
 ## Success Criteria
 
@@ -3870,6 +3873,7 @@ Plans:
 4. **Two-key sibling path:** when one key succeeds and a sibling fails, the failed key is still recorded as owing its reconstruct and is retried. A test fails on the old behaviour.
 5. **`failed_retry` is counted:** `request_allocator_holdings_sync`'s status list includes `failed_retry`, as the cron's does. A test fails on the old list.
 6. **Migration review before merge.** Any migration this phase writes is reviewed by migration-reviewer, rls-policy-auditor and silent-failure-hunter, because a merge of `supabase/migrations/**` auto-applies to PROD.
+7. **The fast-fail race (added 2026-09-27):** when a zero-snapshot book's reconstruct reaches `failed_final` before the daily refresh (`run_refresh_allocator_equity_daily_job`) is claimed, the key is still recorded as owing its reconstruct, the refresh's first row does not strand its history, and the history is rebuilt. A test written first reproduces the race (reconstruct failed, refresh claimed after) and fails on the old behaviour.
 
 Plans:
 
@@ -4112,8 +4116,9 @@ Plans:
 3. The BTC benchmark is current: MTD and 3-month returns, win rate, volatility and drawdown come from a benchmark series that is refreshed, and a stale benchmark is shown as stale rather than as +0.00%.
 9. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and each page is re-checked in the logged-in browser after deploy.
 11. A BTC return that spans a missing stored day is not stamped as one day's move: the allocator's consumers build the cumulative BTC overlay from closes (or levels) and the inner-joined metrics from exactly-one-day returns, with a test for each across a missing day. Routed here 2026-09-27 by Phase 169.2 D-47 (review round 3 WR-01) as TODOS `[169.2-BTC-GAP-RETURN-STAMP]`. `pricesToDailyReturns` in `src/lib/factsheet/benchmark-source.ts` still bridges such a gap into one return at the later date, because 169.2's skip-every-gap attempt made the overlay drift and was reverted.
+12. **The scenario benchmark uses the D-A pairing (routed 2026-09-27, from the 166.4 BENCHALIGN research).** `innerJoinByDate` in `src/app/(dashboard)/allocations/lib/scenario-benchmark.ts` pairs the scenario portfolio with BTC by an inner join on dates. It must use the founder's D-A interval-matched pairing and agree with Phase 166.4 BENCHALIGN (the engine) and Phase 169.5 BENCHCOMPARE (the factsheet; on branch `feat/169-pagetruth`, not yet on `origin/main`), including the founder's 2026-09-27 day-one rule: day one pairs with BTC's same-day return (166.4 D-05, ratified 2026-09-27). A test written first fails on the old inner join.
 
-*(Moved from Phase 169 on 2026-09-26, verbatim with their original numbers, D-37.)* *(Criterion 11 is new, added 2026-09-27; it is numbered past the highest id any 169.x phase uses, so it collides with none.)*
+*(Moved from Phase 169 on 2026-09-26, verbatim with their original numbers, D-37.)* *(Criterion 11 is new, added 2026-09-27; it is numbered past the highest id any 169.x phase uses, so it collides with none.)* *(Criterion 12 is new, added 2026-09-27, numbered past 11 for the same reason.)*
 
 **Plans:** 3 plans in 2 waves, one PR (split 2026-09-26, D-37): W1 169.4-01 RISKTAB, 169.4-02 ALLOCBENCH; W2 169.4-03 integration run + post-deploy browser re-check. Decisions carried in `169.4-CONTEXT.md`; no migration.
 
