@@ -17005,11 +17005,10 @@ describe("ScenarioComposer — 167.1.2 SC-4 zero weight mass renders no result",
     expect(lastChartSeries()).toEqual([]);
     // No "+0.00%" anywhere on the surface (the fabricated figure).
     expect(document.body.textContent ?? "").not.toContain("+0.00%");
-    // The blend header must not claim a mean over a window it does not have.
-    const header = screen.queryByTestId("scenario-blend-header");
-    if (header) {
-      expect(header.textContent ?? "").not.toMatch(/Mean of/);
-      expect(header.textContent ?? "").not.toMatch(/·\s*–\s*$/);
-    }
+    // The blend header must not claim a mean over a window it does not have
+    // (before the BlendHeader branch it read "Mean of 2 strategies · –").
+    expect(screen.getByTestId("scenario-blend-header").textContent).toBe(
+      "No weight on the selected strategies — not a blend",
+    );
   });
 });
