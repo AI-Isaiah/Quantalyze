@@ -28,12 +28,21 @@ import { z } from "zod";
 import { exchangeEnum } from "./closed-sets";
 
 // --- /api/validate-key ---
+// Phase 167.1.2 (D-01, RESEARCH Pitfall 3): `venue_account_id` is NAMED here
+// because it IS written to `api_keys.venue_account_id` by the two connect routes
+// (validate-and-encrypt's persist arm, create-with-key's RPC argument). They
+// read this one named field and nothing else. `.min(1)` refuses a blank id at
+// the boundary (a blank is non-NULL to the venue-identity unique index and
+// would collapse two accounts into one); the service already sends null
+// instead of blank. The passthrough REMAINDER is still never spread into a
+// write, which is what the sanctioned exception below covers.
 export const ValidateKeyResponseSchema = z.object({
   valid: z.boolean(),
   read_only: z.boolean(),
   exchange: z.string().optional(),
   permissions: z.array(z.string()).optional(),
-}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; /api/validate-key result is read for UI display only, never spread into a write
+  venue_account_id: z.string().trim().min(1).max(128).nullable().optional(),
+}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; only the named venue_account_id field is written (to api_keys), the passthrough remainder is never spread into a write
 
 // --- /api/encrypt-key ---
 // The analytics service uses envelope encryption: every credential (key,

@@ -10,6 +10,7 @@ from typing import Any, Literal, TypedDict
 
 from supabase import Client
 
+from services.account_identity import VENUES_WITH_ACCOUNT_ID
 from services.closed_sets import is_trade_side
 from services.ingestion._timestamps import coerce_to_aware_utc
 from services.metrics import _safe_float
@@ -1304,6 +1305,28 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     elif has_trade:
         result["error"] = "Key has trading permissions. Please use a read-only key."
         result["error_code"] = "TRADE_SCOPE"
+
+    # Phase 167.1.2 (D-01): the venue account id, read from a response this
+    # function already fetched (never a new request). It exists so the
+    # connect routes can stamp `api_keys.venue_account_id`, which is what lets
+    # the venue-identity unique index refuse a second live key on one account.
+    # A missing id is None and NEVER fails validation: blocking a connect on an
+    # extra field would turn venue schema drift into an outage, while an
+    # unstamped key is backfilled later. The id is never logged; the warning
+    # below names the venue only.
+    account_id = perms.get("account_id")
+    result["account_id"] = account_id if isinstance(account_id, str) else None
+    if (
+        result["account_id"] is None
+        and result["error"] is None
+        and exchange.id in VENUES_WITH_ACCOUNT_ID
+    ):
+        logger.warning(
+            "validate_key_permissions: %s returned no venue account id; the "
+            "key connects without one and a second key on the same account "
+            "cannot be refused until it is stamped",
+            exchange.id,
+        )
 
     return result
 

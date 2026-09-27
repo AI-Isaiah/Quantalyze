@@ -172,6 +172,37 @@ class TestOkxParser:
             "probe_error": True,
         }
 
+    # Phase 167.1.2 (D-01): the account id rides on the SAME account/config
+    # response the permission probe already fetched (no new request). It is
+    # what the connect routes stamp into api_keys.venue_account_id so the
+    # venue-identity index can refuse a second key on one OKX account.
+    @pytest.mark.asyncio
+    async def test_carries_the_account_uid_from_the_same_response(self):
+        ex = AsyncMock()
+        ex.id = "okx"
+        ex.private_get_account_config = AsyncMock(return_value={
+            "data": [{"perm": "read_only", "uid": "100000001", "mainUid": "100000000"}],
+        })
+        result = await detect_okx_permissions(ex)
+        assert result == {
+            "read": True,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+            "account_id": "100000001",
+        }
+        assert ex.private_get_account_config.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_blank_uid_adds_no_account_id_key(self):
+        ex = AsyncMock()
+        ex.id = "okx"
+        ex.private_get_account_config = AsyncMock(return_value={
+            "data": [{"perm": "read_only", "uid": "  "}],
+        })
+        result = await detect_okx_permissions(ex)
+        assert "account_id" not in result
+
 
 class TestBybitParser:
     @pytest.mark.asyncio
