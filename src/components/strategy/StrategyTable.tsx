@@ -1214,7 +1214,7 @@ export function StrategyTable({
                                   Syncing
                                 </span>
                               ) : (
-                                <span className={`${DATA_STATE_CHIP} text-text-muted bg-track`}>
+                                <span className={`${DATA_STATE_CHIP} text-text-secondary bg-track`}>
                                   No data
                                 </span>
                               ))}
@@ -1378,7 +1378,7 @@ export function StrategyTable({
                             </span>
                           </div>
                           <div className="flex items-center gap-2 mt-1">
-                            <span className={`${DATA_STATE_CHIP} text-text-muted bg-track`}>
+                            <span className={`${DATA_STATE_CHIP} text-text-secondary bg-track`}>
                               No strategy yet
                             </span>
                           </div>
