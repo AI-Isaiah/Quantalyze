@@ -160,3 +160,197 @@ async def test_quiet_key_counts_at_its_latest_holdings_not_zero(monkeypatch: pyt
     # the audit metadata, whatever key it sits under.
     leaked = {k: v for k, v in metadata.items() if v in (1000.0, 500.0, 1500.0)}
     assert not leaked, f"audit metadata carries a USD figure: {sorted(leaked)}"
+
+
+# ---------------------------------------------------------------------------
+# Task 2: one account counted once, write order irrelevant, departed keys out
+# ---------------------------------------------------------------------------
+
+# A holder's USDT and a marked key's BTC. Different symbols on purpose: the
+# assertions must tell WHICH key's dollars reached the total, which a shared
+# symbol would hide.
+HOLDER_USD = 1000.0
+MARKED_USD = 700.0
+
+
+def _seed_holder_and_marked(fake: FakeSupabaseClient, kind: str, **holder: Any) -> None:
+    _seed_key(fake, API_KEY_ID_1, **holder)
+    _seed_key(
+        fake, API_KEY_ID_2,
+        account_share_kind=kind,
+        account_shared_with_api_key_id=API_KEY_ID_1,
+    )
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    _seed_holding(fake, API_KEY_ID_2, "bybit", "BTC", TODAY, MARKED_USD)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_key_is_counted_once_through_its_working_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-01: a key marked 'duplicate' reads an account its live holder already
+    reads. Summing both counts one exchange account twice."""
+    fake = FakeSupabaseClient()
+    _seed_holder_and_marked(fake, "duplicate")
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    row = _today_row(fake)
+    assert row["value_usd"] == pytest.approx(HOLDER_USD), (
+        f"the duplicate's dollars were summed on top of its holder's: {row['value_usd']}"
+    )
+    assert "BTC" not in row["breakdown"]
+    assert _refresh_complete_metadata(audit)["excluded_shared_keys"] == 1
+
+
+@pytest.mark.asyncio
+async def test_composite_member_is_counted_once_through_its_eligible_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-04: two members of one composite on one account (a key rotation inside
+    the composite). The account counts once, through the holder."""
+    fake = FakeSupabaseClient()
+    _seed_holder_and_marked(fake, "composite_member")
+
+    await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
+
+    row = _today_row(fake)
+    assert row["value_usd"] == pytest.approx(HOLDER_USD)
+    assert "BTC" not in row["breakdown"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "holder",
+    [
+        pytest.param({"sync_status": "revoked"}, id="holder-revoked"),
+        pytest.param({"disconnected_at": "2026-09-10T00:00:00Z"}, id="holder-disconnected"),
+    ],
+)
+async def test_duplicate_of_a_departed_holder_counts_on_its_own(
+    monkeypatch: pytest.MonkeyPatch, holder: dict[str, Any]
+) -> None:
+    """Reader rule in COMMENT ON COLUMN api_keys.account_share_kind: the marker
+    is NOT cleared when the holder departs. A departed holder contributes
+    nothing here, so a reader that dropped every 'duplicate' unconditionally
+    would count this account through nobody."""
+    fake = FakeSupabaseClient()
+    _seed_holder_and_marked(fake, "duplicate", **holder)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
+
+    row = _today_row(fake)
+    assert row["value_usd"] == pytest.approx(MARKED_USD), (
+        "the departed holder must contribute nothing and the marked key must "
+        f"count on its own; got {row['value_usd']}"
+    )
+    assert _refresh_complete_metadata(audit)["excluded_shared_keys"] == 0
+
+
+@pytest.mark.asyncio
+async def test_composite_member_of_an_ineligible_holder_counts_on_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-04 excludes a composite member only while its holder is eligible, i.e.
+    while the holder's own holdings are in this sum."""
+    fake = FakeSupabaseClient()
+    _seed_holder_and_marked(fake, "composite_member", is_active=False)
+
+    await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
+
+    assert _today_row(fake)["value_usd"] == pytest.approx(MARKED_USD)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "departed",
+    [
+        pytest.param({"sync_status": "revoked"}, id="revoked"),
+        pytest.param({"disconnected_at": "2026-09-10T00:00:00Z"}, id="disconnected"),
+    ],
+)
+async def test_departed_key_contributes_nothing_even_with_holdings_today(
+    monkeypatch: pytest.MonkeyPatch, departed: dict[str, Any]
+) -> None:
+    """A revoked or disconnected key is not eligible, so its rows (even today's)
+    stay out of the total; nothing carries it forward."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_key(fake, API_KEY_ID_3, **departed)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    _seed_holding(fake, API_KEY_ID_3, "binance", "ETH", TODAY, 400.0)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert _refresh_complete_metadata(audit)["eligible_keys"] == 1
+
+
+def _seed_book(fake: FakeSupabaseClient) -> None:
+    """A fresh key, a quiet key two days stale, and a duplicate of the fresh key."""
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_key(fake, API_KEY_ID_2)
+    _seed_key(
+        fake, API_KEY_ID_3,
+        account_share_kind="duplicate",
+        account_shared_with_api_key_id=API_KEY_ID_1,
+    )
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    _seed_holding(fake, API_KEY_ID_2, "bybit", "BTC", TODAY - timedelta(days=2), 500.0)
+    _seed_holding(fake, API_KEY_ID_3, "binance", "ETH", TODAY, MARKED_USD)
+
+
+@pytest.mark.asyncio
+async def test_write_order_does_not_change_the_persisted_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The row is first-writer-wins on (allocator_id, asof) (``persist_equity_
+    snapshots`` upserts with ignore_duplicates, which the fake honours). Each
+    key's job now computes the same book total, so whichever key writes first,
+    the day keeps the same row. Run A-then-B on one store and B-then-A on
+    another; compare the persisted rows."""
+    rows = []
+    for order in ((API_KEY_ID_1, API_KEY_ID_2), (API_KEY_ID_2, API_KEY_ID_1)):
+        fake = FakeSupabaseClient()
+        _seed_book(fake)
+        for key_id in order:
+            await _run_refresh(monkeypatch, fake, key_id)
+        rows.append(_today_row(fake))
+
+    first, second = rows
+    assert first["value_usd"] == second["value_usd"] == pytest.approx(HOLDER_USD + 500.0)
+    assert first["breakdown"] == second["breakdown"] == {"USDT": HOLDER_USD, "BTC": 500.0}
+
+
+@pytest.mark.asyncio
+async def test_carried_key_keeps_the_deribit_skip_and_the_upnl_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The summation below the read is unchanged for carried rows: a Deribit row
+    is skipped, a derivative contributes its uPnL (never notional), and a
+    derivative with NULL uPnL lands in the perp_upnl_missing audit."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_key(fake, API_KEY_ID_2)
+    stale = TODAY - timedelta(days=1)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    _seed_holding(
+        fake, API_KEY_ID_2, "bybit", "ETHUSDT", stale, 50_000.0,
+        holding_type="derivative", unrealized_pnl_usd=25.0,
+    )
+    _seed_holding(
+        fake, API_KEY_ID_2, "bybit", "SOLUSDT", stale, 9_000.0,
+        holding_type="derivative", unrealized_pnl_usd=None,
+    )
+    _seed_holding(
+        fake, API_KEY_ID_2, "deribit", "BTC-PERPETUAL", stale, 80_000.0,
+        holding_type="derivative", unrealized_pnl_usd=333.0,
+    )
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    row = _today_row(fake)
+    assert row["value_usd"] == pytest.approx(HOLDER_USD + 25.0)
+    missing = [
+        c for c in audit.call_args_list
+        if c.kwargs.get("action") == "allocator.equity.perp_upnl_missing"
+    ]
+    assert len(missing) == 1
+    assert missing[0].kwargs["metadata"]["symbols"] == ["SOLUSDT"]
+    assert _refresh_complete_metadata(audit)["carried_keys"] == 1
