@@ -1980,7 +1980,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_allocator_equity_derived_rls.sql: sections 6 / judged 6 / annotated 6 / waived 0 / biting 6",
     "  file test_allocator_equity_pre_terminus_flag.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
     "  file test_analytics_service_settings_and_vault_tick.sql: sections 14 / judged 14 / annotated 14 / waived 0 / biting 14",
-    "  file test_api_keys_account_identity.sql: sections 37 / judged 37 / annotated 37 / waived 0 / biting 37",
+    "  file test_api_keys_account_identity.sql: sections 41 / judged 41 / annotated 41 / waived 0 / biting 41",
     "  file test_api_keys_exchange_not_user_writable.sql: sections 4 / judged 4 / annotated 4 / waived 0 / biting 4",
     "  file test_api_keys_insert_not_client_writable.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
     // ⭐ ADDED 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2) — the D-11

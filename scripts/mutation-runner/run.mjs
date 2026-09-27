@@ -2563,6 +2563,16 @@ export const FILES_FLOOR = 53;
 //    biting 8`.
 //    WAIVED_CEILING stays 0 — no waiver was added.
 //
+// ⭐ REBASE NOTE 2026-09-27 (Phase 167.1.2 plan 16, D-18, onto origin/main
+//    after CLAIMPAIR): the incoming commit measured 491 -> 495, FOUR new arms
+//    in the already-annotated test_api_keys_account_identity.sql (HIST-signin,
+//    HIST-error, HIST-inactive, HIST-nullstatus) against migration
+//    20260927180000. origin/main had already moved the same base 491 -> 509
+//    (CLAIMPAIR). The union is 509 + 4 = 513, but this rebase does not invent
+//    that floor. ARMS_FLOOR stays at main's measured 509 until one full lane
+//    run on this merged tree prints the union. A stale-low floor is caught by
+//    mutation-runner-floors.test.ts; a guessed 513 would fail the runner if
+//    the count is anything else.
 // ⭐ RE-DERIVED 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 491 -> 506,
 //    FIFTEEN new arms (C-KEY, C-PF, C-ST, C-AL, P5-KEY, P5-PF, P5-ST, P5-AL,
 //    W-LOST, W-INTRO, P2-KEY, P2-PF, P2-ST, P2-AL, P2-C39), all in the NEW file
