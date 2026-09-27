@@ -2497,10 +2497,18 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // ⚠️ THE RELEASE GAP IS STILL REAL AND IS STILL NOT CLOSED: nothing we ship
   // lets an owner of ANY role release their own stored key. 162-06 closed REUSE,
   // not release, and the last bullet keeps routing to us for it.
+  //
+  // ⚠️ 167.1.2 REVIEW-R2 IN-02 — THE CAUSE NAMES THE ACT THAT FAILS, NOT THE
+  // OUTCOME. It said "a new strategy cannot be created over that key" while
+  // `fix[1]` offers "Finish setup", which builds exactly that strategy from the
+  // stored key. The one emitter is the race arm, reached only after a
+  // credential submit, so what cannot work is entering this account's
+  // credentials again. The sentence names no screen or form, because the same
+  // copy renders on every surface that reads the code.
   KEY_ORPHANED: {
     title: "This key is already stored, but no strategy uses it.",
     cause:
-      "A key for this exchange account is already saved on your account, and no strategy is built on it. You may have saved it in an earlier setup whose draft was later deleted, or connected it on another page. A new strategy cannot be created over that key, and it does not clear on its own.",
+      "A key for this exchange account is already saved on your account, and no strategy is built on it. You may have saved it in an earlier setup whose draft was later deleted, or connected it on another page. Entering this account's credentials again cannot build a new strategy over the saved key, and the saved key does not clear on its own.",
     fix: [
       "Connect this strategy with a different account — one whose key is not already stored here.",
       "If your account includes the My Strategies page, look for this account there under “No strategy yet”: “Finish setup” on that row builds the strategy from the key already stored, with no credentials to enter again.",
