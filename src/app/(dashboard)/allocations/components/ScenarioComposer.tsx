@@ -5302,6 +5302,16 @@ export function ScenarioComposer({
         />
       )}
 
+      {/* Phase 170 / SC1-LAYERS (C1-A1 + C1-A2, 2026-09-28) — one square
+          Blend-window data panel. Row 1 header, row 2 window control, row 3
+          timeline, row 4 the scenario KPI strip. Rows 1–3 still mount only
+          when windowBounds is set; with no bounds the panel is row 4 alone
+          and that row has no leading hairline. The eyebrow is the same
+          non-comparative label in every state (frozen 170.1 COPY item (b)). */}
+      <div
+        className="mt-6 border border-border bg-surface"
+        data-testid="scenario-blend-window"
+      >
       {/* Phase 58 (COVERAGE-03) — the honest blend header is the PRIMARY visual
           anchor of this surface (58-UI-SPEC §Interaction): it states the engine's
           member_count · effective window ABOVE the coverage-window control, so
@@ -5311,7 +5321,7 @@ export function ScenarioComposer({
           cross-check reconciles the same axis). Mounts alongside the window
           control (a selected set to describe). */}
       {windowBounds && (
-        <div className="mt-6">
+        <div className="px-4 py-3">
           <BlendHeader metrics={scenarioMetrics} unionSpan={fullRangeWindow} />
         </div>
       )}
@@ -5322,13 +5332,14 @@ export function ScenarioComposer({
           control sits above its graph). Only mounts when the selected set has a
           span to window (windowBounds !== null). A distinct axis from the
           rolling-metrics window / factsheet brush-zoom / startDates (POLISH-01).
-          Presets + DESIGN.md styling land in the Task-2 pass. */}
+          Phase 170 C1-A1 — its own rounded box is gone; it is a hairline row
+          of the Blend-window panel. ref / tabIndex / testid stay (RT-5). */}
       {windowBounds && (
         <div
           // RT-5 — the Include-click focus target (see pendingWindowFocusRef).
           ref={coverageWindowControlRef}
           tabIndex={-1}
-          className="mt-6 flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface px-4 py-3"
+          className="flex flex-wrap items-center gap-3 border-t border-border px-4 py-3"
           data-testid="scenario-coverage-window"
         >
           <span className="text-fixed-11 font-medium uppercase tracking-wide text-text-muted">
@@ -5420,7 +5431,7 @@ export function ScenarioComposer({
           the row chips by construction. Only mounts when there is a windowed set
           to plot. */}
       {windowBounds && (
-        <div className="mt-6">
+        <div className="border-t border-border px-4 py-3">
           <CoverageTimeline
             rows={timelineRows}
             unionWindow={fullRangeWindow}
@@ -5429,15 +5440,8 @@ export function ScenarioComposer({
         </div>
       )}
 
-      {/* Phase 170 / SC1-LAYERS (C1-A2, 2026-09-28) — the scenario strip is
-          row 4 of one square Blend-window data panel, not a second
-          free-standing KPI layer. Rows 1–3 (header, window, timeline) move
-          into this panel in the C1-A1 step. The eyebrow is the same
-          non-comparative label in every state (frozen 170.1 COPY item (b)). */}
-      <div
-        className="mt-6 border border-border bg-surface"
-        data-testid="scenario-blend-window"
-      >
+      {/* Row 4 — the hairline is absent when rows 1–3 did not render. */}
+      <div className={windowBounds ? "border-t border-border" : undefined}>
         <p className="text-micro font-mono uppercase tracking-[0.18em] text-text-muted px-4 pt-3">
           Scenario blend
         </p>
@@ -5453,6 +5457,7 @@ export function ScenarioComposer({
           minHistoryDepthMonths={minHistoryDepthMonths}
           activeVenues={activeVenues}
         />
+      </div>
       </div>
 
       {/* CONSTIT-01 (Pitfall 5) — all-constituents-excluded honest empty,
