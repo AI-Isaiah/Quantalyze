@@ -100,7 +100,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.5.1.3: SYNCADMIT — admit the owner-only status to the trade-sync constant, or prove it must not be: 5 of 5 private keys are never synced and their trades are never stored** (INSERTED)
 - [x] **Phase 164.5.1.4: SYNCCURSOR — the sync cursor is per-KEY while stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies trade window** (INSERTED)
 - [x] **Phase 164.5.2: BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required** (INSERTED)
-- [ ] **Phase 164.5.2.1: BRIDGERESIDUE — the two 164.6.7 bridge residues in sync_strategy_analytics_status** (INSERTED) — not yet planned
+- [ ] **Phase 164.5.2.1: BRIDGERESIDUE — the two 164.6.7 bridge residues in sync_strategy_analytics_status** (INSERTED) — planned (5 plans, 5 waves), not yet executed
 - [ ] **Phase 164.5.3: MT5CREDS — show the MT5 account number on the key card and add a credential-update path** (INSERTED) — verification: human_needed
 - [x] **Phase 164.5.4: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently** (INSERTED)
 - [x] **Phase 164.6: GATE-HYGIENE — every gate-hygiene item that left 164.1: the OPS-08 residue, the composite-stamp twin, the reviewer execution-status rule, the RED-UNDER convention's discoverability and the audit allowlist** (INSERTED)
@@ -2249,10 +2249,24 @@ Plans:
 
 Plans:
 
+**Wave 1**
+
 - [ ] 164.5.2.1-01-PLAN.md — COMPOSITE-REREAD: the migration re-based on the latest bridge, the D-04b membership clear in branches (b) and (a), residue gate arms W1..W7 RED-first
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 164.5.2.1-02-PLAN.md — RETRY-PLAIN-COMPLETE: read-1 fold, `v_refresh_keep`, keep arms, arms R1..R6 + INVARIANT, sentinel and sql-tests roster
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 164.5.2.1-03-PLAN.md — the in-bridge per-strategy lock (D-06 TAKE), D-07 comment correction, new LANE-ONLY dblink gate B1/B2
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 164.5.2.1-04-PLAN.md — curated/protected twins re-pointed, snapshot + VAC-04 ack, local-stack D-11 set, kind-scope drift test by scan
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [ ] 164.5.2.1-05-PLAN.md — census on the merged tree, TODOS + runbook item 7 closeout (D-18 PRE corner accepted and surfaced), release commit
 
 **⭐ ROUTED IN 2026-09-26 (founder; found by the 164.5.2 round-1 review IN-01 and the migration reviewer):** the deployed comment in `sync_strategy_analytics_status` (latest definition `20260906120000`, also in the baseline) still says neither mark RPC takes a per-strategy lock. Since 164.5.2 that is false for mark against mark. Correct it when this phase re-bases the function.
