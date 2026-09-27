@@ -7,8 +7,9 @@
 -- from a reconstruct_allocator_history job that only a user-initiated sync
 -- enqueues. A book at zero stayed at zero. The migration makes the fan-out:
 --   * FIRST enqueue one reconstruct_allocator_history job (idempotency key
---     reconstruct-alloc-<key>-initial) for every QUALIFYING key on a book with
---     zero snapshots that has no reconstruct job in flight (pending, running,
+--     reconstruct-alloc-<key>-initial, a correlation label the database does
+--     not enforce) for every QUALIFYING key on a book with zero snapshots that
+--     has no reconstruct job in flight (pending, running,
 --     done_pending_children, failed_retry) or done, taking whole books under a
 --     per-run cap; qualifying = active, not revoked, sync_status not
 --     sign_in_failed or error, not disconnected, not linked to one of its
@@ -183,7 +184,9 @@ BEGIN
   -- RED-UNDER: in migration 20260927120000, corrupt the bootstrap enqueue's
   --            idempotency key suffix. The reconstruct row still exists (so the
   --            book stays bootstrapped and Z1 stays green), but it no longer
-  --            names the same job request_allocator_holdings_sync names.
+  --            carries the correlation label request_allocator_holdings_sync
+  --            writes. The label dedupes nothing: dedupe is the in-flight
+  --            partial unique index and the in-flight-or-done NOT EXISTS.
   -- RED-UNDER-M: {"arm":"Z2","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"              p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial',","replace":"              p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial-mutated',","occurrences":1}]}
   SELECT count(*) INTO v_n
     FROM compute_jobs
@@ -191,7 +194,7 @@ BEGIN
      AND kind = 'reconstruct_allocator_history'
      AND idempotency_key = 'reconstruct-alloc-' || k_z::text || '-initial';
   IF v_n <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (Z2): a qualifying key on a book with ZERO equity snapshots got % reconstruct_allocator_history job(s) keyed reconstruct-alloc-<key>-initial, expected exactly 1. Without it the book''s history is never reconstructed, or the cron path and the connect path name two different jobs.', v_n;
+    RAISE EXCEPTION 'TEST FAILED (Z2): a qualifying key on a book with ZERO equity snapshots got % reconstruct_allocator_history job(s) keyed reconstruct-alloc-<key>-initial, expected exactly 1. Without it the book''s history is never reconstructed, or the cron path''s job no longer carries the correlation label the connect path writes (a label only: dedupe is the in-flight index and the in-flight-or-done gate).', v_n;
   END IF;
 
   RAISE NOTICE 'group Z: a zero-snapshot book''s qualifying key got one refresh and one initial reconstruct';

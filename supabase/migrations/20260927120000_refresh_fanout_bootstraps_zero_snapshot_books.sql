@@ -158,9 +158,13 @@
 --       key first, then owner id. Before each book it stops once the per-run
 --       count has reached the declared cap. For every qualifying key of the
 --       book with no such row it enqueues one reconstruct_allocator_history
---       job with the idempotency key 'reconstruct-alloc-<key>-initial', the one
---       request_allocator_holdings_sync uses, so the cron path and the user
---       path name one job; a unique_violation is swallowed as the RPC does.
+--       job carrying the idempotency key 'reconstruct-alloc-<key>-initial',
+--       the string request_allocator_holdings_sync writes. That string is a
+--       CORRELATION LABEL only: compute_jobs.idempotency_key is not enforced
+--       by the database. What dedupes (review SFH-06, MIG-01) is the in-flight
+--       partial unique index compute_jobs_one_inflight_reconstruct_per_api_key
+--       with the enqueue helper's in-flight pre-check, and, across runs, the
+--       in-flight-or-done NOT EXISTS on compute_jobs in this loop.
 --   (2) The refresh loop's snapshot conjunct becomes: the owner has a snapshot
 --       row, OR the key is not strategy-linked and its book is BOOTSTRAPPED.
 --       It runs after (3) on purpose: its bootstrapped test reads the
@@ -361,7 +365,7 @@ REVOKE ALL ON FUNCTION public.enqueue_refresh_allocator_equity_for_all() FROM PU
 GRANT ALL ON FUNCTION public.enqueue_refresh_allocator_equity_for_all() TO service_role;
 
 COMMENT ON FUNCTION public.enqueue_refresh_allocator_equity_for_all() IS
-  'Daily cron fan-out for the per-allocator legacy equity store. Two arms, inside one advisory lock. (1) Bootstrap, first, in its own sub-block (an error there is logged as a WARNING, rolls back every bootstrap enqueue of the run and never cancels the refresh): for an owner with ZERO allocator_equity_snapshots rows, one reconstruct_allocator_history job (idempotency key reconstruct-alloc-<key>-initial, the one request_allocator_holdings_sync uses) for every qualifying key with no reconstruct job in flight (pending, running, done_pending_children, failed_retry) or done, so a failed_final reconstruct is retried; qualifying = active, not revoked, sync_status not sign_in_failed or error, not disconnected, not linked to one of its owner''s non-archived strategies (strategies.api_key_id or strategy_keys, mirroring deriveStrategyLinkedKeyIds) and not Deribit. Whole books, newest key first, stopping before a new book once 25 keys (v_bootstrap_cap) were enqueued this call. (2) Refresh: one refresh_allocator_equity_daily job per eligible key (active, not revoked, not disconnected) whose owner has a snapshot row, or which is unlinked on a book where every qualifying key has a reconstruct job in flight or done. A lost enqueue race (serialization_failure) skips one key with a WARNING. Phase 167.1.2 D-17; re-based on migration 075.';
+  'Daily cron fan-out for the per-allocator legacy equity store. Two arms, inside one advisory lock. (1) Bootstrap, first, in its own sub-block (an error there is logged as a WARNING, rolls back every bootstrap enqueue of the run and never cancels the refresh): for an owner with ZERO allocator_equity_snapshots rows, one reconstruct_allocator_history job for every qualifying key with no reconstruct job in flight (pending, running, done_pending_children, failed_retry) or done, so a failed_final reconstruct is retried; qualifying = active, not revoked, sync_status not sign_in_failed or error, not disconnected, not linked to one of its owner''s non-archived strategies (strategies.api_key_id or strategy_keys, mirroring deriveStrategyLinkedKeyIds) and not Deribit. The job carries idempotency key reconstruct-alloc-<key>-initial, the RPC''s correlation label; dedupe is the in-flight partial unique index plus the in-flight-or-done gate, not that key. Whole books, newest key first, stopping before a new book once 25 keys (v_bootstrap_cap) were enqueued this call. (2) Refresh: one refresh_allocator_equity_daily job per eligible key (active, not revoked, not disconnected) whose owner has a snapshot row, or which is unlinked on a book where every qualifying key has a reconstruct job in flight or done. A lost enqueue race (serialization_failure) skips one key with a WARNING. Phase 167.1.2 D-17; re-based on migration 075.';
 
 -- --------------------------------------------------------------------------
 -- Self-verify. CATALOGUE-ONLY: to_regprocedure, pg_get_functiondef,
@@ -371,9 +375,11 @@ COMMENT ON FUNCTION public.enqueue_refresh_allocator_equity_for_all() IS
 -- only needles every mutation in the SQL gate leaves intact (SECDEF, the
 -- search_path pin, the lock key, the two kind literals and the cap's declared
 -- NAME), so a mutated apply survives and the gate's arm is the first failure.
--- The behaviour itself (the revoked, disconnected, Deribit and archived terms,
--- the bootstrapped conjunct, the idempotency key, the cap value and where the
--- cap check sits) is pinned by the gate's arms, never here.
+-- The behaviour itself (the revoked, disconnected, Deribit, archived and
+-- sign_in_failed/error terms, the in-flight-or-done status list, the
+-- bootstrapped conjunct, the idempotency key, the cap value, where the cap
+-- check sits, and the per-call and bootstrap sub-block handlers) is pinned by
+-- the gate's arms, never here.
 -- --------------------------------------------------------------------------
 DO $selfverify$
 DECLARE
