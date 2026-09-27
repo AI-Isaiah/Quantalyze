@@ -2245,11 +2245,15 @@ Plans:
 
 **Requirements**: TODOS entries `[164.6.7-COMPOSITE-REREAD-RESIDUE]`, `[164.6.7-RETRY-PLAIN-COMPLETE]` (both booked on `feat/164.6.7`; they reach `main` when Phase 164.6.7 lands)
 **Depends on:** Phase 164.5.2 (migration ordering and the shared gate census), Phase 164.6.7 (its TODOS entries and its Python ends of both residues)
-**Plans:** 0 plans
+**Plans:** 5 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.5.2.1 to break down)
+- [ ] 164.5.2.1-01-PLAN.md — COMPOSITE-REREAD: the migration re-based on the latest bridge, the D-04b membership clear in branches (b) and (a), residue gate arms W1..W7 RED-first
+- [ ] 164.5.2.1-02-PLAN.md — RETRY-PLAIN-COMPLETE: read-1 fold, `v_refresh_keep`, keep arms, arms R1..R6 + INVARIANT, sentinel and sql-tests roster
+- [ ] 164.5.2.1-03-PLAN.md — the in-bridge per-strategy lock (D-06 TAKE), D-07 comment correction, new LANE-ONLY dblink gate B1/B2
+- [ ] 164.5.2.1-04-PLAN.md — curated/protected twins re-pointed, snapshot + VAC-04 ack, local-stack D-11 set, kind-scope drift test by scan
+- [ ] 164.5.2.1-05-PLAN.md — census on the merged tree, TODOS + runbook item 7 closeout (D-18 PRE corner accepted and surfaced), release commit
 
 **⭐ ROUTED IN 2026-09-26 (founder; found by the 164.5.2 round-1 review IN-01 and the migration reviewer):** the deployed comment in `sync_strategy_analytics_status` (latest definition `20260906120000`, also in the baseline) still says neither mark RPC takes a per-strategy lock. Since 164.5.2 that is false for mark against mark. Correct it when this phase re-bases the function.
 
