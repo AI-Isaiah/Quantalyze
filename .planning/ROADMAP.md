@@ -136,7 +136,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
 - [ ] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — planned (1 plan); HALTED 2026-09-27 at Task 3; resumes after Phase 166.4 ships
-- [ ] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — not yet planned; data integrity, ahead of features
+- [ ] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [ ] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed
 - [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
@@ -3591,7 +3591,7 @@ Plans:
 **Goal:** For a strategy whose date index is sparser than BTC's 7-day calendar (for example weekday-only), every benchmark-relative metric pairs each strategy return with the BTC return over the SAME holding interval, so alpha, beta, correlation, information ratio, Treynor, r² and the rolling greeks and correlation describe the strategy's real co-movement with BTC, and r² equals correlation² again.
 **Requirements**: TBD (criteria below)
 **Depends on:** nothing. **Priority:** data integrity, ahead of features (founder priority rule, 2026-09-27).
-**Plans:** 0 plans
+**Plans:** 4 plans in 4 waves, linear (planned 2026-09-27; plan-check 3 rounds, 0 blockers). Decisions in `166.4-CONTEXT.md`: D-A, D-B (founder), D-01 to D-07 (orchestrator; D-04 to D-07 are readings pending founder ratification). No migration.
 
 **Evidence (orchestrator, 2026-09-27; the reproduction was re-run locally against main-level code; counts and verdicts only):**
 
@@ -3619,7 +3619,10 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 166.4 to break down)
+- [ ] 166.4-01-PLAN.md — W1 engine: one interval-matched pair feeds every benchmark-relative metric; red-first Fri→Mon beta; r² on the shared pair; the fill arm retired; sparse-calendar predicate (SC1, SC2, SC3, SC7)
+- [ ] 166.4-02-PLAN.md — W2 dense parity and the broker and stitch_composite trace, tests only (SC4, SC5)
+- [ ] 166.4-03-PLAN.md — W3 gap tests and the neuters, tests only (SC1, SC2)
+- [ ] 166.4-04-PLAN.md — W4 the Phase 166.3 handoff paragraph and the release entry naming M1 (SC5, SC6, SC7)
 
 ### Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine (INSERTED)
 
@@ -4246,7 +4249,7 @@ kept verbatim.
 | 166.1.1 DDSIGN | 0/? | Queued — feature | - |
 | 166.2 COMPUTEONCE | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.102.0.0 · #874 |
 | 166.3 RECOMPUTE | 0/1 | HALTED 2026-09-27 at Task 3 — resumes after 166.4 ships | - |
-| 166.4 BENCHALIGN | 0/? | Queued — data integrity | - |
+| 166.4 BENCHALIGN | 0/4 | Planned — data integrity | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.89.0.0 · #852 |
 | 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
