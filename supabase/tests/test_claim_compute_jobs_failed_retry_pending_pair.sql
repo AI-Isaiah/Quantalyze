@@ -34,13 +34,22 @@
 -- (the sql-tests mode) the first failed arm exits non-zero; under
 -- ON_ERROR_STOP=0 every arm reports (the red-first census mode). Every arm is
 -- its own BEGIN ... ROLLBACK, so nothing it seeds or claims outlives it.
---   * Seeding runs under SET LOCAL session_replication_role = replica, so the
---     compute_jobs foreign keys (auth.users, api_keys, portfolios, strategies)
---     need no parent rows; CHECK constraints still apply, so every seed kind
---     satisfies compute_jobs_kind_target_coherence. The role is set back to
---     origin BEFORE any claim call, so the claim runs with every trigger live.
---     Measured permitted for the connection role on BOTH lanes (local-stack
---     and pg-lane) before this file was written (164.9.3-01-SUMMARY, A1).
+--   * Seeding runs under SET LOCAL session_replication_role = replica
+--     (measured permitted for the connection role on BOTH lanes, local-stack
+--     and pg-lane, before this file was written: 164.9.3-01-SUMMARY, A1), and
+--     the role is set back to origin BEFORE any claim call, so the claim runs
+--     with every compute_jobs trigger live. Each arm seeds a real PARENT row
+--     for every partition id it uses (auth.users for allocator, api_keys,
+--     portfolios, strategies), with only the parent's NOT NULL columns. The
+--     parents are needed although the replica role skips the seed's own
+--     foreign-key checks: PostgreSQL re-checks a foreign key on an UPDATE of a
+--     row inserted in the same transaction even when the key is unchanged, so
+--     the claim's own UPDATE would raise 23503 against a missing parent
+--     (measured on the local-stack lane, 164.9.3-01-SUMMARY). Seeding the
+--     parents under the replica role fires none of their own triggers, so no
+--     parent insert enqueues a job onto an arm's partition. CHECK constraints
+--     still apply, so every seed kind satisfies
+--     compute_jobs_kind_target_coherence.
 --   * Every id is gen_random_uuid() at run time, and every count is scoped to
 --     the arm's own job ids, never global: claims are queue-wide and the
 --     sql-tests lane carries rows other gate files commit.
@@ -112,12 +121,18 @@ DECLARE
   n_other  int;
 BEGIN
   SET LOCAL session_replication_role = replica;
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO public.api_keys (id, user_id, exchange, label, api_key_encrypted)
+    VALUES (v_part, gen_random_uuid(), 'okx', 'claimpair-gate', 'enc'),
+           (v_part2, gen_random_uuid(), 'okx', 'claimpair-gate', 'enc');
   INSERT INTO public.compute_jobs (id, kind, api_key_id, status, attempts, next_attempt_at)
     VALUES (v_retry, 'poll_allocator_positions', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
            (v_twin,  'poll_allocator_positions', v_part,  'pending',      0, now() - interval '5 minutes'),
            (v_other, 'poll_allocator_positions', v_part2, 'pending',      0, now() - interval '1 minute');
   SET LOCAL session_replication_role = origin;
 
+  v_err := NULL; v_msg := NULL;
   BEGIN
     SELECT count(*) FILTER (WHERE c.id = v_retry),
            count(*) FILTER (WHERE c.id = v_twin),
@@ -135,5 +150,770 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (C-KEY): claim_compute_jobs raised nothing but the api_key_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
   END IF;
   RAISE NOTICE 'C-KEY OK: claim_compute_jobs claimed the pending twin and the unrelated job, held the failed_retry back, raised nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- C-PF — claim_compute_jobs, portfolio partition.
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_twin   uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_twin   int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO public.portfolios (id, user_id, name)
+    VALUES (v_part, gen_random_uuid(), 'claimpair-gate'),
+           (v_part2, gen_random_uuid(), 'claimpair-gate');
+  INSERT INTO public.compute_jobs (id, kind, portfolio_id, status, attempts, next_attempt_at)
+    VALUES (v_retry, 'compute_portfolio', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'compute_portfolio', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'compute_portfolio', v_part2, 'pending',      0, now() - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs(1000, 'claimpair-gate') c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (C-PF): SQLSTATE % from claim_compute_jobs on a due failed_retry job beside a pending twin of the same (kind, portfolio_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another portfolio_id was claimed.', v_err, v_msg;
+  END IF;
+  IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (C-PF): claim_compute_jobs raised nothing but the portfolio_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
+  END IF;
+  RAISE NOTICE 'C-PF OK: claim_compute_jobs claimed the pending twin and the unrelated job, held the failed_retry back, raised nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- C-ST — claim_compute_jobs, strategy partition.
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_twin   uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_twin   int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO public.strategies (id, user_id, name)
+    VALUES (v_part, gen_random_uuid(), 'claimpair-gate'),
+           (v_part2, gen_random_uuid(), 'claimpair-gate');
+  INSERT INTO public.compute_jobs (id, kind, strategy_id, status, attempts, next_attempt_at)
+    VALUES (v_retry, 'compute_analytics', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'compute_analytics', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'compute_analytics', v_part2, 'pending',      0, now() - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs(1000, 'claimpair-gate') c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (C-ST): SQLSTATE % from claim_compute_jobs on a due failed_retry job beside a pending twin of the same (kind, strategy_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another strategy_id was claimed.', v_err, v_msg;
+  END IF;
+  IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (C-ST): claim_compute_jobs raised nothing but the strategy_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
+  END IF;
+  RAISE NOTICE 'C-ST OK: claim_compute_jobs claimed the pending twin and the unrelated job, held the failed_retry back, raised nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- C-AL — claim_compute_jobs, allocator partition.
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_twin   uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_twin   int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO auth.users (id)
+    VALUES (v_part), (v_part2);
+  INSERT INTO public.compute_jobs (id, kind, allocator_id, status, attempts, next_attempt_at)
+    VALUES (v_retry, 'derive_allocator_equity', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'derive_allocator_equity', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'derive_allocator_equity', v_part2, 'pending',      0, now() - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs(1000, 'claimpair-gate') c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (C-AL): SQLSTATE % from claim_compute_jobs on a due failed_retry job beside a pending twin of the same (kind, allocator_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another allocator_id was claimed.', v_err, v_msg;
+  END IF;
+  IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (C-AL): claim_compute_jobs raised nothing but the allocator_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
+  END IF;
+  RAISE NOTICE 'C-AL OK: claim_compute_jobs claimed the pending twin and the unrelated job, held the failed_retry back, raised nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- P5-KEY — the 5-arg claim_compute_jobs_with_priority, api_key_id partition.
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_twin   uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_twin   int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO public.api_keys (id, user_id, exchange, label, api_key_encrypted)
+    VALUES (v_part, gen_random_uuid(), 'okx', 'claimpair-gate', 'enc'),
+           (v_part2, gen_random_uuid(), 'okx', 'claimpair-gate', 'enc');
+  INSERT INTO public.compute_jobs (id, kind, api_key_id, status, attempts, next_attempt_at)
+    VALUES (v_retry, 'poll_allocator_positions', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'poll_allocator_positions', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'poll_allocator_positions', v_part2, 'pending',      0, now() - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate', NULL) c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (P5-KEY): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a pending twin of the same (kind, api_key_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another api_key_id was claimed.', v_err, v_msg;
+  END IF;
+  IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P5-KEY): the 5-arg claim_compute_jobs_with_priority raised nothing but the api_key_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
+  END IF;
+  RAISE NOTICE 'P5-KEY OK: the 5-arg claim_compute_jobs_with_priority claimed the pending twin and the unrelated job, held the failed_retry back, raised nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- P5-PF — the 5-arg claim_compute_jobs_with_priority, portfolio partition.
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_twin   uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_twin   int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO public.portfolios (id, user_id, name)
+    VALUES (v_part, gen_random_uuid(), 'claimpair-gate'),
+           (v_part2, gen_random_uuid(), 'claimpair-gate');
+  INSERT INTO public.compute_jobs (id, kind, portfolio_id, status, attempts, next_attempt_at)
+    VALUES (v_retry, 'compute_portfolio', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'compute_portfolio', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'compute_portfolio', v_part2, 'pending',      0, now() - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate', NULL) c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (P5-PF): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a pending twin of the same (kind, portfolio_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another portfolio_id was claimed.', v_err, v_msg;
+  END IF;
+  IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P5-PF): the 5-arg claim_compute_jobs_with_priority raised nothing but the portfolio_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
+  END IF;
+  RAISE NOTICE 'P5-PF OK: the 5-arg claim_compute_jobs_with_priority claimed the pending twin and the unrelated job, held the failed_retry back, raised nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- P5-ST — the 5-arg claim_compute_jobs_with_priority, strategy partition.
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_twin   uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_twin   int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO public.strategies (id, user_id, name)
+    VALUES (v_part, gen_random_uuid(), 'claimpair-gate'),
+           (v_part2, gen_random_uuid(), 'claimpair-gate');
+  INSERT INTO public.compute_jobs (id, kind, strategy_id, status, attempts, next_attempt_at)
+    VALUES (v_retry, 'compute_analytics', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'compute_analytics', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'compute_analytics', v_part2, 'pending',      0, now() - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate', NULL) c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (P5-ST): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a pending twin of the same (kind, strategy_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another strategy_id was claimed.', v_err, v_msg;
+  END IF;
+  IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P5-ST): the 5-arg claim_compute_jobs_with_priority raised nothing but the strategy_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
+  END IF;
+  RAISE NOTICE 'P5-ST OK: the 5-arg claim_compute_jobs_with_priority claimed the pending twin and the unrelated job, held the failed_retry back, raised nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- P5-AL — the 5-arg claim_compute_jobs_with_priority, allocator partition.
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_twin   uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_twin   int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO auth.users (id)
+    VALUES (v_part), (v_part2);
+  INSERT INTO public.compute_jobs (id, kind, allocator_id, status, attempts, next_attempt_at)
+    VALUES (v_retry, 'derive_allocator_equity', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'derive_allocator_equity', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'derive_allocator_equity', v_part2, 'pending',      0, now() - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate', NULL) c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (P5-AL): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a pending twin of the same (kind, allocator_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another allocator_id was claimed.', v_err, v_msg;
+  END IF;
+  IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P5-AL): the 5-arg claim_compute_jobs_with_priority raised nothing but the allocator_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
+  END IF;
+  RAISE NOTICE 'P5-AL OK: the 5-arg claim_compute_jobs_with_priority claimed the pending twin and the unrelated job, held the failed_retry back, raised nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- W-LOST — the 5-arg claim_compute_jobs_with_priority, allocator partition: the booked repro shape (the twin
+-- is due in the FUTURE), then the twin runs, then the retry runs. No work is
+-- lost: every seeded job is claimed exactly once, in that order.
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_twin   uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_twin   int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO auth.users (id)
+    VALUES (v_part), (v_part2);
+  INSERT INTO public.compute_jobs (id, kind, allocator_id, status, attempts, next_attempt_at)
+    VALUES (v_retry, 'derive_allocator_equity', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'derive_allocator_equity', v_part,  'pending',      0, now() + interval '10 minutes'),
+           (v_other, 'derive_allocator_equity', v_part2, 'pending',      0, now() - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  -- Tick 1: only the retry and the unrelated job are due.
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate', NULL) c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (W-LOST): SQLSTATE % at tick 1 from the 5-arg claim_compute_jobs_with_priority on a due failed_retry job beside a not-yet-due pending twin of the same (kind, allocator_id) (%). The whole batch aborted, so the unrelated due job on another allocator_id was not claimed.', v_err, v_msg;
+  END IF;
+  IF n_other <> 1 OR n_retry <> 0 OR n_twin <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (W-LOST): tick 1 claimed the unrelated due job % time(s), the failed_retry % time(s) and the not-yet-due twin % time(s); expected 1, 0 and 0.', n_other, n_retry, n_twin;
+  END IF;
+
+  -- Tick 2: the twin falls due and must be claimed; the retry still waits.
+  UPDATE public.compute_jobs SET next_attempt_at = now() - interval '1 minute' WHERE id = v_twin;
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate', NULL) c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (W-LOST): SQLSTATE % at tick 2 from the 5-arg claim_compute_jobs_with_priority once the pending twin fell due (%).', v_err, v_msg;
+  END IF;
+  IF n_twin <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (W-LOST): tick 2 claimed the now-due pending twin % time(s) and the failed_retry % time(s); expected 1 and 0. The twin was lost or the retry jumped it.', n_twin, n_retry;
+  END IF;
+
+  -- Tick 3: the twin finished; the retry must now run.
+  UPDATE public.compute_jobs SET status = 'done' WHERE id = v_twin;
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate', NULL) c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (W-LOST): SQLSTATE % at tick 3 from the 5-arg claim_compute_jobs_with_priority after the twin finished (%).', v_err, v_msg;
+  END IF;
+  IF n_retry <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (W-LOST): tick 3 claimed the failed_retry % time(s) after its twin finished; expected 1. The retry was lost.', n_retry;
+  END IF;
+  RAISE NOTICE 'W-LOST OK: tick 1 claimed the unrelated job, tick 2 the twin, tick 3 the retry; nothing raised, nothing lost.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- W-INTRO — the 5-arg claim_compute_jobs_with_priority, strategy partition, compute_intro_snapshot.
+-- ⚠️ REGRESSION ARM: GREEN on the pre-fix tree by design (see the header).
+-- compute_jobs_one_inflight_per_kind_strategy does not cover this kind, so
+-- two pending intro rows and a due failed_retry intro row may share a
+-- strategy and must all be claimed in one tick. A post-rank guard that also
+-- skips on a pending sibling starves all three (CONTEXT D-08).
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_i1     uuid := gen_random_uuid();
+  v_i2     uuid := gen_random_uuid();
+  v_iretry uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_claim  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  -- Parent row: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO public.strategies (id, user_id, name)
+    VALUES (v_part, gen_random_uuid(), 'claimpair-gate');
+  INSERT INTO public.compute_jobs (id, kind, strategy_id, status, attempts, next_attempt_at)
+    VALUES (v_iretry, 'compute_intro_snapshot', v_part, 'failed_retry', 1, now() - interval '10 minutes'),
+           (v_i1,     'compute_intro_snapshot', v_part, 'pending',      0, now() - interval '5 minutes'),
+           (v_i2,     'compute_intro_snapshot', v_part, 'pending',      0, now() - interval '3 minutes');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id IN (v_i1, v_i2, v_iretry))
+      INTO n_claim
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate', NULL) c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (W-INTRO): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority on two pending and one due failed_retry compute_intro_snapshot rows of one strategy (%).', v_err, v_msg;
+  END IF;
+  IF n_claim <> 3 THEN
+    RAISE EXCEPTION 'TEST FAILED (W-INTRO): the 5-arg claim_compute_jobs_with_priority claimed % of the 3 compute_intro_snapshot rows sharing one strategy; expected 3. The intro carve-out is starved.', n_claim;
+  END IF;
+  RAISE NOTICE 'W-INTRO OK: all 3 compute_intro_snapshot rows sharing one strategy were claimed in one tick.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- P2-KEY — the 2-arg claim_compute_jobs_with_priority, api_key_id partition.
+-- --------------------------------------------------------------------------
+BEGIN;
+DROP FUNCTION public.claim_compute_jobs_with_priority(integer, text, boolean, text[], text[]);
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_twin   uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_twin   int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO public.api_keys (id, user_id, exchange, label, api_key_encrypted)
+    VALUES (v_part, gen_random_uuid(), 'okx', 'claimpair-gate', 'enc'),
+           (v_part2, gen_random_uuid(), 'okx', 'claimpair-gate', 'enc');
+  INSERT INTO public.compute_jobs (id, kind, api_key_id, status, attempts, next_attempt_at)
+    VALUES (v_retry, 'poll_allocator_positions', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'poll_allocator_positions', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'poll_allocator_positions', v_part2, 'pending',      0, now() - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate') c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (P2-KEY): SQLSTATE % from the 2-arg claim_compute_jobs_with_priority (the 5-arg overload dropped inside this transaction) on a due failed_retry job beside a pending twin of the same (kind, api_key_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another api_key_id was claimed.', v_err, v_msg;
+  END IF;
+  IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P2-KEY): the 2-arg claim_compute_jobs_with_priority raised nothing but the api_key_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
+  END IF;
+  RAISE NOTICE 'P2-KEY OK: the 2-arg claim_compute_jobs_with_priority claimed the pending twin and the unrelated job, held the failed_retry back, raised nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- P2-PF — the 2-arg claim_compute_jobs_with_priority, portfolio partition.
+-- --------------------------------------------------------------------------
+BEGIN;
+DROP FUNCTION public.claim_compute_jobs_with_priority(integer, text, boolean, text[], text[]);
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_twin   uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_twin   int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO public.portfolios (id, user_id, name)
+    VALUES (v_part, gen_random_uuid(), 'claimpair-gate'),
+           (v_part2, gen_random_uuid(), 'claimpair-gate');
+  INSERT INTO public.compute_jobs (id, kind, portfolio_id, status, attempts, next_attempt_at)
+    VALUES (v_retry, 'compute_portfolio', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'compute_portfolio', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'compute_portfolio', v_part2, 'pending',      0, now() - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate') c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (P2-PF): SQLSTATE % from the 2-arg claim_compute_jobs_with_priority (the 5-arg overload dropped inside this transaction) on a due failed_retry job beside a pending twin of the same (kind, portfolio_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another portfolio_id was claimed.', v_err, v_msg;
+  END IF;
+  IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P2-PF): the 2-arg claim_compute_jobs_with_priority raised nothing but the portfolio_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
+  END IF;
+  RAISE NOTICE 'P2-PF OK: the 2-arg claim_compute_jobs_with_priority claimed the pending twin and the unrelated job, held the failed_retry back, raised nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- P2-ST — the 2-arg claim_compute_jobs_with_priority, strategy partition.
+-- --------------------------------------------------------------------------
+BEGIN;
+DROP FUNCTION public.claim_compute_jobs_with_priority(integer, text, boolean, text[], text[]);
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_twin   uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_twin   int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO public.strategies (id, user_id, name)
+    VALUES (v_part, gen_random_uuid(), 'claimpair-gate'),
+           (v_part2, gen_random_uuid(), 'claimpair-gate');
+  INSERT INTO public.compute_jobs (id, kind, strategy_id, status, attempts, next_attempt_at)
+    VALUES (v_retry, 'compute_analytics', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'compute_analytics', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'compute_analytics', v_part2, 'pending',      0, now() - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate') c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (P2-ST): SQLSTATE % from the 2-arg claim_compute_jobs_with_priority (the 5-arg overload dropped inside this transaction) on a due failed_retry job beside a pending twin of the same (kind, strategy_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another strategy_id was claimed.', v_err, v_msg;
+  END IF;
+  IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P2-ST): the 2-arg claim_compute_jobs_with_priority raised nothing but the strategy_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
+  END IF;
+  RAISE NOTICE 'P2-ST OK: the 2-arg claim_compute_jobs_with_priority claimed the pending twin and the unrelated job, held the failed_retry back, raised nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- P2-AL — the 2-arg claim_compute_jobs_with_priority, allocator partition.
+-- --------------------------------------------------------------------------
+BEGIN;
+DROP FUNCTION public.claim_compute_jobs_with_priority(integer, text, boolean, text[], text[]);
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_twin   uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_twin   int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO auth.users (id)
+    VALUES (v_part), (v_part2);
+  INSERT INTO public.compute_jobs (id, kind, allocator_id, status, attempts, next_attempt_at)
+    VALUES (v_retry, 'derive_allocator_equity', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'derive_allocator_equity', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'derive_allocator_equity', v_part2, 'pending',      0, now() - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate') c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (P2-AL): SQLSTATE % from the 2-arg claim_compute_jobs_with_priority (the 5-arg overload dropped inside this transaction) on a due failed_retry job beside a pending twin of the same (kind, allocator_id) (%). The whole batch aborted, so neither the twin nor an unrelated due job on another allocator_id was claimed.', v_err, v_msg;
+  END IF;
+  IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P2-AL): the 2-arg claim_compute_jobs_with_priority raised nothing but the allocator_id partition is wedged silently: pending twin claimed % time(s), unrelated due job % time(s), failed_retry % time(s); expected 1, 1 and 0.', n_twin, n_other, n_retry;
+  END IF;
+  RAISE NOTICE 'P2-AL OK: the 2-arg claim_compute_jobs_with_priority claimed the pending twin and the unrelated job, held the failed_retry back, raised nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- P2-C39 — the 2-arg claim_compute_jobs_with_priority, api_key_id partition, second tick: once the twin is
+-- running, the still-due retry must neither raise nor be claimed (the C39
+-- running / done_pending_children guard, which the 2-arg body lacks today).
+-- --------------------------------------------------------------------------
+BEGIN;
+DROP FUNCTION public.claim_compute_jobs_with_priority(integer, text, boolean, text[], text[]);
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_twin   uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_twin   int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO public.api_keys (id, user_id, exchange, label, api_key_encrypted)
+    VALUES (v_part, gen_random_uuid(), 'okx', 'claimpair-gate', 'enc'),
+           (v_part2, gen_random_uuid(), 'okx', 'claimpair-gate', 'enc');
+  INSERT INTO public.compute_jobs (id, kind, api_key_id, status, attempts, next_attempt_at)
+    VALUES (v_retry, 'poll_allocator_positions', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'poll_allocator_positions', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'poll_allocator_positions', v_part2, 'pending',      0, now() - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  -- Tick 1: the twin is claimed, the retry held back.
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate') c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (P2-C39): SQLSTATE % at tick 1 from the 2-arg claim_compute_jobs_with_priority (the 5-arg overload dropped inside this transaction) on a due failed_retry job beside a pending twin of the same (kind, api_key_id) (%).', v_err, v_msg;
+  END IF;
+  IF n_twin <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P2-C39): tick 1 claimed the pending twin % time(s) and the failed_retry % time(s); expected 1 and 0.', n_twin, n_retry;
+  END IF;
+
+  -- Tick 2: the twin is running and the retry is still due.
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate') c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (P2-C39): SQLSTATE % at tick 2 from the 2-arg claim_compute_jobs_with_priority with the twin running and the failed_retry still due (%).', v_err, v_msg;
+  END IF;
+  IF n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P2-C39): tick 2 claimed the failed_retry % time(s) beside its running twin; expected 0.', n_retry;
+  END IF;
+  RAISE NOTICE 'P2-C39 OK: tick 1 claimed the twin, tick 2 held the retry back beside the running twin, nothing raised.';
 END $$;
 ROLLBACK;
