@@ -167,13 +167,14 @@ function pickPlaceholderCodename(): string {
  *   · `orphaned`   — 161-05 / WIZERR-03. The live key exists and NOTHING hangs
  *                    off it: both strategy reads succeeded and both came back
  *                    empty. Refusable, with its own honest code.
- *   · `held`       — 167.1.2 REVIEW WR-04. No strategy row points at the live
- *                    key, but it is not an orphan either: a composite links it
- *                    through `strategy_keys`, or the allocator Exchanges page
- *                    connected it and its positions are in
- *                    `allocator_holdings`. Returned by `resolveByVenueIdentity`
- *                    only (the reuse arm's resolver never produces it).
- *                    Refused with the venue-neutral KEY_VENUE_ALREADY_CONNECTED.
+ *   · `held`       — 167.1.2 REVIEW WR-04, narrowed by REVIEW-R2 CR-01. No
+ *                    strategy row points at the live key, but a composite links
+ *                    it through `strategy_keys`, so it is not an orphan.
+ *                    Composite membership is the ONLY signal: see
+ *                    `resolveOtherKeyUse` for why a poll-written table is not
+ *                    one. Returned by `resolveByVenueIdentity` only (the reuse
+ *                    arm's resolver never produces it). Refused with the
+ *                    venue-neutral KEY_VENUE_ALREADY_CONNECTED.
  *   · `unresolved` — genuinely nothing to say: no live key, a read fault, or no
  *                    service-role credential. Fall through.
  *
@@ -268,27 +269,33 @@ async function resolveByVenueIdentity(
 }
 
 /**
- * 167.1.2 REVIEW WR-04 — "NO STRATEGY ROW" IS NOT "NOTHING USES IT".
+ * 167.1.2 REVIEW WR-04 — "NO STRATEGY ROW" IS NOT ALWAYS AN ORPHAN.
  *
- * `resolveStrategiesForKey` reads `strategies.api_key_id` only. Two kinds of
- * live key legitimately have no such row: a composite member, linked through
- * `strategy_keys`, and a key the allocator Exchanges page connected, which
- * never writes `strategies` at all. Until 167.1.2 only an MT5 login reached
- * this fence; now every ccxt venue that reports an account id does, so a
- * manager whose own composite member or allocator key already reads the
- * account was told KEY_ORPHANED ("nothing uses it … its draft was deleted").
+ * `resolveStrategiesForKey` reads `strategies.api_key_id` only. A composite
+ * member has no such row: it is linked through `strategy_keys`. Until 167.1.2
+ * only an MT5 login reached this fence; now every ccxt venue that reports an
+ * account id does, so a manager whose own composite member already reads the
+ * account would have been told KEY_ORPHANED, which is false for it.
  *
- * Two reads on the user-scoped client (RLS plus the explicit owner filter, the
- * posture `resolveStrategiesForKey` states for its own reads):
- *   · `strategy_keys` — any composite membership of the key;
- *   · `allocator_holdings` — positions the allocator poll wrote for the key.
- * Either row → `held`. Both empty → `orphaned`, as before. ⛔ Either read
- * faulting → `unresolved`: a failed read establishes neither claim (Rule 12).
+ * One read on the user-scoped client (RLS plus the explicit owner filter, the
+ * posture `resolveStrategiesForKey` states for its own reads): `strategy_keys`,
+ * any composite membership of the key. A row → `held`. Empty → `orphaned`, as
+ * before. ⛔ A faulted read → `unresolved`: it establishes neither claim
+ * (Rule 12).
  *
- * ⚠️ WHAT THIS CANNOT SEE, recorded rather than guessed: an allocator key
- * connected so recently that no poll has written holdings yet is
- * indistinguishable here from a true orphan, and still answers `orphaned`.
- * `compute_jobs` would show its poll, but it is deny-all to `authenticated`.
+ * ⛔ 167.1.2 REVIEW-R2 CR-01 — NEVER ADD A POLL-WRITTEN TABLE HERE. Round 1 also
+ * read `allocator_holdings` and answered `held` on any row, as if a row proved
+ * the allocator Exchanges page had connected the key. It proves only that the
+ * daily poll ran: `enqueue_poll_allocator_positions_for_all_keys` polls EVERY
+ * live key (no role filter, no strategy filter), and the handler writes
+ * `allocator_id` = the key's owner. So every true orphan with a balance read as
+ * `held` from its first poll on and lost KEY_ORPHANED, the one refusal that
+ * names "Finish setup". The table's unique key also omits `api_key_id`, so its
+ * `api_key_id` is whichever key on that venue wrote last. The read was removed.
+ * A key connected on another page with no strategy is correctly an orphan: the
+ * KEY_ORPHANED copy says so ("…or connected it on another page"), and "Finish
+ * setup" adopts it through the reuse arm. `route.test.ts` pins the read set of
+ * this path so a new table cannot re-enter it unnoticed.
  */
 async function resolveOtherKeyUse(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -311,26 +318,7 @@ async function resolveOtherKeyUse(
     );
     return UNRESOLVED;
   }
-  if (member) return HELD;
-
-  const { data: holding, error: holdingErr } = await supabase
-    .from("allocator_holdings")
-    .select("api_key_id")
-    .eq("allocator_id", userId)
-    .eq("api_key_id", liveKeyId)
-    .limit(1)
-    .maybeSingle();
-  if (holdingErr) {
-    console.error(
-      "[strategies/create-with-key] venue-identity allocator_holdings resolve failed:",
-      scrubSeamError(holdingErr, secrets),
-      holdingErr.code,
-    );
-    return UNRESOLVED;
-  }
-  if (holding) return HELD;
-
-  return ORPHANED;
+  return member ? HELD : ORPHANED;
 }
 
 /**
@@ -1602,14 +1590,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             return venueAlreadyConnectedResponse(venueMatch.strategyName);
           }
           if (venueMatch.kind === "held") {
-            // 167.1.2 REVIEW WR-04 — the live key on this account has no
-            // strategy row but IS used: a composite member or an allocator key
-            // (`resolveOtherKeyUse`). KEY_ORPHANED's "nothing uses it … its
-            // draft was deleted" is false for it. KEY_VENUE_ALREADY_CONNECTED
-            // is the venue-neutral refusal whose copy holds for any holder:
-            // another connected key of yours already reads this account, and
-            // the new key was not saved (the INSERT above was refused and
-            // rolled back). Same body `keys/validate-and-encrypt` answers.
+            // 167.1.2 REVIEW WR-04 (narrowed by REVIEW-R2 CR-01) — the live key
+            // on this account has no strategy row but a composite uses it
+            // (`strategy_keys`, read in `resolveOtherKeyUse`), so KEY_ORPHANED's
+            // "no strategy uses it" is false for it. KEY_VENUE_ALREADY_CONNECTED
+            // is the venue-neutral refusal whose copy holds for it: another
+            // connected key of yours already reads this account, and the new
+            // key was not saved (the INSERT above was refused and rolled back).
+            // Same body `keys/validate-and-encrypt` answers.
             return NextResponse.json(
               {
                 code: "KEY_VENUE_ALREADY_CONNECTED",

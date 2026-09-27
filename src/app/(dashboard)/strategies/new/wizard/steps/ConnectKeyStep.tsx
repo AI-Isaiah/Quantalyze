@@ -333,9 +333,9 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // as their own population and reds when this row is missing (observed).
     "KEY_ORPHANED",
     // 167.1.2 REVIEW WR-04 — the race arm's answer when the live key on this
-    // account has no strategy row but a composite (`strategy_keys`) or the
-    // allocator Exchanges page (`allocator_holdings`) uses it, where
-    // `KEY_ORPHANED`'s "nothing uses it" is false. Admitted HERE IN THE SAME
+    // account has no strategy row but a composite (`strategy_keys`) uses it,
+    // where `KEY_ORPHANED`'s "no strategy uses it" is false. Composite
+    // membership only (REVIEW-R2 CR-01). Admitted HERE IN THE SAME
     // COMMIT the route starts emitting it, for the reason the rows above state;
     // the 409 describe in `wizardErrors.invariant.test.ts` gained it too.
     "KEY_VENUE_ALREADY_CONNECTED",

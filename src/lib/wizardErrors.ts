@@ -428,9 +428,11 @@ export type WizardErrorCode =
   // ⭐ 167.1.2 REVIEW WR-04 — A SECOND EMITTER, AND THE FIRST CLIENT THAT READS
   // THE CODE. `strategies/create-with-key`'s venue-identity race arm answers
   // this code when the colliding live key has no strategy row but a composite
-  // (`strategy_keys`) or the allocator Exchanges page (`allocator_holdings`)
-  // uses it; `KEY_ORPHANED`'s "nothing uses it" is false there. ConnectKeyStep
-  // renders it from `KNOWN_CREATE_WITH_KEY_CODES`. The copy holds on that arm
+  // uses it (`strategy_keys`); `KEY_ORPHANED`'s "no strategy uses it" is false
+  // there. Composite membership is the ONLY such signal: 167.1.2 REVIEW-R2
+  // CR-01 removed an `allocator_holdings` read, because the daily poll writes
+  // that table for every live key, orphans included. ConnectKeyStep renders it
+  // from `KNOWN_CREATE_WITH_KEY_CODES`. The copy holds on that arm
   // clause for clause: the colliding key is the caller's own and connected, and
   // the wizard's INSERT was refused and rolled back, so "your new key was not
   // saved" is measured, not assumed.
@@ -2438,12 +2440,18 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   //     stamps allocator keys connected before plan 02.
   // What reaches this code is what the reads measured, and no more: a live key
   // of the caller's on this account with no `strategies.api_key_id` row
-  // (`resolveStrategiesForKey`), no composite membership and no allocator
-  // holdings (`resolveOtherKeyUse`, 167.1.2 WR-04). A key left behind by a
-  // deleted draft is one such key. An Exchanges-page key with no holdings
-  // recorded yet is another, which is the residual WR-04 recorded. So the
-  // title says "no strategy uses it" rather than "nothing uses it", and the
-  // cause names the deleted draft as one possibility among others.
+  // (`resolveStrategiesForKey`) and no composite membership
+  // (`resolveOtherKeyUse`, 167.1.2 WR-04). A key left behind by a deleted
+  // draft is one such key. A key connected on another page (the manager key
+  // card, or the allocator Exchanges page) that no strategy uses is another,
+  // and it is correctly an orphan: "Finish setup" adopts it through the reuse
+  // arm. So the title says "no strategy uses it" rather than "nothing uses
+  // it", and the cause names the deleted draft as one possibility among
+  // others. ⚠️ 167.1.2 REVIEW-R2 CR-01: round 1 also treated an
+  // `allocator_holdings` row as "held". The daily poll writes that table for
+  // every live key, so every orphan with a balance lost this code after its
+  // first poll. The read was removed; composite membership is the only
+  // signal.
   //
   // ⛔ THE `fix` BULLETS DIVERGE FROM 161-UI-SPEC § WIZERR-03, DELIBERATELY,
   // AND THE DIVERGENCE IS A MEASUREMENT RATHER THAN A PREFERENCE. The spec's

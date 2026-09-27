@@ -2159,8 +2159,10 @@ describe("[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeySt
    *
    * 5 → 6 (167.1.2 REVIEW WR-04): `KEY_VENUE_ALREADY_CONNECTED` joins on the
    * same terms. The venue-identity race arm answers it when the colliding live
-   * key has no strategy row but a composite or an allocator uses it, where
-   * `KEY_ORPHANED`'s "nothing uses it" is false. One new site, one new member,
+   * key has no strategy row but a composite uses it, where `KEY_ORPHANED`'s
+   * "no strategy uses it" is false. (167.1.2 REVIEW-R2 CR-01 narrowed the
+   * trigger to composite membership only; the emitter, and so the count,
+   * stayed.) One new site, one new member,
    * and its roster row lands in ConnectKeyStep in the same commit.
    */
   const EXPECTED_409_CODES = [

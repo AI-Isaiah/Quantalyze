@@ -6243,9 +6243,11 @@ describe("[167-01 / D-05, D-07] KEY_SIGN_IN_FAILED — an ambiguous MT5 sign-in 
 // That stopped holding when `keys/validate-and-encrypt` began stamping the
 // column (MT5 in 164.5.3-02, the ccxt venues in 167.1.2 plan 02) and the daily
 // poll began stamping keys connected before that (167.1.2 plan 04). A key
-// connected on the allocator Exchanges page that has no holdings recorded yet
-// reaches this refusal too (the residual 167.1.2 WR-04 recorded), and telling
-// that owner their draft was deleted names a history they do not have.
+// connected on another page (the manager key card, or the allocator Exchanges
+// page) that no strategy uses reaches this refusal too, and telling that owner
+// their draft was deleted names a history they do not have. (167.1.2
+// REVIEW-R2 CR-01: whether the poll has written holdings for that key is not
+// read and does not matter; composite membership is the only "held" signal.)
 describe("[167.1.2 / WR-04 follow-up] KEY_ORPHANED claims only what every path to it shares", () => {
   const entry = WIZARD_ERROR_COPY.KEY_ORPHANED;
 
