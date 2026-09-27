@@ -1525,12 +1525,13 @@ true for 146 and half of 142–145, and **false for 141**.
       and human-run: dispatch `supabase-migrate.yml` on main and expect a no-op or one bot PR,
       and approve the workflows on the first bot PR.
 
-- [ ] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
+- [x] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
       same (kind, allocator) makes every claim entry point raise `23505` (booked 2026-09-26, found
       on the pg-lane by the Phase 167.1.2 PR B fixer).**
       **Repro, measured 2026-09-26.** Seed a `failed_retry` `derive_allocator_equity` row with
       `next_attempt_at` in the past and a `pending` row for the same allocator. Then
-      `claim_compute_jobs_with_priority` (6-arg and 2-arg) and `claim_compute_jobs` all raise
+      `claim_compute_jobs_with_priority` (6-arg and 2-arg; ⛔ CORRECTED 2026-09-27: 5-arg, and the
+      2-arg's pre-fix result is 42725 not 23505, see 164.9.3 CONTEXT) and `claim_compute_jobs` all raise
       `23505` on `compute_jobs_one_inflight_per_kind_allocator`.
       **Why.** The claim's C39 guard skips a candidate only for a `running` or
       `done_pending_children` sibling, not a `pending` one. `_enqueue_compute_job_internal`'s dedup
@@ -1551,6 +1552,37 @@ true for 146 and half of 142–145, and **false for 141**.
       any kind is claimed until the pair clears. The full repro is kept verbatim in the Phase
       164.5.2 ROADMAP section as lineage. **Owner: Phase 164.9.3 CLAIMPAIR**, whose criterion 4
       now covers all four partitions (api_key_id, portfolio, strategy, allocator).
+      ✅ CLOSED 2026-09-27 by Phase 164.9.3 CLAIMPAIR. Migration
+      `20260927120000_claim_pair_pre_rank_exclusion.sql` (D-08): a `failed_retry` candidate whose
+      `(kind, partition)` already holds a `pending` row is dropped from the `ranked` CTE BEFORE
+      `row_number()` in all three claim bodies, `claim_compute_jobs(integer, text)`, the 5-arg
+      and the 2-arg `claim_compute_jobs_with_priority`, with one clause per partition
+      (`api_key_id`, portfolio, strategy, allocator) matching its
+      `compute_jobs_one_inflight_per_kind_*` index predicate (D-02). The 2-arg is re-based, not
+      dropped, and also gains the C39 running / done_pending_children guard. The enqueue side is
+      unchanged. Gate `supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql`,
+      18 arms (12 partition arms, W-LOST, P2-C39, regression arm W-INTRO, W-LOWTWIN from review
+      round 1, and W-C39SIB and W-C39INTRO from review round 3), each with a mutation twin.
+      Red-first census on the pre-fix lane: 14 RED, all 14 with SQLSTATE 23505, W-INTRO GREEN;
+      W-LOWTWIN RED before the probe fix (no error, 0 of 3 rows claimed); W-C39SIB and
+      W-C39INTRO RED before the round-3 widening (no error, the unrelated `low` job and the retry
+      each claimed 0 times). After the fixes: 18 of 18 green on the pg-lane.
+      Residual (i) is CLOSED in review rounds 1 and 3: the priority throttle probe counted a
+      held-back retry, which beside a `low` pending twin claimed neither row and throttled every
+      due `low` job with no error, on every tick. Both priority overloads now skip such a retry
+      in the probe (a marked `CLAIMPAIR PROBE EXCLUSION` block). Round 3 (founder decision D-11)
+      widened the block to the C39 half: a retry the C39 guard holds back beside a `running` or
+      `done_pending_children` sibling is skipped too, with the intro carve-out on the `pending`
+      sibling only. So the far-future-twin hold, the low-twin wedge and the C39-sibling hold are
+      all gone. What stays (review IN-11): the block covers `failed_retry` rows only, so a due
+      `pending` `compute_intro_snapshot` row that C39 drops beside an in-flight intro sibling is
+      still counted; it predates this phase and is latent while no writer sets `low`.
+      ⚠️ Two residuals are recorded in the migration
+      header, not fixed: (ii) a retry waits for a not-yet-due twin to run first (delay, not
+      loss); (iii) a claim racing a concurrent enqueue of the twin can still raise 23505 for one
+      tick (reasoned, not measured). The ROADMAP-booked option (a), adding `pending` to the
+      post-rank C39 list, was measured as a SILENT permanent wedge that also starves
+      `compute_intro_snapshot`, and was rejected.
 
 - [ ] **`[164.9.3.1-FANIN-GRAPH-RESIDUALS]` Four latent or loud defects on the fan-in graph and
       the bridge's decision cascade (booked 2026-09-26; routed 2026-09-25 from the Phase 164.9.1

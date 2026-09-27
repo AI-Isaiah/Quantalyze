@@ -1,5 +1,169 @@
 # Changelog
 
+## [0.109.0.0] - 2026-09-27 — CLAIMPAIR: a failed_retry job beside a pending twin no longer makes every claim raise 23505
+
+⭐ **What changed for whoever reads this next.** A `failed_retry` compute job and a `pending` twin
+of the same `(kind, partition key)` used to make every claim entry point raise `23505` on a
+`compute_jobs_one_inflight_per_kind_*` unique index. The failed claim aborted the WHOLE batch, so
+an unrelated due job on another partition was not claimed either. Four consecutive ticks all
+raised: it never cleared by itself. `failed_retry` sits outside every one of those partial
+indexes, so any enqueue made while a retry is outstanding writes the pair. The defect was LATENT:
+Sentry showed 0 matching issues over 90 days and 0 matching logs over 30 days. Phase 164.9.3 closes
+it in all three claim entry points and all four partitions (`api_key_id`, portfolio, strategy,
+allocator), in ONE forward migration (`TODOS.md` `[164.9.3-CLAIM-PAIR-23505]`, now closed).
+
+⚠️ **A minor bump: the claim path's behaviour on PROD changes.** The migration
+`20260927120000_claim_pair_pre_rank_exclusion.sql` **auto-applies to TEST and then PROD on merge,
+with no human gate** (the `Production` reviewer was removed 2026-09-23). ROADMAP success
+criterion 3 therefore needs migration-reviewer, rls-policy-auditor and silent-failure-hunter to
+review it BEFORE the merge. All three reviewed it over three rounds, and the last round, on the
+round-3 fix, found no CRITICAL, HIGH or MEDIUM issue. Their verdicts are in the phase's
+`164.9.3-MIGRATION-REVIEW.md`. Before the merge the founder kept the probe-exclusion amendment to
+D-04 and chose to fix the round-2 C39 finding in this phase (D-11) rather than route it.
+
+### Fixed
+- **The claim drops the retry BEFORE ranking** (plans 01-02, founder-ratified decision D-08). In
+  each claim body the `ranked` CTE's `WHERE` gains one clause per partition. Each clause matches
+  its `compute_jobs_one_inflight_per_kind_*` index predicate, and the strategy clause excludes
+  `compute_intro_snapshot` exactly as that index does. A `failed_retry` candidate whose
+  `(kind, partition)` already holds a `pending` row is no longer a candidate, so the partition
+  holds one candidate, the twin. The twin runs (at once if due, else when due) and the retry runs
+  after it finishes, so no work is lost. The block is byte-identical in all three bodies and
+  bracketed by begin and end markers. The enqueue side is unchanged.
+- **All three entry points, by arity.** `claim_compute_jobs(integer, text)` is re-based on
+  `20260603120000`, and the 5-arg `claim_compute_jobs_with_priority` on `20260719073701`. The
+  2-arg `claim_compute_jobs_with_priority(integer, text)` is re-based on `20260428190907`, NOT
+  dropped: every call form of it raises 42725 today, but dropping it would make VAC-04 report
+  `SNAPSHOT_MISSING`, which has no acknowledgement path. The 2-arg also gains the C39
+  running / done_pending_children guard the other two bodies already carry. Measured: without it,
+  the pre-rank clause alone still let the 2-arg's second tick claim the retry beside the
+  now-running twin and raise 23505. Each body is the latest definition byte-for-byte plus the
+  marked blocks (D-04), and SECURITY DEFINER, the pinned `search_path` and the REVOKEs are kept.
+- **The priority throttle no longer counts a retry the claim holds back** (review round 1,
+  WR-01). As first written, both `claim_compute_jobs_with_priority` overloads still counted a due
+  `normal`/`high` `failed_retry` in their throttle probe after the pre-rank clause had dropped it
+  from the candidates. Beside a `low` pending twin that claimed neither row, on every tick, and
+  throttled every due `low` job queue-wide, with no error. Measured: 0 of 3 rows claimed. Each
+  probe now carries a marked `CLAIMPAIR PROBE EXCLUSION` block that drops such a retry from the
+  count, on the same four partitions as the pre-rank clause and with its `compute_intro_snapshot`
+  carve-out on the pending sibling only. It is still claim-side and before ranking, so the
+  ratified D-08 stands; D-04 now reads "no bytes outside the marked CLAIMPAIR blocks". Latent
+  today: no writer sets `priority='low'` yet, but the column comment names `low` as the
+  post-deploy backfill class.
+- **The throttle also skips a retry the C39 guard holds back** (review round 3, founder decision
+  D-11). The probe still counted a due `normal`/`high` `failed_retry` beside a `running` or
+  `done_pending_children` row of the same `(kind, partition)`, which C39 drops in `deduped`, so
+  every due `low` job was throttled while nothing claimed the retry. Beside a fan-in
+  `done_pending_children` row whose parent is `low`, the throttle would hold that parent too, so
+  the hold would never end. That consequence is reasoned, not measured. It is also latent twice
+  over: no caller passes `p_parent_job_ids` and no writer sets `low`. Inside the marked probe blocks of both overloads, the portfolio, allocator and
+  api_key sibling tests now read `p.status IN ('pending', 'running', 'done_pending_children')`.
+  The strategy test takes a split form: a `running` or `done_pending_children` sibling excludes
+  regardless of kind, as C39's strategy clause does, and the `compute_intro_snapshot` carve-out
+  gates the `pending` sibling only. So the probe skips exactly the `failed_retry` rows no claim
+  body takes this tick (see Notes, IN-11). Widening the strategy test literally would have left an intro retry beside a running
+  intro sibling counted; the arm W-C39INTRO tells the two forms apart. The apply-time anchor pins
+  the new shape, and its failure text no longer names a single cause.
+- **An apply-time `DO $verify$` block that reads catalogs only.** It pins each pre-rank clause
+  between the `ranked` CTE and `deduped`, so a clause moved post-rank fails at apply, and pins the
+  probe block inside each throttle probe. It also pins the C39 guard on all four partitions, in
+  order, inside `deduped` in all three bodies, SECURITY DEFINER, the `search_path`, the closed ACL
+  and the `service_role` grant the worker needs, and never calls a claim RPC, so
+  it cannot refuse on TEST's empty tables.
+
+### Root cause
+- **The C39 guard skipped a candidate only beside a `running` or `done_pending_children`
+  sibling, never beside a `pending` one**, while the enqueue's dedup and the unique indexes cover
+  `pending`, `running` and `done_pending_children` but not `failed_retry`. When the retry ranked
+  first in its partition, the batch UPDATE flipped it to `running` and met the pending twin at the
+  unique index. This is the 2026-04-28 worker-spin class.
+- **Why not the ROADMAP-booked option (a).** Adding `pending` to the post-rank C39 status list was
+  measured on a throwaway lane as a SILENT permanent wedge. The retry ranks first, the guard drops
+  it, the twin was already dropped by the rank filter, and neither job is ever claimed (8 of 8
+  cells). It also starved `compute_intro_snapshot` (0 of 3 claimed against 3 of 3 today). Option
+  (a) was rejected on that evidence. The enqueue-side option (b) would not heal pairs that already
+  exist on PROD, and folding a new request into an older job can lose its payload.
+
+### Tests
+- **A red-first 18-arm gate, `supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql`**
+  (plan 01, plus one arm from review round 1 and two from review round 3). It has 12 partition
+  arms (4 partitions x 3 entry points), W-LOST (three ticks, no lost work), P2-C39 (a second tick
+  beside a running twin), the regression arm W-INTRO, W-LOWTWIN (a `normal` retry beside a `low`
+  twin), W-C39SIB (a `normal` retry beside a `done_pending_children` sibling) and W-C39INTRO (an
+  intro retry beside a `running` intro sibling). The first 15 arms were written and run BEFORE the
+  migration existed: on the pre-fix lane, 14 arms were RED, all 14 with SQLSTATE 23505, and
+  W-INTRO was GREEN. W-LOWTWIN was written and run before the probe fix: RED with no error and 0
+  of its 3 rows claimed. W-C39SIB and W-C39INTRO were written and run before the round-3 widening:
+  each RED with no error, the unrelated `low` job and the retry each claimed 0 times. After the
+  fixes, all 18 arms are green in CI mode. Each partition arm also fails if the unrelated job is
+  not claimed or the retry is claimed in that tick, so a silent-wedge "fix" still reads red.
+  Review round 1 made each arm's failure text name the SQLSTATE it actually caught, so the text
+  no longer claims a 23505 for every error. Parents are seeded as real rows, because
+  the claim's own UPDATE re-checks the foreign keys of rows inserted in the same transaction.
+- **D-09 lane proof, with no remote database touched** (plan 03). A fresh local-stack lane
+  replayed the migration on top of the dump, and the whole non-LANE-ONLY `supabase/tests` corpus
+  passed on it (78 of 78, with all six claim gates green). The gate also got its single pg-lane
+  `RED-UNDER-SETUP` apply list, ending with the migration, and exits 0 there.
+- **A layered mutation twin for every arm** (plan 04, then review rounds 1 and 3). Each twin
+  neuters one body's clause for one partition and stands that body's apply-time anchor down, so it
+  can redden only its own arm. W-C39INTRO's twin is the literal-widening form of the strategy
+  test. The narrowed runner reported all 18 arms biting their own arm first, with 0 waived.
+- **Floors and census pins moved by measurement** (plan 05, then review rounds 1 and 3).
+  `FILES_FLOOR` and `ARMS_FLOOR` rise to the values a full runner pass printed with no defects.
+  Plan 05 showed each floor biting in both directions. For the review-round `ARMS_FLOOR` moves,
+  only the stale-low direction was observed; the too-high direction was not re-run (see the
+  comment beside the constant). `WAIVED_CEILING` stays 0. The annotation-parser, floors, `lint-sql-gates` and
+  `gate-family-meta` census pins move with them, and every calibration pin keeps its offset. Read
+  the floors by symbol from `scripts/mutation-runner/run.mjs`, never from here.
+
+### Changed
+- **The two claim snapshots are regenerated** (plan 04).
+  `supabase/schema/functions/claim_compute_jobs.sql` and `claim_compute_jobs_with_priority.sql`
+  were rebuilt by `npm run schema:functions`, and each body is byte-equal to its migration body.
+- **Three VAC-04 acknowledgements** (plan 04). The migration header's `VAC-04 ACKNOWLEDGEMENT`
+  block carries one `prod-body-ack` per changed body. Each was derived locally and cross-checked
+  read-only against the PR's own VAC-04 report of the PROD hashes. An ack is earned only if the
+  VAC-04 run on the release head reports the same PROD hashes. The broken-windows ledger entry
+  for the placeholder this block replaced is marked fixed.
+
+### Notes
+- ⚠️ **Two residuals are recorded in the migration header, not fixed; a third was closed.**
+  (i) CLOSED in review rounds 1 and 3: the priority throttle counted a held-back retry. The first
+  draft of this entry called that a bounded hold. It was a silent permanent wedge beside a `low`
+  twin (see Fixed). The probe now skips a retry held back beside a `pending` twin (round 1) and one
+  the C39 guard holds back beside a `running` or `done_pending_children` sibling (round 3). So the
+  far-future-twin hold, the low-twin wedge and the C39-sibling hold are all gone, and W-LOWTWIN,
+  W-C39SIB and W-C39INTRO pin them. What stays: the probe block covers `failed_retry` rows only,
+  so a due `pending` `compute_intro_snapshot` row that C39 drops beside a running or
+  `done_pending_children` intro sibling is still counted (review IN-11). Only that kind can sit
+  pending beside an in-flight row. It predates this phase and is latent while no writer sets
+  `low`. (ii) A retry waits for a not-yet-due twin to run
+  first: delay, not loss. (iii) A claim racing a concurrent enqueue of the twin can still raise
+  23505 for one tick. That one is reasoned, not measured, and C39 has the same window today.
+- **No overlap with Phase 164.9.3.2 DEFER40001 (D-05).** The migration edits none of
+  `defer_compute_job`, `mark_compute_job_done`, `mark_compute_job_failed` or
+  `_enqueue_compute_job_internal`, so no ordering constraint arises with 164.9.3.2 or 164.9.3.1
+  FANINGRAPH. Only migration-timestamp order at merge time couples them. The planning commit
+  corrected two ROADMAP sentences and the `TODOS.md` repro to match: the claim overload has 5
+  parameters, not 6, the 2-arg's pre-fix result is 42725, and CLAIMPAIR re-bases no enqueue
+  function.
+- ⚠️ **Red on the PR by construction:** VAC-08 (`test-db-drift`) and the baseline-currency check
+  stay red until apply-on-merge and the re-dump bot's baseline PR. This is expected and is not a
+  verdict on the change.
+- **Phase artifacts.** The following are under `.planning/`:
+  - the phase's context, research, patterns and validation, and the six plans and their summaries;
+  - the D-08 ratification and the 2026-09-27 founder decisions (the D-04 amendment kept, and D-11);
+  - three code-review rounds with their fix reports;
+  - the SC3 migration-review record for all three rounds;
+  - the security verification;
+  - the phase verification (`passed` once both founder items were resolved), its UAT record, and
+    STATE and ROADMAP progress.
+- **Integration merges and version.** Three integration merges of `origin/main` carry no change of
+  their own. The first resolved a STATE-only conflict. The second brought a docs-only ROADMAP
+  routing commit. The third brought Phase 166.4 BENCHALIGN, which shipped as `0.108.0.0` first, so
+  this entry, first written as `0.108.0.0`, ships as `0.109.0.0`. It is still a minor bump,
+  because the claim path's behaviour on PROD changes.
+
 ## [0.108.0.0] - 2026-09-27 — BENCHALIGN: a sparser-calendar strategy is compared to BTC over the same holding interval, in every benchmark-relative metric (review rounds folded in)
 
 ⭐ **What changed for whoever reads this next.** Phase 166.4 BENCHALIGN (founder decision D-A)
