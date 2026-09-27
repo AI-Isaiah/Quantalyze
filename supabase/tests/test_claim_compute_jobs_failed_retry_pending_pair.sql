@@ -107,7 +107,9 @@
 --             round 1 (164.9.3-REVIEW.md WR-01): the throttle probe counted
 --             the retry the pre-rank clause holds back, so neither row was
 --             ever claimed and every due `low` job queue-wide was throttled,
---             with no error (a silent permanent wedge).
+--             with no error (a silent permanent wedge). Twin: the 5-arg
+--             CLAIMPAIR PROBE EXCLUSION block made always false (match 1
+--             of 2) + v_p5_probe_anchored.
 --   P2-KEY, P2-PF, P2-ST, P2-AL
 --                             the 2-arg priority overload, same four arms.
 --                             Twin: the `OR TRUE` edit in the 2-arg body
@@ -803,6 +805,17 @@ ROLLBACK;
 -- gate files commit, so any foreign due `normal`/`high` row is pushed a
 -- century out first, inside this arm's own transaction (it ends in
 -- ROLLBACK), so the probe sees only this arm's rows.
+-- RED-UNDER: revert the 5-arg CLAIMPAIR PROBE EXCLUSION block in
+--            20260927120000_claim_pair_pre_rank_exclusion.sql by making it
+--            always false (`FALSE AND` after its `AND NOT (`), match 1 of 2
+--            (body order 5-arg, 2-arg). The throttle probe counts the held-back
+--            normal retry again, so the low twin and the unrelated low job are
+--            throttled while the pre-rank clause still holds the retry back:
+--            nothing is claimed, nothing raises, and this arm's count is its
+--            first raise. Every arm above seeds default `normal` rows only, so
+--            it stays green. ⚠️ LAYERED: v_p5_probe_anchored is stood down
+--            (`IF FALSE AND NOT ...`) in the same mutation.
+-- RED-UNDER-M: {"arm":"W-LOWTWIN","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND NOT (status = 'failed_retry' AND (","replace":"AND NOT (FALSE AND status = 'failed_retry' AND (","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p5_probe_anchored THEN","replace":"IF FALSE AND NOT v_p5_probe_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
