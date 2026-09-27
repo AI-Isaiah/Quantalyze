@@ -1,5 +1,114 @@
 # Changelog
 
+## [0.108.0.0] - 2026-09-27 — CLAIMPAIR: a failed_retry job beside a pending twin no longer makes every claim raise 23505
+
+⭐ **What changed for whoever reads this next.** A `failed_retry` compute job and a `pending` twin
+of the same `(kind, partition key)` used to make every claim entry point raise `23505` on a
+`compute_jobs_one_inflight_per_kind_*` unique index. The failed claim aborted the WHOLE batch, so
+an unrelated due job on another partition was not claimed either. Four consecutive ticks all
+raised: it never cleared by itself. `failed_retry` sits outside every one of those partial
+indexes, so any enqueue made while a retry is outstanding writes the pair. The defect was LATENT:
+Sentry showed 0 matching issues over 90 days and 0 matching logs over 30 days. Phase 164.9.3 closes
+it in all three claim entry points and all four partitions (`api_key_id`, portfolio, strategy,
+allocator), in ONE forward migration (`TODOS.md` `[164.9.3-CLAIM-PAIR-23505]`, now closed).
+
+⚠️ **A minor bump: the claim path's behaviour on PROD changes.** The migration
+`20260927120000_claim_pair_pre_rank_exclusion.sql` **auto-applies to TEST and then PROD on merge,
+with no human gate** (the `Production` reviewer was removed 2026-09-23). ROADMAP success
+criterion 3 therefore needs migration-reviewer, rls-policy-auditor and silent-failure-hunter to
+review it BEFORE the merge. Their verdicts are recorded in the phase's
+`164.9.3-MIGRATION-REVIEW.md`, which this release opens with all three rows PENDING.
+
+### Fixed
+- **The claim drops the retry BEFORE ranking** (plans 01-02, founder-ratified decision D-08). In
+  each claim body the `ranked` CTE's `WHERE` gains one clause per partition. Each clause matches
+  its `compute_jobs_one_inflight_per_kind_*` index predicate, and the strategy clause excludes
+  `compute_intro_snapshot` exactly as that index does. A `failed_retry` candidate whose
+  `(kind, partition)` already holds a `pending` row is no longer a candidate, so the partition
+  holds one candidate, the twin. The twin runs (at once if due, else when due) and the retry runs
+  after it finishes, so no work is lost. The block is byte-identical in all three bodies and
+  bracketed by begin and end markers. The enqueue side is unchanged.
+- **All three entry points, by arity.** `claim_compute_jobs(integer, text)` is re-based on
+  `20260603120000`, and the 5-arg `claim_compute_jobs_with_priority` on `20260719073701`. The
+  2-arg `claim_compute_jobs_with_priority(integer, text)` is re-based on `20260428190907`, NOT
+  dropped: every call form of it raises 42725 today, but dropping it would make VAC-04 report
+  `SNAPSHOT_MISSING`, which has no acknowledgement path. The 2-arg also gains the C39
+  running / done_pending_children guard the other two bodies already carry. Measured: without it,
+  the pre-rank clause alone still let the 2-arg's second tick claim the retry beside the
+  now-running twin and raise 23505. Each body is the latest definition byte-for-byte plus the
+  marked blocks (D-04), and SECURITY DEFINER, the pinned `search_path` and the REVOKEs are kept.
+- **An apply-time `DO $verify$` block that reads catalogs only.** It pins each pre-rank clause
+  between the `ranked` CTE and `deduped`, so a clause moved post-rank fails at apply. It also pins
+  the C39 port, SECURITY DEFINER, the `search_path` and the ACL, and never calls a claim RPC, so
+  it cannot refuse on TEST's empty tables.
+
+### Root cause
+- **The C39 guard skipped a candidate only beside a `running` or `done_pending_children`
+  sibling, never beside a `pending` one**, while the enqueue's dedup and the unique indexes cover
+  `pending`, `running` and `done_pending_children` but not `failed_retry`. When the retry ranked
+  first in its partition, the batch UPDATE flipped it to `running` and met the pending twin at the
+  unique index. This is the 2026-04-28 worker-spin class.
+- **Why not the ROADMAP-booked option (a).** Adding `pending` to the post-rank C39 status list was
+  measured on a throwaway lane as a SILENT permanent wedge. The retry ranks first, the guard drops
+  it, the twin was already dropped by the rank filter, and neither job is ever claimed (8 of 8
+  cells). It also starved `compute_intro_snapshot` (0 of 3 claimed against 3 of 3 today). Option
+  (a) was rejected on that evidence. The enqueue-side option (b) would not heal pairs that already
+  exist on PROD, and folding a new request into an older job can lose its payload.
+
+### Tests
+- **A red-first 15-arm gate, `supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql`**
+  (plan 01). It has 12 partition arms (4 partitions x 3 entry points), W-LOST (three ticks, no
+  lost work), P2-C39 (a second tick beside a running twin) and the regression arm W-INTRO. The
+  gate was written and run BEFORE the migration existed: on the pre-fix lane, 14 arms were RED,
+  all 14 with SQLSTATE 23505, and W-INTRO was GREEN. After the fix, all 15 arms are green in CI
+  mode. Each partition arm also fails if the unrelated job is not claimed or the retry is claimed
+  in that tick, so a silent-wedge "fix" still reads red. Parents are seeded as real rows, because
+  the claim's own UPDATE re-checks the foreign keys of rows inserted in the same transaction.
+- **D-09 lane proof, with no remote database touched** (plan 03). A fresh local-stack lane
+  replayed the migration on top of the dump, and the whole non-LANE-ONLY `supabase/tests` corpus
+  passed on it (78 of 78, with all six claim gates green). The gate also got its single pg-lane
+  `RED-UNDER-SETUP` apply list, ending with the migration, and exits 0 there.
+- **A layered mutation twin for every arm** (plan 04). Each twin neuters one body's clause for one
+  partition and stands that body's apply-time anchor down, so it can redden only its own arm. The
+  narrowed runner reported all 15 arms biting their own arm first, with 0 waived.
+- **Floors and census pins moved by measurement** (plan 05). `FILES_FLOOR` and `ARMS_FLOOR` rise
+  to the values one full runner pass printed with no defects, and each floor was shown to bite in
+  both directions. `WAIVED_CEILING` stays 0. The annotation-parser, floors, `lint-sql-gates` and
+  `gate-family-meta` census pins move with them, and every calibration pin keeps its offset. Read
+  the floors by symbol from `scripts/mutation-runner/run.mjs`, never from here.
+
+### Changed
+- **The two claim snapshots are regenerated** (plan 04).
+  `supabase/schema/functions/claim_compute_jobs.sql` and `claim_compute_jobs_with_priority.sql`
+  were rebuilt by `npm run schema:functions`, and each body is byte-equal to its migration body.
+- **Three VAC-04 acknowledgements** (plan 04). The migration header's `VAC-04 ACKNOWLEDGEMENT`
+  block carries one `prod-body-ack` per changed body. Each was derived locally and cross-checked
+  read-only against the PR's own VAC-04 report of the PROD hashes. An ack is earned only if the
+  VAC-04 run on the release head reports the same PROD hashes. The broken-windows ledger entry
+  for the placeholder this block replaced is marked fixed.
+
+### Notes
+- ⚠️ **Three residuals are recorded in the migration header, not fixed.** (i) The priority
+  throttle still counts a held-back retry, so a due retry beside a far-future twin can hold back
+  low-priority jobs until the twin is due. C39 already over-counts the same way, and this is
+  strictly better than today's full wedge. (ii) A retry waits for a not-yet-due twin to run
+  first: delay, not loss. (iii) A claim racing a concurrent enqueue of the twin can still raise
+  23505 for one tick. That one is reasoned, not measured, and C39 has the same window today.
+- **No overlap with Phase 164.9.3.2 DEFER40001 (D-05).** The migration edits none of
+  `defer_compute_job`, `mark_compute_job_done`, `mark_compute_job_failed` or
+  `_enqueue_compute_job_internal`, so no ordering constraint arises with 164.9.3.2 or 164.9.3.1
+  FANINGRAPH. Only migration-timestamp order at merge time couples them. The planning commit
+  corrected two ROADMAP sentences and the `TODOS.md` repro to match: the claim overload has 5
+  parameters, not 6, the 2-arg's pre-fix result is 42725, and CLAIMPAIR re-bases no enqueue
+  function.
+- ⚠️ **Red on the PR by construction:** VAC-08 (`test-db-drift`) and the baseline-currency check
+  stay red until apply-on-merge and the re-dump bot's baseline PR. This is expected and is not a
+  verdict on the change.
+- **Phase artifacts.** The phase's context, research, patterns, validation, six plans and their
+  summaries, the D-08 ratification, STATE and ROADMAP progress, and the SC3 review record are
+  under `.planning/`. Two integration merges of `origin/main` carry no change of their own (the
+  first resolved a STATE-only conflict, the second brought a docs-only ROADMAP routing commit).
+
 ## [0.107.1.0] - 2026-09-27 — APPURL guard: a Production build refuses a non-canonical NEXT_PUBLIC_APP_URL
 
 ### Fixed
