@@ -2819,6 +2819,25 @@ export function ScenarioComposer({
     return out;
   }, [rawHoldingsSummary]);
 
+  // CF-05 — api_key_id → friendly exchange/account label, built from the SAME
+  // `payload.apiKeys` + `dataSourceLabel` idiom the per-key constituent rows
+  // render (`${Exchange} — ${nickname|••••tail}`). No second label formatter.
+  // Phase 167.1.2 plan 07 (SC-5): moved above `perKeyAdapterOutput` and passed
+  // to buildPerKeyStrategyForBuilderSet as its label map, so each per-key unit
+  // is NAMED by its label at the one place units are built. Every consumer that
+  // reads `s.name` (the CorrelationHeatmap headers via `strategyNames`, the
+  // shortest-history caveat via `coverageShortestName`, the gantt) inherits the
+  // label; before, only the gantt resolved it and the other two showed
+  // `key <api_key_id>`.
+  const apiKeyLabelById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const k of payload.apiKeys ?? []) {
+      const { exchange, nickname, maskedTail } = dataSourceLabel(k);
+      m.set(k.id, `${exchange} — ${nickname ?? maskedTail}`);
+    }
+    return m;
+  }, [payload.apiKeys]);
+
   // Per-key strategy set — wrapped in a useMemo on its inputs. One
   // StrategyForBuilder per api_key_id (id === api_key_id), RAW equity-share
   // weights, default selected=true.
@@ -2847,11 +2866,16 @@ export function ScenarioComposer({
     const eligibleOnly = Object.fromEntries(
       Object.entries(all).filter(([id]) => contributing.has(id)),
     );
-    return buildPerKeyStrategyForBuilderSet(eligibleOnly, equityByApiKeyId);
+    return buildPerKeyStrategyForBuilderSet(
+      eligibleOnly,
+      equityByApiKeyId,
+      apiKeyLabelById,
+    );
   }, [
     payload.perKeyReturnsByApiKeyId,
     payload.contributingApiKeyIds,
     equityByApiKeyId,
+    apiKeyLabelById,
   ]);
 
   // The per-key path is active only in book mode + the book gate satisfied. When
@@ -3580,24 +3604,10 @@ export function ScenarioComposer({
   // a prop and never runs the containment predicate locally, so the gantt bars
   // agree with the row chips and the divisor by construction. Spans come from the
   // shared `selectedSpanById` scan (Rule 2: computed once).
-  // CF-05 — api_key_id → friendly exchange/account label, built from the SAME
-  // `payload.apiKeys` + `dataSourceLabel` idiom the per-key constituent rows
-  // render (`${Exchange} — ${nickname|••••tail}`). A per-key (book-member)
-  // unit carries the PREFIXED `key <uuid>` as its `name` from
-  // buildPerKeyStrategyForBuilderSet (scenario-adapter.ts:146 — the unit's `id`
-  // is the bare api_key_id; its `name` is `key ${apiKeyId}`), so without this
-  // map the gantt would show that raw token. This is the ONE place the
-  // per-key row name is resolved before rows reach CoverageTimeline (which only
-  // renders `row.name` — it never derives labels). No second label formatter.
-  const apiKeyLabelById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const k of payload.apiKeys ?? []) {
-      const { exchange, nickname, maskedTail } = dataSourceLabel(k);
-      m.set(k.id, `${exchange} — ${nickname ?? maskedTail}`);
-    }
-    return m;
-  }, [payload.apiKeys]);
-
+  // CF-05 — the gantt rows resolve a per-key unit through `apiKeyLabelById`
+  // (declared above `perKeyAdapterOutput`). Since Phase 167.1.2 plan 07 the
+  // unit's own `name` already IS that label, so this lookup is redundant and
+  // harmless; it stays so a strategy row (no apiKeys entry) keeps `s.name`.
   const timelineRows = useMemo(
     () =>
       engineSet.strategies

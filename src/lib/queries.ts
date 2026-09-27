@@ -3444,7 +3444,9 @@ export function liveBaselineMetricsFromPerKeyDailies(
     if (!returns || returns.length === 0) continue;
     strategies.push({
       id: apiKeyId,
-      name: `key ${apiKeyId}`,
+      // Phase 167.1.2 plan 07 (SC-5): a neutral constant. This unit's name is
+      // not rendered, but a raw api_key_id must not sit in a name field.
+      name: "Connected key",
       codename: null,
       disclosure_tier: "exploratory",
       strategy_types: [],

@@ -512,6 +512,33 @@ const REF_BTC = "holding:binance:BTC:spot";
 const REF_ETH = "holding:binance:ETH:spot";
 const REF_SOL = "holding:binance:SOL:spot";
 
+// Phase 167.1.2 plan 07 (SC-5) — per-key units are NAMED by their key's label
+// (`<Exchange> — <nickname>`), so the heatmap / PCR / caveat tests that address
+// a leg by its displayed name give each REF a connected-key record with a
+// distinct nickname. Before plan 07 those surfaces printed `key <id>`.
+const REF_LABEL: Record<string, string> = {
+  [REF_BTC]: "Binance — Alpha",
+  [REF_ETH]: "Binance — Beta",
+  [REF_SOL]: "Binance — Gamma",
+};
+const REF_NICK: Record<string, string> = {
+  [REF_BTC]: "Alpha",
+  [REF_ETH]: "Beta",
+  [REF_SOL]: "Gamma",
+};
+/** Attach a labelled apiKeys record for every REF_* per-key unit in `p`. */
+function withRefLabels(
+  p: Partial<MyAllocationDashboardPayload>,
+): Partial<MyAllocationDashboardPayload> {
+  const ids = Object.keys(p.perKeyReturnsByApiKeyId ?? {});
+  return {
+    ...p,
+    apiKeys: ids
+      .filter((id) => id in REF_NICK)
+      .map((id) => ({ ...winApiKey(id), label: REF_NICK[id] })),
+  };
+}
+
 // Read-only-tokens model: live holdings are fixed context with NO per-holding
 // toggle / weight / leverage controls. Every interactive gesture (toggle,
 // reweight, lever, remove) now lives on the ADDED-STRATEGY rows. The browse
@@ -4029,7 +4056,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // genuine presentational component fed by the composer's scenarioMetrics.
   // -------------------------------------------------------------------------
   it("CORR-01 — with ≥2 active de-aliased strategies (≥10 overlapping days) the composer renders the heatmap with de-aliased axis labels", () => {
-    const payload = makePayload(mockTwoStrategies());
+    const payload = makePayload(withRefLabels(mockTwoStrategies()));
     render(
       <ScenarioComposer
         payload={payload}
@@ -4040,13 +4067,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // The de-aliased strategy names (REF_BTC / REF_ETH = the holding scopeRefs,
     // which mkRealStrat sets as both id AND name) appear as heatmap axis labels.
     // Each name renders twice (column header + row header), so use getAllByText.
-    // ENGINE-01: per-key units render as `key {api_key_id}` (the id here is the
-    // scopeRef), so the heatmap axis labels carry that prefix.
+    // Phase 167.1.2 plan 07 (SC-5): per-key units render their key's LABEL
+    // (was `key {api_key_id}` under ENGINE-01), so the heatmap axis labels
+    // carry the label.
     expect(
-      screen.getAllByText(`key ${REF_BTC}`).length,
+      screen.getAllByText(REF_LABEL[REF_BTC]).length,
     ).toBeGreaterThanOrEqual(2);
     expect(
-      screen.getAllByText(`key ${REF_ETH}`).length,
+      screen.getAllByText(REF_LABEL[REF_ETH]).length,
     ).toBeGreaterThanOrEqual(2);
     // The heatmap figure is present (the real component's role="figure" wrapper).
     expect(
@@ -4190,7 +4218,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("CORR-05 — the PCR list renders one role=listitem per constituent, de-aliased, sorted descending", () => {
-    const payload = makePayload(mockThreeStrategies());
+    const payload = makePayload(withRefLabels(mockThreeStrategies()));
     render(
       <ScenarioComposer
         payload={payload}
@@ -4207,12 +4235,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       ?.querySelector('ul[role="list"]') as HTMLElement;
     expect(list).not.toBeNull();
     const items = within(list).getAllByRole("listitem");
-    // One row per active constituent (ENGINE-01: per-key units render as
-    // `key {api_key_id}`).
+    // One row per active constituent (Phase 167.1.2 plan 07: per-key units
+    // render their key's label, was `key {api_key_id}`).
     expect(items.length).toBe(3);
     for (const ref of [REF_BTC, REF_ETH, REF_SOL]) {
       expect(
-        within(list).getAllByText(`key ${ref}`).length,
+        within(list).getAllByText(REF_LABEL[ref]).length,
       ).toBeGreaterThanOrEqual(1);
     }
     // Descending sort: each row's signed % is ≥ the next row's %.
@@ -4248,7 +4276,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   }
 
   it("WR-02 — the PCR bar track is overflow-hidden and the >100% fill is clamped to 100%", () => {
-    const payload = makePayload(mockHedgeBlend());
+    const payload = makePayload(withRefLabels(mockHedgeBlend()));
     render(
       <ScenarioComposer
         payload={payload}
@@ -4262,7 +4290,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       ?.querySelector('ul[role="list"]') as HTMLElement;
     const items = within(list).getAllByRole("listitem");
     // BTC's signed PCR exceeds 100% (the hedge forces it past 1.0).
-    const btcRow = items.find((li) => (li.textContent ?? "").includes(REF_BTC))!;
+    const btcRow = items.find((li) =>
+      (li.textContent ?? "").includes(REF_LABEL[REF_BTC]),
+    )!;
     const btcPct = parseFloat(btcRow.textContent!.match(/(-?\d+\.\d)%/)![1]);
     expect(btcPct).toBeGreaterThan(100);
     // Every bar track clamps overflow so a >100% fill can never bleed out.
@@ -4278,7 +4308,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("WR-03 — a negative-PCR (hedge) leg renders a 'risk-reducing' affordance, not a broken empty bar", () => {
-    const payload = makePayload(mockHedgeBlend());
+    const payload = makePayload(withRefLabels(mockHedgeBlend()));
     render(
       <ScenarioComposer
         payload={payload}
@@ -4293,7 +4323,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // The hedge leg (ETH) carries a negative % AND the risk-reducing tag.
     const ethRow = within(list)
       .getAllByRole("listitem")
-      .find((li) => (li.textContent ?? "").includes(REF_ETH))!;
+      .find((li) => (li.textContent ?? "").includes(REF_LABEL[REF_ETH]))!;
     expect(ethRow.textContent).toMatch(/-\d+\.\d%/); // signed % preserved
     const tag = within(ethRow).getByTestId("pcr-risk-reducing-tag");
     expect(tag).toBeInTheDocument();
@@ -4346,7 +4376,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("CORR-06 — the heatmap axis labels follow the cluster order (correlated legs adjacent, outlier separated)", () => {
-    const payload = makePayload(mockThreeStrategies());
+    const payload = makePayload(withRefLabels(mockThreeStrategies()));
     render(
       <ScenarioComposer
         payload={payload}
@@ -4359,10 +4389,10 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const figure = screen.getByRole("figure", {
       name: /Pairwise correlation heatmap/i,
     });
-    // ENGINE-01: per-key units render as `key {api_key_id}`.
-    const kBtc = `key ${REF_BTC}`;
-    const kEth = `key ${REF_ETH}`;
-    const kSol = `key ${REF_SOL}`;
+    // Phase 167.1.2 plan 07: per-key units render their key's label.
+    const kBtc = REF_LABEL[REF_BTC];
+    const kEth = REF_LABEL[REF_ETH];
+    const kSol = REF_LABEL[REF_SOL];
     const order = Array.from(
       figure.querySelectorAll<HTMLElement>('[class*="text-center"]'),
     )
@@ -4509,7 +4539,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("IMPACT-01 — the coverage caveat names the live N overlapping days AND the shortest-history strategy name", () => {
-    const payload = makePayload(mockTwoStrategies());
+    const payload = makePayload(withRefLabels(mockTwoStrategies()));
     render(
       <ScenarioComposer
         payload={payload}
@@ -4531,8 +4561,59 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(text).toContain(`Historical realized · ${n} overlapping days · not a forecast`);
     // The shortest-history strategy name (REF_BTC/REF_ETH share window length
     // 12, so first-by-input-order REF_BTC wins the deterministic tiebreak).
-    // ENGINE-01: per-key units render as `key {api_key_id}`.
-    expect(text).toContain(`Shortest history: key ${REF_BTC}.`);
+    // Phase 167.1.2 plan 07: per-key units render their key's label.
+    expect(text).toContain(`Shortest history: ${REF_LABEL[REF_BTC]}.`);
+  });
+
+  // Phase 167.1.2 plan 07 (SC-5) — no raw api key id reaches a Scenario
+  // surface. Real per-key units carry UUID ids; before plan 07 the heatmap
+  // headers and the shortest-history caveat printed `key <uuid>`, because only
+  // the gantt resolved the label. The third key has no apiKeys record, so it
+  // exercises the "Connected key" fallback on the same surfaces.
+  it("SC-5 — the heatmap headers and the shortest-history caveat carry key labels, never a key UUID", () => {
+    const UUID_RE =
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+    const K_NICK = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    const K_TAIL = "1b2c3d4e-5f6a-4b7c-9d8e-0f1a2b3c4d5e";
+    const K_NONE = "2c3d4e5f-6a7b-4c8d-8e9f-1a2b3c4d5e6f";
+    const dates = Array.from({ length: 12 }, (_, i) =>
+      `2026-01-${String(i + 1).padStart(2, "0")}`,
+    );
+    const series = (vals: number[]) =>
+      dates.map((date, i) => ({ date, value: vals[i % vals.length] }));
+    const payload = makePayload({
+      ...perKeyBook([
+        { id: K_NICK, returns: series([0.02, -0.01, 0.03, -0.02, 0.01]) },
+        { id: K_TAIL, returns: series([-0.01, 0.005, -0.02]) },
+        { id: K_NONE, returns: series([0.004, -0.006, 0.012, -0.003]) },
+      ]),
+      apiKeys: [
+        { ...winApiKey(K_NICK), exchange: "okx", label: "Main" },
+        // No nickname → the masked tail (last 4 of the id), never the id.
+        { ...winApiKey(K_TAIL), exchange: "bybit", label: "" },
+      ],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={`${ALLOCATOR_A}-sc5-labels`}
+        allocatorMandate={null}
+      />,
+    );
+    const figure = screen.getByRole("figure", {
+      name: /Pairwise correlation heatmap/i,
+    });
+    const headers = figure.textContent ?? "";
+    expect(headers).not.toMatch(UUID_RE);
+    expect(headers).not.toMatch(/\bkey [0-9a-f]/i);
+    expect(headers).toContain("OKX — Main");
+    expect(headers).toContain("Bybit — ••••4d5e");
+    expect(headers).toContain("Connected key");
+    const caveat = screen.getByTestId("scenario-coverage-caveat");
+    const caveatText = caveat.textContent ?? "";
+    expect(caveatText).toContain("Shortest history:");
+    expect(caveatText).not.toMatch(UUID_RE);
+    expect(caveatText).not.toMatch(/\bkey [0-9a-f]/i);
   });
 
   // -------------------------------------------------------------------------
@@ -4867,6 +4948,7 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
     const built = buildPerKeyStrategyForBuilderSet(
       { "key-A": KEY_A_SERIES, "key-B": KEY_B_SERIES },
       equityByApiKeyId,
+      new Map(),
     );
     const selected: Record<string, boolean> = {};
     const weights: Record<string, number> = {};

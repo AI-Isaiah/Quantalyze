@@ -972,7 +972,7 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
     // Reference: the SAME per-key engine set (raw equity weights, all selected)
     // at each basis. The helper's plain-draft per-key path reproduces exactly
     // this set + state (single eligible member, no toggle/weight overrides).
-    const set = buildPerKeyStrategyForBuilderSet({ "key-A": S }, { "key-A": 5000 });
+    const set = buildPerKeyStrategyForBuilderSet({ "key-A": S }, { "key-A": 5000 }, new Map());
     const refState = { ...set.state, window: win };
     const cache = buildDateMapCache(set.strategies);
     const ref365 = computeScenario(set.strategies, refState, cache, 365);
