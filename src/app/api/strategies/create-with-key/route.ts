@@ -1125,13 +1125,19 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
    *
    * ⭐ NARROW BY LOCKED DECISION, AND THE NARROWNESS IS THE HONEST PART. Only a
    * venue that hands back a STABLE NON-SECRET ACCOUNT ID at validation can be
-   * fenced this way, and today that is MT5 alone: the broker login, which
-   * `analytics-service/services/mt5_probe.py` asserts against the gateway. The
-   * ccxt adapter's `ValidationResult` dataclass
-   * (`analytics-service/services/ingestion/adapter.py`) carries NO
-   * account-identity field at all, so every ccxt venue has nothing to stamp,
-   * stays NULL, and the partial index excludes it. Recorded as a residual in
-   * REQUIREMENTS.md rather than papered over.
+   * fenced this way BEFORE validation, and that is MT5 alone: the broker
+   * login, which `analytics-service/services/mt5_probe.py` asserts against the
+   * gateway, is in the request itself.
+   *
+   * ⭐ 167.1.2 (D-01): a ccxt venue (OKX, Bybit, Binance, Deribit) now has an
+   * identity too, but only AFTER validation: `/api/validate-key` reads it from
+   * a response the validator already fetches and returns it as
+   * `venue_account_id`. It is taken right after the read-only verdict below
+   * (the named schema field, never a spread) and rides the RPC as
+   * `p_venue_account_id`, so a second live key on one ccxt account trips the
+   * venue-identity index and resolves through the race arm in the 23505 block
+   * (own draft → deduped, connected strategy → VENUE_ALREADY_CONNECTED, orphan
+   * → KEY_ORPHANED). sFOX has no known id and stays NULL (D-10).
    *
    * ⛔ ONE CAPTURE POINT, NOT A VENUE LITERAL SPRINKLED DOWNSTREAM. `isMt5` is
    * consulted here and nowhere below; every arm past this line is
@@ -1147,7 +1153,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
    * refuses it at the DB, and the guard at :119 already rejected a blank MT5
    * login with a 400 long before here — so this expression cannot produce one.
    */
-  const venueAccountId = isMt5 ? api_key.trim() : null;
+  let venueAccountId: string | null = isMt5 ? api_key.trim() : null;
 
   if (venueAccountId) {
     const venueMatch = await resolveByVenueIdentity(
@@ -1246,6 +1252,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         { code },
         { status: 400, headers: NO_STORE_HEADERS },
       );
+    }
+
+    // 167.1.2 (D-01) — the ccxt identity, venue-NEUTRAL: whatever id the
+    // validator read from THIS credential, or null when the venue returned
+    // none (the create proceeds unstamped, and the parameter is then omitted).
+    // An MT5 login captured above is never overwritten.
+    if (venueAccountId === null) {
+      venueAccountId = validation.venue_account_id ?? null;
     }
 
     // encryptKey() validates the response against EncryptKeyResponseSchema

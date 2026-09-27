@@ -2362,7 +2362,8 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "The account behind these details already backs a strategy of yours, and that strategy has moved past the draft stage — so there is no half-finished session to take you back to. One account backs one strategy at a time. Nothing new was created and the existing strategy was left exactly as it was.",
     fix: [
       "Open the strategy that already uses this account from your strategies page — it keeps updating from this same account.",
-      "To list a second strategy, connect a different account: a separate broker account, or a different login on the same broker.",
+      // 167.1.2 (D-01): venue-neutral — this refusal now also fires for ccxt keys.
+      "To list a second strategy, connect a different account: a separate exchange account or sub-account.",
       "If you believe this account should be free, email security@quantalyze.com before you disconnect anything — disconnecting it stops the existing strategy from updating.",
       // ── 162-06 review / B-2b — preselect-only, and it exists because this
       // entry is NOT recoverable: `actions` carries neither member of
@@ -2564,13 +2565,17 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // allocator's Exchanges list, or nothing at all) — the union member's
   // docblock is the record of why no such claim survives every reachable
   // caller.
+  // 167.1.2 (D-01) — re-authored VENUE-NEUTRAL. This refusal now fires for an
+  // OKX, Bybit, Binance or Deribit key as well as an MT5 login, so "login" and
+  // "broker account" were false for most of the keys that reach it. The
+  // security-email line, `docsHref` and `actions` are unchanged.
   KEY_VENUE_ALREADY_CONNECTED: {
-    title: "You already have a connected key for this account.",
+    title: "This exchange account is already connected on your account.",
     cause:
-      "The login you just entered already identifies a key on your account, and one account can only back one connected key at a time. Your new key was not saved.",
+      "The key you just entered reads an exchange account that another of your connected keys already reads, and one account can back only one connected key at a time. Your new key was not saved.",
     fix: [
-      "Use the key you already have connected for this account instead of adding a new one.",
-      "To connect a second strategy or exchange link, use a different account — a separate broker account, or a different login on the same broker.",
+      "Use the key you already have for this account instead of adding a new one.",
+      "To connect a different account, create a key on that account (a separate exchange account or sub-account) and add it.",
       "If you believe this account should be free to connect fresh, email security@quantalyze.com with the correlation id below before disconnecting anything — the existing key keeps working until you do.",
     ],
     docsHref: "/security",
