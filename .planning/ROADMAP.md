@@ -3263,7 +3263,7 @@ The wait grows with the number of open PRs, because every one of them contends f
 - Phase 164.4.2 moved `sql-tests` to `scripts/local-stack/run.sh`.
 - Phase 164.4.2.1 took `test-db-drift` off the key.
 
-⭐ **Orchestrator decision, 2026-09-26 (autonomous planning, pending founder ratification) — CONTEXT D-14.**
+⭐ **Orchestrator decision, 2026-09-26 (autonomous planning; ✅ RATIFIED by the founder 2026-09-27 via AskUserQuestion, "Ratify D-14") — CONTEXT D-14.**
 The app's CSP `connect-src` in `next.config.ts` refuses a loopback Supabase origin (measured by the
 research), so `e2e-seeded` cannot leave the key without a fix. Taken: derive the configured
 `NEXT_PUBLIC_SUPABASE_URL` origin into `connect-src` only when no existing source already matches it,
@@ -3283,7 +3283,7 @@ Plans:
 
 **Wave 1** *(six file-disjoint plans; 04, 05 and 06 share neuter targets, so they run in isolated worktrees or one after another)*
 - [x] 164.9.4-01-PLAN.md — D-11: commit `164.9.4-MEASUREMENT.md` (BEFORE numbers, AFTER protocol) before any `ci.yml` edit
-- [x] 164.9.4-02-PLAN.md — D-14: the CSP `connect-src` adds the configured Supabase origin only when no source matches it; contract test (reversible, pending founder ratification)
+- [x] 164.9.4-02-PLAN.md — D-14: the CSP `connect-src` adds the configured Supabase origin only when no source matches it; contract test (reversible; founder-ratified 2026-09-27)
 - [x] 164.9.4-03-PLAN.md — D-04: `scripts/local-stack/run.sh --assert-local-handoff` seam that reuses the lane's loopback guards
 - [x] 164.9.4-04-PLAN.md — the dead-holder drill and the Test 3b verdict scan stop depending on `ci.yml`
 - [x] 164.9.4-05-PLAN.md — the `critical-regressions.test.ts` protocol loops are re-pointed to `MUTEX_HOLDERS`, not retired
