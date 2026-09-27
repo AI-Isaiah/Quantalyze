@@ -20,6 +20,16 @@ WHY the status assertions are exact:
 network, no database. Router-logic cases run against a bare app; the
 service-key case drives the real ``main.app`` middleware stack, mirroring the
 split in ``tests/test_prober_cadence_alert.py``.
+
+Review-fix round 1 (REVIEW CR-01 / WR-01, SFH CR-01 / HR-01): a 200 must
+prove the TABLE moved, not that the fetcher returned. ``get_benchmark_returns``
+swallows a failed cache upsert and still returns ``(series, False)``, and its
+fresh-fetch arm never compares the series to the calendar. So the handler
+re-reads the newest stored completed BTC day and answers 500 unless it is at
+least yesterday (UTC), and reports ``through`` from that row. Every test here
+therefore installs an in-memory ``benchmark_prices`` table (``_FakeTable``) at
+both places the code looks the client up; the real-path cases run the real
+``get_benchmark_returns`` with only the upstream fetch patched.
 """
 
 from __future__ import annotations
@@ -27,7 +37,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pandas as pd
@@ -36,6 +46,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routers import cron as cron_mod
+from services import benchmark as benchmark_mod
 
 ROUTE = "/api/benchmark-refresh"
 
@@ -51,8 +62,117 @@ def _returns_ending(last: date, n: int = 3) -> pd.Series:
     return pd.Series([0.01, -0.02, 0.03][:n], index=idx, name="BTC")
 
 
+def _prices_ending(last: date, n: int = 6) -> pd.Series:
+    """Upstream daily closes ending on ``last``, plus a partial row for today
+    (which the real fetcher drops before caching)."""
+    days = [last - timedelta(days=n - 1 - i) for i in range(n)]
+    today = datetime.now(timezone.utc).date()
+    if last < today:
+        days.append(today)
+    idx = pd.DatetimeIndex([pd.Timestamp(d) for d in days])
+    return pd.Series(
+        [40_000.0 + 100.0 * i for i in range(len(days))], index=idx, name="BTC"
+    )
+
+
+class _Resp:
+    def __init__(self, data: list[dict[str, Any]]) -> None:
+        self.data = data
+
+
+class _Query:
+    """The two PostgREST chains the refresh path uses, over an in-memory table:
+    ``select/eq/lt/order/limit/execute`` and ``upsert/execute``. A chain method
+    this fake does not implement raises AttributeError, so a new query shape
+    cannot silently read as a pass."""
+
+    def __init__(self, table: "_FakeTable") -> None:
+        self._t = table
+        self._filters: list[tuple[str, str, Any]] = []
+        self._desc = False
+        self._limit: int | None = None
+        self._upsert: list[dict[str, Any]] | None = None
+
+    def select(self, _cols: str) -> "_Query":
+        return self
+
+    def eq(self, col: str, val: Any) -> "_Query":
+        self._filters.append(("eq", col, val))
+        return self
+
+    def lt(self, col: str, val: Any) -> "_Query":
+        self._filters.append(("lt", col, val))
+        return self
+
+    def order(self, _col: str, desc: bool = False) -> "_Query":
+        self._desc = desc
+        return self
+
+    def limit(self, n: int) -> "_Query":
+        self._limit = n
+        return self
+
+    def upsert(self, payload: list[dict[str, Any]]) -> "_Query":
+        self._upsert = payload
+        return self
+
+    def execute(self) -> _Resp:
+        if self._upsert is not None:
+            if self._t.upsert_error is not None:
+                raise self._t.upsert_error
+            for r in self._upsert:
+                self._t.store[(r["symbol"], r["date"])] = float(r["close_price"])
+            return _Resp(list(self._upsert))
+        out = [
+            {"symbol": s, "date": d, "close_price": c}
+            for (s, d), c in self._t.store.items()
+        ]
+        for op, col, val in self._filters:
+            if op == "eq":
+                out = [r for r in out if r[col] == val]
+            else:
+                out = [r for r in out if r[col] < val]
+        out.sort(key=lambda r: r["date"], reverse=self._desc)
+        if self._limit is not None:
+            out = out[: self._limit]
+        return _Resp(out)
+
+
+class _FakeTable:
+    """An in-memory ``benchmark_prices`` behind a Supabase-client-shaped object."""
+
+    def __init__(self) -> None:
+        self.store: dict[tuple[str, str], float] = {}
+        self.upsert_error: BaseException | None = None
+
+    def seed_through(self, last: date, n: int = 5) -> None:
+        for i in range(n):
+            d = last - timedelta(days=i)
+            self.store[("BTC", d.isoformat())] = 50_000.0 + i
+
+    def newest(self) -> str | None:
+        dates = [d for (s, d) in self.store if s == "BTC"]
+        return max(dates) if dates else None
+
+    def table(self, name: str) -> _Query:
+        assert name == "benchmark_prices", name
+        return _Query(self)
+
+
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def table(monkeypatch: pytest.MonkeyPatch) -> _FakeTable:
+    """Rows through yesterday by default, installed where the handler reads the
+    table (``routers.cron.get_supabase``) and where the real fetcher reads and
+    writes it (``services.benchmark.get_supabase``)."""
+    fake = _FakeTable()
+    fake.seed_through(_yesterday())
+    monkeypatch.setattr(cron_mod, "get_supabase", lambda: fake)
+    monkeypatch.setattr(benchmark_mod, "get_supabase", lambda: fake)
+    return fake
+
+
+@pytest.fixture
+def client(table: _FakeTable) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(cron_mod.router)
     yield TestClient(app, raise_server_exceptions=False)
@@ -124,7 +244,14 @@ def test_empty_series_answers_exactly_500(client, monkeypatch):
 
 def test_exception_answers_exactly_500_logged_by_type_only(client, monkeypatch, caplog):
     secret_detail = "upstream said: sensitive-detail-canary"
-    _patch(monkeypatch, side_effect=RuntimeError(secret_detail))
+    raised = RuntimeError(secret_detail)
+    _patch(monkeypatch, side_effect=raised)
+    # REVIEW IN-04 / SFH MD-02: the log line and the response stay type-only,
+    # but the exception itself (with its stack) goes to Sentry, where
+    # `sentry_init`'s redacting `before_send` applies. Without the capture the
+    # daily alarm says only "RuntimeError".
+    capture = MagicMock()
+    monkeypatch.setattr(cron_mod.sentry_sdk, "capture_exception", capture)
 
     with caplog.at_level("ERROR", logger="quantalyze.analytics"):
         resp = client.post(ROUTE)
@@ -135,6 +262,145 @@ def test_exception_answers_exactly_500_logged_by_type_only(client, monkeypatch, 
     messages = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
     assert any("RuntimeError" in m for m in messages), messages
     assert not any("sensitive-detail-canary" in m for m in messages), messages
+    capture.assert_called_once_with(raised)
+
+
+# --- Review-fix round 1: the 200 must be proven by the TABLE ----------------
+
+
+def test_through_is_reported_from_the_table_not_the_series(client, monkeypatch, table):
+    """A current in-memory series is not a refresh: the handler reports what the
+    table holds. Here the series ends yesterday but the table stops 3 days
+    earlier (the write was lost), so the answer is 500 naming the stored day."""
+    table.store.clear()
+    stored = _yesterday() - timedelta(days=3)
+    table.seed_through(stored)
+    _patch(monkeypatch, return_value=(_returns_ending(_yesterday()), False))
+
+    resp = client.post(ROUTE)
+
+    assert resp.status_code == 500, resp.text
+    assert resp.status_code != 503
+    assert stored.isoformat() in resp.text
+
+
+def test_failed_upsert_through_the_real_fetcher_answers_500(client, monkeypatch, table):
+    """REVIEW CR-01 / SFH CR-01, end to end through the REAL
+    ``get_benchmark_returns``: the upstream fetch succeeds, the cache upsert
+    raises, the fetcher swallows it at warning level and returns
+    ``(series, False)``. The table never moved, so the cron must NOT read
+    green. Before the fix this answered 200 with ``through`` = yesterday."""
+    table.store.clear()
+    stored = _yesterday() - timedelta(days=3)
+    table.seed_through(stored)
+    table.upsert_error = RuntimeError("permission denied for table benchmark_prices")
+    monkeypatch.setattr(
+        benchmark_mod,
+        "fetch_btc_daily_prices",
+        AsyncMock(return_value=_prices_ending(_yesterday())),
+    )
+
+    resp = client.post(ROUTE)
+
+    assert resp.status_code == 500, resp.text
+    assert resp.status_code != 503
+    assert stored.isoformat() in resp.text
+    assert table.newest() == stored.isoformat()
+
+
+def test_successful_upsert_through_the_real_fetcher_answers_200(client, monkeypatch, table):
+    """The control for the case above: same fetch, the upsert lands, so the
+    table reaches yesterday and ``through`` is read back from it."""
+    table.store.clear()
+    table.seed_through(_yesterday() - timedelta(days=3))
+    monkeypatch.setattr(
+        benchmark_mod,
+        "fetch_btc_daily_prices",
+        AsyncMock(return_value=_prices_ending(_yesterday())),
+    )
+
+    resp = client.post(ROUTE)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["through"] == _yesterday().isoformat()
+    assert body["stale"] is False
+    assert body["symbol"] == "BTC"
+    assert table.newest() == _yesterday().isoformat()
+
+
+def test_fetch_ending_before_yesterday_answers_500(client, monkeypatch, table):
+    """REVIEW WR-01 / SFH HR-01: the fetcher's fresh arm returns ``is_stale=False``
+    for whatever the upstream sent. A lagging upstream whose newest completed
+    day is the day before yesterday is written, but it is not a current
+    benchmark, so the cron must page."""
+    table.store.clear()
+    lagging = _yesterday() - timedelta(days=1)
+    monkeypatch.setattr(
+        benchmark_mod,
+        "fetch_btc_daily_prices",
+        AsyncMock(return_value=_prices_ending(lagging)),
+    )
+
+    resp = client.post(ROUTE)
+
+    assert resp.status_code == 500, resp.text
+    assert resp.status_code != 503
+    assert lagging.isoformat() in resp.text
+    # The lagging rows DID land: this is a freshness failure, not a write one.
+    assert table.newest() == lagging.isoformat()
+
+
+def test_a_row_for_today_does_not_count_as_fresh(client, monkeypatch, table):
+    """Only COMPLETED UTC days count (the fetcher's own rule,
+    ``_completed_days_only``). A partial-day row for today must not satisfy the
+    freshness check when yesterday is missing."""
+    table.store.clear()
+    today = _yesterday() + timedelta(days=1)
+    table.seed_through(_yesterday() - timedelta(days=2))
+    table.store[("BTC", today.isoformat())] = 60_000.0
+    _patch(monkeypatch, return_value=(_returns_ending(_yesterday()), False))
+
+    resp = client.post(ROUTE)
+
+    assert resp.status_code == 500, resp.text
+    # The read picked the newest COMPLETED day, not today's partial row.
+    assert (_yesterday() - timedelta(days=2)).isoformat() in resp.text
+
+
+def test_empty_table_answers_500(client, monkeypatch, table):
+    table.store.clear()
+    _patch(monkeypatch, return_value=(_returns_ending(_yesterday()), False))
+
+    resp = client.post(ROUTE)
+
+    assert resp.status_code == 500, resp.text
+    assert resp.status_code != 503
+
+
+def test_table_read_failure_answers_500_type_only_and_captured(client, monkeypatch, caplog):
+    """The verification read itself failing (not configured, PostgREST error,
+    transport) must page as a 500 too, type-only, with a Sentry capture."""
+    _patch(monkeypatch, return_value=(_returns_ending(_yesterday()), False))
+    raised = RuntimeError("Supabase not configured: read-canary")
+
+    def _boom() -> Any:
+        raise raised
+
+    monkeypatch.setattr(cron_mod, "get_supabase", _boom)
+    capture = MagicMock()
+    monkeypatch.setattr(cron_mod.sentry_sdk, "capture_exception", capture)
+
+    with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+        resp = client.post(ROUTE)
+
+    assert resp.status_code == 500, resp.text
+    assert resp.status_code != 503
+    assert "read-canary" not in resp.text
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert any("RuntimeError" in m for m in messages), messages
+    assert not any("read-canary" in m for m in messages), messages
+    capture.assert_called_once_with(raised)
 
 
 @pytest.mark.asyncio

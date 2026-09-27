@@ -349,9 +349,10 @@ NO_LIMITER_QUARANTINE: frozenset[str] = frozenset(
         # `routers/cron.py` `benchmark_refresh` — Phase 169.2 plan 01 (D-08).
         # Cron surface, gated by the SAME shared SERVICE_KEY as
         # `routers.cron.cron_sync` above and classified the same way. Called
-        # once a day by the Vercel cron `/api/cron/refresh-benchmark`; it only
+        # once a day by the Vercel cron `/api/cron/refresh-benchmark`; it
         # awaits the cache-first `get_benchmark_returns("BTC")`, which refetches
-        # upstream prices on a cache miss only.
+        # upstream prices on a cache miss only, then makes one single-row read
+        # of `benchmark_prices` (`_stored_through`) to confirm the table is current.
         "routers.cron.benchmark_refresh",
         # `routers/match.py:1921-1922` — cron surface, service-key gated. This
         # one is EXPLICITLY DECLARED unlimited in prose:

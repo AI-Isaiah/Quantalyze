@@ -3,7 +3,7 @@ import logging
 import re
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 import pandas as pd
@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from services.benchmark import get_benchmark_returns
-from services.db import get_supabase, rows
+from services.db import db_execute, get_supabase, rows
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions, get_and_clear_last_dq_flags, EXCHANGE_CLASSES
 
@@ -2316,6 +2316,31 @@ async def prober_cadence_alert(alert: ProberCadenceAlert) -> dict[str, Any]:
     return {"acknowledged": True}
 
 
+async def _stored_through(symbol: str, *, today: str) -> str | None:
+    """The newest COMPLETED day stored in ``benchmark_prices`` for ``symbol``
+    (``YYYY-MM-DD``), or None when there is none.
+
+    Review-fix round 1 (REVIEW CR-01 / WR-01, SFH CR-01 / HR-01). The refresh
+    endpoint's 200 must rest on the table, because the fetcher it delegates to
+    swallows a failed cache upsert and still returns a current series.
+    ``lt(today)`` mirrors the fetcher's completed-days rule
+    (``services.benchmark._completed_days_only``): a partial-day row for today
+    is not a close and must not count as fresh.
+    """
+    supabase = get_supabase()
+    result = await db_execute(
+        lambda: supabase.table("benchmark_prices")
+        .select("date")
+        .eq("symbol", symbol)
+        .lt("date", today)
+        .order("date", desc=True)
+        .limit(1)
+        .execute()
+    )
+    stored = rows(result)
+    return str(stored[0]["date"])[:10] if stored else None
+
+
 @router.post("/benchmark-refresh")
 async def benchmark_refresh() -> dict[str, Any]:
     """Refresh the cached BTC benchmark through the ONE existing fetcher.
@@ -2332,10 +2357,17 @@ async def benchmark_refresh() -> dict[str, Any]:
     Lives under ``/api`` (not ``/internal``) so the global ``X-Service-Key``
     middleware guards it, exactly like ``/api/cron-sync`` (CONTEXT D-08).
 
-    Answers 200 with ``{symbol, through, stale, points}`` ONLY for a non-empty,
-    non-stale series. Every other outcome (no series, an empty or stale series,
-    an exception) is HTTP 500, because the cron runner only alarms on a non-2xx
-    (the same reason ``cron_sync`` raises 500 above).
+    Answers 200 with ``{symbol, through, stale, points}`` ONLY when the TABLE
+    holds a completed BTC day of yesterday (UTC) or later after the refresh,
+    and ``through`` is that stored day, read back from ``benchmark_prices``
+    (review-fix round 1, REVIEW CR-01 / WR-01). The fetcher's return is not
+    proof: it swallows a failed cache upsert and still returns
+    ``(series, False)``, and its fresh-fetch arm never compares the series to
+    the calendar, so a lost write or a lagging upstream would otherwise read
+    green every morning. Every other outcome (no series, an empty or stale
+    series, an exception, a failed table read, a table older than yesterday)
+    is HTTP 500, because the cron runner only alarms on a non-2xx (the same
+    reason ``cron_sync`` raises 500 above).
 
     The failure status is 500 and never 503, even though a failed upstream
     price is arguably a dependency outage (W2): the TypeScript seam records a
@@ -2346,8 +2378,11 @@ async def benchmark_refresh() -> dict[str, Any]:
         series, is_stale = await get_benchmark_returns("BTC")
     except Exception as exc:  # noqa: BLE001 - any failure must page, as a 500
         # Log the exception TYPE only: an upstream message can carry URLs,
-        # headers or response fragments.
+        # headers or response fragments. The exception itself, with its stack,
+        # goes to Sentry, whose `before_send` redacts (REVIEW IN-04 / SFH
+        # MD-02, the same capture `services.benchmark` makes on its cache read).
         logger.error("benchmark_refresh: refresh raised %s", type(exc).__name__)
+        sentry_sdk.capture_exception(exc)
         raise HTTPException(
             status_code=500,
             detail=f"Benchmark refresh failed: {type(exc).__name__}",
@@ -2360,12 +2395,41 @@ async def benchmark_refresh() -> dict[str, Any]:
             detail="Benchmark refresh failed: no BTC series",
         )
 
-    through = pd.Timestamp(series.index[-1]).date().isoformat()
+    series_through = pd.Timestamp(series.index[-1]).date().isoformat()
     if is_stale:
-        logger.error("benchmark_refresh: BTC series is stale (through %s)", through)
+        logger.error("benchmark_refresh: BTC series is stale (through %s)", series_through)
         raise HTTPException(
             status_code=500,
-            detail=f"Benchmark refresh stale: BTC prices through {through}",
+            detail=f"Benchmark refresh stale: BTC prices through {series_through}",
+        )
+
+    today = datetime.now(timezone.utc).date()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    try:
+        through = await _stored_through("BTC", today=today.isoformat())
+    except Exception as exc:  # noqa: BLE001 - an unverifiable refresh must page
+        logger.error(
+            "benchmark_refresh: reading the stored BTC date raised %s", type(exc).__name__
+        )
+        sentry_sdk.capture_exception(exc)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Benchmark refresh unverified: {type(exc).__name__}",
+        ) from None
+
+    if through is None or through < yesterday:
+        # `logger.error` is a Sentry event under the default LoggingIntegration.
+        logger.error(
+            "benchmark_refresh: benchmark_prices not current (stored BTC through %s, "
+            "needs %s; fetched series through %s)",
+            through, yesterday, series_through,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Benchmark refresh did not reach {yesterday}: "
+                f"stored BTC prices through {through or 'none'}"
+            ),
         )
 
     return {"symbol": "BTC", "through": through, "stale": False, "points": int(len(series))}
