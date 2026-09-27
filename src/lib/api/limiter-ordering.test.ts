@@ -181,6 +181,13 @@ const NO_INPUT = new Set([
   // BEFORE checkLimit, so a malformed id never burns a token. Same NO_INPUT
   // shape as the returns/sync-progress/share siblings above.
   "keys/[id]/memberships/route.ts",
+  // Phase 169.2 / D-20 — the daily BTC benchmark refresh cron. CRON_SECRET
+  // Bearer gate, then adminActionLimiter under one fixed identifier
+  // (`benchmark-refresh:cron`), and NO request body: the handler reads only
+  // the Authorization header, so the burn-a-token-on-bad-body bug cannot occur.
+  // Deny routed through rateLimitDenyJson (pinned by its route.test.ts and the
+  // seam posture invariant).
+  "cron/refresh-benchmark/route.ts",
 ]);
 
 // limit-FIRST is intentional here (public/unauth scraper defense).

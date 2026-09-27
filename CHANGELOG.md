@@ -1,5 +1,129 @@
 # Changelog
 
+## [0.107.0.0] - 2026-09-27 — BENCHFRESH: the BTC benchmark is refreshed daily, read in full, and a failed read answers 503 instead of an empty series
+
+⭐ **What changed for whoever reads this next.** Before this phase nothing kept `benchmark_prices`
+current on a schedule: its only writer was a lazy refetch during an analytics compute. The
+`/api/benchmark/btc` route also read the table in one unpaged, oldest-first select, so once the
+table held more than 1000 daily closes the series silently lost its NEWEST days. Phase 169.2
+BENCHFRESH adds a daily refresh (Vercel cron at 00:10 UTC → the analytics service's existing
+fetcher). It puts every read of the table behind one paged reader. And a stale refresh or a failed
+read now shows as a failure (a 500 or 502 on the cron, a no-store 503 on the route) instead of a
+green run or a cached `200 []`.
+
+### Added
+- **`POST /api/benchmark-refresh` on the analytics service** (`benchmark_refresh` in
+  `analytics-service/routers/cron.py`). It refreshes BTC through the ONE existing fetcher,
+  `services.benchmark.get_benchmark_returns`, and adds no fetch logic of its own. It sits under
+  `/api`, so the global service-key middleware guards it like `/api/cron-sync`. It answers 200
+  with `{symbol, through, stale, points}` only when the TABLE, read back after the refresh (via
+  `_stored_through`), holds a completed BTC day of yesterday (UTC) or later. Every other outcome is
+  a 500, never a 503, because a 503 would trip the analytics breaker that every seam shares.
+- **`/api/cron/refresh-benchmark`**, a Vercel cron route scheduled at `10 0 * * *` in
+  `vercel.json`. It checks `CRON_SECRET` first (401), then the limiter (429 on deny, 503 when
+  misconfigured), then calls `refreshBenchmark()` in `src/lib/analytics-client.ts` through the one
+  analytics seam. It returns 502 when the service fails or its `through` is older than yesterday.
+  A failed or stale refresh reaches Sentry.
+- **`readBenchmarkPrices`, the one reader of `benchmark_prices`**
+  (`src/lib/factsheet/benchmark-source.ts`), along with `pricesToDailyReturns` and
+  `mergeWithFixture`. It reads keyset pages of `BENCHMARK_PAGE_SIZE` newest-first on `date` until
+  it sees an EMPTY page. At its `BENCHMARK_MAX_PAGES` ceiling it returns an error, never a truncated
+  series. It reports the closes it drops as unusable (non-finite or non-positive) instead of
+  skipping them silently.
+- **A `benchmark-refresh` seam budget** in `src/lib/resilient-fetch.ts` (100 s, sized from the
+  fetcher's worst case plus the service's own 80 s deadline). It is registered as non-retried by
+  design in `src/lib/seam-retry-registry.ts`: the only caller is the daily cron, and tomorrow's run
+  is the retry.
+- **`BenchmarkCacheWriteError` and `get_benchmark_returns(..., require_persist=True)`** in
+  `analytics-service/services/benchmark.py`. With the flag set, the scheduled refresh raises when
+  its cache write fails. Every other caller keeps the old behaviour, where the write failure is
+  logged and the fresh series is still returned.
+
+### Changed
+- **`/api/benchmark/btc` returns the newest BTC day.** It reads through `readBenchmarkPrices`, so
+  its length no longer depends on PostgREST's row cap. This closes the highest-risk site of the
+  TODOS unbounded-`.select()` CLASS entry, which is corrected in place from 8 remaining sites to 7.
+- **A read error on `/api/benchmark/btc` answers `503` with `Cache-Control: no-store`**, instead of
+  the old `200 []`, which the CDN could pin for the whole s-maxage/SWR window. The comment on the
+  consumer in `ScenarioComposer` is updated to match; its behaviour (any non-2xx shows the fixture
+  path) is unchanged.
+- **The route's Sentry captures are throttled** by `shouldCaptureNow` keys (`read-error`,
+  `dropped-closes`). They run inside `after()`, so a capture survives the function freezing after
+  the response. The dropped-closes capture carries at most the newest 20 dates.
+
+### Fixed
+Three rounds of code review and silent-failure review, all findings fixed or dispositioned:
+- **Round 1.** The refresh answers 500 unless the STORED series reaches yesterday. Previously the
+  fetcher swallowed a failed upsert and the endpoint still read green. The cron route refuses a
+  stale `through`, reports to Sentry, and sizes its budget to the fetcher. The reader pages by date,
+  and the route never bridges a return across a DROPPED corrupt close.
+- **Round 2.** The refresh fails when its own cache write fails (`require_persist`). It is bounded
+  by `_BENCHMARK_REFRESH_DEADLINE_S` (80 s), and it reads one pinned "today"
+  (`services.benchmark._utc_today`), so a run that crosses 00:00 UTC cannot demand a day the
+  fetcher never aimed at. The route's Sentry captures were throttled and moved into `after()`.
+- **Round 3 (D-47).** Round 2 had made `pricesToDailyReturns` skip every return across a missing
+  day. That made the cumulative BTC overlay (`ScenarioComposer`, the scenario-share page) drift off
+  BTC's real level for every later date. **Reverted:** a missing stored day is bridged again, which
+  is the pre-phase behaviour and matches Python `prices_to_returns`. Only the skip across a dropped
+  corrupt close is kept.
+- **Raw-5xx census (CI).** The refresh's six failure arms raised a raw `HTTPException(500)`, which
+  skips the error contract's `_validate`, and `test_raw_5xx_census.py` went red (18 sites against
+  a quarantine of 12 that may only shrink). All six now raise
+  `service_error(500, "BENCHMARK_REFRESH_FAILED", retryable=False)` with no dependency, so the
+  census is back to 12 with no quarantine change. The status stays 500 and the cron route still
+  answers 502 on any failure. The new code has a reasoned `VENUE_WIRE_CODES_WITHOUT_VERDICT` row
+  (only the cron route calls it, and that route never reads the code) and `STATUS_CONTRACT.md`
+  row S-28.
+
+### Tests
+- New suites: `analytics-service/tests/test_benchmark_refresh.py`,
+  `src/app/api/cron/refresh-benchmark/route.test.ts` and
+  `src/lib/factsheet/benchmark-source.test.ts`. `src/app/api/benchmark/btc/route.test.ts` is
+  extended. Every fix was written red-first (neuter → RED → restore).
+- The new seam key and cron route are named in every seam census: the budget, constants-pin,
+  log-coverage, rate-limit-posture and retry-registry tests, `vercel-cron-limits`,
+  `limiter-ordering`, the limiter route coverage in Python, and `src/__tests__/contracts/REGISTRY.md`.
+
+### Notes
+- **Planning.** The phase's execution, summary, review, fix-report, verification (human_needed
+  14/16, 0 failed), security (threats_open 0) and UAT artefacts are all under
+  `.planning/phases/169.2-*`.
+- **Phase 169's planning does not ship here.** This branch carried seven Phase 169 PAGETRUTH
+  planning commits. Two commits on it remove their `.planning/phases` files again, so every phases
+  path outside 169.2 matches `main`: the 169 directory (10 files), plus 21 files under 169.1,
+  169.3, 169.4 and 169.4.1. Those plans reference the 169 RESEARCH file, and one of them anchors
+  the factsheet cache key at v6 while `main` is on v7, so `plan-anchor-verify` would have gone red.
+  All 31 files are byte-identical on Phase 169's own branch. That planning also left one TODOS
+  entry on this branch, `[169-SCENARIO-WINDOW-ANNUALIZATION]` (owner Phase 167.1.2), which ships
+  with it.
+- **Routed:** Phase 169.4 ALLOCTRUTH gains success criterion 11 for
+  `[169.2-BTC-GAP-RETURN-STAMP]` (2026-09-27, D-47).
+
+### Known limits
+- **`[169.2-BTC-GAP-RETURN-STAMP]` is booked, not fixed.** `pricesToDailyReturns` still stamps a
+  return that bridges a missing stored day as ONE day's move at the later date. The overlay needs
+  the bridge; the inner-joined metrics would rather skip it. This bug predates the phase and is
+  latent, because the daily refresh treats any calendar gap as a cache miss and refetches. It is
+  routed to Phase 169.4 as criterion 11.
+- **Two review LOWs are accepted open** (reasons in `169.2-REVIEW-FIX-A-R2.md`):
+  - The cache read's `.limit(days + 1)` against `max_rows` is left alone. Changing it would alter
+    five pinned mock chains, and the refresh outcome no longer depends on it.
+  - A short-but-current upstream series is not refused. The CoinGecko fallback's free-tier length
+    is unmeasured, so a length floor could page every day Binance is unavailable.
+- **T-169.2-03-B is open, below the block threshold.** The SHA-bound post-deploy readings can only
+  exist after merge.
+- **Post-deploy check (VERIFICATION human item 1).** After merge and deploy:
+  - Bind the Vercel and Railway deployments to the merge SHA, and confirm Railway `/health` answers
+    200.
+  - Count the CI runs bound to that SHA (zero is a FAIL).
+  - After the first scheduled 00:10 UTC run, read the Vercel cron log.
+  - Read `/api/benchmark/btc` with a cache-busting query, and confirm its last point is yesterday
+    UTC.
+- **The 00:10 UTC schedule is a decision to revisit** (D-47). Binance publishes the daily candle at
+  its 00:00 UTC close. If the first scheduled runs answer 500 on freshness, move the cron to about
+  00:30 UTC in `vercel.json`.
+- The refresh deadline cannot recall a database call already handed to a worker thread, so a write
+  may still land after a 500. The next run's read-back sees it.
 ## [0.106.0.2] - 2026-09-27 — record the TEST restore and re-dump evidence; 164.9.2 and 164.5.2 close
 
 ### Notes

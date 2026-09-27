@@ -135,7 +135,8 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
 - [ ] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
-- [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — planned (1 plan); waits on the founder's recompute step
+- [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — planned (1 plan); HALTED 2026-09-27 at Task 3; resumes after Phase 166.4 ships
+- [ ] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — not yet planned; data integrity, ahead of features
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [ ] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed
 - [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
@@ -2632,6 +2633,8 @@ so a `-10005` at the sign-in step stays `SIGN_IN_FAILED`. Other IPC faults move 
 424 to the non-retryable `MT5_TERMINAL_UNRESPONSIVE` 500. `KEY_MT5_TERMINAL_UNRESPONSIVE` joins
 `DASHBOARD_DIALOG_ROUTE_CODES` (in scope).
 
+**Founder decision 2026-09-27 (recorded via `/gsd-phase --edit`):** the narrowest supported viewport is 390 px (iPhone 12) plus desktop at 200% zoom, so this phase's "320px" verification check is replaced by a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser (full decision under Phase 170 LAYOUT).
+
 ### Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session (INSERTED)
 
 **Goal:** A client's key validation cannot evict, disturb or expose another client's broker session
@@ -3581,6 +3584,43 @@ Plans:
 
 - [ ] 166.3-01-PLAN.md — founder-gated PROD recompute: Q1-Q6 read-only pack (Q6: stored residue SQN, D-21 W1), tracer then one-at-a-time enqueues with the kind derived from the class (D-21 W2), blocking rendered check per published row (independent of the code plans)
 
+⛔ **HALTED 2026-09-27 at Task 3 (see `166.3-01-SUMMARY.md` in this phase's directory, on branch `feat/166.3-recompute`).** The tracer recompute (R1) failed A2c: its beta changed sign and its treynor moved, while its r² did not. The cause is not Phase 166. It is the M1 alignment change (`d16b2fb4c`, v0.24.9.31, #323), reproduced locally. R2..R6 were NOT enqueued: rows computed before the M1 deploy still hold the pre-M1 beta, and recomputing them on today's code would degrade them. **Resumes after Phase 166.4 BENCHALIGN ships** (founder decision D-B, 2026-09-27), with its recompute set WIDENED to every sparse-calendar strategy computed since the M1 deploy (2026-05-27). R1 is a private row and must be recomputed again after the fix.
+
+### Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric (INSERTED)
+
+**Goal:** For a strategy whose date index is sparser than BTC's 7-day calendar (for example weekday-only), every benchmark-relative metric pairs each strategy return with the BTC return over the SAME holding interval, so alpha, beta, correlation, information ratio, Treynor, r² and the rolling greeks and correlation describe the strategy's real co-movement with BTC, and r² equals correlation² again.
+**Requirements**: TBD (criteria below)
+**Depends on:** nothing. **Priority:** data integrity, ahead of features (founder priority rule, 2026-09-27).
+**Plans:** 0 plans
+
+**Evidence (orchestrator, 2026-09-27; the reproduction was re-run locally against main-level code; counts and verdicts only):**
+
+- **Root cause: M1, not Phase 166.** Commit `d16b2fb4c` (v0.24.9.31, #323, audit batch 5, "M1 (red-team 2026-05-27)") moved alpha and beta off `qs.stats.greeks(returns, benchmark)` on the unaligned pair. quantstats' `_prepare_benchmark` reindexes the benchmark PRICE levels to the strategy's dates, so it paired each return with the Fri→Mon interval return. M1 moved them to `returns.align(benchmark, join="inner")`, which pairs a Monday return with BTC's Sun→Mon daily move.
+- **Phase 166 is bit-identical to M1.** `_greeks_no_guess` reproduces M1 exactly, so Phase 166's §Q3 parity claim holds. Phase 166 did not cause this.
+- **The metrics disagree with each other today.** `_r_squared`, reached through `compute_qstats_scalars`, still uses the unaligned pair via `_align_benchmark_like_qs`, so r² ≠ correlation². Correlation and `info_ratio` in `compute_all_metrics`, and `_rolling_greeks` / `_rolling_correlation`, use the inner join. All in `analytics-service/services/metrics.py`.
+- **Measured.** On a 67-point weekday-only series: the pre-M1 beta is negative, the M1 and Phase 166 beta is positive (a sign flip), and r² is identical under both. A hand OLS confirms the pre-M1 value is the slope against Fri→Mon returns and the current one the slope against Sun→Mon returns.
+- **Blast radius.** Every strategy computed since the 2026-05-27 deploy whose date index has gaps against BTC's calendar, chiefly weekday-only user CSVs. Dense daily series (crypto exchange dailies) are unaffected. ⚠️ `stitch_composite` (`run_stitch_composite_job`) and the single-key broker path were NOT traced; this phase traces them.
+- **Found by** Phase 166.3's tracer recompute on 2026-09-27 (A2c FAIL: beta sign flipped, treynor moved, r² unchanged). 166.3 is halted until this phase ships.
+
+⭐ **FOUNDER DECISIONS, 2026-09-27 (AskUserQuestion, recorded verbatim):**
+
+- **D-A "Friday→Monday (Recommended)":** for a strategy whose calendar is sparser than BTC's 7-day calendar (e.g. weekday-only), every benchmark-relative metric pairs each strategy return with the BTC return over the SAME interval (compounded from the strategy's previous date to its current date, i.e. price[t_k]/price[t_{k-1}] − 1), not the overlapping daily move. Applies to alpha, beta, correlation, information ratio, Treynor, the rolling greeks/correlation, and r² (so r² = correlation² again). A benchmark gap must be skipped, never back/forward-filled across (keeps the M1 intent).
+- **D-B "New phase under 166 (Recommended)":** a new data-integrity phase, inserted under 166, ahead of features; 166.3 RECOMPUTE stays halted and resumes after it ships, with its recompute set widened to every sparse-calendar strategy computed since the M1 deploy.
+
+## Success Criteria
+
+1. **One pairing.** ONE interval-matched pairing is used by alpha, beta, correlation, `info_ratio`, treynor, r², the rolling greeks and the rolling correlation, and r² equals correlation² on the shared pair.
+2. **A gap is skipped, never filled.** A benchmark gap is skipped and never back- or forward-filled across. M1's intent is kept, and its test stays green.
+3. **A test that fails on today's code.** A test on a weekday-only fixture asserts a hand-computed Fri→Mon beta, and goes RED on today's code.
+4. **Dense series do not move.** Dense daily series stay bit-identical, pinned by a parity test.
+5. **Other paths traced.** The behaviour for `stitch_composite` and for single-key broker series is traced and stated.
+6. **Disclosed.** The CHANGELOG discloses the value change and names M1 (`d16b2fb4c`) as its origin.
+7. **166.3 resumes.** After merge, Phase 166.3 resumes with the widened recompute set (D-B).
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 166.4 to break down)
+
 ### Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine (INSERTED)
 
 **Goal:** Every "drawdown improvement" number means shallower-is-positive, and ranking rewards a shallower drawdown, never a deeper one.
@@ -3649,6 +3689,8 @@ Plans:
 **Wave 5** *(blocked on Wave 4 completion)*
 
 - [x] 167.1-06-PLAN.md — WINDOWS 66 closed, final byte-identity gate, and the ONE release commit carrying the D-06 outcome (D-14: the last plan releases) (wave 5) — DONE 2026-09-24 (`3bba699b1` docs, `7c0e57f7a` chore(release) v0.89.0.0; `167.1-06-SUMMARY.md`). Phase stays human_needed until the three browser checks
+
+**Founder decision 2026-09-27 (recorded via `/gsd-phase --edit`):** the narrowest supported viewport is 390 px (iPhone 12) plus desktop at 200% zoom, so this phase's "320px" verification check is replaced by a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser (full decision under Phase 170 LAYOUT).
 
 ### Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding (INSERTED)
 
@@ -3756,6 +3798,8 @@ Plans:
 
 - [x] 167.2-06-PLAN.md — a composite's key card offers no link control; a withheld success is retired at the applied re-read (KCS-23/04)
 
+**Founder decision 2026-09-27 (recorded via `/gsd-phase --edit`):** the narrowest supported viewport is 390 px (iPhone 12) plus desktop at 200% zoom, so this phase's "320px" verification check is replaced by a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser (full decision under Phase 170 LAYOUT).
+
 ### Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build (INSERTED)
 
 **Goal:** The owner's `/strategies` list and every "has a factsheet" signal agree with what a share-link recipient actually sees. Today a strategy whose `strategy_analytics.computation_status` reads computed, but whose series cannot build (`fetchAndBuildPayload` in `src/lib/factsheet/fetch-and-build-payload.ts` returns no payload), is shown on the list as having a factsheet with no share note, while its recipient lands on the pending page. Only the service-role builder can decide buildability (the series sit behind deny-all RLS) and no owner-readable field records the outcome, so Phase 167.2 could not fix it without a migration or an admin read (167.2 review WR-02, recorded UNFIXABLE-IN-PHASE 2026-09-24). **User-facing.** Inserted 2026-09-24 under the founder's authorization to add phases.
@@ -3771,6 +3815,8 @@ Plans:
 - [ ] 167.2.1-02-PLAN.md — MEMBERSGUARD: GET /api/keys/[id]/memberships on the service role after an explicit owner check; the key card fails closed to KCS-DELETE-UNCHECKED (wave 1)
 - [ ] 167.2.1-03-PLAN.md — LISTTRUTH: /strategies probes computed rows and shows the D-02 unbuildable note, RED first (wave 2)
 - [ ] 167.2.1-04-PLAN.md — OWNERNOTE: the owner factsheet's S7 note uses the same derivation, and the D-03 TODOS entry (wave 3)
+
+**Founder decision 2026-09-27 (recorded via `/gsd-phase --edit`):** the narrowest supported viewport is 390 px (iPhone 12) plus desktop at 200% zoom, so this phase's "320px" verification check is replaced by a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser (full decision under Phase 170 LAYOUT).
 
 ### Phase 168: DRBOPTIONS — a Deribit options account ingests end to end
 
@@ -3806,12 +3852,11 @@ Plans:
 
 ### Phase 169: FACTSHEETTRUTH — a factsheet's headline, benchmark, windows and record length agree with the stored record and with every other page
 
+⭐ **ROUTED HERE 2026-09-26 (Phase 167.2.1 CONTEXT D-07, verifier warning):** a composite whose `csv_daily_returns` read fails transiently is cached as a null payload on the public factsheet until the `unstable_cache` TTL, because `readCompositeFactsheet` cannot tell a read error from an empty composite. 167.2.1 fixed the single-key half (WR-02, `FactsheetReadError`). The composite half needs a distinguishable read error from `readCompositeFactsheet` and a throw in the public cache callback, with a red-first test. After the 2026-09-26 split of Phase 169 it belongs to the factsheet-truth phase.
+
 **Goal:** A strategy's factsheet agrees with itself and with every other page that shows the same strategy: its headline CAGR and Sharpe read the stored metric, its benchmark figures cover only the dates with real prices and say so, its return windows follow the calendar, and its dates and record length are stated one way. Each contradiction is traced to ONE source of truth and fixed there, not patched per page.
 **Narrowed 2026-09-26 by `/gsd-phase --edit` (169 D-37); the goal before the split, kept as lineage:** Every number a page shows agrees with the same number on every other page and with the length of the record it describes. Each contradiction below is traced to ONE source of truth and fixed there, not patched per page.
 **Split, 2026-09-26 (founder decision; 169 D-37):** one logical topic per phase, one reviewable PR each. Phase 169 PAGETRUTH was split into Phases 169 FACTSHEETTRUTH, 169.1 ZOOMKPIS, 169.2 BENCHFRESH, 169.3 SMALLFIXES and 169.4 ALLOCTRUTH; the already-checked plans were moved by hand, not re-planned, and D-13's two-PR packaging retired. Each success criterion keeps its original number in the phase that owns it (a criterion several phases serve is copied verbatim to each), so the plans' requirement ids stay valid. **Execution order is not the numeric order:** 169.2 and 169.3, then 169, then 169.4, then 169.1 (167.1.2 PR C before 169, 169.3-03/04, 169.4 and 169.1-02; 167.2.1 before 169 and 169.1).
-
-⭐ **ROUTED HERE 2026-09-26 (Phase 167.2.1 CONTEXT D-07, verifier warning):** a composite whose `csv_daily_returns` read fails transiently is cached as a null payload on the public factsheet until the `unstable_cache` TTL, because `readCompositeFactsheet` cannot tell a read error from an empty composite. 167.2.1 fixed the single-key half (WR-02, `FactsheetReadError`). The composite half needs a distinguishable read error from `readCompositeFactsheet` and a throw in the public cache callback, with a red-first test. After the 2026-09-26 split of Phase 169 it belongs to the factsheet-truth phase. *(Merged from `origin/main` 2026-09-27; its pre-split **Goal** line is the lineage line above, verbatim.)*
-
 **Founder decision, 2026-09-25 (AskUserQuestion):** the session QA sweep and the 2026-09-24 layout notes book as TWO phases; this numbers phase ships FIRST, Phase 170 PAGECOPY second. Phase 167.1.2 ACCOUNTTRUTH already owns the Allocations equity curve, Sharpe beside a negative return, the Scenario zero weights/UUID/$0 total, and the holdings total; they are EXCLUDED here.
 **Evidence:** the 2026-09-25 in-depth QA sweep of every page in the logged-in account (14 data-integrity findings) and the 2026-09-24 visual UAT. Counts only here; the reports hold no identifiers and are not tracked.
 **Requirements**: TBD (phase-local SC ids)
@@ -3825,6 +3870,7 @@ Plans:
 4. A strategy's CAGR and Sharpe are identical on discovery, recommendations, my-strategies and its factsheet (one computation, one stored value), or a surface that must differ says why.
 5. A factsheet's header date, its "track record through" date and its stated record length agree, and record length is stated one way.
 6. 3-year and 5-year rows are not shown for a record shorter than that period.
+   *Widened 2026-09-27 by `/gsd-phase --edit` (measured by the orchestrator and the founder in the logged-in browser on PROD, main at `320fba4e`/`e6c196d5`):* the scenario "Cumulative return metrics" panel on `/allocations?tab=scenario`, for a record shorter than six months, shows 6 Month = Year-to-date = 1 Year = the same value (the since-inception figure relabelled). The period-row gating this criterion asks for must cover the 6-month and 1-year rows too, not only 3Y and 5Y.
 9. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and each page is re-checked in the logged-in browser after deploy.
 
 *(Criteria 1, 2, 7, 8 and 10 moved on 2026-09-26 to Phases 169.3, 169.4 and 169.1, verbatim with their numbers; criteria 3, 4 and 9 are also served by other phases of the split.)*
@@ -3851,6 +3897,8 @@ Plans:
 **⚠️ REBASE NOTE 2026-09-26 (from 166.2 D-29):** 166.2 edited `src/app/factsheet/[id]/v2/types.ts` and `fetch-and-build-payload.ts` (NaN/null statistic fields, the optional `n_valid`, the v7 payload cache key). 169's plans must re-read both at HEAD before editing.
 
 **⭐ ROUTED IN 2026-09-27 (founder, UAT 2026-09-27):** /allocations Open Positions shows entry/mark prices under $1 as $0, and unrealized P&L as −$0 / +$0 (price formatter rounds to whole dollars). Success: a sub-dollar price and a sub-dollar P&L render with their real precision, and a zero-rounded value never shows a sign.
+
+*(The three paragraphs above were moved here from the end of Phase 169.4.1's section on 2026-09-27 by the Phase 169 replan: they are Phase 169's routed items and are planned as 169-09 RISKUNIT, 169-10 MONEYFMT and the D-48 cache-key bump in 169-02.)*
 
 ### Phase 169.1: ZOOMKPIS — the KPI strip and metrics rail follow the zoom window, and every windowed figure follows the engine's conventions (INSERTED)
 
@@ -3916,7 +3964,6 @@ Plans:
 ### Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers (INSERTED)
 
 **Goal:** Four self-contained page fixes: the `/admin` compute-jobs list loads and a failed load says so; `/recommendations` states the mandate truthfully and never recommends a viewer's own strategy; `/profile` Exchanges counts only live keys and never repeats a balance; `/recommendations` and `/allocations` use one mandate rule.
-**Shipped separately, 2026-09-26 (founder decision D11):** plan 01 shipped separately by founder decision D11; 02–05 follow once 167.1.2 PR C lands. This section is the minimal slice plan 01 needs; the full phase section, split note and remaining plans arrive with plans 02–05. *(Merged from `origin/main` 2026-09-27: plan 01 shipped as PR #868; the minimal slice section it carried is folded into this full one.)*
 **Split, 2026-09-26 (founder decision; 169 D-37):** one logical topic per phase, one reviewable PR each. Phase 169 PAGETRUTH was split into Phases 169 FACTSHEETTRUTH, 169.1 ZOOMKPIS, 169.2 BENCHFRESH, 169.3 SMALLFIXES and 169.4 ALLOCTRUTH; the already-checked plans were moved by hand, not re-planned, and D-13's two-PR packaging retired. Each success criterion keeps its original number in the phase that owns it (a criterion several phases serve is copied verbatim to each), so the plans' requirement ids stay valid. **Execution order is not the numeric order:** 169.2 and 169.3, then 169, then 169.4, then 169.1 (167.1.2 PR C before 169, 169.3-03/04, 169.4 and 169.1-02; 167.2.1 before 169 and 169.1).
 **Founder decision, 2026-09-25 (AskUserQuestion):** the session QA sweep and the 2026-09-24 layout notes book as TWO phases; this numbers phase ships FIRST, Phase 170 PAGECOPY second. Phase 167.1.2 ACCOUNTTRUTH already owns the Allocations equity curve, Sharpe beside a negative return, the Scenario zero weights/UUID/$0 total, and the holdings total; they are EXCLUDED here.
 **Requirements**: TBD (phase-local SC ids)
@@ -3935,11 +3982,13 @@ Plans:
 
 Plans:
 
-- [x] 169.3-01-PLAN.md — /admin compute jobs list reads the admin view; a failed load says so (SC1) (was 169-01) — shipped PR #868 (v0.97.0.1)
+- [x] 169.3-01-PLAN.md — /admin compute jobs list reads the admin view; a failed load says so (SC1) (was 169-01) — shipped separately 2026-09-26 (D11), v0.97.0.1 · #868
 - [ ] 169.3-02-PLAN.md — recommendations: mandate wording and no self-recommendation (SC8) (was 169-03)
 - [ ] 169.3-03-PLAN.md — Exchanges counts live keys only, no repeated balance (SC7) (was 169-09)
 - [ ] 169.3-04-PLAN.md — one mandate rule across recommendations and allocations (SC8) (was 169-10)
 - [ ] 169.3-05-PLAN.md — integration run + post-deploy browser re-check (SC9; this phase's items from old 05b's Task 4 and old 12, verbatim)
+
+**⭐ ROUTED IN 2026-09-27 (seen in the logged-in browser):** the `/profile` Exchanges "Connect exchange" dialog's API Key and API Secret inputs accept the browser's saved-login autofill. A saved site login was filled into both fields. Success: both fields opt out of autocomplete, so a password manager never fills a site login into a key field. No values are recorded here.
 
 ### Phase 169.4: ALLOCTRUTH — the Allocations Risk tab and alpha/beta read the book series and the live BTC feed (INSERTED)
 
@@ -3954,8 +4003,9 @@ Plans:
 2. The Allocations Risk tab and the Overview / Scenario tabs read VaR, alpha/beta and correlation from the same series; one never says "insufficient data" while another shows a value.
 3. The BTC benchmark is current: MTD and 3-month returns, win rate, volatility and drawdown come from a benchmark series that is refreshed, and a stale benchmark is shown as stale rather than as +0.00%.
 9. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and each page is re-checked in the logged-in browser after deploy.
+11. A BTC return that spans a missing stored day is not stamped as one day's move: the allocator's consumers build the cumulative BTC overlay from closes (or levels) and the inner-joined metrics from exactly-one-day returns, with a test for each across a missing day. Routed here 2026-09-27 by Phase 169.2 D-47 (review round 3 WR-01) as TODOS `[169.2-BTC-GAP-RETURN-STAMP]`. `pricesToDailyReturns` in `src/lib/factsheet/benchmark-source.ts` still bridges such a gap into one return at the later date, because 169.2's skip-every-gap attempt made the overlay drift and was reverted.
 
-*(Moved from Phase 169 on 2026-09-26, verbatim with their original numbers, D-37.)*
+*(Moved from Phase 169 on 2026-09-26, verbatim with their original numbers, D-37.)* *(Criterion 11 is new, added 2026-09-27; it is numbered past the highest id any 169.x phase uses, so it collides with none.)*
 
 **Plans:** 3 plans in 2 waves, one PR (split 2026-09-26, D-37): W1 169.4-01 RISKTAB, 169.4-02 ALLOCBENCH; W2 169.4-03 integration run + post-deploy browser re-check. Decisions carried in `169.4-CONTEXT.md`; no migration.
 
@@ -3986,11 +4036,11 @@ Plans:
 - [ ] 169.4.1-01-PLAN.md — the OG card reads the persisted CAGR and Sharpe, on top of 166.2's shared `sharpe(` (SC4, SC9) (was 169-01 Task 4)
 - [ ] 169.4.1-02-PLAN.md — integration run + post-deploy browser re-check (SC9)
 
-**⭐ ROUTED IN 2026-09-27 (seen in the logged-in browser):** the `/profile` Exchanges "Connect exchange" dialog's API Key and API Secret inputs accept the browser's saved-login autofill. A saved site login was filled into both fields. Success: both fields opt out of autocomplete, so a password manager never fills a site login into a key field. No values are recorded here.
-
 ### Phase 170: LAYOUT — page layout reads clean and holds on every page
 
-**Goal:** Pages read as a finished product: no stacked look-alike panels, and the layout holds at 320 px and 200% zoom.
+**Goal:** Pages read as a finished product: no stacked look-alike panels, and the layout holds at 390 px (iPhone 12) and at desktop 200% zoom.
+**Edited 2026-09-27 by `/gsd-phase --edit` (founder decision below); the goal before read:** "the layout holds at 320 px and 200% zoom."
+**Founder decision, 2026-09-27 (AskUserQuestion, "390px + 200% zoom (Recommended)"; founder: "The oldest phone that will use it is an iphone 12, or desktop"):** the narrowest supported viewport is 390 px (iPhone 12), plus desktop at 200% zoom. Every "320 px" check in this phase, including the 2026-09-26 routed item below, is now a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser. The 400%-zoom WCAG 1.4.10 reflow check is deliberately not required.
 **Founder decision, 2026-09-25 (AskUserQuestion):** the second of the two QA phases; ships after Phase 169 PAGETRUTH.
 **Evidence:** the founder's 2026-09-24 layout notes ("too many similar layers stacked", the "get private link" control too dominant and overlapping) and the 2026-09-25 QA sweep (4 user-facing broken, 14 cosmetic findings). Counts only here.
 **Requirements**: TBD (phase-local SC ids)
@@ -4001,8 +4051,9 @@ Plans:
 ## Success Criteria
 
 1. Factsheet and Allocations panels no longer stack as near-identical layers; the private-link control is secondary and never overlaps content.
-2. `/security` and the legal pages show the signed-in header when signed in; the floating tweaks control never covers the bottom navigation; `/compare` does not point to controls that do not exist; `/admin/match` on mobile is read-only in fact, not only in words; no page scrolls horizontally at 320 px.
-3. Each page is re-checked at 320 px and 200% zoom in the logged-in browser after deploy.
+2. `/security` and the legal pages show the signed-in header when signed in; the floating tweaks control never covers the bottom navigation; `/compare` does not point to controls that do not exist; `/admin/match` on mobile is read-only in fact, not only in words; no page scrolls horizontally at 390 px (iPhone 12) or at desktop 200% zoom *(was "at 320 px"; edited 2026-09-27, founder decision above)*.
+   *Evidence, measured 2026-09-27 on PROD `/allocations?tab=scenario` at a 367 CSS px viewport (narrower than the 390 px floor), named offenders to fix under this criterion:* (a) the page overflows horizontally by 235 px: the allocations tab bar (`<div className="ml-auto flex items-center gap-1">` in `src/app/(dashboard)/allocations/AllocationsTabs.tsx`) is 682 px wide and neither scrolls in its own strip nor wraps; (b) the Stress / Streaks / Metrics sub-tabs overflow; (c) a chart container (class `flex-1 relative pointer-coarse:min-h-[44px]`, in `src/app/factsheet/[id]/v2/HeatmapPanels.tsx`) is 770 px wide and does not shrink; (d) the scenario member rows (weight / mode / leverage / notional) are fixed at 573 px; (e) the drawdown table (~389 px) and one other table (~378 px) overflow. *Second instance of (a)'s root cause, measured the same day on PROD `/profile?tab=exchanges` at narrow width:* the tab row (Exchanges / Security / Organizations / Account) runs past the viewport, and each key card's "Disconnect" button sits about 420 px from the left edge, past 390 px; both are clipped, not scrollable, so they cannot be reached.
+3. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom in the logged-in browser after deploy, by the orchestrator, and shows no horizontal page scroll and no clipped primary action *(was "at 320 px and 200% zoom"; edited 2026-09-27, founder decision above)*.
 
 **Plans:** 0 plans
 
@@ -4012,8 +4063,18 @@ Plans:
 
 **⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy 320px check of 167.2.1, measured in the logged-in browser):** on /strategies at 320px the "Get private link" button overlaps the strategy name in the row header and cuts it to two letters. At 640px (200% zoom) the row is clean. Success: at 320px the name, the button, the status pill and the date never overlap, and the name is readable or ellipsised.
 Same pass, same width: on /allocations the floating "Tweaks" button overlaps the bottom navigation's "Strategies" and "Profile" labels. Success: no floating control covers the bottom navigation at 320px. Evidence: `.planning/uat/2026-09-26-browser-pass.md`.
+*Re-confirmed 2026-09-27 at a 367 CSS px viewport on PROD: the floating "Tweaks" button (`TweaksToggle` in `src/app/(dashboard)/allocations/components/TweaksToggle.tsx`) still overlaps the mobile bottom navigation; still open. Both checks in this item now run at 390 px + desktop 200% zoom (founder decision 2026-09-27 above).*
 
 **⭐ OWNED HERE 2026-09-27 (founder, AskUserQuestion, "Book into 170 LAYOUT"; found by the Phase 164.9.4 e2e-seeded axe run):** the grey chip token pair fails WCAG AA, 4.34:1 against the 4.5:1 floor at 11px. It is used by the `CHIP` map entries `no-series` and `manually-excluded` in `src/app/(dashboard)/allocations/components/CoverageStateChip.tsx`, and by `DATA_STATE_CHIP` in `src/components/strategy/StrategyTable.tsx`. Success: each pair reaches at least 4.5:1. The gate is the 164.9.4 e2e-seeded axe check.
+
+**⭐ OWNED HERE 2026-09-27 — narrow-width defects measured 2026-09-27 (iPhone 12 = 390 px floor, founder decision above).** Measured by the orchestrator and the founder in the logged-in browser on PROD (main at `320fba4e`/`e6c196d5`) at a 367 CSS px viewport. Findings (a)–(e) and the Tweaks overlap are recorded under criterion 2 and the 2026-09-26 item above; these are new:
+(f) on `/allocations?tab=scenario` the sticky scenario commit bar (`ScenarioFooter` in `src/app/(dashboard)/allocations/components/ScenarioFooter.tsx`) overlaps the "Distribution of daily returns" section heading;
+(g) the commit bar's "Commit scenario" button (`ScenarioFooter`) is pushed past the right edge, so the primary action is unreachable at phone width;
+(h) "No changes yet" renders twice, in two fonts, in the commit bar (`ScenarioFooter`: the diff-count chip `countLabel` and the delta-summary slot `summaryText` both print it at zero diffs);
+(j) the scenario KPI tiles break values mid-number (a signed decimal wraps one character group per line) and truncate their labels ("SOR…", "CAL…", "MAX…");
+(k) on `/strategies` the sticky "# / STRATEGY" table header overlaps the Sort controls, cutting off the Sharpe and High-to-low selects;
+(l) on `/strategies` strategy names and tags break mid-word at a hyphen (measured on a "Long-/Short" tag).
+Success: at 390 px and at desktop 200% zoom the commit bar never covers a heading, "Commit scenario" is fully visible and tappable, the empty-state text appears once, KPI values never break inside a number and labels are readable, the `/strategies` header never covers the Sort controls, and names and tags wrap only between words.
 
 ### Phase 170.1: COPY — page copy reads clean on every page (INSERTED)
 
@@ -4030,7 +4091,7 @@ Same pass, same width: on /allocations the floating "Tweaks" button overlaps the
 2. No production page carries QA, test or internal-phase text, including strategy descriptions and the placeholder Referral page.
 3. The recorded typos are fixed and pages that share a title are distinguished.
 4. The wizard's post-Submit copy says "submitted" on success, not "already submitted".
-5. Each page is re-checked at 320 px and 200% zoom in the logged-in browser after deploy.
+5. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom in the logged-in browser after deploy, by the orchestrator *(was "at 320 px and 200% zoom"; edited 2026-09-27 by `/gsd-phase --edit` on the founder decision of 2026-09-27: the narrowest supported viewport is 390 px plus desktop 200% zoom, recorded in full under Phase 170 LAYOUT)*.
 
 **Plans:** 0 plans
 
@@ -4045,6 +4106,10 @@ Plans:
 **⭐ ROUTED IN 2026-09-27 (founder, from the Phase 167.2 copy read-through, UAT 2026-09-27):** the 167.2 locked strings pass with these notes, owned here. (1) Two unbounded timing phrases: "Try again in a moment" in `PANEL_STOP_COPY.chain_unreadable` (`src/components/strategy/key-card-copy.ts`) and "Try again later" in `SHARE_CARD_COPY.in_progress` (`src/lib/status-surface-copy.ts`). (2) "Large accounts can take longer" in `SYNC_SLOW_NOTE` (`key-card-copy.ts`). (3) Six passive "could not be …" strings across `key-card-copy.ts` and `status-surface-copy.ts` (measured 2026-09-27: "could not be read" ×2, "could not be re-read", "could not be built", "could not be loaded", "could not be checked"). Success: each is rewritten in active voice with no timing promise the code cannot defend, per DESIGN.md Voice.
 
 **⭐ ROUTED IN 2026-09-27 (found uploading a daily-returns file with the Trade list format selected):** the CSV wizard's missing-column error shows raw pandera rule names to the user: "Failed rule 'column_in_dataframe'." repeated, one per missing column. Success: the user reads which column is missing, in plain words.
+
+**⭐ ROUTED IN 2026-09-27 (measured by the orchestrator and the founder in the logged-in browser on PROD `/allocations?tab=scenario`, main at `320fba4e`/`e6c196d5`):**
+(a) With no benchmark selected, the scenario Returns chart subtitle reads "vs None". Root cause: `src/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload.ts` builds the `none` comparator with `inertComparatorBlock("None", "None")`, and `subtitleFor` in `src/app/factsheet/[id]/v2/TimeSeriesChart.tsx` prints `vs ${cmpName}` whenever the chart config has a `comparatorField`. Success: with no benchmark chosen the subtitle is empty or says "no benchmark".
+(b) The scenario KPI tiles show an unlabelled delta line (e.g. "+0.00") under each value. Success: the delta says what it is compared against (e.g. "vs current book").
 
 ### Phase 165: ACTIONSDEPS — the four GitHub Actions dependabot PRs land first, in the verified order
 
@@ -4114,7 +4179,7 @@ phase's newest plans live only on an open branch, the count says "on main". The 
 table (measured at `733a55f5`, 33 rows) is superseded by this one; its still-accurate rows are
 kept verbatim.
 
-**Totals: 40 of 73 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).**
+**Totals: 41 of 79 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).** Recounted 2026-09-27 from this table's own rows after adding the 169 split (169.1, 169.2, 169.4, 169.4.1) and 164.9.1's close; the earlier "40 of 73" was taken before those rows existed.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -4153,7 +4218,7 @@ kept verbatim.
 | 164.6.3 CIDOCSPATH | 5/5 | Complete | v0.77.40.0 · #791 |
 | 164.6.4 MT5KEEPALIVE | 5/5 | Complete | #800 |
 | 164.6.5 MT5VALIDATEWEDGE | 8/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.96.0.0 · #863 |
-| 164.6.6 MT5TERMINALISOLATION | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
+| 164.6.6 MT5TERMINALISOLATION | 0/? | Queued — data-integrity tier: moved up 2026-09-27 (founder), planning beside 166.4; live MT5 verification joins the founder queue | - |
 | 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.105.0.0 · #869 |
 | 164.6.8 OUTAGEALERT | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 7/7 | Complete — finalized v0.77.32.1; its 33 stranded artifacts restored to main by PR #785. Row said `0/? Queued 2nd` until 2026-09-12 | v0.77.32.1 |
@@ -4180,7 +4245,8 @@ kept verbatim.
 | 166.1 ENGINEFLOOR | 4/4 on main | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.100.0.0 · #872 |
 | 166.1.1 DDSIGN | 0/? | Queued — feature | - |
 | 166.2 COMPUTEONCE | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.102.0.0 · #874 |
-| 166.3 RECOMPUTE | 0/1 | Planned — waits on the founder's recompute step | - |
+| 166.3 RECOMPUTE | 0/1 | HALTED 2026-09-27 at Task 3 — resumes after 166.4 ships | - |
+| 166.4 BENCHALIGN | 0/? | Queued — data integrity | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.89.0.0 · #852 |
 | 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
@@ -4188,8 +4254,12 @@ kept verbatim.
 | 167.2 KEYCARDSYNC | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.88.0.0 · #851 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | #866 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 03 is the founder's live retry | v0.97.0.0 · #867 |
-| 169. PAGETRUTH | 0/? | Queued — feature; needs a replan (cache-key anchor moved) | - |
-| 169.3 SMALLFIXES | 1/1 on main | In progress — plan 01 shipped (v0.97.0.1, #868); plans 02–05 next | - |
+| 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 8 plans on `feat/169-pagetruth`, not on main | Queued — feature; plans being rebuilt (cache-key anchor moved); waits for 167.1.2 PR C | - |
+| 169.1 ZOOMKPIS | 9 plans on `feat/169-pagetruth`, not on main | Queued — feature; split order runs it last, after 169 and 169.4 | - |
+| 169.2 BENCHFRESH | 3/3 | Shipped — verification `human_needed` (14/16, 2 routed to human checks): post-deploy checks pending, not closed | v0.107.0.0 · #879 |
+| 169.3 SMALLFIXES | 1/5 (plan 01 on main; 02–05 on `feat/169-pagetruth`) | In progress — plan 01 shipped (v0.97.0.1, #868); plans 02–05 next, 03/04 gated on 167.1.2 PR C | - |
+| 169.4 ALLOCTRUTH | 3 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 169, 169.2 and 167.1.2 PR C | - |
+| 169.4.1 OGSHARPE | 2 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 166.2 and 169 | - |
 | 170. LAYOUT | 0/? | Queued — feature | - |
 | 170.1 COPY | 0/? | Queued — feature, after 170 | - |
 
