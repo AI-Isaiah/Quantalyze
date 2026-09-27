@@ -37,7 +37,7 @@ created: "2026-09-27"
 
 ## Per-Task Verification Map
 
-Filled from the plans' `<automated>` commands at execution; the requirement-to-test map is in `169-RESEARCH.md` `### Phase Requirements → Test Map` (SC3, SC4, SC5, SC6, SC9, R1 RISKUNIT, R2 MONEYFMT, R3 composite read error). Every fix records neuter → RED → restore in its SUMMARY.
+Filled from the plans' `<automated>` commands at execution; the requirement-to-test map is in `169-RESEARCH.md` `### Phase Requirements → Test Map` (SC4, SC5, SC6, SC9, R1 RISKUNIT, R2 MONEYFMT, R3 composite read error; SC3 moved with the comparator plans to Phase 169.5 on 2026-09-27, D-61, and its RESEARCH rows are that phase's). Every fix records neuter → RED → restore in its SUMMARY.
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -53,7 +53,7 @@ New test files are created by the plan that needs them (listed in `169-RESEARCH.
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| Each changed page reads right in the logged-in account after deploy | SC9 | needs the deployed SHA and the real account | the phase's final plan: factsheet (single-key and composite), `/portfolios/[id]` risk attribution, `/allocations` Open Positions and Holdings; width checks at 390px (iPhone 12) and desktop 200% zoom, run by the orchestrator; no 320px check (founder rule 2026-09-27) |
+| Each changed page reads right in the logged-in account after deploy | SC9 | needs the deployed SHA and the real account | the phase's final plan: factsheet (single-key and composite), `/portfolios/[id]` risk attribution, `/allocations` Open Positions and Holdings, `/allocations?tab=scenario` on a blend shorter than six months (D-57); width checks at 390px (iPhone 12) and desktop 200% zoom, run by the orchestrator; no 320px check (founder rule 2026-09-27) |
 
 ---
 

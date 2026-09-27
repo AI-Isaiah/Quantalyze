@@ -1121,6 +1121,8 @@ call the research left to the plan.
 - **Decision.** One bump, v7 -> v8, in 169-02, with the cache-key test moved in the same commit. No other 169 plan bumps it. 169.1's plans reason from a v7 key and must re-read the key at HEAD in their own re-derive (D-46).
 - **Reversibility:** reversible.
 
+- **Amendment (orchestrator, 2026-09-27, D-62):** after the split (D-61) Phase 169 and Phase 169.5 deploy in two PRs, so the key moves twice: v7 -> v8 in Phase 169 and v8 -> v9 in 169.5-01 (was 169-02). The Why above applies to each PR's payload change.
+
 ### D-49: Risk attribution's double percent (routed 2026-09-26) is plan RISKUNIT in this phase (orchestrator, 2026-09-27)
 - **Routing.** The founder routed it to Phase 169 ("Route as proposed"). It is a unit defect on a number surface, file-disjoint from every other 169 plan and not on the Allocations Risk tab (169.4's surface), so it is a standalone wave-1 plan here rather than a re-route; the one-topic tension with D-37 is accepted because it is one small, separately reviewable plan.
 - **Source of truth.** The producer (`analytics-service/routers/portfolio.py`) sends `marginal_risk_pct` and `weight_pct` in percent; every consumer but `RiskAttribution` agrees. The fix converts once at that one consumer, documents the unit on `RiskDecompositionRow`, formats unsigned (weights and shares are an unsigned domain), aligns the chart domain and tooltip, and rebuilds `RiskAttribution.test.tsx` from the producer's real shape (`src/__tests__/fixtures/portfolio-analytics/complete.json`). `standalone_vol` is not double-scaled and is left alone; its missing period label is copy (Phase 170.1).
@@ -1138,6 +1140,7 @@ call the research left to the plan.
 - **Reversibility:** reversible.
 
 ### D-52: A benchmark read blip may leave an honest "BTC prices unavailable" payload cached for up to the TTL (orchestrator, 2026-09-27; RESEARCH Pitfall 6 / Open Question 5)
+- **Moved to Phase 169.5 on 2026-09-27 (D-61):** the comparator read it governs is 169.5-01's; 169.5-CONTEXT.md reads it from here. Phase 169's own plans no longer apply it.
 - **Why.** Unlike D-41 (a composite outage cached as a false empty record), the cached state here is truthful and bounded; throwing would replace the whole factsheet with the placeholder for that request, which is worse.
 - **Decision.** Accept and record; 169-02's test pins that the unavailable form is dated and never renders as +0.00%.
 - **Reversibility:** reversible.
@@ -1201,9 +1204,14 @@ call the research left to the plan.
 - **Moved, renumbered:** 169-02 -> 169.5-01, 169-03 -> 169.5-02, 169-11 -> 169.5-03, 169-12 -> 169.5-04 (`git mv`, frontmatter and cross-references fixed, a dated move note in each). 169-06's comparator half (the SC3 factsheets, the covered-days EoY item, the v8 key in the release entry) became the new 169.5-05, derived from 169-06 as each D-37 split phase got its own integration plan. D-48, D-54, D-58 and D-59 (with their amendments) and D-60 are copied verbatim into 169.5-CONTEXT.md with a pointer at each here. SC3 is copied verbatim to 169.5 (D-37's rule) and leaves Phase 169's criteria, since no remaining 169 plan serves it.
 - **Phase 169 keeps** 169-01, 169-04, 169-05, 169-06, 169-07, 169-09 and 169-10 in 3 waves: W1 169-01, 169-04, 169-09, 169-10; W2 169-07, 169-05 (file-disjoint; 169-05 still gated on 167.1.2 C3 and no longer waits for 169-11, so it edits MandatePanels.tsx before 169.5-03 does, as D-60 said); W3 169-06, narrowed to these plans.
 - **Order:** Phase 169.5 runs after Phase 169 is on origin/main (169.5-01's and 169.5-04's preconditions check 169's artifacts there AND in HEAD) and after 169.2 (merged). Phases 169.1 and 169.4, whose plans build on the comparator plans, now also depend on 169.5.
-- **Consequence, cache key (reported to the founder, not silently resolved):** D-48's one v7 -> v8 bump moved with 169-02, so Phase 169 now ships its payload changes (169-01's persisted headline, 169-04's null windows and p3y / p5y) under the unchanged v7 key. A factsheet cached before 169's deploy can show its old figures until its entry revalidates (1 h, keyParts `[version, id, computedAt]`). 169-06's cache-drain step now waits the revalidate out or busts each factsheet's publish tag before reading. The alternative, a v7 -> v8 bump in Phase 169 and v8 -> v9 in 169.5, is not taken without a founder call.
+- **Consequence, cache key (reported to the founder, not silently resolved):** D-48's one v7 -> v8 bump moved with 169-02, so Phase 169 now ships its payload changes (169-01's persisted headline, 169-04's null windows and p3y / p5y) under the unchanged v7 key. A factsheet cached before 169's deploy can show its old figures until its entry revalidates (1 h, keyParts `[version, id, computedAt]`). 169-06's cache-drain step now waits the revalidate out or busts each factsheet's publish tag before reading. The alternative, a v7 -> v8 bump in Phase 169 and v8 -> v9 in 169.5, is not taken without a founder call. *(Superseded 2026-09-27 by D-62: that alternative is taken; this paragraph is kept as lineage.)*
 - **Founder cross-reference, 2026-09-27:** Phase 166.4 BENCHALIGN (Python) and Phase 169.5 BENCHCOMPARE (TypeScript) both apply 166.4 founder decision D-A, the Friday-to-Monday interval-matched pairing rule, and must cite each other (169.5's comparator helper and tests name 166.4 D-A; 166.4's pairing code names 169.5).
 - **Reversibility:** reversible (planning only; no plan was deleted).
+
+### D-62: Phase 169 moves the factsheet cache key v7 -> v8; Phase 169.5 moves it v8 -> v9 (orchestrator, autonomous, 2026-09-27; supersedes D-61's cache-key consequence, amends D-48)
+- **Why (measured by the post-split plan-check of Phase 169, 2026-09-27).** D-61 left Phase 169 on the unchanged v7 key and called the gap "old figures for up to the 1 h revalidate". That understated it. `unstable_cache` with `revalidate: 3600` is stale-while-revalidate, and the only tag bust (the admin strategy-review route, `revalidateTag(..., "max")`) is stale-while-revalidate too, so a pre-deploy payload can be served on the first read after either drain. A stale v7 payload has no `p3y` / `p5y`, so 169-05's null gate would HIDE the correct 3 Year / 5 Year rows on long records while it lasts, which is a wrong page, not an old figure. The repo's own key comment in `src/app/factsheet/[id]/v2/page.tsx` records the rule: a value change is bumped so the fix serves at deploy. D-48's reasoning covers 169-04's shape change exactly as it covered 169-02's.
+- **Decision.** Two PRs, two bumps. Phase 169 moves the key v7 -> v8 once, in the plan its revision names, with the cache-key test moved in the same commit; 169-06's cache-drain step returns to "no pre-deploy entry is served" and its CHANGELOG line names the bump. Phase 169.5's 169.5-01 moves it v8 -> v9 and proves the v8 literal is on origin/main AND in HEAD first. D-61's "not taken without a founder call" sentence is superseded; the founder can reverse this (reversibility below).
+- **Reversibility:** reversible (planning only; a key bump costs one cache fill per factsheet).
 
 ### Claude's Discretion
 - Test file names, helper names not fixed above, and the exact caption wording within DESIGN.md's
@@ -1223,7 +1231,7 @@ call the research left to the plan.
 <deferred>
 ## Deferred Ideas
 
-- The `/portfolios/[id]` portfolio analytics compute reading columns the schema lacks: `TODOS.md` `[169-PORTFOLIO-ANALYTICS-COLUMNS]`, owner the founder (routing) (D-53).
+- The `/portfolios/[id]` portfolio analytics compute reading columns the schema lacks: `TODOS.md` `[169-PORTFOLIO-ANALYTICS-COLUMNS]`, owner the founder (routing) (D-53). *(Routed 2026-09-27: Phase 166.4.1 PORTFOLIOANALYTICS, data integrity, inserted on main by PR #889.)*
 - The `standalone_vol` period label: Phase 170.1 COPY (D-49).
 
 - Dropping `get_admin_compute_jobs`: `TODOS.md` `[169-DEAD-ADMIN-JOBS-RPC]` (D-01).

@@ -1495,7 +1495,8 @@ true for 146 and half of 142–145, and **false for 141**.
       is stale or absent, and `standalone_vol`'s period cannot be confirmed end to end.
       **Why not fixed in 169:** a Python compute path, not a page-number surface; found by the
       169 replan research (`169-RESEARCH.md` Open Question 1).
-      **Owner:** THE FOUNDER, to route to a phase (data-integrity). **Trigger:** one read of the
+      **Owner:** THE FOUNDER, to route to a phase (data-integrity). *(Routed 2026-09-27: Phase 166.4.1
+      PORTFOLIOANALYTICS, inserted on main by PR #889.)* **Trigger:** one read of the
       analytics logs for "Portfolio analytics computation failed" confirms or clears it.
       **Closed when:** the compute selects only real columns, derives daily returns from the stored
       series, and a test that fails on today's select pins both.
