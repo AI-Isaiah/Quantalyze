@@ -5880,11 +5880,21 @@ export function ScenarioComposer({
           column / allocator-portfolio payload builder / percentile-rank badge,
           no api-ingest literal (LOCKED honesty invariant — a what-if has no
           verified track record to peer-rank). */}
+      {/* Phase 170 / SC1-LAYERS (C1-A3, 2026-09-28) — the two repeat cards
+          are one closed section. Bodies, disclosures, the 10-point floor, the
+          3M/6M/12M control and both data-panel attributes are unchanged. The
+          card headings are h3 under the section title; size and weight stay. */}
+      <CollapsibleSection
+        id="composer-blend-detail"
+        title="Blend distribution and rolling windows"
+        defaultOpen={false}
+        storageKey="composer-collapse:blend-detail"
+      >
       <Card className="mt-6" data-panel="blend-returns-distribution" aria-label="Returns distribution">
         <div className="mb-3">
-          <h2 className="text-base font-semibold text-text-primary">
+          <h3 className="text-base font-semibold text-text-primary">
             Returns distribution
-          </h2>
+          </h3>
         </div>
         {blendPanels.histogramSeries.length === 0 ? (
           // WR-02 — gate on the ADAPTER's actual degenerate verdict, not a
@@ -5932,9 +5942,9 @@ export function ScenarioComposer({
           never role="alert". */}
       <Card className="mt-6" data-panel="blend-rolling" aria-label="Rolling metrics">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-base font-semibold text-text-primary">
+          <h3 className="text-base font-semibold text-text-primary">
             Rolling metrics
-          </h2>
+          </h3>
           <SegmentedControl
             ariaLabel="Rolling window"
             activeId={String(rollingWindow)}
@@ -5987,6 +5997,7 @@ export function ScenarioComposer({
           </div>
         )}
       </Card>
+      </CollapsibleSection>
 
       {flaggedHoldings.length > 0 && (
         <div className="mt-8 rounded-lg border border-border bg-surface p-4">
