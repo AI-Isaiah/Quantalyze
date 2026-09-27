@@ -2,10 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260422101911_api_keys_disconnected_at.sql
--- enqueue_refresh_allocator_equity_for_all was defined in migration 070
--- (STEP 7). Re-create with the disconnected_at filter.
-
+-- source migration: 20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql
+-- ⚠️ SCHEMA-QUALIFIED DELIBERATELY. An unqualified CREATE OR REPLACE resolves
+-- against the SESSION search_path and could create a second function in
+-- another schema, with default privileges.
 CREATE OR REPLACE FUNCTION public.enqueue_refresh_allocator_equity_for_all()
 RETURNS VOID
 LANGUAGE plpgsql
@@ -14,7 +14,16 @@ SET search_path = public, pg_catalog
 AS $$
 DECLARE
   v_key   RECORD;
+  v_book  RECORD;
+  v_rkey  RECORD;
   v_today TEXT := to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD');
+  -- A reconstruct runs up to 30 minutes, and the first run after this
+  -- migration applies must not flood the worker. The cap is soft at book
+  -- granularity: splitting a book lets a sibling's first snapshot row strand
+  -- the rest. Books beyond it drain on later runs (the cap is per call, and
+  -- pg_cron calls once a day).
+  v_bootstrap_cap CONSTANT integer := 25;
+  v_bootstrap_enqueued integer := 0;
 BEGIN
   IF NOT pg_try_advisory_lock(hashtext('daily_equity_refresh')) THEN
     RAISE NOTICE 'enqueue_refresh_allocator_equity_for_all: another run holds the lock; skipping';
@@ -22,15 +31,96 @@ BEGIN
   END IF;
 
   BEGIN
+    -- Phase 167.1.2 D-17: bootstrap a zero-snapshot book. Whole books, newest
+    -- qualifying key first; never split a book across runs.
+    -- ISOLATED (167.1.2-12 review SFH-02): this loop runs in its own
+    -- sub-block. Any error in it rolls back every bootstrap enqueue of this
+    -- run, logs a WARNING and falls through to the refresh loop, so a failure
+    -- here never cancels the daily refresh of every allocator. That is safe by
+    -- construction: a book whose reconstructs were rolled back is not
+    -- bootstrapped, so the refresh loop still withholds its refresh.
+    BEGIN
+      FOR v_book IN
+        SELECT bq.user_id AS owner_id
+        FROM api_keys bq
+        WHERE bq.is_active = TRUE
+          AND bq.sync_status IS DISTINCT FROM 'revoked'
+          AND bq.disconnected_at IS NULL
+          AND lower(bq.exchange) <> 'deribit'
+          AND NOT EXISTS (SELECT 1 FROM strategies bqs WHERE bqs.api_key_id = bq.id AND bqs.user_id = bq.user_id AND bqs.status <> 'archived')
+          AND NOT EXISTS (SELECT 1 FROM strategy_keys bqsk JOIN strategies bqks ON bqks.id = bqsk.strategy_id WHERE bqsk.api_key_id = bq.id AND bqks.user_id = bq.user_id AND bqks.status <> 'archived')
+          AND NOT EXISTS (SELECT 1 FROM compute_jobs bqj WHERE bqj.api_key_id = bq.id AND bqj.kind = 'reconstruct_allocator_history' AND bqj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done'))
+          AND NOT EXISTS (SELECT 1 FROM allocator_equity_snapshots bqe WHERE bqe.allocator_id = bq.user_id)
+        GROUP BY bq.user_id
+        ORDER BY max(bq.created_at) DESC, bq.user_id
+      LOOP
+        EXIT WHEN v_bootstrap_enqueued >= v_bootstrap_cap;
+        FOR v_rkey IN
+          SELECT rk.id AS api_key_id
+          FROM api_keys rk
+          WHERE rk.user_id = v_book.owner_id
+            AND rk.is_active = TRUE
+            AND rk.sync_status IS DISTINCT FROM 'revoked'
+            AND rk.disconnected_at IS NULL
+            AND lower(rk.exchange) <> 'deribit'
+            AND NOT EXISTS (SELECT 1 FROM strategies rks WHERE rks.api_key_id = rk.id AND rks.user_id = rk.user_id AND rks.status <> 'archived')
+            AND NOT EXISTS (SELECT 1 FROM strategy_keys rksk JOIN strategies rkks ON rkks.id = rksk.strategy_id WHERE rksk.api_key_id = rk.id AND rkks.user_id = rk.user_id AND rkks.status <> 'archived')
+            AND NOT EXISTS (SELECT 1 FROM compute_jobs rkj WHERE rkj.api_key_id = rk.id AND rkj.kind = 'reconstruct_allocator_history' AND rkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done'))
+          ORDER BY rk.created_at DESC, rk.id
+        LOOP
+          BEGIN
+            PERFORM enqueue_compute_job(
+              p_strategy_id     := NULL,
+              p_kind            := 'reconstruct_allocator_history',
+              p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial',
+              p_api_key_id      := v_rkey.api_key_id
+            );
+          -- serialization_failure is the enqueue helper's lost-race signal
+          -- (the winner already left the in-flight statuses). unique_violation
+          -- cannot fire today (the helper inserts ON CONFLICT DO NOTHING) and
+          -- is kept as belt. Either skips ONE key, never the run.
+          EXCEPTION WHEN unique_violation OR serialization_failure THEN
+            RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: reconstruct enqueue skipped for api_key % (SQLSTATE %)', v_rkey.api_key_id, SQLSTATE;
+          END;
+          v_bootstrap_enqueued := v_bootstrap_enqueued + 1;
+        END LOOP;
+      END LOOP;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap loop failed and was rolled back; the refresh loop still runs (SQLSTATE %: %)', SQLSTATE, SQLERRM;
+    END;
+
+    -- The refresh loop runs AFTER the bootstrap loop on purpose: its
+    -- bootstrapped test reads the reconstruct rows the loop above just
+    -- enqueued in this transaction, so a book taken this run is refreshed this
+    -- run, and a book beyond the cap is refreshed only once a later run has
+    -- enqueued its reconstructs. A reconstruct row counts only while it is in
+    -- flight or done: a book whose only reconstruct ended failed_final is not
+    -- bootstrapped, so no refresh row closes its zero-snapshot gate before the
+    -- retry the loop above enqueues.
     FOR v_key IN
       SELECT ak.id AS api_key_id, ak.user_id
       FROM api_keys ak
       WHERE ak.is_active = TRUE
+        AND ak.sync_status IS DISTINCT FROM 'revoked'
         AND ak.disconnected_at IS NULL  -- migration 075
-        AND EXISTS (
-          SELECT 1 FROM allocator_equity_snapshots aes
-          WHERE aes.allocator_id = ak.user_id
-          LIMIT 1
+        AND (
+          EXISTS (SELECT 1 FROM allocator_equity_snapshots aes WHERE aes.allocator_id = ak.user_id)
+          OR (
+            NOT EXISTS (SELECT 1 FROM strategies aks WHERE aks.api_key_id = ak.id AND aks.user_id = ak.user_id AND aks.status <> 'archived')
+            AND NOT EXISTS (SELECT 1 FROM strategy_keys aksk JOIN strategies akks ON akks.id = aksk.strategy_id WHERE aksk.api_key_id = ak.id AND akks.user_id = ak.user_id AND akks.status <> 'archived')
+            AND NOT EXISTS (
+              SELECT 1
+              FROM api_keys bk
+              WHERE bk.user_id = ak.user_id
+                AND bk.is_active = TRUE
+                AND bk.sync_status IS DISTINCT FROM 'revoked'
+                AND bk.disconnected_at IS NULL
+                AND lower(bk.exchange) <> 'deribit'
+                AND NOT EXISTS (SELECT 1 FROM strategies bks WHERE bks.api_key_id = bk.id AND bks.user_id = bk.user_id AND bks.status <> 'archived')
+                AND NOT EXISTS (SELECT 1 FROM strategy_keys bksk JOIN strategies bkks ON bkks.id = bksk.strategy_id WHERE bksk.api_key_id = bk.id AND bkks.user_id = bk.user_id AND bkks.status <> 'archived')
+                AND NOT EXISTS (SELECT 1 FROM compute_jobs bkj WHERE bkj.api_key_id = bk.id AND bkj.kind = 'reconstruct_allocator_history' AND bkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done'))
+            )
+          )
         )
     LOOP
       BEGIN
@@ -40,8 +130,8 @@ BEGIN
           p_idempotency_key := 'daily-equity-' || v_key.api_key_id::text || '-' || v_today,
           p_api_key_id      := v_key.api_key_id
         );
-      EXCEPTION WHEN unique_violation THEN
-        NULL;
+      EXCEPTION WHEN unique_violation OR serialization_failure THEN
+        RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: refresh enqueue skipped for api_key % (SQLSTATE %)', v_key.api_key_id, SQLSTATE;
       END;
     END LOOP;
   EXCEPTION WHEN OTHERS THEN
