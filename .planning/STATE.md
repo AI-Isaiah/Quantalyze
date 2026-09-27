@@ -3,13 +3,13 @@ gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.9.3
-current_phase_name: claimpair-a-due-failed-retry-job-and-a-pending-twin-of-the-s
+current_phase_name: CLAIMPAIR
 status: executing
-stopped_at: Completed 164.6-05-PLAN.md
-last_updated: "2026-09-27T10:54:40.480Z"
-last_activity: 2026-09-26
-last_activity_desc: Phase 164.9.5 verified (human_needed, 4/6; 2 live-only) and shipped as a PR
-state_head: cbb4a696510e87d111ee21d40e60efe511e8d723
+stopped_at: Completed 164.9.3-01-PLAN.md
+last_updated: "2026-09-27T13:08:09.920Z"
+last_activity: 2026-09-27
+last_activity_desc: Phase 164.9.3 execution started
+state_head: 56e11500dc7bcb117b9ab9bcce4114d8bab7d005
 progress:
   total_phases: 72
   completed_phases: 40
@@ -179,8 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.9.3 (claimpair-a-due-failed-retry-job-and-a-pending-twin-of-the-s) — READY TO EXECUTE
-Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
+Phase: 164.9.3 (CLAIMPAIR) — EXECUTING
+Plan: 2 of 6 (01 done: the CLAIMPAIR gate, pre-fix census 14 arms RED with 23505, W-INTRO GREEN)
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
 Plan: 1 of 7
 Phase: 166.1 (ENGINEFLOOR) — EXECUTING
@@ -494,7 +494,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Ready to execute
+Status: Executing Phase 164.9.3
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -510,7 +510,7 @@ Status: Ready to execute
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-26 — Phase 164.9.5 verified (human_needed) and shipped as a PR
+Last activity: 2026-09-27 — Phase 164.9.3 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1181,6 +1181,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.6 P05 | ~9 min | 2 tasks | 2 modified |
 | Phase 164.6.5 P08 | ~40 min | 2 tasks | 11 modified |
 | Phase 166.1 P09 | ~20 min | 3 tasks | 5 modified |
+| Phase 164.9.3 P01 | 20 min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -1676,6 +1677,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.1.1.1]: 164.1.1.1-01: No-floor-move LANE-ONLY exclusion — skip execution plus the three "$out"-derived checks only; the static accounting (sentinel declaration, roster-vs-count coherence, n_arms<=RAISE-sites) stays outside the branch and runs for every file including the excluded one, so SENTINEL_FLOOR (11) and ARMS_FLOOR (213) never move.
 - [Phase 164.1.1.1]: 164.1.1.1-01 MEASURED (re-confirms the pattern above, a fourth time): `state.add-decision` and `state.update-progress` both clobber the `progress:` block downward again this session (`completed_phases` 20→18, `total_plans` 201→203, `percent` 44→40, plus stray blank-line insertions at ~L252-255). Reverted both calls; kept only the decision text, applied by hand.
 - [Phase 164.1.1.1]: 164.1.1.1-01: the static-accounting contract-test scenario counts occurrences of "completion sentinel OK: ALL 7 ARMS EXECUTED" rather than bare presence/absence, because test_sync_status_curated_sentence_survives.sql independently declares the identical "ALL 7 ARMS EXECUTED" text and a presence check could not distinguish the excluded file's line from that other file's.
+- [Phase 164.9.3]: 164.9.3-01: CLAIMPAIR gate seeds a real parent row per partition id under the replica role; replica-only seeding fails at the claim with 23503 (same-transaction FK re-check) — Measured on the local-stack lane: W-INTRO red with 23503 on the strategy foreign key until parents were seeded
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -2380,9 +2382,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-23T22:48:56.456Z
-**Stopped At:** Phase 166 context gathered
-**Resume File:** .planning/phases/166-qstats-truth-every-quantstats-derived-number-reflects-the-re/166-CONTEXT.md
+**Last Date:** 2026-09-27T13:07:17.394Z
+**Stopped At:** Completed 164.9.3-01-PLAN.md
+**Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
 **Stopped At:** Completed 167.1-06-PLAN.md

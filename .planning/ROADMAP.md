@@ -3185,7 +3185,7 @@ Plans:
 **Goal:** A due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim.
 **Requirements**: TODOS `[164.9.3-CLAIM-PAIR-23505]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 6 plans
+**Plans:** 1/6 plans executed
 
 ⭐ **Inserted 2026-09-26 by orchestrator decision** (routed from the Phase 167.1.2 PR B review). It is a separate topic from 164.9.1 JOBRPCTRUTH and 164.9.2 REFDATAUPDATES.
 
@@ -3217,7 +3217,7 @@ Plans:
 
 **Wave 1**
 
-- [ ] 164.9.3-01-PLAN.md — red-first gate: 15 arms (12 partition arms across the 3 claim entry points + W-LOST, W-INTRO, P2-C39) observed RED on the pre-fix local-stack lane before any migration exists (D-03)
+- [x] 164.9.3-01-PLAN.md — red-first gate: 15 arms (12 partition arms across the 3 claim entry points + W-LOST, W-INTRO, P2-C39) observed RED on the pre-fix local-stack lane before any migration exists (D-03)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
