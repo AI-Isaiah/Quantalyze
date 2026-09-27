@@ -38,6 +38,7 @@ import { UpdateMt5SecretDialog } from "@/components/strategy/UpdateMt5SecretDial
 import { createClient } from "@/lib/supabase/client";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 import { computeRetryAtSeconds } from "@/lib/allocator-cooldowns";
+import { accountShareNote } from "@/lib/account-share-note";
 import { AllocatorSyncStatus } from "./AllocatorSyncStatus";
 
 interface ExchangeConnection {
@@ -70,6 +71,12 @@ interface ExchangeConnection {
   // connected with; NULL for every ccxt venue. Rendered in both the active
   // and disconnected sections for exchange === "mt5" only.
   venue_account_id: string | null;
+  // Migration 20260925120000 (Phase 167.1.2 D-11 / D-05). The duplicate
+  // marker the daily poll's identity stamper writes, read by accountShareNote
+  // for the note on an active row, and the owner's departed-history choice.
+  account_shared_with_api_key_id: string | null;
+  account_share_kind: string | null;
+  history_inclusion: string | null;
   // f8 (client-only — NOT persisted to DB): captured from the sync route's
   // `already_inflight` response. When syncing AND ≥30s out, the pill renders
   // the Queued helper via AllocatorSyncStatus.
@@ -104,6 +111,9 @@ type InitialKey = Omit<
   | "last_429_at"
   | "disconnected_at"
   | "venue_account_id"
+  | "account_shared_with_api_key_id"
+  | "account_share_kind"
+  | "history_inclusion"
   | "queued_next_attempt_at"
   | "helper_override"
 > & {
@@ -111,6 +121,9 @@ type InitialKey = Omit<
   last_429_at?: string | null;
   disconnected_at?: string | null;
   venue_account_id?: string | null;
+  account_shared_with_api_key_id?: string | null;
+  account_share_kind?: string | null;
+  history_inclusion?: string | null;
 };
 
 interface Props {
@@ -190,6 +203,17 @@ const SYNC_FAILED_HELPER =
 // meaning.
 const SYNC_DISCONNECTED_HELPER =
   "This API key is disconnected. Reconnect it before syncing holdings.";
+
+// Phase 167.1.2 plan 04 (RESEARCH Pitfall 5). Once ccxt keys carry an account
+// id, a Reconnect into an exchange account another live key of this owner
+// already reads is refused by the database with SQLSTATE 23505: either plan
+// 03's named pre-check (KEY_VENUE_ALREADY_CONNECTED) or, when a connect races
+// it, the unique index api_keys_user_exchange_venue_account_uniq itself. Both
+// carry the same code, so ONE mapping by code covers both, and the message is
+// never parsed. Venue-neutral, and it never echoes the account id.
+const RECONNECT_ACCOUNT_ALREADY_CONNECTED =
+  "This exchange account is already connected through another of your keys. Disconnect that key first, then reconnect this one.";
+const RECONNECT_FAILED_HELPER = "Reconnect failed — try again";
 
 function disconnectedRefusalMessage(body: unknown): string {
   const error =
@@ -276,6 +300,9 @@ function normalizeInitialKey(
     // M1: preserve local null (reconnect in-flight) against stale server snapshot.
     disconnected_at: disconnectedAt,
     venue_account_id: k.venue_account_id ?? null,
+    account_shared_with_api_key_id: k.account_shared_with_api_key_id ?? null,
+    account_share_kind: k.account_share_kind ?? null,
+    history_inclusion: k.history_inclusion ?? null,
     // Landmine 8 + f8/f4 preservation: client-only fields carry over across
     // router.refresh() server-state cycles when the row id matches, unless the
     // row changed section (R2-1, R2-2 above).
@@ -482,7 +509,10 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                   disconnected_at:
                     originalDisconnectedAt ?? new Date().toISOString(),
                   sync_status: "idle",
-                  helper_override: "Reconnect failed — try again",
+                  helper_override:
+                    rpcErr.code === "23505"
+                      ? RECONNECT_ACCOUNT_ALREADY_CONNECTED
+                      : RECONNECT_FAILED_HELPER,
                 }
               : k,
           ),
@@ -856,6 +886,10 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   // Sync + Disconnect; disconnected rows render under a separate section
   // with Reconnect. Derived each render — keys list is small (rarely >10).
   const activeKeys = keys.filter((k) => k.disconnected_at === null);
+  // Phase 167.1.2 plan 04 — the holder a duplicate note names is looked up in
+  // the owner's whole key list, disconnected keys included, so the note can
+  // tell a departed holder (no note) from a missing one.
+  const keysById = new Map(keys.map((k) => [k.id, k]));
   const disconnectedKeys = keys.filter((k) => k.disconnected_at !== null);
 
   // DOGFOOD-2: only assert an active allocation when holdings actually back it.
@@ -913,9 +947,11 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                 bg: "#F1F5F9",
                 fg: "#475569",
               };
+              const shareNote = accountShareNote(key, keysById);
               return (
                 <div
                   key={key.id}
+                  data-testid="allocator-key-row"
                   className="flex items-center gap-4 bg-surface px-4 py-3"
                 >
                   <div
@@ -938,6 +974,17 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                         MT5 account {key.venue_account_id ?? "—"}
                       </p>
                     )}
+                    {/* Phase 167.1.2 plan 04 (D-01, D-11): the named cleanup
+                        path for a key whose exchange account another working
+                        key of this owner already reads. Amber: recoverable
+                        by the owner's own Disconnect on this row (DESIGN.md
+                        semantic-color gates). Active rows only: a disconnected
+                        duplicate is no longer counted, so it asks nothing. */}
+                    {shareNote ? (
+                      <p role="note" className="text-xs text-warning mt-0.5">
+                        {shareNote}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="text-right">
                     <p className="text-fixed-10 uppercase tracking-wider text-text-muted font-semibold">
