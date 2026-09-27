@@ -77,8 +77,26 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({ from: mockFrom }),
 }));
 
-// Silence the route's server-side error log in the error-degrade test.
-vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+// Only `captureToSentry` is replaced: `shouldCaptureNow` (the per-instance
+// throttle, 169.2 round-2 review WR-01) stays REAL, so the tests observe the
+// route's actual capture volume. Its window is reset before every case.
+vi.mock("@/lib/sentry-capture", async (importActual) => ({
+  ...(await importActual<typeof import("@/lib/sentry-capture")>()),
+  captureToSentry: vi.fn(async () => undefined),
+}));
+
+// `after()` needs a Next request scope that vitest does not provide. Run the
+// callback at once, so a capture scheduled through it is observable here
+// (169.2 round-2 review IN-03: the route schedules, it never fires and forgets).
+const afterSpy = vi.hoisted(() =>
+  vi.fn((cb: () => unknown) => {
+    void cb();
+  }),
+);
+vi.mock("next/server", async (importActual) => ({
+  ...(await importActual<typeof import("next/server")>()),
+  after: afterSpy,
+}));
 
 // Rate limit (publicIpLimiter). `rlResult` controls the mocked checkLimit;
 // it defaults to success so the existing data-contract tests below are
@@ -105,8 +123,12 @@ function setError() {
 }
 
 describe("GET /api/benchmark/btc", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    const { __resetCaptureThrottleForTests } = await import(
+      "@/lib/sentry-capture"
+    );
+    __resetCaptureThrottleForTests();
     table.rows = [];
     table.error = null;
     table.cap = 1000;
@@ -367,8 +389,101 @@ describe("GET /api/benchmark/btc", () => {
       expect.anything(),
       expect.objectContaining({
         tags: expect.objectContaining({ stage: "dropped-closes" }),
-        extra: { dropped: ["2024-01-02"] },
+        extra: { count: 1, dropped: ["2024-01-02"] },
       }),
     );
+  });
+
+  it("never bridges a MISSING day: no return at the day after the gap (review round 2 WR-03)", async () => {
+    // BTC trades every day, so a missing row is a hole exactly like a dropped
+    // close. 2024-01-03 is absent: 121/110 − 1 stamped at 2024-01-04 would be
+    // a TWO-day move presented as a one-day return and would feed TE/IR/beta.
+    // The Python side (`_cache_miss_reason`) treats any calendar gap as a
+    // defect; this route must not disagree with it.
+    setRows([
+      { date: "2024-01-01", close_price: 100 },
+      { date: "2024-01-02", close_price: 110 },
+      // 2024-01-03 missing
+      { date: "2024-01-04", close_price: 121 },
+      { date: "2024-01-05", close_price: 133.1 },
+    ]);
+    const { GET } = await import("./route");
+    const res = await GET();
+    const body = (await res.json()) as Array<{ date: string; value: number }>;
+
+    expect(body.map((r) => r.date)).toEqual(["2024-01-02", "2024-01-05"]);
+    expect(body[0].value).toBeCloseTo(0.1, 10); // 110/100 − 1
+    expect(body[1].value).toBeCloseTo(0.1, 10); // 133.1/121 − 1
+  });
+
+  it("captures a persisting corrupt row ONCE per window, not once per request, with a stable message (review round 2 WR-01)", async () => {
+    // Public, cache-bustable route: while a corrupt row sits in the table every
+    // request reaches the function. Each one logs; only the first captures.
+    setRows([
+      { date: "2024-01-01", close_price: 100 },
+      { date: "2024-01-02", close_price: 0 },
+      { date: "2024-01-03", close_price: 110 },
+    ]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    await GET();
+    await GET();
+
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+    const dropCaptures = vi
+      .mocked(captureToSentry)
+      .mock.calls.filter(([, o]) => o.tags.stage === "dropped-closes");
+    expect(dropCaptures).toHaveLength(1);
+    expect(afterSpy).toHaveBeenCalledTimes(1);
+    // No count in the message: a changing count must not split the grouping.
+    expect((dropCaptures[0][0] as Error).message).toBe(
+      "benchmark_prices holds unusable BTC closes",
+    );
+    // The log line is unconditional: it is how an operator counts requests.
+    expect(
+      warn.mock.calls.filter(([m]) => String(m).includes("dropped unusable closes")),
+    ).toHaveLength(2);
+    warn.mockRestore();
+  });
+
+  it("caps the dropped dates one capture carries at the NEWEST 20", async () => {
+    const rows = Array.from({ length: 30 }, (_, i) => ({
+      date: new Date(Date.UTC(2024, 0, 1) + i * 86_400_000)
+        .toISOString()
+        .slice(0, 10),
+      close_price: 0,
+    }));
+    setRows(rows);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    await GET();
+    warn.mockRestore();
+
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+    const [, options] = vi
+      .mocked(captureToSentry)
+      .mock.calls.find(([, o]) => o.tags.stage === "dropped-closes")!;
+    expect(options.extra).toEqual({
+      count: 30,
+      dropped: rows.slice(-20).map((r) => r.date),
+    });
+  });
+
+  it("captures a persisting READ ERROR once per window while every request still answers 503 (review round 2 WR-01)", async () => {
+    setError();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    expect((await GET()).status).toBe(503);
+    expect((await GET()).status).toBe(503);
+
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+    expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+    // Scheduled through after() (review round 2 IN-03), so the capture is not
+    // lost when the function freezes after the 503 is sent.
+    expect(afterSpy).toHaveBeenCalledTimes(1);
+    expect(
+      err.mock.calls.filter(([m]) => String(m).includes("select error")),
+    ).toHaveLength(2);
+    err.mockRestore();
   });
 });

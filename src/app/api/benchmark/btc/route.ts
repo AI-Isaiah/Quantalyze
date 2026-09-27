@@ -1,7 +1,11 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { captureToSentry } from "@/lib/sentry-capture";
-import { readBenchmarkPrices } from "@/lib/factsheet/benchmark-source";
+import { captureToSentry, shouldCaptureNow } from "@/lib/sentry-capture";
+import {
+  pricesToDailyReturns,
+  readBenchmarkPrices,
+  type BenchmarkReturnPoint,
+} from "@/lib/factsheet/benchmark-source";
 import {
   publicIpLimiter,
   checkLimit,
@@ -54,6 +58,14 @@ import {
  * comparison unavailable" empty state, never a red alert. The raw DB error is
  * logged + captured server-side, never surfaced (static body).
  *
+ * Sentry volume (169.2 round-2 review WR-01, IN-03): this route is public and
+ * cache-bustable, and the 503 is no-store, so during an incident (or while a
+ * corrupt row sits in the table) every request reaches the function. The
+ * console line stays UNCONDITIONAL on every request; only the remote capture
+ * is gated by `shouldCaptureNow` (one per arm per instance per window), with a
+ * stable message and a bounded `extra`. Each capture is scheduled with
+ * `after()` so it survives the function freezing once the response is sent.
+ *
  * Security: no query params are accepted; the symbol is hard-coded 'BTC'
  * (V5 input-validation — no user input reaches SQL; CONTEXT locks BTC-only).
  *
@@ -72,10 +84,7 @@ import {
 // the Node-only paths the cookie store relies on.
 export const runtime = "nodejs";
 
-export interface BenchmarkReturnPoint {
-  date: string;
-  value: number;
-}
+export type { BenchmarkReturnPoint };
 
 // Shared market data, refreshed ~daily by benchmark.py. A short s-maxage with
 // stale-while-revalidate is appropriate — NOT private/no-store (the data is
@@ -85,6 +94,10 @@ const CACHE_CONTROL = "public, s-maxage=3600, stale-while-revalidate=86400";
 // A read error must not be cached anywhere (SFH MD-05): the next request has
 // to retry the read, not replay the failure.
 const ERROR_CACHE_CONTROL = "no-store";
+
+// How many of the newest dropped dates one capture carries. A bulk corruption
+// must not ship every date on every event.
+const DROPPED_EXTRA_CAP = 20;
 
 function emptyResponse(): NextResponse {
   return NextResponse.json([] as BenchmarkReturnPoint[], {
@@ -130,7 +143,13 @@ export async function GET(req?: Request): Promise<NextResponse> {
     // names / SQLSTATE / schema detail) is logged + captured server-side only.
     // D-09: a read error is never replaced by the bundled fixture.
     console.error("[api/benchmark/btc] select error:", read.error);
-    captureToSentry(read.error, { tags: { route: "api/benchmark/btc" } });
+    if (shouldCaptureNow("benchmark-btc:read-error")) {
+      after(() =>
+        captureToSentry(read.error, {
+          tags: { route: "api/benchmark/btc", stage: "read" },
+        }),
+      );
+    }
     return NextResponse.json(
       { error: "Benchmark temporarily unavailable" },
       { status: 503, headers: { "Cache-Control": ERROR_CACHE_CONTROL } },
@@ -140,20 +159,26 @@ export async function GET(req?: Request): Promise<NextResponse> {
   if (read.dropped.length > 0) {
     // A stored close that cannot price a return is corrupt data in shared
     // market prices. Make it visible instead of letting it vanish.
+    // The message carries no count, so every event groups as one issue; the
+    // count and the NEWEST dropped dates (capped) ride in `extra`.
     console.warn(
       "[api/benchmark/btc] dropped unusable closes:",
       read.dropped.length,
     );
-    captureToSentry(
-      new Error(
-        `benchmark_prices holds ${read.dropped.length} unusable BTC close(s)`,
-      ),
-      {
-        tags: { route: "api/benchmark/btc", stage: "dropped-closes" },
-        level: "warning",
-        extra: { dropped: read.dropped },
-      },
-    );
+    if (shouldCaptureNow("benchmark-btc:dropped-closes")) {
+      const count = read.dropped.length;
+      const newest = read.dropped.slice(-DROPPED_EXTRA_CAP);
+      after(() =>
+        captureToSentry(
+          new Error("benchmark_prices holds unusable BTC closes"),
+          {
+            tags: { route: "api/benchmark/btc", stage: "dropped-closes" },
+            level: "warning",
+            extra: { count, dropped: newest },
+          },
+        ),
+      );
+    }
   }
 
   const prices = read.prices;
@@ -163,33 +188,13 @@ export async function GET(req?: Request): Promise<NextResponse> {
     return emptyResponse();
   }
 
-  // Daily returns via pct-change, mirroring benchmark.py `prices_to_returns`
-  // (`pct_change().dropna()`): the first row is dropped (no prior close), and
-  // each value = close / prevClose − 1, stamped at the current row's date.
-  //
-  // Validity is owned by the READER (169.2 review WR-04 / IN-02): every close
-  // in `prices` is already a finite positive number, so this loop does not
-  // re-check it. What the loop owns is the HOLE a dropped close leaves: a
-  // return whose two closes straddle a dropped date would be a multi-day move
-  // stamped as one day, so it is skipped. This is the pre-169.2 behaviour: a
-  // bad close at D produced no return at D and none at the next stored day.
-  // (A day with NO stored row at all is still bridged, as it was before 169.2.)
-  const dropped = read.dropped;
-  let d = 0;
-  const series: BenchmarkReturnPoint[] = [];
-  for (let i = 1; i < prices.length; i += 1) {
-    const prev = prices[i - 1];
-    const cur = prices[i];
-    // `dropped` and `prices` are both ascending: advance past every dropped
-    // date at or before `prev`, then any remaining one before `cur` sits in
-    // the gap between them.
-    while (d < dropped.length && dropped[d] <= prev.date) d += 1;
-    if (d < dropped.length && dropped[d] < cur.date) continue;
-    const value = cur.close / prev.close - 1;
-    // Reachable only on float overflow of an extreme ratio.
-    if (!Number.isFinite(value)) continue;
-    series.push({ date: cur.date, value });
-  }
+  // Daily returns through the ONE shared rule (169.2 round-2 review WR-03):
+  // pct-change as in benchmark.py `prices_to_returns`, emitted only for two
+  // closes exactly one UTC day apart. Validity is owned by the reader, gaps by
+  // `pricesToDailyReturns`: a missing row and a dropped corrupt close both
+  // leave a gap, and neither is bridged into a multi-day move stamped as one
+  // day. The Python side treats any calendar gap as a defect too.
+  const series = pricesToDailyReturns(prices);
 
   return NextResponse.json(series, {
     status: 200,

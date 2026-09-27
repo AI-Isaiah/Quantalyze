@@ -40,11 +40,16 @@ import type { DailyPrice } from "./types";
  *
  * A stored close that is non-numeric, non-finite or non-positive cannot price
  * a return, so it is left out of `prices`, and its date is reported in
- * `dropped` (169.2 review WR-04 / MD-03). ⛔ A dropped date is a HOLE, not a
- * missing day to bridge: a consumer that builds returns must not build one
- * across it, or `close(D+1) / close(D-1) - 1` reaches the caller as a ONE-day
- * return. `/api/benchmark/btc` is the enforcer for returns; any later consumer
- * that derives returns from `prices` must honour `dropped` the same way.
+ * `dropped` (169.2 review WR-04 / MD-03) so the corrupt row stays visible.
+ *
+ * ⛔ Returns come from `pricesToDailyReturns` ONLY (169.2 round-2 review WR-03).
+ * It emits a return only for two closes exactly one UTC day apart. BTC trades
+ * every day, so ANY gap between two stored closes is a hole, whether the row
+ * is missing or was dropped as corrupt: bridging it would hand the caller
+ * `close(D+1) / close(D-1) - 1` as a ONE-day return. This is the same rule the
+ * Python side applies (`_cache_miss_reason` treats any calendar gap as a
+ * defect). Because the rule is about dates, a consumer does not need `dropped`
+ * to build returns correctly.
  *
  * ⛔ A read error is an ERROR (D-09). It is never replaced by the bundled
  * fixture: a stale fixture served in place of a failed read is the stale
@@ -59,7 +64,8 @@ import type { DailyPrice } from "./types";
  * planned consumers are Phase 169 FACTSHEETTRUTH plan 169-02 (the factsheet's
  * `fetchAndBuildPayload`), plan 169-03, and Phase 169.4 ALLOCTRUTH plan
  * 169.4-02, which read BTC through `readBenchmarkPrices` and merge the bundled
- * fixture strictly before the DB's first date (D-09).
+ * fixture strictly before the DB's first STORED date (D-09), and derive returns
+ * through `pricesToDailyReturns`.
  */
 
 export const BENCHMARK_PAGE_SIZE = 1000;
@@ -75,8 +81,9 @@ export type BenchmarkReadResult =
       through: string | null;
       /**
        * Ascending dates of stored rows whose close could not price a return
-       * (non-numeric, non-finite or non-positive). They are NOT in `prices`,
-       * and a consumer building returns must not bridge across one.
+       * (non-numeric, non-finite or non-positive). They are NOT in `prices`.
+       * Carried for visibility (the btc route reports them) and for
+       * `mergeWithFixture`, which must not let the fixture fill a stored date.
        */
       dropped: string[];
     }
@@ -162,7 +169,7 @@ export async function readBenchmarkPrices(
     // precision, so the close may arrive as a string. Coerce, then leave out a
     // non-finite or non-positive close (it cannot price a return, and a zero
     // close would turn the next day's return into a division by zero), and
-    // record its date so no consumer bridges the hole it leaves.
+    // record its date so the corrupt row stays visible.
     const close = Number(row.close_price);
     if (!Number.isFinite(close) || close <= 0) {
       dropped.push(row.date);
@@ -179,27 +186,73 @@ export async function readBenchmarkPrices(
   };
 }
 
+export interface BenchmarkReturnPoint {
+  date: string;
+  value: number;
+}
+
+const DAY_MS = 86_400_000;
+
+/**
+ * Daily returns from ascending closes, mirroring `benchmark.py`
+ * `prices_to_returns` (`pct_change().dropna()`): each value is
+ * `close / prevClose - 1`, stamped at the current close's date, and the first
+ * close yields nothing.
+ *
+ * One rule on top (169.2 round-2 review WR-03): a return is emitted ONLY when
+ * the two closes are exactly one UTC day apart. A gap of any cause (a missing
+ * row, a dropped corrupt close, the seam between the fixture and the DB) yields
+ * no return at the later date, never a multi-day move stamped as one day.
+ * Every close is expected to be finite and positive (`readBenchmarkPrices`
+ * guarantees it); the `Number.isFinite` check catches a float overflow of an
+ * extreme ratio.
+ */
+export function pricesToDailyReturns(
+  prices: DailyPrice[],
+): BenchmarkReturnPoint[] {
+  const out: BenchmarkReturnPoint[] = [];
+  for (let i = 1; i < prices.length; i += 1) {
+    const prev = prices[i - 1];
+    const cur = prices[i];
+    const gap =
+      Date.parse(`${cur.date}T00:00:00Z`) - Date.parse(`${prev.date}T00:00:00Z`);
+    if (gap !== DAY_MS) continue;
+    const value = cur.close / prev.close - 1;
+    if (!Number.isFinite(value)) continue;
+    out.push({ date: cur.date, value });
+  }
+  return out;
+}
+
 /**
  * Merge DB closes with the bundled fixture (D-09): the fixture supplies ONLY
- * the dates strictly before the DB's first date, and every DB date wins. A
- * fixture row on or after the DB's first date never appears, so there is no
- * seam day inside the DB window. `through` is the last REAL price date: the
- * DB's last date, or the fixture's when the DB holds nothing.
+ * the dates strictly before the FIRST STORED date, and every DB date wins.
+ *
+ * "First stored" includes a `dropped` (corrupt) row (169.2 round-2 SFH
+ * MD-R2-01): cutting at the first VALID date would let the fixture fill a
+ * dropped date inside the DB window, a fixture/DB seam day the D-09 rule
+ * forbids. So a fixture row on or after the first stored date never appears,
+ * and a dropped date stays a hole, which `pricesToDailyReturns` then refuses
+ * to bridge. `dropped` is passed through so the consumer can still report it.
+ *
+ * `through` is the last REAL price date in the merged series, or null.
  */
 export function mergeWithFixture(
-  dbPrices: DailyPrice[],
+  db: { prices: DailyPrice[]; dropped: string[] },
   fixture: DailyPrice[],
-): { prices: DailyPrice[]; through: string | null } {
-  if (dbPrices.length === 0) {
-    return {
-      prices: [...fixture],
-      through: fixture.length > 0 ? fixture[fixture.length - 1].date : null,
-    };
-  }
-  const dbFirst = dbPrices[0].date;
-  const prefix = fixture.filter((p) => p.date < dbFirst);
+): { prices: DailyPrice[]; through: string | null; dropped: string[] } {
+  // Both lists are ascending, so each one's first element is its oldest.
+  const firstStored = [db.prices[0]?.date, db.dropped[0]]
+    .filter((d): d is string => d !== undefined)
+    .sort()[0];
+  const prefix =
+    firstStored === undefined
+      ? fixture
+      : fixture.filter((p) => p.date < firstStored);
+  const prices = [...prefix, ...db.prices];
   return {
-    prices: [...prefix, ...dbPrices],
-    through: dbPrices[dbPrices.length - 1].date,
+    prices,
+    through: prices.length > 0 ? prices[prices.length - 1].date : null,
+    dropped: db.dropped,
   };
 }

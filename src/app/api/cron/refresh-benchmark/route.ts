@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { safeCompare } from "@/lib/timing-safe-compare";
 import { refreshBenchmark } from "@/lib/analytics-client";
-import { adminActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
+import {
+  adminActionLimiter,
+  checkLimit,
+  isRateLimitMisconfigured,
+  rateLimitDenyJson,
+} from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // The console half of the seam's redaction rule: `console.*` has no scrubbing
 // chokepoint of its own, so the caught value is wrapped here
@@ -60,7 +65,23 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const rl = await checkLimit(adminActionLimiter, "benchmark-refresh:cron");
   if (!rl.success) {
     // The chokepoint decides 429 (throttled) vs 503 (limiter unavailable);
-    // both are non-2xx, so Vercel Cron alarms on either.
+    // both are non-2xx, so Vercel Cron alarms on either. A 503 means the day's
+    // refresh was SKIPPED because the limiter could not be consulted, so it
+    // also goes to Sentry (169.2 round-2 SFH LW-R2-02), awaited like the
+    // failure arm below. A 429 is the limiter working and is not captured.
+    // Once a day, so no throttle is needed.
+    if (isRateLimitMisconfigured(rl)) {
+      console.error(
+        "[api/cron/refresh-benchmark] limiter unavailable; refresh skipped",
+      );
+      await captureToSentry(
+        new Error("refresh-benchmark: limiter unavailable, refresh skipped"),
+        {
+          tags: { route: "cron.refresh-benchmark", stage: "limiter" },
+          level: "error",
+        },
+      );
+    }
     return rateLimitDenyJson(rl, { headers: NO_STORE_HEADERS });
   }
 

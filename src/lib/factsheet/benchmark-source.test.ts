@@ -4,6 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   BENCHMARK_MAX_PAGES,
   mergeWithFixture,
+  pricesToDailyReturns,
   readBenchmarkPrices,
 } from "./benchmark-source";
 
@@ -318,7 +319,7 @@ describe("mergeWithFixture", () => {
       { date: "2024-01-04", close: 40 },
       { date: "2024-01-05", close: 50 },
     ];
-    expect(mergeWithFixture(db, fixture)).toEqual({
+    expect(mergeWithFixture({ prices: db, dropped: [] }, fixture)).toEqual({
       prices: [
         { date: "2024-01-01", close: 1 },
         { date: "2024-01-02", close: 2 },
@@ -327,12 +328,13 @@ describe("mergeWithFixture", () => {
         { date: "2024-01-05", close: 50 },
       ],
       through: "2024-01-05",
+      dropped: [],
     });
   });
 
   it("a fixture row ON or AFTER the DB's first date never appears (DB wins, no seam day)", () => {
     const db = [{ date: "2024-01-02", close: 20 }];
-    const merged = mergeWithFixture(db, fixture);
+    const merged = mergeWithFixture({ prices: db, dropped: [] }, fixture);
     expect(merged.prices).toEqual([
       { date: "2024-01-01", close: 1 },
       { date: "2024-01-02", close: 20 },
@@ -341,10 +343,94 @@ describe("mergeWithFixture", () => {
   });
 
   it("an empty DB leaves the fixture, with through = the fixture's last date", () => {
-    expect(mergeWithFixture([], fixture)).toEqual({ prices: fixture, through: "2024-01-04" });
+    expect(mergeWithFixture({ prices: [], dropped: [] }, fixture)).toEqual({
+      prices: fixture,
+      through: "2024-01-04",
+      dropped: [],
+    });
   });
 
   it("both empty: no prices and through = null", () => {
-    expect(mergeWithFixture([], [])).toEqual({ prices: [], through: null });
+    expect(mergeWithFixture({ prices: [], dropped: [] }, [])).toEqual({
+      prices: [],
+      through: null,
+      dropped: [],
+    });
+  });
+
+  it("a DROPPED oldest stored row is not filled by the fixture: the cut is the first STORED date (SFH round 2 MD-R2-01)", () => {
+    // The DB stored 2024-01-02 but its close was corrupt. Cutting at the first
+    // VALID date (2024-01-03) would slot the fixture's 2024-01-02 into the DB
+    // window: a fixture/DB seam day that D-09 forbids, and a fixture close
+    // silently standing in for a stored one.
+    const merged = mergeWithFixture(
+      {
+        prices: [
+          { date: "2024-01-03", close: 30 },
+          { date: "2024-01-04", close: 40 },
+        ],
+        dropped: ["2024-01-02"],
+      },
+      fixture,
+    );
+    expect(merged).toEqual({
+      prices: [
+        { date: "2024-01-01", close: 1 },
+        { date: "2024-01-03", close: 30 },
+        { date: "2024-01-04", close: 40 },
+      ],
+      through: "2024-01-04",
+      dropped: ["2024-01-02"],
+    });
+    // And the hole it leaves is never bridged into a one-day return.
+    expect(pricesToDailyReturns(merged.prices).map((r) => r.date)).toEqual([
+      "2024-01-04",
+    ]);
+  });
+
+  it("an all-corrupt DB still cuts the fixture at its first stored date", () => {
+    const merged = mergeWithFixture(
+      { prices: [], dropped: ["2024-01-03", "2024-01-04"] },
+      fixture,
+    );
+    expect(merged).toEqual({
+      prices: [
+        { date: "2024-01-01", close: 1 },
+        { date: "2024-01-02", close: 2 },
+      ],
+      through: "2024-01-02",
+      dropped: ["2024-01-03", "2024-01-04"],
+    });
+  });
+});
+
+describe("pricesToDailyReturns", () => {
+  it("emits close/prevClose − 1 at the later date for consecutive UTC days; the first close yields nothing", () => {
+    const out = pricesToDailyReturns([
+      { date: "2024-02-28", close: 100 },
+      { date: "2024-02-29", close: 110 }, // leap day: still one day apart
+      { date: "2024-03-01", close: 99 },
+    ]);
+    expect(out.map((r) => r.date)).toEqual(["2024-02-29", "2024-03-01"]);
+    expect(out[0].value).toBeCloseTo(0.1, 10);
+    expect(out[1].value).toBeCloseTo(-0.1, 10);
+  });
+
+  it("emits NO return across a gap of any cause: a missing row is not bridged into a multi-day move (review round 2 WR-03)", () => {
+    const out = pricesToDailyReturns([
+      { date: "2024-01-01", close: 100 },
+      { date: "2024-01-02", close: 110 },
+      { date: "2024-01-04", close: 121 }, // 2024-01-03 absent
+      { date: "2024-01-05", close: 133.1 },
+    ]);
+    expect(out.map((r) => r.date)).toEqual(["2024-01-02", "2024-01-05"]);
+  });
+
+  it("skips a ratio that overflows to a non-finite value", () => {
+    const out = pricesToDailyReturns([
+      { date: "2024-01-01", close: Number.MIN_VALUE },
+      { date: "2024-01-02", close: Number.MAX_VALUE },
+    ]);
+    expect(out).toEqual([]);
   });
 });

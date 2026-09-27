@@ -169,7 +169,14 @@ describe.each([
     const res = await handler(authed());
     expect(res.status).toBe(503);
     expect(refreshMock).not.toHaveBeenCalled();
-    expect(routeCaptures()).toHaveLength(0);
+    // The day's refresh was skipped; a non-2xx alone reaches nothing remote
+    // (169.2 round-2 SFH LW-R2-02), so exactly one limiter capture.
+    const captures = routeCaptures();
+    expect(captures).toHaveLength(1);
+    expect(captures[0][1]).toEqual({
+      tags: { route: "cron.refresh-benchmark", stage: "limiter" },
+      level: "error",
+    });
   });
 
   it("consumes adminActionLimiter under the one fixed cron identifier", async () => {
