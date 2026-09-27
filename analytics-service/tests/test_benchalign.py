@@ -34,8 +34,21 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from services.metrics import _benchmark_pair, compute_all_metrics
-from tests.test_metrics import _q166_calendar_mismatch, _q166_raw_pair_regression
+from services.metrics import (
+    DEFAULT_PERIODS_PER_YEAR,
+    _benchmark_pair,
+    _rolling_alpha_beta,
+    compute_all_metrics,
+)
+from tests.test_metrics import (
+    _Q166_ROLLING_WINDOW,
+    _Q166_WRITTEN_TOLERANCE,
+    _q166_calendar_mismatch,
+    _q166_raw_pair_regression,
+    _q166_windowed_regression,
+)
+
+_METRICS_LOGGER = "quantalyze.analytics.metrics"
 
 
 def _price_ratio_interval_oracle(strategy_index: pd.DatetimeIndex, benchmark: pd.Series) -> pd.Series:
@@ -197,3 +210,166 @@ def test_benchalign_pair_sorts_the_strategy_and_refuses_duplicate_dates():
     dup_benchmark = pd.concat([benchmark, benchmark.iloc[[7]]])
     with pytest.raises(ValueError, match="166.4 D-A"):
         _benchmark_pair(strategy, dup_benchmark)
+
+
+# ---------------------------------------------------------------------------
+# SC1 (166.4 D-A): ONE pairing feeds every benchmark-relative metric, scalar
+# and rolling, and r_squared is the squared correlation of that pair.
+# ---------------------------------------------------------------------------
+
+
+def _fanout_warnings(caplog) -> list[str]:
+    return [
+        r.getMessage() for r in caplog.records if "benchmark_metrics fan-out failed" in r.getMessage()
+    ]
+
+
+def _one_pairing_fixture(name: str) -> tuple[pd.Series, pd.Series]:
+    """(strategy, benchmark) for the three SC1 r_squared cases, each asserting its own precondition."""
+    if name == "sparse_weekday":
+        strategy, benchmark = _q166_calendar_mismatch()
+        s = strategy.index
+        assert (s[1:] - s[:-1]).max() > pd.Timedelta(days=1), "no multi-day interval"
+        return strategy, benchmark
+    benchmark = _dense_daily("2024-01-01", 400, 16652)
+    b_steps = benchmark.index[1:] - benchmark.index[:-1]
+    assert (b_steps == pd.Timedelta(days=1)).all(), "the dense benchmark must be contiguous"
+    strategy = _dense_daily("2024-03-01", 200, 16653)
+    assert strategy.index.isin(benchmark.index).all()
+    if name == "dense_daily":
+        return strategy, benchmark
+    if name == "dense_daily_with_nan_days":
+        strategy = strategy.copy()
+        strategy.iloc[[20, 71, 150]] = np.nan
+        assert int(strategy.isna().sum()) == 3
+        return strategy, benchmark
+    raise AssertionError(f"unknown fixture {name!r}")
+
+
+@pytest.mark.parametrize(
+    "fixture_name", ("sparse_weekday", "dense_daily", "dense_daily_with_nan_days")
+)
+def test_benchalign_one_pairing_r_squared_is_correlation_squared(fixture_name, caplog):
+    """SC1 (166.4 D-A, D-06): the persisted r_squared is the square of the persisted correlation.
+
+    Both are read off the ONE interval pair, so on sparse, dense and NaN-day
+    series r_squared equals correlation squared (rel 1e-12: ``linregress``
+    and pandas ``corr`` differ by about 1e-16). Before this phase r_squared
+    ran its own back-filled reindex with index 0 zero-filled and the strategy's
+    NaN days zero-filled, so it differed from correlation squared on all three.
+    """
+    strategy, benchmark = _one_pairing_fixture(fixture_name)
+    caplog.set_level(logging.WARNING, logger=_METRICS_LOGGER)
+    mj = compute_all_metrics(strategy, benchmark)["metrics_json"]
+    assert _fanout_warnings(caplog) == []
+    assert mj["r_squared_status"] == "ok", mj["r_squared_status"]
+    assert mj["correlation"] is not None
+    assert mj["r_squared"] == pytest.approx(mj["correlation"] ** 2, rel=1e-12, abs=0.0), (
+        f"r_squared={mj['r_squared']} vs correlation squared {mj['correlation'] ** 2} on {fixture_name}"
+    )
+
+
+def test_benchalign_one_pairing_rolling_greeks_are_the_interval_regression():
+    """SC1 (166.4 D-A): the rolling alpha and beta regress on the same interval pair as the scalars.
+
+    Before this phase ``_rolling_alpha_beta`` built its OWN daily inner join,
+    a second pairing next to the scalar fan-out's. The oracle is the in-test
+    windowed OLS over (strategy, price-ratio interval benchmark), the last 90
+    paired intervals ending on the strategy's last date.
+    """
+    strategy, benchmark = _q166_calendar_mismatch()
+    s = strategy.index
+    assert s.isin(benchmark.index).all() and benchmark.notna().all()
+    oracle = _price_ratio_interval_oracle(s, benchmark)
+    anchor = _q166_windowed_regression(strategy, oracle, _Q166_ROLLING_WINDOW)
+
+    alpha, beta = _rolling_alpha_beta(strategy, benchmark, _Q166_ROLLING_WINDOW)
+    assert beta and alpha, "rolling greeks are empty on a 160-row weekday pair"
+    assert beta[-1]["date"] == s[-1].strftime("%Y-%m-%d")
+    assert alpha[-1]["date"] == s[-1].strftime("%Y-%m-%d")
+    exp_beta, exp_alpha = float(anchor["beta"].iloc[-1]), float(anchor["alpha"].iloc[-1])
+    assert abs(beta[-1]["value"] - exp_beta) <= _Q166_WRITTEN_TOLERANCE, (
+        f"rolling beta last point={beta[-1]['value']}; interval regression slope is {exp_beta}"
+    )
+    assert abs(alpha[-1]["value"] - exp_alpha) <= _Q166_WRITTEN_TOLERANCE, (
+        f"rolling alpha last point={alpha[-1]['value']}; interval intercept is {exp_alpha}"
+    )
+
+
+def test_benchalign_one_pairing_rolling_correlation_is_the_interval_correlation(caplog):
+    """SC1 (166.4 D-A): btc_rolling_correlation_90d's last point is the Pearson correlation over the last 90 paired intervals."""
+    strategy, benchmark = _q166_calendar_mismatch()
+    s = strategy.index
+    assert s.isin(benchmark.index).all() and benchmark.notna().all()
+    oracle = _price_ratio_interval_oracle(s, benchmark)
+    w = _Q166_ROLLING_WINDOW
+    expected = float(np.corrcoef(strategy.to_numpy()[-w:], oracle.to_numpy()[-w:])[0, 1])
+
+    caplog.set_level(logging.WARNING, logger=_METRICS_LOGGER)
+    mj = compute_all_metrics(strategy, benchmark)["metrics_json"]
+    assert _fanout_warnings(caplog) == []
+    series = mj["btc_rolling_correlation_90d"]
+    assert series, "btc_rolling_correlation_90d is empty on a 160-row weekday pair"
+    assert series[-1]["date"] == s[-1].strftime("%Y-%m-%d")
+    assert abs(series[-1]["value"] - expected) <= _Q166_WRITTEN_TOLERANCE, (
+        f"rolling correlation last point={series[-1]['value']}; interval correlation is {expected}"
+    )
+
+
+def test_benchalign_one_pairing_scalars_share_the_pair(caplog):
+    """SC1 (166.4 D-A): alpha, beta, correlation, info_ratio and treynor all equal oracles on the ONE price-ratio pair.
+
+    No metric may read a second pairing: each expected value is computed on
+    the same (strategy, interval benchmark) pair, from the definition.
+    """
+    strategy, benchmark = _q166_calendar_mismatch()
+    s = strategy.index
+    assert s.isin(benchmark.index).all() and benchmark.notna().all()
+    oracle = _price_ratio_interval_oracle(s, benchmark)
+    periods = DEFAULT_PERIODS_PER_YEAR
+    exp_alpha, exp_beta = _q166_raw_pair_regression(strategy, oracle, periods)
+    exp_corr = float(np.corrcoef(strategy.to_numpy(), oracle.to_numpy())[0, 1])
+    excess = strategy - oracle
+    exp_ir = float(excess.mean() * periods / (excess.std() * np.sqrt(periods)))
+
+    caplog.set_level(logging.WARNING, logger=_METRICS_LOGGER)
+    out = compute_all_metrics(strategy, benchmark)
+    mj = out["metrics_json"]
+    assert _fanout_warnings(caplog) == []
+    assert mj["alpha"] == pytest.approx(exp_alpha, rel=1e-9, abs=0.0)
+    assert mj["beta"] == pytest.approx(exp_beta, rel=1e-9, abs=0.0)
+    assert mj["correlation"] == pytest.approx(exp_corr, rel=1e-9, abs=0.0)
+    assert mj["info_ratio"] == pytest.approx(exp_ir, rel=1e-9, abs=0.0)
+    assert out["cagr"] is not None
+    assert mj["treynor"] == pytest.approx(out["cagr"] / exp_beta, rel=1e-9, abs=0.0)
+
+
+def test_benchalign_zone_mismatch_degrades_through_compute_all_metrics(caplog):
+    """T-166.4-03: a pair labelled in different time zones degrades through ``compute_all_metrics``; it never raises.
+
+    A naive daily strategy against the same dates localized to Asia/Tokyo (the
+    shape of ``test_q166r2_a_pair_labelled_in_different_zones_is_refused_not_shifted``).
+    The pair is refused by name inside each existing handler: the scalar
+    fan-out logs its WARNING and writes none of its keys, the rolling leg logs
+    its WARNING and returns no points, and r_squared is None with status
+    ``error``. Before this phase the rolling leg's own inner join raised
+    ``TypeError: Cannot join tz-naive with tz-aware DatetimeIndex`` outside its
+    ``try``, so ``compute_all_metrics`` raised.
+    """
+    idx = pd.date_range("2024-01-01", periods=200, freq="D")
+    r = pd.Series(np.random.default_rng(3).normal(0.001, 0.01, 200), index=idx)
+    b_tokyo = pd.Series(np.random.default_rng(4).normal(0.001, 0.02, 200), index=idx).tz_localize(
+        "Asia/Tokyo"
+    )
+
+    caplog.set_level(logging.WARNING, logger=_METRICS_LOGGER)
+    result = compute_all_metrics(r, b_tokyo)
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("benchmark_metrics fan-out failed" in m for m in messages), messages
+    assert any("rolling_greeks failed" in m for m in messages), messages
+    mj = result["metrics_json"]
+    for key in ("alpha", "beta", "correlation", "info_ratio", "treynor", "btc_rolling_correlation_90d"):
+        assert key not in mj, (key, mj.get(key))
+    assert result.sibling_kinds["rolling_alpha"] == []
+    assert result.sibling_kinds["rolling_beta"] == []
+    assert mj["r_squared"] is None and mj["r_squared_status"] == "error"
