@@ -844,3 +844,231 @@ async def test_a_revoked_holder_does_not_self_heal_its_duplicate(audit_mock: Mag
     assert outcome == "marked_duplicate"
     assert len(sb.updates()) == 1  # the refused stamp; the marker is unchanged
     audit_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (SF-M3 / SF-M4) — the log level says whether anyone must act
+# ---------------------------------------------------------------------------
+#
+# Sentry's logging integration turns ERROR into an event and leaves WARNING as
+# a breadcrumb. A stamp failure that the next poll cannot outgrow (a ccxt
+# method rename, a trigger refusal, a schema-cache miss) repeats every day, and
+# at WARNING the duplicate it hides is never found. So the level is chosen by
+# class: what a retry can clear stays WARNING, everything else is ERROR with
+# the class, the SQLSTATE and the error's scrubbed MESSAGE. The DETAIL echoes
+# row values, the account id included, so it is never logged; every fake below
+# that carries a DETAIL puts the synthetic account id in it so a leak shows.
+
+
+def _stamp_failure_record(caplog: pytest.LogCaptureFixture) -> Any:
+    (rec,) = [r for r in caplog.records if "stamp failed" in r.getMessage()]
+    return rec
+
+
+def _api_error(code: str, message: str) -> APIError:
+    return APIError({
+        "code": code,
+        "message": message,
+        "details": f"Failing row contains ({KEY_ID}, okx, {ACCOUNT_ID}).",
+        "hint": None,
+    })
+
+
+def _write_raises(exc: BaseException) -> Callable[[_Call], Any]:
+    def _r(call: _Call) -> Any:
+        if call.op == "update" and (call.payload or {}).get("venue_account_id"):
+            return exc
+        return None
+
+    return _r
+
+
+def _marker_raises(exc: BaseException) -> Callable[[_Call], Any]:
+    base = _composite_responder([])
+
+    def _r(call: _Call) -> Any:
+        if call.op == "update" and (call.payload or {}).get("account_share_kind") is not None:
+            return exc
+        return base(call)
+
+    return _r
+
+
+def _marker_matches_no_row() -> Callable[[_Call], Any]:
+    base = _composite_responder([])
+
+    def _r(call: _Call) -> Any:
+        if call.op == "update" and (call.payload or {}).get("account_share_kind") is not None:
+            return MagicMock(data=[])
+        return base(call)
+
+    return _r
+
+
+def _read_raises(exc: BaseException) -> MagicMock:
+    ex = MagicMock()
+    ex.private_get_account_config = AsyncMock(side_effect=exc)
+    return ex
+
+
+def _transient_cases() -> list[Any]:
+    import ccxt
+    import httpx
+
+    return [
+        pytest.param(FakeSupabase(), _read_raises(ccxt.NetworkError("okx timed out")),
+                     "NetworkError", id="venue-NetworkError"),
+        pytest.param(FakeSupabase(), _read_raises(ccxt.RateLimitExceeded("okx 429")),
+                     "RateLimitExceeded", id="venue-RateLimitExceeded"),
+        pytest.param(FakeSupabase(_write_raises(httpx.ConnectError("db unreachable"))),
+                     _okx_exchange(), "ConnectError", id="db-ConnectError"),
+        pytest.param(FakeSupabase(_collision_responder(holder_id=None)),
+                     _okx_exchange(), "_HolderVanished", id="holder-vanished"),
+        pytest.param(FakeSupabase(_marker_matches_no_row()),
+                     _okx_exchange(), "_MarkerNotWritten", id="marker-no-row"),
+    ]
+
+
+@pytest.mark.parametrize(("sb", "ex", "cls"), _transient_cases())
+async def test_a_failure_the_next_poll_can_clear_is_a_warning(
+    sb: FakeSupabase, ex: Any, cls: str,
+    caplog: pytest.LogCaptureFixture, audit_mock: MagicMock,
+) -> None:
+    caplog.set_level("DEBUG")
+
+    outcome = await _stamp(sb, _key_row(), ex)
+
+    assert outcome == "error"
+    rec = _stamp_failure_record(caplog)
+    assert rec.levelname == "WARNING"
+    assert f"class={cls}" in rec.getMessage()
+    assert ACCOUNT_ID not in caplog.text
+
+
+async def test_a_stamp_that_runs_out_of_budget_is_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import asyncio
+
+    caplog.set_level("DEBUG")
+    ex = MagicMock()
+
+    async def _hang() -> dict[str, Any]:
+        await asyncio.sleep(30)
+        return {}
+
+    ex.private_get_account_config = _hang
+
+    outcome = await ai.stamp_account_identity(FakeSupabase(), _key_row(), ex, timeout_s=0.05)
+
+    assert outcome == "error"
+    rec = _stamp_failure_record(caplog)
+    assert rec.levelname == "WARNING"
+    assert "class=TimeoutError" in rec.getMessage()
+
+
+def _persistent_cases() -> list[Any]:
+    return [
+        pytest.param(FakeSupabase(), _read_raises(AttributeError("private_get_account_config")),
+                     "AttributeError", None, None, id="venue-method-renamed"),
+        pytest.param(FakeSupabase(), _read_raises(KeyError("data")),
+                     "KeyError", None, None, id="venue-shape-KeyError"),
+        pytest.param(
+            FakeSupabase(_marker_raises(_api_error("42501", "ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER"))),
+            _okx_exchange(), "APIError", "42501", "ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER",
+            id="trigger-refusal",
+        ),
+        pytest.param(
+            FakeSupabase(_write_raises(_api_error(
+                "PGRST204", "Could not find the 'venue_account_id' column of 'api_keys' "
+                "in the schema cache"))),
+            _okx_exchange(), "APIError", "PGRST204", "schema cache",
+            id="schema-cache-miss",
+        ),
+        pytest.param(
+            FakeSupabase(_write_raises(_api_error(
+                "23514", 'new row for relation "api_keys" violates check constraint '
+                '"api_keys_venue_account_id_nonblank"'))),
+            _okx_exchange(), "APIError", "23514", "api_keys_venue_account_id_nonblank",
+            id="check-violation",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(("sb", "ex", "cls", "code", "fragment"), _persistent_cases())
+async def test_a_failure_a_retry_cannot_clear_is_an_error_without_the_detail(
+    sb: FakeSupabase, ex: Any, cls: str, code: str | None, fragment: str | None,
+    caplog: pytest.LogCaptureFixture, audit_mock: MagicMock,
+) -> None:
+    caplog.set_level("DEBUG")
+
+    outcome = await _stamp(sb, _key_row(), ex)
+
+    assert outcome == "error"
+    rec = _stamp_failure_record(caplog)
+    assert rec.levelname == "ERROR"
+    line = rec.getMessage()
+    assert f"class={cls}" in line
+    assert f"code={code}" in line
+    if fragment is not None:
+        # The MESSAGE names the constraint or the refusal token: it is logged.
+        assert fragment in line
+    # The DETAIL is never read, so the account id it echoes never reaches a log.
+    assert ACCOUNT_ID not in caplog.text
+    assert "Failing row contains" not in caplog.text
+
+
+async def test_a_venue_answer_without_an_id_is_a_warning_naming_the_venue(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Every venue in VENUES_WITH_ACCOUNT_ID answers an id; a validated key
+    # whose venue answers none is venue schema drift, the same case the
+    # validator logs at WARNING. At INFO it never surfaced.
+    caplog.set_level("DEBUG")
+
+    outcome = await _stamp(FakeSupabase(), _key_row(), _okx_exchange(uid="  "))
+
+    assert outcome == "no_id"
+    (rec,) = [r for r in caplog.records if "outcome=no_id" in r.getMessage()]
+    assert rec.levelname == "WARNING"
+    assert "venue okx" in rec.getMessage()
+
+
+async def test_a_skipped_stamp_for_want_of_budget_is_a_warning_with_the_budget(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A poll that leaves the stamp no time never stamps its key, so a key
+    # whose polls always run long is never checked for a duplicate. That has
+    # to be visible, with the budget that was left.
+    caplog.set_level("DEBUG")
+
+    outcome = await ai.stamp_account_identity(
+        FakeSupabase(), _key_row(), _okx_exchange(), timeout_s=-3.25
+    )
+
+    assert outcome == "skipped_no_budget"
+    (rec,) = [r for r in caplog.records if "outcome=skipped_no_budget" in r.getMessage()]
+    assert rec.levelname == "WARNING"
+    assert "budget_s=-3.2" in rec.getMessage()
+
+
+@pytest.mark.parametrize(
+    ("row", "responder", "expected"),
+    [
+        pytest.param({}, None, "stamped", id="stamped"),
+        pytest.param({"venue_account_id": "70000002"}, None,
+                     "skipped_already_stamped", id="already-stamped"),
+        pytest.param({"exchange": "sfox"}, None, "skipped_not_ccxt", id="not-ccxt"),
+    ],
+)
+async def test_routine_outcomes_stay_at_info(
+    row: dict[str, Any], responder: Callable[[_Call], Any] | None, expected: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("DEBUG")
+
+    outcome = await _stamp(FakeSupabase(responder), _key_row(**row), _okx_exchange())
+
+    assert outcome == expected
+    (rec,) = [r for r in caplog.records if f"outcome={expected}" in r.getMessage()]
+    assert rec.levelname == "INFO"

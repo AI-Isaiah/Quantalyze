@@ -38,6 +38,9 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Final, Literal
 
+import ccxt
+import httpx
+
 from services.db import db_execute
 from services.redact import scrub_freeform_string
 from services.stitch_composite import MemberWindow, windows_overlap
@@ -436,6 +439,21 @@ class _MarkerNotWritten(Exception):
     the write. Nothing was marked, so nothing was audited."""
 
 
+# Failures the next poll can clear: logged at WARNING (SF-M3). Everything else
+# at the boundary is ERROR. asyncio's TimeoutError is the builtin on 3.11+.
+# ccxt.NetworkError covers RequestTimeout, ExchangeNotAvailable, DDoSProtection
+# and RateLimitExceeded; httpx.TransportError and ConnectionError cover a
+# database blip, as services.audit._is_transient_network_error treats them.
+_RETRYABLE_FAILURES: Final = (
+    TimeoutError,
+    ccxt.NetworkError,
+    httpx.TransportError,
+    ConnectionError,
+    _HolderVanished,
+    _MarkerNotWritten,
+)
+
+
 async def stamp_account_identity(
     supabase: Any,
     key_row: Mapping[str, Any],
@@ -449,9 +467,24 @@ async def stamp_account_identity(
     the whole step so it cannot run the poll past its own handler timeout; a
     budget of zero or less skips the step (``skipped_no_budget``). Every failure,
     the venue call, the look-up, the write and a refusal by the database
-    trigger ``api_keys_account_share_same_owner`` alike, is ``error``, logged by
-    exception class and SQLSTATE code, and retried by the next poll.
+    trigger ``api_keys_account_share_same_owner`` alike, is ``error`` and is
+    retried by the next poll.
     ``asyncio.CancelledError`` is not caught: a cancelled poll stays cancelled.
+
+    Review round 1 (SF-M3 / SF-M4): the log level says whether anyone must act.
+    Sentry events at ERROR and keeps WARNING as a breadcrumb.
+
+    - A failure the next poll can clear (:data:`_RETRYABLE_FAILURES`: the
+      budget running out, a venue network error or rate limit, a transport
+      error to the database, a holder or key that moved mid-step) is WARNING.
+    - Anything else (a renamed ccxt method, a trigger refusal, a schema-cache
+      miss, a CHECK violation) repeats every day and hides the duplicate it
+      would have found, so it is ERROR, with the class, the SQLSTATE and the
+      error's scrubbed MESSAGE (:func:`_safe_message`). The DETAIL, which
+      echoes the row and the account id, is never read.
+    - ``no_id`` is venue schema drift, as the validator treats it, and
+      ``skipped_no_budget`` means this key's polls leave no time to check it
+      for a duplicate, so both are WARNING. The routine outcomes stay INFO.
     """
     key_id = key_row.get("id")
     venue = key_row.get("exchange")
@@ -462,15 +495,37 @@ async def stamp_account_identity(
             outcome = await asyncio.wait_for(
                 _stamp(supabase, key_row, exchange), timeout=timeout_s
             )
-    except Exception as exc:  # noqa: BLE001 — the never-raising boundary
+    except _RETRYABLE_FAILURES as exc:
         logger.warning(
             "account_identity: stamp failed for api_key %s (venue %s): "
             "outcome=error class=%s code=%s — the next poll retries",
             key_id, venue, type(exc).__name__, _error_code(exc),
         )
         return "error"
-    logger.info(
-        "account_identity: api_key %s (venue %s) outcome=%s",
-        key_id, venue, outcome,
-    )
+    except Exception as exc:  # noqa: BLE001 — the never-raising boundary
+        logger.error(
+            "account_identity: stamp failed for api_key %s (venue %s): "
+            "outcome=error class=%s code=%s message=%s — a retry will not clear "
+            "this, so the key is not checked for a duplicate until it is fixed",
+            key_id, venue, type(exc).__name__, _error_code(exc), _safe_message(exc),
+        )
+        return "error"
+    if outcome == "skipped_no_budget":
+        logger.warning(
+            "account_identity: api_key %s (venue %s) outcome=%s budget_s=%.1f — "
+            "the poll used its handler time, so the key was not checked for a "
+            "duplicate",
+            key_id, venue, outcome, timeout_s,
+        )
+    elif outcome == "no_id":
+        logger.warning(
+            "account_identity: api_key %s (venue %s) outcome=%s — the venue "
+            "answered without an account id (schema drift?)",
+            key_id, venue, outcome,
+        )
+    else:
+        logger.info(
+            "account_identity: api_key %s (venue %s) outcome=%s",
+            key_id, venue, outcome,
+        )
     return outcome
