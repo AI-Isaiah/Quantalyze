@@ -604,10 +604,12 @@ async def test_a_marker_write_that_outlives_the_budget_is_still_audited_exactly_
     audited = threading.Event()
     audit_mock = MagicMock(side_effect=lambda **_k: audited.set())
     monkeypatch.setattr(audit_module, "log_audit_event", audit_mock)
-    sb = FakeSupabase(_slow_marker_responder(0.4))
+    # The margins leave the three reads before the marker ample time under
+    # load, so the budget always runs out inside the marker write, never before.
+    sb = FakeSupabase(_slow_marker_responder(1.5))
 
     # First poll: the budget runs out while the marker UPDATE is in flight.
-    first = await ai.stamp_account_identity(sb, _key_row(), _okx_exchange(), timeout_s=0.1)
+    first = await ai.stamp_account_identity(sb, _key_row(), _okx_exchange(), timeout_s=0.5)
     assert first == "error"
     # Bounded wait for the thread to finish, never an open-ended one.
     await asyncio.to_thread(audited.wait, 3.0)
