@@ -258,12 +258,16 @@ async def detect_bybit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
         # AccountTransfer / SubMemberTransfer). Pre-fix the defense-in-
         # depth Wallet check produced false-positive WITHDRAW_SCOPE
         # rejections on live read-only testnet keys.
-        return {
-            "read": True,
-            "trade": False,
-            "withdraw": False,
-            "probe_error": False,
-        }
+        return _with_account_id(
+            {
+                "read": True,
+                "trade": False,
+                "withdraw": False,
+                "probe_error": False,
+            },
+            "bybit",
+            api_info,
+        )
 
     # readOnly="0" path: the permissions arrays ARE authoritative.
     has_withdraw = bool(permissions.get("Wallet"))
@@ -272,12 +276,17 @@ async def detect_bybit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
         or permissions.get("Spot")
         or permissions.get("Exchange")
     )
-    return {
-        "read": True,
-        "trade": has_trade,
-        "withdraw": has_withdraw,
-        "probe_error": False,
-    }
+    # Phase 167.1.2 (D-01): userID from this same response (never parentUid).
+    return _with_account_id(
+        {
+            "read": True,
+            "trade": has_trade,
+            "withdraw": has_withdraw,
+            "probe_error": False,
+        },
+        "bybit",
+        api_info,
+    )
 
 
 # ---------------------------------------------------------------------------
