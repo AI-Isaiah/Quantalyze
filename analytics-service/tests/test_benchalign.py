@@ -23,7 +23,33 @@ parity convention), while this engine pairs index 0 with the benchmark return
 dated t_0 (166.4 D-05).
 
 Every oracle here is written from the definition (price ratios of the
-benchmark's own closes, ``np.cov``), never from the helper under test.
+benchmark's own closes, ``np.cov``), never from the helper under test. The
+dense-parity oracles of 166.4-02 (SC4, SC5) are the one exception in kind:
+they run the engine's own metric mirrors on the daily INNER-JOIN pair, built
+here by date lookup and never by ``_benchmark_pair``, because the claim under
+test is that the pairing reduces to that inner join bit-for-bit.
+
+SC5 TRACE (166.4-02; RESEARCH Q2, Q8). Only user CSV series reach the engine
+with a sparse calendar. The single-key broker path (the broker-sourced branch
+of ``analytics_runner.run_csv_strategy_analytics``, and the mark-to-market and
+smoothed bases of the job worker's broker-dailies derive) hands the engine a
+dense daily index: every calendar day in [first, last], with NaN on guard days
+(``densify_policy="broker_nan"``) or 0.0 on absent days (the
+``derive_basis_series`` default gap-fill). The cash basis is stated PER PATH,
+because the two cash derives differ. The single-key broker cash derive in
+``job_worker.py`` passes ``None`` as the benchmark, so no benchmark metric
+exists on that basis. ``run_stitch_composite_job``'s composite cash derive
+passes ``benchmark_rets`` with ``scalar_returns=gap_fill_daily_returns(stitched_cash)``
+and ``densify_policy="zero_fill"``: benchmarked, zero_fill-densified and dense
+(the path the zero_fill test below exercises). ``stitch_composite`` hands every
+basis a dense gap-filled index. Against a contiguous BTC series every interval
+of a dense index is one day long, so the 166.4 D-A pair equals the daily inner
+join and no stored alpha, beta, correlation, info_ratio, treynor,
+btc_rolling_correlation_90d or rolling alpha/beta value moves. r_squared moves
+(166.4 D-06), because before this phase it ran its own back-filled reindex with
+index 0 zero-filled. One behaviour changes on these paths beyond r_squared:
+when BTC itself has a gap (the stale-cache fallback), the day after the gap is
+now unpaired instead of being paired with a two-day BTC move.
 """
 
 from __future__ import annotations
@@ -34,10 +60,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from services.basis_series import derive_basis_series
 from services.metrics import (
     DEFAULT_PERIODS_PER_YEAR,
+    _annualized_vol_sharpe,
     _benchmark_pair,
+    _finalize_rolling,
+    _greeks_no_guess,
     _rolling_alpha_beta,
+    _rolling_correlation,
+    _rolling_greeks,
+    _safe_float,
     compute_all_metrics,
     strategy_calendar_is_sparse,
 )
@@ -403,3 +436,137 @@ def test_benchalign_sparse_predicate_false_on_dense_calendar():
     assert strategy_calendar_is_sparse(with_nan.index) is False
     assert strategy_calendar_is_sparse(pd.DatetimeIndex([])) is False
     assert strategy_calendar_is_sparse(daily.index[:1]) is False
+
+
+# ---------------------------------------------------------------------------
+# SC4 / SC5 (166.4-02): on dense series against a contiguous benchmark the ONE
+# interval pair IS the daily inner join, so the benchmark family is
+# bit-identical to what M1's inner join produced. r_squared is the stated
+# exception (166.4 D-06).
+# ---------------------------------------------------------------------------
+
+_BENCHMARK_FAMILY_SCALARS = ("alpha", "beta", "correlation", "info_ratio", "treynor")
+
+
+def _assert_contiguous(benchmark: pd.Series) -> None:
+    """The SC4 precondition: every consecutive benchmark step is one calendar day, no NaN."""
+    steps = benchmark.index[1:] - benchmark.index[:-1]
+    assert (steps == pd.Timedelta(days=1)).all(), "the benchmark must be contiguous (SC4 precondition)"
+    assert benchmark.notna().all()
+
+
+def _inner_join_pair(strategy: pd.Series, benchmark: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """M1's daily inner join, built by DATE LOOKUP (never by ``_benchmark_pair``).
+
+    Both legs carry the strategy's own sorted index restricted to the dates the
+    benchmark carries, exactly the shape the engine's pair legs carry. Strategy
+    NaN is kept, as the engine keeps it.
+    """
+    r = strategy.sort_index()
+    r_ij = r[r.index.isin(benchmark.index)]
+    b_ij = pd.Series(benchmark.reindex(r_ij.index).to_numpy(), index=r_ij.index)
+    return r_ij, b_ij
+
+
+def _inner_join_family(
+    r_ij: pd.Series, b_ij: pd.Series, periods_per_year: int, cagr: float | None
+) -> dict[str, object]:
+    """The benchmark family computed by the engine's own mirrors on the inner-join pair.
+
+    Mirrors the ``compute_all_metrics`` fan-out: ``_greeks_no_guess`` for alpha
+    and beta, pandas ``corr`` for correlation, ``_annualized_vol_sharpe`` of the
+    excess for info_ratio, the engine's own full-series cagr over beta for
+    treynor, ``_rolling_correlation`` for the 90-day correlation, and
+    ``_rolling_greeks`` plus ``_finalize_rolling`` for the rolling siblings.
+    """
+    alpha, beta = _greeks_no_guess(r_ij, b_ij, periods_per_year)
+    beta_f = _safe_float(beta)
+    te, info_ratio = _annualized_vol_sharpe(r_ij - b_ij, periods_per_year)
+    greeks = _rolling_greeks(r_ij, b_ij, 90)
+    return {
+        "alpha": _safe_float(alpha),
+        "beta": beta_f,
+        "correlation": _safe_float(r_ij.corr(b_ij)),
+        "info_ratio": _safe_float(info_ratio) if te > 0 else None,
+        "treynor": _safe_float(cagr / beta_f) if beta_f and cagr is not None else None,
+        "btc_rolling_correlation_90d": _rolling_correlation(r_ij, b_ij, 90),
+        "rolling_alpha": _finalize_rolling(greeks["alpha"]),
+        "rolling_beta": _finalize_rolling(greeks["beta"]),
+    }
+
+
+def _assert_family_is_the_inner_join(
+    outer: dict, sibling_kinds: dict, strategy: pd.Series, benchmark: pd.Series, periods_per_year: int
+) -> None:
+    """``==`` (bit-identity) on the whole benchmark family, and the pair legs ARE the inner-join legs."""
+    r_ij, b_ij = _inner_join_pair(strategy, benchmark)
+    expected = _inner_join_family(r_ij, b_ij, periods_per_year, outer["cagr"])
+    mj = outer["metrics_json"]
+    for key in _BENCHMARK_FAMILY_SCALARS:
+        # Anti-vacuity: a key a swallowed fan-out exception dropped, or a None
+        # on both sides, would make the equality meaningless.
+        assert key in mj and expected[key] is not None, (key, mj.get(key), expected[key])
+        assert mj[key] == expected[key], f"{key}: engine {mj[key]!r} != inner join {expected[key]!r}"
+    for key in ("btc_rolling_correlation_90d",):
+        assert expected[key], key
+        assert mj[key] == expected[key], key
+    for kind in ("rolling_alpha", "rolling_beta"):
+        assert expected[kind], kind
+        assert sibling_kinds[kind] == expected[kind], kind
+
+    r, b = _benchmark_pair(strategy, benchmark)
+    assert r.index.equals(r_ij.index) and b.index.equals(r_ij.index)
+    assert np.array_equal(b.to_numpy(), b_ij.to_numpy())
+    # The strategy leg carries NaN guard days on purpose; NaN never equals NaN
+    # under the default, so equal_nan is what compares identical legs.
+    assert np.array_equal(r.to_numpy(), r_ij.to_numpy(), equal_nan=True)
+
+    # 166.4 D-06: r_squared is NOT asserted ==; it is the square of the pair's
+    # correlation (``linregress`` and ``corr`` differ by about 1e-16).
+    assert mj["r_squared_status"] == "ok", mj["r_squared_status"]
+    assert mj["r_squared"] == pytest.approx(mj["correlation"] ** 2, rel=1e-12, abs=0.0)
+
+
+def _contiguous_btc(seed: int) -> pd.Series:
+    """A ~1000-day contiguous 7-day benchmark ending on a fixed date, the shape of the BTC cache path."""
+    idx = pd.date_range(end="2026-06-30", periods=1000, freq="D")
+    return pd.Series(np.random.default_rng(seed).normal(0.0004, 0.03, len(idx)), index=idx, name="BTC")
+
+
+def test_benchalign_derive_basis_broker_nan_benchmark_family_is_the_inner_join(caplog):
+    """SC5 / SC4 (166.4 D-A): the single-key broker path keeps a benchmark family bit-identical to the inner join.
+
+    The strategy is built the way the broker-sourced branch of
+    ``run_csv_strategy_analytics`` builds it: a series with three absent
+    interior days, reindexed to ``pd.date_range(min, max, freq="D")`` so the
+    absent days become NaN guard days. ``derive_basis_series`` hands its
+    ``scalar_returns`` to ``compute_all_metrics`` verbatim, so the inner-join
+    oracle is built on that same series.
+    """
+    benchmark = _contiguous_btc(166402)
+    _assert_contiguous(benchmark)
+    start = benchmark.index[300]
+    raw_idx = pd.date_range(start, periods=400, freq="D")
+    raw = pd.Series(np.random.default_rng(166403).normal(0.0005, 0.02, len(raw_idx)), index=raw_idx)
+    raw = raw.drop(raw.index[[37, 150, 311]])
+    strategy = raw.reindex(pd.date_range(raw.index.min(), raw.index.max(), freq="D"))
+    strategy.name = "returns"
+    # Preconditions: strictly inside benchmark coverage, exactly 3 NaN guard
+    # days, and a dense (non-sparse) calendar.
+    assert strategy.index[0] > benchmark.index[0] and strategy.index[-1] < benchmark.index[-1]
+    assert int(strategy.isna().sum()) == 3
+    assert strategy_calendar_is_sparse(strategy.index) is False
+
+    caplog.set_level(logging.WARNING, logger=_METRICS_LOGGER)
+    result = derive_basis_series(
+        strategy,
+        benchmark,
+        periods_per_year=365,
+        cumulative_method="geometric",
+        day_basis="calendar",
+        benchmark_symbol="BTC",
+        scalar_returns=strategy,
+        densify_policy="broker_nan",
+    )
+    assert _fanout_warnings(caplog) == []
+    _assert_family_is_the_inner_join(result.metrics_json, result.sibling_kinds, strategy, benchmark, 365)
