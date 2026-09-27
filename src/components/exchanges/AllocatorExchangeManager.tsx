@@ -916,7 +916,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
               return (
                 <div
                   key={key.id}
-                  className="flex items-center gap-4 bg-surface px-4 py-3"
+                  className="flex flex-wrap items-center gap-4 bg-surface px-4 py-3"
                 >
                   <div
                     className="flex h-10 w-10 items-center justify-center rounded-md font-metric text-xs font-bold tabular-nums"
@@ -959,35 +959,37 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     queuedNextAttemptAt={key.queued_next_attempt_at}
                     helperOverride={key.helper_override}
                   />
-                  <Button
-                    variant="primary"
-                    disabled={key.sync_status === "syncing"}
-                    aria-label={`Sync ${key.exchange} now`}
-                    title={
-                      key.sync_status === "syncing"
-                        ? "Sync in progress"
-                        : undefined
-                    }
-                    onClick={() => handleSync(key.id)}
-                  >
-                    Sync now
-                  </Button>
-                  {key.exchange === "mt5" && (
+                  <div className="flex flex-wrap gap-2 basis-full sm:basis-auto sm:ml-auto">
+                    <Button
+                      variant="primary"
+                      disabled={key.sync_status === "syncing"}
+                      aria-label={`Sync ${key.exchange} now`}
+                      title={
+                        key.sync_status === "syncing"
+                          ? "Sync in progress"
+                          : undefined
+                      }
+                      onClick={() => handleSync(key.id)}
+                    >
+                      Sync now
+                    </Button>
+                    {key.exchange === "mt5" && (
+                      <Button
+                        variant="secondary"
+                        aria-label={`Update password for ${key.exchange} key`}
+                        onClick={() => setUpdatingKeyId(key.id)}
+                      >
+                        Update password
+                      </Button>
+                    )}
                     <Button
                       variant="secondary"
-                      aria-label={`Update password for ${key.exchange} key`}
-                      onClick={() => setUpdatingKeyId(key.id)}
+                      aria-label={`Disconnect ${key.exchange} key`}
+                      onClick={() => openDeleteConfirm(key.id)}
                     >
-                      Update password
+                      Disconnect
                     </Button>
-                  )}
-                  <Button
-                    variant="secondary"
-                    aria-label={`Disconnect ${key.exchange} key`}
-                    onClick={() => openDeleteConfirm(key.id)}
-                  >
-                    Disconnect
-                  </Button>
+                  </div>
                 </div>
               );
             })}
@@ -1017,7 +1019,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
               return (
                 <div
                   key={key.id}
-                  className="flex items-center gap-4 bg-surface px-4 py-3 opacity-75"
+                  className="flex flex-wrap items-center gap-4 bg-surface px-4 py-3 opacity-75"
                 >
                   <div
                     className="flex h-10 w-10 items-center justify-center rounded-md font-metric text-xs font-bold tabular-nums"
@@ -1067,28 +1069,30 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                       before the RPC in handleReconnect, so this disabled check
                       prevents a second click from queuing a duplicate RPC +
                       sync POST and racing against the first. */}
-                  <Button
-                    variant="primary"
-                    disabled={key.sync_status === "syncing"}
-                    aria-label={`Reconnect ${key.exchange} key`}
-                    title={
-                      key.sync_status === "syncing"
-                        ? "Reconnect in progress"
-                        : undefined
-                    }
-                    onClick={() => handleReconnect(key.id)}
-                  >
-                    Reconnect
-                  </Button>
-                  {key.exchange === "mt5" && (
+                  <div className="flex flex-wrap gap-2 basis-full sm:basis-auto sm:ml-auto">
                     <Button
-                      variant="secondary"
-                      aria-label={`Update password for ${key.exchange} key`}
-                      onClick={() => setUpdatingKeyId(key.id)}
+                      variant="primary"
+                      disabled={key.sync_status === "syncing"}
+                      aria-label={`Reconnect ${key.exchange} key`}
+                      title={
+                        key.sync_status === "syncing"
+                          ? "Reconnect in progress"
+                          : undefined
+                      }
+                      onClick={() => handleReconnect(key.id)}
                     >
-                      Update password
+                      Reconnect
                     </Button>
-                  )}
+                    {key.exchange === "mt5" && (
+                      <Button
+                        variant="secondary"
+                        aria-label={`Update password for ${key.exchange} key`}
+                        onClick={() => setUpdatingKeyId(key.id)}
+                      >
+                        Update password
+                      </Button>
+                    )}
+                  </div>
                 </div>
               );
             })}
