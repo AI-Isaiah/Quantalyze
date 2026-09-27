@@ -181,6 +181,7 @@ import type { CoverageState } from "./CoverageStateChip";
 // the browse drawer's own rows render this same leaf, and two hand-rolled
 // chips for one claim drift.
 import { YoursChip } from "./YoursChip";
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import type { ProvenanceTier } from "@/lib/design-tokens/trust-tier";
 import { deriveProvenance } from "../lib/provenance";
@@ -7211,7 +7212,8 @@ function CompositionList({
           here double-labels the same content. No top margin on the card either:
           the list is the sole child inside the collapsible's <details> body, so
           spacing comes from the summary's border + mb-4, not a sibling-era mt-8. */}
-      <ul className="grid gap-2" data-testid="scenario-constituent-list">
+      <ResponsiveTable label="Strategies and weights">
+      <ul className="grid gap-2 min-w-max" data-testid="scenario-constituent-list">
         {/* CONSTIT-01/02/03 — per-key exchange sources as uniform constituent
             rows, interleaved ABOVE the added strategies in the ONE list. Same row
             anatomy as an added row: an include/exclude toggle (the shared
@@ -7976,6 +7978,7 @@ function CompositionList({
           );
         })}
       </ul>
+      </ResponsiveTable>
       {/* WEIGHTS-00 honesty caveat (A1 locked) — leverage scales return, vol and
           max drawdown but the risk-adjusted ratios and correlation are
           leverage-INVARIANT (no borrow cost modeled). Mirrors the
