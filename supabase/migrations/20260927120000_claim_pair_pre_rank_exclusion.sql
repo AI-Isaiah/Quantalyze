@@ -780,6 +780,22 @@ DECLARE
     'AND\s+\(\s*api_key_id\s+IS\s+NULL\s+OR\s+NOT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+x\s+WHERE\s+x\.kind\s*=\s*ranked\.kind\s+AND\s+x\.api_key_id\s*=\s*ranked\.api_key_id\s+AND\s+x\.status\s+IN\s*\(\s*''running''\s*,\s*''done_pending_children''\s*\)\s*\)\s*\)';
   c_c39_re                  CONSTANT text :=
     'deduped\s+AS\s*\(.*' || c_c39_pf_re || '\s*' || c_c39_st_re || '\s*' || c_c39_al_re || '\s*' || c_c39_key_re || '.*\mUPDATE\s+compute_jobs\M';
+  -- The probe exclusion (review round 1, WR-01) in both priority overloads:
+  -- the whole negated disjunction, all four partitions in order with the
+  -- strategy carve-out, inside the throttle probe statement (`[^;]*` keeps
+  -- it within that one statement) and before `WITH ranked AS (` opens.
+  v_p5_probe_anchored       boolean;
+  v_p2_probe_anchored       boolean;
+  c_probe_re                CONSTANT text :=
+    'AND\s+NOT\s*\(\s*status\s*=\s*''failed_retry''\s+AND\s*\(\s*'
+    || '\(\s*portfolio_id\s+IS\s+NOT\s+NULL\s+AND\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+p\s+WHERE\s+p\.kind\s*=\s*compute_jobs\.kind\s+AND\s+p\.portfolio_id\s*=\s*compute_jobs\.portfolio_id\s+AND\s+p\.status\s*=\s*''pending''\s*\)\s*\)\s*'
+    || 'OR\s*\(\s*strategy_id\s+IS\s+NOT\s+NULL\s+AND\s+kind\s*<>\s*''compute_intro_snapshot''\s+AND\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+p\s+WHERE\s+p\.kind\s*=\s*compute_jobs\.kind\s+AND\s+p\.strategy_id\s*=\s*compute_jobs\.strategy_id\s+AND\s+p\.status\s*=\s*''pending''\s*\)\s*\)\s*'
+    || 'OR\s*\(\s*allocator_id\s+IS\s+NOT\s+NULL\s+AND\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+p\s+WHERE\s+p\.kind\s*=\s*compute_jobs\.kind\s+AND\s+p\.allocator_id\s*=\s*compute_jobs\.allocator_id\s+AND\s+p\.status\s*=\s*''pending''\s*\)\s*\)\s*'
+    || 'OR\s*\(\s*api_key_id\s+IS\s+NOT\s+NULL\s+AND\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+p\s+WHERE\s+p\.kind\s*=\s*compute_jobs\.kind\s+AND\s+p\.api_key_id\s*=\s*compute_jobs\.api_key_id\s+AND\s+p\.status\s*=\s*''pending''\s*\)\s*\)\s*\)\s*\)';
+  c_p5_probe_re             CONSTANT text :=
+    'v_high_pending\s*:=\s*CASE\s+WHEN\s+EXISTS\s*\([^;]*' || c_probe_re || '[^;]*\)\s*THEN\s+1\s+ELSE\s+0\s+END\s*;.*\mWITH\s+ranked\s+AS\s*\(';
+  c_p2_probe_re             CONSTANT text :=
+    'SELECT\s+count\s*\(\s*\*\s*\)\s+INTO\s+v_high_pending\s+FROM\s+compute_jobs\s+WHERE\s[^;]*' || c_probe_re || '[^;]*;.*\mWITH\s+ranked\s+AS\s*\(';
 BEGIN
   -- ===== claim_compute_jobs(integer, text) =====
   IF v_ccj_oid IS NULL THEN
@@ -892,6 +908,12 @@ BEGIN
     RAISE EXCEPTION 'claim-pair-pre-rank: the 5-arg claim_compute_jobs_with_priority does not drop, before ranking, a failed_retry candidate whose (kind, api_key_id) holds a pending row. The pairing raises 23505 and aborts the whole batch again.';
   END IF;
 
+  -- (5b) the probe exclusion, inside the throttle probe, before ranking.
+  v_p5_probe_anchored := v_p5_body ~ c_p5_probe_re;
+  IF NOT v_p5_probe_anchored THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: the 5-arg claim_compute_jobs_with_priority throttle probe still counts a failed_retry row the pre-rank clause holds back (its (kind, partition) holds a pending row). A normal/high retry beside a low pending twin then claims neither row and throttles every due low job, silently and permanently.';
+  END IF;
+
   -- (6) carried forward from 20260603120000 STEP 3 (the priority RPC arms)
   -- and from 20260719073701 (the kind filter), 5-arg only.
   IF v_p5_body !~* 'last_error\s*=\s*NULL' OR v_p5_body !~* 'error_kind\s*=\s*NULL' THEN
@@ -983,6 +1005,12 @@ BEGIN
     RAISE EXCEPTION 'claim-pair-pre-rank: the 2-arg claim_compute_jobs_with_priority does not carry, in its dedupe, the running / done_pending_children guard on all four partitions. Its second tick claims a retry beside a now-running twin and raises 23505.';
   END IF;
 
+  -- (10b) the probe exclusion, inside the throttle count, before ranking.
+  v_p2_probe_anchored := v_p2_body ~ c_p2_probe_re;
+  IF NOT v_p2_probe_anchored THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: the 2-arg claim_compute_jobs_with_priority throttle count still counts a failed_retry row the pre-rank clause holds back (its (kind, partition) holds a pending row). A normal/high retry beside a low pending twin then claims neither row and throttles every due low job, silently and permanently.';
+  END IF;
+
   -- (11) SECURITY DEFINER, and the search_path pin is the VALUE.
   SELECT p.prosecdef, p.proconfig INTO v_p2_secdef, v_p2_cfg
     FROM pg_proc p WHERE p.oid = v_p2_oid;
@@ -1000,6 +1028,6 @@ BEGIN
     RAISE EXCEPTION 'claim-pair-pre-rank: anon or authenticated holds EXECUTE on the SECURITY DEFINER 2-arg claim_compute_jobs_with_priority — ACL drifted open. The PUBLIC probe above already passed, so this is a grant held by the named role directly.';
   END IF;
 
-  RAISE NOTICE 'claim-pair-pre-rank: claim_compute_jobs and both claim_compute_jobs_with_priority overloads drop, before ranking, a failed_retry candidate beside a pending twin on all four partitions (strategy with the intro carve-out); the 2-arg carries the C39 guard on all four partitions; carried-forward invariants (5-arg and claim_compute_jobs), SECURITY DEFINER, the exact search_path pin and the ACL intact for all three.';
+  RAISE NOTICE 'claim-pair-pre-rank: claim_compute_jobs and both claim_compute_jobs_with_priority overloads drop, before ranking, a failed_retry candidate beside a pending twin on all four partitions (strategy with the intro carve-out); the throttle probe of neither priority overload counts a retry held back that way; the 2-arg carries the C39 guard on all four partitions; carried-forward invariants (5-arg and claim_compute_jobs), SECURITY DEFINER, the exact search_path pin and the ACL intact for all three.';
 END
 $verify$;
