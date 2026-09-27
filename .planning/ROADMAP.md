@@ -3294,10 +3294,10 @@ Plans:
 - [x] 164.9.4-08-PLAN.md — `e2e-seeded` moves to the lane and off the key, so `ci.yml` holds no key; D-09 build-guard retarget
 
 **Wave 4** *(blocked on Wave 3 completion; file-disjoint)*
-- [ ] 164.9.4-09-PLAN.md — new pins the topology allows: per-job "holds and names no key", seam-before-boot rows, D-04 handoff order
-- [ ] 164.9.4-10-PLAN.md — `ci.yml` prose outside the two moved jobs
-- [ ] 164.9.4-11-PLAN.md — dated doc addenda (runbook, `CLAUDE.md`, `CONTRIBUTING.md`) and the D-15 evidence-only TODOS entry
-- [ ] 164.9.4-12-PLAN.md — dated prose notes in script headers and the other two workflows, key counts pinned unchanged
+- [x] 164.9.4-09-PLAN.md — new pins the topology allows: per-job "holds and names no key", seam-before-boot rows, D-04 handoff order
+- [x] 164.9.4-10-PLAN.md — `ci.yml` prose outside the two moved jobs
+- [x] 164.9.4-11-PLAN.md — dated doc addenda (runbook, `CLAUDE.md`, `CONTRIBUTING.md`) and the D-15 evidence-only TODOS entry
+- [x] 164.9.4-12-PLAN.md — dated prose notes in script headers and the other two workflows, key counts pinned unchanged
 
 ### Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically (INSERTED)
 

@@ -180,7 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 164.9.4 (CIOFFMUTEX) — EXECUTING
-Plan: 9 of 12 (waves 1–3, plans 01–08, complete)
+Plan: 12 of 12 DONE (all four waves); not yet verified — the AFTER CI measurement (SC3, SC4) needs a push
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
 Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
