@@ -1,4 +1,4 @@
-import { test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import { assertNoReflow } from "./helpers/reflow";
 
 /**
@@ -42,5 +42,73 @@ test.describe("reflow gate (WCAG 1.4.10) @ 320px", () => {
     // the single <h1> (src/app/security/page.tsx), so `main h1` resolves it
     // unambiguously; the helper asserts it visible before measuring.
     await assertNoReflow(page, "main h1");
+  });
+});
+
+/**
+ * Phase 170 T0 — server-free self-test of assertNoReflow. Inline HTML only
+ * (page.setContent, no navigation, no seed) so the gate's two directions are
+ * proven in Chromium without a server: a wide flex child inside a fake
+ * #main-content must throw even when documentElement does not overflow, and
+ * content clipped inside a bounded overflow-x auto region must not.
+ */
+const FIXTURE_SHELL = `<!DOCTYPE html>
+<html style="height:100%">
+  <head><meta charset="utf-8"></head>
+  <body style="height:100%;margin:0">
+    <div class="shell" style="display:flex;height:100%">
+      <main id="main-content" style="flex:1 1 0%;overflow-y:auto;min-width:0">
+        <h1 id="fixture-anchor">Fixture</h1>
+        PLACEHOLDER
+      </main>
+    </div>
+  </body>
+</html>`;
+
+const WIDE_ROW =
+  '<div style="display:flex;flex-wrap:nowrap"><div style="flex:0 0 800px;width:800px;height:40px">wide</div></div>';
+
+test.describe("assertNoReflow helper self-test (Phase 170 T0)", () => {
+  test.describe.configure({ timeout: 30_000 });
+
+  test("red fixture: wide flex child inside #main-content rejects with main= and an offender", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.setContent(FIXTURE_SHELL.replace("PLACEHOLDER", WIDE_ROW));
+    await expect(assertNoReflow(page, "#fixture-anchor")).rejects.toThrow(
+      /main=\d+[\s\S]*offender=\S+/,
+    );
+  });
+
+  test("green fixture: 800px content inside a bounded overflow-x auto region resolves", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    // A contained scroller is not a page overflow. The 800px row sticks out
+    // of a max-width:100% overflow-x:auto box, and that box's right edge
+    // stays inside main, so neither scroller overflows and the helper
+    // resolves. The row is clipped, not a page offender.
+    const contained =
+      '<div style="max-width:100%;overflow-x:auto">' + WIDE_ROW + "</div>";
+    await page.setContent(FIXTURE_SHELL.replace("PLACEHOLDER", contained));
+    await assertNoReflow(page, "#fixture-anchor");
+  });
+
+  test("document fixture: body-level 800px element with no #main-content rejects with doc=", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.setContent(`<!DOCTYPE html>
+<html>
+  <head><meta charset="utf-8"></head>
+  <body style="margin:0">
+    <h1 id="fixture-anchor">Fixture</h1>
+    <div style="width:800px;height:40px">wide</div>
+  </body>
+</html>`);
+    await expect(assertNoReflow(page, "#fixture-anchor")).rejects.toThrow(
+      /doc=/,
+    );
   });
 });
