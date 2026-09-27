@@ -133,6 +133,19 @@ about the CLI link and the marker.
   schema-apply wait alone" is a MERGE-PUSH statement. The wait does not run on a
   `pull_request`, so a PR-run `test-db-drift` has no ordering against `apply-test` or a
   restore at all.
+  ⛔ **CORRECTED 2026-09-26 (Phase 164.9.4 CIOFFMUTEX) — half (a) a third time; the 2026-09-25 note above is kept as lineage.**
+  **No `ci.yml` job holds the key.** `python` and `e2e-seeded` now boot the local-stack lane
+  private to their runner, behind `scripts/local-stack/run.sh --assert-local-handoff`, and read
+  no shared TEST, so nothing in `ci.yml` contends with `apply-test` for the key any more.
+  `test-db-drift` is the only `ci.yml` job still running the schema-apply wait
+  (`grep -n 'wait-for-test-schema-apply.sh' .github/workflows/ci.yml`: its one invocation is in
+  `test-db-drift`; the rest are comments and `sql-gate-lint`'s `--self-test`). Re-measured
+  2026-09-26 with `grep -c 61616158` per workflow file: **0×** in `ci.yml`, **7×** in
+  `supabase-migrate.yml`, **8×** in `test-restore-from-baseline.yml`, **5×** in
+  `mutex-probe.yml`, **1×** in `analytics-deploy-verify.yml` (issue text only), 0× in every other
+  workflow. The takers left are `apply-test`, `restore` and the drill probe; runbook
+  `docs/runbooks/shared-test-db-mutex.md` §7.2 carries the census. This supersedes the 17×
+  reading above.
   (b) **Narrowed for `sql-tests`** by DECISION F. Its lane replays a PR's own new migration
   on top of the committed dump BEFORE merge (see the D-F note below), so its corpus gates
   run against the PR's schema instead of being red until merge. Nothing else about (b)
@@ -154,6 +167,7 @@ about the CLI link and the marker.
   (`restore-test-from-baseline.sh`) still REFUSES a dump older than the migrations, through
   the gate's default mode. ⚠️ A re-dump must regenerate the marker in the SAME commit
   (`supabase/schema/BASELINE.md`, `## Regenerating`).
+  ⛔ **CORRECTED 2026-09-26 (Phase 164.9.4 CIOFFMUTEX):** the lane jobs are now `sql-tests`, `frontend-local-stack`, `frontend-live-db-lane`, `python` and `e2e-seeded`; the three-job list above is kept as lineage.
 - ⭐ **2026-09-23 (Phase 164.4.2) — the local-stack lane PINS its Postgres image to
   `17.6.1.113`, and the pin is load-bearing.** `LANE_PG_VERSION` in `scripts/local-stack/run.sh`
   is written into the lane's `.temp/postgres-version`, and the boot asserts the running image
