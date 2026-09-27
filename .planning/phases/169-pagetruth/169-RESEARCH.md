@@ -1,430 +1,492 @@
-# Phase 169: PAGETRUTH - Research
+# Phase 169: FACTSHEETTRUTH - Research (regenerated)
 
-**Researched:** 2026-09-25
-**Domain:** Cross-page number consistency (Next.js 16 RSC pages, TS factsheet math, analytics-service benchmark cache, one Postgres RPC)
-**Confidence:** HIGH for root causes (each traced to code and quoted); MEDIUM for sequencing against Phase 167.1.2 (depends on an unmerged plan set)
+**Researched:** 2026-09-27 (regenerated against `origin/main` at `320fba4ef`, phase branch HEAD contains it)
+**Supersedes:** the 2026-09-25 research (commit `2d01a2244`). See `## Lineage` at the end.
+**Domain:** factsheet number consistency (Next.js 16 RSC + TS factsheet math), plus two routed display-unit defects on `/portfolios/[id]` and `/allocations`
+**Confidence:** HIGH for every root cause (each re-read at HEAD this session and quoted); MEDIUM for sequencing (two external merges are still open: Phase 169.2 PR #879 and Phase 167.1.2 PR C3)
 
 ## Summary
 
-The eight success criteria trace to **seven independent root causes**. None of them needs a migration. Several criteria are one-line predicate bugs: SC1's empty state, SC6's windows, SC7's count and SC8's gate. SC3 and SC4 are "two sources for one number" defects, and they are the structural core of the phase.
+All four factsheet root causes the 2026-09-25 research named for this phase still hold at HEAD, verbatim: the BTC comparator is still the bundled fixture forward-filled flat (B), the single-key headline still comes from the TypeScript recompute instead of the persisted scalars (C), the freshness chip still prints the compute date under a "Track record" subject (D), and every return window still clamps to the record's start (E). The composite read-error item (169-07, D-41) also still holds: `readCompositeFactsheet` still folds a failed `csv_daily_returns` read into an empty series, and the v2 page's own comment names it as the accepted residual "owned by Phase 169 plan 04".
 
-- **SC1.** The 500 is a Postgres error inside `get_admin_compute_jobs`. `RETURNS TABLE("id" …)` declares an OUT variable named `id`, and the admin gate's `WHERE id = auth.uid()` is then ambiguous. I reproduced this on a throwaway local cluster. Every call fails before the gate returns anything. A second, latent defect sits behind it: the route calls the RPC with the service-role client, so `auth.uid()` is NULL. Once the ambiguity is fixed, the gate would return an empty set for every caller.
-- **SC3.** Every factsheet's BTC column, and the /allocations Overview BTC column, is computed from a **bundled static JSON**. It ends 2026-05-12 and is forward-filled flat after that. That is why MTD and 3M read exactly +0.00%.
-- **SC4.** The factsheet recomputes CAGR and Sharpe in TypeScript. Discovery, recommendations and my-strategies read the Python-persisted scalars. The factsheet overlays the persisted values only for composites and options strategies.
-- **SC5.** The freshness chip changes its subject to "Track record" but still prints the compute date under it.
-- **SC6.** `periodReturn` clamps its look-back to index 0, so a 3Y row on a 0.45-year record shows the whole-record return.
-- **SC2 and SC7.** These sit on surfaces that Phase 167.1.2 is rebuilding. They must land **after** 167.1.2's PR C, and they read fields that phase introduces (`equityDailyReturns`, `equityHistoryState`, `account_share_kind`).
+What moved under the plans is the scaffolding, not the defects. Phase 166.2 (#874) already bumped the factsheet cache key to `factsheet-v2-payload-v7` in its three-part form. It also replaced every dated "v6" quote with `vN`. So 169-02's "v6 -> v7" task, every "exactly N files still hold v6" criterion and all of 169-08's key-reconciliation work are obsolete. Phase 167.2.1 was merged into the branch before any 169 code existed, so the rebase 169-08 was written for has nothing left to reconcile. The 169.2 reader's contract adds `dropped` (corrupt closes that must not be bridged), which 169-02 and 169-03 do not carry. And "167.1.2 PR C" no longer exists as one PR: only C3 (plan 167.1.2-07) touches a 169 file (`MetricsColumn.tsx`).
 
-**Primary recommendation:** Six code plans do not depend on 167.1.2: 01 ADMINJOBS, 02 BENCHFEED, 03 RECS, 04 KPISOURCE, 05 BENCHTRUTH and 06 CHIP+WINDOWS-MATH. Ship them first as one PR, in two waves. Three more plans read fields that 167.1.2 PR C introduces: 07 RECORDLENGTH+3Y/5Y in MetricsColumn, 08 RISKTAB and 09 EXCHANGES. Ship those in a second PR, gated by a precondition check that PR C is merged. Take no migration. Record the dead RPC's DROP as an open question.
+The two routed items each have ONE wrong consumer. **Risk attribution:** the producer and every other consumer agree the unit is percent (0 to 100). Only `RiskAttribution` feeds it to `formatPercent`, which takes fractions, so a 28% share renders "+2800.00%". **Open Positions:** OpenPositionsTable and HoldingsTable format prices through whole-dollar formatters, and P&L through a `formatPnl` that picks its sign before rounding. So a $0.42 price reads "$0" and a +$0.37 P&L reads "+$0". The fix belongs beside Phase 150's declared single money module, `src/lib/dollar-validation.ts`. No root cause needs a migration. A separate, out-of-scope defect was found behind the risk-attribution data and is routed to the orchestrator (Open Question 1).
 
-## User Constraints
+**Primary recommendation:**
+- Keep 169-01, 169-04 and 169-07. Relax their entry gates so they can start now.
+- Rewrite 169-02: a v7 -> v8 bump, plus the `dropped` contract.
+- Rewrite 169-03 lightly (carry `dropped`; the chart already breaks at null).
+- Rewrite 169-05's gate so it waits on C3 only, and resolve its test conflict with 167.1.2-07.
+- Drop 169-08 and move its one surviving duty to 169-06.
+- Add two small file-disjoint plans for the routed items. No migration.
 
-No `169-CONTEXT.md` exists (no discuss step was run). The binding constraints are the ROADMAP `### Phase 169` entry, quoted verbatim:
+<user_constraints>
+## User Constraints (from CONTEXT.md)
 
-### Locked Decisions (ROADMAP, verbatim)
-- **Founder decision, 2026-09-25 (AskUserQuestion):** "the session QA sweep and the 2026-09-24 layout notes book as TWO phases; this numbers phase ships FIRST, Phase 170 PAGECOPY second. Phase 167.1.2 ACCOUNTTRUTH already owns the Allocations equity curve, Sharpe beside a negative return, the Scenario zero weights/UUID/$0 total, and the holdings total; they are EXCLUDED here."
-- "Each contradiction below is traced to ONE source of truth and fixed there, not patched per page."
-- **Depends on:** "none in code. Plan after 167.1.2 plan 01 (HIDE) so the two do not edit the same Allocations widgets at once."
-- SC9: "Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and each page is re-checked in the logged-in browser after deploy."
+`169-CONTEXT.md` has no separate "Claude's Discretion" list beyond one bullet, and its decision bodies run to about 1,100 lines. The planner reads CONTEXT.md directly. Below: the decision headings **verbatim** (each heading is the decision), with their status for THIS phase after the 2026-09-26 split. Retired or moved decisions are marked; their bodies are lineage.
 
-### Claude's Discretion
-All implementation choices below (sources, predicates, plan split).
+### Locked Decisions (verbatim headings, in force for Phase 169)
+- **D-02:** "Plan 07 OWNS the MetricsColumn period math (orchestrator, OQ2, 2026-09-25)" — now plan 169-05 (D-37 id map). Amended by D-17.
+- **D-09:** "A comparator is measured only over the dates it has real prices for (planner, 2026-09-25)" — includes "A DB read error renders the comparator unavailable. It never falls back to the fixture".
+- **D-10:** "The factsheet headline reads the persisted scalars for single-key strategies (planner, 2026-09-25)" — the OG half moved to Phase 169.4.1 (D-44).
+- **D-11:** "One calendar coverage rule for every return window (planner, applying D-02, 2026-09-25)"
+- **D-12:** "Record length is stated one way (planner, 2026-09-25)" — four sites, including the Terms panel's "Sample size" Term.
+- **D-14:** "No migration (orchestrator, 2026-09-25)"
+- **D-16:** "The freshness chip's date line matches its subject (planner, 2026-09-25)"
+- **D-17:** "SC6 is read literally: a 3 Year / 5 Year row is NOT SHOWN for a shorter record (orchestrator, W4, 2026-09-25)"
+- **D-19:** "The factsheet cache shape key moves v6 -> v7 once, in plan 05a (planner, W3, 2026-09-25)" — ⚠️ its premise is obsolete at HEAD (v7 exists since 166.2). See Finding K and Open Question 2.
+- **D-21:** "No PR 1 type change may force an edit in a 167.1.2 file (orchestrator, round-3 B2, 2026-09-25)" — `ComparatorBlock.through` and the payload BTC field are OPTIONAL.
+- **D-22:** "Merge order with Phase 167.2.1 (orchestrator, round-3 W2, 2026-09-25; mirrors 167.2.1 D-09)" — owner moved to 169-08 by D-42; this research moves it to 169-06.
+- **D-23:** "The discovery detail page's duplicate builder assembly (167.2.1 D-03)" — the consolidation is 169.1-01's; Phase 169 keeps the lockstep test (169-03).
+- **D-25:** "Founder principle, 2026-09-25: "calculate Sharpe once; every page reads it" (founder direction, recorded by the orchestrator)"
+- **D-37:** "Phase 169 is split into five one-topic phases, and D-13's two-PR packaging retires (founder decision + orchestrator, 2026-09-26)"
+- **D-41:** "A composite's failed `csv_daily_returns` read is a `read_error`, and the public cache never stores it (orchestrator (routed from 167.2.1 D-07), 2026-09-26)"
+- **D-42:** "One rebase of the phase branch, owned by a new plan 169-08 between wave 3 and wave 5 (orchestrator (plan-check blocker), 2026-09-26)" — ⚠️ obsolete in effect at HEAD. See Finding L.
+- **D-44:** "The OG card's half of D-10 splits out to Phase 169.4.1 OGSHARPE (FOUNDER DECISION, 2026-09-26)"
 
-### Deferred / out of scope (verbatim from the ROADMAP and the 167.1.2 exclusion)
-- The Allocations equity curve, Sharpe beside a negative return, the Scenario zero weights, UUID and $0 total, and the holdings total. All of these belong to Phase 167.1.2.
-- Layout, copy, typos, raw enums, internal text and test text belong to Phase 170 PAGECOPY. That covers QA findings L1–L11 and Y1–Y4.
+Moved out with their plans (lineage only for Phase 169): D-01, D-03, D-05, D-06, D-08, D-15, D-20 (Phases 169.2 / 169.3); D-26 to D-36 (Phase 169.1); D-43, D-45 (Phase 169.4.1). Retired: D-13 (by D-37), D-43 (by D-44).
+
+### Claude's Discretion (verbatim)
+- "Test file names, helper names not fixed above, and the exact caption wording within DESIGN.md's em-dash and dated-document rules."
+
+### Deferred Ideas (OUT OF SCOPE) (verbatim)
+- "Dropping `get_admin_compute_jobs`: `TODOS.md` `[169-DEAD-ADMIN-JOBS-RPC]` (D-01)."
+- "A `periodsPerYear` on the Scenario payload, so a selected range there shows figures instead of the withheld form: `TODOS.md` `[169-SCENARIO-WINDOW-ANNUALIZATION]`, owner Phase 167.1.2 (D-29)."
+- "\"Month-to-date\" relabel on an ended record, and the D12 venue label: Phase 170 (D-04, D-06)."
+- "QA D14 (the `/admin` Strategy Review owner attribution when display names collide) and QA I5 (the intro-requests \"N in progress\" relabel): Phase 170 (D-06 as amended 2026-09-25)."
+- "Widening `deriveMandateIsSet` to every engine-consumed preference field: not planned (D-03)."
+- "A live feed for SPX, ETH, GLD and IEF: not planned; they carry a dated `through` label (D-09)."
+
+### Out of scope by the orchestrator's brief (owned elsewhere)
+167.1.2 (the Allocations equity curve, Sharpe beside a negative return, the Scenario zero weights, UUID and $0 total, the holdings total, Open Positions showing closed positions), 169.1 (zoom KPIs, engine conventions, the discovery-detail consolidation), 169.2 (BTC freshness and refresh), 169.3 (admin jobs, recommendations, profile exchanges, the mandate rule), 169.4 (the Allocations Risk tab), 169.4.1 (the OG card), 170 / 170.1 (layout and copy).
+</user_constraints>
 
 <phase_requirements>
 ## Phase Requirements
 
-| ID | Description | Research Support |
+| ID | Description (ROADMAP `### Phase 169`, verbatim) | Research Support |
 |----|-------------|------------------|
-| SC1 | /admin Compute Jobs: no HTTP 500, and no "No compute jobs found" on error | Root cause A (ambiguous `id` in the RPC, service-role `auth.uid()` NULL, empty state ignores `error`) |
-| SC2 | The Risk tab and Overview/Scenario read one series | Root cause G (Risk widgets read `payload.strategies`; Overview reads the equity series) and the 167.1.2 boundary |
-| SC3 | BTC benchmark current; a stale benchmark is shown as stale | Root cause B (static `BTC_DAILY` ending 2026-05-12, forward-filled flat) and the `/api/benchmark/btc` 1000-row truncation |
-| SC4 | CAGR/Sharpe identical across surfaces | Root cause C (TS `compute()` vs persisted `strategy_analytics` scalars; overlay only on composite/options) |
-| SC5 | Header date, "track record through" and record length agree; length stated one way | Root cause D (`FreshnessChip` prints `computedAt` under a "Track record" subject; `n/252` vs calendar years) |
-| SC6 | No 3Y/5Y rows for shorter records | Root cause E (`periodReturn` clamps to index 0; trailing windows in `compute()` never null) |
-| SC7 | /profile Exchanges counts live keys only and never repeats a balance | Root cause H (`activeKeys` = not disconnected, includes revoked); duplicate balance needs 167.1.2's marker |
-| SC8 | /recommendations mandate copy and stale records | Root cause F (candidates render regardless of `mandateSet`; header copy hard-coded; no series-end shown) |
-| SC9 | Neuter→RED→restore test per fix and a browser re-check | Validation Architecture below |
+| SC3 | "The BTC benchmark is current: MTD and 3-month returns, win rate, volatility and drawdown come from a benchmark series that is refreshed, and a stale benchmark is shown as stale rather than as +0.00%." | Finding B (forward-fill at `alignReturns`), Finding M (169.2 reader contract incl. `dropped`), Finding K (cache key) |
+| SC4 | "A strategy's CAGR and Sharpe are identical on discovery, recommendations, my-strategies and its factsheet (one computation, one stored value), or a surface that must differ says why." | Finding C (no persisted overlay on the single-key arm; resolve-stage select lacks the scalars), Finding F (D-41 composite read error) |
+| SC5 | "A factsheet's header date, its "track record through" date and its stated record length agree, and record length is stated one way." | Finding D (chip date line; four record-length phrasings on two clocks) |
+| SC6 | "3-year and 5-year rows are not shown for a record shorter than that period." | Finding E (`compoundFrom` never null; `periodReturn(3 * 252)` clamps to index 0) |
+| SC9 | "Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and each page is re-checked in the logged-in browser after deploy." | Validation Architecture |
+| R1 (routed 2026-09-26) | "risk attribution renders a share in percent twice … Success: the page shows the producer's number once, and a test built from the producer's real shape fails on the double scale." | Finding R1 |
+| R2 (routed 2026-09-27) | "/allocations Open Positions shows entry/mark prices under $1 as $0, and unrealized P&L as −$0 / +$0 … Success: a sub-dollar price and a sub-dollar P&L render with their real precision, and a zero-rounded value never shows a sign." | Finding R2 |
+| R3 (routed 2026-09-26, = D-41) | "The composite read must surface a distinguishable read error and the public cache callback must throw on it, with a red-first test." | Finding F |
 </phase_requirements>
 
-## Project Constraints (from CLAUDE.md)
+## Project Constraints (from CLAUDE.md / AGENTS.md)
 
-- **The Supabase CLI is linked to PRODUCTION.** No `db push`, `db reset --linked`, `--db-url` or remote SQL. The schema comes from `supabase/schema/baseline.sql` only.
-- **Migrations auto-apply to TEST, then to PROD, on merge**, with no human gate. Any migration needs the 3-reviewer pass (migration-reviewer, rls-policy-auditor, silent-failure-hunter) before merge. This research recommends none.
-- **A failing TEST apply blocks PROD.** A data-reading `DO` block can refuse on the empty TEST database.
-- Coverage thresholds: read them from `vitest.config.ts`. They are a ratchet, so never restate them.
-- **CHANGELOG discipline:** every ship writes a unified entry, with the commit checklist cross-checked. `VERSION` and `package.json` must be byte-equal 4-digit strings. Never run `npm version`.
-- Never write a CI skip token in a commit message or PR body, not even to deny it.
-- `covered_digest` and `covered_files` are banned in verification frontmatter. Use `verified_at_sha` and `drift_subjects`, and exclude TODOS, CHANGELOG, VERSION and package.json.
-- Read DESIGN.md before any visual or copy decision. The em-dash null rule applies ("a claim with no date, a metric with no provenance … fails"; `DESIGN.md:26-30`).
-- AGENTS.md: "This is NOT the Next.js you know". Read `node_modules/next/dist/docs/` before writing route or RSC code.
-- The repo is PUBLIC and `.planning/` is tracked. No identifiers, home paths, usernames or strategy names in any artifact.
-- Never start `uvicorn` locally. It claims real PROD compute jobs. Run pytest only from `analytics-service/`.
-- Do not hand-dispatch gsd agents. `gsd-tools` state handlers can clobber STATE.md and ROADMAP.md, so `git diff` after each one.
+- ⛔ The Supabase CLI in this checkout is linked to PRODUCTION. No `supabase`, `psql` or remote SQL. The schema comes from `supabase/schema/baseline.sql` only. This research ran none.
+- ⛔ Merging `supabase/migrations/**` auto-applies to TEST, then PROD, with no human gate. This phase needs no migration (D-14 holds; see below).
+- AGENTS.md: "This is NOT the Next.js you know". Read `node_modules/next/dist/docs/` before touching route or cache code. The v2 page's comment cites the bundled Next 16.2.11 `unstable_cache` behaviour ("on a miss the callback is awaited BEFORE `cacheNewResult`, so a throw propagates and nothing is stored").
+- Coverage thresholds: read them from `vitest.config.ts`; never restate them.
+- CHANGELOG discipline: one unified entry per version, the commit checklist cross-checked, and `VERSION` / `package.json` byte-equal 4-digit strings. Never `npm version`. HEAD is `0.106.0.2`; 169.2's open branch is at `0.107.0.0`, so re-read `VERSION` at ship.
+- Never write the CI skip trailer in a commit or PR body, not even to deny it.
+- Verification frontmatter uses `verified_at_sha` + `drift_subjects`. `covered_digest` / `covered_files` are banned.
+- DESIGN.md governs every visual decision: the Numbers Contract, the em-dash null rule, "Red = never for a zero". Its Numbers Contract has **no currency row** (see R2).
+- The repo is PUBLIC and `.planning/` is tracked: no identifiers, strategy names, home paths or usernames in any artifact.
+- pytest runs only from `analytics-service/`. Never start `uvicorn`.
+- The Phase 166.2 compute-once gate (`src/lib/return-stats.single-source.test.ts`) constrains every `src/` edit (Pitfall 3).
+- Never hand-dispatch gsd agents. `gsd-tools` state handlers can clobber STATE.md / ROADMAP.md, so `git diff` after each.
 
 ## Architectural Responsibility Map
 
 | Capability | Primary Tier | Secondary Tier | Rationale |
 |------------|-------------|----------------|-----------|
-| Admin job list (SC1) | API route (`/api/admin/compute-jobs`) | Browser (`ComputeJobsTable` states) | The route owns the admin gate and the read; the client only renders load, error and empty states |
-| BTC price feed (SC3) | analytics-service (fetch + `benchmark_prices` cache) | Vercel cron (daily trigger), DB table | The only fetcher is Python (`services/benchmark.py`); TS must read the table, never re-fetch |
-| Benchmark metrics (SC3) | Frontend server (RSC payload build) | Browser (`basis-context` re-derive) | `buildFactsheetPayload` is server-side; the MTM basis re-derives client-side, so the series must ride the payload |
-| Headline CAGR/Sharpe (SC4) | analytics-service (persisted `strategy_analytics`) | Frontend server (overlay) | Ranking, discovery and recommendations already read the persisted value; the factsheet must read the same |
-| Freshness and record length (SC5, SC6) | Browser (FactsheetView, MetricsColumn) | TS math (`compute.ts`) | Pure presentation plus one pure-math gate |
-| Risk tab series (SC2) | Frontend server (payload field from 167.1.2) | Browser widgets | Widgets accept `compositeReturns`; the payload supplies it |
-| Exchange key liveness (SC7) | Browser (`AllocatorExchangeManager`) | DB marker columns (167.1.2) | Count and balance display; the duplicate identity is 167.1.2's data |
-| Recommendations gating (SC8) | Frontend server (RSC page) | DB (`series_end` projection) | Server decides the copy and the candidate rendering |
+| Headline CAGR / Sharpe (SC4) | Frontend server (resolve stage + `readSingleKeyBasisOpts` in `fetch-and-build-payload.ts` / `composite-read-path.ts`) | Database (persisted `strategy_analytics` scalars) | The engine persists the value every list reads; the factsheet must overlay it, not recompute |
+| BTC comparator numbers (SC3) | Frontend server (`buildFactsheetPayload` / `comparator-block.ts`) | Database (`benchmark_prices`, read via 169.2's `readBenchmarkPrices`) | Coverage and `through` are decided where the block is built |
+| BTC re-derive on basis / leverage toggle (SC3) | Browser (`basis-context.tsx` -> `deriveSeriesBundle`) | Frontend server (prices carried on the payload) | The browser cannot read the DB; the same bounded prices must ride the payload |
+| Freshness chip and record length (SC5) | Browser (`FreshnessChip`, `MetricsColumn`, `MandatePanels`) | TS math (`compute()` `years`) | Presentation of one stored date and one calendar length |
+| Return windows (SC6) | TS math (`compute()` in `src/lib/factsheet/compute.ts`) | Browser (`MetricsColumn` hides 3Y / 5Y rows) | One calendar coverage rule, one implementation |
+| Composite read error vs empty (D-41) | Frontend server (reader + resolve stage + `unstable_cache` callback) | — | Only the server can tell an outage from a fact about the row, and only it decides what is cached |
+| Risk share display (routed R1) | Browser (`RiskAttribution`) | API (`services/portfolio_risk.py` is the unit's owner) | The producer's unit is fixed; the one wrong consumer converts |
+| Price / P&L display (routed R2) | Browser (OpenPositionsTable, HoldingsTable) | Shared lib (`src/lib/dollar-validation.ts`, the declared money module) | One formatter module, many tables |
 
-## Root Causes (one source of truth each)
+## Root causes, re-verified at HEAD
 
-### A. SC1: `/api/admin/compute-jobs` returns 500 [VERIFIED]
+### B. SC3: the BTC comparator is the bundled fixture, forward-filled flat [VERIFIED: read this session]
+- `src/lib/factsheet/align.ts` `alignReturns`, verbatim: `if (a != null && b != null && b !== 0) rets.push(a / b - 1); else rets.push(0);`, with `lastP` carried forward. Past the fixture's last date, `a === b`, so every day is a 0 return.
+- `src/lib/factsheet/build-payload.ts` still aligns straight from the fixtures in BOTH `deriveSeriesBundle` and `buildFactsheetPayload`: `const btcRet = alignReturns(BTC_DAILY, dates);` (two occurrences, plus SPX / ETH / GLD / IEF).
+- Fixture coverage, measured this session by loading each JSON: `btc-daily.json 1113 2023-04-26 2026-05-12`, `eth-daily.json 1112 2023-04-26 2026-05-11`, and `spx/gld/ief-daily.json 762 2023-04-26 2026-05-08`.
+- `src/lib/factsheet/comparator-block.ts` `buildComparatorBlock` computes `const benchSummary = compute(benchReturns, dates, 0, periodsPerYear);` and `jointMetrics(stratReturns, benchReturns, …)` over the whole zero-padded series. There is no `through` field, and `dailyReturns: benchReturns` is carried as-is.
+- `fetch-and-build-payload.ts` performs NO benchmark read today (no `readBenchmarkPrices`, no `benchmark_prices`).
 
-**The route:** `src/app/api/admin/compute-jobs/route.ts:34-49` [VERIFIED: read this session]:
-```ts
-const admin = createAdminClient();
-const { data, error } = await admin.rpc("get_admin_compute_jobs", { p_limit, p_offset, p_status, p_kind, p_exchange });
-if (error) { console.error("get_admin_compute_jobs RPC failed:", error);
-  return NextResponse.json({ error: "Failed to fetch compute jobs" }, { status: 500, … }); }
-```
+### C. SC4: the single-key headline is the TS recompute [VERIFIED]
+- `build-payload.ts`: `const strategyMetrics = overlayBasisScalars(computedMetrics, opts?.metricsByBasis?.cash_settlement);`. Its own comment says the overlay does nothing when "`cash_settlement` is absent (overlayBasisScalars returns base unchanged)".
+- `composite-read-path.ts` `singleKeyBasisOpts` threads only `mark_to_market` / `smoothed_mtm`, "NEVER a lingering cash_settlement key (SC-4)". It returns `{}` for every non-options single-key strategy.
+- **New at HEAD (167.2.1's resolve stage):** `resolveFactsheetInputs` selects `strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis, computation_status )`. That embed contains **none** of the seven `BASIS_KPI_MAP` scalars. So 169-01 must widen this select (the probe shares it; the cost is harmless).
+- `BASIS_KPI_MAP` (`src/lib/factsheet/basis-metrics.ts`), verbatim server keys: `cumulative_return`, `volatility`, `max_drawdown`, `cagr`, `sharpe`, `sortino`, `calmar`.
+- The discovery page's row already carries them. `PUBLIC_ANALYTICS_COLUMNS` (queries.ts) is `"cumulative_return, cagr, volatility, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, six_month_return, sparkline_returns, computation_status, computed_at"`, and `STRATEGY_DETAIL_DISCOVERY_ANALYTICS_COLUMNS` extends it. No `queries.ts` edit is needed.
+- **Nuance:** the resolve stage's G1 already returns `notBuildable("not_computed")` unless `isComputedAnalytics(...)`, and `isRankableAnalyticsRow` (closed-sets.ts) is `return isComputedAnalytics(row?.computation_status);`. So 169-01's "not rankable → no overlay" arm is unreachable through `fetchAndBuildPayload`. It is reachable only on the discovery page, which has no G1 gate, until 169.1-01 consolidates it. Keep the arm and its test (it pins the discovery path).
+- The D-25 cash re-pin premise holds. `basis-context.tsx`: `if (basis === "cash_settlement" || L <= 0) return lb.strategyMetrics;`, with the comment "cash's `basisM` already equals the client recompute". 169-01 makes that comment false, so its re-pin step stays.
 
-**The function:** `supabase/schema/baseline.sql:5623-5663` [VERIFIED: read this session]. It is `RETURNS TABLE("id" "uuid", "strategy_id" "uuid", … "user_email" "text")`, `LANGUAGE "plpgsql" STABLE SECURITY DEFINER`, and its gate is:
-```sql
-SELECT COALESCE(
-  (SELECT is_admin FROM profiles WHERE id = auth.uid() LIMIT 1),
-  false
-) INTO v_is_admin;
-```
-The body is identical in the original migration, `supabase/migrations/20260412094449_compute_jobs_admin_and_defer.sql:337`. No later migration redefines it. The baseline is a dump of PROD's catalogue, so PROD carries this body.
+### D. SC5: two dates under one chip subject; four record-length phrasings [VERIFIED]
+- `FactsheetView.tsx` `FreshnessChip`: `const subject = seriesIsBinding ? "Track record" : "Computed";`. Its date line still renders `{formatIsoDate(computedAt)}` with `({Math.round(days)}d)`.
+- `MetricsColumn.tsx`: `<Row label="Years Observed" value={m.years.toFixed(2)} bench="" />`, and the warning `⚠ Only {m.n} observations ({(m.n / 252).toFixed(2)}y)`.
+- `MandatePanels.tsx`: `({payload.strategyMetrics.n.toLocaleString()} trading days, {payload.strategyMetrics.years.toFixed(2)} years).` and `<Term label="Sample size">{payload.strategyMetrics.n.toLocaleString()} days · {payload.strategyMetrics.years.toFixed(2)}y</Term>`.
+- `compute()`: `const years = days / 365.25;` (calendar).
 
-**The falsification** was run on a throwaway local PostgreSQL 16.13 cluster. The input was the function body verbatim, minimal `profiles` and `compute_jobs_admin` tables, and an `auth.uid()` stub. The output, pasted:
-```
-ERROR:  column reference "id" is ambiguous
-LINE 1: ...ECT COALESCE((SELECT is_admin FROM profiles WHERE id = auth....
-DETAIL:  It could refer to either a PL/pgSQL variable or a table column.
-QUERY:  SELECT COALESCE((SELECT is_admin FROM profiles WHERE id = auth.uid() LIMIT 1), false)
-CONTEXT:  PL/pgSQL function f() line 4 at SQL statement
-```
-[VERIFIED: local PG 16.13 repro]. PROD runs PG 17 with the default `plpgsql.variable_conflict = error`, and I assume it raises identically [ASSUMED]. The error fires on **every** call, before any row is read. So the function has never returned rows through this route. There is no `supabase/tests` gate for it: a grep for `get_admin_compute_jobs` under `supabase/tests` hits only a comment.
+### E. SC6: windows clamp to the record start [VERIFIED]
+- `compute.ts` `compute()`: `compoundFrom` loops `if (new Date(dates[i]) > cutoff) c *= 1 + rets[i];` and never returns null. It returns `p3m: compoundFrom(offsetDays(90))`, `p6m: compoundFrom(offsetDays(182))` and `p1y: compoundFrom(offsetDays(365))`. There is no `p3y` / `p5y`.
+- `MetricsColumn.tsx`: `const periodReturn = (lookbackDays: number): number | null => {`, `<Row label="3 Year" value={pct(periodReturn(3 * 252), true)} bench="" />` and `<Row label="5 Year" value={pct(periodReturn(5 * 252), true)} bench="" />`.
+- `src/lib/factsheet/types.ts` `ComputeResult`: `mtd: number; ytd: number; p3m: number; p6m: number; p1y: number;`.
+- ⚠️ The brief named `src/app/factsheet/[id]/v2/types.ts`. **That file does not exist** (directory listing this session). The type file is `src/lib/factsheet/types.ts`, which is what #874 edited.
 
-**The latent second defect.** The route passes the **service-role** client (`src/lib/supabase/admin.ts`, `createSupabaseClient(url, serviceKey)`). `auth.uid()` is then NULL, so after an ambiguity fix the gate would hit `IF NOT v_is_admin THEN RETURN;` and return an empty set for every caller. That is a permanent "No compute jobs found".
+### F. D-41 / R3: a composite read outage is cached as a null payload [VERIFIED]
+- `composite-read-path.ts` `readCompositeFactsheet`: on `sparseErr` it only `console.error`s ("composite csv_daily_returns read failed"). It then continues with `(sparseRows ?? [])`, "Fail-SAFE: below, an empty series returns null".
+- `fetch-and-build-payload.ts` `resolveFactsheetInputs`: `if (!composite) return compositeUnbuildable(id, caller, "headline");`, and an empty series maps to `compositeUnbuildable(id, caller, "empty_series")`. The `NotBuildableReason` union is verbatim `"read_error" | "not_visible" | "not_computed" | "composite_unbuildable" | "too_few_points" | "malformed_series"`.
+- The v2 page `buildFactsheetPayloadCached`: `if (built.reason === "read_error") throw new FactsheetReadError();`. Its comment says verbatim: "⚠️ Accepted residual under D-07, owned by Phase 169 plan 04: a composite's failed `csv_daily_returns` read still arrives as `composite_unbuildable` … so that outage cannot be told apart here and its `null` is still cached."
+- 169-07's design (a thrown `CompositeSeriesReadError`, caught only in the resolve stage and mapped to `read_error` with its code) fits HEAD unchanged. `probeFactsheetBuildable` shares the resolve stage, so it answers `read_error` too, which `status-surface-copy.ts` already renders (`"unreadable"`, `"finished_build_unreadable"`).
 
-**The "No compute jobs found" on error.** `src/components/admin/ComputeJobsTable.tsx:298` [VERIFIED] renders `{jobs.length === 0 && !loading && (… No compute jobs found.` and ignores `error`. On a failed load, `jobs` stays `[]`, so both the alert (`role="alert"`, the error text) and the false empty row render.
+### K. The factsheet cache key at HEAD (drives 169-02, 169-03, 169-07, 169-08) [VERIFIED]
+- `src/app/factsheet/[id]/v2/page.tsx`: `["factsheet-v2-payload-v7", id, computedAt],`, lineage "Bumped v6→v7 (Phase 166.2 review round 2, IN-03): the shape is unchanged but the VALUES are not. … bumping serves the fix at deploy instead of after the 1h TTL drain."
+- The house rule in the same comment: "Bump it … whenever FactsheetPayload adds non-optional fields".
+- `git grep factsheet-v2-payload-v` over `src`: four LIVE v7 sites. They are `page.tsx` (keyParts), `page.cache-isolation.test.tsx` `const EXPECTED_KEY_PREFIX = "factsheet-v2-payload-v7";`, `page.public-cache-key.test.tsx` `expect(cacheKeys).toEqual([["factsheet-v2-payload-v7", STRATEGY_ID, T0]]);`, and the `fetch-and-build-payload.ts` CACHE KEY REALITY paragraph. Every other hit is a `vN` placeholder (the NEUTER-D records, the phase-148 header). **Zero `v6` strings remain in `src`.**
+- **Recommendation: bump v7 -> v8 exactly once, in 169-02.** The lineage line names every payload-value change this phase ships: 169-04's null windows and `p3y`/`p5y`, 169-02's `through` and covered-span numbers, 169-03's carried BTC prices, and 169-05's null-padded `dailyReturns`. Reasons:
+  1. The deciding case is 169-03. Under D-21's reader rule, a stale v7 entry has no carried prices, so the browser MTM / leverage re-derive yields the BTC **unavailable** form for up to the 1 h TTL. That is a visible regression during the drain, not a byte-identical page.
+  2. 166.2 set the precedent of bumping for a values-only change, "so the fix serves at deploy".
+  3. The `computedAt` key part does not move on a deploy.
+  169-03, 169-05 and 169-07 do not bump again.
 
-**The "header counts a job in progress".** That count is not a compute-job count. It is `IntroRequestsTab`'s summary, `src/components/admin/AdminTabs.tsx:217`: `{counts.intro_made} in progress`, where `counts.intro_made` = intro requests with status `intro_made` [VERIFIED]. `TabsContent` is Radix and renders only the active panel (`src/components/ui/Tabs.tsx:102-103`). There is no compute-jobs header to reconcile. SC1's second clause is therefore satisfied by the empty-state fix alone. Relabelling the intro counts ("intro requests") is copy, which belongs to Phase 170.
+### L. 169-08's rebase has nothing left to reconcile [VERIFIED]
+- The branch already contains `origin/main`: `git merge-base --is-ancestor origin/main HEAD` succeeded this session, with two merge commits of `origin/main` on the branch. So the D-42 phase-entry sync has happened, and 167.2.1 (#866) came in before any 169 code.
+- D-42 (a) to (d) are true at HEAD, before any 169 edit: three-part keyParts, the KEY SHAPE pin at v7, and zero v6 strings. (e) (the D-22 parity table and SC1 live repro) is still a duty, because 169-01 edits the resolve stage's select. It belongs in 169-06 step 0, which already carries it.
+- A `git rebase` would drop the branch's merge commits and replay its docs commits. Bring in C3 / 169.2 with an orchestrator **merge**, as the entry sync was done.
 
-**Fix (no migration).** The route reads the admin view directly with the service-role client, after its existing `isAdminUser` gate. This mirrors its sibling page, `src/app/(dashboard)/admin/compute-jobs/page.tsx`, which already reads `compute_jobs` via `createAdminClient()` with an explicit column list. The read is: `admin.from("compute_jobs_admin").select("<the 21 RPC columns, explicit>")`, with `.eq` filters only when the param is present, `.order("created_at", { ascending: false })` and `.range(offset, offset + limit - 1)`. Keep the limit clamp at 1..200 and the offset at ≥0. The view `compute_jobs_admin` (`baseline.sql:10579-10608`) is `security_invoker`, exposes no `claim_token`, and is granted to `service_role` (`baseline.sql:15671`). Keep the `src/__tests__/compute-jobs-claim-token-not-leaked.test.ts` grep gate green: never `select("*")`. The client change is `jobs.length === 0 && !loading && !error`.
+### M. The 169.2 reader's contract (open PR #879, read from `origin/feat/169.2`) [VERIFIED: `git show origin/feat/169.2:src/lib/factsheet/benchmark-source.ts`]
+- Exports, verbatim: `BENCHMARK_PAGE_SIZE = 1000`, `BENCHMARK_MAX_PAGES = 50`, `type BenchmarkSymbol = "BTC"`, `BenchmarkReadResult`, `BenchmarkReadOptions { from?: string; to?: string }`, `readBenchmarkPrices(client, symbol, opts)`, `BenchmarkReturnPoint`, `pricesToDailyReturns(prices, dropped)` and `mergeWithFixture(db: { prices; dropped }, fixture)`.
+- `BenchmarkReadResult` is `{ ok: true; prices: DailyPrice[]; through: string | null; dropped: string[] } | { ok: false; error: unknown }`. `mergeWithFixture` returns `{ prices, through, dropped }`.
+- The names 169-02 cites (`readBenchmarkPrices`, `mergeWithFixture`, the `{ ok, prices, through }` result) **match**. What 169-02 / 169-03 miss:
+  1. **`dropped`.** The module says "⛔ Returns come from `pricesToDailyReturns(prices, dropped)` ONLY … A consumer therefore MUST pass the reader's `dropped` through". Price-based alignment (`alignReturns`) would silently bridge a corrupt close. The build opt and the payload field must carry `dropped`, and the coverage-aware alignment must yield no return for a pair whose span contains a dropped date. The recommended way is to derive BTC returns with `pricesToDailyReturns` and align those RETURNS by date, rather than re-deriving from prices.
+  2. `mergeWithFixture`'s `through` "is NOT a DB-freshness signal". 169-02 already trims and recomputes `through` from the trimmed series, which is correct.
+  3. 169.2 touches no file a 169 plan edits (its non-planning diff stat against `origin/main`: benchmark-source, the btc and cron routes, seam censuses, `ScenarioComposer.tsx`, `vercel.json`, `analytics-service`), so the entry sync that brings it in is conflict-free for 169's `src/lib/factsheet/**` edits.
 
-### B. SC3: BTC benchmark frozen at 2026-05-12 [VERIFIED]
+## Routed items
 
-**Source of every factsheet and /allocations Overview BTC number.** `src/lib/factsheet/benchmarks.ts:1-25` [VERIFIED]:
-```ts
-import btcDaily from "./data/btc-daily.json";
-/** Bundled benchmark price series. Sourced from Yahoo Finance daily closes, covering 2023-04-26 onwards. … Extending coverage is a follow-on (either expand the static fixture or add a server-side fetcher). */
-export const BTC_DAILY: DailyPrice[] = btcDaily as DailyPrice[];
-export const BENCH_END = BTC_DAILY[BTC_DAILY.length - 1]?.date ?? null;
-```
-I measured the fixture coverage this session: `btc-daily.json 1113 2023-04-26 2026-05-12`, `eth-daily.json … 2026-05-11`, `spx/gld/ief-daily.json … 2026-05-08`. The last change to `btc-daily.json` is commit `a7abfadd5` (2026-05-20) [VERIFIED: git log].
+### R1. Risk attribution renders a percent share twice [VERIFIED end to end; one sub-claim ASSUMED]
+**Producer (the unit's owner):**
+- `analytics-service/services/portfolio_risk.py` `compute_risk_decomposition`: `"marginal_risk_pct": _safe_float(float(cr / port_vol * 100)),`, a percent from 0 to 100 (`None` when the book carries no risk).
+- `"standalone_vol": _safe_float(float(np.sqrt(covariance_matrix[i][i]))),`, where the covariance comes from `overlap_df.cov()` in `routers/portfolio.py`. It is never annualised and is a **fraction** (not a percent). It is a **daily** volatility ONLY IF `overlap_df` holds daily returns. Open Question 1 shows its input is `returns_series`, which `metrics.py` writes as a cumulative series, so the period (and meaning) of `standalone_vol` is **unconfirmed end to end** [VERIFIED for the expression; the input's meaning is inferred, see OQ1]. It is not double-scaled either way.
+- `routers/portfolio.py`: `"weight_pct": _safe_float(ordered_weights[i] * 100),`, a percent.
 
-**The forward-fill that turns "no data" into "0% return".** In `src/lib/factsheet/align.ts:12-32`, `alignReturns` carries `lastP` forward and pushes `a / b - 1`, which is **0** on every day past the fixture's end. `build-payload.ts:360-367` says so out loud: "comparator series just go flat on the unsupported dates". The consumers are `build-payload.ts:229-232` (`deriveSeriesBundle`, which is also run client-side from `basis-context.tsx`), `build-payload.ts:407-410` (`buildFactsheetPayload`) and `comparator-block.ts` (`compute(benchReturns, …)` → `mtd`, `p3m`, `win_rate`, `ann_vol`, `max_dd`). Every strategy day after 2026-05-12 is therefore a 0.00% BTC day. That explains: MTD and 3M exactly +0.00%; a win rate of 11.45%, because zero days are not wins; a depressed volatility and drawdown; and an IR/alpha whose sign disagrees (QA D8 is downstream of this). /allocations Overview goes through `allocator-portfolio-payload.ts:3,46` → `buildFactsheetPayload`, so it has the same source.
+**Every consumer, by symbol:**
 
-**The DB feed exists but is not used by the factsheet.** `benchmark_prices(date, symbol, close_price)` has PK `(date, symbol)` (`baseline.sql:10254-10258`, `:12015-12016`) and public SELECT RLS (`:13808`, `:13812`). The only writer is `analytics-service/services/benchmark.py` `get_benchmark_returns`. It is **lazy**: it refetches from Binance, then CoinGecko, and upserts only on a cache miss during an analytics compute (`analytics_runner.py:1723`, `routers/portfolio.py:986`, `job_worker.py:5414`). No scheduled refresh exists (the `vercel.json` crons list has no benchmark job) [VERIFIED].
+| Consumer | Treats share as | Correct? |
+|---|---|---|
+| `src/lib/portfolio-analytics-adapter.ts` (`asNumber(v.marginal_risk_pct)`, passes through) | producer unit | ✓ |
+| `src/lib/portfolio-insights.ts` (`top.marginal_risk_pct > top.weight_pct * 1.4 && top.marginal_risk_pct > 30`, `${Math.round(top.marginal_risk_pct)}%`) | percent | ✓ |
+| `analytics-service/services/portfolio_optimizer.py` narrative (`{top_risk['marginal_risk_pct']:.0f}% of portfolio volatility`) | percent | ✓ |
+| `src/components/portfolio/RiskAttribution.tsx` table: `formatPercent(d.weight_pct)`, `formatPercent(d.marginal_risk_pct)`; chart `domain={[0, 1]}`; tooltip `` `${(Number(v) * 100).toFixed(1)}%` `` | **fraction** | ✗ |
+| `RiskAttribution.test.tsx` fixtures (`marginal_risk_pct: 0.8, weight_pct: 0.3`) | fraction the producer never sends | ✗ (encodes the wrong unit) |
 
-**A second truncation defect on the Scenario path.** In `src/app/api/benchmark/btc/route.ts:105-109` [VERIFIED], `.from("benchmark_prices").select("date, close_price").eq("symbol", "BTC").order("date", { ascending: true })` has no range. PostgREST caps it at `max_rows` (`supabase/config.toml:18`: `max_rows = 1000`), so it returns the **oldest** 1000 rows. Each fresh fetch upserts `days + 1 = 1001` completed days and the table keeps every older row, so it holds more than 1000 rows. The route's newest row therefore lags today, and the lag grows by one day per day. PROD's `max_rows` and row count are [ASSUMED].
+- `formatPercent` (`src/lib/utils.ts`), verbatim: `return \`${sign}${(value * 100).toFixed(decimals)}%\`;`, with `signed` defaulting to true.
+- Replicated this session with that exact expression: `formatPercent(28)` → `+2800.00%`, `formatPercent(40)` → `+4000.00%`, `formatPercent(0.11)` → `+11.00%`.
+- The `Assessment` comparison `share > d.weight_pct * 1.3` is unit-consistent (both percent) and correct today.
 
-**Fix (no migration).**
-1. **Refresh.** Add a daily Vercel cron route, `/api/cron/refresh-benchmark`, with the `CRON_SECRET` Bearer pattern of `src/app/api/cron/warm-analytics/route.ts`. It calls a new analytics-service endpoint under `/internal` (the `verify_service_key` pattern, `main.py:783`). That endpoint calls the existing `get_benchmark_returns("BTC")` and returns `{through: <newest cached date>, stale: bool}`. It returns non-2xx on `None`, because the cron only alarms on non-2xx (comment at `warm-analytics/route.ts`). Do not write a second fetcher in TS.
-2. **One read path.** Add `src/lib/factsheet/benchmark-source.ts`, which pages `benchmark_prices` newest-first in 1000-row pages until a short page, then reverses. Both `/api/benchmark/btc` and the factsheet payload builders use it. Merge rule: DB closes win on every date the DB has, and the bundled fixture supplies only dates strictly before the DB's first date. This avoids a Yahoo/Binance seam day inside the DB window.
-3. **Coverage, not flat.** Each comparator block carries `through` (its last real price date). `alignReturns` must not fabricate 0 returns past `through`. Either clip the comparator's `compute` to the overlap, or mark those days `null`. A window (MTD, 3M, 6M, YTD, 1Y) that ends after `through` renders the em-dash with a dated caption ("BTC prices through <date>"), never +0.00%. SPX, ETH, GLD and IEF stay static (the DB has no feed: `benchmark.py` raises `Unsupported benchmark` for anything but BTC). They get the same `through` label automatically, which is honest.
-4. The series must ride the payload (bounded to the strategy's date range), because `basis-context.tsx` re-derives `deriveSeriesBundle` in the browser, where a server DB read is impossible.
+**One source of truth:** the unit is the producer's (percent, as the `_pct` suffix says), and every other consumer already agrees. Fix:
+1. Document the unit on `RiskDecompositionRow` in `src/lib/types.ts`. Its doc today states nullability but no unit.
+2. Make `RiskAttribution` convert once (`/ 100`) before `formatPercent(..., { signed: false })`. Weights and shares are an unsigned domain per `src/__tests__/format-percent-contract.test.ts` ("pass `{ signed: false }` for unsigned-domain values like weights").
+3. Fix the stacked bar so its domain and tooltip agree with the unit fed to it.
+4. Rewrite `RiskAttribution.test.tsx`'s fixtures to the producer's percent shape.
+- Do NOT convert at the adapter: that would move `portfolio-insights.ts` and its tests too, for the same outcome. `standalone_vol` is not double-scaled (a fraction into a fractions formatter), so leave its value alone. Its "+" sign and missing "daily" qualifier are labelling (see Open Question 3).
 
-### C. SC4: CAGR/Sharpe differ between the lists and the factsheet [VERIFIED]
+**Placement / collisions:**
+- `RiskAttribution` renders only on `/portfolios/[id]` (`page.tsx`, `<RiskAttribution data={riskDecomposition} />` under "Risk decomposition"). `AllocationsTabs.tsx` names it only in a comment.
+- The Allocations Risk tab's `widgets/risk/RiskDecomposition.tsx` is a different component that computes its own decomposition.
+- The 169.4 plans' `files_modified` are `RiskTabPanel.tsx`, `AlphaBetaDecomposition.tsx`, `book-risk-input.ts`, `allocator-portfolio-payload.ts`, `queries.ts`, `AllocationDashboardV2.tsx` and their tests. **No collision with 169.4.**
 
-| Site | Computation | Read by |
-|------|-------------|---------|
-| `analytics-service/services/metrics.py` `compute_all_metrics` (CAGR `:1683-1690`: `(1+total_return) ** (_CALENDAR_DAYS_PER_YEAR / _elapsed_days) - 1` over the post-last-break suffix; Sharpe on `stat_returns`) → persisted `strategy_analytics.cagr`, `.sharpe`, `.cumulative_return`, `.volatility`, `.max_drawdown`, `.sortino`, `.calmar` (`baseline.sql` `strategy_analytics` columns) | Python, calendar/365, suffix-aware | **Discovery** (`queries.ts:335` projection `"computed_at, computation_status, cumulative_return, cagr, sharpe, …"`), **recommendations** (RPC `get_allocator_recommendations` → `recommendations/page.tsx:129-130`, `:220-221`), **my-strategies** (`getMyStrategies`, `strategy_analytics (*)`, `queries.ts:637`) |
-| `metrics_json_by_basis.cash_settlement` | Python, same engine | Factsheet **only for composites and options** |
-| `src/lib/factsheet/compute.ts:18-50` `compute()`: `years = days / 365.25`, `cagr = eq[n-1] ** (1/years) - 1` over the whole series; Sharpe via `pstdev` over all days | TS second computation | **Factsheet** KpiStrip (`FactsheetView.tsx:1422-1423`) and MetricsColumn §I, for every single-key, non-options strategy |
-| `src/lib/factsheet/og-metrics.ts` `computeOgHeadline` | TS third computation (CAGR hidden < 0.95y) | OG image card (`src/app/api/og/factsheet/[id]/route.tsx:133`) |
+**⚠️ Found behind this item, OUT OF SCOPE, routed to the orchestrator (Open Question 1):**
+- `routers/portfolio.py` `_compute_portfolio_analytics` selects `"strategy_id, returns_series, equity_curve, total_aum"` from `strategy_analytics`. The table's column list in `supabase/schema/baseline.sql` has **neither `equity_curve` nor `total_aum`**. The full column list of `CREATE TABLE IF NOT EXISTS "public"."strategy_analytics"` as dumped, verbatim: `id strategy_id computed_at computation_status computation_error benchmark cumulative_return cagr volatility sharpe sortino calmar max_drawdown max_drawdown_duration_days six_month_return sparkline_returns sparkline_drawdown metrics_json returns_series drawdown_series monthly_returns daily_returns rolling_metrics return_quantiles trade_metrics data_quality_flags volume_metrics exposure_metrics computation_warned metrics_json_by_basis computing_started_at series_completeness computation_error_source computation_error_job_id`. Also, `git grep equity_curve -- supabase/migrations` hits only `portfolio_equity_curve` (another table) and a COMMENT on `allocator_equity_derived` [VERIFIED: both read this session].
+- Separately, it treats `returns_series` as daily returns (`strategy_returns[sid] = s`, then `.cov()`). `services/metrics.py` writes `returns_series` from `cumulative`, the equity curve (`(1 + returns_for_chart).cumprod()` on the geometric path) [VERIFIED: metrics.py].
+- Inference [ASSUMED, not measured against PROD]: the select raises and the compute always lands in its `except Exception` arm (row marked FAILED). So `/portfolios/[id]`'s risk decomposition is stale or never freshly produced, and `standalone_vol`'s unit cannot be confirmed end to end on real data.
+- The R1 display fix is correct regardless. This is a data-integrity defect and needs a phase, not a TODO.
 
-The mechanism is `build-payload.ts:405` [VERIFIED]: `const strategyMetrics = overlayBasisScalars(computedMetrics, opts?.metricsByBasis?.cash_settlement);`. `basis-metrics.ts:33-35` documents the gap itself: "`serverScalars` ABSENT … This is the single-key / non-composite path: no persisted by-basis object, so the client-computed `base` is the coherent value". `fetch-and-build-payload.ts:224`: "The assembly returns `{}` for every non-options single-key strategy". The overlay's own rationale is already the SC4 answer. `build-payload.ts` explains: "The KpiStrip's seven headline scalars read the PERSISTED `cash_settlement` basis so they agree with discovery / ranking / acceptance" [CITED: build-payload.ts:396-404].
+### R2. Open Positions: sub-dollar prices read "$0", P&L reads "+$0" / "−$0" [VERIFIED]
+- `src/app/(dashboard)/allocations/components/OpenPositionsTable.tsx` has a private `formatUsd` (`maximumFractionDigits: 0`), used on `entry_price`, `mark_price` and `notional_usd`. It also has a private `formatPnl`: `const sign = n >= 0 ? "+" : "−";`, then the whole-dollar `Math.abs(n)`, used on each row's `unrealized_pnl_usd` and on the footer total. `pnlColor` colors by the raw sign (`pnl > 0` green, `pnl < 0` red).
+- Replicated this session with those exact bodies: `formatUsd(0.4213)` → `$0`, `formatUsd(0.00009876)` → `$0`, `formatPnl(0.37)` → `+$0`, `formatPnl(-0.21)` → `−$0`, `formatPnl(-0.0001)` → `−$0`. A red "−$0" also violates DESIGN.md's "Red … Never for absence, never for a zero."
+- **The one owner already exists:** `src/lib/dollar-validation.ts` `formatUsd`, doc'd "Whole-dollar USD rendering for the allocations surface". HoldingsTable imports it with the comment "it is now the ONE money formatter for this surface … a second money formatter here is forbidden". OpenPositionsTable's private `formatUsd` is a byte-identical duplicate of it, a Phase 150 violation.
+- **Same defect class, enumerated (money):**
+  - `HoldingsTable.tsx` renders `formatUsd(h.entry_price)` (shared whole-dollar, so a sub-dollar entry price reads $0) and carries its own `formatPnl`, identical to OpenPositionsTable's, on `h.unrealized_pnl_usd`.
+  - No other `src` file renders `entry_price` / `mark_price` (grep this session).
+- **Same sign-before-rounding shape, different unit (percent / ratio deltas), NOT in R2's literal scope:** `KpiStrip.tsx` `formatSignedDelta`, `ScenarioComposer.tsx` `pushDelta`, `SyncPreviewStep.tsx` `formatContribution`, `HeatmapPanels.tsx` `formatPctShort`, and `formatPercent` itself (`value >= 0 ? "+" : ""` before `toFixed`, so −0.00001 renders "-0.00%"). Listed for the orchestrator; recommend they stay out of this phase (Rule 2) unless the founder widens R2.
+- **Fix at one source:** add a price formatter and a signed-money formatter beside `formatUsd` in `src/lib/dollar-validation.ts`. The signed formatter derives its sign (and the caller's color) from the ROUNDED value, so a value that rounds to zero is unsigned and uncolored. Delete both local `formatPnl` copies and OpenPositionsTable's private `formatUsd`. Leave the existing whole-dollar `formatUsd` unchanged: it is pinned by `src/lib/dollar-validation.test.ts` and is right for AUM, notional and allocation amounts.
+- **Precision policy is a design decision [ASSUMED, needs founder confirmation]:** DESIGN.md's Numbers Contract has rows for ratios, percentages, tail risk and integers, and **none for currency**. A proposal to confirm: price ≥ $1 at 2 dp, below $1 to 4 significant digits (capped), P&L at 2 dp, and a zero-after-rounding value unsigned and muted. The chosen rule should be added to DESIGN.md's Numbers Contract in the same plan.
+- **Collisions:** no unexecuted plan on this branch, and no 167.1.2 plan (read in the sibling worktree), lists `OpenPositionsTable.tsx`, `HoldingsTable.tsx` or `dollar-validation.ts`. 167.1.2's "Open Positions shows closed positions" item edits `queries.ts` / `latest-holdings-per-key.ts`, a different file.
 
-**Fix (no migration).** In the ONE shared single-key owner, `readSingleKeyBasisOpts` (`src/lib/factsheet/composite-read-path.ts:509`), which is called by both `fetch-and-build-payload.ts:240` and `discovery/[slug]/[strategyId]/page.tsx:141`, supply the persisted top-level scalars as the cash headline when `cash_settlement` is absent. Map them through `BASIS_KPI_MAP` (`basis-metrics.ts:18-26`: `cumulative_return, volatility, max_drawdown, cagr, sharpe, sortino, calmar`). Gate this on the row being rankable (`isRankableAnalyticsRow`, the same predicate recommendations uses). Otherwise a failed run's leftovers would overlay. The OG card reads the same persisted scalars and keeps its display policy (hide CAGR < 0.95y). /allocations Overview is the allocator's own book, has no persisted scalars, and is 167.1.2's surface, so it is not touched.
+## Existing plans: verdicts at HEAD
 
-### D. SC5: the header date, "track record through" and record length [VERIFIED]
+| Plan | Verdict | Reason (re-measured) |
+|---|---|---|
+| 169-01 KPISOURCE | **KEEP**, small edits | Root cause C holds. Edits: (a) widen `resolveFactsheetInputs`' `strategy_analytics` embed with the seven scalars (the plan's "strategies select" key-link already implies it); (b) drop the `readBenchmarkPrices`-on-main check from its Task 1 entry gate (169-01 reads no benchmark), keeping "branch and HEAD contain origin/main" (true now); (c) note G1 makes the not-rankable arm discovery-only. |
+| 169-02 BENCHTRUTH-CORE | **REWRITE** | (a) Task 3 becomes v7 -> v8 (Finding K); every "v6 survives in exactly N files" criterion and the `verify-symbol … factsheet-v2-payload-v6` line are obsolete (zero v6 at HEAD). (b) The opt and alignment must carry and honour `dropped` (Finding M). (c) Its precondition stays: 169.2 on the branch. |
+| 169-03 BENCHTRUTH-PAGE | **REWRITE (light)** | Carry `dropped` in the payload BTC field. Its PRECONDITION "`grep -c 'factsheet-v2-payload-v7'`" and the "(no v8)" criterion no longer discriminate (v7 predates the phase; with the bump it must read v8). `TimeSeriesChart.tsx` `buildPath` already breaks the path at null (`const skip = v == null \|\| !Number.isFinite(v) …; prevValid = false`), so the chart edit may be test-only. The lockstep test and the discovery page's BTC read stay (169.1-01 owns the consolidation). |
+| 169-04 CHIP+WINDOWS | **KEEP**, gate edit | Root causes D and E hold verbatim. Drop the 169.2 check from its entry gate (it reads no benchmark). |
+| 169-05 RECORDLENGTH+3Y/5Y | **REWRITE the gate + the conflict** | (a) Its gate checks `departed-history.ts` (C4), `account-share-note.ts` (C1), `equityDailyReturns` (C2) and 169.2. Only C3 (167.1.2-07) edits a file of this plan (`MetricsColumn.tsx`; it also edits `scenario-factsheet-payload.ts`, which 169 does not touch). Gate on C3's artefact instead, e.g. `MetricsColumn.periods-per-year.test.tsx` on `origin/main`. (b) Rule 7 conflict: 167.1.2-07's planned test asserts an observation-clock length ("periodsPerYear 252, 200 observations: the warning renders with \"(0.79y)\""), which D-12 supersedes with a calendar length. 169-05 says both "only the stated LENGTH changes" and "167.1.2's tests unedited". Pick one (Open Question 4). |
+| 169-06 integration + browser re-check | **KEEP**, step 0 rewritten | 166.1 and 166.2 are on `origin/main` and `compute.ts` already has `import { dispersion, sharpe as sharpeRatio } from "@/lib/return-stats";`, so step 0b's detection is true before any 169 code and its reconciliation arm is moot. Step 0 absorbs 169-08's surviving duty (D-22 parity table + SC1 live repro after the last sync). Add R1 (`/portfolios/[id]` risk decomposition) and R2 (`/allocations` Open Positions + Holdings) browser items. |
+| 169-07 COMPOSITEREADERR | **KEEP**, gate + deps edit | Premise verified (Finding F). Remove the "this branch carries 169-02's v7 key" check (non-discriminating) and the `depends_on 169-08`; it needs only 169-01 (same files: `composite-read-path.ts`, `fetch-and-build-payload.ts`, the discovery page). If 169-02 bumps to v8, its v7-count check becomes v8 or is dropped (it does not own the key). |
+| 169-08 REBASE | **DROP** | Finding L: (a) to (d) are done at HEAD; (e) moves to 169-06 step 0; the C3 / 169.2 intake is an orchestrator merge, as the phase-entry sync was. |
+| NEW R1 plan (RISKUNIT) | **ADD** | `src/lib/types.ts` (doc only), `RiskAttribution.tsx`, `RiskAttribution.test.tsx`. File-disjoint from every 169 plan; wave 1. |
+| NEW R2 plan (MONEYFMT) | **ADD** | `src/lib/dollar-validation.ts` (+ test), `OpenPositionsTable.tsx`, `HoldingsTable.tsx`, their tests, `DESIGN.md` Numbers Contract row. File-disjoint; wave 1. Precision policy needs founder confirmation first. |
 
-- `FactsheetView.tsx:1195-1272` `FreshnessChip`: when `seriesIsBinding`, the eyebrow reads `{subject} · {label}` = "Track record · old" (`:1266`). The date line under it still prints `{formatIsoDate(computedAt)}` with `({Math.round(days)}d)` (`:1269-1270`), which is the compute date. `SeriesRecencyLine` (`:1317-1326`) then prints "Track record through {end.formatted}". So there are two dates under one subject. **Fix:** when the series arm binds, the chip's date line shows the series end and its age (`resolveSeriesEnd`, the same derivation the line uses), and the compute date moves to its own labelled line ("Computed <date>"). The chip's 3d/7d ladder is unchanged.
-- Record length appears in three phrasings over two clocks. `MandatePanels.tsx:42`: `({n} trading days, {years.toFixed(2)} years)`. `MetricsColumn.tsx:66`: `Years Observed {m.years.toFixed(2)}`. `MetricsColumn.tsx:72`: `Only {m.n} observations ({(m.n / 252).toFixed(2)}y)`. `m.years` is calendar (`compute.ts:36-37`, `days / 365.25`), while `(m.n / 252)` is an observation clock. On a daily crypto series, 166 observations give 0.45 calendar years but 0.66 "y". **Fix:** one pure formatter (for example `src/lib/factsheet/record-length.ts`) that takes `{n, years}` and states the length once, in calendar years (domain rule: RETURN/CAGR on the calendar clock). All three sites call it. "Trading days" is wrong for 24/7 venues, so it becomes "daily observations".
-- ⚠️ **Conflict with 167.1.2 plan 07, surfaced per CLAUDE.md Rule 7.** That plan (167.1.2 branch, commit `d3649d486`) edits the same `MetricsColumn.tsx` lines. Its must-have is "the observation warning, its 'years' figure and its 3Y / 5Y look-backs derive from payload.periodsPerYear". That keeps an observation clock for a length and for return windows. It removes the /252 error for crypto but still disagrees with the calendar "Years Observed" on sparse CSV/MT5 series. It also keeps the index-0 clamp that causes SC6. Recommendation: 169's MetricsColumn plan lands **after** 167.1.2 PR C and replaces the plan 07 look-back with the calendar gate below. Alternatively, the orchestrator trims plan 07 to the threshold sentence before it executes. Either way, only one of the two may own the `periodReturn` lines.
+**Sequencing (facts, not a decision).** Two independent external waits:
+1. **169.2 (#879 open):** only 169-02 and 169-03 need it.
+2. **167.1.2 C3 (plan 167.1.2-07, not yet executed; no SUMMARY in the sibling worktree):** only 169-05 needs it.
 
-### E. SC6: 3Y and 5Y rows on sub-year records [VERIFIED]
+With the wave-1 gates relaxed, 169-01, 169-04, R1 and R2 can start now, and 169-07 can follow 169-01. The phase then needs one orchestrator merge of `origin/main` per external arrival: two if 169.2 and C3 land apart, one if both land before 169-02 starts. Each merge is followed by the D-22 re-run in 169-06 step 0. No plan syncs itself.
 
-`MetricsColumn.tsx:403-424` `CumulativeReturnsPanel`:
-```ts
-const periodReturn = (lookbackDays: number): number | null => {
-  if (n < 2) return null;
-  const startIdx = Math.max(0, n - 1 - lookbackDays);
-```
-with `<Row label="3 Year" value={pct(periodReturn(3 * 252), true)} …/>` and `"5 Year" … periodReturn(5 * 252)`. On a record shorter than the look-back, `startIdx` clamps to 0 and the row shows `eq[n-1]/eq[0]-1`. That is the record return **excluding day 1**, which is why it differs from "Since Inception" (−43.01% vs −42.76%). The same class sits in `compute.ts:141-184`: `compoundFrom(offsetDays(90|182|365))` never returns null, so 3M, 6M and 1Y also show the since-inception return on a shorter record. **Fix:** one calendar-cutoff helper. A trailing window of D calendar days returns `null` when the first date is after `lastDate − D`, and the row renders the em-dash (or the row is hidden; this is the planner's call against DESIGN.md's null rule). Apply it to `compute()`'s `p3m`, `p6m` and `p1y`, and to the 3Y/5Y rows as 3×365 and 5×365 calendar days. That is not 3×252 observations: 3×252 = 756 days, which on a daily crypto series is about 2.07 calendar years. MTD and YTD keep their calendar cutoffs. Note that `compute()` also feeds the benchmark summary (`comparator-block.ts`) and the allocator Scenario payload, so a short record nulls the bench windows too. That is the correct result, and the `__snapshots__` in `src/lib/factsheet/` will move.
-
-### F. SC8: /recommendations [VERIFIED]
-
-`recommendations/page.tsx:80` sets `const mandateSet = Boolean(preferences?.mandate_archetype);`. `:232` hard-codes `description="Top 3 strategies that fit your mandate. Updated daily."`. `:245` renders `{!mandateSet ? <NoMandateState /> : null}` **and** `:251` renders `{candidates.length > 0 && (` independently of `mandateSet`. The match engine scores allocators with no mandate on defaults (`analytics-service/services/match_defaults.py:39,57`, `"mandate_archetype": None`), so a batch exists and both blocks render. **Fix:** a single `mandateSet` branch drives both the header description and the candidate section. With no mandate, the page either withholds the list or labels it "scored on default preferences" with the set-mandate CTA; it never says "fit your mandate". **Stale records:** extend the already-bounded status read (`:162-170`, `.select("strategy_id, computation_status")` over the RPC's own ids) with the existing projection device `series_end:returns_series->-1->>date` (`queries.ts:283-298`, `:335`). Render the track-record age through the existing `resolveEffectiveRecency` (`src/lib/freshness.ts`) / `SyncBadge` copy ("Track record ends …"). Do not add a new threshold. **Predicate drift (open question):** `/allocations` uses `deriveMandateIsSet` (`queries.ts:3124-3131`: `max_weight` or `preferred_strategy_types`). Recommendations uses `mandate_archetype`. Both are written by `MandateForm`. Unifying them means editing `queries.ts`, which 167.1.2 plans 01, 07 and 11 also edit.
-
-### G. SC2: the Risk tab reads a different series [VERIFIED]
-
-`RiskTabPanel.tsx` passes the whole payload to six widgets. VaR/ES and TailRisk compute `data.compositeReturns ?? buildCompositeReturns(data.strategies)` (`widgets/risk/VarExpectedShortfall.tsx:36`, `TailRisk.tsx:40`). `buildCompositeReturns` (`widgets/lib/composite-returns.ts`) weights `strategy.strategy_analytics.daily_returns` by `weight ?? current_weight ?? 0`, and `if (w === 0) continue;`. `payload.strategies` is the legacy `portfolio_strategies` set. It is empty or zero-weighted for a key-connected book, so the result is "Insufficient return data" (VaR shows it when `allReturns.length < 10`). `AlphaBetaDecomposition.tsx:20-25` is a **different quantity**: "portfolio daily returns vs an equal-weight benchmark of all strategies", not vs BTC. `CorrelationMatrix.tsx:98` reads `analytics.correlation_matrix` or `strategies`. The Overview reads the equity-curve returns (factsheet payload); the Scenario reads `perKeyReturnsByApiKeyId`. `riskWidgetDataSchema` already accepts `compositeReturns` ("an optional precomputed override (injected by tests; absent in prod)", `widgets/lib/widget-data.ts`).
-
-**Boundary with 167.1.2 (decided here).** 167.1.2 owns the book series. Plan 01 adds `equityHistoryState: "rebuilding" | "ready"` and withholds the curve. Plan 11 adds `equityDailyReturns: DailyPoint[]` from `payload.returns` (quoted from the 167.1.2 plans 01 and 11). 169 owns only the Risk tab's **consumption**:
-- When `rebuilding`, the Risk tab renders the same `EquityHistoryRebuilding` state, not "insufficient data".
-- When `ready`, `RiskTabPanel` passes `compositeReturns = equityDailyReturns` to VaR, TailRisk and RiskDecomposition.
-- Alpha/beta is computed vs BTC from the same series and the fixed BTC feed (SC3), so it agrees with Overview's "α vs BTC".
-- Correlation reads the per-key set the Scenario uses, labelled through 167.1.2's `apiKeyLabelById`.
-
-This needs 167.1.2 PR C merged. It edits none of 167.1.2's files: `RiskTabPanel.tsx` and `widgets/risk/*` are absent from every 167.1.2 `files_modified` list.
-
-### H. SC7: /profile Exchanges [VERIFIED]
-
-`AllocatorExchangeManager.tsx:719` is `const activeKeys = keys.filter((k) => k.disconnected_at === null);`. A credential-revoked key (`sync_status = 'revoked'`, never disconnected) is therefore "connected" and counted in `${activeKeys.length} connected · …` (`:733-738`). The balance is `formatUsd(key.account_balance_usdt)` (`:795`), a per-key column written on every sync (`analytics-service/routers/exchange.py:1425`, `routers/cron.py:1063`). Three keys on one exchange account each hold the same account's balance. That is 167.1.2's identity defect, marked by its `account_share_kind`/`account_shared_with_api_key_id` (167.1.2 D-11). **Fix:** one liveness predicate, "connected" = `disconnected_at === null && sync_status !== 'revoked'`. 167.1.2 D-09 already defines "departed" = disconnected OR revoked, and its plan 09 adds `src/lib/departed-history.ts`; reuse that predicate rather than writing a third. A revoked key's balance renders as "last known … as of <last_sync_at>" or not at all. A key marked `duplicate`/`composite_member` renders no balance and points to the holder (167.1.2 plan 04's `accountShareNote` sentence is the one source of that wording). `AllocatorExchangeManager.tsx` is edited by 167.1.2 plans 04 and 09, so this plan must land after PR C.
+**Cross-phase notice for the orchestrator:** 169.1's plans (D-19 amendments for 14b to 14f) reason from a v7 key and a "no v8 bump" rule. If 169 bumps to v8, those plans' key text is stale when 169.1 runs after 169.
 
 ## Standard Stack
 
-No new packages. Everything uses what is installed.
-
-| Library | Version | Use here |
-|---------|---------|----------|
-| next | ^16.2.11 (package.json) | RSC pages, route handlers, `vercel.json` crons |
-| vitest | ^4.1.2 (package.json) | All TS tests (`npm test` = `vitest run`) |
-| @supabase/supabase-js | installed | `.from().select().range()` paging |
-| pytest (analytics-service) | installed in the main checkout `.venv` | The refresh endpoint test |
+No new packages. Everything is in `package.json`: `next ^16.2.11`, `vitest ^4.1.2`, `@supabase/supabase-js`. Python: none of this phase's plans edits `analytics-service/`.
 
 ## Package Legitimacy Audit
 
-This phase installs no external packages. There is nothing to audit. **Packages removed:** none. **Flagged:** none.
+This phase installs no external packages. **Packages removed:** none. **Flagged:** none.
 
 ## Architecture Patterns
 
 ### System Architecture Diagram
-
 ```
-                 Vercel cron (daily) ──► /api/cron/refresh-benchmark ──X-Service-Key──► analytics /internal/benchmark/refresh
-                                                                                          │ get_benchmark_returns("BTC")
-                                                                                          ▼ Binance → CoinGecko → upsert
-                                                                                   benchmark_prices (date,symbol PK)
-                                                                                          │ paged newest-first
-                                     ┌────────────────────────────────────────────────────┤
-                                     ▼                                                    ▼
-                       benchmark-source.ts (ONE reader, DB ∪ pre-DB fixture, `through`)   /api/benchmark/btc → Scenario overlay
-                                     │
-strategy_analytics (persisted scalars + series) ─► readSingleKeyBasisOpts ─► buildFactsheetPayload
-                                                   (persisted headline)         │ strategy series + BTC series + through
-                                                                                ▼
-                                             payload ─► KpiStrip / MetricsColumn / MandatePanels / FreshnessChip
-                                                    └─► basis-context (browser re-derive, same series)
+strategy_analytics (persisted scalars + series) ──► resolveFactsheetInputs (G0..G4; select widened, 169-01)
+        │                                                   │ composite? ──► readCompositeFactsheet ──(read error: throw CompositeSeriesReadError, 169-07)──► read_error ──► cached callback throws, nothing stored
+        │                                                   ▼
+        │                                           buildFromResolved ──► readSingleKeyBasisOpts (+ persisted cash headline, 169-01)
+        │                                                   │
+benchmark_prices ──► readBenchmarkPrices (169.2) ──► mergeWithFixture ──► trim to [first-1d, last] ──► { prices, through, dropped } (169-02)
+                                                            ▼
+                                   buildFactsheetPayload ──► comparator block over the COVERED span, windows null past `through`
+                                                            │  compute(): calendar windows, p3y/p5y (169-04)
+                                                            ▼
+                                   unstable_cache ["factsheet-v2-payload-v8", id, computedAt] (bump in 169-02)
+                                                            ▼
+                     FactsheetView: chip (series end + "Computed <date>", 169-04) · MetricsColumn (record-length formatter, 3Y/5Y hidden, 169-05)
+                     basis-context re-derive ◄── payload BTC { prices, through, dropped } (169-03)
 
-portfolio book (167.1.2: equityHistoryState, equityDailyReturns) ─► RiskTabPanel ─► compositeReturns ─► VaR / Tail / α-β vs BTC
-admin page ─► /api/admin/compute-jobs ─isAdminUser─► service-role read of compute_jobs_admin ─► ComputeJobsTable (error ≠ empty)
+portfolio_risk.py (percent) ──► adapter ──► RiskAttribution (convert /100 once, unsigned, R1)
+allocator_holdings rows ──► OpenPositionsTable / HoldingsTable ──► dollar-validation.ts price + signed-money formatters (R2)
 ```
 
 ### Pattern 1: persisted-first overlay (SC4)
-**What:** The display reads the stored scalar and falls back to the client computation only when no trustworthy stored value exists. **Where:** the `overlayBasisScalars` mechanism already exists; the fix changes only its input for the single-key arm.
+Feed the persisted scalars into the EXISTING `overlayBasisScalars` through `readSingleKeyBasisOpts`. Do not add a second mapping; `BASIS_KPI_MAP` is the one map.
 
 ### Pattern 2: coverage-dated comparator (SC3)
-**What:** A comparator carries its own `through` date. A window that extends past it is null plus a dated caption, never a forward-filled zero. This matches the DESIGN.md "dated document" principle.
+Each block carries an optional `through`. Past it, windows are null and per-day arrays are null. A read error gives the unavailable form, never the fixture.
 
-### Pattern 3: error ≠ empty (SC1)
-This repo's precedent: "149 review WR-01 — error ≠ empty" (`my-strategies/page.tsx:69`). The empty state renders only when there is no error.
+### Pattern 3: an outage is thrown, a fact is returned (D-41)
+This mirrors 167.2.1's `FactsheetReadError`. The reader throws a named class; only the resolve stage catches that class, and `unstable_cache` stores nothing on a throw.
+
+### Pattern 4: convert units at the one wrong consumer, not the boundary (R1)
+When the producer and every other consumer agree, the outlier converts, and the type documents the unit.
 
 ### Anti-Patterns to Avoid
-- **Patching per page.** For example, special-casing `+0.00%` in MetricsColumn. The ROADMAP forbids it: fix at the one source.
-- **A second BTC fetcher in TS.** Python owns fetching and caching.
-- **A silent fallback to the bundled fixture on a DB read error.** That fallback is the stale bug itself. On a read error, render the comparator unavailable.
-- **Editing `queries.ts`, `AllocationDashboardV2.tsx`, `ScenarioComposer.tsx` or `AllocatorExchangeManager.tsx` before 167.1.2 PR C merges.** The same files are in flight there.
+- Special-casing "+0.00%" or "$0" in a page: fix at the formatter or the builder.
+- Re-deriving BTC returns from prices with `alignReturns` after 169.2 ships: it bridges a dropped close.
+- A `git rebase` of the phase branch: it drops the entry-sync merge commits.
+- Changing `dollar-validation.ts` `formatUsd` to show cents: it moves AUM and allocation amounts on every money surface and breaks its pinned test.
 
 ## Don't Hand-Roll
 
 | Problem | Don't Build | Use Instead | Why |
-|---------|-------------|-------------|-----|
-| BTC price fetch and cache | A TS fetcher | `services/benchmark.py` `get_benchmark_returns` | It already handles completed-days-only, gap detection and a stale fallback |
-| Series end date | A new query | `series_end:returns_series->-1->>date` projection + `resolveEffectiveRecency` | One ladder; a fourth freshness ladder is forbidden (`FactsheetView.tsx` SeriesRecencyLine doc) |
-| Headline overlay | A new mapping | `BASIS_KPI_MAP` + `overlayBasisScalars` | Strict NaN→"—" semantics already exist |
-| Key "departed" predicate | A third predicate | 167.1.2's `src/lib/departed-history.ts` (D-09) | One definition across the compose and the card |
-| Admin read | A new RPC or migration | The service-role read of `compute_jobs_admin`, as the sibling page does | Avoids a PROD auto-apply |
+|---|---|---|---|
+| BTC read / paging / corrupt closes | a second reader or price→return loop | `readBenchmarkPrices`, `mergeWithFixture`, `pricesToDailyReturns` (169.2) | keyset paging, `dropped` handling, strictly-decreasing check |
+| Headline overlay | a new scalar map | `BASIS_KPI_MAP` + `overlayBasisScalars` | strict null → "—" semantics exist |
+| Any Sharpe / Pearson / beta | an inline ratio | `@/lib/return-stats` | Phase 166.2 compute-once gate fails CI otherwise |
+| Rankable / computed predicate | a status literal compare | `isRankableAnalyticsRow` / `isComputedAnalytics` | SI-01 census greps raw source |
+| Series end date | a new derivation | `resolveSeriesEnd` (FactsheetView) | chip and line must agree |
+| Money formatting | a per-table formatter | `src/lib/dollar-validation.ts` (extend it) | Phase 150 made it the one owner |
+| Percent formatting | a local `formatPercent` | `@/lib/utils` `formatPercent` | `format-percent-contract.test.ts` forbids local declarations |
 
 ## Common Pitfalls
 
-### Pitfall 1: the overlay breaks chart/headline invariance (SC4)
-Python's `cumulative_return` compounds the post-last-break suffix (`metrics.py:1683`), while the chart's endpoint is TS `cumEq` over the whole series. On a chain-broken series, "Cumulative Return" would disagree with the chart's end. **Avoid:** pin a test that the persisted `cumulative_return` equals the chart endpoint on a clean series. On a broken-chain series, the existing `dataQuality` caveat must render. **Warning sign:** snapshot diffs in `FactsheetBody.*` tests.
+### Pitfall 1: persisted cumulative_return vs the chart endpoint (SC4)
+Python compounds the post-last-break suffix; the chart draws the whole series. On a chain-broken series the overlay can disagree with the chart end. Pin equality on a clean series, and require the existing `dataQuality` caveat on a broken one (unchanged from the prior research).
 
-### Pitfall 2: the benchmark series is too big for the RSC payload
-The whole DB history is about 1,200 points × 5 comparators. **Avoid:** ship only BTC closes within `[strategyStart − 1d, strategyEnd]`.
+### Pitfall 2: the benchmark series in the RSC payload
+Ship only BTC closes within `[strategy first date − 1 day, strategy last date]`, plus the `dropped` dates in that range.
 
-### Pitfall 3: null windows cascade (SC6)
-`compute()` feeds `comparator-block.ts`, the allocator payload and the Scenario payload. Nulling `p1y` changes their shapes, because `ComputeResult` types become `number | null`. **Avoid:** widen the type once and let tsc find every reader. Snapshots move deliberately; explain each moved snapshot in the SUMMARY.
+### Pitfall 3: the compute-once gate (`src/lib/return-stats.single-source.test.ts`)
+- Its whole-tree shape matcher flags, among fourteen forms, `SHARPE S8 <..ret..> / <..vol..>` (e.g. `annRet / annVol` by name) and `SHARPE S6 ID * ANN / ID`.
+- Coverage code in `comparator-block.ts` / `align.ts` must not divide a return-named value by a vol-named one, and must not name a covered-span helper that way.
+- The file states: "this gate constrains every later src/ edit, including Phase 169's". A red gate is fixed by routing through `@/lib/return-stats`, never by an allowlist entry.
+- It also names comparator-block.ts as "NOT in the list … the file computes no ratio and Phase 169 owns its edits". Keep it that way.
 
-### Pitfall 4: PostgREST `max_rows` silently truncates
-Any unbounded `.order()` read of a growing table returns the first 1000 rows (`supabase/config.toml:18`). **Avoid:** page explicitly and assert a short final page.
+### Pitfall 4: null windows cascade through the type (SC6)
+- Widening `ComputeResult` windows to `number | null` reaches `comparator-block.ts`, the allocator payload and `scenario-factsheet-payload.ts` (a 167.1.2 file).
+- D-21's optional-field device and `tsc` find every reader. `ComparatorBlock.summary` already picks `"mtd" | "ytd" | "p3m" | "p6m" | "p1y"`.
+- Snapshots under `src/lib/factsheet/__snapshots__/` move deliberately; explain each moved key.
 
-### Pitfall 5: cron alarms only on non-2xx
-A refresh that "succeeds" with `{ok:false}` reads green. **Avoid:** return 500 when `get_benchmark_returns` returns `None` or `is_stale=True` (the pattern documented at `warm-analytics/route.ts`).
+### Pitfall 5: `dailyReturns` null padding readers (169-05)
+Re-measured at HEAD, the comparator `dailyReturns` readers are `MetricsColumn.tsx` (EoY loop, `const r = cmp.dailyReturns[i];`), `DistributionPanels.tsx` (EoY bars, `const r = vcmp.dailyReturns[i];`) and `HistogramChart.tsx` (`const b = cmp.dailyReturns?.[i];`, already guarded). D-21's list is still complete.
 
-### Pitfall 6: two phases editing MetricsColumn (SC5/SC6 vs 167.1.2 plan 07)
-The same `periodReturn` and warning lines are in both. **Avoid:** land after PR C and rebase, or trim plan 07 (Open Question 2).
+### Pitfall 6: a benchmark read blip is cached for the TTL
+169-02 turns a `benchmark_prices` read error into the BTC unavailable form, and the WHOLE payload is then stored by `unstable_cache` for up to 1 h under that `computedAt`. This is the same class D-41 closes for composites, but here the rendered state is honest ("BTC prices unavailable") and bounded. Recommendation: accept and record it. Throwing would replace the whole factsheet with the placeholder for that request, which is worse. See Open Question 5.
 
-### Pitfall 7: an effect never identifies the writer (browser re-check, SC9)
-A correct number after deploy may come from a cache. The factsheet cache key is id-only (`fetch-and-build-payload.ts` header comment). **Avoid:** re-check each page with the deployed commit hash confirmed. For factsheets, check a strategy whose cache has drained, or bust it via the publish tag.
+### Pitfall 7: an effect never identifies the writer (browser re-check)
+Keys are `[version, id, computedAt]`, so a deploy does not bust entries without the version bump. Bind each browser reading to the deployed SHA and a non-zero SHA-bound CI run count.
+
+### Pitfall 8: `/portfolios/[id]` may show no fresh risk data (R1)
+Because of Open Question 1, the post-deploy browser check of R1 may find "No risk attribution data available." or an old row. That is not evidence the unit fix failed. The component test with the producer's real shape is the gate; the browser item records what it saw.
 
 ## Code Examples
 
 ```ts
-// SC1 — route read (shape; columns quoted from baseline.sql:5623 RETURNS TABLE)
-const { data, error } = await admin
-  .from("compute_jobs_admin")
-  .select("id, strategy_id, portfolio_id, kind, status, attempts, max_attempts, next_attempt_at, claimed_at, claimed_by, last_error, error_kind, idempotency_key, exchange, trade_count, created_at, updated_at, metadata, strategy_name, portfolio_name, user_email")
-  .order("created_at", { ascending: false })
-  .range(p_offset, p_offset + p_limit - 1);   // + .eq("status"|"kind"|"exchange") only when present
+// SC4 — widen the resolve-stage embed (fetch-and-build-payload.ts resolveFactsheetInputs). Keys verbatim from BASIS_KPI_MAP.
+strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis, computation_status,
+                     cumulative_return, volatility, max_drawdown, cagr, sharpe, sortino, calmar )
 ```
 ```ts
-// SC6 — calendar trailing window (shape)
-const trailing = (days: number): number | null => {
-  const cutoff = offsetDays(days);                 // compute.ts helper
-  return new Date(dates[0]) > cutoff ? null : compoundFrom(cutoff);
-};
+// SC3 — honour 169.2's contract (shape; names verbatim from origin/feat/169.2 benchmark-source.ts)
+const read = await readBenchmarkPrices(supabase, "BTC", { from, to });
+const merged = read.ok ? mergeWithFixture({ prices: read.prices, dropped: read.dropped }, BTC_DAILY) : null;
+// trim merged.prices to [from, to]; through = last trimmed date; carry merged.dropped;
+// BTC returns = pricesToDailyReturns(trimmed, merged.dropped), then aligned BY DATE to the strategy dates.
+```
+```ts
+// R1 — the one conversion (RiskAttribution), unsigned per the formatPercent contract
+formatPercent(d.marginal_risk_pct == null ? null : d.marginal_risk_pct / 100, 1, { signed: false })
+```
+```ts
+// R2 — sign from the ROUNDED value (shape; name and precision to be confirmed, see R2)
+const rounded = Number(n.toFixed(2));
+const sign = rounded > 0 ? "+" : rounded < 0 ? "−" : "";
 ```
 
-## State of the Art
+## State of the Art (what changed on main since the plans)
 
-| Old Approach | Current Approach | When Changed | Impact |
-|--------------|------------------|--------------|--------|
-| Bundled Yahoo fixtures for comparators | DB-fed BTC + dated coverage | This phase | The BTC column moves on every factsheet |
-| Client `compute()` headline for single-key | Persisted scalars everywhere | This phase (composites since Phase 90) | The factsheet matches discovery |
+| Old premise in the plans | At HEAD | When | Impact |
+|---|---|---|---|
+| cache key v6, two parts | `["factsheet-v2-payload-v7", id, computedAt]` | 167.2.1 (#866), 166.2 (#874) | 169-02 bumps to v8; 169-08's reconciliation is moot |
+| dated NEUTER-D records quote v6 | they quote `vN` | 166.2 | "exactly N files hold v6" criteria are void |
+| 166.1 may merge after 169 | 166.1 (#872) and 166.2 (#874) merged; `compute.ts` imports `@/lib/return-stats` | 2026-09-26/27 | 169-06 step 0b detection is already true |
+| "167.1.2 PR C" is one PR | C1 (02,04), C2 (10,05,11,12,13), C3 (06,07,14), C4 (09,15), then 08 | founder, 2026-09-27 | only C3 gates 169-05 |
+| 169.2 reader returns `{ ok, prices, through }` | also `dropped`; returns only via `pricesToDailyReturns` | 169.2 review rounds (branch) | 169-02/03 carry `dropped` |
+| `src/app/factsheet/[id]/v2/types.ts` | does not exist; `src/lib/factsheet/types.ts` | — | cite the real file |
+
+## Runtime State Inventory
+
+Not a rename/refactor phase. One runtime-state item exists and is handled by the key bump: **cached factsheet payloads** in Next's `unstable_cache` (1 h TTL) keyed `["factsheet-v2-payload-v7", id, computedAt]`. The bump to v8 makes pre-deploy entries unreachable. Stored data, live service config, OS registrations, secrets and build artifacts: none (verified by reading every file the plans edit; no plan writes a table, env var or cron).
 
 ## Assumptions Log
 
 | # | Claim | Section | Risk if Wrong |
 |---|-------|---------|---------------|
-| A1 | PROD PostgREST `max_rows` = 1000 (local config says 1000) | B | The truncation fix is still harmless (paging is correct at any cap) |
-| A2 | PROD (PG 17) raises the same ambiguity error as the local PG 16 repro | A | If PROD somehow resolves it, the 500 has another cause. Check Vercel logs for the `get_admin_compute_jobs RPC failed:` line before closing SC1 |
-| A3 | PROD `benchmark_prices` holds more than 1000 BTC rows | B | Scenario lag is smaller than stated; the fix is unchanged |
-| A4 | The Vercel plan allows one more cron (8 exist, one at `*/15`) | B | Fall back to adding the refresh call inside the existing daily `warm-analytics` cron |
-| A5 | Which mandate predicate is canonical (`mandate_archetype` vs `deriveMandateIsSet`) | F | Page self-consistency holds either way; cross-surface agreement needs a decision |
-| A6 | 167.1.2 ships `equityDailyReturns` and `equityHistoryState` as written in its plans 01 and 11 | G | The SC2 plan's inputs change; re-read the merged code before planning 08 |
-| A7 | BTC cum 13.80% equal to BTC vol 13.80% on /allocations is a coincidence of the flat series | B | If it is a field-mapping bug, the SC3 tests must catch it: pin cum ≠ vol on a fixture |
-| A8 | The QA's "1 in progress" was the Intro Requests summary (Radix unmounts inactive panels) | A | If a compute-jobs header exists elsewhere, SC1 needs one more reconciliation |
+| A1 | `_compute_portfolio_analytics` fails in PROD on its select of non-existent columns (inferred from baseline.sql; not measured) | R1 / OQ1 | If some other path writes `risk_decomposition`, the R1 browser check will show live data; the fix is unchanged |
+| A2 | The R2 precision policy (price ≥ $1 at 2 dp, below $1 to 4 significant digits; P&L 2 dp; zero-after-rounding unsigned and muted) | R2 | A design decision; DESIGN.md requires founder approval before any deviation |
+| A3 | A v8 bump is wanted (founder / orchestrator call on D-19's premise) | Finding K | Without it, the MTM / leverage re-derive shows BTC unavailable for up to 1 h after deploy |
+| A4 | 167.1.2-07's executed test will pin "(0.79y)" as its plan says (the plan is unexecuted) | 169-05 verdict | If it asserts only the threshold, the conflict disappears |
+| A5 | 169.2 merges with the reader contract as on `origin/feat/169.2` today | Finding M | A further review round could rename or reshape it; re-read at the sync |
 
-## Open Questions (all RESOLVED 2026-09-25; pointers inline)
+## Open Questions
 
-1. **(RESOLVED 2026-09-25: not dropped here; CONTEXT D-01, TODOS `[169-DEAD-ADMIN-JOBS-RPC]`) Drop the dead `get_admin_compute_jobs`?** After fix A it has no caller, and its body is broken. The fix-or-drop rule says drop. A DROP is a migration, which means auto-apply, 3 reviewers, `database.types.ts` and the census pins. Recommendation: do not bundle it into this phase. Record it for the next migration-carrying phase, with this research as the evidence. The orchestrator decides.
-2. **(RESOLVED 2026-09-25: 169 plan 07 owns it, after PR C; CONTEXT D-02, D-17) MetricsColumn ownership vs 167.1.2 plan 07.** Recommendation: 169 plan 07 owns the calendar-gated windows and the record-length formatter, and lands after PR C. Tell the 167.1.2 orchestrator that plan 07's `periodReturn` look-back change will be superseded.
-3. **(RESOLVED 2026-09-25: unified on `deriveMandateIsSet` in plan 10, PR 2, rather than the page-local recommendation below; CONTEXT D-03) Mandate predicate unification (A5).** Recommendation: page-local self-consistency now. Unify after 167.1.2 releases `queries.ts`.
-4. **(RESOLVED 2026-09-25: routed to Phase 170; CONTEXT D-04) Month-to-date on an ended record.** `compute()`'s `mtd` is the record's last month, not today's. With SC3's `through` and SC5's series-end line it is dated. A relabel ("last month of record") is copy, for Phase 170.
-5. **(RESOLVED 2026-09-25: D12 and D14 routed to Phase 170, D14 as amended; own-strategy recommendation fixed in plan 03 at the engine; CONTEXT D-05, D-06) Not covered by any SC:** QA D12 (venue label on CSV strategies), D14 (attribution to verify), recommending the viewer's own strategy. Route them via the ROADMAP if they are data-integrity; otherwise fix-or-drop in Phase 170.
+1. **The portfolio analytics select (`equity_curve`, `total_aum`) and `returns_series`-as-returns in `routers/portfolio.py`.** What we know: neither column exists on `strategy_analytics` in baseline.sql, and `returns_series` is written as a cumulative series. What's unclear: PROD behaviour (no DB access by rule). Recommendation: route to a new data-integrity phase via `/gsd-phase`, not into 169; confirm with one Sentry / log read of "Portfolio analytics computation failed".
+2. **v8 or not (D-19's premise).** Recommendation: v8, once, in 169-02 (Finding K); CONTEXT gets a dated D-19 amendment.
+3. **`standalone_vol` labelling.** It is a fraction (daily, if its input is daily returns; see OQ1) shown as "Standalone Vol" with a "+" sign. Recommendation: in the R1 plan, render it unsigned (a formatter argument, number truth) and route the "daily" qualifier to Phase 170 (copy), unless the founder wants both here. Do not annualise on the page (D-25: no page-local computation).
+4. **169-05 vs 167.1.2-07's test.** Options: (a) 169-05 edits 167.1.2's `MetricsColumn.periods-per-year.test.tsx` length assertion with a dated supersession line citing D-12; (b) ask the 167.1.2 orchestrator to make 167.1.2-07 assert only the threshold. Recommendation: (b) if C3 is not yet planned in detail, else (a); never both "unedited" and "changed".
+5. **A cached BTC-unavailable payload after a read blip (Pitfall 6).** Recommendation: accept and record it in 169-02's SUMMARY as a known, honest, TTL-bounded limit.
+6. **R2 precision policy (A2).** Recommendation: ask the founder with the concrete proposal before the R2 plan executes; add the confirmed row to DESIGN.md.
 
 ## Environment Availability
 
 | Dependency | Required By | Available | Version | Fallback |
-|------------|------------|-----------|---------|----------|
+|---|---|---|---|---|
 | node | vitest, tsx | ✓ | v25.8.1 | — |
-| node_modules in the 169 worktree | vitest | ✗ | — | `npm ci` in the worktree (resolution walks UP and the sibling checkout is not an ancestor) |
-| analytics-service `.venv` in the 169 worktree | pytest | ✗ | — | Create a venv in the worktree, or run pytest with the main checkout's `.venv` python from `analytics-service/` |
-| psql + postgresql@16 binaries (Homebrew) | optional local SQL repro | ✓ | 16.13 | — |
-| Remote DB access | — | Not to be used | — | The CLI is linked to PROD; never used |
+| `node_modules` in this worktree | vitest, tsc | ✗ | — | Executors follow each plan's worktree rule. This research did not symlink one (brief forbids it) and so ran no vitest; resolution walks UP and the main checkout is not an ancestor |
+| `analytics-service/.venv` in this worktree | pytest | ✗ | — | Not needed: no plan edits Python |
+| Remote DB | — | not to be used | — | baseline.sql only |
 
 ## Validation Architecture
 
+`workflow.nyquist_validation` is `true` in `.planning/config.json`.
+
 ### Test Framework
 | Property | Value |
-|----------|-------|
-| Framework | vitest ^4.1.2; pytest (analytics-service) |
+|---|---|
+| Framework | vitest ^4.1.2 (package.json) |
 | Config file | `vitest.config.ts` |
 | Quick run command | `npx vitest run <file>` |
-| Full suite command | `npm test` (and `cd analytics-service && pytest`) |
+| Full suite command | `npm test` plus `npx tsc --noEmit -p .` |
+
+"Fails today" below is reasoned from the source quoted above plus this session's node replications of the exact formatter bodies. No vitest run was possible here (no `node_modules`). Each executor records the real neuter → RED → restore.
 
 ### Phase Requirements → Test Map
-| Req | Behavior | Type | Command | File Exists? |
-|-----|----------|------|---------|-------------|
-| SC1 | Route reads the view, 500 only on a read error, admin gate precedes the read, no `claim_token` | unit | `npx vitest run src/app/api/admin/compute-jobs/route.test.ts` | ✅ (rewrite the rpc mocks) |
-| SC1 | Error renders the alert and NOT "No compute jobs found" | component | `npx vitest run src/components/admin/ComputeJobsTable.test.tsx` | ✅ extend |
-| SC2 | Risk tab shows rebuilding state / uses `equityDailyReturns`; α-β vs BTC | component | `npx vitest run src/app/(dashboard)/allocations/widgets/risk/risk.test.tsx` | ✅ extend + new RiskTabPanel test |
-| SC3 | Past `through`, the windows are null, not 0; the Scenario route returns the newest rows (paging) | unit | `npx vitest run src/lib/factsheet/align.test.ts src/app/api/benchmark/btc/route.test.ts` | ✅ extend |
-| SC3 | The refresh endpoint calls `get_benchmark_returns`, non-2xx on None/stale | pytest | `pytest tests/test_benchmark_refresh.py` | ❌ Wave 0 |
-| SC3 | Cron route: 401 without the secret, 500 on upstream failure | unit | `npx vitest run src/app/api/cron/refresh-benchmark/route.test.ts` | ❌ Wave 0 |
-| SC4 | Single-key factsheet CAGR/Sharpe equal the persisted values | unit | `npx vitest run src/lib/factsheet/composite-read-path.test.ts` (or a new test beside `basis-metrics.test.ts`) | partial |
-| SC5 | Chip date = series end when the series binds; one record-length phrase | component | `npx vitest run src/app/factsheet/[id]/v2/FactsheetView.chip-honesty.test.tsx` | ✅ extend |
-| SC6 | 3M/6M/1Y/3Y/5Y null on shorter records (calendar cutoff) | unit | `npx vitest run src/lib/factsheet/compute.metrics.test.ts` | ✅ extend |
-| SC7 | The count excludes revoked keys; a duplicate shows no balance | component | `npx vitest run src/components/exchanges/AllocatorExchangeManager.test.tsx` | ✅ extend |
-| SC8 | No "fit your mandate" without a mandate; series-end age shown | component | new `src/app/(dashboard)/recommendations/page.test.tsx` | ❌ Wave 0 |
+| Req | Behavior | Type | Automated Command | Fails today because | File Exists? |
+|---|---|---|---|---|---|
+| SC4 | single-key factsheet CAGR / Sharpe == persisted; persisted null → "—" | unit | `npx vitest run src/lib/factsheet/build-payload.headline-source.test.ts src/lib/factsheet/composite-read-path.test.ts` | `singleKeyBasisOpts` returns `{}`; the overlay is a no-op | ❌ new file / ✅ extend |
+| SC4 | cash leverage keeps persisted Sharpe / Sortino | component | `npx vitest run "src/app/factsheet/[id]/v2/basis-context.cash-leverage-repin.test.tsx"` | `if (basis === "cash_settlement" …) return lb.strategyMetrics;` | ❌ new |
+| SC3 | BTC windows null past `through`; win rate / vol over the covered span; read error → unavailable, never fixture; `dropped` not bridged | unit | `npx vitest run src/lib/factsheet/build-payload.benchmark-opt.test.ts src/lib/factsheet/comparator-block.coverage.test.ts src/lib/factsheet/align.test.ts src/lib/factsheet/fetch-and-build-payload.benchmark.test.ts` | `alignReturns` pushes 0 past the fixture; no DB read | ❌ new / ✅ extend |
+| SC3 | re-derive uses the carried prices; caption; chart gap | component | `npx vitest run "src/app/factsheet/[id]/v2/basis-context.benchmark-prices.test.tsx" "src/app/factsheet/[id]/v2/ComparatorPicker.test.tsx" "src/app/factsheet/[id]/v2/MandatePanels.comparator-coverage.test.tsx"` | re-derive aligns `BTC_DAILY`; "forward-filled" copy | ❌ / ✅ extend |
+| SC3 | cache key v8 | unit | `npx vitest run "src/app/factsheet-share/[token]/page.cache-isolation.test.tsx" "src/app/factsheet/[id]/v2/page.public-cache-key.test.tsx"` | pins say v7 | ✅ edit pins |
+| SC5 | chip date = series end when the series binds; "Computed <date>" line | component | `npx vitest run "src/app/factsheet/[id]/v2/FactsheetView.chip-honesty.test.tsx"` | `{formatIsoDate(computedAt)}` under "Track record" | ✅ extend |
+| SC5 | one record-length phrase, calendar years, "daily observations" | unit + component | `npx vitest run src/lib/factsheet/record-length.test.ts "src/app/factsheet/[id]/v2/MetricsColumn.record-length.test.tsx"` | `(m.n / 252).toFixed(2)`; "trading days" | ❌ new |
+| SC6 | 3M / 6M / 1Y / 3Y / 5Y null on a shorter record; 3Y / 5Y rows absent | unit + component | `npx vitest run src/lib/factsheet/compute.metrics.test.ts "src/app/factsheet/[id]/v2/MetricsColumn.record-length.test.tsx"` | `compoundFrom` never null; `periodReturn(3 * 252)` clamps | ✅ extend |
+| SC3 / D-21 | EoY never counts an uncovered day as 0 | component | `npx vitest run "src/app/factsheet/[id]/v2/EoyComparatorCoverage.test.tsx"` | `dailyReturns: benchReturns` zero-padded | ❌ new |
+| R3 / D-41 | composite read error → `read_error`, not cached; empty read unchanged | unit + page | `npx vitest run src/lib/factsheet/composite-read-path.test.ts src/lib/factsheet/fetch-and-build-payload.test.ts "src/app/factsheet/[id]/v2/page.composite-read-error.test.tsx" "src/app/(dashboard)/discovery/[slug]/[strategyId]/page.pending-fallback.test.tsx"` | `sparseErr` folded into `[]` → `composite_unbuildable` | ❌ new / ✅ extend |
+| R1 | producer-shape row (parsed from `src/__tests__/fixtures/portfolio-analytics/complete.json` through the adapter) renders 28.0% / 40.0%, unsigned; bar domain matches | component | `npx vitest run src/components/portfolio/RiskAttribution.test.tsx` | `formatPercent(28)` → `+2800.00%` (replicated) | ✅ rewrite fixtures + add case |
+| R2 | $0.42 price shows its precision; +0.37 P&L shows cents; a value rounding to 0 has no sign and no color | unit + component | `npx vitest run src/lib/dollar-validation.test.ts "src/app/(dashboard)/allocations/components/OpenPositionsTable.all-columns.test.tsx" "src/app/(dashboard)/allocations/components/HoldingsTable.test.tsx"` | `formatUsd(0.4213)` → `$0`, `formatPnl(-0.0001)` → `−$0` (replicated) | ✅ extend |
+| SC9 | neuter → RED → restore per fix; browser re-check bound to the deployed SHA | manual + CI | 169-06 | — | plan |
 
 ### Sampling Rate
-- **Per task commit:** the quick command for the touched test files.
-- **Per wave merge:** `npm test` plus `npx tsc --noEmit` plus lint. Run pytest when Python was touched.
-- **Phase gate:** the full suite green, each fix's neuter→RED→restore recorded in its SUMMARY, then the logged-in browser re-check of /admin, /allocations (Risk), three factsheets, /discovery, /recommendations, /my-strategies and /profile?tab=exchanges on the deployed commit.
+- **Per task commit:** the quick command for the touched files.
+- **Per wave merge:** `npm test`, `npx tsc --noEmit -p .`, `npm run lint` (which runs the planning-hygiene check), and the compute-once gate `npx vitest run src/lib/return-stats.single-source.test.ts`.
+- **Phase gate:** full suite green. 169-06 step 0 runs the D-22 parity table (`fetch-and-build-payload.test.ts`) and the SC1 live repro after the last sync. Then the browser re-check of a factsheet (single-key and composite), discovery detail, `/portfolios/[id]`, and `/allocations` Open Positions + Holdings.
 
 ### Wave 0 Gaps
-- [ ] `analytics-service/tests/test_benchmark_refresh.py`
-- [ ] `src/app/api/cron/refresh-benchmark/route.test.ts`
-- [ ] `src/app/(dashboard)/recommendations/page.test.tsx`
-- [ ] `src/lib/factsheet/benchmark-source.test.ts`
-
-## Proposed Plan Split
-
-| Plan | SC | Wave | Files (primary) | Depends on |
-|------|----|------|-----------------|------------|
-| 01 ADMINJOBS | 1 | 1 | `api/admin/compute-jobs/route.ts`(+test), `components/admin/ComputeJobsTable.tsx`(+test) | — |
-| 02 BENCHFEED | 3a | 1 | `api/benchmark/btc/route.ts`(+test), `lib/factsheet/benchmark-source.ts`(+test), `api/cron/refresh-benchmark/route.ts`(+test), `vercel.json`, `analytics-service/routers/internal.py`, `analytics-service/tests/test_benchmark_refresh.py` | — |
-| 03 RECS | 8 | 1 | `(dashboard)/recommendations/page.tsx`(+new test) | — |
-| 04 KPISOURCE | 4 | 1 | `lib/factsheet/composite-read-path.ts`, `api/og/factsheet/[id]/route.tsx`, `lib/factsheet/og-metrics.ts`(+tests) | — |
-| 05 BENCHTRUTH | 3b | 2 | `lib/factsheet/build-payload.ts`, `benchmarks.ts`, `align.ts`, `comparator-block.ts`, `types.ts`, `fetch-and-build-payload.ts`, `factsheet/[id]/v2/basis-context.tsx`, `MandatePanels.tsx` comparator sentence | 02, 04 |
-| 06 CHIP+WINDOWS-MATH | 5a, 6a | 2 | `factsheet/[id]/v2/FactsheetView.tsx` (FreshnessChip), `lib/factsheet/compute.ts` (+tests, snapshots) | — (disjoint from 05) |
-| 07 RECORDLENGTH+3Y/5Y | 5b, 6b | 3 | `factsheet/[id]/v2/MetricsColumn.tsx`, new `lib/factsheet/record-length.ts`, `MandatePanels.tsx` line 42 | 05, 06, **167.1.2 PR C** |
-| 08 RISKTAB | 2 | 3 | `(dashboard)/allocations/RiskTabPanel.tsx`, `widgets/risk/*`, `widgets/attribution/AlphaBetaDecomposition.tsx` (+tests) | 02, **167.1.2 PR C** |
-| 09 EXCHANGES | 7 | 3 | `components/exchanges/AllocatorExchangeManager.tsx`(+test) | **167.1.2 PR C** |
-
-Plans 05 and 07 both touch `MandatePanels.tsx`. Keep them in different waves (as above), or move the line-42 edit into 07 only.
-
-**PRs.** PR 1 = waves 1–2 (independent of 167.1.2). PR 2 = wave 3, cut after 167.1.2 PR C merges. The first task of each wave-3 plan must check that `HEAD` contains PR C's merge commit and fail loudly otherwise. This is the same device as 167.1.2's `D12_ORDER_OK`. **Migrations:** none.
+- [ ] `src/lib/factsheet/build-payload.headline-source.test.ts`, `build-payload.benchmark-opt.test.ts`, `comparator-block.coverage.test.ts`, `fetch-and-build-payload.benchmark.test.ts`, `record-length.test.ts`
+- [ ] `src/app/factsheet/[id]/v2/basis-context.cash-leverage-repin.test.tsx`, `basis-context.benchmark-prices.test.tsx`, `MetricsColumn.record-length.test.tsx`, `EoyComparatorCoverage.test.tsx`, `page.composite-read-error.test.tsx`, `MandatePanels.comparator-coverage.test.tsx`
+- No framework install needed.
 
 ## Security Domain
 
+`security_enforcement` is absent from config, so it is treated as enabled.
+
 | ASVS Category | Applies | Standard Control |
-|---------------|---------|-----------------|
+|---|---|---|
 | V2 Authentication | no | — |
 | V3 Session Management | no | — |
-| V4 Access Control | yes | SC1: `isAdminUser` must run BEFORE the service-role read (it already does, `route.ts:17-25`); keep `assertSameOrigin`; never project `claim_token`. Cron: `CRON_SECRET` Bearer with `safeCompare`; Python endpoint behind `verify_service_key` |
-| V5 Input Validation | yes | Clamp `limit`/`offset`; `status`/`kind`/`exchange` pass as `.eq` values (parameterised by PostgREST); the benchmark route still takes no params |
+| V4 Access Control | yes | The BTC read reuses the resolve stage's service-role handle for a public-SELECT market table; the outer request-scoped signature probe stays the auth gate; no visibility widening. The persisted scalars come from the same row the gate already admitted. |
+| V5 Input Validation | yes | `from` / `to` are derived from the strategy's own dates, never request params; formatters treat non-finite as "—" |
 | V6 Cryptography | no | — |
 
 | Pattern | STRIDE | Mitigation |
-|---------|--------|------------|
-| Service-role read reachable by a non-admin | Elevation | Gate first, then read; a test asserts 403 makes no DB call |
-| Cache-busting abuse on the public benchmark route | DoS | Existing `publicIpLimiter` is unchanged |
-| Recommendations extra read widened by params | Info disclosure | Keep the read bounded to the RPC's returned ids (existing pattern, `page.tsx:162-170`) |
+|---|---|---|
+| A viewer-dependent value entering the id-keyed cache | Information disclosure | Nothing added is viewer-dependent (market prices, row scalars); the CACHE KEY REALITY corollary holds |
+| A read outage pinned in the cache | Denial of service (availability) | D-41 throws for the composite series; the BTC blip is honest and TTL-bounded (Pitfall 6) |
+| A corrupt benchmark close bridged into a fabricated return | Tampering (integrity) | Carry `dropped`; returns only via `pricesToDailyReturns` |
+
+## Lineage (what the 2026-09-25 research said, re-judged at HEAD)
+
+- **Still holds (re-verified, quoted above):** B (the BTC fixture forward-filled flat), C (the single-key headline recomputed), D (chip date and record length), E (windows clamp), and the D-41 composite read-error premise. Pitfalls 1, 2, 3 (null cascade, now Pitfall 4), 4 (`max_rows`, now 169.2's) and 7 carry over.
+- **Moved with the 2026-09-26 split (D-37 / D-44):** A (admin compute jobs) → 169.3, shipped (#868); F (recommendations) → 169.3; G (Risk tab series) → 169.4; H (profile exchanges) → 169.3; the OG card → 169.4.1; the discovery-detail consolidation → 169.1-01; the zoom and convention work → 169.1.
+- **Obsolete:** the v6 cache-key premise and every "v6 survives in N files" check (v7 three-part since 166.2 / 167.2.1; zero v6 strings); "167.1.2 PR C" as one gate (split into C1 to C4; only C3 matters here); the 169-08 rebase (entry sync done, 167.2.1 already in); the 166.1 merge-order reconciliation arm (166.1 and 166.2 are on main); the old research's "`/internal` endpoint" BENCHFEED design (169.2's, already built differently); `src/app/factsheet/[id]/v2/types.ts` (never existed).
+- **New in this regeneration:** Finding M (`dropped`), Finding K (v8), R1, R2, Open Question 1 (the portfolio router select), Pitfalls 3, 6 and 8.
 
 ## Sources
 
-### Primary (HIGH confidence, read this session)
-- `supabase/schema/baseline.sql` (the function `:5623-5669`, the view `:10579-10613`, `compute_jobs`, `benchmark_prices`, `strategy_analytics`, `allocator_preferences`)
-- `src/app/api/admin/compute-jobs/route.ts`, `src/components/admin/ComputeJobsTable.tsx`, `AdminTabs.tsx`, `src/components/ui/Tabs.tsx`
-- `src/lib/factsheet/{benchmarks,align,build-payload,comparator-block,compute,basis-metrics,fetch-and-build-payload,og-metrics}.ts`, `src/lib/factsheet/data/*.json` (coverage measured)
-- `src/app/api/benchmark/btc/route.ts`, `supabase/config.toml`, `analytics-service/services/benchmark.py`, `services/metrics.py:1590-1720`
-- `src/app/factsheet/[id]/v2/{FactsheetView,MetricsColumn,MandatePanels}.tsx`
-- `src/app/(dashboard)/recommendations/page.tsx`, `src/lib/queries.ts` (payload type, `deriveMandateIsSet`, per-key blend)
-- `src/app/(dashboard)/allocations/RiskTabPanel.tsx`, `widgets/risk/*`, `widgets/attribution/AlphaBetaDecomposition.tsx`, `widgets/lib/{composite-returns,widget-data}.ts`
-- `src/components/exchanges/AllocatorExchangeManager.tsx`
-- The 167.1.2 CONTEXT (D-02, D-09, D-11) and plans 01, 04, 07, 09 and 11 `files_modified`/must-haves (167.1.2 branch at `d3649d486`)
-- A local PostgreSQL 16.13 reproduction of the ambiguity error (output pasted above)
+### Primary (HIGH, read this session)
+- `src/lib/factsheet/{align,comparator-block,compute,build-payload,basis-metrics,composite-read-path,fetch-and-build-payload,types}.ts`, `src/lib/factsheet/data/*.json` (coverage measured)
+- `src/app/factsheet/[id]/v2/{page,FactsheetView,MetricsColumn,MandatePanels,basis-context,TimeSeriesChart}.tsx`
+- `src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx`, `src/lib/queries.ts` (`PUBLIC_ANALYTICS_COLUMNS`), `src/lib/closed-sets.ts` (`isRankableAnalyticsRow`)
+- `src/lib/return-stats.single-source.test.ts` (header), `src/__tests__/format-percent-contract.test.ts` (header)
+- `origin/feat/169.2:src/lib/factsheet/benchmark-source.ts`, and `git diff origin/main origin/feat/169.2 --stat`
+- `src/components/portfolio/RiskAttribution.tsx` (+ test), `src/lib/utils.ts` (`formatPercent`), `src/lib/types.ts` (`RiskDecompositionRow`), `src/lib/portfolio-insights.ts`, `src/lib/portfolio-analytics-adapter.ts`, `analytics-service/services/portfolio_risk.py`, `analytics-service/routers/portfolio.py`, `analytics-service/services/metrics.py`
+- `src/app/(dashboard)/allocations/components/{OpenPositionsTable,HoldingsTable,KpiStrip,ScenarioComposer}.tsx`, `src/lib/dollar-validation.ts` (+ test header), `DESIGN.md` Numbers Contract
+- `supabase/schema/baseline.sql` (`strategy_analytics` column list)
+- 167.1.2 plans 01 to 15 `files_modified` and plan 07's must-haves (sibling worktree, read-only); the 169.4 plans' `files_modified`
+- `git show --stat b10cea659` (#874), `git log origin/main`
 
 ### Secondary / Tertiary
-- None. No external documentation was needed. Every question was an in-repo root-cause trace, so the research-plan seam was not used.
+- None. Every question was an in-repo trace, so the research-plan seam and external docs were not needed.
 
 ## Metadata
 
 **Confidence breakdown:**
-- Root causes: HIGH. Each is quoted from source and SC1 was reproduced.
-- Fix design: HIGH for SC1, SC3, SC4, SC6 and SC8; MEDIUM for SC2 and SC7 (they depend on 167.1.2's unmerged code).
-- Sequencing: MEDIUM. It depends on when 167.1.2 PR C lands and on Open Question 2.
+- Root causes: HIGH (each quoted at HEAD).
+- Plan verdicts: HIGH for 01, 04, 07, 08; MEDIUM for 02 / 03 (they depend on 169.2's final contract) and 05 (depends on 167.1.2-07 as executed).
+- Routed items: HIGH for the unit and formatter defects; LOW for Open Question 1's PROD behaviour (inferred).
 
-**Research date:** 2026-09-25
-**Valid until:** 2026-10-09, or until 167.1.2 PR C merges, whichever is first (re-read the merged code before planning plans 07–09)
+**Research date:** 2026-09-27
+**Valid until:** the next merge to `origin/main` of 169.2 (#879) or 167.1.2 C3, whichever is first. Re-read the reader contract and `MetricsColumn.tsx` at that sync.

@@ -2,7 +2,7 @@
 
 **Gathered:** 2026-09-25 (no discuss step; decisions below were taken by the planning orchestrator on
 the research's open questions, and by the planner where the research left the call to the plan)
-**Status:** Ready for execution (revised 2026-09-25 after the plan-checker pass: B1, B2, W1 to W7; see D-06, D-13 and D-17 to D-19; revised again 2026-09-25 after the round-3 re-check: B1, B2, W1 to W3; see D-20 to D-24; revised a third time 2026-09-25 on the orchestrator's decision that D-23 must name the plan that consolidates the discovery page, and on the founder principle "calculate Sharpe once; every page reads it": see the D-13 and D-23 amendments, D-25 and D-26; revised a fourth time 2026-09-26 on the founder's zoom decision of 2026-09-25: see D-27 and the D-13 amendment of that date; revised a fifth time 2026-09-26 after the final plan-check (W1 to W3, I1, I3) and the founder's decision to fix the compounding limit: see the D-27, D-13, D-19 and D-25 amendments of that date and the new plan 14b; split 2026-09-26 into Phases 169, 169.1, 169.2, 169.3 and 169.4, see D-37)
+**Status:** Replanned 2026-09-27 against current main (D-46 to D-53). Earlier status: Ready for execution (revised 2026-09-25 after the plan-checker pass: B1, B2, W1 to W7; see D-06, D-13 and D-17 to D-19; revised again 2026-09-25 after the round-3 re-check: B1, B2, W1 to W3; see D-20 to D-24; revised a third time 2026-09-25 on the orchestrator's decision that D-23 must name the plan that consolidates the discovery page, and on the founder principle "calculate Sharpe once; every page reads it": see the D-13 and D-23 amendments, D-25 and D-26; revised a fourth time 2026-09-26 on the founder's zoom decision of 2026-09-25: see D-27 and the D-13 amendment of that date; revised a fifth time 2026-09-26 after the final plan-check (W1 to W3, I1, I3) and the founder's decision to fix the compounding limit: see the D-27, D-13, D-19 and D-25 amendments of that date and the new plan 14b; split 2026-09-26 into Phases 169, 169.1, 169.2, 169.3 and 169.4, see D-37)
 **Sources:** `.planning/ROADMAP.md` `### Phase 169` (9 success criteria, founder decision 2026-09-25),
 `169-RESEARCH.md` (commit `2d01a2244`), CLAUDE.md, DESIGN.md.
 
@@ -1104,6 +1104,48 @@ call the research left to the plan.
   pass-through neuter pins the route wiring; plan 169.4.1-02's step 0 (the 166.1 check) is lineage, because
   it cannot tell 166.1 from 166.2.
 - **Reversibility:** reversible (gate expression and test plan only).
+### D-46: The 2026-09-27 replan re-derives the plan set against current main; the split stands (orchestrator, autonomous, 2026-09-27)
+- **Why.** The plans were written against a main that lacked 166.2 (#874), 166.1 (#872), 169.3 plan 01 (#868) and 167.1.2 PR A/B (#859, #870). The phase branch merged `origin/main` on 2026-09-27 (ledger conflicts kept both sides) and `169-RESEARCH.md` was regenerated against that tree (verify context-drift had flagged it stale).
+- **Decision.** Replan Phase 169 FACTSHEETTRUTH through `/gsd-plan-phase 169`: keep a plan whose anchors still resolve, rewrite one whose anchors moved, drop one with no job left. D-37's split (169.1, 169.2, 169.3, 169.4) and D-44's 169.4.1 stand; only Phase 169's own plans are replanned here. The sibling phases carry the same kind of stale anchor (a v7 key they assume will be bumped by 169, "167.1.2 PR C" gates, a 166.2-not-merged gate) and are NOT re-derived in this run: each needs its own re-derive pass before execution.
+- **UI gate.** The plan-phase UI safety gate blocks a frontend phase with no UI-SPEC. This phase adds no component, layout or visual direction: it changes which number a surface reads and how a number is formatted, inside DESIGN.md's existing number rules; layout and copy are Phases 170 and 170.1. The gate's own `--skip-ui` route is taken (precedent: Phase 164.9's planning).
+- **Reversibility:** reversible (planning only).
+
+### D-47: 169-08 (the wave-4 rebase) is dropped; syncs are orchestrator merges of `origin/main` (orchestrator, 2026-09-27; supersedes D-42's rebase plan, RESEARCH Findings K and L)
+- **Why.** Measured at HEAD: the branch already contains `origin/main` with 167.2.1, and the factsheet cache key is already the three-part `factsheet-v2-payload-v7` key (166.2). 169-08 has nothing left to reconcile. A rebase would also drop the branch's merge commits.
+- **Decision.** No rebase plan. The two remaining upstream inputs (169.2 #879 for 169-02/169-03; 167.1.2 C3 for 169-05) are brought in by the orchestrator with `git merge origin/main` once each has merged, and each dependent plan's entry gate proves its input is on `origin/main` AND in HEAD before any code commit.
+- **Reversibility:** reversible.
+
+### D-48: The factsheet cache key moves v7 -> v8 once, in 169-02 (orchestrator, 2026-09-27; amends D-19, whose v6 -> v7 premise is obsolete)
+- **Why.** 166.2 already moved the key to v7 (`src/app/factsheet/[id]/v2/page.tsx`, `page.public-cache-key.test.tsx`); no `v6` string remains. 169-02 and 169-03 change the payload's comparator shape (coverage-dated BTC, the `dropped` list, payload-carried prices); a cached v7 payload read by v8 code would render the old flat-fixture comparator for up to the TTL.
+- **Decision.** One bump, v7 -> v8, in 169-02, with the cache-key test moved in the same commit. No other 169 plan bumps it. 169.1's plans reason from a v7 key and must re-read the key at HEAD in their own re-derive (D-46).
+- **Reversibility:** reversible.
+
+### D-49: Risk attribution's double percent (routed 2026-09-26) is plan RISKUNIT in this phase (orchestrator, 2026-09-27)
+- **Routing.** The founder routed it to Phase 169 ("Route as proposed"). It is a unit defect on a number surface, file-disjoint from every other 169 plan and not on the Allocations Risk tab (169.4's surface), so it is a standalone wave-1 plan here rather than a re-route; the one-topic tension with D-37 is accepted because it is one small, separately reviewable plan.
+- **Source of truth.** The producer (`analytics-service/routers/portfolio.py`) sends `marginal_risk_pct` and `weight_pct` in percent; every consumer but `RiskAttribution` agrees. The fix converts once at that one consumer, documents the unit on `RiskDecompositionRow`, formats unsigned (weights and shares are an unsigned domain), aligns the chart domain and tooltip, and rebuilds `RiskAttribution.test.tsx` from the producer's real shape (`src/__tests__/fixtures/portfolio-analytics/complete.json`). `standalone_vol` is not double-scaled and is left alone; its missing period label is copy (Phase 170.1).
+- **Reversibility:** reversible.
+
+### D-50: Sub-dollar prices and signed zero on /allocations Open Positions (routed 2026-09-27) is plan MONEYFMT in this phase; the precision rule (orchestrator, 2026-09-27)
+- **Routing.** Founder UAT 2026-09-27 booked it into Phase 169. It is not 167.1.2's holdings total. Standalone wave-1 plan, file-disjoint from the other 169 plans.
+- **Source of truth.** One price formatter and one signed-money formatter beside `formatUsd` in `src/lib/dollar-validation.ts` (the declared single money module); `OpenPositionsTable`'s private copies and `HoldingsTable`'s `formatPnl` are replaced by them.
+- **Precision rule (DESIGN.md has no currency row, so it is decided here):** a price of $1 or more shows 2 decimals; a price under $1 shows 4 significant digits; P&L shows 2 decimals; the sign is taken from the ROUNDED value, so a value that rounds to zero shows no sign and the neutral colour. A null stays the em-dash.
+- **Reversibility:** reversible.
+
+### D-51: 169-05 owns the stated record length, and may edit 167.1.2-07's length assertion (orchestrator, 2026-09-27; RESEARCH Open Question 4)
+- **Conflict.** 167.1.2-07 (in PR C3) plans a test pinning an observation-clock length ("(0.79y)"); D-12 states record length one way, in calendar years. 169-05 said both "only the stated length changes" and "167.1.2's tests stay unedited"; both cannot hold.
+- **Decision.** D-12 wins (the later, phase-owning decision on record length). 169-05 runs after C3 is on `origin/main` and in HEAD, and edits only that length assertion in 167.1.2's test, with a dated comment naming D-12 and D-51; 167.1.2's threshold assertion is kept unedited.
+- **Reversibility:** reversible.
+
+### D-52: A benchmark read blip may leave an honest "BTC prices unavailable" payload cached for up to the TTL (orchestrator, 2026-09-27; RESEARCH Pitfall 6 / Open Question 5)
+- **Why.** Unlike D-41 (a composite outage cached as a false empty record), the cached state here is truthful and bounded; throwing would replace the whole factsheet with the placeholder for that request, which is worse.
+- **Decision.** Accept and record; 169-02's test pins that the unavailable form is dated and never renders as +0.00%.
+- **Reversibility:** reversible.
+
+### D-53: The portfolio analytics compute defect found by the research is routed out, not planned here (orchestrator, 2026-09-27; RESEARCH Open Question 1)
+- **Finding (inferred from source, not measured against PROD).** `_compute_portfolio_analytics` selects `strategy_analytics` columns that `supabase/schema/baseline.sql` does not carry, and reads `returns_series` as daily returns while `metrics.py` writes it cumulative, so `/portfolios/[id]` risk decomposition may never refresh.
+- **Decision.** Out of 169's scope (a Python compute path, not a page number). Booked in `TODOS.md` as `[169-PORTFOLIO-ANALYTICS-COLUMNS]` for the founder to route to a phase; RISKUNIT's browser item records what it sees without treating an empty panel as evidence against the unit fix.
+- **Reversibility:** reversible.
+
 ### Claude's Discretion
 - Test file names, helper names not fixed above, and the exact caption wording within DESIGN.md's
   em-dash and dated-document rules.
@@ -1121,6 +1163,9 @@ call the research left to the plan.
 
 <deferred>
 ## Deferred Ideas
+
+- The `/portfolios/[id]` portfolio analytics compute reading columns the schema lacks: `TODOS.md` `[169-PORTFOLIO-ANALYTICS-COLUMNS]`, owner the founder (routing) (D-53).
+- The `standalone_vol` period label: Phase 170.1 COPY (D-49).
 
 - Dropping `get_admin_compute_jobs`: `TODOS.md` `[169-DEAD-ADMIN-JOBS-RPC]` (D-01).
 - A `periodsPerYear` on the Scenario payload, so a selected range there shows figures instead of
