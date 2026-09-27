@@ -53,7 +53,7 @@ New test files are created by the plan that needs them (listed in `169-RESEARCH.
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| Each changed page reads right in the logged-in account after deploy | SC9 | needs the deployed SHA and the real account | the phase's final plan: factsheet (single-key and composite), `/portfolios/[id]` risk attribution, `/allocations` Open Positions and Holdings; 320px checks excluded (founder does those) |
+| Each changed page reads right in the logged-in account after deploy | SC9 | needs the deployed SHA and the real account | the phase's final plan: factsheet (single-key and composite), `/portfolios/[id]` risk attribution, `/allocations` Open Positions and Holdings; width checks at 390px (iPhone 12) and desktop 200% zoom, run by the orchestrator; no 320px check (founder rule 2026-09-27) |
 
 ---
 
