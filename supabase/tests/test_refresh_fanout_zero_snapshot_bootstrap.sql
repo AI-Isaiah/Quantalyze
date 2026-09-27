@@ -55,25 +55,28 @@
 -- creates, and nothing that can RAISE precedes arm Z1. On migration 075's body
 -- the full file must fail with arm Z1 first; with Z1's marked block deleted it
 -- must fail with arm Z2. Keep Z1 and Z2 the FIRST TWO assertions in the file.
--- On 075's body R, N3c, N4, N4d, N6, N7, C, S, X1, X3 and G can also
+-- On 075's body R, N3c, N4, N4d, N6, N7, MX, C, S, X1, X3 and G can also
 -- fail, so none of them may move ahead of Z1 or between Z1 and Z2. Every
 -- later group seeds its own fixtures and makes its own call(s) after Z2,
 -- never before.
 --
 -- ⭐ ORDER IS LOAD-BEARING. Each arm must be the FIRST failure under its own
 -- mutation (scripts/mutation-runner). File order, fixed:
---   Z1, Z2, N1, R, N2, N3, N3b, N3c, N4, N4d, N5, N6, E, N7, B, F, C, S, X1,
---   X2, X3, G.
--- MATCHED PAIRS: every negative-control key (N1, R, N2, N3, N3b, N3c, N6,
--- N7) differs from a qualifying key in exactly ONE attribute, the one its
--- arm's mutation removes; everything else is active, not revoked, sync_status
--- idle, not disconnected, not Deribit and unlinked. A revoked key seeded
--- inactive, or a disconnected key also revoked, would leave its mutation
--- inert.
+--   Z1, Z2, N1, R, N2, N3, N3b, N3c, N4, N4d, N5, N6, E, N7, MX, M1, M2, M3,
+--   M4, M5, M6, B, F, C, S, X1, X2, X3, G.
+-- MATCHED PAIRS: every negative-control key (N1, R, N2, N3, N3b, N3c, N6, N7
+-- and the mixed book's M1 to M6 keys) differs from a qualifying key in
+-- exactly ONE attribute, the one its arm's mutation removes; everything else
+-- is active, not revoked, sync_status idle, not disconnected, not Deribit and
+-- unlinked. A revoked key seeded inactive, or a disconnected key also
+-- revoked, would leave its mutation inert.
 -- Each mutation names ONE copy of the predicate by its table alias (book
 -- selection bq*, per-key selection rk*, refresh loop ak*/aes, bootstrapped
 -- subquery bk*), so an edit of one copy is never inert because another copy
--- still filters the key.
+-- still filters the key. The MIXED BOOK (group MX, review SFH-07) holds a
+-- qualifying key beside one key of each excluded kind, so the book selection
+-- takes it and each per-key (rk*) copy is the ONLY filter for its key: arms
+-- M1 to M6 each drop ONE rk* term, and MX drops ONE bk* term.
 -- Interference walk, each mutation against every EARLIER arm's fixture:
 --   Z1   none earlier; the first assertion.
 --   Z2   Z1: the reconstruct row still exists with a wrong key, so Z's book is
@@ -100,7 +103,15 @@
 --   E    Z to N6: no earlier linked key on a snapshot book; N5's key is
 --        unlinked.
 --   N7   Z to E: every earlier key's sync_status is idle or revoked.
---   B    Z to N7: every earlier zero-snapshot book is bootstrapped or holds no
+--   MX   Z to N7: N1's book holds only its disconnected key, which the
+--        refresh loop's ak copy still filters; no other earlier book holds a
+--        disconnected key.
+--   M1-M6  Z to MX: every earlier book whose key M1 to M6 would admit (N1,
+--        N2, N3, N3b, N6, N7) holds ONLY that key, so the book selection
+--        (bq*, unedited) never takes it and the rk* copy is never reached; MX
+--        asserts only the qualifying key, and each of M1 to M6 only its own
+--        key.
+--   B    Z to M6: every earlier zero-snapshot book is bootstrapped or holds no
 --        eligible unlinked key, so dropping the conjunct adds no refresh there.
 --   F    Z to B: the only earlier failed_final row is N4's, and N4's key
 --        also holds its pending retry, so its book is bootstrapped under
@@ -672,6 +683,134 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (N7): a sign_in_failed key and an error key, each alone on a zero-snapshot book, got % reconstruct and % refresh job(s) together, expected 0 and 2. A reconstruct against a refused credential fails permanently and spends a cap slot every day; the refresh population is 075''s.', v_rec, v_ref;
   END IF;
 END $grpn7$;
+
+-- ==========================================================================
+-- GROUP MX — the MIXED book (review SFH-07): ONE zero-snapshot book holding a
+-- qualifying key q beside one key of each excluded kind: disconnected (d),
+-- revoked (r), linked through strategies.api_key_id (l1), linked through
+-- strategy_keys (l2), Deribit (x), sign_in_failed (s) and error (e). The
+-- book selection takes this book through q, so for every excluded key the
+-- per-key (rk*) copy is the ONLY filter, and one regressed copy bites.
+-- ==========================================================================
+DO $grpmx$
+DECLARE
+  v_run  text := replace(gen_random_uuid()::text, '-', '');
+  v_base timestamptz := now() + INTERVAL '100 years' + INTERVAL '12 days';
+  uid    uuid := gen_random_uuid();
+  k_q    uuid := gen_random_uuid();
+  k_d    uuid := gen_random_uuid();
+  k_r    uuid := gen_random_uuid();
+  k_l1   uuid := gen_random_uuid();
+  k_l2   uuid := gen_random_uuid();
+  k_x    uuid := gen_random_uuid();
+  k_s    uuid := gen_random_uuid();
+  k_e    uuid := gen_random_uuid();
+  s_l2   uuid;
+  v_ref  int;
+  v_rec  int;
+  v_n    int;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000', 'test-fanout-boot-mx-' || v_run || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email)
+  VALUES (uid, 'fanout boot MX', 'test-fanout-boot-mx-' || v_run || '@quantalyze.test')
+  ON CONFLICT (id) DO NOTHING;
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, created_at)
+  VALUES (k_q,  uid, 'okx',     'fanout boot MX q',  'enc', true, v_base + INTERVAL '8 minutes'),
+         (k_l1, uid, 'okx',     'fanout boot MX l1', 'enc', true, v_base + INTERVAL '5 minutes'),
+         (k_l2, uid, 'okx',     'fanout boot MX l2', 'enc', true, v_base + INTERVAL '4 minutes'),
+         (k_x,  uid, 'deribit', 'fanout boot MX x',  'enc', true, v_base + INTERVAL '3 minutes');
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, disconnected_at, created_at)
+  VALUES (k_d, uid, 'okx', 'fanout boot MX d', 'enc', true, now(), v_base + INTERVAL '7 minutes');
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, sync_status, created_at)
+  VALUES (k_r, uid, 'okx', 'fanout boot MX r', 'enc', true, 'revoked',        v_base + INTERVAL '6 minutes'),
+         (k_s, uid, 'okx', 'fanout boot MX s', 'enc', true, 'sign_in_failed', v_base + INTERVAL '2 minutes'),
+         (k_e, uid, 'okx', 'fanout boot MX e', 'enc', true, 'error',          v_base + INTERVAL '1 minute');
+  INSERT INTO strategies (user_id, api_key_id, name, status)
+  VALUES (uid, k_l1, 'fanout boot MX l1', 'draft');
+  INSERT INTO strategies (user_id, api_key_id, name, status)
+  VALUES (uid, NULL, 'fanout boot MX l2', 'draft')
+  RETURNING id INTO s_l2;
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
+  VALUES (s_l2, k_l2, uid, CURRENT_DATE - 30, 0);
+
+  PERFORM public.enqueue_refresh_allocator_equity_for_all();
+
+  -- ----- MX: the qualifying key of a mixed book gets both jobs ------------
+  -- RED-UNDER: drop the disconnected conjunct from the bootstrapped (bk)
+  --            copy ONLY in migration 20260927120000. The disconnected key
+  --            then counts as qualifying with no reconstruct, the book is never
+  --            bootstrapped, and the qualifying key's refresh is withheld.
+  -- RED-UNDER-M: {"arm": "MX", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "bk.disconnected_at IS NULL", "replace": "TRUE", "occurrences": 1}]}
+  SELECT count(*) FILTER (WHERE kind = 'refresh_allocator_equity_daily'),
+         count(*) FILTER (WHERE kind = 'reconstruct_allocator_history')
+    INTO v_ref, v_rec
+    FROM compute_jobs
+   WHERE api_key_id = k_q;
+  IF v_ref <> 1 OR v_rec <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (MX): the qualifying key of a zero-snapshot book that also holds one key of each excluded kind got % refresh and % reconstruct job(s), expected 1 and 1. An excluded key is counted as qualifying in the bootstrapped copy, so the book is never refreshed.', v_ref, v_rec;
+  END IF;
+
+  -- ----- M1: the per-key copy alone filters a disconnected key ------------
+  -- RED-UNDER: drop the disconnected conjunct from the per-key (rk) copy ONLY
+  --            in migration 20260927120000.
+  -- RED-UNDER-M: {"arm": "M1", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "rk.disconnected_at IS NULL", "replace": "TRUE", "occurrences": 1}]}
+  SELECT count(*) INTO v_n FROM compute_jobs
+   WHERE api_key_id = k_d AND kind = 'reconstruct_allocator_history';
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (M1): a disconnected key on a mixed zero-snapshot book got % reconstruct job(s), expected 0. The per-key selection lost its disconnected filter.', v_n;
+  END IF;
+
+  -- ----- M2: the per-key copy alone filters a revoked key -----------------
+  -- RED-UNDER: drop the revoked conjunct from the per-key (rk) copy ONLY in
+  --            migration 20260927120000.
+  -- RED-UNDER-M: {"arm": "M2", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "rk.sync_status IS DISTINCT FROM 'revoked'", "replace": "TRUE", "occurrences": 1}]}
+  SELECT count(*) INTO v_n FROM compute_jobs
+   WHERE api_key_id = k_r AND kind = 'reconstruct_allocator_history';
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (M2): a revoked key on a mixed zero-snapshot book got % reconstruct job(s), expected 0. The per-key selection lost its revoked filter.', v_n;
+  END IF;
+
+  -- ----- M3: the per-key copy alone filters a directly linked key ---------
+  -- RED-UNDER: drop the strategies.api_key_id half of the discriminator from
+  --            the per-key (rk) copy ONLY in migration 20260927120000.
+  -- RED-UNDER-M: {"arm": "M3", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "WHERE rks.api_key_id = rk.id", "replace": "WHERE FALSE AND rks.api_key_id = rk.id", "occurrences": 1}]}
+  SELECT count(*) INTO v_n FROM compute_jobs
+   WHERE api_key_id = k_l1 AND kind = 'reconstruct_allocator_history';
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (M3): a key linked through strategies.api_key_id, on a mixed zero-snapshot book, got % reconstruct job(s), expected 0. Manager data would be written into the allocator equity store.', v_n;
+  END IF;
+
+  -- ----- M4: the per-key copy alone filters a strategy_keys-linked key ----
+  -- RED-UNDER: drop the strategy_keys half of the discriminator from the
+  --            per-key (rk) copy ONLY in migration 20260927120000.
+  -- RED-UNDER-M: {"arm": "M4", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "WHERE rksk.api_key_id = rk.id", "replace": "WHERE FALSE AND rksk.api_key_id = rk.id", "occurrences": 1}]}
+  SELECT count(*) INTO v_n FROM compute_jobs
+   WHERE api_key_id = k_l2 AND kind = 'reconstruct_allocator_history';
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (M4): a key linked only through strategy_keys, on a mixed zero-snapshot book, got % reconstruct job(s), expected 0. A composite member key would be written into the allocator equity store.', v_n;
+  END IF;
+
+  -- ----- M5: the per-key copy alone filters a Deribit key -----------------
+  -- RED-UNDER: drop the Deribit conjunct from the per-key (rk) copy ONLY in
+  --            migration 20260927120000.
+  -- RED-UNDER-M: {"arm": "M5", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "lower(rk.exchange) <> 'deribit'", "replace": "TRUE", "occurrences": 1}]}
+  SELECT count(*) INTO v_n FROM compute_jobs
+   WHERE api_key_id = k_x AND kind = 'reconstruct_allocator_history';
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (M5): a Deribit key on a mixed zero-snapshot book got % reconstruct job(s), expected 0. The worker refuses Deribit reconstruction permanently.', v_n;
+  END IF;
+
+  -- ----- M6: the per-key copy alone filters refused credentials -----------
+  -- RED-UNDER: drop the sign_in_failed/error conjunct from the per-key (rk)
+  --            copy ONLY in migration 20260927120000.
+  -- RED-UNDER-M: {"arm": "M6", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "coalesce(rk.sync_status, '') NOT IN ('sign_in_failed', 'error')", "replace": "TRUE", "occurrences": 1}]}
+  SELECT count(*) INTO v_n FROM compute_jobs
+   WHERE api_key_id IN (k_s, k_e) AND kind = 'reconstruct_allocator_history';
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (M6): a sign_in_failed key and an error key on a mixed zero-snapshot book got % reconstruct job(s) together, expected 0. A reconstruct against a refused credential fails permanently.', v_n;
+  END IF;
+END $grpmx$;
 
 -- ==========================================================================
 -- GROUP B — a zero-snapshot book BEYOND the cap gets no job of either kind in
