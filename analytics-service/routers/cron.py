@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from services import benchmark as benchmark_service
 from services.benchmark import get_benchmark_returns
+from services.error_contract import service_error
 from services.db import db_execute, get_supabase, rows
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions, get_and_clear_last_dq_flags, EXCHANGE_CLASSES
@@ -2387,6 +2388,15 @@ async def benchmark_refresh() -> dict[str, Any]:
     breaker failure for a 503 only, and that breaker is shared by every
     analytics call, so a stale benchmark must not be able to trip it.
 
+    Every failure arm raises through ``service_error(500,
+    "BENCHMARK_REFRESH_FAILED", retryable=False, ...)``, never a raw
+    ``HTTPException``: that routes each one through the error contract's
+    ``_validate`` and puts the R-2 envelope at ``body.detail``, and
+    ``tests/test_raw_5xx_census.py`` forbids a raw 5xx outside its quarantine.
+    No ``dependency`` is named, so the TypeScript budget row's
+    ``dependencies: []`` stays true. The per-arm ``detail`` string is what
+    tells the arms apart.
+
     Review-fix round 2:
 
     * REVIEW WR-02 — the fetcher is called with ``require_persist=True``, so a
@@ -2416,8 +2426,10 @@ async def benchmark_refresh() -> dict[str, Any]:
             "benchmark_refresh: exceeded the %ss deadline", _BENCHMARK_REFRESH_DEADLINE_S
         )
         sentry_sdk.capture_exception(exc)
-        raise HTTPException(
-            status_code=500,
+        raise service_error(
+            500,
+            "BENCHMARK_REFRESH_FAILED",
+            retryable=False,
             detail=(
                 "Benchmark refresh failed: exceeded the "
                 f"{_BENCHMARK_REFRESH_DEADLINE_S:g}s deadline"
@@ -2437,23 +2449,29 @@ async def _benchmark_refresh_once(today: date) -> dict[str, Any]:
         # MD-02, the same capture `services.benchmark` makes on its cache read).
         logger.error("benchmark_refresh: refresh raised %s", type(exc).__name__)
         sentry_sdk.capture_exception(exc)
-        raise HTTPException(
-            status_code=500,
+        raise service_error(
+            500,
+            "BENCHMARK_REFRESH_FAILED",
+            retryable=False,
             detail=f"Benchmark refresh failed: {type(exc).__name__}",
         ) from None
 
     if series is None or series.empty:
         logger.error("benchmark_refresh: refresh returned no BTC series")
-        raise HTTPException(
-            status_code=500,
+        raise service_error(
+            500,
+            "BENCHMARK_REFRESH_FAILED",
+            retryable=False,
             detail="Benchmark refresh failed: no BTC series",
         )
 
     series_through = pd.Timestamp(series.index[-1]).date().isoformat()
     if is_stale:
         logger.error("benchmark_refresh: BTC series is stale (through %s)", series_through)
-        raise HTTPException(
-            status_code=500,
+        raise service_error(
+            500,
+            "BENCHMARK_REFRESH_FAILED",
+            retryable=False,
             detail=f"Benchmark refresh stale: BTC prices through {series_through}",
         )
 
@@ -2465,8 +2483,10 @@ async def _benchmark_refresh_once(today: date) -> dict[str, Any]:
             "benchmark_refresh: reading the stored BTC date raised %s", type(exc).__name__
         )
         sentry_sdk.capture_exception(exc)
-        raise HTTPException(
-            status_code=500,
+        raise service_error(
+            500,
+            "BENCHMARK_REFRESH_FAILED",
+            retryable=False,
             detail=f"Benchmark refresh unverified: {type(exc).__name__}",
         ) from None
 
@@ -2477,8 +2497,10 @@ async def _benchmark_refresh_once(today: date) -> dict[str, Any]:
             "needs %s; fetched series through %s)",
             through, yesterday, series_through,
         )
-        raise HTTPException(
-            status_code=500,
+        raise service_error(
+            500,
+            "BENCHMARK_REFRESH_FAILED",
+            retryable=False,
             detail=(
                 f"Benchmark refresh did not reach {yesterday}: "
                 f"stored BTC prices through {through or 'none'}"

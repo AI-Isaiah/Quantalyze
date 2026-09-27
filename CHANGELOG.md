@@ -66,6 +66,14 @@ Three rounds of code review and silent-failure review, all findings fixed or dis
   BTC's real level for every later date. **Reverted:** a missing stored day is bridged again, which
   is the pre-phase behaviour and matches Python `prices_to_returns`. Only the skip across a dropped
   corrupt close is kept.
+- **Raw-5xx census (CI).** The refresh's six failure arms raised a raw `HTTPException(500)`, which
+  skips the error contract's `_validate`, and `test_raw_5xx_census.py` went red (18 sites against
+  a quarantine of 12 that may only shrink). All six now raise
+  `service_error(500, "BENCHMARK_REFRESH_FAILED", retryable=False)` with no dependency, so the
+  census is back to 12 with no quarantine change. The status stays 500 and the cron route still
+  answers 502 on any failure. The new code has a reasoned `VENUE_WIRE_CODES_WITHOUT_VERDICT` row
+  (only the cron route calls it, and that route never reads the code) and `STATUS_CONTRACT.md`
+  row S-28.
 
 ### Tests
 - New suites: `analytics-service/tests/test_benchmark_refresh.py`,

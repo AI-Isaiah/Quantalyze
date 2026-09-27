@@ -257,6 +257,34 @@ def test_empty_series_answers_exactly_500(client, monkeypatch):
     assert resp.status_code == 500
 
 
+def test_failure_arms_answer_the_error_contract_envelope(client, monkeypatch):
+    """Every failure arm goes through ``service_error``, never a raw 500.
+
+    A raw ``HTTPException(500)`` skips the contract's ``_validate`` and answers a
+    bare ``{"detail": "<string>"}``, which ``test_raw_5xx_census.py`` forbids.
+    The envelope must say ``retryable: false`` (R-1: the cron's retry is
+    tomorrow's run) and name NO dependency, so the TypeScript budget row's
+    ``dependencies: []`` stays true and no breaker key can be minted.
+    """
+    stale_through = _yesterday() - timedelta(days=4)
+    arms = {
+        "no series": {"return_value": (None, True)},
+        "stale": {"return_value": (_returns_ending(stale_through), True)},
+        "raised": {"side_effect": RuntimeError("boom")},
+    }
+    for label, kwargs in arms.items():
+        _patch(monkeypatch, **kwargs)
+
+        resp = client.post(ROUTE)
+
+        assert resp.status_code == 500, (label, resp.text)
+        envelope = resp.json()["detail"]
+        assert envelope["code"] == "BENCHMARK_REFRESH_FAILED", (label, envelope)
+        assert envelope["retryable"] is False, (label, envelope)
+        assert envelope["dependency"] is None, (label, envelope)
+        assert envelope["detail"].startswith("Benchmark refresh"), (label, envelope)
+
+
 def test_exception_answers_exactly_500_logged_by_type_only(client, monkeypatch, caplog):
     secret_detail = "upstream said: sensitive-detail-canary"
     raised = RuntimeError(secret_detail)
