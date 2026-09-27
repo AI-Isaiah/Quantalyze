@@ -296,7 +296,9 @@ describe("ScenarioFooter", () => {
     );
 
     const monoEl = container.querySelector(".font-mono") as HTMLElement;
-    const items = monoEl.querySelectorAll(":scope > span");
+    // Each "{value} {label}" item is its own nowrap span. The " · " joiner
+    // sits outside those spans so a wrap breaks between items, never inside one.
+    const items = monoEl.querySelectorAll(".whitespace-nowrap");
     expect(items).toHaveLength(2);
     expect(items[0].textContent).toBe("+0.3 Sharpe");
     expect(items[1].textContent).toBe("−4% Max DD");
