@@ -40,6 +40,7 @@ const PULLING_JOBS: Record<string, string> = {
   "ci.yml:frontend-local-stack": "`run.sh up` runs `supabase start` (pulls the stack images)",
   "ci.yml:frontend-live-db-lane": "`run.sh up` runs `supabase start` (pulls the stack images)",
   "ci.yml:sql-tests": "`run.sh up` runs `supabase start` (pulls the stack images)",
+  "ci.yml:python": "`run.sh up` runs `supabase start` (pulls the stack images)",
   "migration-drift-check.yml:check":
     "VAC-04 runs `supabase db dump`, which pulls supabase/postgres (measured: run 35911761546)",
   "test-restore-from-baseline.yml:restore":

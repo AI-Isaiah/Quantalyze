@@ -189,8 +189,17 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
   // test-restore-from-baseline.yml 1 — total 4, so the floor has ZERO slack
   // and losing any single witness fails this test. Re-measure the same way
   // before the next move, never restate it by arithmetic.
+  // 2026-09-26, Phase 164.9.4 CIOFFMUTEX D-06: the floor went 4 -> 3 because a
+  // holder LEFT — `python` no longer takes the shared-test-db key (its pytest
+  // runs on a local-stack lane private to its runner), so its release step and
+  // dead-holder annotation went with it. The floor follows the measured
+  // corpus; this is not a relaxation.
+  // Measured per file, 2026-09-26, by `grep -c` on the annotation text:
+  // ci.yml 1 (`e2e-seeded`), supabase-migrate.yml 1,
+  // test-restore-from-baseline.yml 1 — total 3, so the floor has ZERO slack
+  // and losing any single witness fails this test.
   // ─────────────────────────────────────────────────────────────────────
-  it("Test 2: at least 4 dead-holder annotations exist across the three files (anti-vacuity floor)", () => {
+  it("Test 2: at least 3 dead-holder annotations exist across the three files (anti-vacuity floor)", () => {
     let total = 0;
     for (const rel of TARGET_FILES) {
       const src = readText(rel);
@@ -199,9 +208,9 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
     }
     expect(
       total,
-      `aggregate dead-holder annotation count across the three files is ${total} — expected at least 4. ` +
+      `aggregate dead-holder annotation count across the three files is ${total} — expected at least 3. ` +
         `A corpus that shrank to zero would make Test 1 pass vacuously.`,
-    ).toBeGreaterThanOrEqual(4);
+    ).toBeGreaterThanOrEqual(3);
   });
 
   // ─────────────────────────────────────────────────────────────────────
@@ -243,7 +252,7 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
   describe("Test 3b: a verdict step inside a working-directory job is workspace-rooted", () => {
     for (const rel of TARGET_FILES) {
       it(`${rel} — no verdict step can exit 127 on a bare relative path`, () => {
-        const { checked, violations } = scanVerdictSteps(readText(rel));
+        const { violations } = scanVerdictSteps(readText(rel));
         expect(
           violations,
           `${rel}: a "${VERDICT_STEP_NAME}" step inside a job that pins ` +
@@ -252,16 +261,15 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
             `("No such file or directory") on EVERY run instead of ever reporting a dead holder. ` +
             `Use the workspace-rooted form. Violations:\n${violations.join("\n")}`,
         ).toEqual([]);
-        // Anti-vacuity: ci.yml MUST exercise this arm — the `python` job is the
-        // measured case. A zero here means the scan stopped finding the steps,
-        // not that the corpus got safer.
-        if (rel.endsWith("ci.yml")) {
-          expect(
-            checked,
-            "ci.yml: no verdict step was found inside a working-directory job — this arm " +
-              "measured NOTHING. The `python` job is the known case; if it moved, re-aim the scan.",
-          ).toBeGreaterThan(0);
-        }
+        // 2026-09-26, Phase 164.9.4 CIOFFMUTEX D-06: the ci.yml anti-vacuity arm
+        // that stood here (ci.yml MUST have a verdict step inside a
+        // working-directory job) was removed because its only subject LEFT:
+        // `python`, the measured 127 case, no longer takes the shared-test-db
+        // key, so no verdict step in any TARGET_FILES entry sits in a
+        // working-directory job. The arm's anti-vacuity is carried by the
+        // in-memory calibration `it` below (added in plan 04), which proves on
+        // in-memory text that this scan flags the bare spelling and accepts the
+        // rooted one.
       });
     }
 

@@ -1481,8 +1481,18 @@ describe("Critical regression guards", () => {
     // ordering pin now carries SC-2 for `test-db-drift`, and its TTL and
     // `needs: python` moved into that pin because the per-holder TTL loop no
     // longer covers it.
+    //
+    // Re-subjected by Phase 164.9.4 CIOFFMUTEX (D-01 / D-02 / D-06), 2026-09-26.
+    // `python` left the key: its pytest suite runs against a local-stack lane
+    // private to its own runner (measured green there with zero tests needing
+    // shared TEST, D-07), so DB_JOBS is `e2e-seeded` alone. With one ci.yml
+    // holder, a same-file pairwise identity between ci.yml holders is vacuous
+    // (there is nothing to pair); the absolute protocol pins below still bite,
+    // because MUTEX_HOLDERS keeps 3 subjects (`e2e-seeded` plus the two
+    // CROSS_FILE_HOLDERS). The holder-set pin below still asserts the set
+    // EXACTLY, so `python` re-acquiring fails it.
     describe("shared-test-db serialization via the advisory-lock mutex (D-05 / Phase 158)", () => {
-      const DB_JOBS = ["python", "e2e-seeded"] as const;
+      const DB_JOBS = ["e2e-seeded"] as const;
       // Same job-slicing idiom as the supabase-migrate describes above:
       // anchor on the start-of-line job key, stop at the next top-level one.
       // A key line may carry a trailing comment, and the next key may start with
@@ -1951,6 +1961,33 @@ describe("Critical regression guards", () => {
           holders.includes("test-db-drift"),
           "ci.yml test-db-drift acquires (or names) shared-test-db key 61616158 again — Phase 164.4.2.1 D-02 took it off the key: VAC-08 is read-only, it is ordered after apply-test by the `Wait for the TEST schema apply` step, and holding the key made it wait up to 20m31s for 2-5 s of work. Name the key in prose, never by number, inside this job",
         ).toBe(false);
+      });
+
+      // Phase 164.9.4 D-08, in its OWN `it` for the same reason as the negative
+      // above. `python` runs pytest against a local-stack lane whose values
+      // reach pytest through $GITHUB_ENV. A step `env:` entry beats that file,
+      // so ONE `secrets.TEST_SUPABASE_*` entry left on the pytest step would
+      // silently send the live-DB modules back to shared TEST, unserialized now
+      // that the job holds no key. The ordering wait existed only to order
+      // shared-TEST work, and the lane DSN must never be exported under the
+      // shared-TEST secret's name.
+      it("python reads no shared-TEST secret and runs no TEST ordering wait (Phase 164.9.4 D-08)", () => {
+        const body = jobSlice(readText(".github/workflows/ci.yml"), "python");
+        expectNoMatch(
+          body,
+          /secrets\.TEST_SUPABASE_/,
+          "ci.yml python reads a `secrets.TEST_SUPABASE_*` value again — a step `env:` secret shadows the lane handoff exported through $GITHUB_ENV, so pytest's live-DB modules would silently run against shared TEST with no key held (Phase 164.9.4 D-08)",
+        );
+        expectNoMatch(
+          body,
+          /- name: Wait for the TEST schema apply/,
+          "ci.yml python runs the TEST schema-apply ordering wait again — it orders shared-TEST work, and since Phase 164.9.4 this job does none; it only costs every merge push (D-08)",
+        );
+        expectNoMatch(
+          body,
+          /^\s+TEST_SUPABASE_DB_URL=/m,
+          "ci.yml python exports TEST_SUPABASE_DB_URL — that is the shared-TEST secret's name, and exporting the lane DSN under it silently un-skips 20+ psycopg modules this phase does not scope in (RESEARCH Anti-Patterns, Phase 164.9.4)",
+        );
       });
 
       // Phase 164.4.2.1 D-07: with the key gone, the ordering wait is SC-2's
