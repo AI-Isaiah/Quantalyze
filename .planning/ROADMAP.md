@@ -3280,12 +3280,12 @@ suite unable to catch a CSP edit that breaks login.
 Plans:
 
 **Wave 1** *(six file-disjoint plans; 04, 05 and 06 share neuter targets, so they run in isolated worktrees or one after another)*
-- [ ] 164.9.4-01-PLAN.md — D-11: commit `164.9.4-MEASUREMENT.md` (BEFORE numbers, AFTER protocol) before any `ci.yml` edit
-- [ ] 164.9.4-02-PLAN.md — D-14: the CSP `connect-src` adds the configured Supabase origin only when no source matches it; contract test (reversible, pending founder ratification)
-- [ ] 164.9.4-03-PLAN.md — D-04: `scripts/local-stack/run.sh --assert-local-handoff` seam that reuses the lane's loopback guards
-- [ ] 164.9.4-04-PLAN.md — the dead-holder drill and the Test 3b verdict scan stop depending on `ci.yml`
-- [ ] 164.9.4-05-PLAN.md — the `critical-regressions.test.ts` protocol loops are re-pointed to `MUTEX_HOLDERS`, not retired
-- [ ] 164.9.4-06-PLAN.md — the six byte-identity `it`s are re-subjected to the two other workflows, each seen RED under a neuter
+- [x] 164.9.4-01-PLAN.md — D-11: commit `164.9.4-MEASUREMENT.md` (BEFORE numbers, AFTER protocol) before any `ci.yml` edit
+- [x] 164.9.4-02-PLAN.md — D-14: the CSP `connect-src` adds the configured Supabase origin only when no source matches it; contract test (reversible, pending founder ratification)
+- [x] 164.9.4-03-PLAN.md — D-04: `scripts/local-stack/run.sh --assert-local-handoff` seam that reuses the lane's loopback guards
+- [x] 164.9.4-04-PLAN.md — the dead-holder drill and the Test 3b verdict scan stop depending on `ci.yml`
+- [x] 164.9.4-05-PLAN.md — the `critical-regressions.test.ts` protocol loops are re-pointed to `MUTEX_HOLDERS`, not retired
+- [x] 164.9.4-06-PLAN.md — the six byte-identity `it`s are re-subjected to the two other workflows, each seen RED under a neuter
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 164.9.4-07-PLAN.md — `python` moves to the local-stack lane and off the key; its pins move in the same commit
