@@ -30,19 +30,24 @@ function SignedOutLinks() {
  * links; the page does not error, and no name, email or id is shown.
  */
 export async function MarketingHeaderActions() {
+  // The session read is the only thing in the try. JSX stays outside it:
+  // react-hooks/error-boundaries rejects JSX constructed in try/catch, and a
+  // render error is not what this catch is for. A failed read fails closed.
+  let signedIn = false;
   try {
     const supabase = await createClient();
     const {
       data: { user },
       error,
     } = await supabase.auth.getUser();
-    if (error || !user) return <SignedOutLinks />;
-    return (
-      <Link href={DEFAULT_AUTHENTICATED_ROUTE} className={SIGN_UP_CLASS}>
-        Go to app
-      </Link>
-    );
+    signedIn = !error && user != null;
   } catch {
-    return <SignedOutLinks />;
+    signedIn = false;
   }
+  if (!signedIn) return <SignedOutLinks />;
+  return (
+    <Link href={DEFAULT_AUTHENTICATED_ROUTE} className={SIGN_UP_CLASS}>
+      Go to app
+    </Link>
+  );
 }
