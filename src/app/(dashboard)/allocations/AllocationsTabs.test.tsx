@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import type { ReadonlyURLSearchParams } from "next/navigation";
 
@@ -20,8 +20,9 @@ import type { ReadonlyURLSearchParams } from "next/navigation";
  *   4. ?tab=mandate  → Mandate active.
  *   5. ?tab=risk     → Risk active.
  *   6. ?tab=scenario → Scenario panel visible, NO Scenario tab button.
- *   7. ?tab=performance (legacy Phase 07 alias) → Overview + router.replace
- *      strips the param.
+ *   7. ?tab=performance (legacy Phase 07 alias) → Overview + the native
+ *      history.replaceState strips the param (Phase 167.1.2 plan 07; was the
+ *      router's replace, which re-ran the server render).
  *   8. ?tab=xyz (unknown) → Overview silent fallback (D-04). No URL cleanup
  *      because unknown is not in {overview, performance}.
  *   9. ArrowRight wraps focus across the 5 visible tabs in D-05 order
@@ -33,6 +34,17 @@ import type { ReadonlyURLSearchParams } from "next/navigation";
 const mockReplace = vi.fn();
 const mockRefresh = vi.fn();
 const mockPush = vi.fn();
+// Phase 167.1.2 plan 07 (SC-5c) — tab URLs go through the native History API.
+// An App Router replace to a changed query on this force-dynamic page refetches
+// the RSC payload (getMyAllocationDashboard re-runs); history.replaceState does
+// not, and Next syncs useSearchParams to it. The spy is a no-op by default so
+// jsdom's location does not leak across tests; `mockReplace` stays wired to the
+// router mock so every arm can assert it is NEVER called.
+let mockHistoryReplace: MockInstance<History["replaceState"]>;
+/** The URL argument of every history.replaceState call, in order. */
+function historyUrls(): string[] {
+  return mockHistoryReplace.mock.calls.map((c) => String(c[2]));
+}
 
 vi.mock("next/navigation", async () => {
   return {
@@ -204,6 +216,10 @@ function expectOnlyVisibleBody(testid: (typeof ACTIVE_BODIES)[number]): void {
 // (a no-op for the describes that don't read it) so later describes can
 // rely on a clean call history without per-block boilerplate.
 function resetRouterMocks(): void {
+  mockHistoryReplace?.mockRestore();
+  mockHistoryReplace = vi
+    .spyOn(window.history, "replaceState")
+    .mockImplementation(() => {});
   mockReplace.mockReset();
   mockRefresh.mockReset();
   mockPush.mockReset();
@@ -340,16 +356,14 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     setSearchParams("tab=performance");
     render(<AllocationsTabs {...STUB_PROPS} />);
     expectOnlyVisibleBody("overview-v2");
-    // The cleanup effect must call router.replace with the tab param removed.
-    expect(mockReplace).toHaveBeenCalled();
-    const cleanupCall = mockReplace.mock.calls.find(
-      (c) => typeof c[0] === "string" && !c[0].includes("tab="),
-    );
+    // The cleanup effect must call history.replaceState with the tab param
+    // removed, and never the router's replace (SC-5c).
+    const cleanupUrl = historyUrls().find((u) => !u.includes("tab="));
     expect(
-      cleanupCall,
-      "router.replace called with tab param stripped",
-    ).toBeDefined();
-    expect(cleanupCall![1]).toEqual({ scroll: false });
+      cleanupUrl,
+      "history.replaceState called with tab param stripped",
+    ).toBe("/allocations");
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 
   // M-0042 (pr-test-analyzer) — the legacy ?tab=performance strip effect
@@ -363,20 +377,16 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     setSearchParams("tab=performance&otherParam=value");
     render(<AllocationsTabs {...STUB_PROPS} />);
     expectOnlyVisibleBody("overview-v2");
-    expect(mockReplace).toHaveBeenCalled();
     // The cleanup call is the one without a `tab=` segment (the param strip).
-    const cleanupCall = mockReplace.mock.calls.find(
-      (c) => typeof c[0] === "string" && !c[0].includes("tab="),
-    );
+    const url = historyUrls().find((u) => !u.includes("tab="));
     expect(
-      cleanupCall,
-      "router.replace called with tab param stripped",
+      url,
+      "history.replaceState called with tab param stripped",
     ).toBeDefined();
-    const url = cleanupCall![0] as string;
     // otherParam must survive the strip — assert both the key and its value.
     expect(url).toContain("otherParam=value");
     expect(url).toContain("/allocations?");
-    expect(cleanupCall![1]).toEqual({ scroll: false });
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 
   it("?tab=xyz (unknown) → Overview silent fallback, no URL cleanup", () => {
@@ -384,8 +394,57 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     render(<AllocationsTabs {...STUB_PROPS} />);
     expectOnlyVisibleBody("overview-v2");
     // Unknown values are NOT cleaned up — only "overview" and "performance"
-    // trigger the strip effect. router.replace must not have been called.
+    // trigger the strip effect. No URL write of either kind.
+    expect(mockHistoryReplace).not.toHaveBeenCalled();
     expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  // Phase 167.1.2 plan 07 (SC-5c). A tab click writes the URL through the
+  // native History API exactly once and never through the router: the
+  // router's replace to a changed query on this force-dynamic page refetches
+  // the RSC payload, so every tab click re-ran getMyAllocationDashboard.
+  it("SC-5c — clicking a tab calls history.replaceState once with the tab URL and never the router's replace", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    mockHistoryReplace.mockClear();
+    fireEvent.click(screen.getByRole("tab", { name: "Holdings" }));
+    expect(mockHistoryReplace).toHaveBeenCalledTimes(1);
+    expect(mockHistoryReplace).toHaveBeenCalledWith(
+      null,
+      "",
+      "/allocations?tab=holdings",
+    );
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  // The visible tab is derived from useSearchParams. Next documents that
+  // history.replaceState integrates with useSearchParams; this arm models that
+  // sync (the mock reads the live jsdom URL, and a re-render stands in for the
+  // router's update) and pins that the component switches its visible body off
+  // the URL alone. That Next itself performs the sync is the browser check's
+  // to confirm (recorded as pending in the plan SUMMARY), not this mock's.
+  it("SC-5c — after history.replaceState, the URL-derived visible tab switches", async () => {
+    mockHistoryReplace.mockRestore();
+    const realReplace = window.history.replaceState.bind(window.history);
+    mockHistoryReplace = vi
+      .spyOn(window.history, "replaceState")
+      .mockImplementation((...args) => realReplace(...args));
+    const originalUrl = window.location.pathname + window.location.search;
+    realReplace(null, "", "/allocations");
+    vi.mocked(useSearchParams).mockImplementation(
+      () =>
+        new URLSearchParams(
+          window.location.search,
+        ) as unknown as ReadonlyURLSearchParams,
+    );
+    const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
+    expectOnlyVisibleBody("overview-v2");
+    fireEvent.click(screen.getByRole("tab", { name: "Mandate" }));
+    expect(window.location.search).toBe("?tab=mandate");
+    rerender(<AllocationsTabs {...STUB_PROPS} />);
+    await expectOnlyVisibleBodyAsync("mandate-body");
+    expect(mockReplace).not.toHaveBeenCalled();
+    realReplace(null, "", originalUrl);
   });
 
   it("ArrowRight wraps focus across the visible tabs in VISIBLE_TAB_KEYS order (includes Scenario, SURF-01)", () => {
@@ -396,13 +455,12 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     // factsheet view (no separate Analytics tab). Wrap from Scenario → Overview.
     const order = ["Overview", "Holdings", "Outcomes", "Mandate", "Risk", "Scenario"];
     for (let i = 0; i < order.length; i++) {
-      mockReplace.mockClear();
+      mockHistoryReplace.mockClear();
       const current = screen.getByRole("tab", { name: order[i] });
       fireEvent.keyDown(current, { key: "ArrowRight" });
       const expectedNext = order[(i + 1) % order.length];
-      expect(mockReplace).toHaveBeenCalled();
-      const call = mockReplace.mock.calls[0];
-      const url = String(call[0]);
+      expect(mockHistoryReplace).toHaveBeenCalled();
+      const url = historyUrls()[0];
       if (expectedNext === "Overview") {
         // Overview is the default — no tab param in URL.
         expect(url.includes("tab=")).toBe(false);
@@ -486,9 +544,10 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P Export chip (M-1041 / M
     render(<AllocationsTabs {...STUB_PROPS} />);
     const exportChip = screen.getByRole("button", { name: "Export" });
     fireEvent.click(exportChip);
-    expect(mockReplace).toHaveBeenCalled();
-    const url = String(mockReplace.mock.calls[0][0]);
+    expect(mockHistoryReplace).toHaveBeenCalled();
+    const url = historyUrls()[0];
     expect(url).toContain("tab=holdings");
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 
   it("Export chip announces redirect via aria-live region (M-1044 silent-failure fix)", async () => {
@@ -924,21 +983,25 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (ME
     resetRouterMocks();
   });
 
-  it("Export chip from Risk: router.replace called exactly ONCE with { scroll: false }", () => {
+  it("Export chip from Risk: history.replaceState called exactly ONCE, the router's replace never", () => {
     setSearchParams("tab=risk");
     render(<AllocationsTabs {...STUB_PROPS} />);
     // Pre-render setup may call replace zero times (no cleanup needed for
     // tab=risk since risk is canonical and stays). Clear to isolate the
     // click's effect.
-    mockReplace.mockClear();
+    mockHistoryReplace.mockClear();
 
     const exportChip = screen.getByRole("button", { name: "Export" });
     fireEvent.click(exportChip);
 
-    // Single-shot: exactly one replace call from the click path.
-    expect(mockReplace).toHaveBeenCalledTimes(1);
-    const [, opts] = mockReplace.mock.calls[0];
-    expect(opts).toEqual({ scroll: false });
+    // Single-shot: exactly one URL write from the click path, and it is the
+    // native History API (no RSC refetch, no scroll: replaceState never
+    // scrolls, which is what `{ scroll: false }` used to ask the router for).
+    expect(mockHistoryReplace).toHaveBeenCalledTimes(1);
+    const [state, unused] = mockHistoryReplace.mock.calls[0];
+    expect(state).toBeNull();
+    expect(unused).toBe("");
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 
   it("Export chip clicked twice from Risk → re-announces (microtask-clear pinned)", async () => {
@@ -1068,8 +1131,8 @@ describe("AllocationsTabs — Tweaks showOutcomes redirect guard", () => {
   it("bounces user off ?tab=outcomes when showOutcomes flips to false", async () => {
     // Pre-seed the Tweaks panel with showOutcomes=false. The user is
     // sitting on ?tab=outcomes. On mount the OutcomesTabRedirectGuard
-    // effect should call router.replace to remove the tab param (default
-    // overview).
+    // effect should call history.replaceState to remove the tab param
+    // (default overview).
     window.localStorage.setItem(
       "allocations.tweaks",
       JSON.stringify({
@@ -1086,12 +1149,12 @@ describe("AllocationsTabs — Tweaks showOutcomes redirect guard", () => {
     await act(async () => {
       render(<AllocationsTabs {...STUB_PROPS} />);
     });
-    // changeTab("overview") delegates to router.replace with the tab
+    // changeTab("overview") delegates to history.replaceState with the tab
     // param stripped — that's how the redirect manifests.
-    expect(mockReplace).toHaveBeenCalled();
-    const lastCallArg = mockReplace.mock.calls[mockReplace.mock.calls.length - 1]?.[0];
-    expect(typeof lastCallArg).toBe("string");
-    expect(lastCallArg as string).not.toMatch(/tab=outcomes/);
+    expect(mockHistoryReplace).toHaveBeenCalled();
+    const urls = historyUrls();
+    expect(urls[urls.length - 1]).not.toMatch(/tab=outcomes/);
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 
   it("does NOT redirect when showOutcomes is true (default) and user is on outcomes", async () => {
@@ -1100,11 +1163,11 @@ describe("AllocationsTabs — Tweaks showOutcomes redirect guard", () => {
       render(<AllocationsTabs {...STUB_PROPS} />);
     });
     // The guard's effect fires but the `if (!showOutcomes && ...)` branch
-    // doesn't trigger. router.replace should NOT have been called by the
-    // guard. (Other code paths may call it — assert no call mentions
+    // doesn't trigger. history.replaceState should NOT have been called by
+    // the guard. (Other code paths may call it — assert no call mentions
     // stripping ?tab=outcomes specifically.)
-    for (const call of mockReplace.mock.calls) {
-      const url = typeof call[0] === "string" ? call[0] : "";
+    expect(mockReplace).not.toHaveBeenCalled();
+    for (const url of historyUrls()) {
       if (url.includes("/allocations") && !url.includes("tab=")) {
         // A call that strips the tab param shouldn't happen here.
         throw new Error(
@@ -1140,12 +1203,11 @@ describe("AllocationsTabs — Tweaks showOutcomes redirect guard", () => {
     expect(document.body.getAttribute("data-show-outcomes")).toBe("false");
     const holdings = screen.getByRole("tab", { name: "Holdings" });
     holdings.focus();
-    mockReplace.mockClear();
+    mockHistoryReplace.mockClear();
     // ArrowRight from Holdings should land on Mandate (not Outcomes).
     fireEvent.keyDown(holdings, { key: "ArrowRight" });
-    const lastUrl = (
-      mockReplace.mock.calls[mockReplace.mock.calls.length - 1]?.[0] ?? ""
-    ) as string;
+    const urls = historyUrls();
+    const lastUrl = urls[urls.length - 1] ?? "";
     expect(lastUrl).toMatch(/tab=mandate/);
     expect(lastUrl).not.toMatch(/tab=outcomes/);
   });
