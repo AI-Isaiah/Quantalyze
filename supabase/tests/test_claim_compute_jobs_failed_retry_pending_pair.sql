@@ -100,6 +100,14 @@
 --             measured 0 of 3 claimed under that guard). Twin: the
 --             `OR kind = 'compute_intro_snapshot'` carve-out deleted from
 --             the 5-arg strategy clause (2 of 3 claimed).
+--   W-LOWTWIN 5-arg, allocator partition, priority mix: a due `normal`
+--             failed_retry beside a due `low` pending twin, plus an unrelated
+--             due `low` job on another allocator. The twin and the unrelated
+--             job must be claimed and the retry held back. Added in review
+--             round 1 (164.9.3-REVIEW.md WR-01): the throttle probe counted
+--             the retry the pre-rank clause holds back, so neither row was
+--             ever claimed and every due `low` job queue-wide was throttled,
+--             with no error (a silent permanent wedge).
 --   P2-KEY, P2-PF, P2-ST, P2-AL
 --                             the 2-arg priority overload, same four arms.
 --                             Twin: the `OR TRUE` edit in the 2-arg body
@@ -117,7 +125,10 @@
 --
 -- The twelve partition arms, W-LOST and P2-C39 are RED on the pre-fix tree,
 -- each with SQLSTATE 23505; W-INTRO is GREEN there. That census is recorded
--- as verdict + count in 164.9.3-01-SUMMARY.md. The machine-executable mutation
+-- as verdict + count in 164.9.3-01-SUMMARY.md. W-LOWTWIN came later: it is
+-- RED against the migration as plan 02 shipped it (no error; the twin, the
+-- unrelated job and the retry each claimed 0 times), recorded as verdict +
+-- count in 164.9.3-REVIEW-FIX.md. The machine-executable mutation
 -- twins were added once the migration they edit existed (plan 164.9.3-04);
 -- scripts/mutation-runner executes each on a throwaway pg-lane, mutating
 -- COPIES, and requires the FIRST `TEST FAILED` to name that twin's arm.
@@ -779,6 +790,68 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (W-INTRO): the 5-arg claim_compute_jobs_with_priority claimed % of the 3 compute_intro_snapshot rows sharing one strategy; expected 3. The intro carve-out is starved.', n_claim;
   END IF;
   RAISE NOTICE 'W-INTRO OK: all 3 compute_intro_snapshot rows sharing one strategy were claimed in one tick.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- W-LOWTWIN — the 5-arg claim_compute_jobs_with_priority, allocator partition,
+-- priority mix. R is a due `normal` failed_retry and T a due `low` pending
+-- twin of the same (kind, allocator_id); U is an unrelated due `low` pending
+-- job on another allocator. The pre-rank clause holds R back, so R must not
+-- trip the `normal`/`high` throttle either: T and U are claimed, R is not.
+-- The throttle probe is queue-wide and the sql-tests lane carries rows other
+-- gate files commit, so any foreign due `normal`/`high` row is pushed a
+-- century out first, inside this arm's own transaction (it ends in
+-- ROLLBACK), so the probe sees only this arm's rows.
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_twin   uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_twin   int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  UPDATE public.compute_jobs
+     SET next_attempt_at = now() + interval '100 years'
+   WHERE priority IN ('normal', 'high')
+     AND status IN ('pending', 'failed_retry')
+     AND next_attempt_at <= now();
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO auth.users (id)
+    VALUES (v_part), (v_part2);
+  INSERT INTO public.compute_jobs (id, kind, allocator_id, status, priority, attempts, next_attempt_at)
+    VALUES (v_retry, 'derive_allocator_equity', v_part,  'failed_retry', 'normal', 1, now() - interval '10 minutes'),
+           (v_twin,  'derive_allocator_equity', v_part,  'pending',      'low',    0, now() - interval '5 minutes'),
+           (v_other, 'derive_allocator_equity', v_part2, 'pending',      'low',    0, now() - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_twin),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_twin, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate', NULL) c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (W-LOWTWIN): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority (%); the batch aborted.', v_err, v_msg;
+  END IF;
+  IF n_twin <> 1 OR n_other <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (W-LOWTWIN): the 5-arg claim_compute_jobs_with_priority raised nothing but claimed the low pending twin % time(s), the unrelated low job % time(s) and the normal failed_retry % time(s); expected 1, 1 and 0. The throttle counted a retry the pre-rank clause holds back, so the partition and every due low job are wedged silently.', n_twin, n_other, n_retry;
+  END IF;
+  RAISE NOTICE 'W-LOWTWIN OK: the 5-arg claim_compute_jobs_with_priority claimed the low pending twin and the unrelated low job, held the normal failed_retry back, raised nothing.';
 END $$;
 ROLLBACK;
 
