@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 170
 current_phase_name: LAYOUT — page layout reads clean and holds on every page
 status: executing
-stopped_at: Completed 170-07-PLAN.md
-last_updated: "2026-09-27T22:36:30.000Z"
+stopped_at: Completed 170-08-PLAN.md
+last_updated: "2026-09-27T22:52:00.000Z"
 last_activity: 2026-09-27
-last_activity_desc: Completed 170-07-PLAN.md
-state_head: ae616eb2d63d57c0c72a06aed6b44092896ef04c
+last_activity_desc: Completed 170-08-PLAN.md
+state_head: df831285bc3d3f0dce236df1cd2cf2451e4d2f4f
 progress:
   total_phases: 80
   completed_phases: 41
   total_plans: 370
-  completed_plans: 354
+  completed_plans: 355
   percent: 51
 ---
 
@@ -180,7 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — EXECUTING
-Plan: 5 of 14
+Plan: 8 of 14
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
 Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
@@ -512,7 +512,7 @@ Status: Executing Phase 170
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-27 — Completed 170-07-PLAN.md
+Last activity: 2026-09-27 — Completed 170-08-PLAN.md
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1189,6 +1189,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 170 P05 | 12 min | 2 tasks | 6 files |
 | Phase 170 P06 | 18 min | 2 tasks | 8 files |
 | Phase 170 P07 | 12 min | 3 tasks | 8 files |
+| Phase 170 P08 | 9 min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -1226,6 +1227,12 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - The session read stays in the async child. The layout function stays synchronous. JSX is outside the try, because the error-boundaries lint rejects JSX built in try/catch. A failed read still renders Sign in / Sign up.
 - DEFAULT_AUTHENTICATED_ROUTE has one definition. Other copies of the same path were left in place.
 - The one-item note renders when one item resolved, including a single holding. The sentence is the Copywriting Contract literal.
+
+### Phase 170 decisions (plan 08)
+
+- The inset focus ring is on the underline trigger only. The segmented arm keeps the HEAD class strings.
+- The active underline tab is scrolled with computeTabStripScroll from offsetLeft, offsetWidth, scrollLeft and clientWidth. The element scroll-into-view API is not used.
+- A disconnected key row has Reconnect, not Disconnect. That row's action group wraps the buttons it actually renders.
 
 ### Roadmap Evolution
 
@@ -2444,8 +2451,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-27T22:36:30.000Z
-**Stopped At:** Completed 170-07-PLAN.md
+**Last Date:** 2026-09-27T22:52:00.000Z
+**Stopped At:** Completed 170-08-PLAN.md
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
