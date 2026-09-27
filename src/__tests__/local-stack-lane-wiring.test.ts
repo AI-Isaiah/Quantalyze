@@ -1066,7 +1066,13 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
   // is that the lane's gate reads no git history, so that is what the history half
   // now pins. The seam half covers all three jobs, since each now names its own
   // replay set before its boot.
-  it("the lane's currency gate reads no git history (so a shallow clone cannot vacate it), and all three lane-booting CI jobs run the currency seam before the boot", () => {
+  // Retitled 2026-09-26, Phase 164.9.4 (D-03 / D-06): `python` and `e2e-seeded` boot
+  // the lane too now, so the seam list gains their rows and the title stops counting.
+  // Lineage title: "the lane's currency gate reads no git history (so a shallow clone
+  // cannot vacate it), and all three lane-booting CI jobs run the currency seam
+  // before the boot". The list is hand-kept, not detected: a NEW lane-booting job
+  // must add its own row here.
+  it("the lane's currency gate reads no git history (so a shallow clone cannot vacate it), and every lane-booting CI job runs the currency seam before the boot", () => {
     // (1) History. The lane calls the gate in --replay-set mode, and that mode's
     // body never reaches the epoch reader — the only git consumer in the gate. If
     // either half moves, a shallow-cloned lane job would compare two identical
@@ -1104,6 +1110,8 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       [LANE_JOB, "frontend-live-db-lane"],
       ["frontend-live-db-lane", "frontend-policy"],
       ["sql-tests", "secret-scan"],
+      ["python", "test-db-drift"],
+      ["e2e-seeded", "lighthouse-mobile"],
     ] as const) {
       const lines = jobBlock(job, next);
       const seam = lines.findIndex(
@@ -1264,6 +1272,51 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
       ).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Phase 164.9.4 D-04 (SC-2), 2026-09-27. The `it` above proves the seam REFUSES a
+  // non-loopback handoff; this one proves each consuming CI job CALLS it at the
+  // right moment. A seam that runs after the first `$GITHUB_ENV` write has already
+  // handed a misrouted URL to every later step, and one that runs after the first
+  // DB-touching step guards nothing. Per job, on the live lines of its block: the
+  // boot, then the seam, then the first line naming `GITHUB_ENV`, then the first
+  // DB-touching step. One `expect` per condition, so a failure names which broke.
+  it("each CI job that exports the lane handoff asserts loopback first: boot, then --assert-local-handoff, then the first GITHUB_ENV write, then the first DB-touching step (Phase 164.9.4 D-04)", () => {
+    const rows = [
+      ["python", "test-db-drift", "pytest --cov=services"],
+      ["e2e-seeded", "lighthouse-mobile", "SEED_CONFIRM_STAGING=true npx tsx scripts/seed-demo-data.ts"],
+    ] as const;
+    // Anti-vacuity: a shortened row list would pass every check below for the
+    // job it dropped. Both jobs that consume the handoff are rows.
+    expect(rows.length, "AIM: the handoff-order pin no longer covers both handoff-consuming jobs").toBeGreaterThanOrEqual(2);
+    for (const [job, nextJob, firstDbStep] of rows) {
+      const start = CI.indexOf(`\n  ${job}:\n`);
+      expect(start, `the ${job} job is gone from ci.yml`).toBeGreaterThan(-1);
+      const end = CI.indexOf(`\n  ${nextJob}:\n`, start);
+      expect(end, `could not find the end of the ${job} block (next job ${nextJob})`).toBeGreaterThan(start);
+      const lines = liveLines(CI.slice(start, end));
+      const boot = lines.findIndex((l) => l === "run: bash scripts/local-stack/run.sh up");
+      const seam = lines.findIndex((l) => l.includes("bash scripts/local-stack/run.sh --assert-local-handoff"));
+      const firstExport = lines.findIndex((l) => l.includes("GITHUB_ENV"));
+      const firstDb = lines.findIndex((l) => l.includes(firstDbStep));
+      expect(boot, `${job} no longer boots the lane with run.sh up (D-04)`).toBeGreaterThan(-1);
+      expect(seam, `${job} no longer calls run.sh --assert-local-handoff (D-04)`).toBeGreaterThan(-1);
+      expect(firstExport, `${job} no longer writes the lane handoff to GITHUB_ENV (D-04)`).toBeGreaterThan(-1);
+      expect(firstDb, `${job} no longer runs its first DB-touching step \`${firstDbStep}\` (D-04)`).toBeGreaterThan(-1);
+      expect(boot < seam, `${job} asserts the handoff BEFORE the lane boots, so it reads no handoff (D-04)`).toBe(true);
+      expect(
+        seam < firstExport,
+        `${job} writes to GITHUB_ENV BEFORE run.sh --assert-local-handoff, so a misrouted URL reaches every later step before the loopback check (D-04)`,
+      ).toBe(true);
+      expect(
+        firstExport < firstDb,
+        `${job} runs \`${firstDbStep}\` BEFORE the lane handoff is exported, so it reads no lane values (D-04)`,
+      ).toBe(true);
+      expect(
+        lines.some((l) => l.includes("*@127.0.0.1:*")),
+        `${job} carries the '*@127.0.0.1:*' glob, which accepts ?host=/hostaddr= overrides (D-04, WR-08)`,
+      ).toBe(false);
     }
   });
 });

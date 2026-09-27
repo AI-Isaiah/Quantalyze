@@ -1984,6 +1984,26 @@ describe("Critical regression guards", () => {
         ).toBe(false);
       });
 
+      // Phase 164.9.4 D-02 (D-06), 2026-09-27: the two jobs this phase took off the
+      // key, each in its OWN `it` for the reason above. The exactly-empty pin
+      // already fails when either returns, but its diff shows a set, not a cause;
+      // these name the ONE job that went back on the key.
+      it("python holds and names no shared-test-db key (Phase 164.9.4 D-02)", () => {
+        const holders = measureHolders(readText(".github/workflows/ci.yml"));
+        expect(
+          holders.includes("python"),
+          "ci.yml python acquires (or names) the shared-test-db key again — Phase 164.9.4 D-02 took it off the key: pytest runs against a local-stack lane private to its own runner, so holding the key only re-queues every run behind shared TEST's other holders. Name the key in prose, never by number, inside this job",
+        ).toBe(false);
+      });
+
+      it("e2e-seeded holds and names no shared-test-db key (Phase 164.9.4 D-02)", () => {
+        const holders = measureHolders(readText(".github/workflows/ci.yml"));
+        expect(
+          holders.includes("e2e-seeded"),
+          "ci.yml e2e-seeded acquires (or names) the shared-test-db key again — Phase 164.9.4 D-02 took it off the key: the seed, the build and the seeded specs run against a local-stack lane private to its own runner, so holding the key only re-queues every run behind shared TEST's other holders. Name the key in prose, never by number, inside this job",
+        ).toBe(false);
+      });
+
       // Phase 164.9.4 D-08, in its OWN `it` for the same reason as the negative
       // above. `python` runs pytest against a local-stack lane whose values
       // reach pytest through $GITHUB_ENV. A step `env:` entry beats that file,
