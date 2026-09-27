@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, cleanup, within, act } from "@testing-library/react";
 import { AllocatorMatchQueue } from "./AllocatorMatchQueue";
 
 /**
@@ -847,5 +847,178 @@ describe("<AllocatorMatchQueue> — [140.4-05] the load failure is announced", (
       await screen.findByRole("heading", { name: /Demo Allocator/i }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+/**
+ * N-MATCH (170-06, AD-07). Below md the queue is read-only in the handlers,
+ * not only in the banner: Recompute, KEEP/SKIP, Send intro and the
+ * preferences-panel recompute request must not leave the browser, and every
+ * write control carries `hidden` plus an `md:` display class. The server
+ * snapshot of useMediaQuery is false, so visibility is CSS — these cases
+ * drive the JS guard by stubbing matchMedia.
+ *
+ * A real viewport below 768 is also below 1024, so both queries are false.
+ * `!/min-width: 768px/.test(query)` alone would report lg as matching.
+ */
+function installMatchMedia(initial: { md: boolean; lg: boolean }) {
+  const state = { ...initial };
+  const listeners = new Set<() => void>();
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    configurable: true,
+    value: (query: string) => ({
+      get matches() {
+        if (/min-width:\s*768px/.test(query)) return state.md;
+        if (/min-width:\s*1024px/.test(query)) return state.lg;
+        return false;
+      },
+      media: query,
+      onchange: null,
+      addEventListener: (_event: string, cb: () => void) => {
+        listeners.add(cb);
+      },
+      removeEventListener: (_event: string, cb: () => void) => {
+        listeners.delete(cb);
+      },
+      addListener: (cb: () => void) => {
+        listeners.add(cb);
+      },
+      removeListener: (cb: () => void) => {
+        listeners.delete(cb);
+      },
+      dispatchEvent: () => false,
+    }),
+  });
+  return {
+    set(next: Partial<{ md: boolean; lg: boolean }>) {
+      if (next.md !== undefined) state.md = next.md;
+      if (next.lg !== undefined) state.lg = next.lg;
+      for (const cb of listeners) cb();
+    },
+  };
+}
+
+function mutationCalls(mock: { mock: { calls: unknown[][] } }, needle: string) {
+  return mock.mock.calls.filter((call) => String(call[0]).includes(needle));
+}
+
+describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
+  function jsonResponse(body: unknown, status = 200) {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  it("below md, action-bar and empty-state Recompute now issue no request and Edit preferences opens no panel", async () => {
+    installMatchMedia({ md: false, lg: false });
+    const payload = buildPayload();
+    payload.batch = null;
+    payload.candidates = [];
+    const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue(jsonResponse(payload));
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+
+    const recomputes = screen.getAllByRole("button", { name: /Recompute now/i });
+    expect(recomputes).toHaveLength(2);
+    for (const button of recomputes) fireEvent.click(button);
+    fireEvent.click(screen.getByRole("button", { name: /Edit preferences/i }));
+
+    expect(mutationCalls(fetchMock, "/api/admin/match/recompute")).toHaveLength(0);
+    expect(screen.queryByRole("heading", { name: /CRM-style editor/i })).toBeNull();
+  });
+
+  it("below md, shortlist Send intro and detail KEEP / SKIP / Send intro issue no request and open no panel", async () => {
+    installMatchMedia({ md: false, lg: false });
+    const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue(jsonResponse(buildPayload()));
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+
+    fireEvent.click(screen.getByRole("button", { name: "KEEP" }));
+    fireEvent.click(screen.getByRole("button", { name: "SKIP" }));
+    for (const button of screen.getAllByRole("button", { name: /Send intro/i })) {
+      if (button.tagName === "BUTTON") fireEvent.click(button);
+    }
+
+    expect(mutationCalls(fetchMock, "/api/admin/match/decisions")).toHaveLength(0);
+    expect(mutationCalls(fetchMock, "/api/admin/match/send-intro")).toHaveLength(0);
+    expect(document.querySelector(".fixed.inset-0")).toBeNull();
+
+    // s/u/d/r. Below md is also below lg, and the handlers must still not fetch.
+    (document.body as HTMLElement).focus();
+    for (const key of ["s", "u", "d", "r"]) {
+      fireEvent.keyDown(window, { key });
+    }
+    expect(mutationCalls(fetchMock, "/api/admin/match/recompute")).toHaveLength(0);
+    expect(mutationCalls(fetchMock, "/api/admin/match/decisions")).toHaveLength(0);
+    expect(document.querySelector(".fixed.inset-0")).toBeNull();
+  });
+
+  it("below md, PreferencesPanel onRecomputeRequested does not POST recompute", async () => {
+    // Open while md matches, then narrow. The panel is already mounted, so
+    // the early return — not the opener — is what stops the recompute.
+    const media = installMatchMedia({ md: true, lg: false });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation((url: string) => {
+      if (String(url).includes("/preferences/")) return Promise.resolve(jsonResponse({ ok: true }));
+      return Promise.resolve(jsonResponse(buildPayload()));
+    });
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+    fireEvent.click(screen.getByRole("button", { name: /Edit preferences/i }));
+    expect(screen.getByRole("heading", { name: /CRM-style editor/i })).toBeInTheDocument();
+
+    act(() => {
+      media.set({ md: false });
+    });
+
+    const form = screen.getByRole("button", { name: "Save preferences" }).closest("form");
+    expect(form).not.toBeNull();
+    fireEvent.submit(form!);
+
+    await waitFor(() => {
+      expect(confirmSpy).toHaveBeenCalled();
+    });
+    expect(mutationCalls(fetchMock, "/api/admin/match/recompute")).toHaveLength(0);
+  });
+
+  it("hides every write control with hidden plus an md display class, and the banner names 768px or wider", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(jsonResponse(buildPayload()));
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+
+    for (const name of [/Recompute now/i, /Edit preferences/i]) {
+      const classes = screen.getByRole("button", { name }).className.split(/\s+/);
+      expect(classes, String(name)).toContain("hidden");
+      expect(classes, String(name)).toContain("md:inline-flex");
+      // Button's base `inline-flex` is emitted after `.hidden` in Tailwind v4
+      // and would keep the control visible. The unprefixed display must be gone.
+      expect(classes, String(name)).not.toContain("inline-flex");
+    }
+
+    const shortlist = screen.getByText("Shortlist").parentElement;
+    expect(shortlist).not.toBeNull();
+    const nestedSend = within(shortlist!).getByRole("button", { name: /Send intro/i });
+    expect(nestedSend.tagName).toBe("BUTTON");
+    const sendClasses = nestedSend.className.split(/\s+/);
+    expect(sendClasses).toContain("hidden");
+    expect(sendClasses).toContain("md:inline-flex");
+
+    const bar = screen.getByRole("button", { name: "KEEP" }).parentElement;
+    expect(bar).not.toBeNull();
+    const barClasses = bar!.className.split(/\s+/);
+    expect(barClasses).toContain("hidden");
+    expect(barClasses).toContain("md:flex");
+    expect(barClasses).not.toContain("flex");
+
+    const banner = screen.getByText(/768px or wider/);
+    expect(banner.textContent).not.toContain("1024px");
+    expect(banner.closest("div")?.className).toContain("md:hidden");
+    expect(banner.closest("div")?.className).toContain("border-accent/30");
+    expect(banner.closest("div")?.className).toContain("bg-accent/5");
   });
 });
