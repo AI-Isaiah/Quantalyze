@@ -355,11 +355,12 @@ line is kept for the record of how the numbers were maintained by hand until now
 # `-pr`-filtered phases by construction.
 ```
 
-## 2026-09-27 — `progress:` re-derived at `a4cd9b32`
+## 2026-09-27 — `progress:` recomputed by the tool, and why it had stopped moving
 
-Moved from 54/35/310/299/65% to **69/40/353/347/58%**. The measurement:
+The block moved from 54/35/310/299/65% to **72/40/353/347/56%**. The numbers are the output of `gsd-tools query state.update-progress`, run at `78d9a9a2`, not a hand edit. The tool ran cleanly on main: it touched only the `progress:` block and the body's `Progress:` line. `.planning/phases/` is on main now, so the old warning against running it (the `-pr` filter stripped the phase artifacts) no longer holds.
 
-- **Phases:** 73 v1.20 phases have a roadmap section. 165, 165.1 and 165.2 were retired by the founder, and 164.10 was closed by decision, so 69 count. 40 of those have `VERIFICATION.md` `status: passed`.
-- **Plans:** the PLAN and SUMMARY files for phases 158 and later under `.planning/phases/` on main.
+**Root cause of "stuck at 67%":** `/gsd-autonomous` recomputes progress when a phase completes. `phase complete` ticks the checkbox and runs this update. Since 2026-09-17 phases have been closed by hand on their own branches: the checkbox was ticked by hand and the complete step was never run. Nothing recomputed the block, so it only moved when someone typed it. The status-line bar reads this block, and on a checkout sitting on an old branch it reads that branch's copy.
 
-The percent went DOWN because about 20 phases were added since the last reading, not because work was undone. A phase whose verification is `human_needed` is not counted as complete. The full table is `### v1.20 Progress` in ROADMAP.md.
+⚠️ The tool counts 165, 165.1 and 165.2 in the 72 total because their phase directories still exist, although the founder retired them. That under-states the percent by about 2 points, and it is left as the tool reports it.
+
+Rule from here: when a phase's verification flips to `passed` on main, run `phase complete <N>` in a checkout of main, `git diff` the result, keep only its intended lines, and ship that with the phase's paperwork.
