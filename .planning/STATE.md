@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: "166.4"
-current_phase_name: BENCHALIGN
+current_phase: 164.9.3
+current_phase_name: CLAIMPAIR
 status: executing
-stopped_at: Completed 164.6-05-PLAN.md
-last_updated: "2026-09-27T14:33:23.646Z"
+stopped_at: Completed 164.9.3-06-PLAN.md
+last_updated: "2026-09-27T15:08:00.000Z"
 last_activity: 2026-09-27
-last_activity_desc: Phase 166.4 execution started
-state_head: c1b4bc062b9ff6e54dad1d445d8decc77c003a99
+last_activity_desc: Phase 164.9.3 execution started
+state_head: dd42818862a2c2c9ba81cf3d0b1da5bb0fcff35d
 progress:
   total_phases: 73
   completed_phases: 41
@@ -179,6 +179,10 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
+Phase: 164.9.3 (CLAIMPAIR) — EXECUTING
+Plan: 6 of 6 (01 done: the CLAIMPAIR gate, pre-fix census 14 arms RED with 23505, W-INTRO GREEN; 02 done: the pre-rank exclusion migration, all 15 arms GREEN on the replayed local-stack lane; 03 done: D-09 lane proof, corpus 78 of 78 on the replayed local-stack lane, the gate green on the pg-lane from its own SETUP list; 04 done: all 15 arms bite on the pg-lane through layered twins, runner biting 15; snapshots regenerated; three VAC-04 acks earned; 05 done: FILES_FLOOR 52 -> 53 and ARMS_FLOOR 491 -> 506 from one full run, coverage 53/80, separated in both directions, every census pin moved to its measured value; 06 done: origin/main merged again with the migration still sorting last, TODOS [164.9.3-CLAIM-PAIR-23505] closed, CHANGELOG [0.108.0.0] with VERSION/package.json at 0.108.0.0, SC3 record opened with three PENDING reviewer rows)
+Phase: 169.2 (BENCHFRESH) — EXECUTING
+Plan: 1 of 3
 Phase: 166.4 (BENCHALIGN) — EXECUTING
 Plan: 1 of 4
 Phase: 166.4 (BENCHALIGN) — PLANNED 2026-09-27 (4 plans, 4 waves; on branch feat/166.4-benchalign)
@@ -498,7 +502,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 166.4
+Status: Executing Phase 164.9.3
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -514,7 +518,7 @@ Status: Executing Phase 166.4
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-27 — Phase 166.4 execution started
+Last activity: 2026-09-27 — Phase 164.9.3 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1185,6 +1189,12 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.6 P05 | ~9 min | 2 tasks | 2 modified |
 | Phase 164.6.5 P08 | ~40 min | 2 tasks | 11 modified |
 | Phase 166.1 P09 | ~20 min | 3 tasks | 5 modified |
+| Phase 164.9.3 P01 | 20 min | 2 tasks | 1 files |
+| Phase 164.9.3 P02 | 15 min | 2 tasks | 1 files |
+| Phase 164.9.3 P03 | 6 min | 2 tasks | 1 files |
+| Phase 164.9.3 P04 | 25 min | 2 tasks | 4 files |
+| Phase 164.9.3 P05 | 57 min | 2 tasks | 5 files |
+| Phase 164.9.3 P06 | 7 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -1701,6 +1711,12 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.1.1.1]: 164.1.1.1-01: No-floor-move LANE-ONLY exclusion — skip execution plus the three "$out"-derived checks only; the static accounting (sentinel declaration, roster-vs-count coherence, n_arms<=RAISE-sites) stays outside the branch and runs for every file including the excluded one, so SENTINEL_FLOOR (11) and ARMS_FLOOR (213) never move.
 - [Phase 164.1.1.1]: 164.1.1.1-01 MEASURED (re-confirms the pattern above, a fourth time): `state.add-decision` and `state.update-progress` both clobber the `progress:` block downward again this session (`completed_phases` 20→18, `total_plans` 201→203, `percent` 44→40, plus stray blank-line insertions at ~L252-255). Reverted both calls; kept only the decision text, applied by hand.
 - [Phase 164.1.1.1]: 164.1.1.1-01: the static-accounting contract-test scenario counts occurrences of "completion sentinel OK: ALL 7 ARMS EXECUTED" rather than bare presence/absence, because test_sync_status_curated_sentence_survives.sql independently declares the identical "ALL 7 ARMS EXECUTED" text and a presence check could not distinguish the excluded file's line from that other file's.
+- [Phase 164.9.3]: 164.9.3-01: CLAIMPAIR gate seeds a real parent row per partition id under the replica role; replica-only seeding fails at the claim with 23503 (same-transaction FK re-check) — Measured on the local-stack lane: W-INTRO red with 23503 on the strategy foreign key until parents were seeded
+- [Phase 164.9.3]: 164.9.3-02: the migration's verify anchors pin PLACEMENT as well as text (each pre-rank clause must match between the ranked CTE opening and the deduped opening; the 2-arg C39 port between deduped and the batch UPDATE), so a later edit moving the guard post-rank, the rejected option (a), refuses at apply
+- [Phase 164.9.3]: 164.9.3-03: the CLAIMPAIR gate's pg-lane SETUP list is the enqueue dedupe gate's list plus fixtures 29 and 36-fixture-compute-jobs-claim-token.sql, with the migration last; the template entries were kept because the lane run showed no need to drop any
+- [Phase 164.9.3]: 164.9.3-04: each CLAIMPAIR twin mutates ONE body and ONE partition (OR TRUE inserted before the pre-rank NOT EXISTS, body chosen by measured nth) and stands down only that body-by-partition anchor; the VAC-04 acks are derived locally from --diff-bodies against origin/main and were cross-checked read-only against the PR's VAC-04 PROD MATCH hashes
+- [Phase 164.9.3]: 164.9.3-05: the mutation runner and pg-lane run WITHOUT the shared lane lock (coordinator correction: the lock guards only the local-stack lane); both floors were pushed to measured+1 in ONE full run, whose two defects named each floor
+- [Phase 164.9.3]: 164.9.3-06: the release is a MINOR bump to 0.108.0.0 (the migration changes the PROD claim path and auto-applies on merge); SC3 stays OPEN as a ship precondition in 164.9.3-MIGRATION-REVIEW.md (three reviewers before merge)
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -2405,9 +2421,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-23T22:48:56.456Z
-**Stopped At:** Phase 166 context gathered
-**Resume File:** .planning/phases/166-qstats-truth-every-quantstats-derived-number-reflects-the-re/166-CONTEXT.md
+**Last Date:** 2026-09-27T15:08:00.000Z
+**Stopped At:** Completed 164.9.3-06-PLAN.md
+**Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
 **Stopped At:** Completed 167.1-06-PLAN.md

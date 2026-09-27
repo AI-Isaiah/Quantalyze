@@ -1127,7 +1127,10 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // the UNION of the two lines above. Each side added one file over the common
     // base of 77, so BOTH joined the corpus: 77 + 1 + 1 = 79.
     // MEASURED: `node scripts/lint-sql-gates.mjs` printed `scanned 79 file(s)` on the merged tree.
-    expect(res.out).toMatch(/scanned 79 file/);
+    // MOVED 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05), 79 -> 80:
+    // supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql joined the corpus.
+    // MEASURED: `node scripts/lint-sql-gates.mjs` printed `scanned 80 file(s); 0 finding(s)`.
+    expect(res.out).toMatch(/scanned 80 file/);
     expect(res.status, res.out).toBe(0);
   });
 
