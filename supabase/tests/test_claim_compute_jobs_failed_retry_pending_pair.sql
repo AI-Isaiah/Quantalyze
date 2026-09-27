@@ -902,6 +902,18 @@ ROLLBACK;
 -- arm's rows sort ahead of any other due row inside the LIMIT 1000 window.
 -- The foreign normal/high push is W-LOWTWIN's: it assumes a lane private to
 -- this runner (164.9.3-REVIEW.md IN-07), and it ends in ROLLBACK.
+-- RED-UNDER: revert the 5-arg CLAIMPAIR PROBE EXCLUSION allocator disjunct in
+--            20260927120000_claim_pair_pre_rank_exclusion.sql to its
+--            pending-only sibling test (`= 'pending'`). The find is the
+--            allocator line plus the widened status line at the 5-arg's
+--            indentation; the 2-arg's block is indented two columns less, so
+--            it matches once. The probe counts R again, U is throttled and
+--            this arm's count is its first raise. W-LOWTWIN above seeds a
+--            PENDING twin, which the reverted test still excludes, so it
+--            stays green; every earlier arm seeds `normal` rows only.
+--            ⚠️ LAYERED: v_p5_probe_anchored is stood down
+--            (`IF FALSE AND NOT ...`) in the same mutation.
+-- RED-UNDER-M: {"arm":"W-C39SIB","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND p.allocator_id = compute_jobs.allocator_id\n                  AND p.status       IN ('pending', 'running', 'done_pending_children')))","replace":"AND p.allocator_id = compute_jobs.allocator_id\n                  AND p.status       = 'pending'))","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p5_probe_anchored THEN","replace":"IF FALSE AND NOT v_p5_probe_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -965,6 +977,16 @@ ROLLBACK;
 -- behind the intro carve-out, R is still counted and U is still throttled.
 -- Rows are seeded 10 years in the past and foreign normal/high rows are
 -- pushed out, as in W-C39SIB.
+-- RED-UNDER: re-add `kind <> 'compute_intro_snapshot' AND` in front of the
+--            5-arg probe's strategy EXISTS in
+--            20260927120000_claim_pair_pre_rank_exclusion.sql, match 1 of 2
+--            (body order 5-arg, 2-arg): the literal-widening form. The carve-out
+--            then covers the running sibling too, the probe counts R, U is
+--            throttled and this arm's count is its first raise. W-INTRO seeds
+--            `normal` rows only and W-C39SIB / W-LOWTWIN use the allocator
+--            partition, so every arm above stays green. ⚠️ LAYERED:
+--            v_p5_probe_anchored is stood down in the same mutation.
+-- RED-UNDER-M: {"arm":"W-C39INTRO","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"OR (strategy_id IS NOT NULL AND EXISTS (","replace":"OR (strategy_id IS NOT NULL AND kind <> 'compute_intro_snapshot' AND EXISTS (","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p5_probe_anchored THEN","replace":"IF FALSE AND NOT v_p5_probe_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
