@@ -1380,6 +1380,9 @@ AllocatorEquityAction = Literal[
     "allocator.equity.refresh_failed",
     "allocator.equity.sibling_lookup_failed",
     "allocator.equity.perp_upnl_missing",
+    # Phase 167.1.2 plan 12, review SFH-R2-01: the daily refresh held a
+    # zero-snapshot book's first row while its reconstruct was in flight.
+    "allocator.equity.refresh_held_for_reconstruct",
 ]
 
 

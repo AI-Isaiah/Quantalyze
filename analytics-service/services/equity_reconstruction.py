@@ -1717,6 +1717,85 @@ async def _api_key_already_reconstructed(supabase: Any, api_key_id: str) -> bool
     return len(data) > 0
 
 
+# Phase 167.1.2 plan 12, review SFH-R2-01: the reconstruct statuses that hold
+# a zero-snapshot book's daily refresh. It is the in-flight half of the list
+# migration 20260927120000's fan-out counts as "bootstrapped" (its `done` is
+# left out on purpose): a done reconstruct already wrote the rows it could, so
+# the refresh may start the book. failed_retry is in flight because the worker
+# claims it again.
+_RECONSTRUCT_IN_FLIGHT_STATUSES: tuple[str, ...] = (
+    "pending", "running", "done_pending_children", "failed_retry",
+)
+
+
+async def _inflight_reconstructs_for_zero_snapshot_book(
+    supabase: Any, allocator_id: str
+) -> int:
+    """How many ``reconstruct_allocator_history`` jobs are in flight for any
+    key of ``allocator_id`` while the book has ZERO legacy snapshot rows. 0
+    when the book already has a snapshot row (the hold is for a book's FIRST
+    row only) or when nothing is in flight.
+
+    Why it exists (review SFH-R2-01). The daily fan-out bootstraps a
+    zero-snapshot book by enqueueing its reconstruct and its refresh in the
+    SAME run. The refresh is fast and the reconstruct crawl runs up to 30
+    minutes, so a refresh that wrote today's row would give the book its first
+    snapshot before the reconstruct finished. If that reconstruct then ended
+    failed_final, the fan-out (which bootstraps only zero-snapshot books,
+    D-17 (c)) would never retry it, and the key's backfill would be lost for
+    good. Holding the write keeps the book at zero until the reconstruct is
+    done, and a failed one is retried by the next fan-out run.
+
+    Every read RAISES on failure, by design: the caller turns a raise into a
+    FAILED job and a ``refresh_failed`` audit. Swallowing it here would fall
+    through to the write this probe exists to hold.
+    """
+
+    def _sel_snapshot() -> Any:
+        return (
+            supabase.table("allocator_equity_snapshots")
+            .select("asof")
+            .eq("allocator_id", allocator_id)
+            .limit(1)
+            .execute()
+        )
+
+    if getattr(await db_execute(_sel_snapshot), "data", None):
+        return 0
+
+    def _sel_key_ids() -> Any:
+        return (
+            supabase.table("api_keys")
+            .select("id")
+            .eq("user_id", allocator_id)
+            .execute()
+        )
+
+    key_ids = [
+        r["id"]
+        for r in (getattr(await db_execute(_sel_key_ids), "data", None) or [])
+        if r.get("id")
+    ]
+    if not key_ids:
+        return 0
+
+    def _sel_inflight() -> Any:
+        return (
+            supabase.table("compute_jobs")
+            .select("id", count="exact")
+            .eq("kind", "reconstruct_allocator_history")
+            .in_("api_key_id", key_ids)
+            .in_("status", list(_RECONSTRUCT_IN_FLIGHT_STATUSES))
+            .execute()
+        )
+
+    res = await db_execute(_sel_inflight)
+    count = getattr(res, "count", None)
+    if count is not None:
+        return int(count)
+    return len(getattr(res, "data", None) or [])
+
+
 # The columns the refresh job reads from a holdings row. One list, so the
 # latest-asof read and the rows read cannot drift apart.
 _REFRESH_HOLDINGS_COLUMNS = (
@@ -3375,6 +3454,35 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                     "eligible_keys": latest.eligible_keys,
                     "carried_keys": latest.carried_keys,
                     "excluded_shared_keys": latest.excluded_shared_keys,
+                },
+            )
+            return DispatchResult(outcome=DispatchOutcome.DONE)
+
+        # Phase 167.1.2 plan 12, review SFH-R2-01: never write a book's FIRST
+        # snapshot row while its history reconstruct is in flight. The daily
+        # fan-out enqueues both jobs in the same run for a zero-snapshot book;
+        # this row would close its bootstrap gate before the reconstruct had
+        # succeeded, and a reconstruct that then failed would never be retried.
+        # A read failure here raises into the handler below (FAILED job,
+        # refresh_failed audit), never into a write.
+        inflight = await _inflight_reconstructs_for_zero_snapshot_book(
+            ctx.supabase, allocator_id
+        )
+        if inflight:
+            logger.info(
+                "refresh_allocator_equity_daily: held for allocator=%s "
+                "(zero snapshots, %d reconstruct job(s) in flight)",
+                allocator_id, inflight,
+            )
+            _emit_audit(
+                allocator_id, api_key_id,
+                "allocator.equity.refresh_held_for_reconstruct",
+                {
+                    "reason": "reconstruct_in_flight",
+                    "venue": venue,
+                    # Counts only, never a USD figure or a key id.
+                    "inflight_reconstructs": inflight,
+                    "eligible_keys": latest.eligible_keys,
                 },
             )
             return DispatchResult(outcome=DispatchOutcome.DONE)

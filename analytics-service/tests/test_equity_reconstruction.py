@@ -80,6 +80,9 @@ class _FakeTable:
         self._select_neq_filters: list[tuple[str, Any]] = []
         self._select_is_null_cols: list[str] = []
         self._select_ranges: list[tuple[str, str, str]] = []  # (col, op, val)
+        # PostgREST `.in_(col, values)`: col IN (values). Added for the daily
+        # refresh's reconstruct-hold probe (Phase 167.1.2 plan 12, SFH-R2-01).
+        self._select_in_filters: list[tuple[str, frozenset]] = []
         self._select_count_mode: str | None = None
         # Pending write
         self._pending_op: str | None = None  # 'upsert' | 'update' | 'insert' | 'delete'
@@ -147,6 +150,10 @@ class _FakeTable:
             self._select_is_null_cols.append(col)
         else:
             self._select_filters.append((col, val))
+        return self
+
+    def in_(self, col: str, values):
+        self._select_in_filters.append((col, frozenset(values)))
         return self
 
     def gte(self, col: str, val):
@@ -248,6 +255,8 @@ class _FakeTable:
                 if any(row.get(c) == v for c, v in self._select_neq_filters):
                     continue
                 if any(row.get(c) is not None for c in self._select_is_null_cols):
+                    continue
+                if not all(row.get(c) in vals for c, vals in self._select_in_filters):
                     continue
                 # range filters
                 ok = True

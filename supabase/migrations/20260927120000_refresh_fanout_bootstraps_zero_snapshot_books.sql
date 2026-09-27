@@ -90,9 +90,8 @@
 -- (pending, running, done_pending_children, failed_retry) or DONE. That is
 -- request_allocator_holdings_sync's rule (done, pending, running,
 -- done_pending_children) plus failed_retry: the worker claims a failed_retry
--- row again, so it is in flight, and enqueue_ledger_composite_refresh and
--- enqueue_ledger_refresh_for_strategies count it in flight for the same
--- reason. ⚠️ The RPC omits failed_retry, so a user sync during a scheduled
+-- row again, so it is in flight, and the two ledger refresh fan-outs count it
+-- in flight for the same reason. ⚠️ The RPC omits failed_retry, so a user sync during a scheduled
 -- retry enqueues a second reconstruct; that is outside this file and is
 -- flagged for cleanup, not fixed here. A failed_final row does NOT count: an
 -- earlier version counted a reconstruct row in any status, so a failed
@@ -103,7 +102,9 @@
 --   * A zero-snapshot book whose qualifying key's reconstruct ended
 --     failed_final is re-enqueued on the next run, under the per-run cap. A
 --     key that fails every time retries once a day while its book stays at
---     zero snapshots (the refresh writes no row for a book with no holdings).
+--     zero snapshots: the refresh writes no row for a book with no holdings,
+--     and for a book WITH holdings the worker holds the write while the
+--     reconstruct is in flight (the Python hold below).
 --   * A zero-snapshot book whose done reconstruct wrote no rows is
 --     re-enqueued once that done row is reaped (after 30 days), under the cap.
 --   * A key whose sync_status is sign_in_failed or error is NOT qualifying: a
@@ -112,15 +113,37 @@
 --     refresh population, as on 075, and the owner's re-sign-in goes through
 --     request_allocator_holdings_sync, which enqueues its reconstruct.
 --     rate_limited stays qualifying: it is transient.
--- ⚠️ RESIDUAL, recorded (T-167.1.2-58): the refresh is enqueued in the SAME
--- run as the reconstruct it waits for, because an in-flight row counts. If
--- holdings exist, the refresh writes today's row before the 30-minute
--- reconstruct ends, and a reconstruct that then ends failed_final leaves a
--- book WITH snapshots, which this function never bootstraps again (D-17 (c)).
--- The key's next sync through request_allocator_holdings_sync recovers it,
--- because that RPC's gate ignores failed rows. Closing it here would mean
--- withholding the refresh until every reconstruct is DONE, which re-decides
--- D-17's same-run refresh; that is not this file's call.
+-- THE SAME-RUN REFRESH, AND THE PYTHON HOLD THAT MAKES IT SAFE (review
+-- SFH-R2-01). The refresh is enqueued in the SAME run as the reconstruct it
+-- waits for, because an in-flight row counts (D-17's same-run refresh, arms
+-- Z1, B, C, N3c and N4). The refresh job is fast and the reconstruct crawl
+-- runs up to 30 minutes, so the refresh usually runs first. On its own this
+-- file would therefore let the refresh write a book's FIRST row while the
+-- reconstruct was still running; a reconstruct that then ended failed_final
+-- would leave a book WITH snapshots, which this function never bootstraps
+-- again (D-17 (c)), and the key's backfill would be lost for good. The
+-- mitigation is in the worker, not here:
+-- run_refresh_allocator_equity_daily_job (analytics-service
+-- services/equity_reconstruction.py) writes NO row for a book with zero
+-- snapshots while any of its keys has a reconstruct_allocator_history job
+-- pending, running, done_pending_children or failed_retry. It audits the hold
+-- as allocator.equity.refresh_held_for_reconstruct and ends done, and a read
+-- failure of that probe fails the job instead of writing. A reconstruct that
+-- fails therefore leaves the book at zero, and this function's status filter
+-- retries it on the next run.
+-- ⚠️ RESIDUALS, recorded and not fixed here (one class with plan 12's R-12-1
+-- and plan 13's R-13-1, "no durable per-key history-reconstructed marker",
+-- UNROUTED, founder decision):
+--   * the hold sees only a reconstruct IN FLIGHT. If the same-run reconstruct
+--     reaches failed_final BEFORE the refresh is claimed (a permanent failure
+--     early in the job, with both jobs claimed at once), the refresh sees no
+--     in-flight row and writes the first row, and the key is stranded;
+--   * on a book with TWO qualifying keys, one key's reconstruct can end done
+--     and write rows while the other's ends failed_final. The book then has
+--     snapshots and the failed key is never bootstrapped again.
+--   Neither is recovered by a later user sync on its own: that RPC runs only
+--   from the Exchanges page, and it returns {already_inflight} before its
+--   reconstruct gate whenever a poll is in flight (D-17 (b)).
 --
 -- THREATS, as this file mitigates them:
 --   T-167.1.2-42 (worker flood): the per-run cap, soft at book granularity;
@@ -128,9 +151,11 @@
 --     sign_in_failed and error keys excluded.
 --   T-167.1.2-58 (a qualifying key stranded at zero): the reconstruct loop
 --     runs first and never splits a book, and the refresh waits until every
---     qualifying key has a reconstruct row in flight or done, so no first
---     snapshot row closes the gate before every key's reconstruct is
---     enqueued. A failed reconstruct no longer counts. Residual above.
+--     qualifying key has a reconstruct row in flight or done, so no refresh
+--     is enqueued before every key's reconstruct is. A failed reconstruct no
+--     longer counts. What keeps the refresh from writing the first row while
+--     that reconstruct is still running is the worker's hold above; the
+--     residuals above remain.
 --
 -- DEPLOY NOTE (D-17, amends D-12's PR C list). This migration adds no column,
 -- no table, no type and no signature change, and nothing in PR C reads anything
