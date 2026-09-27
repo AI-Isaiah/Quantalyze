@@ -4727,3 +4727,86 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
     },
   );
 });
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 plan 04 (D-01, D-11) — the manager's key card names a key that
+// reads the same exchange account as another of the owner's live keys, beside
+// the Delete control that already exists, through the SAME accountShareNote
+// the allocator card uses. A composite_member pair (D-04) is legitimate and
+// shows nothing. Without the note the marker the daily poll writes is
+// invisible on this surface, and the owner has no named way to clean it up.
+// ---------------------------------------------------------------------------
+describe("ApiKeyManager — duplicate-account note (167.1.2 plan 04)", () => {
+  function row(overrides: Record<string, unknown>) {
+    return {
+      id: "key-okx-holder",
+      user_id: "user-a",
+      exchange: "okx",
+      label: "Main OKX",
+      is_active: true,
+      sync_status: "complete",
+      last_sync_at: "2026-09-20T11:58:00Z",
+      account_balance_usdt: 1000,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+      venue_account_id: null,
+      account_shared_with_api_key_id: null,
+      account_share_kind: null,
+      history_inclusion: null,
+      ...overrides,
+    };
+  }
+
+  it("renders the duplicate sentence on the marked key's card, beside its Delete control", async () => {
+    selectResultMock.mockReturnValue({
+      data: [
+        row({}),
+        row({
+          id: "key-okx-dup",
+          label: "Second OKX",
+          account_shared_with_api_key_id: "key-okx-holder",
+          account_share_kind: "duplicate",
+        }),
+      ],
+      error: null,
+    });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    const card = await screen.findByTestId("api-key-card-key-okx-dup");
+    const note = within(card).getByRole("note");
+    expect(note.textContent).toBe(
+      "This key reads the same exchange account as OKX — Main OKX. Disconnect one of them.",
+    );
+    expect(within(card).getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("api-key-card-key-okx-holder")).queryByRole("note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders nothing for a composite_member pair", async () => {
+    selectResultMock.mockReturnValue({
+      data: [
+        row({}),
+        row({
+          id: "key-okx-dup",
+          label: "Second OKX",
+          account_shared_with_api_key_id: "key-okx-holder",
+          account_share_kind: "composite_member",
+        }),
+      ],
+      error: null,
+    });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    await screen.findByTestId("api-key-card-key-okx-dup");
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+});
