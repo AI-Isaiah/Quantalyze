@@ -1525,7 +1525,7 @@ true for 146 and half of 142–145, and **false for 141**.
       and human-run: dispatch `supabase-migrate.yml` on main and expect a no-op or one bot PR,
       and approve the workflows on the first bot PR.
 
-- [ ] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
+- [x] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
       same (kind, allocator) makes every claim entry point raise `23505` (booked 2026-09-26, found
       on the pg-lane by the Phase 167.1.2 PR B fixer).**
       **Repro, measured 2026-09-26.** Seed a `failed_retry` `derive_allocator_equity` row with
@@ -1552,6 +1552,25 @@ true for 146 and half of 142–145, and **false for 141**.
       any kind is claimed until the pair clears. The full repro is kept verbatim in the Phase
       164.5.2 ROADMAP section as lineage. **Owner: Phase 164.9.3 CLAIMPAIR**, whose criterion 4
       now covers all four partitions (api_key_id, portfolio, strategy, allocator).
+      ✅ CLOSED 2026-09-27 by Phase 164.9.3 CLAIMPAIR. Migration
+      `20260927120000_claim_pair_pre_rank_exclusion.sql` (D-08): a `failed_retry` candidate whose
+      `(kind, partition)` already holds a `pending` row is dropped from the `ranked` CTE BEFORE
+      `row_number()` in all three claim bodies, `claim_compute_jobs(integer, text)`, the 5-arg
+      and the 2-arg `claim_compute_jobs_with_priority`, with one clause per partition
+      (`api_key_id`, portfolio, strategy, allocator) matching its
+      `compute_jobs_one_inflight_per_kind_*` index predicate (D-02). The 2-arg is re-based, not
+      dropped, and also gains the C39 running / done_pending_children guard. The enqueue side is
+      unchanged. Gate `supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql`,
+      15 arms (12 partition arms, W-LOST, P2-C39, regression arm W-INTRO), each with a mutation
+      twin. Red-first census on the pre-fix lane: 14 RED, all 14 with SQLSTATE 23505, W-INTRO
+      GREEN. After the fix: 15 of 15 green on the local-stack and pg-lanes. ⚠️ Three residuals
+      are recorded in the migration header, not fixed: (i) the priority throttle still counts a
+      held-back retry, so a due retry beside a far-future twin can hold back low-priority jobs
+      until the twin is due; (ii) a retry waits for a not-yet-due twin to run first (delay, not
+      loss); (iii) a claim racing a concurrent enqueue of the twin can still raise 23505 for one
+      tick (reasoned, not measured). The ROADMAP-booked option (a), adding `pending` to the
+      post-rank C39 list, was measured as a SILENT permanent wedge that also starves
+      `compute_intro_snapshot`, and was rejected.
 
 - [ ] **`[164.9.3.1-FANIN-GRAPH-RESIDUALS]` Four latent or loud defects on the fan-in graph and
       the bridge's decision cascade (booked 2026-09-26; routed 2026-09-25 from the Phase 164.9.1
