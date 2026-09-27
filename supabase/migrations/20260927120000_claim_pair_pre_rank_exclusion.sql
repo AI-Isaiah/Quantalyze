@@ -32,15 +32,27 @@
 --         "no bytes outside the marked CLAIMPAIR blocks"). As first written,
 --         the throttle probe of both priority overloads still counted a due
 --         normal/high retry the pre-rank clause holds back. This header then
---         called that a bounded hold, and it was not: beside a `low` pending
---         twin, neither row was ever claimed and every due `low` job
---         queue-wide was throttled, with no error, on every tick (measured).
---         Each probe now carries a marked CLAIMPAIR PROBE EXCLUSION block that
---         drops such a retry from the count, on the same four partitions and
---         with the same intro carve-out as the pre-rank block. So neither the
---         far-future-twin hold nor the low-twin wedge remains; the gate arm
---         W-LOWTWIN pins it. What stays: C39 still counts a retry beside a
---         running row in the probe, a hold that ends when that row finishes.
+--         called that a hold that ends when the twin is due, and it was not:
+--         beside a `low` pending twin, neither row was ever claimed and every
+--         due `low` job queue-wide was throttled, with no error, on every
+--         tick (measured). Each probe now carries a marked CLAIMPAIR PROBE
+--         EXCLUSION block that drops such a retry from the count, on the same
+--         four partitions as the pre-rank block and with its intro carve-out
+--         on the pending sibling only. Review round 3 (founder decision D-11)
+--         widened the block to the C39 half too: a retry the C39 guard holds
+--         back beside a running or done_pending_children row of the same
+--         (kind, partition) is dropped from the count as well, on all four
+--         partitions and with no intro carve-out, as in C39 itself. Beside a
+--         fan-in done_pending_children row whose parent is `low`, that hold
+--         never ended. So the far-future-twin hold, the low-twin wedge and
+--         the C39-sibling hold are all gone; the gate arms W-LOWTWIN,
+--         W-C39SIB and W-C39INTRO pin them. What stays (164.9.3-REVIEW.md
+--         IN-11): the block is scoped to failed_retry rows, so a due PENDING
+--         compute_intro_snapshot row that C39 drops beside a running or
+--         done_pending_children intro row of the same strategy is still
+--         counted. Only that kind can sit pending beside an in-flight row
+--         (the strategy index carves it out). It predates this migration and
+--         is latent while no writer sets `low`.
 --   (ii)  A retry waits for a not-yet-due twin to run first: delay, not loss.
 --         It is inherent to one-in-flight-per-partition.
 --   (iii) A claim racing a concurrent enqueue of the twin can still raise
@@ -360,29 +372,35 @@ BEGIN
        -- pending row) is not claimable this tick, so it must not trip the
        -- throttle either. Counted, it held back a `low` pending twin and every
        -- other due `low` job while never being claimed itself: a silent,
-       -- permanent wedge. Same four partitions and the same strategy carve-out
-       -- as the pre-rank block, written as one negated disjunction.
+       -- permanent wedge. Review round 3 (founder decision D-11): the same
+       -- holds for a failed_retry the C39 guard in `deduped` holds back beside
+       -- a running or done_pending_children row of the same (kind, partition),
+       -- so every sibling test also names those two statuses. Four partitions,
+       -- one negated disjunction. The intro carve-out gates the pending sibling
+       -- only, as in the pre-rank block; C39's strategy clause has none, so a
+       -- running or done_pending_children sibling holds an intro retry too.
        AND NOT (status = 'failed_retry' AND (
              (portfolio_id IS NOT NULL AND EXISTS (
                SELECT 1 FROM compute_jobs p
                 WHERE p.kind         = compute_jobs.kind
                   AND p.portfolio_id = compute_jobs.portfolio_id
-                  AND p.status       = 'pending'))
-          OR (strategy_id IS NOT NULL AND kind <> 'compute_intro_snapshot' AND EXISTS (
+                  AND p.status       IN ('pending', 'running', 'done_pending_children')))
+          OR (strategy_id IS NOT NULL AND EXISTS (
                SELECT 1 FROM compute_jobs p
                 WHERE p.kind        = compute_jobs.kind
                   AND p.strategy_id = compute_jobs.strategy_id
-                  AND p.status      = 'pending'))
+                  AND (p.status IN ('running', 'done_pending_children')
+                       OR (p.status = 'pending' AND compute_jobs.kind <> 'compute_intro_snapshot'))))
           OR (allocator_id IS NOT NULL AND EXISTS (
                SELECT 1 FROM compute_jobs p
                 WHERE p.kind         = compute_jobs.kind
                   AND p.allocator_id = compute_jobs.allocator_id
-                  AND p.status       = 'pending'))
+                  AND p.status       IN ('pending', 'running', 'done_pending_children')))
           OR (api_key_id IS NOT NULL AND EXISTS (
                SELECT 1 FROM compute_jobs p
                 WHERE p.kind       = compute_jobs.kind
                   AND p.api_key_id = compute_jobs.api_key_id
-                  AND p.status     = 'pending'))))
+                  AND p.status     IN ('pending', 'running', 'done_pending_children')))))
        -- CLAIMPAIR PROBE EXCLUSION END
        AND next_attempt_at <= now()
        AND (p_kind_include IS NULL OR kind = ANY(p_kind_include))
@@ -586,29 +604,35 @@ BEGIN
      -- pending row) is not claimable this tick, so it must not trip the
      -- throttle either. Counted, it held back a `low` pending twin and every
      -- other due `low` job while never being claimed itself: a silent,
-     -- permanent wedge. Same four partitions and the same strategy carve-out
-     -- as the pre-rank block, written as one negated disjunction.
+     -- permanent wedge. Review round 3 (founder decision D-11): the same
+     -- holds for a failed_retry the C39 guard in `deduped` holds back beside
+     -- a running or done_pending_children row of the same (kind, partition),
+     -- so every sibling test also names those two statuses. Four partitions,
+     -- one negated disjunction. The intro carve-out gates the pending sibling
+     -- only, as in the pre-rank block; C39's strategy clause has none, so a
+     -- running or done_pending_children sibling holds an intro retry too.
      AND NOT (status = 'failed_retry' AND (
            (portfolio_id IS NOT NULL AND EXISTS (
              SELECT 1 FROM compute_jobs p
               WHERE p.kind         = compute_jobs.kind
                 AND p.portfolio_id = compute_jobs.portfolio_id
-                AND p.status       = 'pending'))
-        OR (strategy_id IS NOT NULL AND kind <> 'compute_intro_snapshot' AND EXISTS (
+                AND p.status       IN ('pending', 'running', 'done_pending_children')))
+        OR (strategy_id IS NOT NULL AND EXISTS (
              SELECT 1 FROM compute_jobs p
               WHERE p.kind        = compute_jobs.kind
                 AND p.strategy_id = compute_jobs.strategy_id
-                AND p.status      = 'pending'))
+                AND (p.status IN ('running', 'done_pending_children')
+                     OR (p.status = 'pending' AND compute_jobs.kind <> 'compute_intro_snapshot'))))
         OR (allocator_id IS NOT NULL AND EXISTS (
              SELECT 1 FROM compute_jobs p
               WHERE p.kind         = compute_jobs.kind
                 AND p.allocator_id = compute_jobs.allocator_id
-                AND p.status       = 'pending'))
+                AND p.status       IN ('pending', 'running', 'done_pending_children')))
         OR (api_key_id IS NOT NULL AND EXISTS (
              SELECT 1 FROM compute_jobs p
               WHERE p.kind       = compute_jobs.kind
                 AND p.api_key_id = compute_jobs.api_key_id
-                AND p.status     = 'pending'))))
+                AND p.status     IN ('pending', 'running', 'done_pending_children')))))
      -- CLAIMPAIR PROBE EXCLUSION END
      AND next_attempt_at <= now();
 
@@ -793,18 +817,20 @@ DECLARE
     'AND\s+\(\s*api_key_id\s+IS\s+NULL\s+OR\s+NOT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+x\s+WHERE\s+x\.kind\s*=\s*ranked\.kind\s+AND\s+x\.api_key_id\s*=\s*ranked\.api_key_id\s+AND\s+x\.status\s+IN\s*\(\s*''running''\s*,\s*''done_pending_children''\s*\)\s*\)\s*\)';
   c_c39_re                  CONSTANT text :=
     'deduped\s+AS\s*\(.*' || c_c39_pf_re || '\s*' || c_c39_st_re || '\s*' || c_c39_al_re || '\s*' || c_c39_key_re || '.*\mUPDATE\s+compute_jobs\M';
-  -- The probe exclusion (review round 1, WR-01) in both priority overloads:
-  -- the whole negated disjunction, all four partitions in order with the
-  -- strategy carve-out, inside the throttle probe statement (`[^;]*` keeps
-  -- it within that one statement) and before `WITH ranked AS (` opens.
+  -- The probe exclusion (review round 1, WR-01; widened in review round 3,
+  -- D-11) in both priority overloads: the whole negated disjunction, all
+  -- four partitions in order, each sibling test naming pending, running and
+  -- done_pending_children, the intro carve-out on the pending sibling only,
+  -- inside the throttle probe statement (`[^;]*` keeps it within that one
+  -- statement) and before `WITH ranked AS (` opens.
   v_p5_probe_anchored       boolean;
   v_p2_probe_anchored       boolean;
   c_probe_re                CONSTANT text :=
     'AND\s+NOT\s*\(\s*status\s*=\s*''failed_retry''\s+AND\s*\(\s*'
-    || '\(\s*portfolio_id\s+IS\s+NOT\s+NULL\s+AND\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+p\s+WHERE\s+p\.kind\s*=\s*compute_jobs\.kind\s+AND\s+p\.portfolio_id\s*=\s*compute_jobs\.portfolio_id\s+AND\s+p\.status\s*=\s*''pending''\s*\)\s*\)\s*'
-    || 'OR\s*\(\s*strategy_id\s+IS\s+NOT\s+NULL\s+AND\s+kind\s*<>\s*''compute_intro_snapshot''\s+AND\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+p\s+WHERE\s+p\.kind\s*=\s*compute_jobs\.kind\s+AND\s+p\.strategy_id\s*=\s*compute_jobs\.strategy_id\s+AND\s+p\.status\s*=\s*''pending''\s*\)\s*\)\s*'
-    || 'OR\s*\(\s*allocator_id\s+IS\s+NOT\s+NULL\s+AND\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+p\s+WHERE\s+p\.kind\s*=\s*compute_jobs\.kind\s+AND\s+p\.allocator_id\s*=\s*compute_jobs\.allocator_id\s+AND\s+p\.status\s*=\s*''pending''\s*\)\s*\)\s*'
-    || 'OR\s*\(\s*api_key_id\s+IS\s+NOT\s+NULL\s+AND\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+p\s+WHERE\s+p\.kind\s*=\s*compute_jobs\.kind\s+AND\s+p\.api_key_id\s*=\s*compute_jobs\.api_key_id\s+AND\s+p\.status\s*=\s*''pending''\s*\)\s*\)\s*\)\s*\)';
+    || '\(\s*portfolio_id\s+IS\s+NOT\s+NULL\s+AND\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+p\s+WHERE\s+p\.kind\s*=\s*compute_jobs\.kind\s+AND\s+p\.portfolio_id\s*=\s*compute_jobs\.portfolio_id\s+AND\s+p\.status\s+IN\s*\(\s*''pending''\s*,\s*''running''\s*,\s*''done_pending_children''\s*\)\s*\)\s*\)\s*'
+    || 'OR\s*\(\s*strategy_id\s+IS\s+NOT\s+NULL\s+AND\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+p\s+WHERE\s+p\.kind\s*=\s*compute_jobs\.kind\s+AND\s+p\.strategy_id\s*=\s*compute_jobs\.strategy_id\s+AND\s*\(\s*p\.status\s+IN\s*\(\s*''running''\s*,\s*''done_pending_children''\s*\)\s+OR\s*\(\s*p\.status\s*=\s*''pending''\s+AND\s+compute_jobs\.kind\s*<>\s*''compute_intro_snapshot''\s*\)\s*\)\s*\)\s*\)\s*'
+    || 'OR\s*\(\s*allocator_id\s+IS\s+NOT\s+NULL\s+AND\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+p\s+WHERE\s+p\.kind\s*=\s*compute_jobs\.kind\s+AND\s+p\.allocator_id\s*=\s*compute_jobs\.allocator_id\s+AND\s+p\.status\s+IN\s*\(\s*''pending''\s*,\s*''running''\s*,\s*''done_pending_children''\s*\)\s*\)\s*\)\s*'
+    || 'OR\s*\(\s*api_key_id\s+IS\s+NOT\s+NULL\s+AND\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+p\s+WHERE\s+p\.kind\s*=\s*compute_jobs\.kind\s+AND\s+p\.api_key_id\s*=\s*compute_jobs\.api_key_id\s+AND\s+p\.status\s+IN\s*\(\s*''pending''\s*,\s*''running''\s*,\s*''done_pending_children''\s*\)\s*\)\s*\)\s*\)\s*\)';
   c_p5_probe_re             CONSTANT text :=
     'v_high_pending\s*:=\s*CASE\s+WHEN\s+EXISTS\s*\([^;]*' || c_probe_re || '[^;]*\)\s*THEN\s+1\s+ELSE\s+0\s+END\s*;.*\mWITH\s+ranked\s+AS\s*\(';
   c_p2_probe_re             CONSTANT text :=
@@ -929,10 +955,11 @@ BEGIN
     RAISE EXCEPTION 'claim-pair-pre-rank: the 5-arg claim_compute_jobs_with_priority does not drop, before ranking, a failed_retry candidate whose (kind, api_key_id) holds a pending row. The pairing raises 23505 and aborts the whole batch again.';
   END IF;
 
-  -- (5b) the probe exclusion, inside the throttle probe, before ranking.
+  -- (5b) the probe exclusion (pending twin and C39 sibling), inside the
+  -- throttle probe, before ranking.
   v_p5_probe_anchored := v_p5_body ~ c_p5_probe_re;
   IF NOT v_p5_probe_anchored THEN
-    RAISE EXCEPTION 'claim-pair-pre-rank: the 5-arg claim_compute_jobs_with_priority throttle probe still counts a failed_retry row the pre-rank clause holds back (its (kind, partition) holds a pending row). A normal/high retry beside a low pending twin then claims neither row and throttles every due low job, silently and permanently.';
+    RAISE EXCEPTION 'claim-pair-pre-rank: the 5-arg claim_compute_jobs_with_priority throttle probe''s CLAIMPAIR PROBE EXCLUSION block is missing, moved or altered (all four partitions, pending and running/done_pending_children siblings, the intro carve-out on the pending sibling only, inside the probe statement). The throttle then counts a failed_retry no claim takes this tick, or skips one a claim does take.';
   END IF;
 
   -- (6) carried forward from 20260603120000 STEP 3 (the priority RPC arms)
@@ -1029,10 +1056,11 @@ BEGIN
     RAISE EXCEPTION 'claim-pair-pre-rank: the 2-arg claim_compute_jobs_with_priority does not carry, in its dedupe, the running / done_pending_children guard on all four partitions. Its second tick claims a retry beside a now-running twin and raises 23505.';
   END IF;
 
-  -- (10b) the probe exclusion, inside the throttle count, before ranking.
+  -- (10b) the probe exclusion (pending twin and C39 sibling), inside the
+  -- throttle count, before ranking.
   v_p2_probe_anchored := v_p2_body ~ c_p2_probe_re;
   IF NOT v_p2_probe_anchored THEN
-    RAISE EXCEPTION 'claim-pair-pre-rank: the 2-arg claim_compute_jobs_with_priority throttle count still counts a failed_retry row the pre-rank clause holds back (its (kind, partition) holds a pending row). A normal/high retry beside a low pending twin then claims neither row and throttles every due low job, silently and permanently.';
+    RAISE EXCEPTION 'claim-pair-pre-rank: the 2-arg claim_compute_jobs_with_priority throttle count''s CLAIMPAIR PROBE EXCLUSION block is missing, moved or altered (all four partitions, pending and running/done_pending_children siblings, the intro carve-out on the pending sibling only, inside the count statement). The throttle then counts a failed_retry no claim takes this tick, or skips one a claim does take.';
   END IF;
 
   -- (11) SECURITY DEFINER, and the search_path pin is the VALUE.
@@ -1055,6 +1083,6 @@ BEGIN
     RAISE EXCEPTION 'claim-pair-pre-rank: service_role does not hold EXECUTE on the 2-arg claim_compute_jobs_with_priority';
   END IF;
 
-  RAISE NOTICE 'claim-pair-pre-rank: claim_compute_jobs and both claim_compute_jobs_with_priority overloads drop, before ranking, a failed_retry candidate beside a pending twin on all four partitions (strategy with the intro carve-out); the throttle probe of neither priority overload counts a retry held back that way; the 2-arg carries the C39 guard on all four partitions; carried-forward invariants (5-arg and claim_compute_jobs), SECURITY DEFINER, the exact search_path pin, the closed ACL and the service_role grant intact for all three.';
+  RAISE NOTICE 'claim-pair-pre-rank: claim_compute_jobs and both claim_compute_jobs_with_priority overloads drop, before ranking, a failed_retry candidate beside a pending twin on all four partitions (strategy with the intro carve-out); the throttle probe of neither priority overload counts a retry held back that way or by the C39 guard; the 2-arg carries the C39 guard on all four partitions; carried-forward invariants (5-arg and claim_compute_jobs), SECURITY DEFINER, the exact search_path pin, the closed ACL and the service_role grant intact for all three.';
 END
 $verify$;
