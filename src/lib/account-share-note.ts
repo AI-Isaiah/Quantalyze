@@ -25,6 +25,17 @@
  *
  * The note shows the holder's own label (exchange and nickname, or a masked id
  * tail), never an account id and never a user id (T-167.1.2-17).
+ *
+ * 167.1.2 REVIEW WR-01 / WR-02 / SF-L1 — what the note may ask:
+ *   - The caller names the verb of the control ITS card carries. The allocator
+ *     card has Disconnect; the manager card has Delete and no Disconnect. The
+ *     parameter is required so a new caller cannot inherit a verb it lacks.
+ *   - The D-18 rule is applied to the MARKED key too. A marked key that is
+ *     disconnected, inactive or failing counts for nothing, and it is never
+ *     polled again, so its marker never clears. Asking the owner to remove one
+ *     of the pair there asks for a remedy already applied, forever.
+ *   - A holder absent from the caller's key list cannot be judged working, so
+ *     the note says nothing rather than naming "another of your keys".
  */
 
 import { dataSourceLabel } from "@/lib/api-key-label";
@@ -41,8 +52,8 @@ export interface AccountShareNoteKey {
   account_share_kind: string | null;
 }
 
-/** Named in the note when the holder row is not in the caller's key list. */
-export const ACCOUNT_SHARE_HOLDER_FALLBACK_LABEL = "another of your keys";
+/** The remedy control each key card carries, named in the note's last sentence. */
+export type AccountShareNoteAction = "Disconnect" | "Delete";
 
 /** Last-sync statuses that make a holder NOT working (D-18). */
 const NOT_WORKING_SYNC_STATUSES: ReadonlySet<string> = new Set([
@@ -69,18 +80,20 @@ function holderLabel(holder: AccountShareNoteKey): string {
 
 /**
  * The duplicate sentence for `key`, or `null` when there is nothing to say:
- * the key is unmarked, marked `composite_member`, or its holder is no longer
- * working. `keysById` is the caller's own key list, keyed by id.
+ * the key is unmarked or marked `composite_member`, the key itself is not
+ * working, its holder is not in `keysById`, or its holder is not working.
+ * `keysById` is the caller's own key list, keyed by id. `action` is the label
+ * of the remedy control on the caller's card.
  */
 export function accountShareNote(
   key: AccountShareNoteKey,
   keysById: ReadonlyMap<string, AccountShareNoteKey>,
+  action: AccountShareNoteAction,
 ): string | null {
   const holderId = key.account_shared_with_api_key_id;
   if (key.account_share_kind !== "duplicate" || holderId === null) return null;
+  if (!isWorkingHolder(key)) return null;
   const holder = keysById.get(holderId);
-  if (holder !== undefined && !isWorkingHolder(holder)) return null;
-  const label =
-    holder === undefined ? ACCOUNT_SHARE_HOLDER_FALLBACK_LABEL : holderLabel(holder);
-  return `This key reads the same exchange account as ${label}. Disconnect one of them.`;
+  if (holder === undefined || !isWorkingHolder(holder)) return null;
+  return `This key reads the same exchange account as ${holderLabel(holder)}. ${action} one of them.`;
 }

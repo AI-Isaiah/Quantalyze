@@ -1665,9 +1665,11 @@ export function ApiKeyManager({
                     sentence the allocator card shows, from the same source,
                     beside this card's Delete. The holder is looked up in every
                     key this read returned, not only the listed ones, so a
-                    composite's filtered list still names it. */}
+                    composite's filtered list still names it. The verb is
+                    this card's own control, Delete: the manager card has no
+                    Disconnect (167.1.2 REVIEW WR-01). */}
                 {(() => {
-                  const shareNote = accountShareNote(key, keysById);
+                  const shareNote = accountShareNote(key, keysById, "Delete");
                   return shareNote ? (
                     <p role="note" className="text-xs text-warning mt-0.5">
                       {shareNote}

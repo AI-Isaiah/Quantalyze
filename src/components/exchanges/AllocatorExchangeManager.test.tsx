@@ -2710,11 +2710,26 @@ describe("AllocatorExchangeManager — duplicate-account note and reconnect refu
     },
   );
 
-  it("says 'another of your keys' when the holder is not in the list", () => {
+  // 167.1.2 REVIEW SF-L1: a holder this list does not carry cannot be judged
+  // working under D-18, and an unjudged holder is not grounds for asking the
+  // owner to disconnect a key. Unknown says nothing (this used to name
+  // "another of your keys").
+  it("shows nothing when the holder is not in the list", () => {
     render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[dupKey()]} />);
-    expect(screen.getByRole("note").textContent).toBe(
-      "This key reads the same exchange account as another of your keys. Disconnect one of them.",
+    expect(within(dupRow()).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
+  });
+
+  // 167.1.2 REVIEW WR-02: an inactive row still renders in the active list, and
+  // a marked key that is itself not working (D-18 applied to the marked key)
+  // counts for nothing, so the note must not ask for a disconnect.
+  it("shows nothing on a marked key that is itself inactive", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[holderKey(), dupKey({ is_active: false })]}
+      />,
     );
+    expect(within(dupRow()).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
   });
 
   it.each([

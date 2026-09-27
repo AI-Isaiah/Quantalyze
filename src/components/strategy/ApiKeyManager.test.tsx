@@ -4780,9 +4780,13 @@ describe("ApiKeyManager — duplicate-account note (167.1.2 plan 04)", () => {
     const card = await screen.findByTestId("api-key-card-key-okx-dup");
     const note = within(card).getByRole("note");
     expect(note.textContent).toBe(
-      "This key reads the same exchange account as OKX — Main OKX. Disconnect one of them.",
+      "This key reads the same exchange account as OKX — Main OKX. Delete one of them.",
     );
+    // 167.1.2 REVIEW WR-01: the sentence's verb is a control THIS card has.
+    // The manager card offers Delete and no Disconnect, so a note asking the
+    // owner to "Disconnect" pointed at a button that does not exist here.
     expect(within(card).getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: /Disconnect/ })).not.toBeInTheDocument();
     expect(
       within(screen.getByTestId("api-key-card-key-okx-holder")).queryByRole("note"),
     ).not.toBeInTheDocument();
@@ -4817,7 +4821,7 @@ describe("ApiKeyManager — duplicate-account note (167.1.2 plan 04)", () => {
   // them. Judged inside the duplicate's own card, by the sentence text, because
   // a failing holder renders a status line of its own.
   const OKX_DUP_SENTENCE =
-    "This key reads the same exchange account as OKX — Main OKX. Disconnect one of them.";
+    "This key reads the same exchange account as OKX — Main OKX. Delete one of them.";
 
   async function renderPair(holderOverrides: Record<string, unknown>) {
     selectResultMock.mockReturnValue({
@@ -4857,5 +4861,36 @@ describe("ApiKeyManager — duplicate-account note (167.1.2 plan 04)", () => {
   ])("names the holder on the duplicate's card while it is working, last sync %s", async (_name, holderOverrides) => {
     const card = await renderPair(holderOverrides);
     expect(within(card).getByText(OKX_DUP_SENTENCE)).toBeInTheDocument();
+  });
+
+  // 167.1.2 REVIEW WR-02: this card lists EVERY key the read returns, the
+  // disconnected ones included. A marked key the owner has already
+  // disconnected (the remedy the note asks for) is never polled again, so its
+  // marker never clears; the note must not keep asking for a remedy already
+  // applied. Same for a marked key that is inactive or failing (D-18 applied
+  // to the marked key itself).
+  it.each([
+    ["disconnected", { disconnected_at: "2026-09-21T00:00:00Z" }],
+    ["inactive", { is_active: false }],
+    ["revoked", { sync_status: "revoked" }],
+  ])("renders nothing on a marked key that is itself %s", async (_name, dupOverrides) => {
+    selectResultMock.mockReturnValue({
+      data: [
+        row({}),
+        row({
+          id: "key-okx-dup",
+          label: "Second OKX",
+          account_shared_with_api_key_id: "key-okx-holder",
+          account_share_kind: "duplicate",
+          ...dupOverrides,
+        }),
+      ],
+      error: null,
+    });
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+    const card = await screen.findByTestId("api-key-card-key-okx-dup");
+    expect(within(card).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
   });
 });

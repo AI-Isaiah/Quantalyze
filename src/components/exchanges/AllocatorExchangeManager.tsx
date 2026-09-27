@@ -947,7 +947,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                 bg: "#F1F5F9",
                 fg: "#475569",
               };
-              const shareNote = accountShareNote(key, keysById);
+              const shareNote = accountShareNote(key, keysById, "Disconnect");
               return (
                 <div
                   key={key.id}

@@ -41,7 +41,7 @@ function noteFor(holder: AccountShareNoteKey): string | null {
     account_shared_with_api_key_id: holder.id,
     account_share_kind: "duplicate",
   });
-  return accountShareNote(dup, new Map([[holder.id, holder], [dup.id, dup]]));
+  return accountShareNote(dup, new Map([[holder.id, holder], [dup.id, dup]]), "Disconnect");
 }
 
 describe("isWorkingHolder (D-18)", () => {
@@ -78,5 +78,62 @@ describe("isWorkingHolder (D-18)", () => {
     const holder = key(overrides);
     expect(isWorkingHolder(holder)).toBe(false);
     expect(noteFor(holder)).toBeNull();
+  });
+});
+
+/**
+ * 167.1.2 REVIEW WR-01 / WR-02 / SF-L1 — what the note may ask of the owner.
+ *
+ * WHY THIS MATTERS. The note is a remedy, so it has to name a control the
+ * owner can press on the card it sits on, and it has to be true. Three ways it
+ * was not:
+ *   - WR-01: it said "Disconnect" on the manager card, which offers "Delete"
+ *     and no Disconnect at all. The caller names the verb of its own control.
+ *   - WR-02: it rendered on a marked key that was itself disconnected or
+ *     failing. Such a key counts for nothing (D-18), it is never polled again,
+ *     so the marker never clears, and the owner was asked for a remedy they had
+ *     already applied, forever.
+ *   - SF-L1: with the holder absent from the caller's key list it named
+ *     "another of your keys". A holder that cannot be read cannot be judged
+ *     working under D-18, and an unjudged holder is not grounds for asking the
+ *     owner to remove a key. Unknown says nothing.
+ */
+describe("accountShareNote — the remedy is true and names this card's control", () => {
+  const holder = key({ sync_status: "complete" });
+  function dupOf(overrides: Partial<AccountShareNoteKey> = {}): AccountShareNoteKey {
+    return key({
+      id: "dup-0002",
+      label: "Second",
+      account_shared_with_api_key_id: holder.id,
+      account_share_kind: "duplicate",
+      ...overrides,
+    });
+  }
+
+  it("names the caller's own control verb: Delete on the manager card, Disconnect on the allocator card", () => {
+    const dup = dupOf();
+    const keysById = new Map([[holder.id, holder], [dup.id, dup]]);
+    expect(accountShareNote(dup, keysById, "Delete")).toBe(
+      "This key reads the same exchange account as OKX — Main. Delete one of them.",
+    );
+    expect(accountShareNote(dup, keysById, "Disconnect")).toBe(DUP_SENTENCE);
+  });
+
+  it.each<[string, Partial<AccountShareNoteKey>]>([
+    ["disconnected", { disconnected_at: "2026-09-20T00:00:00Z" }],
+    ["inactive", { is_active: false }],
+    ["revoked", { sync_status: "revoked" }],
+    ["sign_in_failed", { sync_status: "sign_in_failed" }],
+    ["error", { sync_status: "error" }],
+  ])("says nothing on a marked key that is itself %s: it counts for nothing and its marker never clears", (_name, overrides) => {
+    const dup = dupOf(overrides);
+    expect(
+      accountShareNote(dup, new Map([[holder.id, holder], [dup.id, dup]]), "Delete"),
+    ).toBeNull();
+  });
+
+  it("says nothing when the holder is not in the caller's key list (it cannot be judged working)", () => {
+    const dup = dupOf();
+    expect(accountShareNote(dup, new Map([[dup.id, dup]]), "Disconnect")).toBeNull();
   });
 });
