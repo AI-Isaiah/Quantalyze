@@ -1,0 +1,362 @@
+-- ==========================================================================
+-- Phase 164.9.3 (CLAIMPAIR), [164.9.3-CLAIM-PAIR-23505], founder-ratified
+-- decision D-08: a due `failed_retry` compute job and a `pending` twin of the
+-- same (kind, partition key) no longer make a claim entry point raise 23505.
+-- Entry points, by symbol AND arity:
+--   * public.claim_compute_jobs(integer, text)
+--   * public.claim_compute_jobs_with_priority(integer, text, boolean, text[], text[])  (5-arg)
+--   * public.claim_compute_jobs_with_priority(integer, text)                          (2-arg)
+--
+-- WHAT IT CLOSES. `failed_retry` is outside the predicate of every
+-- `compute_jobs_one_inflight_per_kind_*` partial unique index, so an enqueue
+-- made while a retry is outstanding writes a `pending` twin beside it. Each
+-- claim body then ranked the two rows in one partition and flipped the winner
+-- to `running`; when the retry won, the batch UPDATE met the pending twin at
+-- the unique index. Measured on a throwaway lane before this file existed:
+-- 8 of 8 cells (4 partitions x {claim_compute_jobs, the 5-arg}) raised 23505,
+-- the WHOLE batch aborted (an unrelated due job on another partition id was
+-- not claimed either), and 4 consecutive ticks all raised: it never
+-- self-clears. The red-first gate
+-- supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql
+-- recorded the same on the schema of record: 14 arms red, all with 23505.
+-- After this file every claim body drops such a retry from its candidate set
+-- BEFORE ranking, so the partition holds one candidate, the twin. The twin
+-- runs (at once if due, else when due) and the retry runs after it finishes;
+-- no work is lost. The 2-arg overload also receives the running /
+-- done_pending_children (C39) guard the other two bodies already carry;
+-- measured, the pre-rank clause alone still let its SECOND tick claim the
+-- retry beside the now-running twin and raise 23505.
+--
+-- WHAT IT DOES NOT CLOSE (recorded, not fixed):
+--   (i)   The 5-arg and 2-arg throttle probe still counts a due normal/high
+--         retry the new clause holds back, so a due retry beside a far-future
+--         twin can hold back low-priority jobs until the twin is due. C39
+--         already over-counts the same way for a retry beside a running row;
+--         this is strictly better than today's full wedge. The probe is left
+--         unchanged (D-04: no bytes outside the guard).
+--   (ii)  A retry waits for a not-yet-due twin to run first: delay, not loss.
+--         It is inherent to one-in-flight-per-partition.
+--   (iii) A claim racing a concurrent enqueue of the twin can still raise
+--         23505 for one tick: its snapshot predates the committed twin, so it
+--         flips the retry and meets the twin at the unique check. The next
+--         tick sees the pair and excludes the retry. Reasoned, not measured
+--         (it needs two backends); C39 has the same window today.
+--   D-05: this migration edits NONE of defer_compute_job,
+--   mark_compute_job_done, mark_compute_job_failed (Phase 164.9.3.2
+--   DEFER40001 will change their errcode) and NONE of
+--   _enqueue_compute_job_internal. There is no overlap with Phase 164.9.3.2
+--   DEFER40001 or Phase 164.9.3.1 FANINGRAPH: if both are open this phase
+--   lands first and 164.9.3.2 re-bases on whatever is latest. Only
+--   migration-timestamp order at merge time couples them.
+--   It also leaves set_departed_key_history_inclusion untouched (its
+--   failed_retry reuse stays correct; the pairs it leaves beside an existing
+--   pending row become harmless here).
+--
+-- WHY PRE-RANK. The guard sits in each body's `ranked` CTE WHERE, before
+-- row_number(), never in `deduped`. The booked alternative (a), adding
+-- 'pending' to the post-rank C39 status list, was measured as a SILENT
+-- permanent wedge: the retry ranks first, the guard drops it, the twin was
+-- already dropped by the rank filter, nothing re-ranks, and neither job is
+-- ever claimed (8 of 8 cells); it also starved compute_intro_snapshot (0 of 3
+-- claimed against 3 of 3 today). The enqueue-side alternative (b) would not
+-- heal pairs that already exist, and folding a new request into an older job
+-- can lose that request's payload. The class is closed at the one statement
+-- every writer's rows meet: the claim.
+-- The guard is one contiguous block per body, bracketed by a begin and an end
+-- marker comment and byte-identical in all three bodies; the ported C39 block
+-- in the 2-arg is bracketed the same way and is verbatim from
+-- claim_compute_jobs. Inside each clause the inner table is aliased x and the
+-- outer candidate is referenced as compute_jobs.<col>, which binds to the
+-- unaliased FROM compute_jobs of the `ranked` CTE.
+--
+-- RE-BASE (D-04). Each CREATE OR REPLACE below is the LATEST definition,
+-- byte-for-byte, plus the marked block(s): claim_compute_jobs from
+-- 20260603120000 STEP 1a; the 5-arg claim_compute_jobs_with_priority from
+-- 20260719073701 (its CREATE FUNCTION becomes CREATE OR REPLACE FUNCTION: the
+-- signature is unchanged, so there is no drop); the 2-arg from 20260428190907
+-- STEP 2 (re-based, NOT dropped: every call form of it raises 42725 today,
+-- but a drop would make VAC-04 report SNAPSHOT_MISSING, which has no
+-- acknowledgement path). Re-grepped across every migration at execution: no
+-- later definition of any of the three arities and no ALTER FUNCTION exists.
+-- Nothing else in the 2-arg changes: no claim token, no error clears, no
+-- tie-break, no throttle rewrite. Each REVOKE is re-issued with the full
+-- argument signature (a bare claim_compute_jobs_with_priority raises 42725
+-- where two overloads exist). No function comment is re-issued and no
+-- function is dropped: CREATE OR REPLACE keeps the existing comment and ACL.
+--
+-- VAC-04 ACKNOWLEDGEMENT: placeholder, filled by plan 164.9.3-04.
+--
+-- Transaction style: NO explicit BEGIN/COMMIT (Supabase wraps each migration
+-- in an implicit transaction; SET LOCAL lock_timeout applies to that wrap).
+-- This migration writes ZERO table data and validates no existing rows: its
+-- DO block reads catalogs only ([164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]) and
+-- never calls a claim RPC, which would claim real rows on apply. Every RAISE
+-- format string below is a SINGLE literal (Phase 85 invariant #21, no '||'
+-- concatenation inside a RAISE format slot).
+--
+-- Execution proof is NOT this file's DO block (a copy-and-placement check).
+-- It is the behavioural gate named above, run on the local-stack lane that
+-- replays this file on top of the committed dump.
+-- ==========================================================================
+
+SET LOCAL search_path = public, pg_catalog;
+SET LOCAL lock_timeout = '3s';
+
+-- --------------------------------------------------------------------------
+-- claim_compute_jobs(integer, text), re-based from 20260603120000 STEP 1a
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION claim_compute_jobs(
+  p_batch_size INTEGER,
+  p_worker_id  TEXT
+)
+RETURNS SETOF compute_jobs
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+    RAISE EXCEPTION 'claim_compute_jobs: p_batch_size must be > 0, got %', p_batch_size
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  IF p_batch_size > 1000 THEN
+    RAISE EXCEPTION 'claim_compute_jobs: p_batch_size % exceeds cap of 1000', p_batch_size
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  IF p_worker_id IS NULL OR length(p_worker_id) = 0 THEN
+    RAISE EXCEPTION 'claim_compute_jobs: p_worker_id is required'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  RETURN QUERY
+  WITH ranked AS (
+    SELECT id, kind, portfolio_id, strategy_id, allocator_id, api_key_id, next_attempt_at,
+           -- H-1238: append `, id` to every row_number() ORDER BY for a
+           -- deterministic tie-break when two rows share next_attempt_at.
+           row_number() OVER (PARTITION BY kind, portfolio_id ORDER BY next_attempt_at, id) AS rn_p,
+           row_number() OVER (PARTITION BY kind, strategy_id  ORDER BY next_attempt_at, id) AS rn_s,
+           row_number() OVER (PARTITION BY kind, allocator_id ORDER BY next_attempt_at, id) AS rn_a,
+           row_number() OVER (PARTITION BY kind, api_key_id   ORDER BY next_attempt_at, id) AS rn_k
+    FROM compute_jobs
+    WHERE status IN ('pending', 'failed_retry')
+      AND next_attempt_at <= now()
+      -- CLAIMPAIR PRE-RANK EXCLUSION BEGIN (D-08)
+      -- Phase 164.9.3: a failed_retry row whose (kind, partition) already
+      -- holds a pending row is not a candidate. Applied here, BEFORE
+      -- row_number(), never in `deduped`: excluded after ranking, the retry
+      -- would still rank first and take its pending twin down with it (a
+      -- silent, permanent partition wedge). One clause per partition, each
+      -- matching its compute_jobs_one_inflight_per_kind_* index predicate;
+      -- that strategy index excludes compute_intro_snapshot, so this does too.
+      AND (portfolio_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = compute_jobs.kind
+           AND x.portfolio_id = compute_jobs.portfolio_id
+           AND x.status       = 'pending'))
+      AND (strategy_id IS NULL OR status <> 'failed_retry' OR kind = 'compute_intro_snapshot' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind        = compute_jobs.kind
+           AND x.strategy_id = compute_jobs.strategy_id
+           AND x.status      = 'pending'))
+      AND (allocator_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = compute_jobs.kind
+           AND x.allocator_id = compute_jobs.allocator_id
+           AND x.status       = 'pending'))
+      AND (api_key_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind       = compute_jobs.kind
+           AND x.api_key_id = compute_jobs.api_key_id
+           AND x.status     = 'pending'))
+      -- CLAIMPAIR PRE-RANK EXCLUSION END
+  ),
+  deduped AS (
+    SELECT id FROM ranked
+    WHERE (portfolio_id  IS NULL OR rn_p = 1)
+      -- H-1235: carve-out for compute_intro_snapshot. The partial unique
+      -- index `compute_jobs_one_inflight_per_kind_strategy` (mig 048)
+      -- excludes this kind via `kind <> 'compute_intro_snapshot'`, so
+      -- multiple intro_snapshot rows sharing a strategy_id (different
+      -- allocators) can legitimately coexist. Without this carve-out the
+      -- dedupe forces sequential drain — slowing the queue with no
+      -- 23505 risk to prevent.
+      AND (strategy_id   IS NULL OR kind = 'compute_intro_snapshot' OR rn_s = 1)
+      AND (allocator_id  IS NULL OR rn_a = 1)
+      AND (api_key_id    IS NULL OR rn_k = 1)
+      -- C39 / NEW-C39-01 (preserved verbatim from
+      -- 20260526100000_claim_dedupe_done_pending_children_guard.sql):
+      -- exclude candidates whose partition already has an inflight (running
+      -- or done_pending_children) row. Without this guard a failed_retry
+      -- row can coexist with a done_pending_children row for the same
+      -- (kind, partition_col) and the batch UPDATE that flips failed_retry
+      -- → running violates the partial unique index (23505). Per-partition
+      -- column; NULL partition columns are skipped.
+      AND (portfolio_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = ranked.kind
+           AND x.portfolio_id = ranked.portfolio_id
+           AND x.status IN ('running', 'done_pending_children')
+      ))
+      AND (strategy_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind        = ranked.kind
+           AND x.strategy_id = ranked.strategy_id
+           AND x.status IN ('running', 'done_pending_children')
+      ))
+      AND (allocator_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = ranked.kind
+           AND x.allocator_id = ranked.allocator_id
+           AND x.status IN ('running', 'done_pending_children')
+      ))
+      AND (api_key_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind       = ranked.kind
+           AND x.api_key_id = ranked.api_key_id
+           AND x.status IN ('running', 'done_pending_children')
+      ))
+  )
+  UPDATE compute_jobs
+     SET status      = 'running',
+         claimed_at  = now(),
+         claimed_by  = p_worker_id,
+         attempts    = attempts + 1,
+         claim_token = gen_random_uuid(),   -- mig 117: P97 fence
+         last_error  = NULL,                -- M-1137/M-1138: clear the prior attempt's
+         error_kind  = NULL                 -- error on a failed_retry -> running re-claim
+   WHERE id IN (
+     SELECT cj.id FROM compute_jobs cj
+      WHERE cj.id IN (SELECT id FROM deduped)
+        AND cj.status IN ('pending', 'failed_retry')  -- H-1/M-1: re-check status after CTE snapshot+lock to guard against concurrent status transitions
+      -- F-2: append `, cj.id` so the inner ordering is fully deterministic
+      -- at the LIMIT boundary. The row_number() windows above already
+      -- tie-break on id (H-1238); without this clause two candidates that
+      -- tie on next_attempt_at could swap which one survives the
+      -- LIMIT p_batch_size cut across pg restarts/vacuums.
+      ORDER BY cj.next_attempt_at, cj.id
+      LIMIT p_batch_size
+      FOR UPDATE SKIP LOCKED
+   )
+   RETURNING *;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION claim_compute_jobs(INTEGER, TEXT) FROM PUBLIC, anon, authenticated;
+
+-- --------------------------------------------------------------------------
+-- Self-verify: catalog reads only (pg_proc, pg_get_functiondef, ACL
+-- functions). It never calls a claim RPC and reads no compute_jobs row.
+-- --------------------------------------------------------------------------
+DO $verify$
+DECLARE
+  v_ccj_oid                 oid := to_regprocedure('public.claim_compute_jobs(integer, text)');
+  v_ccj_fn                  text;
+  v_ccj_body                text;
+  v_ccj_cfg                 text[];
+  v_ccj_secdef              boolean;
+  v_ccj_portfolio_anchored  boolean;
+  v_ccj_strategy_anchored   boolean;
+  v_ccj_allocator_anchored  boolean;
+  v_ccj_api_key_anchored    boolean;
+  c_search_path             CONSTANT text := 'search_path=public, pg_temp';
+  c_ccj_sig                 CONSTANT text := 'public.claim_compute_jobs(integer, text)';
+  -- Each pre-rank clause must sit inside the `ranked` CTE, i.e. after its
+  -- opening and before `deduped` opens. One regex per partition pins the
+  -- partition column, the failed_retry status test, the pending-sibling
+  -- subquery on the same (kind, column), and that placement together.
+  c_ranked_open             CONSTANT text := 'WITH\s+ranked\s+AS\s*\(.*';
+  c_ranked_close            CONSTANT text := '.*\mdeduped\s+AS\s*\(';
+  c_pf_re                   CONSTANT text :=
+    '\(\s*portfolio_id\s+IS\s+NULL\s+OR\s+status\s*<>\s*''failed_retry''\s+OR\s+NOT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+x\s+WHERE\s+x\.kind\s*=\s*compute_jobs\.kind\s+AND\s+x\.portfolio_id\s*=\s*compute_jobs\.portfolio_id\s+AND\s+x\.status\s*=\s*''pending''\s*\)\s*\)';
+  c_st_re                   CONSTANT text :=
+    '\(\s*strategy_id\s+IS\s+NULL\s+OR\s+status\s*<>\s*''failed_retry''\s+OR\s+kind\s*=\s*''compute_intro_snapshot''\s+OR\s+NOT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+x\s+WHERE\s+x\.kind\s*=\s*compute_jobs\.kind\s+AND\s+x\.strategy_id\s*=\s*compute_jobs\.strategy_id\s+AND\s+x\.status\s*=\s*''pending''\s*\)\s*\)';
+  c_al_re                   CONSTANT text :=
+    '\(\s*allocator_id\s+IS\s+NULL\s+OR\s+status\s*<>\s*''failed_retry''\s+OR\s+NOT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+x\s+WHERE\s+x\.kind\s*=\s*compute_jobs\.kind\s+AND\s+x\.allocator_id\s*=\s*compute_jobs\.allocator_id\s+AND\s+x\.status\s*=\s*''pending''\s*\)\s*\)';
+  c_key_re                  CONSTANT text :=
+    '\(\s*api_key_id\s+IS\s+NULL\s+OR\s+status\s*<>\s*''failed_retry''\s+OR\s+NOT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+x\s+WHERE\s+x\.kind\s*=\s*compute_jobs\.kind\s+AND\s+x\.api_key_id\s*=\s*compute_jobs\.api_key_id\s+AND\s+x\.status\s*=\s*''pending''\s*\)\s*\)';
+BEGIN
+  -- ===== claim_compute_jobs(integer, text) =====
+  IF v_ccj_oid IS NULL THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: public.claim_compute_jobs(integer, text) does not resolve after its CREATE OR REPLACE';
+  END IF;
+
+  v_ccj_fn := pg_get_functiondef(v_ccj_oid);
+  -- Strip BOTH plpgsql comment syntaxes, block first (T-163-16). The guard's
+  -- own comment prose names failed_retry and pending, so no regex below may
+  -- run on the unstripped text.
+  v_ccj_body := regexp_replace(regexp_replace(v_ccj_fn, '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
+
+  -- NULL FAILS OPEN THROUGH EVERY REGEX ARM BELOW.
+  IF v_ccj_body IS NULL THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: the comment-stripped claim_compute_jobs body came back NULL, so every regex arm below would pass without reading anything. Refusing to report compliance on an unread body.';
+  END IF;
+
+  -- (1) the four pre-rank clauses, each inside the ranked CTE.
+  v_ccj_portfolio_anchored := v_ccj_body ~ (c_ranked_open || c_pf_re || c_ranked_close);
+  IF NOT v_ccj_portfolio_anchored THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs does not drop, before ranking, a failed_retry candidate whose (kind, portfolio_id) holds a pending row. The pairing raises 23505 and aborts the whole batch again.';
+  END IF;
+  v_ccj_strategy_anchored := v_ccj_body ~ (c_ranked_open || c_st_re || c_ranked_close);
+  IF NOT v_ccj_strategy_anchored THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs does not drop, before ranking, a failed_retry candidate whose (kind, strategy_id) holds a pending row, with the compute_intro_snapshot carve-out of its index. The pairing raises 23505 and aborts the whole batch again.';
+  END IF;
+  v_ccj_allocator_anchored := v_ccj_body ~ (c_ranked_open || c_al_re || c_ranked_close);
+  IF NOT v_ccj_allocator_anchored THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs does not drop, before ranking, a failed_retry candidate whose (kind, allocator_id) holds a pending row. The pairing raises 23505 and aborts the whole batch again.';
+  END IF;
+  v_ccj_api_key_anchored := v_ccj_body ~ (c_ranked_open || c_key_re || c_ranked_close);
+  IF NOT v_ccj_api_key_anchored THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs does not drop, before ranking, a failed_retry candidate whose (kind, api_key_id) holds a pending row. The pairing raises 23505 and aborts the whole batch again.';
+  END IF;
+
+  -- (2) carried forward from 20260603120000 STEP 3, so this full-body re-base
+  -- cannot silently revert what that migration pinned. The intro carve-out
+  -- is pinned in its `deduped` form: the bare word now also occurs in the
+  -- new strategy clause, which would make a word-only check vacuous.
+  IF v_ccj_body !~* 'last_error\s*=\s*NULL' OR v_ccj_body !~* 'error_kind\s*=\s*NULL' THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs does not clear last_error/error_kind on re-claim (M-1137/M-1138)';
+  END IF;
+  IF v_ccj_body !~* 'status\s+IN\s*\(\s*''pending''\s*,\s*''failed_retry''\s*\)' THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs lost status IN (pending, failed_retry) candidacy';
+  END IF;
+  IF v_ccj_body !~* 'done_pending_children' THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs lost the C39 done_pending_children guard';
+  END IF;
+  IF v_ccj_body !~* 'claim_token\s*=\s*gen_random_uuid' THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs lost the claim_token = gen_random_uuid() P97 fence';
+  END IF;
+  IF v_ccj_body !~* 'kind\s*=\s*''compute_intro_snapshot''\s+OR\s+rn_s\s*=\s*1' THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs lost the compute_intro_snapshot carve-out in its dedupe (H-1235)';
+  END IF;
+  IF v_ccj_body !~* 'next_attempt_at\s*,\s*id' THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs lost the `, id` tie-break (H-1238/F-2)';
+  END IF;
+
+  -- (3) SECURITY DEFINER, and the search_path pin is the VALUE, not the word.
+  SELECT p.prosecdef, p.proconfig INTO v_ccj_secdef, v_ccj_cfg
+    FROM pg_proc p WHERE p.oid = v_ccj_oid;
+  IF v_ccj_secdef IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs is no longer SECURITY DEFINER, so the worker (service_role) could not reach compute_jobs through it';
+  END IF;
+  IF v_ccj_cfg IS NULL OR NOT (c_search_path = ANY(v_ccj_cfg)) THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs does not pin search_path to the exact declared value (pg_proc.proconfig=%). A SECURITY DEFINER function whose pin is missing, empty or reordered is search-path-hijackable.', v_ccj_cfg;
+  END IF;
+
+  -- (4) ACL: the REVOKE above re-converged.
+  IF to_regrole('anon') IS NULL
+     OR to_regrole('authenticated') IS NULL
+     OR to_regrole('service_role') IS NULL THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: one of the roles anon / authenticated / service_role does not exist on this database, so the ACL arm cannot be evaluated. These are Supabase-standard roles; their absence means this migration is running somewhere it was not written for.';
+  END IF;
+  -- The PUBLIC probe runs first so a PUBLIC leak is named as a PUBLIC leak.
+  PERFORM public._assert_no_public_execute(c_ccj_sig);
+  IF has_function_privilege('anon', v_ccj_oid, 'EXECUTE')
+     OR has_function_privilege('authenticated', v_ccj_oid, 'EXECUTE') THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: anon or authenticated holds EXECUTE on the SECURITY DEFINER claim_compute_jobs — ACL drifted open. The PUBLIC probe above already passed, so this is a grant held by the named role directly.';
+  END IF;
+
+  RAISE NOTICE 'claim-pair-pre-rank: claim_compute_jobs drops, before ranking, a failed_retry candidate beside a pending twin on all four partitions (strategy with the intro carve-out); carried-forward invariants, SECURITY DEFINER, the exact search_path pin and the ACL intact.';
+END
+$verify$;
