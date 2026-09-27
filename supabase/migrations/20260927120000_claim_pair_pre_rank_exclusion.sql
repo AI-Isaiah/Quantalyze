@@ -27,13 +27,20 @@
 -- measured, the pre-rank clause alone still let its SECOND tick claim the
 -- retry beside the now-running twin and raise 23505.
 --
--- WHAT IT DOES NOT CLOSE (recorded, not fixed):
---   (i)   The 5-arg and 2-arg throttle probe still counts a due normal/high
---         retry the new clause holds back, so a due retry beside a far-future
---         twin can hold back low-priority jobs until the twin is due. C39
---         already over-counts the same way for a retry beside a running row;
---         this is strictly better than today's full wedge. The probe is left
---         unchanged (D-04: no bytes outside the guard).
+-- WHAT IT DOES NOT CLOSE (recorded, not fixed), after one CLOSED residual:
+--   (i)   CLOSED in review round 1 (164.9.3-REVIEW.md WR-01; D-04 amended to
+--         "no bytes outside the marked CLAIMPAIR blocks"). As first written,
+--         the throttle probe of both priority overloads still counted a due
+--         normal/high retry the pre-rank clause holds back. This header then
+--         called that a bounded hold, and it was not: beside a `low` pending
+--         twin, neither row was ever claimed and every due `low` job
+--         queue-wide was throttled, with no error, on every tick (measured).
+--         Each probe now carries a marked CLAIMPAIR PROBE EXCLUSION block that
+--         drops such a retry from the count, on the same four partitions and
+--         with the same intro carve-out as the pre-rank block. So neither the
+--         far-future-twin hold nor the low-twin wedge remains; the gate arm
+--         W-LOWTWIN pins it. What stays: C39 still counts a retry beside a
+--         running row in the probe, a hold that ends when that row finishes.
 --   (ii)  A retry waits for a not-yet-due twin to run first: delay, not loss.
 --         It is inherent to one-in-flight-per-partition.
 --   (iii) A claim racing a concurrent enqueue of the twin can still raise
@@ -65,7 +72,11 @@
 -- The guard is one contiguous block per body, bracketed by a begin and an end
 -- marker comment and byte-identical in all three bodies; the ported C39 block
 -- in the 2-arg is bracketed the same way and is verbatim from
--- claim_compute_jobs. Inside each clause the inner table is aliased x and the
+-- claim_compute_jobs. The probe exclusion in the two priority overloads is a
+-- third kind of marked block (CLAIMPAIR PROBE EXCLUSION BEGIN/END), inside the
+-- throttle probe's WHERE, with a different shape (one negated disjunction,
+-- inner alias p) so it can never be mistaken for the pre-rank block.
+-- Inside each pre-rank clause the inner table is aliased x and the
 -- outer candidate is referenced as compute_jobs.<col>, which binds to the
 -- unaliased FROM compute_jobs of the `ranked` CTE.
 --
@@ -79,7 +90,7 @@
 -- acknowledgement path). Re-grepped across every migration at execution: no
 -- later definition of any of the three arities and no ALTER FUNCTION exists.
 -- Nothing else in the 2-arg changes: no claim token, no error clears, no
--- tie-break, no throttle rewrite. Each REVOKE is re-issued with the full
+-- tie-break, and no throttle change beyond the marked probe block. Each REVOKE is re-issued with the full
 -- argument signature (a bare claim_compute_jobs_with_priority raises 42725
 -- where two overloads exist). No function comment is re-issued and no
 -- function is dropped: CREATE OR REPLACE keeps the existing comment and ACL.

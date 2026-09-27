@@ -1561,12 +1561,16 @@ true for 146 and half of 142–145, and **false for 141**.
       `compute_jobs_one_inflight_per_kind_*` index predicate (D-02). The 2-arg is re-based, not
       dropped, and also gains the C39 running / done_pending_children guard. The enqueue side is
       unchanged. Gate `supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql`,
-      15 arms (12 partition arms, W-LOST, P2-C39, regression arm W-INTRO), each with a mutation
-      twin. Red-first census on the pre-fix lane: 14 RED, all 14 with SQLSTATE 23505, W-INTRO
-      GREEN. After the fix: 15 of 15 green on the local-stack and pg-lanes. ⚠️ Three residuals
-      are recorded in the migration header, not fixed: (i) the priority throttle still counts a
-      held-back retry, so a due retry beside a far-future twin can hold back low-priority jobs
-      until the twin is due; (ii) a retry waits for a not-yet-due twin to run first (delay, not
+      16 arms (12 partition arms, W-LOST, P2-C39, regression arm W-INTRO, and W-LOWTWIN from
+      review round 1), each with a mutation twin. Red-first census on the pre-fix lane: 14 RED,
+      all 14 with SQLSTATE 23505, W-INTRO GREEN; W-LOWTWIN RED before the probe fix (no error,
+      0 of 3 rows claimed). After the fix: 16 of 16 green on the local-stack and pg-lanes.
+      Residual (i) is CLOSED in review round 1 (WR-01): the priority throttle probe counted a
+      held-back retry, which beside a `low` pending twin claimed neither row and throttled every
+      due `low` job with no error, on every tick. Both priority overloads now skip such a retry
+      in the probe (a marked `CLAIMPAIR PROBE EXCLUSION` block), so neither the far-future-twin
+      hold nor the low-twin wedge remains. ⚠️ Two residuals are recorded in the migration
+      header, not fixed: (ii) a retry waits for a not-yet-due twin to run first (delay, not
       loss); (iii) a claim racing a concurrent enqueue of the twin can still raise 23505 for one
       tick (reasoned, not measured). The ROADMAP-booked option (a), adding `pending` to the
       post-rank C39 list, was measured as a SILENT permanent wedge that also starves

@@ -37,9 +37,20 @@ review it BEFORE the merge. Their verdicts are recorded in the phase's
   the pre-rank clause alone still let the 2-arg's second tick claim the retry beside the
   now-running twin and raise 23505. Each body is the latest definition byte-for-byte plus the
   marked blocks (D-04), and SECURITY DEFINER, the pinned `search_path` and the REVOKEs are kept.
+- **The priority throttle no longer counts a retry the claim holds back** (review round 1,
+  WR-01). As first written, both `claim_compute_jobs_with_priority` overloads still counted a due
+  `normal`/`high` `failed_retry` in their throttle probe after the pre-rank clause had dropped it
+  from the candidates. Beside a `low` pending twin that claimed neither row, on every tick, and
+  throttled every due `low` job queue-wide, with no error. Measured: 0 of 3 rows claimed. Each
+  probe now carries a marked `CLAIMPAIR PROBE EXCLUSION` block that drops such a retry from the
+  count, on the same four partitions and with the same `compute_intro_snapshot` carve-out. It is
+  still claim-side and before ranking, so the ratified D-08 stands; D-04 now reads "no bytes
+  outside the marked CLAIMPAIR blocks". Latent today: no writer sets `priority='low'` yet, but the
+  column comment names `low` as the post-deploy backfill class.
 - **An apply-time `DO $verify$` block that reads catalogs only.** It pins each pre-rank clause
-  between the `ranked` CTE and `deduped`, so a clause moved post-rank fails at apply. It also pins
-  the C39 port, SECURITY DEFINER, the `search_path` and the ACL, and never calls a claim RPC, so
+  between the `ranked` CTE and `deduped`, so a clause moved post-rank fails at apply, and pins the
+  probe block inside each throttle probe. It also pins the C39 port, SECURITY DEFINER, the
+  `search_path` and the ACL, and never calls a claim RPC, so
   it cannot refuse on TEST's empty tables.
 
 ### Root cause
@@ -56,11 +67,13 @@ review it BEFORE the merge. Their verdicts are recorded in the phase's
   exist on PROD, and folding a new request into an older job can lose its payload.
 
 ### Tests
-- **A red-first 15-arm gate, `supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql`**
-  (plan 01). It has 12 partition arms (4 partitions x 3 entry points), W-LOST (three ticks, no
-  lost work), P2-C39 (a second tick beside a running twin) and the regression arm W-INTRO. The
-  gate was written and run BEFORE the migration existed: on the pre-fix lane, 14 arms were RED,
-  all 14 with SQLSTATE 23505, and W-INTRO was GREEN. After the fix, all 15 arms are green in CI
+- **A red-first 16-arm gate, `supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql`**
+  (plan 01, plus one arm from review round 1). It has 12 partition arms (4 partitions x 3 entry
+  points), W-LOST (three ticks, no lost work), P2-C39 (a second tick beside a running twin), the
+  regression arm W-INTRO and W-LOWTWIN (a `normal` retry beside a `low` twin). The first 15 arms
+  were written and run BEFORE the migration existed: on the pre-fix lane, 14 arms were RED, all
+  14 with SQLSTATE 23505, and W-INTRO was GREEN. W-LOWTWIN was written and run before the probe
+  fix: RED with no error and 0 of its 3 rows claimed. After the fix, all 16 arms are green in CI
   mode. Each partition arm also fails if the unrelated job is not claimed or the retry is claimed
   in that tick, so a silent-wedge "fix" still reads red. Parents are seeded as real rows, because
   the claim's own UPDATE re-checks the foreign keys of rows inserted in the same transaction.
@@ -70,7 +83,7 @@ review it BEFORE the merge. Their verdicts are recorded in the phase's
   `RED-UNDER-SETUP` apply list, ending with the migration, and exits 0 there.
 - **A layered mutation twin for every arm** (plan 04). Each twin neuters one body's clause for one
   partition and stands that body's apply-time anchor down, so it can redden only its own arm. The
-  narrowed runner reported all 15 arms biting their own arm first, with 0 waived.
+  narrowed runner reported all 16 arms biting their own arm first, with 0 waived.
 - **Floors and census pins moved by measurement** (plan 05). `FILES_FLOOR` and `ARMS_FLOOR` rise
   to the values one full runner pass printed with no defects, and each floor was shown to bite in
   both directions. `WAIVED_CEILING` stays 0. The annotation-parser, floors, `lint-sql-gates` and
@@ -88,10 +101,11 @@ review it BEFORE the merge. Their verdicts are recorded in the phase's
   for the placeholder this block replaced is marked fixed.
 
 ### Notes
-- ⚠️ **Three residuals are recorded in the migration header, not fixed.** (i) The priority
-  throttle still counts a held-back retry, so a due retry beside a far-future twin can hold back
-  low-priority jobs until the twin is due. C39 already over-counts the same way, and this is
-  strictly better than today's full wedge. (ii) A retry waits for a not-yet-due twin to run
+- ⚠️ **Two residuals are recorded in the migration header, not fixed; a third was closed.**
+  (i) CLOSED in review round 1: the priority throttle counted a held-back retry. The first draft
+  of this entry called that a bounded hold. It was a silent permanent wedge beside a `low` twin
+  (see Fixed). The probe now skips such a retry, so neither the far-future-twin hold nor the
+  low-twin wedge remains, and W-LOWTWIN pins it. (ii) A retry waits for a not-yet-due twin to run
   first: delay, not loss. (iii) A claim racing a concurrent enqueue of the twin can still raise
   23505 for one tick. That one is reasoned, not measured, and C39 has the same window today.
 - **No overlap with Phase 164.9.3.2 DEFER40001 (D-05).** The migration edits none of
