@@ -3817,6 +3817,7 @@ Plans:
 - **R-13-1: a non-empty sole-key replace wipes sibling keys' history.** In `replace_equity_snapshots` (`analytics-service/services/equity_reconstruction.py`), a non-empty replace for one key wipes the history of disconnected sibling keys. PR C changes this function, so the symbol is cited by name only.
 - **Two-key sibling path:** when one key's reconstruct succeeds and another's fails, the allocator-wide snapshot count reads as "reconstructed", and the failed key's history is skipped.
 - **`public.request_allocator_holdings_sync(uuid)`:** its in-flight status lists (`'pending', 'running', 'done_pending_children'`, plus `'done'` in the second check) omit `failed_retry`, unlike the cron. So a key whose job sits in `failed_retry` is treated as not in flight.
+- **The fast-fail race (routed 2026-09-27, 167.1.2-12 REVIEW-SFH-R3 M-1/M-2):** a zero-snapshot book's reconstruct reaches `failed_final` before the daily refresh (`run_refresh_allocator_equity_daily_job` in `analytics-service/services/equity_reconstruction.py`) is claimed. The refresh then sees nothing in flight, writes the book's first row, and the key's history is stranded. Claim order within one fan-out burst is by random uuid, 5 per batch, so the reconstruct and the refresh are usually claimed in different batches.
 
 ## Success Criteria
 
@@ -3826,6 +3827,7 @@ Plans:
 4. **Two-key sibling path:** when one key succeeds and a sibling fails, the failed key is still recorded as owing its reconstruct and is retried. A test fails on the old behaviour.
 5. **`failed_retry` is counted:** `request_allocator_holdings_sync`'s status list includes `failed_retry`, as the cron's does. A test fails on the old list.
 6. **Migration review before merge.** Any migration this phase writes is reviewed by migration-reviewer, rls-policy-auditor and silent-failure-hunter, because a merge of `supabase/migrations/**` auto-applies to PROD.
+7. **The fast-fail race (added 2026-09-27):** when a zero-snapshot book's reconstruct reaches `failed_final` before the daily refresh (`run_refresh_allocator_equity_daily_job`) is claimed, the key is still recorded as owing its reconstruct, the refresh's first row does not strand its history, and the history is rebuilt. A test written first reproduces the race (reconstruct failed, refresh claimed after) and fails on the old behaviour.
 
 Plans:
 
