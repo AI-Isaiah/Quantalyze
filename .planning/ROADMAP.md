@@ -3305,6 +3305,14 @@ The wait grows with the number of open PRs, because every one of them contends f
 - `e2e-seeded`: the axe `color-contrast` check fails on the `No data` chip, #64748b on #f1f5f9 = 4.34:1, under the 4.5:1 AA floor at 11px. It is owned by Phase 170 LAYOUT (F2, "Book into 170 LAYOUT").
 - SC-3 cannot pass until both land. There is no waiver.
 
+⭐ **ROUTED IN 2026-09-27 (founder, AskUserQuestion "Yes, add to 164.9.4"): a docs-only push to `main` runs the full corpus.** The docs-only short path (Phase 164.6.3: the `changed-paths` job and `scripts/classify-changed-paths.mjs`) applies to `pull_request` events only. For a push, `changed-paths` hard-codes a code verdict, so every push to `main` runs the full corpus, including `python` and `e2e-seeded` on the shared-TEST key.
+- **Measured 2026-09-27:** five roadmap-only merges to `main` each ran `python` and `e2e-seeded` on push. Runs `36311440078` and `36311239974` (push, `main`) failed with `timed out after 3600s waiting for the shared-test-db advisory lock (key 61616158)`, with 8 and 7 jobs waiting.
+- **Success:**
+  - A push to `main` whose diff against its first parent is docs-only takes the short path. It still produces a recorded green CI run that Railway can wait on.
+  - A push that touches any code path runs the full corpus.
+  - A test fails on the old behaviour (a docs-only push classified as code), and a second test proves that a code-touching push is not filtered.
+  - The existing rule that `changed-paths` itself carries no `if:` is kept. The job still runs on every event, because a skipped `needs:` job skips its dependents.
+
 ## Success Criteria
 1. Neither job acquires advisory key `61616158`.
 2. Each job boots its own local-stack or pg-lane database, behind a loopback-DSN guard.
@@ -3727,6 +3735,13 @@ Plans:
 **Depends on:** Phase 167.1
 ⚠️ **2026-09-24 correction (read-only root-cause trace at `96b5db4c`):** the collapse also lives in the analytics-side unique index `(allocator_id, venue, symbol, asof)` on `allocator_holdings`, and for ONE account behind several keys it merges CORRECTLY but attributes the row to whichever key polled last. Adding `api_key_id` to the key as framed above would triple-count that case. Phase 167.1.2 ACCOUNTTRUTH decides account identity first (founder: refuse a second key on the same account); re-scope this phase against it before planning.
 **Plans:** 0 plans
+
+⭐ **ROUTED IN 2026-09-27 (from the 167.1.2 PR C executor): three holdings readers still read allocator-wide instead of per key.**
+- **R-15-1:** the scenario commit route, `src/app/api/allocator/scenario/commit/route.ts` (its `allocator_holdings` lookup for the audit recompute).
+- **R-15-2:** `_load_holding_portfolio_context` in `analytics-service/routers/match.py`.
+- **R-15-3:** `getLatestExposureSnapshot` in `src/lib/portfolio-exposure.ts`.
+
+After 167.1.2 PR C ships, Open Positions (per key, latest asof) and the exposure panel will disagree about a quiet key until these three move. Success: each reads per key, with a test that fails on the allocator-wide read. Each symbol was verified at `origin/main` `c052ab4d` on 2026-09-27.
 
 Plans:
 
