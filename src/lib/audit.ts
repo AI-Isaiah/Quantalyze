@@ -463,6 +463,13 @@ export type AuditAction =
   // AuditAction parity test stays green (test_action_literal_matches_ts_union
   // in test_audit.py).
   | "api_key.rotate_secret"
+  // Phase 167.1.2 / D-01 + D-11: the daily poll-s identity stamper marked this
+  // key as reading the same exchange account as a live key of the same owner.
+  // Python-only call site (analytics-service services.account_identity) --
+  // kept here so the TS and Python AuditAction taxonomies stay in sync.
+  // entity_id = the marked api_keys.id, metadata = venue and the holder key
+  // id, never the account id. Emitted once per transition into duplicate.
+  | "api_key.account_duplicate_detected"
   | "trades.upload"
   | "admin.partner_import"
   // --- /review follow-up (T4-C1 + T4-M6) ------------------------------
@@ -686,6 +693,8 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP = {
   // Phase 164.5.3 / MT5CREDS — the credential-rotation route anchors on the
   // key row it corrected, same as api_key.decrypt / api_key.revoke above.
   "api_key.rotate_secret": "api_key",
+  // Phase 167.1.2 D-01 / D-11 — anchors on the marked key row.
+  "api_key.account_duplicate_detected": "api_key",
   // B4c reconciliation: ADR-0023 L149 + the call site both anchor on
   // strategy (entity_id = strategies.id; "trades.upload is a bulk insert,
   // strategy is the ownership anchor"). The prior map value "trades_upload"

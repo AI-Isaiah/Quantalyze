@@ -39,9 +39,12 @@ from collections.abc import Mapping
 from typing import Any, Final, Literal
 
 from services.db import db_execute
+from services.stitch_composite import MemberWindow, windows_overlap
 
 __all__ = [
     "ACCOUNT_IDENTITY_UNIQUE_INDEX",
+    "COMPOSITE_MEMBER_SHARED_ACCOUNT",
+    "DUPLICATE_DETECTED_AUDIT_ACTION",
     "StampOutcome",
     "VENUES_WITH_ACCOUNT_ID",
     "read_venue_account_id",
@@ -200,22 +203,109 @@ async def _find_live_holder(
     return _first_row(await db_execute(_q))
 
 
+# D-04 (167.1.2-CONTEXT, measured in code by the planner at 83eae5da5): two
+# members of ONE composite strategy may read ONE exchange account. The composite
+# key-add RPC mints a fresh api_keys row per member and writes no identity, each
+# member carries a declared half-open [window_start, window_end) in
+# strategy_keys, the stitch requires those windows to be pairwise disjoint, and
+# nothing disconnects a member whose window has closed. A disjoint pair on one
+# account is therefore a key rotation inside a composite: legitimate, NOT a
+# duplicate. The stamper names it with this kind instead, emits no duplicate
+# audit event, and the allocator book counts that account once, through the
+# holder. The overlap test is stitch_composite.windows_overlap, the one
+# canonical predicate; it is never re-implemented here.
+COMPOSITE_MEMBER_SHARED_ACCOUNT: Final = "composite_member"
+_DUPLICATE: Final = "duplicate"
+
+# The audit action for a key newly marked 'duplicate' (RESEARCH A4). No action in
+# the closed set described it, so it is new, in both services.audit.AuditAction
+# and the TS AuditAction union (test_action_literal_matches_ts_union).
+DUPLICATE_DETECTED_AUDIT_ACTION: Final = "api_key.account_duplicate_detected"
+
+
+def _member_window(row: Mapping[str, Any]) -> MemberWindow:
+    end = row.get("window_end")
+    return MemberWindow(
+        seq=int(row["seq"]),
+        window_start=str(row["window_start"]),
+        window_end=None if end is None else str(end),
+    )
+
+
+async def _share_kind(supabase: Any, key_id: str, holder_id: str) -> str:
+    """``composite_member`` when the key and its holder are members of one
+    composite strategy with disjoint declared windows (D-04), else ``duplicate``.
+    """
+
+    def _q() -> object:
+        return (
+            supabase.table("strategy_keys")
+            .select("strategy_id, api_key_id, window_start, window_end, seq")
+            .in_("api_key_id", [key_id, holder_id])
+            .execute()
+        )
+
+    rows = getattr(await db_execute(_q), "data", None) or []
+    by_strategy: dict[str, dict[str, MemberWindow]] = {}
+    for row in rows:
+        if isinstance(row, Mapping):
+            by_strategy.setdefault(str(row["strategy_id"]), {})[
+                str(row["api_key_id"])
+            ] = _member_window(row)
+    for members in by_strategy.values():
+        mine, theirs = members.get(key_id), members.get(holder_id)
+        if mine is not None and theirs is not None and not windows_overlap(mine, theirs):
+            return COMPOSITE_MEMBER_SHARED_ACCOUNT
+    return _DUPLICATE
+
+
+def _audit_duplicate(key_row: Mapping[str, Any], holder_id: str) -> None:
+    """One ``api_key.account_duplicate_detected`` event; never raises.
+
+    ``log_audit_event`` re-raises on a permission failure by contract, and a
+    lost audit row must not undo a marker that has already landed, so the drop
+    is logged instead. Metadata carries the venue and the holder key id only:
+    never the account id, never the user id (T-167.1.2-17).
+    """
+    from services import audit as audit_module
+
+    try:
+        audit_module.log_audit_event(
+            user_id=str(key_row["user_id"]),
+            action=DUPLICATE_DETECTED_AUDIT_ACTION,
+            entity_type="api_key",
+            entity_id=str(key_row["id"]),
+            metadata={"venue": key_row["exchange"], "holder_api_key_id": holder_id},
+        )
+    except Exception as exc:  # noqa: BLE001 — the marker stands; the drop is logged
+        logger.warning(
+            "account_identity: audit %s dropped for api_key %s: class=%s",
+            DUPLICATE_DETECTED_AUDIT_ACTION, key_row.get("id"), type(exc).__name__,
+        )
+
+
 async def _mark_shared(
     supabase: Any, key_row: Mapping[str, Any], holder_id: str
 ) -> StampOutcome:
-    """Write the marker on ``key_row``, naming ``holder_id``.
+    """Write the marker on ``key_row``, naming ``holder_id`` and its kind.
 
     The key is neither disconnected nor deleted (D-01); its
     ``venue_account_id`` stays NULL, so its next poll tries the stamp again and
-    succeeds once the holder has left (the self-heal).
+    succeeds once the holder has left (the self-heal). A 'duplicate' is audited
+    once, on the transition into it; the daily poll meeting the same marker
+    again writes and audits nothing.
     """
-    kind = "duplicate"
+    kind = await _share_kind(supabase, str(key_row["id"]), holder_id)
+    outcome: StampOutcome = (
+        "marked_composite_member"
+        if kind == COMPOSITE_MEMBER_SHARED_ACCOUNT
+        else "marked_duplicate"
+    )
     if (
         key_row.get("account_shared_with_api_key_id") == holder_id
         and key_row.get("account_share_kind") == kind
     ):
-        # Already marked with this holder and kind: no write.
-        return "marked_duplicate"
+        return outcome
 
     def _q() -> object:
         return (
@@ -229,7 +319,9 @@ async def _mark_shared(
         )
 
     await db_execute(_q)
-    return "marked_duplicate"
+    if kind == _DUPLICATE:
+        _audit_duplicate(key_row, holder_id)
+    return outcome
 
 
 async def _stamp(

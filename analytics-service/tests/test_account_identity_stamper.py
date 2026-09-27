@@ -243,7 +243,9 @@ async def test_a_venue_answer_without_an_id_writes_nothing() -> None:
     assert sb.calls == []
 
 
-async def test_collision_with_a_live_sibling_marks_the_key_and_never_acts_on_it() -> None:
+async def test_collision_with_a_live_sibling_marks_the_key_and_never_acts_on_it(
+    audit_mock: MagicMock,
+) -> None:
     sb = FakeSupabase(_collision_responder())
 
     outcome = await _stamp(sb, _key_row(), _okx_exchange())
@@ -261,7 +263,7 @@ async def test_collision_with_a_live_sibling_marks_the_key_and_never_acts_on_it(
     _assert_write_set_is_identity_only(sb)
     # The holder look-up is scoped to the same owner, venue and account, and to
     # live keys other than this one (T-167.1.2-18).
-    (look,) = [c for c in sb.calls if c.op == "select"]
+    (look,) = [c for c in sb.calls if c.table == "api_keys" and c.op == "select"]
     assert ("eq", "user_id", OWNER_ID) in look.filters
     assert ("eq", "exchange", "okx") in look.filters
     assert ("eq", "venue_account_id", ACCOUNT_ID) in look.filters
@@ -269,7 +271,9 @@ async def test_collision_with_a_live_sibling_marks_the_key_and_never_acts_on_it(
     assert ("neq", "id", KEY_ID) in look.filters
 
 
-async def test_the_account_id_value_never_reaches_the_log(caplog: pytest.LogCaptureFixture) -> None:
+async def test_the_account_id_value_never_reaches_the_log(
+    caplog: pytest.LogCaptureFixture, audit_mock: MagicMock
+) -> None:
     caplog.set_level("DEBUG")
     sb = FakeSupabase(_collision_responder())
 
