@@ -73,6 +73,109 @@ function Harness() {
   );
 }
 
+// Export button class string, read from AllocationsTabs.tsx. The toggle must
+// carry every token of it (AD-05: same class list as the adjacent Export
+// button) plus the coarse-pointer hit target and shrink-0.
+const EXPORT_BUTTON_CLASSES = [
+  "inline-flex",
+  "items-center",
+  "gap-1",
+  "rounded-md",
+  "border",
+  "border-border",
+  "bg-surface",
+  "px-2.5",
+  "py-1",
+  "text-xs",
+  "font-medium",
+  "text-text-secondary",
+  "transition-colors",
+  "hover:border-accent/40",
+  "hover:text-text-primary",
+  "focus-visible:outline",
+  "focus-visible:outline-2",
+  "focus-visible:outline-accent",
+];
+
+describe("Tweaks — Phase 170 AD-05 / N-TWEAKS inline control", () => {
+  // WHY: a fixed bottom-right chip covered the mobile nav (2026-09-26) and
+  // the scenario footer's Commit button (2026-09-27). Inline means no
+  // position style at all, so it cannot cover either.
+  it("[AD-05] the toggle has no inline position and carries the Export class list", () => {
+    render(<Harness />);
+    const toggle = screen.getByRole("button", { name: /toggle tweaks panel/i });
+    expect(toggle.style.position).toBe("");
+    const classes = toggle.className.split(/\s+/);
+    for (const token of [
+      ...EXPORT_BUTTON_CLASSES,
+      "pointer-coarse:min-h-[44px]",
+      "shrink-0",
+    ]) {
+      expect(classes).toContain(token);
+    }
+  });
+
+  // WHY: DESIGN.md reserves accent for the pressed state (border, text,
+  // 12% tint). Variant classes keep that on aria-pressed without an inline
+  // style that would also pin position.
+  it("[AD-05] the pressed state is accent border, text, and tint via aria-pressed variants", () => {
+    render(<Harness />);
+    const toggle = screen.getByRole("button", { name: /toggle tweaks panel/i });
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    const classes = toggle.className.split(/\s+/);
+    expect(classes).toContain("aria-pressed:border-accent");
+    expect(classes).toContain("aria-pressed:text-accent");
+    expect(classes).toContain("aria-pressed:bg-accent/10");
+  });
+
+  // WHY: below md the panel must open above the nav (bottom-20) and scroll
+  // inside its own max height. Positioning by class is what makes the
+  // offset responsive; an inline bottom/right/width/position cannot.
+  it("[N-TWEAKS] the open panel is class-positioned above the nav", () => {
+    render(<Harness />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /toggle tweaks panel/i }),
+    );
+    const panel = screen.getByRole("dialog", { name: "Tweaks" });
+    const classes = panel.className.split(/\s+/);
+    for (const token of [
+      "fixed",
+      "z-50",
+      "bottom-20",
+      "md:bottom-5",
+      "right-4",
+      "left-4",
+      "sm:left-auto",
+      "sm:w-[300px]",
+      "md:right-5",
+      "max-h-[calc(100dvh-10rem)]",
+    ]) {
+      expect(classes).toContain(token);
+    }
+    expect(panel.style.bottom).toBe("");
+    expect(panel.style.right).toBe("");
+    expect(panel.style.width).toBe("");
+    expect(panel.style.position).toBe("");
+  });
+
+  // WHY: the outside-click guard closes on any mousedown that is not the
+  // toggle. The toggle click must still close exactly once, via the
+  // existing closest("[data-tweaks-toggle]") guard, not via a second close.
+  it("[AD-05] clicking the toggle while the panel is open closes it once", () => {
+    render(<Harness />);
+    const toggle = screen.getByRole("button", { name: /toggle tweaks panel/i });
+    fireEvent.click(toggle);
+    expect(screen.getByRole("dialog", { name: "Tweaks" })).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.queryByRole("dialog", { name: "Tweaks" })).toBeNull();
+    // A second click re-opens. If the outside-click guard also closed,
+    // this click would leave the panel shut.
+    fireEvent.click(toggle);
+    expect(screen.getByRole("dialog", { name: "Tweaks" })).toBeInTheDocument();
+  });
+});
+
 describe("Tweaks — toggle + panel visibility", () => {
   it("hides the panel by default (no toggle clicked)", () => {
     render(<Harness />);

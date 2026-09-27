@@ -315,6 +315,18 @@ describe("AllocationsTabs — Phase 170 item (a) narrow header strip", () => {
     });
     expect(addBtn.className.split(/\s+/)).toContain("shrink-0");
   });
+
+  // WHY: AD-05 removes the floating chip. Exactly one toggle, and it lives
+  // in the action row with Export, so it cannot cover the nav or the
+  // scenario footer from a second root-level mount.
+  it("[AD-05] exactly one Tweaks toggle renders, in the same container as Export", () => {
+    setSearchParams("");
+    const { container } = render(<AllocationsTabs {...STUB_PROPS} />);
+    const toggles = container.querySelectorAll("[data-tweaks-toggle]");
+    expect(toggles).toHaveLength(1);
+    const exportBtn = screen.getByRole("button", { name: "Export" });
+    expect(toggles[0].parentElement).toBe(exportBtn.parentElement);
+  });
 });
 
 describe("AllocationsTabs — Phase 117 / UIFIX-02 clip-proof tab focus ring", () => {
