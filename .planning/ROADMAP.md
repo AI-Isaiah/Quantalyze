@@ -121,7 +121,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.8.5: PROBERPARSE — the prod-prober hygiene rules stop being dodgeable and its parser stops dropping rows silently: the ||-split service key and the dollar-quoted literal both go RED, an unreadable oracle no longer disables the live credential scan, a malformed cron.job record becomes a measure-fail instead of a continue, and the app-GUC linter successor check stops accepting any readable file** (INSERTED)
 - [x] **Phase 164.8.6: VAULTTICKFIX — the forward migration Phase 164.7 earned: the verification check that cannot fail is re-run correctly, the Vault read becomes single-row-safe, the whitespace-key guard learns btrim, and the SECURITY DEFINER grant set is asserted whole instead of two names deep** (INSERTED)
 - [x] **Phase 164.9: TESTISOLATION — a run's assertions against the shared TEST project stop being unreliable: per-run isolation replaces global truth** (INSERTED)
-- [ ] **Phase 164.9.1: JOBRPCTRUTH — the compute-job RPC surface does what its own comments say** (INSERTED) — verification: human_needed
+- [x] **Phase 164.9.1: JOBRPCTRUTH — the compute-job RPC surface does what its own comments say** (INSERTED) — verification: passed (completed 2026-09-27)
 - [x] **Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD** (INSERTED)
 - [ ] **Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim** (INSERTED) — not yet verified
 - [ ] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — not yet verified
@@ -4033,7 +4033,7 @@ kept verbatim.
 | 164.8.5 PROBERPARSE (prober hygiene rules stop being dodgeable; the parser stops dropping rows) | 7/7 (+4 FIX) | Complete — PR #774 | - |
 | 164.8.6 VAULTTICKFIX (the forward migration Phase 164.7 earned) | 8/8 | Complete — PR #778, follow-ups #779/#781/#782. ⛔ Plan 08 WITHDRAWN not shipped (`tokenMeasure` fired the credential rule on credential-free prose); redesign routed to 164.8.4 | v0.77.34.0 |
 | 164.9 TESTISOLATION | 11/11 | Complete | #837 |
-| 164.9.1 JOBRPCTRUTH | 14/14 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.93.0.0 · #860 |
+| 164.9.1 JOBRPCTRUTH | 14/14 | Complete — verification passed 2026-09-27 (last browser check closed) | v0.93.0.0 · #860 |
 | 164.9.2 REFDATAUPDATES | 5/5 | Complete | v0.93.0.1 · #862 |
 | 164.9.3 CLAIMPAIR | 0/? | Queued — blocker | - |
 | 164.9.3.1 FANINGRAPH | 0/? | Queued — blocker, after 164.9.3 | - |
