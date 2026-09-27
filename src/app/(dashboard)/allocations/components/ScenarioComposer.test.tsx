@@ -16993,4 +16993,75 @@ describe("ScenarioComposer — Phase 170 SC1-LAYERS blend window (C1-A2)", () =>
     expect(props?.mode).toBe("scenario");
     expect(props?.variant).toBe("panel");
   });
+
+  it("C1-A1: with a coverage window the header, control and timeline are hairline rows of the blend panel, ahead of the KPI row", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload(unequalSpanBook())}
+        allocatorId={`${ALLOCATOR_A}-p170-rows`}
+        allocatorMandate={null}
+      />,
+    );
+    const panel = screen.getByTestId("scenario-blend-window");
+    const rows = Array.from(panel.children);
+    expect(rows).toHaveLength(4);
+    const header = screen.getByTestId("scenario-blend-header");
+    const windowRow = screen.getByTestId("scenario-coverage-window");
+    const timeline = document.getElementById("scenario-coverage-timeline");
+    expect(timeline).not.toBeNull();
+    expect(rows[0]).toBe(header.parentElement);
+    expect(rows[1]).toBe(windowRow);
+    expect(rows[2]).toBe(timeline!.parentElement);
+    expect(rows[3]).toContainElement(screen.getByText("Scenario blend"));
+
+    // Row 1 is padding only. Rows 2–4 carry the interior hairline.
+    expect(classTokens(rows[0].className)).toEqual(
+      expect.arrayContaining(["px-4", "py-3"]),
+    );
+    expect(classTokens(rows[0].className)).not.toContain("border-t");
+    for (const row of rows.slice(1)) {
+      const tokens = classTokens(row.className);
+      expect(tokens).toContain("border-t");
+      expect(tokens).toContain("border-border");
+    }
+    // 2026-09-28 Phase 170 C1-A1 — the window control is a panel row, not its
+    // own rounded box. The class it replaced was
+    // `mt-6 flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface px-4 py-3`.
+    // RT-5 still focuses this same element (tabIndex -1, same testid).
+    const windowTokens = classTokens(windowRow.className);
+    expect(windowTokens).not.toContain("rounded-md");
+    expect(windowTokens.some((token) => token.startsWith("rounded"))).toBe(false);
+    expect(windowTokens).not.toContain("border");
+    expect(windowTokens).not.toContain("bg-surface");
+    expect(windowTokens).not.toContain("mt-6");
+    expect(windowTokens).toEqual(
+      expect.arrayContaining([
+        "flex",
+        "flex-wrap",
+        "items-center",
+        "gap-3",
+        "px-4",
+        "py-3",
+      ]),
+    );
+    expect(windowRow).toHaveAttribute("tabindex", "-1");
+  });
+
+  it("C1-A1: with no window bounds the blend panel is the KPI row alone and that row has no leading hairline", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={`${ALLOCATOR_A}-p170-nowindow`}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.queryByTestId("scenario-coverage-window")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("scenario-blend-header")).not.toBeInTheDocument();
+    expect(document.getElementById("scenario-coverage-timeline")).toBeNull();
+    const panel = screen.getByTestId("scenario-blend-window");
+    const rows = Array.from(panel.children);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toContainElement(screen.getByText("Scenario blend"));
+    expect(classTokens(rows[0].className)).not.toContain("border-t");
+  });
 });
