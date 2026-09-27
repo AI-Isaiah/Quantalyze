@@ -5195,6 +5195,23 @@ export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
         "different service entry point.",
     ],
     [
+      "BENCHMARK_REFRESH_FAILED",
+      "Detail: one of six arm-specific sentences, each starting 'Benchmark " +
+        "refresh' (no series, stale series, fetch raised, stored-date read " +
+        "raised, table older than yesterday, deadline exceeded), 500 " +
+        "retryable:false, no dependency. Minted by `benchmark_refresh` and " +
+        "`_benchmark_refresh_once` in analytics-service/routers/cron.py " +
+        "(Phase 169.2, `POST /api/benchmark-refresh`). NOT a key-validation code. " +
+        "MEASURED at HEAD: its only TypeScript entry point is `refreshBenchmark` " +
+        "in analytics-client, whose only caller is " +
+        "`src/app/api/cron/refresh-benchmark/route.ts`. That route has ONE catch " +
+        "arm that never reads `seamCode` and never calls " +
+        "`classifyKeyValidationError` — it logs, captures to Sentry and answers " +
+        "a static `{ok:false}` 502 so Vercel Cron alarms. No browser receives " +
+        "this code and no verdict row could ever fire. If a route ever renders " +
+        "it, that route earns its own arm, not a KEY_* verdict.",
+    ],
+    [
       "ANALYTICS_ROW_NOT_CREATED",
       "Detail: 'Could not start the analytics computation — please retry.', 503, " +
         "from `_compute_portfolio_analytics` in portfolio.py when the analytics " +

@@ -124,6 +124,25 @@ export const RecomputeMatchResponseSchema = z.object({
   allocator_id: z.string().optional(),
 }).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat per-branch extras; discriminated on status, never spread into a write
 
+// --- /api/benchmark-refresh ---
+// Phase 169.2 / plan 02 (D-08). The service answers 200 ONLY for a current,
+// non-empty BTC series (every other outcome is a 500), so a 200 whose `stale`
+// is anything but `false` is contract drift and must fail the parse rather
+// than report a refresh that did not happen. `through` is the last real price
+// date (ISO `YYYY-MM-DD`). `points` is the length of the series the service
+// holds (`benchmark_refresh` returns `int(len(series))`); the service refuses
+// an empty series, so it is at least 1. It is KEPT (review fix MD-06) and
+// echoed by the cron route, so a refresh that came back far shorter than the
+// fetcher's window is visible in the cron's own log line instead of being
+// stripped here.
+export const BenchmarkRefreshResponseSchema = z.object({
+  symbol: z.literal("BTC"),
+  through: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  stale: z.literal(false),
+  points: z.number().int().positive(),
+});
+export type BenchmarkRefreshResponse = z.infer<typeof BenchmarkRefreshResponseSchema>;
+
 // ─────────────────────────────────────────────────────────────────────
 // Strict primitive responses (Sprint 2 Task 2.9 and later)
 //

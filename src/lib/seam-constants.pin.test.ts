@@ -124,6 +124,11 @@ const EXPECTED_TIMEOUT_MS: Record<string, number> = {
   "keys-permissions": 15_000,
   "keys-rotate-secret": 120_000,
   "process-key-unified-dormant": 60_000,
+  // Phase 169.2 / D-08 — the daily BTC benchmark refresh. Review fix WR-02
+  // (2026-09-27) moved it from 60 000: hand-computed from the fetcher, 3
+  // upstream requests x 30 s (`services/benchmark.py`, 2 Binance pages + the
+  // CoinGecko fallback) = 90 000, plus 10 000 for the cache read and upsert.
+  "benchmark-refresh": 100_000,
 };
 
 /**
@@ -154,6 +159,7 @@ const EXPECTED_BUDGET_KEYS: string[] = [
   "keys-permissions",
   "keys-rotate-secret",
   "process-key-unified-dormant",
+  "benchmark-refresh",
 ];
 
 /**
@@ -199,6 +205,9 @@ const EXPECTED_DEPENDENCIES: Record<string, string[]> = {
   "keys-permissions": [],
   "keys-rotate-secret": ["mt5-gateway"],
   "process-key-unified-dormant": [],
+  // Phase 169.2 / D-08 — none: the endpoint answers 500 on every failure and
+  // never a 503, so it has no counting site for any dependency key.
+  "benchmark-refresh": [],
 };
 
 /**
@@ -239,6 +248,8 @@ const EXPECTED_RETRIES: Record<string, number> = {
   "keys-permissions": 0,
   "keys-rotate-secret": 0,
   "process-key-unified-dormant": 0,
+  // Phase 169.2 / D-08 — 0 by design: tomorrow's cron run is the retry.
+  "benchmark-refresh": 0,
 };
 
 /**
@@ -303,7 +314,7 @@ function durationToMs(duration: string): number {
 }
 
 describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => {
-  it("declares exactly the 15 pinned budget keys (SET equality, not length)", () => {
+  it("declares exactly the 16 pinned budget keys (SET equality, not length)", () => {
     // Sorted SET equality. A length assertion is green under a rename, which is
     // how a call site quietly loses the budget it was supposed to spend.
     // 14 → 15 at Phase 164.5.3: "keys-rotate-secret" added (D-04's
@@ -480,12 +491,12 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
       ).toBe(3);
       expect(
         Object.keys(RETRY_AUDIT_NO_ANALYTICS).length,
-        "RETRY_AUDIT_NO_ANALYTICS no longer holds exactly 6 refusals " +
+        "RETRY_AUDIT_NO_ANALYTICS no longer holds exactly 7 refusals " +
           "(validate-key, validate-key-serialized, encrypt-key, " +
-          "match-recompute, portfolio-analytics, match-eval). Together with the " +
-          "4 above this is the whole 10-wrapper analytics surface: a wrapper in " +
-          "NEITHER map has no audit verdict at all.",
-      ).toBe(6);
+          "match-recompute, portfolio-analytics, match-eval, benchmark-refresh). " +
+          "Together with the 4 above this is the whole 11-wrapper analytics " +
+          "surface: a wrapper in NEITHER map has no audit verdict at all.",
+      ).toBe(7);
     });
 
     it.each(Object.keys(RETRY_SAFE_ANALYTICS))(

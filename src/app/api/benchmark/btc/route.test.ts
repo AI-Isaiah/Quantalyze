@@ -8,36 +8,95 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  *   - [{date, value}] shape, ascending by date, pct-change of close_price,
  *     first row dropped (no prior close) — mirrors benchmark.py prices_to_returns.
  *   - PUBLIC cacheable Cache-Control (shared market data) — NOT no-store/private.
- *   - Read error degrades to HTTP 200 with [] (honest empty state, never 500/red).
+ *   - An empty table is HTTP 200 with [] (honest empty state).
+ *   - A read error is 503 + no-store (Phase 169.2, SFH MD-05): never a cached 200 [].
  *   - NO tenant/user data — every object has exactly {date, value}.
  *
  * The supabase server client is mocked so the test is hermetic; the
- * `.from().select().eq().order()` chain resolves to a per-test fixture.
+ * `.from().select().eq()[.lt()].order().limit()` chain (keyset-paged since
+ * Phase 169.2) resolves against a per-test table.
  */
 
-// The route awaits `.from("benchmark_prices").select("date, close_price")
-//   .eq("symbol","BTC").order("date",{ascending:true})` → { data, error }.
-// `orderResult` is what that terminal `.order(...)` resolves to; each test
-// sets it before invoking GET.
-const { orderResult, mockOrder, mockEq, mockFrom } = vi.hoisted(
-  () => {
-    const orderResult: { value: { data: unknown; error: unknown } } = {
-      value: { data: [], error: null },
+// The fake client mirrors PostgREST: `.from().select().eq()`, an optional
+// keyset cursor `.lt("date", d)`, then `.order().limit(n)`. EVERY page is
+// capped at `table.cap` rows, the way `max_rows` caps a real read, and answers
+// 200 with a partial body. That cap is what the pre-169.2 route fell to: an
+// unranged ascending read of a table larger than the cap returned the OLDEST
+// rows and never the newest.
+const { table, mockOrder, mockEq, mockLimit, mockFrom } = vi.hoisted(() => {
+  type Row = { date: string; close_price: unknown };
+  const table: {
+    rows: Row[] | null;
+    error: unknown;
+    cap: number;
+  } = { rows: [], error: null, cap: 1000 };
+
+  function answer(ascending: boolean, cursor: string | null, n: number) {
+    if (table.error) return { data: null, error: table.error };
+    if (table.rows === null) return { data: null, error: null };
+    const sorted = table.rows
+      .filter((r) => cursor === null || r.date < cursor)
+      .sort((a, b) =>
+        ascending ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date),
+      );
+    return { data: sorted.slice(0, Math.min(n, table.cap)), error: null };
+  }
+
+  const mockLimit = vi.fn();
+  const mockOrder = vi.fn();
+  const mockEq = vi.fn();
+  const mockFrom = vi.fn(() => {
+    let cursor: string | null = null;
+    const b = {
+      select: () => b,
+      eq: (col: string, val: unknown) => {
+        mockEq(col, val);
+        return b;
+      },
+      lt: (_col: string, val: string) => {
+        cursor = val;
+        return b;
+      },
+      order: (col: string, o: { ascending: boolean }) => {
+        mockOrder(col, o);
+        const ascending = o?.ascending !== false;
+        return {
+          limit: (n: number) => {
+            mockLimit(n);
+            return Promise.resolve(answer(ascending, cursor, n));
+          },
+        };
+      },
     };
-    const mockOrder = vi.fn(async () => orderResult.value);
-    const mockEq = vi.fn(() => ({ order: mockOrder }));
-    const mockSelect = vi.fn(() => ({ eq: mockEq }));
-    const mockFrom = vi.fn(() => ({ select: mockSelect }));
-    return { orderResult, mockOrder, mockEq, mockSelect, mockFrom };
-  },
-);
+    return b;
+  });
+  return { table, mockOrder, mockEq, mockLimit, mockFrom };
+});
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({ from: mockFrom }),
 }));
 
-// Silence the route's server-side error log in the error-degrade test.
-vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+// Only `captureToSentry` is replaced: `shouldCaptureNow` (the per-instance
+// throttle, 169.2 round-2 review WR-01) stays REAL, so the tests observe the
+// route's actual capture volume. Its window is reset before every case.
+vi.mock("@/lib/sentry-capture", async (importActual) => ({
+  ...(await importActual<typeof import("@/lib/sentry-capture")>()),
+  captureToSentry: vi.fn(async () => undefined),
+}));
+
+// `after()` needs a Next request scope that vitest does not provide. Run the
+// callback at once, so a capture scheduled through it is observable here
+// (169.2 round-2 review IN-03: the route schedules, it never fires and forgets).
+const afterSpy = vi.hoisted(() =>
+  vi.fn((cb: () => unknown) => {
+    void cb();
+  }),
+);
+vi.mock("next/server", async (importActual) => ({
+  ...(await importActual<typeof import("next/server")>()),
+  after: afterSpy,
+}));
 
 // Rate limit (publicIpLimiter). `rlResult` controls the mocked checkLimit;
 // it defaults to success so the existing data-contract tests below are
@@ -54,20 +113,25 @@ vi.mock("@/lib/ratelimit", () => ({
 }));
 
 function setRows(rows: Array<{ date: string; close_price: number }>) {
-  orderResult.value = { data: rows, error: null };
+  table.rows = rows;
+  table.error = null;
 }
 
 function setError() {
-  orderResult.value = {
-    data: null,
-    error: { message: "boom", code: "PGRST500" },
-  };
+  table.rows = null;
+  table.error = { message: "boom", code: "PGRST500" };
 }
 
 describe("GET /api/benchmark/btc", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
-    orderResult.value = { data: [], error: null };
+    const { __resetCaptureThrottleForTests } = await import(
+      "@/lib/sentry-capture"
+    );
+    __resetCaptureThrottleForTests();
+    table.rows = [];
+    table.error = null;
+    table.cap = 1000;
     rlResult.value = { success: true };
   });
 
@@ -122,7 +186,12 @@ describe("GET /api/benchmark/btc", () => {
     expect(body.some((r) => r.date === "2024-01-01")).toBe(false);
   });
 
-  it("queries benchmark_prices for symbol BTC ordered by date ascending", async () => {
+  it("queries benchmark_prices for symbol BTC newest-first, in keyset .limit() pages", async () => {
+    // Phase 169.2 (D-08): this case used to pin `{ ascending: true }` on an
+    // unranged read, which was the defect itself — PostgREST caps that read at
+    // max_rows and returns the OLDEST rows. The read is now newest-first and
+    // keyset-paged; the reader hands the route an ascending series for the
+    // pct-change loop.
     setRows([
       { date: "2024-01-01", close_price: 100 },
       { date: "2024-01-02", close_price: 110 },
@@ -132,7 +201,30 @@ describe("GET /api/benchmark/btc", () => {
 
     expect(mockFrom).toHaveBeenCalledWith("benchmark_prices");
     expect(mockEq).toHaveBeenCalledWith("symbol", "BTC");
-    expect(mockOrder).toHaveBeenCalledWith("date", { ascending: true });
+    expect(mockOrder).toHaveBeenCalledWith("date", { ascending: false });
+    expect(mockLimit).toHaveBeenCalledWith(1000);
+  });
+
+  it("returns the NEWEST stored BTC day when the table holds more rows than one capped read", async () => {
+    // 1500 stored days behind a 1000-row max_rows cap. The pre-169.2 route read
+    // unranged + ascending, so its last point was the 1000th-OLDEST day and the
+    // newest 500 days never reached the Scenario composer.
+    const rows = Array.from({ length: 1500 }, (_, i) => ({
+      date: new Date(Date.UTC(2021, 0, 1) + i * 86_400_000)
+        .toISOString()
+        .slice(0, 10),
+      close_price: 20_000 + i,
+    }));
+    setRows(rows);
+
+    const { GET } = await import("./route");
+    const res = await GET();
+    const body = (await res.json()) as Array<{ date: string; value: number }>;
+
+    expect(res.status).toBe(200);
+    expect(body[body.length - 1].date).toBe(rows[1499].date);
+    expect(body[0].date).toBe(rows[1].date);
+    expect(body).toHaveLength(1499);
   });
 
   it("sets a PUBLIC cacheable Cache-Control header (not no-store / private)", async () => {
@@ -149,18 +241,26 @@ describe("GET /api/benchmark/btc", () => {
     expect(cc).not.toContain("private");
   });
 
-  it("degrades to HTTP 200 with [] on a read error (never 500) AND captures the error", async () => {
+  it("answers a read error with 503 + no-store (never a cached 200 []) AND captures the error", async () => {
+    // Phase 169.2 SFH MD-05: this case used to pin `200 []` with the PUBLIC
+    // s-maxage/SWR header, which pinned ONE transient PostgREST error at the
+    // CDN as "no benchmark" for up to an hour (a day stale). Both callers
+    // (ScenarioComposer, the scenario-share page) treat any non-2xx as the
+    // neutral "unavailable" state, so the UI is unchanged; what changes is that
+    // the next request retries the read.
     setError();
     const { GET } = await import("./route");
     const res = await GET();
 
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual([]);
-    // still cacheable on the degraded path
-    expect(res.headers.get("Cache-Control") ?? "").toContain("public");
+    expect(res.status).toBe(503);
+    const cc = res.headers.get("Cache-Control") ?? "";
+    expect(cc).toContain("no-store");
+    expect(cc).not.toContain("s-maxage");
+    expect(cc).not.toContain("public");
+    // Static body: the raw DB error never reaches the caller.
+    expect(await res.json()).toEqual({ error: "Benchmark temporarily unavailable" });
 
-    // The degrade path MUST stay observable — a refactor that drops the
+    // The error path MUST stay observable — a refactor that drops the
     // server-side capture would otherwise make this a true silent failure
     // with a green suite. Pin that captureToSentry fired with the route tag.
     const { captureToSentry } = await import("@/lib/sentry-capture");
@@ -172,12 +272,23 @@ describe("GET /api/benchmark/btc", () => {
     );
   });
 
-  it("returns [] for an empty / missing benchmark_prices result (200)", async () => {
-    orderResult.value = { data: null, error: null };
+  it("returns 200 [] (cacheable) for an EMPTY benchmark_prices table", async () => {
+    setRows([]);
     const { GET } = await import("./route");
     const res = await GET();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([]);
+    expect(res.headers.get("Cache-Control") ?? "").toContain("public");
+  });
+
+  it("treats a page with neither data nor an error as a READ ERROR (503), not an empty table", async () => {
+    // SFH LW-03: a null page used to end the read as if the table were empty.
+    table.rows = null;
+    table.error = null;
+    const { GET } = await import("./route");
+    const res = await GET();
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Cache-Control") ?? "").toContain("no-store");
   });
 
   it("exposes NO tenant data — every object has exactly {date, value}", async () => {
@@ -247,11 +358,18 @@ describe("GET /api/benchmark/btc", () => {
   it("skips a point with a non-positive CURRENT close (finite-but-corrupt return)", async () => {
     // A zero/negative `close` yields a finite return <= -1 (<= -100%/day) that
     // passes the Number.isFinite(value) check and would silently poison TE/IR/beta.
-    // The numerator must be guarded for positivity, not only finiteness.
+    //
+    // Phase 169.2 (review WR-04 / SFH MD-03): the shared reader now leaves the
+    // 0 close out of `prices` and REPORTS its date in `dropped`. The route must
+    // not bridge that hole: 110/100 − 1 stamped at 2024-01-03 would be a
+    // TWO-day move presented as a one-day return. So, exactly as before 169.2,
+    // a bad close at D yields no return at D and none at the next stored day.
+    // (This expectation was briefly rewritten to accept the bridged return; it
+    // is restored here.)
     setRows([
       { date: "2024-01-01", close_price: 100 },
-      { date: "2024-01-02", close_price: 0 }, // close <= 0 → point skipped
-      { date: "2024-01-03", close_price: 110 }, // prevClose=0 → also skipped
+      { date: "2024-01-02", close_price: 0 }, // close <= 0 → left out, date reported
+      { date: "2024-01-03", close_price: 110 }, // would bridge the hole → skipped
       { date: "2024-01-04", close_price: 121 },
     ]);
     const { GET } = await import("./route");
@@ -262,8 +380,119 @@ describe("GET /api/benchmark/btc", () => {
       expect(Number.isFinite(r.value)).toBe(true);
       expect(r.value).toBeGreaterThan(-1); // no <= -100%/day corruption leaks through
     }
-    // Only 2024-01-04 (121/110 − 1) survives; the 0-close point and its successor drop.
     expect(body).toEqual([{ date: "2024-01-04", value: expect.any(Number) }]);
     expect(body[0].value).toBeCloseTo(0.1, 10); // 121/110 − 1
+
+    // The corrupt row is made visible, not silently dropped.
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+    expect(captureToSentry).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tags: expect.objectContaining({ stage: "dropped-closes" }),
+        extra: { count: 1, dropped: ["2024-01-02"] },
+      }),
+    );
+  });
+
+  it("BRIDGES a MISSING day: the move across it is one return at the next stored date (review round 3 WR-01, narrowing round-2 WR-03)", async () => {
+    // The scenario composer and the scenario-share page compound these returns
+    // into the BTC wealth overlay. Skipping the move across a missing row would
+    // leave that overlay off BTC's real level for every later date, so a
+    // missing row is bridged, as before 169.2 and as Python `prices_to_returns`
+    // does. (Contrast the dropped-close test above: a CORRUPT close is not
+    // bridged.) Known limit: the two-day move is stamped at 2024-01-04.
+    setRows([
+      { date: "2024-01-01", close_price: 100 },
+      { date: "2024-01-02", close_price: 110 },
+      // 2024-01-03 missing
+      { date: "2024-01-04", close_price: 121 },
+      { date: "2024-01-05", close_price: 133.1 },
+    ]);
+    const { GET } = await import("./route");
+    const res = await GET();
+    const body = (await res.json()) as Array<{ date: string; value: number }>;
+
+    expect(body.map((r) => r.date)).toEqual([
+      "2024-01-02",
+      "2024-01-04",
+      "2024-01-05",
+    ]);
+    expect(body[0].value).toBeCloseTo(0.1, 10); // 110/100 − 1
+    expect(body[1].value).toBeCloseTo(0.1, 10); // 121/110 − 1, bridged
+    expect(body[2].value).toBeCloseTo(0.1, 10); // 133.1/121 − 1
+    // Compounding the served returns lands on BTC's real level: 133.1/100.
+    const level = body.reduce((c, r) => c * (1 + r.value), 1);
+    expect(level).toBeCloseTo(1.331, 10);
+  });
+
+  it("captures a persisting corrupt row ONCE per window, not once per request, with a stable message (review round 2 WR-01)", async () => {
+    // Public, cache-bustable route: while a corrupt row sits in the table every
+    // request reaches the function. Each one logs; only the first captures.
+    setRows([
+      { date: "2024-01-01", close_price: 100 },
+      { date: "2024-01-02", close_price: 0 },
+      { date: "2024-01-03", close_price: 110 },
+    ]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    await GET();
+    await GET();
+
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+    const dropCaptures = vi
+      .mocked(captureToSentry)
+      .mock.calls.filter(([, o]) => o.tags.stage === "dropped-closes");
+    expect(dropCaptures).toHaveLength(1);
+    expect(afterSpy).toHaveBeenCalledTimes(1);
+    // No count in the message: a changing count must not split the grouping.
+    expect((dropCaptures[0][0] as Error).message).toBe(
+      "benchmark_prices holds unusable BTC closes",
+    );
+    // The log line is unconditional: it is how an operator counts requests.
+    expect(
+      warn.mock.calls.filter(([m]) => String(m).includes("dropped unusable closes")),
+    ).toHaveLength(2);
+    warn.mockRestore();
+  });
+
+  it("caps the dropped dates one capture carries at the NEWEST 20", async () => {
+    const rows = Array.from({ length: 30 }, (_, i) => ({
+      date: new Date(Date.UTC(2024, 0, 1) + i * 86_400_000)
+        .toISOString()
+        .slice(0, 10),
+      close_price: 0,
+    }));
+    setRows(rows);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    await GET();
+    warn.mockRestore();
+
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+    const [, options] = vi
+      .mocked(captureToSentry)
+      .mock.calls.find(([, o]) => o.tags.stage === "dropped-closes")!;
+    expect(options.extra).toEqual({
+      count: 30,
+      dropped: rows.slice(-20).map((r) => r.date),
+    });
+  });
+
+  it("captures a persisting READ ERROR once per window while every request still answers 503 (review round 2 WR-01)", async () => {
+    setError();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    expect((await GET()).status).toBe(503);
+    expect((await GET()).status).toBe(503);
+
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+    expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+    // Scheduled through after() (review round 2 IN-03), so the capture is not
+    // lost when the function freezes after the 503 is sent.
+    expect(afterSpy).toHaveBeenCalledTimes(1);
+    expect(
+      err.mock.calls.filter(([m]) => String(m).includes("select error")),
+    ).toHaveLength(2);
+    err.mockRestore();
   });
 });

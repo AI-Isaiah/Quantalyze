@@ -11,9 +11,9 @@ last_activity: 2026-09-27
 last_activity_desc: Phase 164.9.3 execution started
 state_head: 95e8f0788f446f6c29550982144d84d575f228d3
 progress:
-  total_phases: 72
-  completed_phases: 40
-  total_plans: 359
+  total_phases: 73
+  completed_phases: 41
+  total_plans: 353
   completed_plans: 347
   percent: 56
 ---
@@ -181,6 +181,10 @@ is decided by verification status, never by plan counts.**
 
 Phase: 164.9.3 (CLAIMPAIR) — EXECUTING
 Plan: 3 of 6 (01 done: the CLAIMPAIR gate, pre-fix census 14 arms RED with 23505, W-INTRO GREEN; 02 done: the pre-rank exclusion migration, all 15 arms GREEN on the replayed local-stack lane)
+Phase: 169.2 (BENCHFRESH) — EXECUTING
+Plan: 1 of 3
+Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
+Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
 Plan: 1 of 7
 Phase: 166.1 (ENGINEFLOOR) — EXECUTING
@@ -1303,6 +1307,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.9.2 REFDATAUPDATES inserted after Phase 164.9 on 2026-09-24 (via `/gsd-phase --insert`, founder-approved by AskUserQuestion): the shared-TEST restore replay also replays migration UPDATEs on public tables it just filled. Found by preflight run `36003106273`, which aborted on the 164.9 plan-07 wrong-state check. It owns `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` and unblocks 164.9 criterion 8.
 - Phase 164.4.2.1 DRIFTOFFMUTEX inserted after Phase 164.4.2 on 2026-09-24 (hand-inserted; founder rule "book the phase if it holds", AskUserQuestion; runs 2–5 confirmed the slowdown)
 - Phase 167.1.2 ACCOUNTTRUTH inserted after Phase 167.1.1 on 2026-09-24 (hand-inserted; founder UAT on the allocator book; founder decisions "Refuse a second key" and "Hide it until correct", AskUserQuestion)
+- Phases 169.1 ZOOMKPIS, 169.2 BENCHFRESH, 169.3 SMALLFIXES and 169.4 ALLOCTRUTH inserted after Phase 169 on 2026-09-26 (via `/gsd-phase --insert`; founder decision 2026-09-26: one logical topic per phase, one reviewable PR each). Phase 169 PAGETRUTH narrowed to 169 FACTSHEETTRUTH (`/gsd-phase --edit`). The already-checked plans were moved by hand, not re-planned (169 D-37). Execution order is 169.2 and 169.3, then 169, then 169.4, then 169.1, NOT the numeric order: 169 needs 169.2 (and 167.1.2 PR C and 167.2.1), 169.4 needs 169 and 169.2, and 169.1 needs 169 and 169.4.
+- Phase 169 edited: edited fields: title, goal, depends_on, success_criteria, plans (narrowed to FACTSHEETTRUTH at the 2026-09-26 split, 169 D-37)
+- Phase 169.4.1 OGSHARPE inserted after Phase 169.4 on 2026-09-26 (via `/gsd-phase --insert`; gsd-tools numbered it 169.4.1). Split from Phase 169 (founder decision 2026-09-26, Option A after 169 plan-check round 3): the OG share card's Sharpe edit, which needs Phase 166.2, moved out of 169-01 so Phase 169 no longer waits on 166.2. Depends on 166.2 and 169.
 - Phase 164.6.6 edited: edited fields: goal, success_criteria (criterion 3 split out to 164.6.8 OUTAGEALERT, founder decision 2026-09-26: one topic per phase)
 - Phase 164.6.8 inserted after Phase 164.6.6: OUTAGEALERT, split from 164.6.6 criterion 3 by founder decision 2026-09-26 (one topic per phase); owns MT5-PROBER-WEDGE-CALIBRATION-01 (routed by PR #863)
 - Phase 170 edited: edited fields: title (PAGECOPY → LAYOUT), goal, success_criteria (criteria 2, 3, 4, 6 split out to 170.1 COPY, founder decision 2026-09-26: one topic per phase)
@@ -1321,6 +1328,21 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 166.1 SPLIT into three on 2026-09-26 (founder decision: too large to review as one PR after five plan-check rounds; 166.1-CONTEXT D-23). Phase 166.1 edited (via `/gsd-phase --edit 166.1`) to ENGINEFLOOR, the Python half: plans 01, 01b, 03 and a new release plan 09.
 - Phase 166.2 COMPUTEONCE inserted after Phase 166.1 on 2026-09-26 (via `/gsd-phase --insert`, `--sibling` allocation): the TypeScript half, old 166.1 plans 04-08 moved as 166.2-01..07; does not depend on 166.1.
 - Phase 166.3 RECOMPUTE inserted after Phase 166.2 on 2026-09-26 (via `/gsd-phase --insert`, `--sibling` allocation): the founder PROD recompute, old 166.1 plan 02 moved as 166.3-01; depends only on the Phase 166 deploy.
+- Phase 164.9.3.2 DEFER40001 inserted after Phase 164.9.3 on 2026-09-27 (via `/gsd-phase --insert`; founder decision F1, "New blocker phase"): a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end. A blocker, beside 164.9.3.
+- Phase 166.4 BENCHALIGN inserted after Phase 166 on 2026-09-27 (via `/gsd-phase --insert`; founder decision D-B, "New phase under 166"): a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric (founder decision D-A). Data integrity, ahead of features. Phase 166.3 RECOMPUTE is halted until it ships.
+- Phase 170 edited: edited fields: goal, success_criteria (390px decision; narrow-width findings 2026-09-27)
+- Phase 170.1 edited: edited fields: success_criteria (390px decision; scenario copy findings 2026-09-27)
+- Phase 170 edited: edited fields: success_criteria (profile exchanges tab row and Disconnect clipped, 2026-09-27)
+- Phase 169 edited: edited fields: success_criteria (SC-6 period-row gating widened to 6M and 1Y, 2026-09-27)
+- Phase 164.6.5 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
+- Phase 167.1 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
+- Phase 167.2 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
+- Phase 167.2.1 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
+- Phase 169.3 edited (--force): routed in: credential inputs strip pasted whitespace (passphrase excluded) (founder UAT 2026-09-27)
+- Phase 166.4.1 inserted after Phase 166.4: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly (data integrity; evidence verified by the orchestrator 2026-09-27) (URGENT)
+- Phase 164.9.4 edited: routed in: a docs-only push to main runs the full corpus; the short path must cover a docs-only push too (founder 2026-09-27)
+- Phase 167.1.1 edited: routed in: three holdings readers still allocator-wide (R-15-1 scenario commit route, R-15-2 _load_holding_portfolio_context, R-15-3 getLatestExposureSnapshot) (from the 167.1.2 PR C executor, 2026-09-27)
+- Phase 167.1.2.1 inserted after Phase 167.1.2: RECONMARKER — a per-key history-reconstructed marker so no key's equity history is lost or skipped (data integrity; routed from the 167.1.2 PR C executor, 2026-09-27) (URGENT)
 
 ### Decisions
 
