@@ -110,6 +110,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.4: MT5KEEPALIVE — nothing TRIGGERS a recovery, so the terminal sits dark for hours while recovery itself takes minutes** (INSERTED)
 - [ ] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verification: human_needed
 - [ ] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — not yet verified
+- [ ] **Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out** (INSERTED) — not yet planned (waits for the founder's live scrub spike)
 - [ ] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button** (INSERTED) — not yet verified
 - [x] **Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here** (INSERTED)
@@ -2651,7 +2652,7 @@ the former 4 is renumbered 3 below, text unchanged.
 (dated 2026-09-25, from 164.6.5 plan 01) here. Both close only on the next live wedge captured before
 any restart or heal, which is 164.6.8's evidence, so both `**Owns**` lines now live under Phase
 164.6.8, carried verbatim. This phase owns neither.
-**Plans:** 8 plans
+**Plans:** 4 plans (re-plan pending; was 8 before the 2026-09-27 split)
 
 ⛔ **SAME INCIDENT AS 164.6.5, DIFFERENT DEFECT.** 164.6.5 makes validation stop breaking the
 terminal; this phase makes the terminal stop being a shared mutable resource. 164.6.5 is
@@ -2673,16 +2674,70 @@ independently shippable; this is the architecture.
    pooled terminals) vs serialize-and-restore on one terminal. Both have real cost; record the
    reasoning wherever this repo tracks decisions.
 
+⭐ **Founder decision 2026-09-27 (AskUserQuestion), recorded in full in `164.6.6-CONTEXT.md`.**
+- **D-01, eviction scope = VALIDATION switches only.** Criterion 1 is narrowed accordingly: a key
+  validation no longer switches the job terminal. Normal job switches between onboarded keys stay,
+  and each one is recorded against the holder it displaced (the handover record, `cron_runs`, no
+  migration: founder accepted). Criterion 1's original text above is kept as lineage.
+- **D-02, option (b)+(f):** a separate validation-only gateway, wiped after every use, plus
+  recording on the jobs terminal. Serialize-and-restore (c) REJECTED. Criterion 3 is closed by this
+  record.
+- D-03 reverses 164.6.5 D-07 for saved accounts and history only, and the jobs terminal KEEPS its `Logs` (164.6.8's wedge evidence); founder decision, deviation recorded here and in `164.6.6-CONTEXT.md`. The deletions themselves ship in Phase 164.6.6.1, not here.
+- **D-05, fail loud:** with `MT5_VALIDATION_GATEWAY_*` unset, the validation is refused with a clear
+  error and an alert; it never falls back to the jobs terminal.
+- **D-06, routed to Phase 164.6.8 OUTAGEALERT** (frozen; it waits there): the validation terminal's
+  monitoring gap and the reader of skipped-cleanup rows (`TODOS.md`
+  `MT5-VALIDATION-TERMINAL-COVERAGE-01`).
+- **D-07, H3 is HIGH and fixed IN this phase:** authentication or network isolation on the rpyc
+  channel, and master passwords rejected before any login, each with a failing-first test.
+- **SPLIT:** the wipe/scrub work (the scrub spike, the scrub verb, the validation-terminal scrub, the
+  job-terminal scrub, D-04 scrub cadence, and the must-fix W-1/W-2) moved to **Phase 164.6.6.1
+  MT5SCRUB**, re-planned after the founder's live spike. The founder judged it HIGH-risk if shipped
+  as planned (W-2: jobs terminal left logged out after a failed relaunch; W-1: a lock-up).
+  ⚠️ Criterion 2 is therefore met only in part by this phase: the job terminal stops receiving
+  un-onboarded accounts, and the founder's one-time Navigator clean-up removes the list it holds;
+  wiping either terminal after use is 164.6.6.1's. The validation-gateway STAND-UP stays in this
+  phase, because this phase's routing refuses every validation until that gateway exists.
+
 Plans:
 
 - [ ] 164.6.6-01-PLAN.md — handover record: every job-terminal switch recorded against the displaced holder (wave 2, after the founder decision in plan 02)
 - [ ] 164.6.6-02-PLAN.md — FOUNDER decisions D-01..D-07 (eviction scope, isolation option, 164.6.5 D-07 reversal, scrub cadence, H3) recorded in CONTEXT.md and here (wave 1, gates every other plan)
-- [ ] 164.6.6-03-PLAN.md — validation-gateway runbook + FOUNDER stand-up and scrub spike S-01..S-08
 - [ ] 164.6.6-04-PLAN.md — both validate sites routed to the validation terminal, fail loud when unset
-- [ ] 164.6.6-05-PLAN.md — narrow terminate-and-scrub verb over rpyc, gated like the recycle verb
-- [ ] 164.6.6-06-PLAN.md — validation terminal scrubbed inside the lease after every validation
-- [ ] 164.6.6-07-PLAN.md — job terminal scrubbed on every ipc_fault recovery, credentialed relaunch within budget
 - [ ] 164.6.6-08-PLAN.md — live-check runbook + FOUNDER post-deploy verification L1..L7
+- ⛔ MOVED 2026-09-27 to Phase 164.6.6.1 MT5SCRUB (founder split): 164.6.6-03 (scrub spike; its gateway stand-up half stays here, re-planned), 164.6.6-05, 164.6.6-06, 164.6.6-07. Re-planning this phase (narrowed scope + a new H3 plan) rewrites this list.
+
+### Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out (INSERTED)
+
+**Goal:** The validation terminal is wiped of every validated account after each use, and the jobs
+terminal's saved client accounts and history are removed, without ever leaving the jobs terminal
+logged out and without a lock-up.
+**Requirements**: TBD
+**Depends on:** Phase 164.6.6 (the validation gateway, the routing and the handover record), AND the
+founder's live scrub spike on the validation terminal (run from the moved spike plan). ⛔ Not
+plan-checked or executed before the spike; re-planned after it.
+**Split 2026-09-27 from Phase 164.6.6 by founder decision.** The founder judged the wipe work HIGH if
+shipped as planned: W-2 would leave the jobs terminal logged out after a failed relaunch, and W-1
+risks a lock-up. Both are MUST-FIX here, carried verbatim in `164.6.6.1-CONTEXT.md`. It inherits
+164.6.6 D-03 (164.6.5 D-07 reversed for saved accounts and history only; the jobs terminal keeps its
+`Logs`) and owns D-04 (scrub cadence), OPEN until the founder answers at re-plan.
+**Plans:** 4 plans (moved from 164.6.6, NOT re-planned; they predate the spike and the must-fix items)
+
+**Success criteria (to be derived properly at planning):**
+
+1. After every validation, the validation terminal lists no client account and holds none of that
+   account's saved data (scope of `Logs` there: founder answers at re-plan).
+2. The jobs terminal's saved client accounts and history are removed on the cadence the founder sets
+   (D-04), and its Journal `Logs` are kept (164.6.6 D-03).
+3. No scrub path can leave the jobs terminal logged out (W-2) or lock the terminal or a lease (W-1);
+   each is proven by a failing-first test and by the spike's measured relaunch timing.
+
+Plans:
+
+- [ ] 164.6.6.1-01-PLAN.md — (was 164.6.6-03) validation-gateway runbook + FOUNDER scrub spike; its stand-up half is now delivered by 164.6.6
+- [ ] 164.6.6.1-02-PLAN.md — (was 164.6.6-05) narrow terminate-and-scrub verb over rpyc
+- [ ] 164.6.6.1-03-PLAN.md — (was 164.6.6-06) validation terminal scrubbed inside the lease after every validation
+- [ ] 164.6.6.1-04-PLAN.md — (was 164.6.6-07) job terminal scrubbed on every ipc_fault recovery, credentialed relaunch within budget
 
 ### Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button (INSERTED)
 
@@ -4296,6 +4351,7 @@ kept verbatim.
 | 164.6.4 MT5KEEPALIVE | 5/5 | Complete | #800 |
 | 164.6.5 MT5VALIDATEWEDGE | 8/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.96.0.0 · #863 |
 | 164.6.6 MT5TERMINALISOLATION | 0/? | Queued — data-integrity tier: moved up 2026-09-27 (founder), planning beside 166.4; live MT5 verification joins the founder queue | - |
+| 164.6.6.1 MT5SCRUB | 0/4 (moved, not re-planned) | Waiting — split from 164.6.6 on 2026-09-27 (founder); re-planned only after the founder's live scrub spike | - |
 | 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.105.0.0 · #869 |
 | 164.6.8 OUTAGEALERT | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 7/7 | Complete — finalized v0.77.32.1; its 33 stranded artifacts restored to main by PR #785. Row said `0/? Queued 2nd` until 2026-09-12 | v0.77.32.1 |

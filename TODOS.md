@@ -5349,6 +5349,31 @@ recycles the terminal on `ipc_fault` (plan 05), so a wedge can heal before a sch
 run reads it. Capturing one may need a deliberate, founder-supervised window rather than
 waiting.
 
+### MT5-VALIDATION-TERMINAL-COVERAGE-01 — the validation-only MT5 gateway is dark to every monitor, and nothing reads a skipped cleanup (booked 2026-09-27, Phase 164.6.6 D-06)
+
+**Why it is open.** Phase 164.6.6 (founder decision D-02, 2026-09-27) moves key validation onto a
+second, validation-only MT5 gateway. Two things are left uncovered by design:
+
+- **(a) Monitoring gap.** The session monitor, the boot heal, the `ipc_fault` recycle and the
+  prod-prober MT5 arm all read the single `MT5_GATEWAY_HOST` / `MT5_GATEWAY_PORT` pair
+  (`services/mt5_relogin.py`, `services/mt5_session_monitor.py`, `scripts/prod-prober/arms/mt5.mjs`).
+  The validation gateway (`MT5_VALIDATION_GATEWAY_HOST` / `MT5_VALIDATION_GATEWAY_PORT`) is dark to
+  all four: a wedged or logged-out validation terminal is noticed only when a user's validation fails.
+- **(b) No reader of skipped-cleanup rows.** Phase 164.6.6.1 MT5SCRUB writes one `cron_runs` row
+  (`cron_name = 'mt5_terminal_scrub'`) per scrub outcome. On any non-`scrubbed` outcome (skipped for
+  budget, refused, partial, failed, relaunch failed) the last validated account stays on the
+  validation terminal until the next successful scrub, and nothing reads those rows.
+
+**Owner:** Phase 164.6.8 (OUTAGEALERT), routed by the founder on 2026-09-27 (164.6.6 D-06). 164.6.8 is
+frozen; the item waits there.
+**Trigger:** the start of 164.6.8 planning, or the first validation failure traced to the validation
+terminal, whichever comes first. Part (b) is live only once 164.6.6.1 ships its scrub rows.
+**Gate (what closes it):** (a) the validation terminal is measured by the same liveness instrument as
+the job terminal and an outage on it reaches a human without one clicking a button; (b) a non-`scrubbed`
+`mt5_terminal_scrub` row reaches a human, with a test that fails first when the reader is removed.
+⛔ **Not a close:** a log line nobody reads, or a check that only runs when someone validates a key.
+
+
 ### ⛔ DRIFT-02 — a surgical in-place patch means the REPO no longer holds the true function body (booked 2026-08-27)
 
 ⭐ Caught by the pre-merge PROD diff, which is the ONLY thing that could have caught it.

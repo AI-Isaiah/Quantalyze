@@ -1339,6 +1339,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.9.4 edited: routed in: a docs-only push to main runs the full corpus; the short path must cover a docs-only push too (founder 2026-09-27)
 - Phase 167.1.1 edited: routed in: three holdings readers still allocator-wide (R-15-1 scenario commit route, R-15-2 _load_holding_portfolio_context, R-15-3 getLatestExposureSnapshot) (from the 167.1.2 PR C executor, 2026-09-27)
 - Phase 167.1.2.1 inserted after Phase 167.1.2: RECONMARKER — a per-key history-reconstructed marker so no key's equity history is lost or skipped (data integrity; routed from the 167.1.2 PR C executor, 2026-09-27) (URGENT)
+- Phase 164.6.6.1 inserted after Phase 164.6.6: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out (split from 164.6.6 by founder decision 2026-09-27; waits for the founder's live scrub spike)
+- Phase 164.6.8 edited: routed in: MT5-VALIDATION-TERMINAL-COVERAGE-01, the validation terminal's monitoring gap and the reader of skipped-cleanup rows (164.6.6 D-06, founder 2026-09-27)
 
 ### Decisions
 
