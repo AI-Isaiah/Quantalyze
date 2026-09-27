@@ -17064,4 +17064,45 @@ describe("ScenarioComposer — Phase 170 SC1-LAYERS blend window (C1-A2)", () =>
     expect(rows[0]).toContainElement(screen.getByText("Scenario blend"));
     expect(classTokens(rows[0].className)).not.toContain("border-t");
   });
+
+  it("C1-A3: the distribution and rolling cards sit in one closed section, and their headings are h3", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={`${ALLOCATOR_A}-p170-blend-detail`}
+        allocatorMandate={null}
+      />,
+    );
+    const details = document.getElementById(
+      "composer-blend-detail",
+    ) as HTMLDetailsElement | null;
+    expect(details).not.toBeNull();
+    expect(details!.tagName).toBe("DETAILS");
+    // Closed by default. CollapsibleSection keeps children mounted, so both
+    // data-panels are in the DOM while the section is shut.
+    expect(details!.open).toBe(false);
+    expect(details!.querySelector("summary")?.textContent).toContain(
+      "Blend distribution and rolling windows",
+    );
+    const dist = details!.querySelector(
+      '[data-panel="blend-returns-distribution"]',
+    );
+    const roll = details!.querySelector('[data-panel="blend-rolling"]');
+    expect(dist).not.toBeNull();
+    expect(roll).not.toBeNull();
+    // 2026-09-28 Phase 170 C1-A3 — these two headings drop from h2 to h3 under
+    // the section title. Size and weight classes stay `text-base font-semibold`.
+    // The pre-existing getByText pins in the Phase 30 block still match the
+    // words; they never pinned the heading level.
+    const distHeading = dist!.querySelector("h3");
+    const rollHeading = roll!.querySelector("h3");
+    expect(distHeading?.textContent).toBe("Returns distribution");
+    expect(rollHeading?.textContent).toBe("Rolling metrics");
+    expect(distHeading?.className).toContain("text-base");
+    expect(distHeading?.className).toContain("font-semibold");
+    expect(rollHeading?.className).toContain("text-base");
+    expect(rollHeading?.className).toContain("font-semibold");
+    expect(dist!.querySelector("h2")).toBeNull();
+    expect(roll!.querySelector("h2")).toBeNull();
+  });
 });
