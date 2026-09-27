@@ -1,5 +1,154 @@
 # Changelog
 
+## [0.108.0.0] - 2026-09-27 — BENCHALIGN: a sparser-calendar strategy is compared to BTC over the same holding interval, in every benchmark-relative metric (review rounds folded in)
+
+⭐ **What changed for whoever reads this next.** Phase 166.4 BENCHALIGN (founder decision D-A)
+pairs each strategy return with BTC's return over the SAME holding interval. A weekday strategy's
+Monday return is now paired with BTC's Friday-to-Monday move, not its Sunday-to-Monday move. One
+pairing, `_benchmark_pair` in `analytics-service/services/metrics.py`, now feeds alpha, beta,
+correlation, information ratio, Treynor, r_squared, the 90-day rolling correlation and the rolling
+alpha/beta, so r_squared equals correlation squared again. An interval without a BTC close at both
+ends, or with a BTC date missing inside it, is left unpaired, never back- or forward-filled.
+
+⚠️ **This is a minor bump because values users can see change, on purpose.** Measured by running
+the phase-base engine (merge base `8eafe105`) and the release engine side by side on the same
+committed fixtures:
+
+| fixture | metric | before | after |
+|---|---|---|---|
+| SC3 weekday strategy vs 7-day BTC (`_q166_calendar_mismatch`) | beta | +0.012560995909126458 | **−0.0074239186416205985** (sign flip) |
+| same | alpha | 0.13859455190461534 | 0.13883648147122388 |
+| same | correlation | 0.03145618628996794 | −0.022291552331747115 |
+| same | treynor | 10.244913675949753 | −17.334015226339694 |
+| same | r_squared | 0.0005305518445182663 | 0.0004969133053590204 |
+| M1's test fixture (daily strategy vs business-day benchmark) | alpha | −0.37475915258336256 | −0.3258865239753311 |
+| same | beta | 0.04181777191266626 | −0.013651163018416783 |
+
+⛔ **No PRODUCTION row was recomputed, and this release carries no migration.** A stored value
+changes only on that strategy's next compute. Phase 166.3 RECOMPUTE owns the recompute and may
+resume once this merges and the worker is deployed, with the widened set recorded in its
+`### Phase 166.3` ROADMAP section: every benchmarked strategy (166.4 D-06).
+
+### Root cause
+- **M1 `d16b2fb4c` (v0.24.9.31, #323, 2026-05-27) split the pairing.** It moved alpha and beta
+  onto a daily inner join, which pairs a weekday strategy's Monday return with BTC's
+  Sunday-to-Monday move. r_squared kept a back-filled reindex, which zero-filled the first
+  benchmark point. So beta could flip sign while r_squared did not move. Phase 166 reproduced M1's
+  pairing exactly; it did not cause it. Phase 166.3's tracer recompute (R1) surfaced it.
+
+### Fixed
+- **One interval-matched benchmark pair for the scalar fan-out** (`0f8fd291f`, red-first in
+  `cdbd84072`). `_interval_matched_benchmark` returns, per strategy date, BTC's return over
+  (t_{k-1}, t_k]: a single return verbatim, several compounded, unpaired when either endpoint has
+  no close. `compute_all_metrics` builds `_benchmark_pair` once and feeds it to alpha, beta,
+  correlation, information ratio and Treynor.
+- **The rolling greeks, the rolling correlation and r_squared read the same pair; the fill arms
+  are retired; a sparse-calendar predicate is public** (`4a55d4ba9`, red-first in `4bc1f75cd`).
+  `_rolling_alpha_beta`, `_r_squared` and `_r_squared_pair_varies` read `_benchmark_pair`.
+  `_align_benchmark_like_qs` keeps only its equal-index path and raises a ValueError naming 166.4
+  D-A on an unequal pair, so a caller that skips the pairing fails loud. Phase 166's "the reindex
+  branch is kept on purpose" rationale is superseded by D-A (166.4 D-01). A naive strategy against
+  a zone-aware benchmark now degrades inside `compute_all_metrics` instead of raising from the
+  rolling leg. `strategy_calendar_is_sparse` is the predicate Phase 166.3 selects on (166.4 D-03).
+- **A BTC date missing inside a multi-day interval now unpairs that interval** (`d1d1fc077`,
+  review round 1 WR-01, red-first). Before this, a weekday strategy's Friday-to-Monday interval
+  was still paired when BTC's Saturday return row was missing, and the missing day's move was
+  silently dropped, which is a fill across a gap that D-A forbids. The production shape that
+  reaches it is one NaN BTC close, which `prices_to_returns` turns into two dropped return rows.
+  The helper now pairs an interval only when every date of the benchmark's own calendar inside it
+  carries a return; it infers that calendar from the weekdays the benchmark carries (all seven for
+  BTC, Monday to Friday for a business-day series), so business-day pairs keep their Mondays and
+  SC4 dense parity is unchanged.
+- **A strategy return of plus or minus infinity is read as a missing value once, in
+  `_benchmark_pair`** (`a4cbd5969`, review round 1 WR-02). `_r_squared` and
+  `_r_squared_pair_varies` used to drop that row while alpha, beta, correlation and information
+  ratio did not, so r_squared could be defined while correlation was not. Now every benchmark
+  metric drops the same row, and r_squared equals correlation squared on that input too.
+
+### Changed
+- **Sparse user-CSV strategies:** every benchmark-relative metric moves on the next compute.
+  Only a user-CSV series can have a sparse calendar in production.
+- **Dense strategies:** alpha, beta, correlation, information ratio, Treynor and the rolling
+  series are bit-identical, pinned by the SC4 parity test on four dense shapes. r_squared moves on
+  EVERY benchmarked row, by construction (166.4 D-06): the old value zero-filled the first
+  benchmark point. Measured on base commit `c1b4bc062` against the release engine, on two committed
+  synthetic dense fixtures: 0.00010582832055343811 → 5.812609307917895e-05 and
+  0.001937851398314801 → 0.0019729955639240094, with correlation and beta unchanged in both.
+- **Single-key broker and `stitch_composite` paths (SC5):** both hand the engine a dense series, so
+  nothing but r_squared moves. The single-key broker cash basis carries no benchmark. The
+  `stitch_composite` cash basis is benchmarked, zero_fill-densified and dense, so the same dense
+  statement covers it. When BTC itself has a gap (the stale-fallback path), the day after the gap
+  is now unpaired instead of paired with a two-day BTC move.
+- **Sparse strategies across a BTC gap (`d1d1fc077`):** a sparse interval that spans any missing
+  BTC date is now unpaired. That includes a missing BTC PRICE row, whose next return used to
+  telescope correctly across the gap; the helper receives returns, so it cannot tell a missing
+  price from a missing return and treats both as a gap. The full 7-day BTC series production
+  serves has no such gap in the normal case.
+- **Strategies with a plus or minus infinity return (`a4cbd5969`):** alpha, beta, correlation and
+  information ratio are now computed on the remaining rows instead of being absent, matching
+  r_squared. The headline metrics (CAGR, volatility, Sharpe) on such a series are still absent.
+- **Phase 166.3's ROADMAP section carries the handoff** (`a57e81c32`): the sparse subset named by
+  `strategy_calendar_is_sparse`, the widened recompute set (every benchmarked strategy, every
+  class), two read-only counts-only queries for the founder, R1 re-entering the set, and the resume
+  condition.
+
+### Tests
+- **New `analytics-service/tests/test_benchalign.py` and `tests/benchalign_fixtures.py`**
+  (`cdbd84072`, `4bc1f75cd`, `77cd87bdb`, `42a4bb1bd`, `6d15ed80a`). They cover the SC3
+  Friday-to-Monday beta, the one-pairing checks (r_squared equals correlation squared, the rolling
+  greeks and rolling correlation are computed on the interval pair), the zone-degrade test, the D-04,
+  D-05 and D-07 conventions, the sparse predicate, SC4 dense parity, the SC5 broker_nan and
+  zero_fill paths through `derive_basis_series`, the D-06 r_squared move, and the SC2 gap tests (an
+  absent, NaN or infinite interior close unpairs both adjacent intervals).
+- **Review-round tests** (`d1d1fc077`, `a4cbd5969`):
+  `test_benchalign_gap_missing_row_inside_a_weekday_interval_unpairs_it` (a missing BTC row
+  strictly inside a weekday interval unpairs exactly that interval; every other pair matches a
+  price-ratio oracle), and a plus-infinity and a minus-infinity case added to the r_squared equals
+  correlation squared test. All three went RED on the pre-fix engine.
+- **Four existing tests re-expressed, exactly the four the research predicted:** M1's
+  `test_benchmark_metrics_share_single_aligned_sample_on_calendar_mismatch` keeps its intent
+  assertions with its oracle rebuilt on the shared pair (166.4 D-04); the greeks parity
+  `calendar_mismatch` case moved to the SC3 test; and the two r_squared parity cases are
+  re-anchored on correlation squared. `tests/qstats_gate.py`'s mirrored reason strings name the
+  166.4 D-A pair. The golden 252-day parity file is unedited and green.
+- **Neuters N1-N7 each went RED and were restored byte-identical:** the pre-166.4 inner join
+  (N1), the t_{k-1} close check (N2), the D-05 index-0 block (N3, N7), a zero-fill in
+  `_r_squared` (N4), the sparse predicate (N5) and the D-07 base close (N6).
+- Full analytics suite: 7093 passed, 90 skipped, 0 failed. mypy with CI's exact line: no issues.
+
+### Notes
+- **D-04, D-05, D-06 and D-07 were ratified by the founder on 2026-09-27** (`cfc2c18b5`). D-04:
+  the both-endpoints rule also applies when BTC is the sparser leg, so a daily strategy's Monday
+  against a business-day benchmark is unpaired. D-05: the first strategy date pairs with BTC's
+  return dated that day, so a sparse series that starts on a Monday gets one daily-shaped first
+  pair; Phase 169.5 BENCHCOMPARE adopts this day-one rule before it executes. D-06: Phase 166.3
+  recomputes every benchmarked strategy, so stored r_squared agrees with correlation squared
+  everywhere. D-07: BTC's base close is the day before its first stored return, so a dense
+  strategy older than the BTC window keeps its first in-window pair; it assumes the stored BTC
+  series is contiguous (research assumption A1).
+- **Two review rounds, then verification and security** (`a7bc6da79`, `75930bc21`, `623d801cd`,
+  `501435fcc`). Round 1 found two warnings, fixed in `d1d1fc077` and `a4cbd5969`, with
+  `288cc5019` updating the D-02 cross-citation in the helper and test module docstrings. Round 2,
+  and the silent-failure review run beside each round, found no HIGH or CRITICAL. Two round-2
+  warnings are recorded rather than fixed, because production does not reach either: the benchmark
+  calendar is inferred from the weekdays present rather than declared (a weekday-only slice of BTC
+  would still get the Sunday-to-Monday pairing; production always passes the full 7-day series),
+  and a pair whose two legs share a zone like Europe/London that crosses UTC midnight between
+  seasons loses intervals silently. Verification passed 7 of 7 success criteria; the security audit
+  closed 15 of 15 threats.
+- **The Python and TypeScript pairings now differ in two places** (`288cc5019`): the D-05 index-0
+  rule and the interior-gap rule above. Phase 169.5 BENCHCOMPARE decides whether to adopt the
+  interior-gap rule as well.
+- **Planning and tracking commits:** phase context, research, pattern map and plans
+  (`e37a4ddea`, `5b322f435`, `b19f25b3e`, `b96c076cc`); the plan summaries (`5050a0108`,
+  `130c0d2c1`, `d0f8ef169`, `4e6e50f27`, `718efbd77`); and the orchestrator's tracking updates
+  after waves 1 to 4 (`fe267ed9e`, `bc16d1d58`, `daccc1035`, `92b345157`). `c1b4bc062` and
+  `e286f427e` merge `origin/main` into the branch and carry no change of their own. `ec8a1420e`
+  was the first release commit; this entry replaces it.
+- **Same-class sites found outside this phase's scope,** each read from `.planning/ROADMAP.md` and `TODOS.md` on 2026-09-27:
+  - `analytics-service/routers/portfolio.py` `benchmark_comparison` (an inner-join correlation, and BTC's own TWR drops weekend moves): routed to Phase 166.4.1
+  - `src/app/(dashboard)/allocations/lib/scenario-benchmark.ts` `innerJoinByDate` (the allocations scenario benchmark): routed to Phase 169.4
+
 ## [0.107.1.0] - 2026-09-27 — APPURL guard: a Production build refuses a non-canonical NEXT_PUBLIC_APP_URL
 
 ### Fixed
