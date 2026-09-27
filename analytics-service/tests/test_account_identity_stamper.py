@@ -362,3 +362,366 @@ async def test_poll_marks_a_sibling_on_a_held_account(monkeypatch: pytest.Monkey
     status_writes = [u for u in sb.updates() if set(u) & STATUS_COLUMNS]
     assert [set(u) for u in status_writes] == [{"sync_status", "sync_error", "last_sync_at"}]
     assert status_writes[0]["sync_status"] == "complete"
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — D-04 composite exemption
+# ---------------------------------------------------------------------------
+#
+# A composite strategy stitches member keys over disjoint declared windows. Two
+# members on one exchange account with disjoint windows is a key rotation inside
+# a composite (D-04, measured in code), a legitimate pair and NOT a duplicate:
+# the stamp must say so by name, and must not audit it as a duplicate.
+
+STRATEGY_A = "00000000-0000-4000-8000-0000000000c1"
+STRATEGY_B = "00000000-0000-4000-8000-0000000000c2"
+
+
+def _member(api_key_id: str, strategy_id: str, start: str, end: str | None, seq: int) -> dict[str, Any]:
+    return {
+        "strategy_id": strategy_id,
+        "api_key_id": api_key_id,
+        "window_start": start,
+        "window_end": end,
+        "seq": seq,
+    }
+
+
+def _composite_responder(members: list[dict[str, Any]]) -> Callable[[_Call], Any]:
+    base = _collision_responder()
+
+    def _r(call: _Call) -> Any:
+        if call.table == "strategy_keys" and call.op == "select":
+            return MagicMock(data=members)
+        return base(call)
+
+    return _r
+
+
+@pytest.fixture
+def audit_mock(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    from services import audit as audit_module
+
+    m = MagicMock()
+    monkeypatch.setattr(audit_module, "log_audit_event", m)
+    return m
+
+
+async def test_composite_rotation_on_one_account_is_marked_composite_member(
+    audit_mock: MagicMock,
+) -> None:
+    # The holder ran [2026-01-01, 2026-06-01), this key runs from 2026-06-01:
+    # adjacent half-open windows do not overlap (stitch_composite.windows_overlap).
+    sb = FakeSupabase(_composite_responder([
+        _member(HOLDER_ID, STRATEGY_A, "2026-01-01", "2026-06-01", 0),
+        _member(KEY_ID, STRATEGY_A, "2026-06-01", None, 1),
+    ]))
+
+    outcome = await _stamp(sb, _key_row(), _okx_exchange())
+
+    assert outcome == "marked_composite_member"
+    assert sb.updates()[-1] == {
+        "account_shared_with_api_key_id": HOLDER_ID,
+        "account_share_kind": "composite_member",
+    }
+    # Both keys' memberships are read in one query, filtered to the pair.
+    (sk,) = [c for c in sb.calls if c.table == "strategy_keys"]
+    assert ("in", "api_key_id", [KEY_ID, HOLDER_ID]) in sk.filters
+    # A legitimate pair is not a duplicate: no duplicate audit event.
+    audit_mock.assert_not_called()
+    _assert_write_set_is_identity_only(sb)
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        pytest.param(
+            [
+                _member(HOLDER_ID, STRATEGY_A, "2026-01-01", "2026-07-01", 0),
+                _member(KEY_ID, STRATEGY_A, "2026-06-01", None, 1),
+            ],
+            id="overlapping-windows",
+        ),
+        pytest.param(
+            [
+                _member(HOLDER_ID, STRATEGY_A, "2026-01-01", "2026-06-01", 0),
+                _member(KEY_ID, STRATEGY_B, "2026-06-01", None, 0),
+            ],
+            id="different-strategies",
+        ),
+        pytest.param(
+            [_member(KEY_ID, STRATEGY_A, "2026-06-01", None, 1)],
+            id="holder-not-a-member",
+        ),
+        pytest.param([], id="neither-a-member"),
+    ],
+)
+async def test_anything_but_a_disjoint_pair_in_one_composite_is_a_duplicate(
+    members: list[dict[str, Any]], audit_mock: MagicMock
+) -> None:
+    sb = FakeSupabase(_composite_responder(members))
+
+    outcome = await _stamp(sb, _key_row(), _okx_exchange())
+
+    assert outcome == "marked_duplicate"
+    assert sb.updates()[-1]["account_share_kind"] == "duplicate"
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — the audit event, once per transition
+# ---------------------------------------------------------------------------
+
+
+async def test_a_new_duplicate_emits_exactly_one_audit_event(audit_mock: MagicMock) -> None:
+    sb = FakeSupabase(_composite_responder([]))
+
+    await _stamp(sb, _key_row(), _okx_exchange())
+
+    audit_mock.assert_called_once()
+    _args, kwargs = audit_mock.call_args
+    assert kwargs["action"] == "api_key.account_duplicate_detected"
+    assert kwargs["entity_type"] == "api_key"
+    assert kwargs["entity_id"] == KEY_ID
+    assert kwargs["user_id"] == OWNER_ID
+    # Venue and holder only: never the uid, never the account id (T-167.1.2-17).
+    assert kwargs["metadata"] == {"venue": "okx", "holder_api_key_id": HOLDER_ID}
+
+
+async def test_an_unchanged_duplicate_is_not_re_audited_or_re_written(audit_mock: MagicMock) -> None:
+    # The daily poll meets the same duplicate every day. One event marks the
+    # transition; a daily repeat would bury it.
+    sb = FakeSupabase(_composite_responder([]))
+    row = _key_row(account_shared_with_api_key_id=HOLDER_ID, account_share_kind="duplicate")
+
+    outcome = await _stamp(sb, row, _okx_exchange())
+
+    assert outcome == "marked_duplicate"
+    audit_mock.assert_not_called()
+    # Only the refused stamp attempt; no marker re-write.
+    assert len(sb.updates()) == 1
+
+
+async def test_a_duplicate_with_a_new_holder_is_a_new_transition(audit_mock: MagicMock) -> None:
+    sb = FakeSupabase(_composite_responder([]))
+    other = "00000000-0000-4000-8000-00000000000c"
+    row = _key_row(account_shared_with_api_key_id=other, account_share_kind="duplicate")
+
+    await _stamp(sb, row, _okx_exchange())
+
+    audit_mock.assert_called_once()
+    assert sb.updates()[-1]["account_shared_with_api_key_id"] == HOLDER_ID
+
+
+async def test_a_failed_audit_emit_does_not_fail_the_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services import audit as audit_module
+
+    def _boom(**_k: Any) -> None:
+        raise RuntimeError("audit down")
+
+    monkeypatch.setattr(audit_module, "log_audit_event", _boom)
+    sb = FakeSupabase(_composite_responder([]))
+
+    outcome = await _stamp(sb, _key_row(), _okx_exchange())
+
+    # The marker landed; the lost audit row is logged, not raised.
+    assert outcome == "marked_duplicate"
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — Pitfall 4: the stamp can never harm a poll
+# ---------------------------------------------------------------------------
+
+
+def _ccxt_network_error() -> BaseException:
+    import ccxt
+
+    return ccxt.NetworkError("okx GET account/config timed out")
+
+
+def _ccxt_rate_limit() -> BaseException:
+    import ccxt
+
+    return ccxt.RateLimitExceeded("okx 429")
+
+
+def _trigger_refusal(code: str, name: str) -> BaseException:
+    return APIError({"code": code, "message": name, "details": None, "hint": None})
+
+
+_READ_FAILURES = [
+    pytest.param(_ccxt_network_error, id="read-NetworkError"),
+    pytest.param(_ccxt_rate_limit, id="read-RateLimitExceeded"),
+    pytest.param(lambda: KeyError("data"), id="read-KeyError"),
+]
+
+# The same-owner trigger refuses a marker write with its own SQLSTATE per case
+# (migration 20260925120000). The stamper classifies these by code into
+# 'error'; it never parses the message.
+_MARKER_REFUSALS = [
+    pytest.param("23503", "ACCOUNT_SHARE_HOLDER_NOT_FOUND", id="marker-23503"),
+    pytest.param("42501", "ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER", id="marker-42501"),
+    pytest.param("55000", "ACCOUNT_SHARE_HOLDER_NOT_LIVE", id="marker-55000"),
+    pytest.param("23000", "ACCOUNT_SHARE_HOLDER_IS_MARKED", id="marker-23000-marked"),
+    pytest.param("23000", "ACCOUNT_SHARE_KEY_IS_A_HOLDER", id="marker-23000-holder"),
+]
+
+
+async def _baseline_poll(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, list[dict[str, Any]]]:
+    """The poll with the stamp step replaced by a no-op: what it returns and writes."""
+    sb = FakeSupabase()
+
+    async def _no_stamp(*_a: Any, **_k: Any) -> str:
+        return "skipped_not_ccxt"
+
+    with monkeypatch.context() as m:
+        m.setattr(ai, "stamp_account_identity", _no_stamp)
+        result = await _drive_poll(m, _key_row(), sb, _okx_exchange())
+    return result, sb.updates()
+
+
+def _status_writes(updates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [u for u in updates if not set(u) <= ALLOWED_WRITE_COLUMNS]
+
+
+def _without_timestamps(updates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{k: v for k, v in u.items() if k != "last_sync_at"} for u in updates]
+
+
+@pytest.mark.parametrize("make_exc", _READ_FAILURES)
+async def test_a_failing_venue_read_leaves_the_poll_exactly_as_without_the_stamp(
+    monkeypatch: pytest.MonkeyPatch, make_exc: Callable[[], BaseException]
+) -> None:
+    base_result, base_updates = await _baseline_poll(monkeypatch)
+
+    async def _raise(_ex: Any, _venue: str) -> str | None:
+        raise make_exc()
+
+    monkeypatch.setattr(ai, "read_venue_account_id", _raise)
+    sb = FakeSupabase()
+    result = await _drive_poll(monkeypatch, _key_row(), sb, _okx_exchange())
+
+    assert result == base_result
+    assert _without_timestamps(sb.updates()) == _without_timestamps(base_updates)
+
+
+async def test_a_failing_stamp_write_leaves_the_poll_exactly_as_without_the_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_result, base_updates = await _baseline_poll(monkeypatch)
+
+    def _r(call: _Call) -> Any:
+        if call.op == "update" and (call.payload or {}).get("venue_account_id"):
+            return APIError({"code": "08006", "message": "connection failure",
+                             "details": None, "hint": None})
+        return None
+
+    sb = FakeSupabase(_r)
+    result = await _drive_poll(monkeypatch, _key_row(), sb, _okx_exchange())
+
+    assert result == base_result
+    # The only extra write is the refused identity attempt itself.
+    assert _without_timestamps(_status_writes(sb.updates())) == _without_timestamps(base_updates)
+
+
+@pytest.mark.parametrize(("code", "name"), _MARKER_REFUSALS)
+async def test_a_trigger_refusal_of_the_marker_is_an_error_token(
+    code: str, name: str, audit_mock: MagicMock
+) -> None:
+    base = _composite_responder([])
+
+    def _r(call: _Call) -> Any:
+        if call.op == "update" and "account_share_kind" in (call.payload or {}) and (
+            call.payload or {}
+        ).get("account_share_kind") is not None:
+            return _trigger_refusal(code, name)
+        return base(call)
+
+    sb = FakeSupabase(_r)
+
+    outcome = await _stamp(sb, _key_row(), _okx_exchange())
+
+    assert outcome == "error"
+    # No marker landed, so no duplicate is announced.
+    audit_mock.assert_not_called()
+
+
+async def test_a_hanging_venue_is_cut_off_by_the_budget() -> None:
+    import asyncio
+
+    ex = MagicMock()
+
+    async def _hang() -> dict[str, Any]:
+        await asyncio.sleep(30)
+        return {}
+
+    ex.private_get_account_config = _hang
+    sb = FakeSupabase()
+
+    outcome = await ai.stamp_account_identity(sb, _key_row(), ex, timeout_s=0.05)
+
+    assert outcome == "error"
+    assert sb.calls == []
+
+
+async def test_no_budget_left_skips_the_step_without_a_venue_call() -> None:
+    ex = _okx_exchange()
+
+    outcome = await ai.stamp_account_identity(FakeSupabase(), _key_row(), ex, timeout_s=0.0)
+
+    assert outcome == "skipped_no_budget"
+    ex.private_get_account_config.assert_not_awaited()
+
+
+async def test_a_poll_near_its_timeout_skips_the_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The handler's own wait_for would kill a poll whose stamp ran past the
+    # ceiling, after the holdings and the success status had landed. The
+    # budget is what is left of the ceiling, so a late poll skips the step.
+    from services import job_worker as jw
+
+    monkeypatch.setitem(jw.TIMEOUT_PER_KIND, "poll_allocator_positions", 5.0)
+    ex = _okx_exchange()
+    sb = FakeSupabase()
+
+    result = await _drive_poll(monkeypatch, _key_row(), sb, ex)
+
+    assert result.outcome == jw.DispatchOutcome.DONE
+    ex.private_get_account_config.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — self-heal and the reader rule's revoked-holder case
+# ---------------------------------------------------------------------------
+
+
+async def test_a_marked_key_self_heals_once_its_holder_is_disconnected(audit_mock: MagicMock) -> None:
+    # K was marked while H was live. H is now disconnected, so the index (which
+    # excludes disconnected rows) no longer refuses K's stamp.
+    sb = FakeSupabase()  # no collision any more
+    row = _key_row(account_shared_with_api_key_id=HOLDER_ID, account_share_kind="duplicate")
+
+    outcome = await _stamp(sb, row, _okx_exchange())
+
+    assert outcome == "stamped"
+    assert sb.updates() == [{
+        "venue_account_id": ACCOUNT_ID,
+        "account_shared_with_api_key_id": None,
+        "account_share_kind": None,
+    }]
+    audit_mock.assert_not_called()
+
+
+async def test_a_revoked_holder_does_not_self_heal_its_duplicate(audit_mock: MagicMock) -> None:
+    # A revoked key is still LIVE for api_keys_user_exchange_venue_account_uniq
+    # (disconnected_at IS NULL), so K's stamp keeps hitting the index and K
+    # stays marked. What keeps that account counted is the READER rule in the
+    # account_share_kind COMMENT (count through the holder only while it is
+    # working), not the stamper. Pinned so nobody "fixes" it here by
+    # un-marking K behind the owner's back.
+    sb = FakeSupabase(_composite_responder([]))
+    row = _key_row(account_shared_with_api_key_id=HOLDER_ID, account_share_kind="duplicate")
+
+    outcome = await _stamp(sb, row, _okx_exchange())
+
+    assert outcome == "marked_duplicate"
+    assert len(sb.updates()) == 1  # the refused stamp; the marker is unchanged
+    audit_mock.assert_not_called()
