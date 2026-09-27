@@ -1454,6 +1454,18 @@ true for 146 and half of 142–145, and **false for 141**.
       **Closed when:** a migration drops the function, `database.types.ts` loses it, and
       `grep -rn get_admin_compute_jobs src` finds only lineage comments.
 
+- [ ] **`[169.2-BTC-GAP-RETURN-STAMP]` A BTC return across a missing stored day is stamped as one
+      day's move (booked 2026-09-27, Phase 169.2 D-47, review round 3 WR-01).**
+      `pricesToDailyReturns` (`src/lib/factsheet/benchmark-source.ts`) bridges two stored closes with
+      a missing day between them into ONE return at the later date. The cumulative BTC overlay
+      (`ScenarioComposer`, the scenario-share page) needs that bridge to stay on BTC's real level;
+      the inner-joined metrics would rather skip it. Phase 169.2 briefly skipped every gap (round-2
+      WR-03), which made the overlay drift, so it reverted to bridging and kept only the skip across a
+      dropped corrupt close. Pre-existing and latent: the daily refresh treats any calendar gap as a
+      cache miss and refetches, so a gap in `benchmark_prices` should not persist.
+      ✅ **Destination: Phase 169.4 ALLOCTRUTH**, whose plans read BTC through `readBenchmarkPrices`
+      and `mergeWithFixture`. **Closed when:** consumers build the overlay from closes (or levels)
+      and the metrics from exactly-one-day returns, with a test for each across a missing day.
 - [ ] **`[169-SCENARIO-WINDOW-ANNUALIZATION]` A selected range on the `/allocations` Scenario tab
       shows the withheld form, because the Scenario payload carries no `periodsPerYear`
       (booked 2026-09-26, Phase 169 D-29).**
