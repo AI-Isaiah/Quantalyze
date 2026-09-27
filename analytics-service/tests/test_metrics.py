@@ -518,6 +518,15 @@ class TestComputeAllMetrics:
         the post-fix contract: every benchmark-relative metric is over the
         intersection, and (anti-vacuity) the produced alpha/beta differ from what
         the OLD full-range path would have produced.
+
+        166.4 D-04 (2026-09-27, ratified by the founder 2026-09-27): the one
+        shared sample is now the 166.4 D-A interval pair, not the daily inner
+        join. The both-endpoints rule applies whichever leg is sparser, so on
+        this fixture (a DAILY strategy against a BUSINESS-DAY benchmark) every
+        Monday after index 0 has no benchmark close dated Sunday and leaves the
+        pair: the 85 inner-join rows become 69. The intent assertions are
+        unchanged (one sample for every metric; different from the full-range
+        back-fill); only the oracle pair is rebuilt, from the definition.
         """
         rng = np.random.default_rng(7)
         # Strategy trades 24/7 (every calendar day).
@@ -527,15 +536,43 @@ class TestComputeAllMetrics:
         b_dates = pd.bdate_range("2024-01-01", periods=85)
         bench = pd.Series(rng.normal(0.0005, 0.025, 85), index=b_dates, name="BTC")
 
-        # Sanity: the calendars genuinely differ (intersection < strategy length).
-        aligned = strat.align(bench, join="inner")
-        ar, ab = aligned[0], aligned[1]
+        # 166.4 D-04 oracle pair, built from the definition: a benchmark date
+        # with a finite return is a close, and so is the day before its first
+        # return (166.4 D-07); interval k >= 1 is paired iff the strategy dates
+        # k-1 and k are both closes, and its value is the price ratio
+        # price[t_k] / price[t_{k-1}] - 1; index 0 pairs with the benchmark
+        # return dated t_0 (166.4 D-05).
+        base_close = bench.index[0] - pd.Timedelta(days=1)
+        closes = set(bench.index[bench.notna()]) | {base_close}
+        price = (1.0 + bench).cumprod()
+
+        def _price_at(d):
+            return 1.0 if d == base_close else float(price[d])
+
+        s = strat.index
+        dates, values = [], []
+        if s[0] in bench.index:
+            dates.append(s[0])
+            values.append(float(bench[s[0]]))
+        for k in range(1, len(s)):
+            if s[k] in closes and s[k - 1] in closes and s[k] != base_close:
+                dates.append(s[k])
+                values.append(_price_at(s[k]) / _price_at(s[k - 1]) - 1.0)
+        ar = strat.loc[dates]
+        ab = pd.Series(values, index=pd.DatetimeIndex(dates), name="BTC")
+        # Sanity: the calendars genuinely differ (the pair < strategy length),
+        # and the rows the old inner join had but the pair lacks are exactly
+        # the Mondays after index 0.
         assert 1 < len(ar) < len(strat), "fixture must have a real calendar gap"
+        inner = s[s.isin(bench.index)]
+        dropped = inner[~inner.isin(ar.index)]
+        assert (len(inner), len(ar)) == (85, 69)
+        assert (dropped.dayofweek == 0).all() and s[0] not in dropped
 
         result = compute_all_metrics(strat, bench)
         mj = result["metrics_json"]
 
-        # Oracle: every benchmark-relative metric over the SAME inner-join sample.
+        # Oracle: every benchmark-relative metric over the SAME D-A sample.
         exp = qs.stats.greeks(ar, ab)
         exp_alpha = _safe_float(exp.get("alpha", 0))
         exp_beta = _safe_float(exp.get("beta", 0))
@@ -3624,7 +3661,10 @@ def test_q166_greeks_undefined_beta_is_none_not_zero(caplog):
     assert fanout == [], [r.getMessage() for r in fanout]
 
 
-_Q166_GREEKS_PARITY_PAIRS = ("golden_with_benchmark", "calendar_mismatch")
+# 166.4 D-A: "calendar_mismatch" left this list. Its oracle (live quantstats on
+# the daily inner join) IS the defect; the fixture is now owned by
+# test_benchalign_weekday_beta_is_the_friday_to_monday_regression.
+_Q166_GREEKS_PARITY_PAIRS = ("golden_with_benchmark",)
 
 
 @pytest.mark.parametrize("pair_name", _Q166_GREEKS_PARITY_PAIRS)
@@ -3633,7 +3673,8 @@ def test_q166_parity_greeks_match_live_quantstats_on_nan_free_series(
 ):
     """BENIGN PARITY (D-08): on NaN-free input the D-15 pairwise restriction
     removes nothing, so alpha and beta must equal live 0.0.81 `greeks` on the
-    SAME inner-join pair `compute_all_metrics` builds (M1), to rel 1e-12."""
+    SAME pair `compute_all_metrics` builds, to rel 1e-12. Both legs share one
+    calendar here, so the 166.4 D-A interval pair equals the inner join."""
     strategy, benchmark = _q166_benchmark_pair(pair_name, request)
     assert not strategy.isna().any() and not benchmark.isna().any()
     aligned_r, aligned_b = strategy.align(benchmark, join="inner")
