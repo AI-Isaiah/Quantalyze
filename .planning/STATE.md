@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.9.3
-current_phase_name: CLAIMPAIR
-status: executing
-stopped_at: Completed 164.9.3-06-PLAN.md
+current_phase: 164.9.3.1
+current_phase_name: FANINGRAPH
+status: planning
+stopped_at: Phase 164.9.3 complete (PR #890 merged as 5ce71a986, v0.109.0.0), next in the ratified blocker order is 164.9.3.1
 last_updated: "2026-09-27T15:08:00.000Z"
 last_activity: 2026-09-27
-last_activity_desc: Phase 164.9.3 execution started
+last_activity_desc: Phase 164.9.3 CLAIMPAIR complete, verification passed, PR #890 merged
 state_head: dd42818862a2c2c9ba81cf3d0b1da5bb0fcff35d
 progress:
   total_phases: 73
-  completed_phases: 41
+  completed_phases: 42
   total_plans: 353
   completed_plans: 347
-  percent: 56
+  percent: 58
 ---
 
 ## ⭐ STATE lineage
@@ -179,8 +179,7 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.9.3 (CLAIMPAIR) — EXECUTING
-Plan: 6 of 6 (01 done: the CLAIMPAIR gate, pre-fix census 14 arms RED with 23505, W-INTRO GREEN; 02 done: the pre-rank exclusion migration, all 15 arms GREEN on the replayed local-stack lane; 03 done: D-09 lane proof, corpus 78 of 78 on the replayed local-stack lane, the gate green on the pg-lane from its own SETUP list; 04 done: all 15 arms bite on the pg-lane through layered twins, runner biting 15; snapshots regenerated; three VAC-04 acks earned; 05 done: FILES_FLOOR 52 -> 53 and ARMS_FLOOR 491 -> 506 from one full run, coverage 53/80, separated in both directions, every census pin moved to its measured value; 06 done: origin/main merged again with the migration still sorting last, TODOS [164.9.3-CLAIM-PAIR-23505] closed, CHANGELOG [0.108.0.0] with VERSION/package.json at 0.108.0.0, SC3 record opened with three PENDING reviewer rows)
+Phase: 164.9.3 (CLAIMPAIR) — COMPLETE 2026-09-27 (verification passed; PR #890 merged as 5ce71a986, v0.109.0.0)
 Phase: 169.2 (BENCHFRESH) — EXECUTING
 Plan: 1 of 3
 Phase: 166.4 (BENCHALIGN) — EXECUTING
@@ -502,7 +501,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 164.9.3
+Status: Phase 164.9.3 complete; next is 164.9.3.1 FANINGRAPH (ratified blocker order)
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -972,7 +971,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [██████░░░░] 56%
+Progress: [██████░░░░] 58%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
