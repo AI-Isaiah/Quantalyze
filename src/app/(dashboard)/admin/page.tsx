@@ -34,7 +34,7 @@ export default async function AdminPage() {
       .from("strategies")
       .select(
         `id, name, status, source, strategy_types, created_at, user_id,
-         profiles!strategies_user_id_fkey(display_name),
+         profiles!strategies_user_id_fkey(display_name, email),
          strategy_analytics (cagr, sharpe, max_drawdown, computation_status, computed_at)`,
       )
       .eq("status", "pending_review")

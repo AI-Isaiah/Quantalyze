@@ -913,9 +913,7 @@ describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
 
   it("below md, action-bar and empty-state Recompute now issue no request and Edit preferences opens no panel", async () => {
     installMatchMedia({ md: false, lg: false });
-    const payload = buildPayload();
-    payload.batch = null;
-    payload.candidates = [];
+    const payload = { ...buildPayload(), batch: null, candidates: [] };
     const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue(jsonResponse(payload));
 
     render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
@@ -962,8 +960,9 @@ describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
     // the early return — not the opener — is what stops the recompute.
     const media = installMatchMedia({ md: true, lg: false });
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-    const fetchMock = vi.spyOn(global, "fetch").mockImplementation((url: string) => {
-      if (String(url).includes("/preferences/")) return Promise.resolve(jsonResponse({ ok: true }));
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("/preferences/")) return Promise.resolve(jsonResponse({ ok: true }));
       return Promise.resolve(jsonResponse(buildPayload()));
     });
 
@@ -1007,7 +1006,7 @@ describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
     const nestedSend = within(shortlist!)
       .getAllByRole("button", { name: /Send intro/i })
       .find((el) => el.tagName === "BUTTON");
-    expect(nestedSend).toBeTruthy();
+    if (!nestedSend) throw new Error("shortlist Send intro button missing");
     const sendClasses = nestedSend.className.split(/\s+/);
     expect(sendClasses).toContain("hidden");
     expect(sendClasses).toContain("md:inline-flex");
