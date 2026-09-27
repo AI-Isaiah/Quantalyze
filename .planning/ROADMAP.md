@@ -3706,6 +3706,15 @@ Plans:
    - PR C should also state which connect path is meant to enqueue the first reconstruct.
 8. **Open Positions shows closed positions as open.** The `allocator_holdings` read feeding `holdingsSummary` in `derivePhase07Fields` has no `asof` filter, and it keeps the newest row per venue:symbol:type across every date. A position closed the day before survives, as 5 symbols did on 2026-09-27. Keep each key's latest `asof` before de-duplicating, matching `getLatestExposureSnapshot`, with a test that fails today.
 
+
+**⭐ Founder decision, 2026-09-27 (AskUserQuestion, "Split by topic (Recommended)"): the remaining PR C is split into topic PRs.** PR A (plan 01, #859) and PR B (plan 03, #870) have already merged.
+- **C1, duplicate accounts:** plans 02 (done) and 04.
+- **C2, history rebuild:** plans 10 (done), 05, 11, 12 and 13. Plans 12 and 13 carry migrations.
+- **C3, honest empties and small fixes:** plans 06 (done), 07 and 14.
+- **C4, departed-account overview:** plans 09 and 15.
+- **Plan 08, the PROD recompute, runs last.**
+- The three executed plans (02, 06 and 10) move into their PRs unchanged. The phase CONTEXT records the same decision on the phase branch.
+
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1.2 to break down)
@@ -3846,6 +3855,8 @@ Plans:
 
 - [x] 169.3-01-PLAN.md — /admin compute jobs list reads the admin view; a failed load says so (SC1) (was 169-01)
 
+**⭐ ROUTED IN 2026-09-27 (seen in the logged-in browser):** the `/profile` Exchanges "Connect exchange" dialog's API Key and API Secret inputs accept the browser's saved-login autofill. A saved site login was filled into both fields. Success: both fields opt out of autocomplete, so a password manager never fills a site login into a key field. No values are recorded here.
+
 ### Phase 170: LAYOUT — page layout reads clean and holds on every page
 
 **Goal:** Pages read as a finished product: no stacked look-alike panels, and the layout holds at 320 px and 200% zoom.
@@ -3869,6 +3880,8 @@ Plans:
 
 **⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy 320px check of 167.2.1, measured in the logged-in browser):** on /strategies at 320px the "Get private link" button overlaps the strategy name in the row header and cuts it to two letters. At 640px (200% zoom) the row is clean. Success: at 320px the name, the button, the status pill and the date never overlap, and the name is readable or ellipsised.
 Same pass, same width: on /allocations the floating "Tweaks" button overlaps the bottom navigation's "Strategies" and "Profile" labels. Success: no floating control covers the bottom navigation at 320px. Evidence: `.planning/uat/2026-09-26-browser-pass.md`.
+
+**⭐ OWNED HERE 2026-09-27 (founder, AskUserQuestion, "Book into 170 LAYOUT"; found by the Phase 164.9.4 e2e-seeded axe run):** the grey chip token pair fails WCAG AA, 4.34:1 against the 4.5:1 floor at 11px. It is used by the `CHIP` map entries `no-series` and `manually-excluded` in `src/app/(dashboard)/allocations/components/CoverageStateChip.tsx`, and by `DATA_STATE_CHIP` in `src/components/strategy/StrategyTable.tsx`. Success: each pair reaches at least 4.5:1. The gate is the 164.9.4 e2e-seeded axe check.
 
 ### Phase 170.1: COPY — page copy reads clean on every page (INSERTED)
 
@@ -3898,6 +3911,8 @@ Plans:
 **⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy copy check of 167.2.1):** for a strategy whose last computation finished but whose factsheet cannot be built, the /strategies note and the owner factsheet's banner say the numbers "appear there once a computation succeeds" (wait), while the factsheet body says the computation finished and to contact support (act). Success: the list note, the owner banner and the body give the owner the same instruction for this state.
 
 **⭐ ROUTED IN 2026-09-27 (founder, from the Phase 167.2 copy read-through, UAT 2026-09-27):** the 167.2 locked strings pass with these notes, owned here. (1) Two unbounded timing phrases: "Try again in a moment" in `PANEL_STOP_COPY.chain_unreadable` (`src/components/strategy/key-card-copy.ts`) and "Try again later" in `SHARE_CARD_COPY.in_progress` (`src/lib/status-surface-copy.ts`). (2) "Large accounts can take longer" in `SYNC_SLOW_NOTE` (`key-card-copy.ts`). (3) Six passive "could not be …" strings across `key-card-copy.ts` and `status-surface-copy.ts` (measured 2026-09-27: "could not be read" ×2, "could not be re-read", "could not be built", "could not be loaded", "could not be checked"). Success: each is rewritten in active voice with no timing promise the code cannot defend, per DESIGN.md Voice.
+
+**⭐ ROUTED IN 2026-09-27 (found uploading a daily-returns file with the Trade list format selected):** the CSV wizard's missing-column error shows raw pandera rule names to the user: "Failed rule 'column_in_dataframe'." repeated, one per missing column. Success: the user reads which column is missing, in plain words.
 
 ### Phase 165: ACTIONSDEPS — the four GitHub Actions dependabot PRs land first, in the verified order
 
