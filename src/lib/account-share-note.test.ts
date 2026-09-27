@@ -168,3 +168,32 @@ describe("D-18 parity: the TypeScript not-working statuses equal the SQL tuple",
     expect(tuple).toEqual([...NOT_WORKING_SYNC_STATUSES].sort());
   });
 });
+
+/**
+ * 167.1.2 REVIEW IN-03 — the note names the holder by its exchange's display
+ * name. The note can fire for every venue that reports an account id, Deribit
+ * included, and for MT5 through the login; a holder without a nickname then
+ * read "deribit — ••••0001" while the other venues were capitalised. The names
+ * are the ones EXCHANGE_DISPLAY (closed-sets.ts) carries.
+ */
+describe("accountShareNote — the holder's exchange is named by its display name on every venue", () => {
+  it.each([
+    ["binance", "Binance"],
+    ["okx", "OKX"],
+    ["bybit", "Bybit"],
+    ["deribit", "Deribit"],
+    ["sfox", "sFOX"],
+    ["mt5", "MT5"],
+  ])("%s → %s", (exchange, display) => {
+    const holder = key({ exchange, label: "" });
+    const dup = key({
+      id: "dup-0002",
+      exchange,
+      account_shared_with_api_key_id: holder.id,
+      account_share_kind: "duplicate",
+    });
+    expect(accountShareNote(dup, new Map([[holder.id, holder], [dup.id, dup]]), "Disconnect")).toBe(
+      `This key reads the same exchange account as ${display} — ••••0001. Disconnect one of them.`,
+    );
+  });
+});

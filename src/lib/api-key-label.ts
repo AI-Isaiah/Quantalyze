@@ -21,6 +21,12 @@ const EXCHANGE_LABELS: Record<string, string> = {
   binance: "Binance",
   okx: "OKX",
   bybit: "Bybit",
+  // 167.1.2 REVIEW IN-03: the duplicate note names a holder on every venue that
+  // reports an account id, so every venue needs its display name here (the
+  // values EXCHANGE_DISPLAY carries). Without them the note read "deribit — …".
+  deribit: "Deribit",
+  sfox: "sFOX",
+  mt5: "MT5",
 };
 
 /**
