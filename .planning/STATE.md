@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: "166.4"
-current_phase_name: BENCHALIGN
-status: executing
-stopped_at: Completed 164.6-05-PLAN.md
-last_updated: "2026-09-27T14:33:23.646Z"
+current_phase: 161
+current_phase_name: WIZERR — Honest error surfaces
+status: planning
+stopped_at: Phase 166.4 complete, ready to plan Phase 161
+last_updated: "2026-09-27T16:45:49.492Z"
 last_activity: 2026-09-27
-last_activity_desc: Phase 166.4 execution started
-state_head: c1b4bc062b9ff6e54dad1d445d8decc77c003a99
+last_activity_desc: Phase 166.4 complete, transitioned to Phase 161
+state_head: a8137e4a8837396874a67c99e9d3a91649a2b1a5
 progress:
-  total_phases: 73
+  total_phases: 80
   completed_phases: 41
-  total_plans: 353
-  completed_plans: 347
-  percent: 56
+  total_plans: 360
+  completed_plans: 351
+  percent: 51
 ---
 
 ## ⭐ STATE lineage
@@ -179,8 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 166.4 (BENCHALIGN) — EXECUTING
-Plan: 1 of 4
+Phase: 161 — WIZERR — Honest error surfaces
+Plan: Not started
 Phase: 166.4 (BENCHALIGN) — PLANNED 2026-09-27 (4 plans, 4 waves; on branch feat/166.4-benchalign)
 Plan: 0 of 4
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
@@ -498,7 +498,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 166.4
+Status: Ready to plan
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -514,7 +514,7 @@ Status: Executing Phase 166.4
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-27 — Phase 166.4 execution started
+Last activity: 2026-09-27 — Phase 166.4 complete, transitioned to Phase 161
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -968,7 +968,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [██████░░░░] 56%
+Progress: [█████░░░░░] 51%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -2406,7 +2406,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-09-23T22:48:56.456Z
-**Stopped At:** Phase 166 context gathered
+**Stopped At:** Phase 166.4 complete, ready to plan Phase 161
 **Resume File:** .planning/phases/166-qstats-truth-every-quantstats-derived-number-reflects-the-re/166-CONTEXT.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
