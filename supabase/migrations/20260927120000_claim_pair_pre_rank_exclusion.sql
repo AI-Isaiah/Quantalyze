@@ -341,6 +341,36 @@ BEGIN
       FROM compute_jobs
      WHERE priority IN ('normal','high')
        AND status IN ('pending', 'failed_retry')
+       -- CLAIMPAIR PROBE EXCLUSION BEGIN (D-08, D-04 amendment)
+       -- Phase 164.9.3 review round 1 (WR-01): a failed_retry row that the
+       -- pre-rank block below holds back (its (kind, partition) holds a
+       -- pending row) is not claimable this tick, so it must not trip the
+       -- throttle either. Counted, it held back a `low` pending twin and every
+       -- other due `low` job while never being claimed itself: a silent,
+       -- permanent wedge. Same four partitions and the same strategy carve-out
+       -- as the pre-rank block, written as one negated disjunction.
+       AND NOT (status = 'failed_retry' AND (
+             (portfolio_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM compute_jobs p
+                WHERE p.kind         = compute_jobs.kind
+                  AND p.portfolio_id = compute_jobs.portfolio_id
+                  AND p.status       = 'pending'))
+          OR (strategy_id IS NOT NULL AND kind <> 'compute_intro_snapshot' AND EXISTS (
+               SELECT 1 FROM compute_jobs p
+                WHERE p.kind        = compute_jobs.kind
+                  AND p.strategy_id = compute_jobs.strategy_id
+                  AND p.status      = 'pending'))
+          OR (allocator_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM compute_jobs p
+                WHERE p.kind         = compute_jobs.kind
+                  AND p.allocator_id = compute_jobs.allocator_id
+                  AND p.status       = 'pending'))
+          OR (api_key_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM compute_jobs p
+                WHERE p.kind       = compute_jobs.kind
+                  AND p.api_key_id = compute_jobs.api_key_id
+                  AND p.status     = 'pending'))))
+       -- CLAIMPAIR PROBE EXCLUSION END
        AND next_attempt_at <= now()
        AND (p_kind_include IS NULL OR kind = ANY(p_kind_include))
        AND (p_kind_exclude IS NULL OR NOT (kind = ANY(p_kind_exclude)))
@@ -537,6 +567,36 @@ BEGIN
     FROM compute_jobs
    WHERE priority IN ('normal','high')
      AND status IN ('pending', 'failed_retry')
+     -- CLAIMPAIR PROBE EXCLUSION BEGIN (D-08, D-04 amendment)
+     -- Phase 164.9.3 review round 1 (WR-01): a failed_retry row that the
+     -- pre-rank block below holds back (its (kind, partition) holds a
+     -- pending row) is not claimable this tick, so it must not trip the
+     -- throttle either. Counted, it held back a `low` pending twin and every
+     -- other due `low` job while never being claimed itself: a silent,
+     -- permanent wedge. Same four partitions and the same strategy carve-out
+     -- as the pre-rank block, written as one negated disjunction.
+     AND NOT (status = 'failed_retry' AND (
+           (portfolio_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM compute_jobs p
+              WHERE p.kind         = compute_jobs.kind
+                AND p.portfolio_id = compute_jobs.portfolio_id
+                AND p.status       = 'pending'))
+        OR (strategy_id IS NOT NULL AND kind <> 'compute_intro_snapshot' AND EXISTS (
+             SELECT 1 FROM compute_jobs p
+              WHERE p.kind        = compute_jobs.kind
+                AND p.strategy_id = compute_jobs.strategy_id
+                AND p.status      = 'pending'))
+        OR (allocator_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM compute_jobs p
+              WHERE p.kind         = compute_jobs.kind
+                AND p.allocator_id = compute_jobs.allocator_id
+                AND p.status       = 'pending'))
+        OR (api_key_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM compute_jobs p
+              WHERE p.kind       = compute_jobs.kind
+                AND p.api_key_id = compute_jobs.api_key_id
+                AND p.status     = 'pending'))))
+     -- CLAIMPAIR PROBE EXCLUSION END
      AND next_attempt_at <= now();
 
   -- Atomic claim with priority precedence + throttle guard + partition dedupe.
