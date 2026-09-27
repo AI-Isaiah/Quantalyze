@@ -4043,7 +4043,9 @@ Plans:
 
 ### Phase 170: LAYOUT — page layout reads clean and holds on every page
 
-**Goal:** Pages read as a finished product: no stacked look-alike panels, and the layout holds at 320 px and 200% zoom.
+**Goal:** Pages read as a finished product: no stacked look-alike panels, and the layout holds at 390 px (iPhone 12) and at desktop 200% zoom.
+**Edited 2026-09-27 by `/gsd-phase --edit` (founder decision below); the goal before read:** "the layout holds at 320 px and 200% zoom."
+**Founder decision, 2026-09-27 (AskUserQuestion, "390px + 200% zoom (Recommended)"; founder: "The oldest phone that will use it is an iphone 12, or desktop"):** the narrowest supported viewport is 390 px (iPhone 12), plus desktop at 200% zoom. Every "320 px" check in this phase, including the 2026-09-26 routed item below, is now a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser. The 400%-zoom WCAG 1.4.10 reflow check is deliberately not required.
 **Founder decision, 2026-09-25 (AskUserQuestion):** the second of the two QA phases; ships after Phase 169 PAGETRUTH.
 **Evidence:** the founder's 2026-09-24 layout notes ("too many similar layers stacked", the "get private link" control too dominant and overlapping) and the 2026-09-25 QA sweep (4 user-facing broken, 14 cosmetic findings). Counts only here.
 **Requirements**: TBD (phase-local SC ids)
@@ -4054,8 +4056,9 @@ Plans:
 ## Success Criteria
 
 1. Factsheet and Allocations panels no longer stack as near-identical layers; the private-link control is secondary and never overlaps content.
-2. `/security` and the legal pages show the signed-in header when signed in; the floating tweaks control never covers the bottom navigation; `/compare` does not point to controls that do not exist; `/admin/match` on mobile is read-only in fact, not only in words; no page scrolls horizontally at 320 px.
-3. Each page is re-checked at 320 px and 200% zoom in the logged-in browser after deploy.
+2. `/security` and the legal pages show the signed-in header when signed in; the floating tweaks control never covers the bottom navigation; `/compare` does not point to controls that do not exist; `/admin/match` on mobile is read-only in fact, not only in words; no page scrolls horizontally at 390 px (iPhone 12) or at desktop 200% zoom *(was "at 320 px"; edited 2026-09-27, founder decision above)*.
+   *Evidence, measured 2026-09-27 on PROD `/allocations?tab=scenario` at a 367 CSS px viewport (narrower than the 390 px floor), named offenders to fix under this criterion:* (a) the page overflows horizontally by 235 px: the allocations tab bar (`<div className="ml-auto flex items-center gap-1">` in `src/app/(dashboard)/allocations/AllocationsTabs.tsx`) is 682 px wide and neither scrolls in its own strip nor wraps; (b) the Stress / Streaks / Metrics sub-tabs overflow; (c) a chart container (class `flex-1 relative pointer-coarse:min-h-[44px]`, in `src/app/factsheet/[id]/v2/HeatmapPanels.tsx`) is 770 px wide and does not shrink; (d) the scenario member rows (weight / mode / leverage / notional) are fixed at 573 px; (e) the drawdown table (~389 px) and one other table (~378 px) overflow.
+3. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom in the logged-in browser after deploy, by the orchestrator, and shows no horizontal page scroll and no clipped primary action *(was "at 320 px and 200% zoom"; edited 2026-09-27, founder decision above)*.
 
 **Plans:** 0 plans
 
@@ -4065,8 +4068,18 @@ Plans:
 
 **⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy 320px check of 167.2.1, measured in the logged-in browser):** on /strategies at 320px the "Get private link" button overlaps the strategy name in the row header and cuts it to two letters. At 640px (200% zoom) the row is clean. Success: at 320px the name, the button, the status pill and the date never overlap, and the name is readable or ellipsised.
 Same pass, same width: on /allocations the floating "Tweaks" button overlaps the bottom navigation's "Strategies" and "Profile" labels. Success: no floating control covers the bottom navigation at 320px. Evidence: `.planning/uat/2026-09-26-browser-pass.md`.
+*Re-confirmed 2026-09-27 at a 367 CSS px viewport on PROD: the floating "Tweaks" button (`TweaksToggle` in `src/app/(dashboard)/allocations/components/TweaksToggle.tsx`) still overlaps the mobile bottom navigation; still open. Both checks in this item now run at 390 px + desktop 200% zoom (founder decision 2026-09-27 above).*
 
 **⭐ OWNED HERE 2026-09-27 (founder, AskUserQuestion, "Book into 170 LAYOUT"; found by the Phase 164.9.4 e2e-seeded axe run):** the grey chip token pair fails WCAG AA, 4.34:1 against the 4.5:1 floor at 11px. It is used by the `CHIP` map entries `no-series` and `manually-excluded` in `src/app/(dashboard)/allocations/components/CoverageStateChip.tsx`, and by `DATA_STATE_CHIP` in `src/components/strategy/StrategyTable.tsx`. Success: each pair reaches at least 4.5:1. The gate is the 164.9.4 e2e-seeded axe check.
+
+**⭐ OWNED HERE 2026-09-27 — narrow-width defects measured 2026-09-27 (iPhone 12 = 390 px floor, founder decision above).** Measured by the orchestrator and the founder in the logged-in browser on PROD (main at `320fba4e`/`e6c196d5`) at a 367 CSS px viewport. Findings (a)–(e) and the Tweaks overlap are recorded under criterion 2 and the 2026-09-26 item above; these are new:
+(f) on `/allocations?tab=scenario` the sticky scenario commit bar (`ScenarioFooter` in `src/app/(dashboard)/allocations/components/ScenarioFooter.tsx`) overlaps the "Distribution of daily returns" section heading;
+(g) the commit bar's "Commit scenario" button (`ScenarioFooter`) is pushed past the right edge, so the primary action is unreachable at phone width;
+(h) "No changes yet" renders twice, in two fonts, in the commit bar (`ScenarioFooter`: the diff-count chip `countLabel` and the delta-summary slot `summaryText` both print it at zero diffs);
+(j) the scenario KPI tiles break values mid-number (a signed decimal wraps one character group per line) and truncate their labels ("SOR…", "CAL…", "MAX…");
+(k) on `/strategies` the sticky "# / STRATEGY" table header overlaps the Sort controls, cutting off the Sharpe and High-to-low selects;
+(l) on `/strategies` strategy names and tags break mid-word at a hyphen (measured on a "Long-/Short" tag).
+Success: at 390 px and at desktop 200% zoom the commit bar never covers a heading, "Commit scenario" is fully visible and tappable, the empty-state text appears once, KPI values never break inside a number and labels are readable, the `/strategies` header never covers the Sort controls, and names and tags wrap only between words.
 
 ### Phase 170.1: COPY — page copy reads clean on every page (INSERTED)
 
