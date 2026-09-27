@@ -3216,6 +3216,7 @@ Plans:
 - **Measured:** 2026-09-25 on the local-stack lane at the 164.9.1 release head, in one transaction ending in `ROLLBACK`. The full repro recipe is kept verbatim as lineage in Phase 164.5.2's section and in `TODOS.md` `[164.9.3-CLAIM-PAIR-23505]`.
 - **Fix options recorded there, not decided:** (a) add `'pending'` to each guard's `x.status` list with `x.id <> ranked.id`; (b) fold the enqueue into, or supersede, the outstanding `failed_retry`. Criterion 2 above already leaves that choice to the planner.
 - ⭐ **DECIDED 2026-09-27 (164.9.3 CONTEXT D-08, from lane measurements in 164.9.3-RESEARCH.md): neither (a) nor (b).** Option (a) was measured to turn the loud 23505 into a SILENT permanent wedge (C39 runs after ranking) and to starve `compute_intro_snapshot`. The fix drops a `failed_retry` candidate whose partition already holds a `pending` job BEFORE ranking, in all three claim bodies; the enqueue side is unchanged.
+- ⭐ **FOUNDER DECISIONS 2026-09-27 (AskUserQuestion, before merge; 164.9.3 CONTEXT):** (1) the D-04 amendment is KEPT: the `CLAIMPAIR PROBE EXCLUSION` blocks in both priority overloads ship, and D-04 reads "no bytes outside the marked CLAIMPAIR blocks". (2) D-11: round-2 review WR-01 is FIXED in this phase, not routed: the probe sibling tests widen to `IN ('pending','running','done_pending_children')` inside the marked blocks, so the throttle also skips a retry the C39 guard holds back, with a red-first arm, a mutation twin and census pins moved by measurement.
 
 Plans:
 
