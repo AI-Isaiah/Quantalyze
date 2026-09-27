@@ -147,6 +147,22 @@ export interface LiveHoldingsSummary {
    *  holding here too, so the excludes side fails open like the includes
    *  side. Never added to, or subtracted from, `total` (D-03). */
   excludedUnknownStatus: LiveHoldingsPart;
+  /** Phase 167.1.2 SC-4. Holdings the contributing-set narrowing dropped from
+   *  `total` whose key is TRUSTED (present in `statusByKeyId`, not untrusted)
+   *  and not manager-side: an allocator key with no return series yet. Until
+   *  this part they fell through every branch and landed in no part at all,
+   *  so the composer said nothing about them. On the founder's book that is
+   *  where a shared account's dollars sat. The composer names it as "excludes
+   *  $X from connected keys with no return history yet". Never added to, or
+   *  subtracted from, `total` (D-03). */
+  excludedTrusted: LiveHoldingsPart;
+  /** Phase 167.1.2 SC-4. Holdings the narrowing dropped whose key the payload
+   *  names as manager-side (D-20: not the allocator's book), whatever its
+   *  status. Kept OUT of every disclosure, per D-20's reasoning, but counted,
+   *  so that every toggled-on dollar is in exactly one of `total` or an
+   *  `excluded*` part (the conservation invariant the unit suite generates
+   *  books against). */
+  excludedManagerSide: LiveHoldingsPart;
 }
 
 /**
@@ -225,6 +241,8 @@ export function summarizeLiveHoldings(args: {
     unknownStatus: { amount: 0, count: 0, unavailable: 0 },
     excludedUntrusted: { amount: 0, count: 0, unavailable: 0 },
     excludedUnknownStatus: { amount: 0, count: 0, unavailable: 0 },
+    excludedTrusted: { amount: 0, count: 0, unavailable: 0 },
+    excludedManagerSide: { amount: 0, count: 0, unavailable: 0 },
   };
   const addTo = (part: LiveHoldingsPart, h: DashboardHolding, equity: number) => {
     part.amount += equity;
@@ -247,14 +265,20 @@ export function summarizeLiveHoldings(args: {
       // D-20: a manager-side key the payload identifies is not the allocator's
       // book, so its holdings are not part of what the narrowing excluded from
       // THEIR AUM. Only the indistinguishable remainder may over-disclose.
-      if (!managerSide.has(h.api_key_id)) {
-        if (untrusted) {
-          addTo(out.excludedUntrusted, h, equity);
-        } else if (!args.statusByKeyId.has(h.api_key_id)) {
-          // Review round 3 WR-01: an ABSENT status is unknown, not trusted,
-          // on the excludes side too (the WR-05 `.has` rule).
-          addTo(out.excludedUnknownStatus, h, equity);
-        }
+      // Phase 167.1.2 SC-4: every branch below lands the holding in a part, so
+      // no toggled-on dollar leaves this loop unaccounted for.
+      if (managerSide.has(h.api_key_id)) {
+        addTo(out.excludedManagerSide, h, equity);
+      } else if (untrusted) {
+        addTo(out.excludedUntrusted, h, equity);
+      } else if (!args.statusByKeyId.has(h.api_key_id)) {
+        // Review round 3 WR-01: an ABSENT status is unknown, not trusted,
+        // on the excludes side too (the WR-05 `.has` rule).
+        addTo(out.excludedUnknownStatus, h, equity);
+      } else {
+        // Trusted, not contributing, not manager-side: a key with no return
+        // series yet. Before 167.1.2 this fell through to `continue` unnamed.
+        addTo(out.excludedTrusted, h, equity);
       }
       continue;
     }
@@ -281,6 +305,11 @@ export interface KeyTrustClauseRender {
   /** The row unit, singular then plural, e.g. `holding` / `holdings`. */
   unit: readonly [string, string];
 }
+
+/** Phase 167.1.2 SC-4 — the noun for `excludedTrusted`, the one phrase the
+ *  plan fixed ("excludes $X from connected keys with no return history yet").
+ *  Local to this module: only this clause renders it. */
+const NO_RETURN_HISTORY_KEY_SET_NOUN = "connected keys with no return history yet";
 
 /**
  * Phase 167.1 AUMTRUST — the ONE lower-case clause that names the parts of a
@@ -315,6 +344,12 @@ export interface KeyTrustClauseRender {
  *   with the unknown-status noun after the excluded untrusted part, e.g.
  *   `excludes $Z from keys with an unknown sync status`. Its presence rules
  *   out the shared-noun form. Open Positions passes neither excluded part.
+ * - Phase 167.1.2 SC-4: an optional `excludedTrusted` part (dropped dollars
+ *   from a trusted key with no return series yet) is named last, as
+ *   `excludes $X from connected keys with no return history yet`, with the
+ *   same count and unavailable rules. Its presence rules out the shared-noun
+ *   form, which would otherwise return before naming it. Open Positions
+ *   passes it no more than the other excluded parts.
  */
 export function buildKeyTrustClause(
   untrusted: LiveHoldingsPart,
@@ -322,6 +357,7 @@ export function buildKeyTrustClause(
   render: KeyTrustClauseRender,
   excludedUntrusted?: LiveHoldingsPart,
   excludedUnknownStatus?: LiveHoldingsPart,
+  excludedTrusted?: LiveHoldingsPart,
 ): string {
   const phrase = (part: LiveHoldingsPart, noun: string): string => {
     const base = `${render.amount(part.amount)} from ${noun}`;
@@ -342,12 +378,19 @@ export function buildKeyTrustClause(
     excludedUnknownStatus !== undefined && excludedUnknownStatus.count > 0
       ? excludedUnknownStatus
       : null;
+  const excludedNoHistory =
+    excludedTrusted !== undefined && excludedTrusted.count > 0
+      ? excludedTrusted
+      : null;
   const excludedParts: string[] = [];
   if (excluded !== null) {
     excludedParts.push(phrase(excluded, UNTRUSTED_KEY_SET_NOUN));
   }
   if (excludedUnknown !== null) {
     excludedParts.push(phrase(excludedUnknown, UNKNOWN_KEY_STATUS_SET_NOUN));
+  }
+  if (excludedNoHistory !== null) {
+    excludedParts.push(phrase(excludedNoHistory, NO_RETURN_HISTORY_KEY_SET_NOUN));
   }
   if (excludedParts.length === 0) return `includes ${parts.join(" and ")}`;
   if (parts.length === 0) return `excludes ${excludedParts.join(" and ")}`;
@@ -356,6 +399,7 @@ export function buildKeyTrustClause(
   const oneNoun =
     excluded !== null &&
     excludedUnknown === null &&
+    excludedNoHistory === null &&
     unknownStatus.count === 0 &&
     untrusted.unavailable === 0 &&
     excluded.unavailable === 0;
