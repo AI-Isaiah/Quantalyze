@@ -135,7 +135,8 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
 - [ ] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
-- [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — planned (1 plan); waits on the founder's recompute step
+- [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — planned (1 plan); HALTED 2026-09-27 at Task 3; resumes after Phase 166.4 ships
+- [ ] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — not yet planned; data integrity, ahead of features
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [ ] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed
 - [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
@@ -3581,6 +3582,43 @@ Plans:
 
 - [ ] 166.3-01-PLAN.md — founder-gated PROD recompute: Q1-Q6 read-only pack (Q6: stored residue SQN, D-21 W1), tracer then one-at-a-time enqueues with the kind derived from the class (D-21 W2), blocking rendered check per published row (independent of the code plans)
 
+⛔ **HALTED 2026-09-27 at Task 3 (see `166.3-01-SUMMARY.md` in this phase's directory, on branch `feat/166.3-recompute`).** The tracer recompute (R1) failed A2c: its beta changed sign and its treynor moved, while its r² did not. The cause is not Phase 166. It is the M1 alignment change (`d16b2fb4c`, v0.24.9.31, #323), reproduced locally. R2..R6 were NOT enqueued: rows computed before the M1 deploy still hold the pre-M1 beta, and recomputing them on today's code would degrade them. **Resumes after Phase 166.4 BENCHALIGN ships** (founder decision D-B, 2026-09-27), with its recompute set WIDENED to every sparse-calendar strategy computed since the M1 deploy (2026-05-27). R1 is a private row and must be recomputed again after the fix.
+
+### Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric (INSERTED)
+
+**Goal:** For a strategy whose date index is sparser than BTC's 7-day calendar (for example weekday-only), every benchmark-relative metric pairs each strategy return with the BTC return over the SAME holding interval, so alpha, beta, correlation, information ratio, Treynor, r² and the rolling greeks and correlation describe the strategy's real co-movement with BTC, and r² equals correlation² again.
+**Requirements**: TBD (criteria below)
+**Depends on:** nothing. **Priority:** data integrity, ahead of features (founder priority rule, 2026-09-27).
+**Plans:** 0 plans
+
+**Evidence (orchestrator, 2026-09-27; the reproduction was re-run locally against main-level code; counts and verdicts only):**
+
+- **Root cause: M1, not Phase 166.** Commit `d16b2fb4c` (v0.24.9.31, #323, audit batch 5, "M1 (red-team 2026-05-27)") moved alpha and beta off `qs.stats.greeks(returns, benchmark)` on the unaligned pair. quantstats' `_prepare_benchmark` reindexes the benchmark PRICE levels to the strategy's dates, so it paired each return with the Fri→Mon interval return. M1 moved them to `returns.align(benchmark, join="inner")`, which pairs a Monday return with BTC's Sun→Mon daily move.
+- **Phase 166 is bit-identical to M1.** `_greeks_no_guess` reproduces M1 exactly, so Phase 166's §Q3 parity claim holds. Phase 166 did not cause this.
+- **The metrics disagree with each other today.** `_r_squared`, reached through `compute_qstats_scalars`, still uses the unaligned pair via `_align_benchmark_like_qs`, so r² ≠ correlation². Correlation and `info_ratio` in `compute_all_metrics`, and `_rolling_greeks` / `_rolling_correlation`, use the inner join. All in `analytics-service/services/metrics.py`.
+- **Measured.** On a 67-point weekday-only series: the pre-M1 beta is negative, the M1 and Phase 166 beta is positive (a sign flip), and r² is identical under both. A hand OLS confirms the pre-M1 value is the slope against Fri→Mon returns and the current one the slope against Sun→Mon returns.
+- **Blast radius.** Every strategy computed since the 2026-05-27 deploy whose date index has gaps against BTC's calendar, chiefly weekday-only user CSVs. Dense daily series (crypto exchange dailies) are unaffected. ⚠️ `stitch_composite` (`run_stitch_composite_job`) and the single-key broker path were NOT traced; this phase traces them.
+- **Found by** Phase 166.3's tracer recompute on 2026-09-27 (A2c FAIL: beta sign flipped, treynor moved, r² unchanged). 166.3 is halted until this phase ships.
+
+⭐ **FOUNDER DECISIONS, 2026-09-27 (AskUserQuestion, recorded verbatim):**
+
+- **D-A "Friday→Monday (Recommended)":** for a strategy whose calendar is sparser than BTC's 7-day calendar (e.g. weekday-only), every benchmark-relative metric pairs each strategy return with the BTC return over the SAME interval (compounded from the strategy's previous date to its current date, i.e. price[t_k]/price[t_{k-1}] − 1), not the overlapping daily move. Applies to alpha, beta, correlation, information ratio, Treynor, the rolling greeks/correlation, and r² (so r² = correlation² again). A benchmark gap must be skipped, never back/forward-filled across (keeps the M1 intent).
+- **D-B "New phase under 166 (Recommended)":** a new data-integrity phase, inserted under 166, ahead of features; 166.3 RECOMPUTE stays halted and resumes after it ships, with its recompute set widened to every sparse-calendar strategy computed since the M1 deploy.
+
+## Success Criteria
+
+1. **One pairing.** ONE interval-matched pairing is used by alpha, beta, correlation, `info_ratio`, treynor, r², the rolling greeks and the rolling correlation, and r² equals correlation² on the shared pair.
+2. **A gap is skipped, never filled.** A benchmark gap is skipped and never back- or forward-filled across. M1's intent is kept, and its test stays green.
+3. **A test that fails on today's code.** A test on a weekday-only fixture asserts a hand-computed Fri→Mon beta, and goes RED on today's code.
+4. **Dense series do not move.** Dense daily series stay bit-identical, pinned by a parity test.
+5. **Other paths traced.** The behaviour for `stitch_composite` and for single-key broker series is traced and stated.
+6. **Disclosed.** The CHANGELOG discloses the value change and names M1 (`d16b2fb4c`) as its origin.
+7. **166.3 resumes.** After merge, Phase 166.3 resumes with the widened recompute set (D-B).
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 166.4 to break down)
+
 ### Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine (INSERTED)
 
 **Goal:** Every "drawdown improvement" number means shallower-is-positive, and ranking rewards a shallower drawdown, never a deeper one.
@@ -4195,7 +4233,8 @@ kept verbatim.
 | 166.1 ENGINEFLOOR | 4/4 on main | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.100.0.0 · #872 |
 | 166.1.1 DDSIGN | 0/? | Queued — feature | - |
 | 166.2 COMPUTEONCE | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.102.0.0 · #874 |
-| 166.3 RECOMPUTE | 0/1 | Planned — waits on the founder's recompute step | - |
+| 166.3 RECOMPUTE | 0/1 | HALTED 2026-09-27 at Task 3 — resumes after 166.4 ships | - |
+| 166.4 BENCHALIGN | 0/? | Queued — data integrity | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.89.0.0 · #852 |
 | 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
