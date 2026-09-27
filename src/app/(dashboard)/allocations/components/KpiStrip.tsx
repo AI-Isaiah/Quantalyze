@@ -109,6 +109,12 @@ interface KpiStripProps {
    * primary still renders.
    */
   liveMetrics?: ComputedMetrics | null;
+  /**
+   * Phase 170 / SC1-LAYERS. Passed through to KpiPanel. Omitted keeps the
+   * panel's own default ("cards"), so every existing caller stays
+   * byte-identical. The scenario composer passes "panel".
+   */
+  variant?: "cards" | "panel";
 }
 
 interface Cell {
@@ -308,6 +314,7 @@ export function KpiStrip({
   mode = "live",
   scenarioMetrics = null,
   liveMetrics = null,
+  variant,
 }: KpiStripProps) {
   // Phase 07 / 07-03 — the warm-up helper line renders for each null KPI
   // cell when the allocator is still backfilling AND not globally stale.
@@ -527,5 +534,7 @@ export function KpiStrip({
     },
   );
 
-  return <KpiPanel cells={panelCells} ariaLabel="Portfolio KPIs" />;
+  return (
+    <KpiPanel cells={panelCells} ariaLabel="Portfolio KPIs" variant={variant} />
+  );
 }

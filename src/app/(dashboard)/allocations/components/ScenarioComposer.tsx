@@ -5429,9 +5429,21 @@ export function ScenarioComposer({
         </div>
       )}
 
-      <div className="mt-6">
+      {/* Phase 170 / SC1-LAYERS (C1-A2, 2026-09-28) — the scenario strip is
+          row 4 of one square Blend-window data panel, not a second
+          free-standing KPI layer. Rows 1–3 (header, window, timeline) move
+          into this panel in the C1-A1 step. The eyebrow is the same
+          non-comparative label in every state (frozen 170.1 COPY item (b)). */}
+      <div
+        className="mt-6 border border-border bg-surface"
+        data-testid="scenario-blend-window"
+      >
+        <p className="text-micro font-mono uppercase tracking-[0.18em] text-text-muted px-4 pt-3">
+          Scenario blend
+        </p>
         <KpiStrip
           mode="scenario"
+          variant="panel"
           scenarioMetrics={scenarioMetrics}
           liveMetrics={liveMetricsForKpi}
           metrics={liveMetricsForKpi}
