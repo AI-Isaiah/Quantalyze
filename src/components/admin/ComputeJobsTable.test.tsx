@@ -264,3 +264,80 @@ describe("ComputeJobsTable — @container parent/child structural guard", () => 
     expect(tabular.length).toBeGreaterThan(0);
   });
 });
+
+/**
+ * Phase 169.3 plan 01 (SC1) — error ≠ empty (the 149 review WR-01 idiom).
+ *
+ * A failed load must read as a failure, never as an empty queue: while the
+ * error alert shows, the definitive "No compute jobs found." row must NOT
+ * render. Only a load that SUCCEEDED with zero rows may claim the queue is
+ * empty. Before the fix both the alert and the empty row rendered together,
+ * so an admin saw "No compute jobs found." under an HTTP 500.
+ */
+describe("ComputeJobsTable — a failed load is not an empty queue", () => {
+  const EMPTY_TEXT = "No compute jobs found.";
+
+  it("HTTP 500: shows the error alert and NOT the empty-queue row", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 500,
+        json: async () => ({ error: "Failed to fetch compute jobs" }),
+      })) as unknown as typeof fetch,
+    );
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Failed to fetch compute jobs");
+    expect(screen.queryByText(EMPTY_TEXT)).toBeNull();
+  });
+
+  it("network failure (fetch rejects): shows the error alert and NOT the empty-queue row", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("network down");
+      }) as unknown as typeof fetch,
+    );
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("network down");
+    expect(screen.queryByText(EMPTY_TEXT)).toBeNull();
+  });
+
+  it("OK with []: shows the empty-queue row and no alert", async () => {
+    // The file-level beforeEach stubs fetch to resolve OK with [].
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+
+    expect(await screen.findByText(EMPTY_TEXT)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("OK with rows: renders the rows, neither the alert nor the empty-queue row", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => fullPage(),
+      })) as unknown as typeof fetch,
+    );
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+
+    await screen.findByRole("button", { name: /load more/i });
+    // 50 job rows + the header row.
+    expect(screen.getAllByRole("row")).toHaveLength(51);
+    expect(screen.queryByText(EMPTY_TEXT)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});

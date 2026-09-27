@@ -53,6 +53,7 @@ from services.closed_sets import (
     perp_quote,
 )
 from services.dateday import epoch_ms_to_iso_day, sort_events_stable
+from services.dispersion import dispersion_is_residue
 from services.db import db_execute, get_supabase
 from services.job_worker import (
     AllocatorEquityAction,
@@ -3669,7 +3670,9 @@ class EquityCurveBuilder:
             return None
         excess = returns - (risk_free_rate / periods)
         std = excess.std()
-        if std == 0 or math.isnan(std):
+        # Phase 166.1 (S5): residue dispersion (a constant yield taken from a
+        # compounding NAV has a ~1e-16 std, never exactly 0) means no Sharpe.
+        if math.isnan(std) or dispersion_is_residue(float(std), float(excess.mean())):
             return None
         return float((excess.mean() / std) * (periods ** 0.5))
 

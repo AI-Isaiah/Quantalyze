@@ -142,6 +142,26 @@ describe("<ReplacementCard> — H-1077", () => {
     expect(chip.className).toContain("text-negative");
   });
 
+  // 166.1 D7 (founder 2026-09-26) / round-1 SFH HIGH-2: a flat incumbent or
+  // candidate gives the bridge a delta that does not exist. It arrived as 0.0
+  // and rendered "+0.00 Sharpe" / "+0.0% Corr" in green, read as "unchanged".
+  it("renders a null delta as a colorless dash, never +0", () => {
+    render(
+      <ReplacementCard
+        candidate={buildCandidate({ sharpe_delta: null, corr_delta: null, dd_delta: 0.04 })}
+        replacementFor="old-1"
+      />,
+    );
+    for (const label of ["Sharpe", "Corr"]) {
+      const chip = screen.getByText(`— ${label}`);
+      expect(chip.className).toContain("text-text-muted");
+      expect(chip.className).not.toContain("text-positive");
+      expect(chip.className).not.toContain("text-negative");
+    }
+    expect(screen.queryByText(/\+0\.00 Sharpe|\+0\.0% Corr/)).toBeNull();
+    expect(screen.getByText("+4.0% MaxDD").className).toContain("text-positive");
+  });
+
   it("POSTs to /api/intro with the candidate id, source=bridge, and replacement_for", async () => {
     const fetchSpy = vi.fn(async () =>
       new Response(JSON.stringify({ ok: true }), { status: 200 }),

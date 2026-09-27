@@ -84,17 +84,78 @@ replay it, and boot green on a schema missing it. A full list cannot make that m
 
 | | |
 |---|---|
-| Taken | 2026-09-24 |
+| Taken | 2026-09-27 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
 | Supabase CLI | 2.84.2 (CI pins 2.98.2 — see the caveat below) |
-| sha256 | `b473ab7e48df967d981e99c1b366ca26bf9d1ccf81066df5c44c112413dcb21f` |
-| Shape | 63 tables, 155 policies, 123 function statements (121 distinct names), **0 data statements** |
+| sha256 | `5a32d248b240cc1141d4ce15b15d39d8577944a3b1d23f66d686deaa93f52211` |
+| Shape | 63 tables, 155 policies, 125 function statements (123 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
 `scripts/local-stack/REPLAY-SPIKE.md`: no DSN, no `\connect`, no `ALTER DATABASE`, no JWT,
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-09-27 — the #870 and #873 applies, two migrations, two new functions
+
+⛔ **A SEPARATE REVIEWED ACT, taken by the founder** with a read-only `supabase db dump --linked`
+(CLI 2.84.2); this checkout runs no database command against a remote. Taken AFTER both
+migrations had applied to PRODUCTION: Supabase Migrate run `36266617140` on merge commit
+`74f9b5cd2` (#870) and run `36274235531` on merge commit `37e6e6f7a` (#873), `apply-test` and
+`apply` success on each. `37e6e6f7a` is the `MERGE` used to regenerate the marker. The next merge,
+`8c0871735` (#869), touches no file under `supabase/migrations/**`.
+
+**Which migrations the new dump now carries** — measured from the marker diff, the complete set
+added since the 2026-09-26 capture:
+
+| migration | what it adds | expected shape delta |
+|---|---|---|
+| `20260925120000_api_keys_account_identity.sql` | three `api_keys` columns and their constraints, `enforce_api_keys_account_share_same_owner` + its trigger, `set_departed_key_history_inclusion`, index `api_keys_account_shared_with_idx`, a re-based `reconnect_allocator_api_key`, column SELECT grants, re-stated COMMENTs | +2 function statements, +2 distinct names, +1 trigger, +1 index |
+| `20260926120000_mark_compute_job_bridge_advisory_lock.sql` | `CREATE OR REPLACE` of `mark_compute_job_done` and `mark_compute_job_failed` | none of the counted shapes (body replacement of existing functions) |
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Shape | 63 tables, 155 policies, 123 → **125** function statements (121 → **123** distinct names), 35 → 36 triggers, 126 → 127 indexes |
+| Data statements | **0** — unchanged |
+| sha256 | `22cce9c0…` → `5a32d248…` |
+| Secret scan (all five classes) | **0** matches, `grep -a` |
+| Home path / local username / project ref | 0 matches |
+| File integrity | single `SET client_encoding`, no NUL bytes |
+| Currency gate | `baseline-currency: carried=279 replay=0 marker-sha=match defects=0` |
+| Body drift | `baseline-content-drift`: compared 125 — MATCH 122, DRIFT 3 (the three allowlisted `[DRIFT-06]` rows), findings **0**. The pre-dump reading was findings on 5 functions: `enforce_api_keys_account_share_same_owner`, `set_departed_key_history_inclusion`, `reconnect_allocator_api_key`, `mark_compute_job_done`, `mark_compute_job_failed`. |
+
+### Regenerated 2026-09-26 — the Phase 164.9.1 apply, three migrations, no shape change
+
+⛔ **A SEPARATE REVIEWED ACT, taken by the founder** with a read-only `supabase db dump --linked`
+(CLI 2.84.2); this checkout runs no database command against a remote. Taken AFTER Phase 164.9.1's
+migrations had applied to PRODUCTION (Supabase Migrate run `36221903723`, `apply-test` and `apply`
+jobs success, on merge commit `96219c04a`, the `MERGE` used to regenerate the marker). No later
+merge touches `supabase/migrations/**` (`096671f2d`, #861, changes CI only).
+
+**Which migrations the new dump now carries** — measured from the marker diff, the complete set
+added since the 2026-09-24 capture:
+
+| migration | what it adds | expected shape delta |
+|---|---|---|
+| `20260924230827_fanin_initial_status_10param.sql` | `CREATE OR REPLACE` + `COMMENT ON FUNCTION` of `_enqueue_compute_job_internal` | none of the counted shapes (body replacement of an existing function) |
+| `20260924233749_allocator_sync_restore_inflight_prefetch.sql` | `CREATE OR REPLACE` + `COMMENT ON FUNCTION` of `request_allocator_holdings_sync` | none of the counted shapes |
+| `20260925071300_bridge_outcomes_invariant_comments.sql` | `COMMENT ON TABLE` / `COMMENT ON COLUMN` on `bridge_outcomes` | none of the counted shapes |
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Shape | 63 tables, 155 policies, 123 function statements — **unchanged** |
+| Data statements | **0** — unchanged |
+| sha256 | `b473ab7e…` → `22cce9c0…` |
+| Secret scan (all five classes) | **0** matches; gitleaks over the file: no leaks |
+| Home path / local username | 0 matches |
+| File integrity | single `SET client_encoding`, no NUL bytes |
+| Currency gate | `baseline-currency: carried=277 replay=0 marker-sha=match defects=0` |
+| Function snapshot | `dump-sql-functions.ts --check`: 121 names agree, 0 ratcheted disagreements |
+| Body drift | `baseline-content-drift`: compared 123 — MATCH 120, DRIFT 3 (the three allowlisted `[DRIFT-06]` rows), findings **0**. The pre-dump reading on `main` was DRIFT 5 with findings, the red `sql-gate-lint` this dump clears. |
 
 ### Regenerated 2026-09-24 — the Phase 164.6 apply, two function bodies, nothing else
 
@@ -410,7 +471,7 @@ Read-only, from a checkout linked to production, DSN never committed or echoed:
 
 ```
 supabase db dump --linked -f supabase/schema/baseline.sql
-grep -anE 'postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase|\\connect|ALTER DATABASE|eyJ[A-Za-z0-9_-]{10,}' supabase/schema/baseline.sql
+grep -anE 'postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase|\\connect|ALTER DATABASE|eyJ[A-Za-z0-9_-]{10,}|sb_secret_[A-Za-z0-9_-]{16,}|(^|[^_A-Za-z])[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]("? *(:=|=| ) *[Ee]?[^ -&(-~][!-&(-~]|"? *: *"[!#-~]|=[!-&(-~]|=[^ -&(-~]{2}[!-&(-~])' supabase/schema/baseline.sql
 ```
 
 Any hit on the second command means **do not commit**.
@@ -437,6 +498,56 @@ different dump. That refusal is the point.
 set into the marker, so the set the lane replays shrinks back toward zero. Refreshing the dump is
 therefore periodic upkeep, **not** a per-migration founder action: between regenerations a new
 migration simply replays on the lane.
+
+⭐ **AUTOMATED 2026-09-26 (Phase 164.9.5 AUTOREDUMP).** The procedure above now runs by itself.
+After `supabase-migrate.yml`'s `apply` job succeeds on `main`, the `redump-dump` job re-dumps
+PRODUCTION read-only with the same credential set as `apply`, and the `redump-pr` job proposes
+the result as ONE pull request from the fixed branch `automation/baseline-redump`, reused across
+applies. The logic lives in `scripts/baseline-redump.mjs`: `--gate-dump` runs in the credentialed
+job, `--compose`, `--check-bot-branch` and `--open-or-edit-pr` in the write-token job, so the
+PROD credential and the write token never share a job. It REFUSES, and proposes nothing, on any
+of: a hit of the secret scan above (the five classes, a Supabase `sb_secret_` key, or a password
+in a credential form, in any case: a quoted string after the word, a JSON `"password":` member,
+or `password=` in a connection string, a quoted value as pg_dump doubles it (`password=''…''`) included,
+while `WHERE password = x` and `password = ''` are not hits; only the count and line numbers are printed, never the
+line); a gitleaks finding over the dump (explicit `.gitleaks.toml`, redacted, inline allow
+comments ignored, a missing or empty dump refused rather than read as clean); a NUL byte, a
+`SET client_encoding` count other than one, or a home-directory path; zero tables or any data
+statement; a dump that lost a `CREATE EXTENSION` name the committed dump carries (the same check
+reads `CREATE SCHEMA` names too, but that half is forward-looking only: the committed dump has 0
+`CREATE SCHEMA` lines, so it covers nothing today);
+a `main` that lacks a migration the merge carries (it would pair PROD with a marker that
+disagrees with it; a re-run attempt is NOT refused by its number, because this listing check
+already judges it, D-32); a marker not taken from the tree of the
+applied merge; an artifact whose merge is not an ancestor
+of `main`, or whose marker omits a migration `main`'s marker carries and `main`'s checkout still
+holds (a migration renamed or deleted on `main` is exempted and named in a `::notice::`); a red currency, content-drift
+or staleness gate on the composed tree; the skip trailer in the commit message or the PR text;
+a proposal already on the bot branch whose marker carries a migration the composed commit lacks
+and `main`'s checkout holds (a re-run of an older run's `redump-pr` never replaces a newer open
+proposal); and a commit on the bot branch that the bot did not author, while an open pull request has that
+branch as its head (once that pull request is merged or closed, the next run resets the branch). It writes only the six paths PR #864
+changed (the dump, the marker, this file, `CHANGELOG.md`, `VERSION`, `package.json`), with
+measured values only. It never writes the "what it adds" column; the PR body asks the reviewer
+to add it. ⛔ **It never merges.** Its CI runs wait for a human to click
+**Approve workflows to run**, and because branch protection is off, a merge with zero completed
+checks is possible: read each head-SHA run's conclusion before merging. When the dump and marker
+are byte-identical to the committed pair, it opens nothing and prints a `::notice::` instead.
+It does the same, and leaves the baseline alone, when `main` already carries a migration the
+applied merge lacks (D-31): PROD has not applied that later migration yet, so this dump would be
+superseded, and that migration's own apply run re-dumps. That verdict is taken BEFORE the
+`CREATE EXTENSION` completeness check, so a superseded re-run is skipped and never refused by it
+(R3-01); the secret, gitleaks, integrity and data-statement refusals still run first.
+**Recorded limits (D-33).** A dump truncated after its `CREATE EXTENSION` lines is NOT refused:
+those lines sit near the top of the file, and the tail-count floor that tried to catch a
+truncated dump was reverted by founder decision D-33 because it refused correct dumps (a
+`DROP COLUMN` removes column-level `GRANT` lines with no `REVOKE`). Such a dump reaches only the
+bot pull request, where the reviewer sees a large deletion; nothing merges without a human. And an
+extension dropped on PROD outside a migration (a dashboard or CLI change) makes the next dump
+one `CREATE EXTENSION` short, so the completeness check refuses it, and every later migration
+merge's re-dump refuses too, until a hand re-dump through `## Regenerating` commits a dump without it.
+The manual procedure above REMAINS the fallback, for a refusal that needs a human reading of the
+dump, or when the automation is unavailable.
 
 ⚠️ **SP-M03 — the CLAIM used to exceed the COMMAND.** The certification above names five
 classes (DSN, `\connect`, `ALTER DATABASE`, JWT, project ref); this grep matched only three

@@ -175,6 +175,12 @@ const NO_INPUT = new Set([
   // about whether there is input to validate ahead of the limiter, not the verb.
   "strategies/[id]/share/route.ts",
   "strategies/[id]/share/revoke/route.ts",
+  // Phase 167.2.1 D-01 — the key card's composite-membership GET. withAuth +
+  // per-user userActionLimiter (`key-memberships:<user.id>`), but NO request
+  // body: the only input is the `[id]` URL param, validated (isUuid → 400)
+  // BEFORE checkLimit, so a malformed id never burns a token. Same NO_INPUT
+  // shape as the returns/sync-progress/share siblings above.
+  "keys/[id]/memberships/route.ts",
 ]);
 
 // limit-FIRST is intentional here (public/unauth scraper defense).

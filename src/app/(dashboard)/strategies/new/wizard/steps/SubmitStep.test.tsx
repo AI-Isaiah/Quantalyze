@@ -673,6 +673,42 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     expect(screen.getByText(sentId!)).toBeInTheDocument();
   });
 
+  // 164.6.5-07 / D-14 (task 2) — THE DEFECT THIS TASK CLOSES. MEASURED in
+  // production: two retries 45s and 55s apart in one open tab rendered the
+  // IDENTICAL id, because the id shown came from the page-load memo rather
+  // than the request that actually failed. Two submit attempts, neither
+  // carrying an upstream correlation_id, must render TWO DIFFERENT ids.
+  it("[164.6.5-07 / D-14] two failed submit attempts render TWO DIFFERENT ids", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse({ code: "TOTALLY_MADE_UP", error: "weird" }, 500),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ code: "TOTALLY_MADE_UP", error: "weird again" }, 500),
+      );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+
+    const firstInit = fetchSpy.mock.calls[0][1] as RequestInit;
+    const firstId = new Headers(firstInit.headers).get("X-Correlation-Id");
+    expect(screen.getByText(firstId!)).toBeInTheDocument();
+
+    trackMock.mockClear();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+
+    const secondInit = fetchSpy.mock.calls[1][1] as RequestInit;
+    const secondId = new Headers(secondInit.headers).get("X-Correlation-Id");
+    expect(
+      secondId,
+      "the same id rendered across two distinct failed requests — support " +
+        "cannot tell which failure the id identifies",
+    ).not.toBe(firstId);
+    expect(screen.getByText(secondId!)).toBeInTheDocument();
+  });
+
   // ============================================================
   // Phase 140.3-15 / TS-38 — OUR CONFIG FAULT, AT THE RENDER.
   //

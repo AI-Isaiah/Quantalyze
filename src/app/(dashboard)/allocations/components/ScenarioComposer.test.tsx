@@ -562,6 +562,8 @@ function makePayload(
     ],
     equityCurveSource: "legacy",
     derivedCurveComputedAt: null,
+    // Phase 167.1.2 / D-02: the producer emits "rebuilding" for every allocator.
+    equityHistoryState: "rebuilding",
     minHistoryDepthMonths: 12,
     equityBaselineUnknown: false,
     activeVenues: ["Binance"],
@@ -954,6 +956,10 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const payload = makePayload({
       lastSyncAt: "2026-06-24T00:00:00.000Z",
       allKeysStale: true,
+      // Phase 167.1.2 / D-02: moved to "ready" explicitly. While "rebuilding"
+      // the own-book series is withheld in BOTH modes, so the blank-mode gate
+      // this test pins is only observable once the history may be shown.
+      equityHistoryState: "ready",
     });
     render(
       <ScenarioComposer
@@ -6919,8 +6925,11 @@ describe("ScenarioComposer — Phase 43 GUARD-01 static guard + assembled degene
     // (D) The chart-bound Peer / Mandate / OwnBookDelta props degrade HONESTLY:
     // a 0-constituent degenerate blend yields no peer rank (below floor → null),
     // no mandate panel (no constituents → undefined), and the own-book delta is
-    // undefined because the default book equity (2 points) gives <2 derivable
-    // returns. None is a fabricated zero/NaN — they are the honest absence.
+    // undefined because gate=false forces BLANK mode, which empties the own-book
+    // series before the delta is built (measured 2026-09-25: the chart receives
+    // `equityDailyPoints: []` here). The `bookReturns.length < 2` guard is pinned
+    // by its own case in the 167.1.2 D-02 describe block, not by this render.
+    // None is a fabricated zero/NaN — they are the honest absence.
     const props = lastChartProps();
     expect(props.scenarioPeer ?? null).toBeNull();
     expect(props.scenarioMandate ?? null).toBeNull();
@@ -16642,5 +16651,239 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     expect(markers[0].textContent).toBe(
       "Excludes $0 from keys with an unknown sync status.",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 / D-02 + D-03 — the own-book comparison is hidden while the
+// allocator's equity history is rebuilt, and the absence is DISCLOSED.
+//
+// Why this matters: the own-book line and the "vs your book" delta are built
+// from `equityDailyPoints`, the curve D-02 withholds because it could count one
+// exchange account twice or read a no-sync day as zero. A Sharpe/Sortino/max-DD
+// delta against that curve would be a wrong number the allocator can act on.
+// Hiding it silently would read as "no book"; the one sentence says why.
+// The live-book KPIs (`liveBaselineMetrics`) come from the per-key blend, not
+// from that curve, so D-03 keeps them visible.
+//
+// The fixture carries a 3-point curve (2 derivable returns, the minimum for a
+// delta), so case 3 proves the SAME fixture yields a delta when "ready" and the
+// absences in case 1 are the gate, not a too-short series.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while rebuilding", () => {
+  const OWN_BOOK_REBUILDING_COPY =
+    "Your book's own history is being rebuilt, so the comparison with your current book is not shown.";
+  const THREE_POINT_CURVE = [
+    { date: "2026-01-01", value: 100_000 },
+    { date: "2026-01-02", value: 101_000 },
+    { date: "2026-01-03", value: 99_500 },
+  ];
+  type D02ChartProps = {
+    equityDailyPoints: Array<{ date: string; value: number }>;
+    scenarioOwnBookDelta?: { book_n?: number } | undefined;
+  };
+  const lastChart = (): D02ChartProps =>
+    vi.mocked(ScenarioFactsheetChart).mock.calls.at(-1)![0] as D02ChartProps;
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    cleanup();
+  });
+
+  it("rebuilding: no own-book series reaches the chart, no own-book delta, and the disclosure renders once (and not in blank mode)", () => {
+    const payload = makePayload({
+      equityDailyPoints: THREE_POINT_CURVE,
+      equityHistoryState: "rebuilding",
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    const props = lastChart();
+    expect(props.equityDailyPoints).toEqual([]);
+    expect(props.scenarioOwnBookDelta).toBeUndefined();
+
+    const notes = screen.getAllByTestId("scenario-ownbook-rebuilding");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].textContent).toBe(OWN_BOOK_REBUILDING_COPY);
+
+    // Blank slate has no own book to compare against, so the sentence would
+    // explain an absence the user chose; it does not render there.
+    fireEvent.click(screen.getByRole("radio", { name: /blank slate/i }));
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  });
+
+  // Review round 1 (WR-01 / SFH-01): the composer gate is fail-closed. A
+  // payload with NO field, null, "" or an unknown state withholds the own-book
+  // series exactly like "rebuilding"; only an explicit "ready" shows it. The
+  // 3-point curve is present in every case, so an absent delta is the gate.
+  it.each([
+    ["missing", undefined, true],
+    ["null", null, false],
+    ["an empty string", "", false],
+    ["an unrecognised state", "partial", false],
+  ])("equityHistoryState %s → the own-book series is withheld and disclosed (fail-closed)", (_label, value, deleteField) => {
+    const payload = makePayload({
+      equityDailyPoints: THREE_POINT_CURVE,
+      equityHistoryState: value as never,
+    });
+    if (deleteField) {
+      delete (payload as Partial<MyAllocationDashboardPayload>).equityHistoryState;
+      expect("equityHistoryState" in payload).toBe(false);
+    }
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const props = lastChart();
+    expect(props.equityDailyPoints).toEqual([]);
+    expect(props.scenarioOwnBookDelta).toBeUndefined();
+    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
+  });
+
+  it("rebuilding: the live-book KPIs (liveBaselineMetrics) still reach the KPI strip (D-03)", () => {
+    const payload = makePayload({
+      equityDailyPoints: THREE_POINT_CURVE,
+      equityHistoryState: "rebuilding",
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const kpiProps = vi.mocked(KpiStrip).mock.calls.at(-1)![0];
+    const live = kpiProps.liveMetrics as unknown as {
+      twr?: number | null;
+      sharpe?: number | null;
+      max_drawdown?: number | null;
+    };
+    expect(live.twr).toBe(payload.liveBaselineMetrics.ytdTwr);
+    expect(live.sharpe).toBe(payload.liveBaselineMetrics.sharpe);
+    expect(live.max_drawdown).toBe(payload.liveBaselineMetrics.maxDd);
+  });
+
+  // Review round 1 (SFH-05): the disclosure explains an absence D-02 caused.
+  // A book with no snapshot yet (a first connect) has no own-book history to
+  // withhold, so the sentence would be false there. `snapshotCount` survives
+  // the withholding, so the composer can tell the two apart.
+  it("rebuilding + a live book with NO snapshot yet: no disclosure (nothing was withheld); with snapshots it renders", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload({ equityHistoryState: "rebuilding", snapshotCount: 0 })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Book mode is live (the default fixture has holdings), so only the
+    // snapshot condition decides the absence.
+    expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+
+    cleanup();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ equityHistoryState: "rebuilding", snapshotCount: 3 })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
+  });
+
+  // Review round 2 (WR-02): the own-book series has TWO sources, the
+  // trustworthy derived curve and the legacy snapshots. `snapshotCount` counts
+  // only the legacy rows, so a book whose history is ALL derived (every legacy
+  // row terminus-flagged, or no legacy row at all) reports 0 snapshots while
+  // D-02 still withholds a real curve. Gating on the legacy count alone
+  // silenced the disclosure for exactly that book.
+  it("rebuilding + NO legacy snapshot but a trustworthy DERIVED curve: the disclosure renders (something was withheld)", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          equityHistoryState: "rebuilding",
+          snapshotCount: 0,
+          equityCurveSource: "derived",
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
+
+    // Control: the same zero-snapshot book on the legacy source has nothing to
+    // withhold, so the case above is decided by the derived source alone.
+    cleanup();
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          equityHistoryState: "rebuilding",
+          snapshotCount: 0,
+          equityCurveSource: "legacy",
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  });
+
+  // Review round 1 (WR-02): the `bookReturns.length < 2` guard in
+  // `scenarioOwnBookDelta`. A 2-point book yields ONE return, and a Sharpe or
+  // Sortino delta from one observation is not a number worth showing. The
+  // series DOES reach the chart (so "ready" is honoured); only the delta is
+  // absent, which isolates the guard from the rebuilding gate above.
+  it("ready + a 2-point book (one derivable return): the series reaches the chart but no own-book delta is built", () => {
+    const TWO_POINT_CURVE = THREE_POINT_CURVE.slice(0, 2);
+    const payload = makePayload({
+      equityDailyPoints: TWO_POINT_CURVE,
+      equityHistoryState: "ready",
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const props = lastChart();
+    expect(props.equityDailyPoints).toEqual(TWO_POINT_CURVE);
+    expect(props.scenarioOwnBookDelta).toBeUndefined();
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  });
+
+  it("ready (regression guard): the own-book series and delta flow as before and no disclosure renders", () => {
+    const payload = makePayload({
+      equityDailyPoints: THREE_POINT_CURVE,
+      equityHistoryState: "ready",
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const props = lastChart();
+    expect(props.equityDailyPoints).toEqual(THREE_POINT_CURVE);
+    expect(props.scenarioOwnBookDelta).toBeDefined();
+    expect(props.scenarioOwnBookDelta?.book_n).toBe(2);
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
   });
 });

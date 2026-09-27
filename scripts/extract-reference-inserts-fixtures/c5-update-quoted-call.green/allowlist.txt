@@ -1,0 +1,3 @@
+# fixture allowlist — c5-update-quoted-call.green
+20260101000000_fx_a.sql	public.fx_ref	1	# consumer: the extractor self-test
+20260101000000_fx_a.sql	public.fx_ref	update:1	# consumer: the extractor self-test

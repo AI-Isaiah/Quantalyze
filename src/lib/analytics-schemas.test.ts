@@ -477,6 +477,18 @@ describe("BridgeResponseSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  // 166.1 D7 (founder 2026-09-26) / round-1 SFH HIGH-2: the Python bridge
+  // emits None for a delta whose either side does not exist (a leg whose
+  // returns do not vary). It must parse as null, not fail the whole response.
+  it("accepts a null sharpe_delta, dd_delta and corr_delta", () => {
+    const parsed = BridgeResponseSchema.parse({
+      candidates: [{ ...VALID_CANDIDATE, sharpe_delta: null, dd_delta: null, corr_delta: null }],
+    });
+    expect(parsed.candidates[0].sharpe_delta).toBeNull();
+    expect(parsed.candidates[0].dd_delta).toBeNull();
+    expect(parsed.candidates[0].corr_delta).toBeNull();
+  });
+
   it("rejects when sharpe_delta is a string (no numeric coercion)", () => {
     // Python returning "0.1" instead of 0.1 must fail loud, not coerce.
     const result = BridgeResponseSchema.safeParse({

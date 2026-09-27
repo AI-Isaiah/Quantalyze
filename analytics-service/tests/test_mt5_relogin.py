@@ -59,7 +59,7 @@ from pathlib import Path
 import pytest
 
 from services import mt5_concurrency, mt5_relogin, mt5_session_episodes
-from services.mt5_client import Mt5Client
+from services.mt5_client import Mt5Client, Mt5SessionSnapshot
 from services.mt5_concurrency import Mt5TerminalBusyError
 
 # --------------------------------------------------------------------------- #
@@ -89,9 +89,14 @@ def _reset_state():
     """
     mt5_concurrency.reset_terminal_state_for_tests()
     mt5_relogin._reset_relogin_log_throttle_for_tests()
+    # ⭐ 164.6.5 plan 05 — re-arms the ipc_fault escalation gate. A gate one test
+    # disarmed would make the next test's "fires once" depend on test ORDER.
+    mt5_session_episodes._reset_session_episode_state_for_tests()
     yield
+    _FakeMt5.clock = None
     mt5_concurrency.reset_terminal_state_for_tests()
     mt5_relogin._reset_relogin_log_throttle_for_tests()
+    mt5_session_episodes._reset_session_episode_state_for_tests()
 
 
 # --------------------------------------------------------------------------- #
@@ -99,17 +104,246 @@ def _reset_state():
 # --------------------------------------------------------------------------- #
 
 
+class _FakeClock:
+    """The heal's clock, advanced ONLY by the doubles' crossings (and, from WR-02,
+    by the heal's own sleeps). ⭐ It is what lets the budget be MEASURED against
+    the one condition it exists for — every rpyc crossing taking its full ceiling
+    — without a test waiting 220 real seconds (164.6.5 review round 1, WR-04)."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture(autouse=True)
+def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> "_FakeClock":
+    clock = _FakeClock()
+    monkeypatch.setattr(mt5_relogin, "_clock", clock.monotonic)
+    monkeypatch.setattr(mt5_relogin, "_sleep", clock.sleep)
+    _FakeMt5.clock = clock
+    return clock
+
+
+
+
+class _FakeNamespace:
+    """``conn.namespace`` — a NETREF on the real transport, so ``[name]`` is its
+    own rpyc crossing (WR-04), recorded as one."""
+
+    def __init__(self, owner: "_FakeMt5 | None", entries: dict) -> None:
+        self._owner = owner
+        self._entries = entries
+
+    def __getitem__(self, name: str):
+        if self._owner is not None:
+            self._owner._trip("recycle_lookup")
+        return self._entries[name]
+
+
 class _FakeRpycConn:
     """The rpyc connection `mt5linux.MetaTrader5` hangs off its name-mangled
     `_MetaTrader5__conn` attribute — the ONLY transport-close seam 0.1.9 exposes,
     and therefore the one `Mt5Client.close()` reaches. Shaped, not mocked, so the
-    close branch is genuinely exercised offline."""
+    close branch is genuinely exercised offline.
 
-    def __init__(self) -> None:
+    ⭐ 164.6.5 plan 05 — IT ALSO CARRIES THE RECYCLE SEAM (`execute` +
+    `namespace`), so the heal's escalation drives the REAL plan-02 verb — the real
+    fence, the real `_guarded_read`, the real verdict parse and the real relaunch
+    probe — and only the Win32 body on the far side of the wire is faked. It
+    records EXACTLY what crossed: the executed source and the arguments of the
+    remote call, which is what "no credential reaches the recycle" is asserted
+    against. ``recycle_raises`` in the owner's scenario makes the remote call
+    raise; a successful call marks the owner ``recycled`` so its next bare
+    `initialize()` answers ``initialize_after_recycle``.
+    """
+
+    def __init__(self, owner: "_FakeMt5 | None" = None) -> None:
         self.close_calls = 0
+        self._owner = owner
+        self.executed: list[str] = []
+        self.evaluated: list[str] = []
+        self.recycle_calls: list[tuple[tuple, dict]] = []
 
     def close(self) -> None:
         self.close_calls += 1
+
+    def execute(self, source: str) -> None:
+        # ⛔ WR-04 — an rpyc CROSSING, bounded only by `sync_request_timeout`, and
+        # counted as one. The double used to record nothing here, so the gate that
+        # "counts the path, never restates it" counted 8 because the double
+        # under-reported the recycle's three crossings as one.
+        if self._owner is not None:
+            self._owner._trip("recycle_execute")
+        self.executed.append(source)
+
+    def eval(self, source: str) -> object:
+        """⭐ WR-03 root cause (164.6.5 review round 2) — rpyc classic's
+        ``conn.eval``: ONE crossing, charged as one. The REAL committed source is
+        evaluated against a bridge-side view of the owning double, whose MT5
+        calls are far-side work and cross nothing. What comes back is wrapped
+        exactly as rpyc's brine would hand it over: a tuple of scalars by value,
+        anything else as a netref whose every touch is another crossing."""
+        owner = self._owner
+        assert owner is not None, "the eval seam needs its owning double"
+        owner._trip("session_snapshot")
+        self.evaluated.append(source)
+        result = eval(source, {"mt5": _BridgeSideMt5(owner)})  # noqa: S307 — the point is to run the real source
+        return _FakeNetref.wrap(owner, result)
+
+    @property
+    def namespace(self) -> "_FakeNamespace":
+        from services import mt5_client as _mt5_client
+
+        return _FakeNamespace(
+            self._owner, {_mt5_client._REMOTE_TERMINAL_RECYCLE_FN: self._recycle}
+        )
+
+    def _recycle(self, *args, **kwargs) -> str:
+        import json as _json
+
+        self.recycle_calls.append((args, dict(kwargs)))
+        owner = self._owner
+        assert owner is not None, "the recycle seam needs its owning double"
+        owner.call_order.append("recycle")
+        owner._trip("recycle")
+        exc = owner._scenario.get("recycle_raises")
+        if exc is not None:
+            raise exc
+        owner.recycled = True
+        owner.recycled_at = _FakeMt5.clock.now if _FakeMt5.clock is not None else 0.0
+        hook = owner._scenario.get("after_recycle_crossed")
+        if hook is not None:
+            hook()
+        # ⭐ WR-03 / SFH-01 — the counts are a SCENARIO KNOB. A double that always
+        # answered (1, 1, 1) made every "the recycle landed" test pass by
+        # construction: no case could express a recycle that ended nothing.
+        matched, terminated, exited = owner._scenario.get("recycle_counts", (1, 1, 1))
+        if terminated == 0:
+            # Nothing was ended, so the next bare `initialize()` attaches to the
+            # SAME, still-running terminal: the pre-recycle answers stand.
+            owner.recycled = False
+        return _json.dumps(
+            {
+                "matched": matched,
+                "terminated": terminated,
+                "exited": exited,
+                "open_errors": owner._scenario.get("open_errors", []),
+                "terminate_errors": owner._scenario.get("terminate_errors", []),
+                "file_versions": owner._scenario.get(
+                    "file_versions", [[5, 0, 0, 6182]] * matched
+                ),
+                "file_version_errors": owner._scenario.get(
+                    "file_version_errors", [0] * matched
+                ),
+                # ⭐ 164.6.5 review round 2, Topic B (`mt5_client`, dd2ceb0e3) —
+                # the six fields the remote source now returns.
+                "attempted": owner._scenario.get("attempted", matched),
+                "unprocessed": owner._scenario.get("unprocessed", 0),
+                "enumerated": owner._scenario.get("enumerated", matched + 3),
+                "enumerate_error": owner._scenario.get("enumerate_error", 0),
+                "pid_errors": owner._scenario.get("pid_errors", []),
+                "file_version_exc": owner._scenario.get(
+                    "file_version_exc", [None] * matched
+                ),
+            }
+        )
+
+
+def _crosses_by_value(value: object) -> bool:
+    """What rpyc's brine hands back BY VALUE rather than as a netref: scalars,
+    and plain tuples of them. A namedtuple, a dict, a bound method and an
+    iterator are all NETREFS on the real transport."""
+    if value is None or isinstance(value, (bool, int, float, str, bytes)):
+        return True
+    return type(value) is tuple and all(_crosses_by_value(v) for v in value)
+
+
+class _FakeNetref:
+    """⭐ WR-03 (164.6.5 review round 2) — a NETREF to a remote object, so an
+    answering `terminal_info()` / `account_info()` costs what it costs on the
+    real transport. The double used to hand back a LOCAL namedtuple, which made
+    `_materialize` look like zero crossings; on the wire every attribute access,
+    every call, the `__iter__` and every `next()` is its own rpyc crossing (this
+    module's `_materialize` comment: ONE ROUND-TRIP PER FIELD). Each is recorded
+    and charged against the fake clock like any other crossing."""
+
+    def __init__(self, owner: "_FakeMt5", value: object) -> None:
+        self._nr_owner = owner
+        self._nr_value = value
+
+    @staticmethod
+    def wrap(owner: "_FakeMt5", value: object) -> object:
+        return value if _crosses_by_value(value) else _FakeNetref(owner, value)
+
+    def __getattr__(self, name: str) -> object:
+        self._nr_owner._trip("netref_getattr")
+        return _FakeNetref.wrap(self._nr_owner, getattr(self._nr_value, name))
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._nr_owner._trip("netref_call")
+        return _FakeNetref.wrap(self._nr_owner, self._nr_value(*args, **kwargs))  # type: ignore[operator]
+
+    def __iter__(self) -> "_FakeNetrefIterator":
+        self._nr_owner._trip("netref_iter")
+        return _FakeNetrefIterator(self._nr_owner, iter(self._nr_value))  # type: ignore[call-overload]
+
+
+class _FakeNetrefIterator:
+    def __init__(self, owner: "_FakeMt5", it) -> None:
+        self._owner = owner
+        self._it = it
+
+    def __iter__(self) -> "_FakeNetrefIterator":
+        return self
+
+    def __next__(self) -> object:
+        self._owner._trip("netref_next")  # the closing StopIteration crosses too
+        return _FakeNetref.wrap(self._owner, next(self._it))
+
+
+def _info_tuple(name: str, fields: int, **known: object):
+    """A namedtuple shaped like the MetaTrader5 package's, with exactly ``fields``
+    fields: the ``known`` ones first, then fillers."""
+    from collections import namedtuple
+
+    names = list(known) + [f"field_{i}" for i in range(fields - len(known))]
+    return namedtuple(name, names)(*known.values(), *range(fields - len(known)))
+
+
+#: ⭐ WR-03 root cause — a terminal on the HOUSE session, connected, at the
+#: MetaTrader5 package's documented field counts (22 / 28).
+_HOUSE_TERMINAL = _info_tuple("TerminalInfo", 22, build=6182, connected=True)
+_HOUSE_ACCOUNT = _info_tuple(
+    "AccountInfo", 28, login=int(_FAKE_LOGIN), server=_FAKE_SERVER
+)
+
+
+class _BridgeSideMt5:
+    """The MetaTrader5 package AS THE BRIDGE SEES IT: the `mt5` a committed
+    remote expression reads through. Its calls answer from the owning double's
+    scenario and join its `call_order`, but they are far-side work, so they
+    record NO crossing — the crossing is the one `conn.eval` that ran them."""
+
+    def __init__(self, owner: "_FakeMt5") -> None:
+        self._owner = owner
+
+    def terminal_info(self) -> object:
+        self._owner.call_order.append("terminal_info")
+        return self._owner._scenario.get("terminal_info")
+
+    def account_info(self) -> object:
+        self._owner.call_order.append("account_info")
+        return self._owner._scenario.get("account_info")
+
+    def last_error(self) -> object:
+        return self._owner._last_error_value()
 
 
 class _FakeMt5:
@@ -129,6 +363,14 @@ class _FakeMt5:
       ``last_error_after_heal``      -> the `(code, text)` tuple once a credentialed
                                         call has been accepted (falls back to
                                         ``last_error``)
+      ``terminal_info`` / ``account_info`` -> what those reads return (default
+                                        ``None``, i.e. the terminal cannot answer)
+      ``recycle_raises``             -> exception the remote recycle call raises
+      ``initialize_after_recycle``   -> what a BARE `initialize()` returns once the
+                                        terminal was recycled (falls back to
+                                        ``initialize``)
+      ``last_error_after_recycle``   -> the `(code, text)` tuple once recycled
+                                        (falls back to ``last_error``)
 
     ⭐ The bare and credentialed forms are SEPARATE scenario keys because the whole
     branch under test is "answer the detector one way, the heal another". A double
@@ -155,9 +397,24 @@ class _FakeMt5:
     answer a different code than the first.
     """
 
+    #: The shared `_FakeClock` (set by the autouse fixture). Every crossing
+    #: advances it by the scenario's ``crossing_cost_s`` (default 0).
+    clock: "_FakeClock | None" = None
+
+    def _trip(self, name: str) -> None:
+        """ONE rpyc crossing: recorded, and charged against the fake clock."""
+        self.round_trips.append(name)
+        if _FakeMt5.clock is not None:
+            _FakeMt5.clock.now += self._scenario.get("crossing_costs", {}).get(
+                name, self._scenario.get("crossing_cost_s", 0.0)
+            )
+
     def __init__(self, scenario: dict) -> None:
         self._scenario = scenario
-        self._MetaTrader5__conn = _FakeRpycConn()
+        self._MetaTrader5__conn = _FakeRpycConn(self)
+        #: 164.6.5 plan 05 — set by a successful remote recycle.
+        self.recycled = False
+        self.recycled_at = 0.0
         self.initialize_kwargs: list[dict] = []
         self.call_order: list[str] = []
         self.credentialed_accepted = False
@@ -175,9 +432,7 @@ class _FakeMt5:
         self.call_order.append(
             "initialize_credentialed" if credentialed else "initialize"
         )
-        self.round_trips.append(
-            "initialize_credentialed" if credentialed else "initialize"
-        )
+        self._trip("initialize_credentialed" if credentialed else "initialize")
         post_heal = not credentialed and self.credentialed_accepted
         sleep_s = self._scenario.get("initialize_sleep_s")
         if sleep_s:
@@ -187,6 +442,19 @@ class _FakeMt5:
             import time as _time
 
             _time.sleep(sleep_s)
+        if not credentialed and self.recycled:
+            # ⭐ 164.6.5 plan 05 — the terminal was ended and relaunched; what a
+            # bare `initialize()` answers now is the scenario's post-recycle
+            # state, defaulting to the pre-recycle one (a wedge that persists).
+            after = self._scenario.get("relaunch_authorized_after_s")
+            if after is not None and _FakeMt5.clock is not None:
+                # ⭐ WR-02 — a relaunch that takes TIME, as the live spike measured
+                # (86 s kill-to-authorized): answering only once that long has
+                # passed on the heal's clock since the terminate crossed.
+                return _FakeMt5.clock.now - self.recycled_at >= after
+            return self._scenario.get(
+                "initialize_after_recycle", self._scenario.get("initialize", True)
+            )
         if post_heal:
             # ⭐ The re-probe is a REAL round-trip over the same wedgeable bridge,
             # so it can raise like any other. `reprobe_raises` expresses a fault
@@ -212,8 +480,32 @@ class _FakeMt5:
             self.credentialed_accepted = True
         return result
 
+    def terminal_info(self):
+        self.call_order.append("terminal_info")
+        self._trip("terminal_info")
+        return _FakeNetref.wrap(self, self._scenario.get("terminal_info"))
+
+    def account_info(self):
+        self.call_order.append("account_info")
+        self._trip("account_info")
+        return _FakeNetref.wrap(self, self._scenario.get("account_info"))
+
+    def login(self, *args, **kwargs):
+        # ⭐ 164.6.5 SFH-05 — the JOB path's per-call login, reached only by the
+        # gate proving a recovery the job path saw re-arms the escalation.
+        self.call_order.append("login")
+        self._trip("login")
+        return self._scenario.get("login", True)
+
     def last_error(self):
-        self.round_trips.append("last_error")
+        self._trip("last_error")
+        return self._last_error_value()
+
+    def _last_error_value(self):
+        """What `last_error()` answers, WITHOUT a crossing (the bridge-side view
+        reads it inside the one `conn.eval`)."""
+        if self.recycled and "last_error_after_recycle" in self._scenario:
+            return self._scenario["last_error_after_recycle"]
         if self.credentialed_accepted and "last_error_after_heal" in self._scenario:
             return self._scenario["last_error_after_heal"]
         return self._scenario.get("last_error", (0, "unknown"))
@@ -1355,7 +1647,26 @@ async def test_an_ipc_fault_is_not_healed_and_the_verdict_names_the_code(
     with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         assert await mt5_relogin.heal_mt5_terminal_session() is None
 
-    assert fake.call_order == ["initialize"]
+    # ⭐ 164.6.5 plan 05 — `-10005` (bridge answered, terminal did not) now
+    # ESCALATES to a terminal-process recycle: capture the evidence, recycle,
+    # relaunch. The other two codes still touch nothing past the probe. In NO
+    # case is a credential sent — that is the half this parametrization guards.
+    if ipc_code == -10005:
+        # ⭐ 164.6.5 WR-02 — the relaunch is WATCHED: after the verb's own
+        # relaunch probe come the bare, credential-free relaunch polls, and
+        # nothing else. ⛔ WR-03 (review round 2) removed the capture; ⭐ its root
+        # cause (same day) put it back as ONE bridge-side read: `terminal_info`
+        # is read on the far side, and a terminal that does not answer it is
+        # not asked `account_info`.
+        assert fake.call_order[:4] == [
+            "initialize",
+            "terminal_info",
+            "recycle",
+            "initialize",
+        ]
+        assert set(fake.call_order[4:]) <= {"initialize"}, fake.call_order
+    else:
+        assert fake.call_order == ["initialize"]
     assert not any("login" in kw for kw in fake.initialize_kwargs)
     record = _records(caplog)[-1]
     message = record.getMessage()
@@ -1379,6 +1690,1729 @@ async def test_an_ipc_fault_is_not_healed_and_the_verdict_names_the_code(
         "different faults (WR-01)"
     )
     _assert_no_credential_value_escaped(_records(caplog))
+
+
+# --------------------------------------------------------------------------- #
+# ⭐ 164.6.5 plan 05 (criterion 3, D-08) — THE HEAL ACTS ON `ipc_fault`.
+#
+# Production read `not_healed:ipc_fault` FIVE consecutive times on 2026-09-21:
+# the heal cannot drive a terminal whose IPC is dead, so it never reached a login
+# attempt. It now ESCALATES the `-10005` class (the bridge answered, the terminal
+# did not) to the plan-02 terminal-process recycle — once per run of readings,
+# inside the one lease, never with a credential, and never raising.
+#
+# ⛔ Every gate below was observed RED under a neuter of the production behaviour
+# it names before it was restored (recorded in the plan's SUMMARY).
+# --------------------------------------------------------------------------- #
+
+_IPC_TIMEOUT = -10005
+_IPC_TIMEOUT_TEXT = "IPC timeout"
+_WEDGED = {"initialize": False, "last_error": (_IPC_TIMEOUT, _IPC_TIMEOUT_TEXT)}
+
+#: The `-10005` verdict as it stood BEFORE this plan — MEASURED by running this
+#: file's verdict gate against the pre-plan `mt5_relogin.py` (see the SUMMARY).
+#: ⛔ A literal on purpose: composing it with `_not_healed` would pass for any
+#: edit that changed the composition inside `_heal_blocking` too.
+_PRE_ESCALATION_IPC_TIMEOUT_VERDICT = (
+    "not_healed:ipc_fault:code=-10005:MT5 client error (code=-10005): IPC timeout"
+)
+
+_ESCALATION_KINDS = (
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLED,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_STILL_FAULTED,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_FAILED,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_CAPPED,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_DEGRADED,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
+)
+
+
+def _capture_outcomes(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Replace the episode sink with a list, so each test reads the STRUCTURED
+    `HealOutcome` the heal produced rather than parsing a log line — and no
+    Supabase client is ever reached."""
+    outcomes: list = []
+
+    async def _record(outcome, *, source, poll_interval_s):
+        outcomes.append(outcome)
+
+    monkeypatch.setattr(mt5_relogin, "record_mt5_heal_outcome", _record)
+    return outcomes
+
+
+def _recycle_count(fake) -> int:
+    return len(fake._MetaTrader5__conn.recycle_calls)
+
+
+async def _heal_n_times(n: int) -> None:
+    for _ in range(n):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+
+async def test_ESCALATION_five_consecutive_ipc_timeouts_produce_exactly_ONE_recycle(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⭐ FIVE IS THE MEASURED PRODUCTION SEQUENCE, not an arbitrary count.
+
+    ⛔ THE DEBOUNCE IS THE DIFFERENCE BETWEEN A RECOVERY AND AN OUTAGE. At a
+    ten-minute cadence an un-debounced escalation recycles the ONE shared
+    terminal every ten minutes for as long as the recycle does not help, and
+    each recycle drops the IPC for every other caller. The terminal here stays
+    wedged after the recycle, which is exactly when a second attempt would fire.
+    """
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, dict(_WEDGED))
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(5)
+
+    assert _recycle_count(fake) == 1, (
+        f"five consecutive readings of ONE wedge produced {_recycle_count(fake)} "
+        "recycles — the debounce is what stops the heal recycling a shared "
+        "terminal on every tick"
+    )
+    assert [o.escalation_kind for o in outcomes] == [
+        mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_STILL_FAULTED,
+        None,
+        None,
+        None,
+        None,
+    ]
+    debounced = [
+        r for r in _records(caplog) if "is NOT repeated" in r.getMessage()
+    ]
+    assert len(debounced) == 4, "each suppressed attempt must still be SAID"
+
+
+async def test_ESCALATION_re_arms_after_a_reading_of_a_different_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reading that is not the escalating class ENDS the run, so the next wedge
+    is a new run and earns its own one attempt. ⛔ Without this, one wedge would
+    spend the only recycle this process will ever make."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, dict(_WEDGED))
+    outcomes = _capture_outcomes(monkeypatch)
+
+    await _heal_n_times(2)  # one wedge: one recycle, one debounced reading
+    assert _recycle_count(fake) == 1
+
+    fake._scenario["initialize_after_recycle"] = True  # the terminal recovered
+    await _heal_n_times(1)
+    assert outcomes[-1].first_kind == mt5_session_episodes.KIND_ALREADY_AUTHORIZED
+
+    fake._scenario["initialize_after_recycle"] = False  # ...and wedged again
+    await _heal_n_times(2)
+    assert _recycle_count(fake) == 2, (
+        "a new wedge after an authorized reading did not escalate — the gate "
+        "was never re-armed"
+    )
+
+
+@pytest.mark.parametrize(
+    "answered,rewedge",
+    [
+        pytest.param(
+            {"initialize_after_recycle": True},
+            {"initialize_after_recycle": False},
+            id="relaunch-AUTHORIZED",
+        ),
+        pytest.param(
+            {"last_error_after_recycle": (-6, "Terminal: Authorization failed")},
+            {"last_error_after_recycle": (_IPC_TIMEOUT, _IPC_TIMEOUT_TEXT)},
+            id="relaunch-answered-NO-ACCOUNT",
+        ),
+    ],
+)
+async def test_ESCALATION_CR01_a_recycle_that_WORKED_re_arms_so_the_NEXT_wedge_is_recycled(
+    monkeypatch: pytest.MonkeyPatch, answered: dict, rewedge: dict
+) -> None:
+    """⛔ CR-01 (164.6.5 review round 1). The relaunch probe MEASURED the terminal
+    answering, so the run of faults is over. The failure it guards: a client
+    validation re-wedges the terminal BEFORE the next tick sees it healthy, so no
+    authorized first-probe reading ever arrives — and a gate that only a
+    first-probe reading could re-arm debounced every later `-10005` until a
+    redeploy. Wedge -> recycle that works -> wedge on the very NEXT tick must be
+    TWO recycles, with no healthy tick in between."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, {**_WEDGED, **answered})
+    outcomes = _capture_outcomes(monkeypatch)
+
+    await _heal_n_times(1)
+    assert _recycle_count(fake) == 1
+    assert outcomes[0].escalation_kind in (
+        mt5_session_episodes.KIND_IPC_FAULT_RECYCLED,
+        mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
+        mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
+    )
+
+    fake._scenario.update(rewedge)  # re-wedged before any tick saw it healthy
+    await _heal_n_times(1)
+
+    assert outcomes[1].first_kind == mt5_session_episodes.KIND_IPC_FAULT
+    assert _recycle_count(fake) == 2, (
+        "a recycle whose relaunch MEASURED the terminal answering left the gate "
+        "disarmed, so the next wedge was debounced instead of recycled (CR-01)"
+    )
+
+
+async def test_R2_CR01_a_wedge_that_RECURS_after_each_working_recycle_is_CAPPED_and_raised_at_ERROR(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+) -> None:
+    """⛔ CR-01 (164.6.5 review round 2). Round 1's CR-01 re-arm is right for the
+    ACTION, but composed with the alarm's reset it let a wedge that returns every
+    tick recycle the SHARED terminal every tick, unbounded, and never reach
+    ERROR: each recycle "worked", each ended the run, each logged at INFO. That
+    is Cause B as the runbook describes it — a client validation's account
+    switch re-wedging the terminal — and nothing emitted the signal.
+
+    ⭐ ORCHESTRATOR DECISION 2026-09-25 (recorded in CONTEXT.md): a rolling
+    one-hour window caps recycles at 2; the 2nd within the hour is an ERROR
+    naming the Cause B signal; once capped nothing is recycled until the
+    oldest recycle is an hour old, and the cap is re-raised at ERROR hourly."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch, {**_WEDGED, "initialize_after_recycle": True}
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    def _tick() -> None:
+        fake.recycled = False  # a client validation re-wedged it before this tick
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        for _ in range(4):  # t = 0, 10, 20, 30 min
+            _tick()
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+
+        assert _recycle_count(fake) == 2, (
+            f"{_recycle_count(fake)} recycles of the shared terminal in 30 min; "
+            "the rolling-hour cap is 2"
+        )
+        kinds = [o.escalation_kind for o in outcomes]
+        assert kinds[2:] == [mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_CAPPED] * 2
+        errors = [r.getMessage() for r in _records(caplog) if r.levelno >= logging.ERROR]
+        assert len(errors) == 1, errors
+        assert "Cause B" in errors[0] and "REPEATED WEDGE" in errors[0], errors
+
+        # An hour after the FIRST recycle it has left the window: the remedy is
+        # available again, and the recurrence is raised again.
+        _fake_clock.now += 2 * 600.0  # t = 60 min (the loop left it at 40)
+        _tick()
+        await _heal_n_times(1)
+
+    assert _recycle_count(fake) == 3
+    errors = [r.getMessage() for r in _records(caplog) if r.levelno >= logging.ERROR]
+    assert len(errors) == 2 and "Cause B" in errors[1], errors
+
+
+def test_R2_CR01_the_recycle_window_is_TWO_stamps_and_a_refused_claim_takes_its_entry_back() -> None:
+    """The window is two monotonic stamps because the cap is 2 (a list would be
+    unbounded module state). ⛔ Raising the cap without widening the storage
+    would silently count at most two, so the cap is pinned beside it. And a
+    claim the verb's own fence refused recycled NOTHING: its window entry must
+    go, or a refused attempt would count toward the Cause B cap."""
+    episodes = mt5_session_episodes
+    assert episodes.IPC_FAULT_RECYCLE_CAP == 2
+    window = mt5_relogin._IPC_FAULT_RECYCLE_WINDOW_S
+
+    assert episodes.claim_ipc_fault_escalation(100.0, window) == 1
+    episodes.restore_ipc_fault_attempt()
+    assert episodes.ipc_fault_recycles_in_window(100.0, window) == 0
+
+    assert episodes.claim_ipc_fault_escalation(100.0, window) == 1
+    episodes.end_ipc_fault_run()  # a working recycle ends the RUN...
+    assert episodes.claim_ipc_fault_escalation(200.0, window) == 2  # ...not the window
+    assert episodes.ipc_fault_recycles_in_window(100.0 + window, window) == 1
+
+
+@pytest.mark.parametrize(
+    "neutral_code",
+    [
+        pytest.param(0, id="the-unattributed-sentinel"),
+        pytest.param(-10003, id="ipc-init-failed"),
+        pytest.param(-10004, id="bridge-DETACHED"),
+    ],
+)
+async def test_ESCALATION_WR08_a_reading_that_measured_no_answer_does_NOT_re_arm(
+    monkeypatch: pytest.MonkeyPatch, neutral_code: int
+) -> None:
+    """⛔ WR-08 (164.6.5 review round 1). `0` is `_raise_last`'s sentinel for
+    "last_error() itself failed" — it measured NOTHING — and `-10003` / `-10004`
+    are the terminal not answering either. A bridge that intermittently times
+    out `last_error()` during a wedge reads `-10005, 0, -10005, 0 ...`; if the
+    middle reading re-arms the gate, the shared terminal is recycled every other
+    tick (every 20 minutes), the periodic outage the debounce exists to prevent.
+    `-10005, <neutral>, -10005` must be ONE recycle."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, dict(_WEDGED))
+    _capture_outcomes(monkeypatch)
+
+    await _heal_n_times(1)
+    assert _recycle_count(fake) == 1
+
+    fake._scenario["last_error_after_recycle"] = (neutral_code, "no answer")
+    await _heal_n_times(1)
+    fake._scenario["last_error_after_recycle"] = (_IPC_TIMEOUT, _IPC_TIMEOUT_TEXT)
+    await _heal_n_times(1)
+
+    assert _recycle_count(fake) == 1, (
+        f"a `{neutral_code}` reading between two wedged readings re-armed the "
+        "gate and the terminal was recycled again (WR-08)"
+    )
+
+
+async def test_ESCALATION_SFH05_a_recovery_ONLY_the_job_path_saw_re_arms_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ SFH-05 (164.6.5 review round 1). While jobs hold the lease every monitor
+    tick is a busy SKIP that measures nothing, so the heal's own probe never sees
+    the terminal recover. A job's `login()` does: its bare `initialize()`
+    answered. The next wedge after that is a NEW run and must be recycled — not
+    debounced as "already attempted in this run"."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, dict(_WEDGED))
+    _capture_outcomes(monkeypatch)
+
+    await _heal_n_times(1)
+    assert _recycle_count(fake) == 1
+
+    # A job, on its own client for the SAME terminal, logs in successfully.
+    healthy = _FakeMt5({"initialize": True, "login": True})
+    job_client = Mt5Client(
+        _FAKE_HOST, int(_FAKE_PORT), _connect=lambda **_k: healthy
+    )
+    job_client.login(int(_FAKE_LOGIN), _FAKE_PASSWORD, _FAKE_SERVER)
+
+    await _heal_n_times(1)  # the terminal has wedged again
+
+    assert _recycle_count(fake) == 2, (
+        "the terminal answered the job path's login between the two wedges, "
+        "yet the second wedge was debounced as the same run (SFH-05)"
+    )
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        pytest.param(-10004, id="bridge-DETACHED"),
+        pytest.param(-10003, id="ipc-init-failed"),
+        pytest.param(0, id="the-unattributed-sentinel"),
+    ],
+)
+async def test_ESCALATION_never_fires_where_the_recycle_cannot_reach(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """⛔ A DETACHED bridge (`-10004`) gives the recycle nothing to talk to — the
+    verb has to travel THROUGH that bridge — and the shipped remedy there is a
+    redeploy. `-10003` and the `0` sentinel are not the wedge. The CALL COUNT is
+    asserted, not merely the verdict: a recycle that fired and then failed would
+    leave the verdict unchanged."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch, {"initialize": False, "last_error": (code, "No IPC connection")}
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    await _heal_n_times(1)
+
+    assert _recycle_count(fake) == 0
+    assert fake.call_order == ["initialize"], (
+        "nothing past the probe may touch the terminal for this class — not the "
+        f"evidence capture, not the recycle: {fake.call_order}"
+    )
+    assert outcomes[0].escalation_kind is None
+
+
+def test_the_escalation_gate_is_exactly_the_ipc_timeout_code() -> None:
+    """⛔ The gate is DERIVED from the shipped `_IPC_TRANSPORT_CODES` tuple, so a
+    code added to that tuple would silently widen what the heal recycles on.
+    This pin makes that widening a decision."""
+    assert mt5_relogin._RECYCLE_REACHABLE_IPC_CODES == frozenset({-10005})
+
+
+async def test_ESCALATION_a_minus_six_still_takes_the_credentialed_heal_and_never_recycles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`-6` is the bridge answering with no account signed in: the ONE fault the
+    credentialed heal exists for. It behaves exactly as before this plan."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {"initialize": False, "last_error": (-6, "Terminal: Authorization failed")},
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    await _heal_n_times(1)
+
+    assert fake.call_order == [
+        "initialize",
+        "initialize_credentialed",
+        "initialize",
+    ]
+    assert _recycle_count(fake) == 0
+    assert outcomes[0].final_kind == mt5_session_episodes.KIND_HEALED
+    assert outcomes[0].escalation_kind is None
+
+
+async def test_ESCALATION_a_raising_recycle_cannot_escape_the_heal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ THE HIGHEST-SEVERITY PROPERTY. A raise out of the heal reaches the
+    entry's handler and, from there, `_crash_handler` — which stops the
+    dispatch, watchdog and enqueue loops while `/health` stays green: a silent
+    ANALYTICS outage caused by an MT5 fault.
+
+    Proved with a `RuntimeError` from the verb itself — a type `_heal_blocking`'s
+    own `except Mt5ClientError` arms would let straight through."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, dict(_WEDGED))
+    outcomes = _capture_outcomes(monkeypatch)
+
+    def _raising(self) -> dict:
+        raise RuntimeError("the recycle blew up")
+
+    monkeypatch.setattr(Mt5Client, "recycle_terminal_process", _raising)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert len(outcomes) == 1, (
+        "the heal did not return an outcome — the raise escaped `_heal_blocking`"
+    )
+    assert (
+        outcomes[0].escalation_kind
+        == mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_FAILED
+    )
+    assert outcomes[0].verdict == _PRE_ESCALATION_IPC_TIMEOUT_VERDICT
+    failed = [
+        r
+        for r in _records(caplog)
+        if mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_FAILED in r.getMessage()
+    ]
+    assert failed and failed[0].levelno == logging.ERROR
+    assert "the recycle blew up" not in failed[0].getMessage(), (
+        "the escalation line quoted exception TEXT; it names the class only"
+    )
+    assert not any("did not complete" in r.getMessage() for r in _records(caplog))
+
+
+def test_ESCALATION_the_session_abandonment_exception_still_escapes_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ `Mt5SessionAbandoned` is a PLAIN exception ON PURPOSE (D-42): an
+    our-infrastructure refusal must never be re-classified. The escalation's
+    guard must not widen to swallow it — from the recycle OR from the capture."""
+    from services.mt5_client import Mt5SessionAbandoned
+
+    class _Client:
+        terminal_key = "stub.test:1"
+
+        def __init__(self, raise_in: str) -> None:
+            self._raise_in = raise_in
+
+        def session_snapshot(
+            self, *, expected_login: int | None, expected_server: str
+        ) -> Mt5SessionSnapshot:
+            if self._raise_in == "capture":
+                raise Mt5SessionAbandoned("session_snapshot")
+            return Mt5SessionSnapshot(None, 1, True, True, None, None, True)
+
+        def recycle_terminal_process(self) -> dict:
+            # ⚠️ Raises ONLY in the recycle case: if it raised in both, the
+            # capture case would pass on the recycle's raise even with the
+            # capture swallowing its own (measured: that neuter stayed GREEN).
+            if self._raise_in == "recycle":
+                raise Mt5SessionAbandoned("terminal_recycle")
+            return {"matched": 1, "terminated": 1, "exited": 1,
+                    "authorized": True, "relaunch_code": None}
+
+    for raise_in in ("capture", "recycle"):
+        mt5_session_episodes._reset_session_episode_state_for_tests()
+        with pytest.raises(Mt5SessionAbandoned):
+            mt5_relogin._escalate_ipc_fault(
+                _Client(raise_in), _IPC_TIMEOUT, "unused-server"  # type: ignore[arg-type]
+            )
+
+
+def _escalation_client(fake) -> Mt5Client:
+    return Mt5Client(_FAKE_HOST, int(_FAKE_PORT), _connect=lambda **_k: fake)
+
+
+@pytest.mark.parametrize(
+    "released", ["during_the_capture", "after_the_capture"]
+)
+def test_ESCALATION_WR01_an_escalation_abandoned_BEFORE_the_recycle_crossed_keeps_the_attempt(
+    monkeypatch: pytest.MonkeyPatch, released: str
+) -> None:
+    """⛔ WR-01 (164.6.5 review round 1). The gate used to be claimed as the
+    escalation's FIRST act, so an escalation abandoned during the evidence
+    capture, or refused by the recycle verb's own first-statement fence, had
+    spent the run's one attempt with NO process ended — and every later `-10005`
+    was debounced until a redeploy.
+
+    Driven through the REAL verb: the lease releases (the generation bumps)
+    after the capture, so the verb's own fence refuses before anything crosses.
+    The next escalation must still be allowed to recycle."""
+    from services.mt5_client import Mt5SessionAbandoned, bump_mt5_terminal_epoch
+
+    fake = _FakeMt5(dict(_WEDGED))
+    client = _escalation_client(fake)
+    real_capture = mt5_relogin._capture_wedge_evidence
+
+    def _capture_with_lease_release(c, env_server, deadline):
+        c._assert_live("bind")  # first touch binds the generation (the first probe, in production)
+        if released == "during_the_capture":
+            bump_mt5_terminal_epoch(c.terminal_key)
+            return real_capture(c, env_server, deadline)  # its first read is refused
+        line = real_capture(c, env_server, deadline)
+        bump_mt5_terminal_epoch(c.terminal_key)
+        return line
+
+    monkeypatch.setattr(
+        mt5_relogin, "_capture_wedge_evidence", _capture_with_lease_release
+    )
+    with pytest.raises(Mt5SessionAbandoned) as refused:
+        mt5_relogin._escalate_ipc_fault(client, _IPC_TIMEOUT, _FAKE_SERVER)
+    if released == "after_the_capture":
+        assert refused.value.stage == mt5_relogin._RECYCLE_FENCE_STAGE
+    assert fake._MetaTrader5__conn.recycle_calls == [], "the refused recycle crossed"
+
+    monkeypatch.setattr(mt5_relogin, "_capture_wedge_evidence", real_capture)
+    fresh = _FakeMt5(dict(_WEDGED))
+    kind = mt5_relogin._escalate_ipc_fault(
+        _escalation_client(fresh), _IPC_TIMEOUT, _FAKE_SERVER
+    )
+    assert kind is not None and _recycle_count(fresh) == 1, (
+        "an escalation refused BEFORE the recycle crossed spent the run's one "
+        "attempt, so the next wedged reading was debounced (WR-01)"
+    )
+
+
+def test_ESCALATION_WR01_an_escalation_abandoned_AFTER_the_terminate_crossed_spends_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half, so the re-arm above cannot be widened into "re-arm on
+    ANY abandonment": once the terminate has crossed, the shared terminal WAS
+    recycled, and a second attempt in the same run is exactly what the debounce
+    refuses. Here the lease releases while the remote call is in flight, so the
+    relaunch probe's fence is the one that refuses."""
+    from services.mt5_client import Mt5SessionAbandoned, bump_mt5_terminal_epoch
+
+    fake = _FakeMt5(dict(_WEDGED))
+    client = _escalation_client(fake)
+    fake._scenario["after_recycle_crossed"] = lambda: bump_mt5_terminal_epoch(
+        client.terminal_key
+    )
+    with pytest.raises(Mt5SessionAbandoned) as refused:
+        mt5_relogin._escalate_ipc_fault(client, _IPC_TIMEOUT, _FAKE_SERVER)
+    assert refused.value.stage != mt5_relogin._RECYCLE_FENCE_STAGE
+    assert _recycle_count(fake) == 1
+
+    fresh = _FakeMt5(dict(_WEDGED))
+    assert (
+        mt5_relogin._escalate_ipc_fault(
+            _escalation_client(fresh), _IPC_TIMEOUT, _FAKE_SERVER
+        )
+        is None
+    )
+    assert _recycle_count(fresh) == 0
+
+
+async def test_ESCALATION_the_verdict_string_did_not_move(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ `not_healed:` IS A CONTRACT downstream keys off. This plan changes what
+    the heal DOES, never what an existing verdict MEANS — so the `-10005` verdict
+    is byte-identical to the pre-plan one whether the escalation fired, was
+    debounced, or failed, and so is the line that logs it."""
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, dict(_WEDGED))
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(2)  # fired, then debounced
+
+    assert outcomes[0].escalation_kind is not None
+    assert outcomes[1].escalation_kind is None
+    for outcome in outcomes:
+        assert outcome.verdict == _PRE_ESCALATION_IPC_TIMEOUT_VERDICT
+        assert outcome.first_kind == mt5_session_episodes.KIND_IPC_FAULT
+        assert outcome.first_code == _IPC_TIMEOUT
+        assert outcome.final_kind is None and outcome.final_code is None
+    verdict_lines = [
+        r.getMessage()
+        for r in _records(caplog)
+        if r.getMessage().startswith("mt5 boot heal: not_healed:")
+    ]
+    assert verdict_lines == [
+        f"mt5 boot heal: {_PRE_ESCALATION_IPC_TIMEOUT_VERDICT}"
+    ] * 2
+
+
+async def test_ESCALATION_no_credential_reaches_the_recycle(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ ASSERTED STRUCTURALLY — on what CROSSED THE WIRE and what the verb was
+    CALLED WITH — never by searching a log for a value. Escalating means
+    recycling the process; it NEVER means another login (D-08)."""
+    from services import mt5_client
+
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, dict(_WEDGED))
+    _capture_outcomes(monkeypatch)
+    verb_calls: list[tuple[tuple, dict]] = []
+    real_verb = Mt5Client.recycle_terminal_process
+
+    def _recording(self, *args, **kwargs):
+        verb_calls.append((args, dict(kwargs)))
+        return real_verb(self, *args, **kwargs)
+
+    monkeypatch.setattr(Mt5Client, "recycle_terminal_process", _recording)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert verb_calls == [((), {})], "the recycle verb was handed arguments"
+    conn = fake._MetaTrader5__conn
+    assert conn.executed == [mt5_client._REMOTE_TERMINAL_RECYCLE_SRC], (
+        "something other than the committed recycle source crossed the wire"
+    )
+    assert conn.recycle_calls == [((mt5_client._TERMINAL_EXIT_WAIT_MS,), {})]
+    assert "initialize_credentialed" not in fake.call_order
+    assert all(
+        not ({"login", "password", "server"} & set(kw))
+        for kw in fake.initialize_kwargs
+    ), f"a credential reached initialize(): {fake.initialize_kwargs}"
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+async def test_ESCALATION_the_wedge_evidence_is_captured_BEFORE_the_recycle(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⭐ `MT5-SWITCH-WEDGE-CAUSE-01`: the wedge is PROCESS state, so the recycle
+    that heals it erases the only evidence for its cause. The build, the
+    connection state and whether the session's broker server is the
+    environment's must be READ and LOGGED before the recycle runs.
+
+    ⛔ The server is logged as a COMPARISON, never as a name (T-164.6.2-12), and
+    no account number is read into the line."""
+    from collections import namedtuple
+
+    terminal = namedtuple("TerminalInfo", "build connected")(6182, False)
+    account = namedtuple("AccountInfo", "login server")(
+        int(_FAKE_LOGIN), _FAKE_SERVER
+    )
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch, {**_WEDGED, "terminal_info": terminal, "account_info": account}
+    )
+    _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert fake.call_order.index("terminal_info") < fake.call_order.index("recycle")
+    assert fake.call_order.index("account_info") < fake.call_order.index("recycle")
+    messages = [r.getMessage() for r in _records(caplog)]
+    evidence = [i for i, m in enumerate(messages) if "pre-recycle wedge evidence" in m]
+    escalated = [i for i, m in enumerate(messages) if "escalated to a terminal" in m]
+    assert evidence and escalated and evidence[0] < escalated[0]
+    line = messages[evidence[0]]
+    assert "build=6182" in line
+    assert "connected=False" in line
+    assert "session_server_matches_env=True" in line
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+async def test_ESCALATION_an_unanswered_capture_is_recorded_not_captured_and_still_recycles(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A wedged terminal may not answer the capture reads at all. The fields are
+    then recorded `not_captured` WITH THE REASON — never filled in by logging in
+    — the second read is skipped, and the recycle still runs."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, dict(_WEDGED))
+    _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert "account_info" not in fake.call_order
+    assert _recycle_count(fake) == 1
+    line = next(
+        r.getMessage()
+        for r in _records(caplog)
+        if "pre-recycle wedge evidence" in r.getMessage()
+    )
+    assert "build=not_captured" in line
+    # ⭐ WR-03 root cause — the far side reads `last_error()` in the same
+    # crossing, so the code arrives without an exception to name.
+    assert "terminal_info failed: code=-10005" in line
+    assert "initialize_credentialed" not in fake.call_order
+
+
+@pytest.mark.parametrize(
+    "scenario,expected_kind,expected_level",
+    [
+        pytest.param(
+            {"initialize_after_recycle": True},
+            # SFH-08 (review round 2) — authorized, but the post-relaunch check
+            # found no `terminal_info` answer (this scenario carries none), so
+            # the house session is unverified, never INFO.
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
+            logging.WARNING,
+            id="back-and-authorized-UNVERIFIED",
+        ),
+        pytest.param(
+            {
+                "initialize_after_recycle": True,
+                "terminal_info": _HOUSE_TERMINAL,
+                "account_info": _HOUSE_ACCOUNT,
+            },
+            # ⭐ WR-03 root cause (review round 2) — the check RUNS at the default
+            # budget, so a relaunch back on the house session, connected, is
+            # `recycled` at INFO again.
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED,
+            logging.INFO,
+            id="back-on-the-HOUSE-session-VERIFIED",
+        ),
+        pytest.param(
+            {"last_error_after_recycle": (-6, "Terminal: Authorization failed")},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
+            logging.WARNING,
+            id="back-with-no-account-yet",
+        ),
+        pytest.param(
+            {},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_STILL_FAULTED,
+            logging.ERROR,
+            id="still-wedged",
+        ),
+    ],
+)
+async def test_ESCALATION_the_outcome_kind_and_its_severity_follow_the_relaunch(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    scenario: dict,
+    expected_kind: str,
+    expected_level: int,
+) -> None:
+    """The four kinds exist because the REMEDIES differ. `-6` after a relaunch is
+    left to the ordinary heal on the NEXT reading: the escalation itself never
+    sends a credential, even when the terminal comes back unsigned-in."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, {**_WEDGED, **scenario})
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert outcomes[0].escalation_kind == expected_kind
+    line = next(
+        r for r in _records(caplog) if "escalated to a terminal" in r.getMessage()
+    )
+    assert line.levelno == expected_level
+    assert "initialize_credentialed" not in fake.call_order
+
+
+@pytest.mark.parametrize(
+    "counts,relaunch,expected_kind,expected_level",
+    [
+        pytest.param(
+            (0, 0, 0),
+            {"initialize": True},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
+            # ⭐ IN-02 (review round 2) — WARNING, qualified: the relaunch may
+            # have LAUNCHED a terminal that was not running at all.
+            logging.WARNING,
+            id="matched-NOTHING-and-the-probe-answered",
+        ),
+        pytest.param(
+            (1, 0, 0),
+            {},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
+            logging.ERROR,
+            id="terminate-REFUSED-and-still-wedged",
+        ),
+        pytest.param(
+            (2, 1, 1),
+            {"initialize_after_recycle": True},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
+            logging.ERROR,
+            id="PARTIAL-one-terminal-survived",
+        ),
+        pytest.param(
+            (1, 1, 0),
+            {"initialize_after_recycle": True},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
+            logging.WARNING,
+            id="terminated-but-exit-UNCONFIRMED",
+        ),
+    ],
+)
+async def test_ESCALATION_WR03_a_recycle_that_did_not_end_every_terminal_is_never_recycled(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    counts: tuple[int, int, int],
+    relaunch: dict,
+    expected_kind: str,
+    expected_level: int,
+) -> None:
+    """⛔ WR-03 / SFH-01 (164.6.5 review round 1). The counts are the ONLY evidence
+    the Wine-side terminate landed, and it has never run live. A verdict that
+    ended nothing (`matched=0`: an image-name difference under Wine;
+    `terminated=0`: the open or terminate refused) must never read `recycled`
+    — at INFO, "nothing for anyone to do" — because the relaunch probe happened
+    to attach to the SAME terminal and it answered; nor `still_faulted`, which
+    says a recycle ran. A partial landing leaves a terminal alive that may be the
+    wedged one. And a terminate whose exit was not confirmed is at least a
+    WARNING, never INFO."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch, {**_WEDGED, **relaunch, "recycle_counts": counts}
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+    if relaunch.get("initialize") is True:
+        # The terminal answers only AFTER the (non-)recycle: the first probe
+        # must still read the wedge so the escalation runs at all.
+        answers = iter([False, True])
+        real = fake.initialize
+
+        def _first_wedged(**kwargs):
+            real(**kwargs)
+            return next(answers)
+
+        fake.initialize = _first_wedged
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert outcomes[0].escalation_kind == expected_kind
+    line = next(
+        r for r in _records(caplog) if "escalated to a terminal" in r.getMessage()
+    )
+    assert line.levelno == expected_level
+    assert f"matched={counts[0]} terminated={counts[1]}" in line.getMessage()
+    assert ("no_process_matched_relaunch_answered" in line.getMessage()) == (
+        counts[0] == 0
+    ), "IN-02: only matched=0 with an answering relaunch carries the qualifier"
+
+
+async def test_ESCALATION_SFH09_the_refusal_codes_are_NAMED_in_the_escalation_line(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⭐ SFH-09. A recycle that did not land must say WHY on the operator's line:
+    "access denied" (5) and "already gone" (87) have different remedies."""
+    _set_full_env(monkeypatch)
+    _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "recycle_counts": (1, 0, 0),
+            "terminate_errors": [5],
+        },
+    )
+    _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    line = next(
+        r.getMessage()
+        for r in _records(caplog)
+        if "escalated to a terminal" in r.getMessage()
+    )
+    assert "open_errors=[] terminate_errors=[5]" in line
+    # ⭐ 164.6.5 review round 2 — Topic B's six new verdict fields reach the
+    # escalation line too, as counts, codes and class names only.
+    for fragment in (
+        "attempted=1",
+        "unprocessed=0",
+        "enumerated=4",
+        "enumerate_error=0",
+        "pid_errors=[]",
+        "file_version_exc=[None]",
+    ):
+        assert fragment in line, (fragment, line)
+
+
+@pytest.mark.parametrize(
+    "after_failure,post_code,crossing_costs,expected_fragment,run_ended",
+    [
+        pytest.param(
+            True, None, {}, "post_failure_probe=authorized", True,
+            id="the-terminal-ANSWERED",
+        ),
+        # `-6` is the terminal answering with no account yet: a falsy
+        # `initialize()`, so the answered-count does NOT move, and only this
+        # reading's own verdict can end the run.
+        pytest.param(
+            False, -6, {}, "post_failure_probe=code=-6", True,
+            id="the-terminal-ANSWERED-with-no-account",
+        ),
+        pytest.param(
+            False, None, {}, f"post_failure_probe=code={_IPC_TIMEOUT}", False,
+            id="still-WEDGED",
+        ),
+        # The failed call itself spent the budget the reading would need: the
+        # derived default (8 crossings x 30 s + 10 s = 250 s since the WR-03
+        # root cause) less 200 s leaves 50 s, under one reading's 60 s.
+        pytest.param(
+            True, None, {"recycle": 200.0}, "post_failure_probe=not_read", False,
+            id="the-budget-cannot-cover-it",
+        ),
+    ],
+)
+async def test_R2_SFH04_a_FAILED_recycle_takes_one_budget_gated_reading(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    after_failure: bool,
+    post_code: int | None,
+    crossing_costs: dict,
+    expected_fragment: str,
+    run_ended: bool,
+) -> None:
+    """⛔ R2-SFH-04 part 3 (164.6.5 review round 2). After a transport failure, a
+    snapshot failure or unreadable counts, the recycle call may already have
+    ended the terminal, and its own relaunch probe never ran, so the terminal
+    stayed down until some later caller's bare `initialize()` launched it (the
+    D-05 record measured about 4m45s). One budget-gated, credential-free
+    detector reading now follows: it relaunches a terminal the failed call may
+    have ended, and the line says whether it answered. An answer ends the run;
+    the kind stays `recycle_failed` at ERROR, since the verb itself needs a
+    human."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "recycle_raises": RuntimeError("the transport dropped"),
+            "crossing_costs": crossing_costs,
+        },
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+    answers = iter([False, after_failure, False, after_failure])
+    real = fake.initialize
+
+    def _scripted(**kwargs):
+        real(**kwargs)
+        return next(answers)
+
+    fake.initialize = _scripted
+    if post_code is not None:
+        codes = iter([_IPC_TIMEOUT, post_code] * 2)
+        real_last_error = fake.last_error
+
+        def _scripted_last_error():
+            real_last_error()
+            return (next(codes), "scripted")
+
+        fake.last_error = _scripted_last_error
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert (
+        outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_FAILED
+    )
+    line = next(
+        r for r in _records(caplog) if "escalated to a terminal" in r.getMessage()
+    )
+    assert line.levelno == logging.ERROR
+    assert expected_fragment in line.getMessage(), line.getMessage()
+    assert "the transport dropped" not in line.getMessage()
+    assert "initialize_credentialed" not in fake.call_order
+    probes = fake.call_order.count("initialize")
+    assert probes == (1 if "not_read" in expected_fragment else 2), fake.call_order
+
+    await _heal_n_times(1)  # the next wedged reading
+    assert _recycle_count(fake) == (2 if run_ended else 1), (
+        "a post-failure reading that measured the terminal answering must end the "
+        "run (and one that did not must not)"
+    )
+
+
+async def test_ESCALATION_WR02_a_recycle_that_WORKS_slowly_is_logged_recycled_never_human_needed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ WR-02 / SFH-02 (164.6.5 review round 1). The live spike MEASURED a cold
+    relaunch reaching authorized 86 s after the kill. The verb's single relaunch
+    probe is bounded at 20 s, so a WORKING recycle read an IPC code on it and was
+    logged `recycled_still_faulted` at ERROR — "a human is needed" — minutes
+    before the next tick found the terminal healthy. Driven here on the measured
+    timeline: every not-yet-answering `initialize()` spends its 20 s IPC timeout
+    and the terminal answers 86 s after the terminate crossed."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "crossing_costs": {"initialize": 20.0},
+            "relaunch_authorized_after_s": 86.0,
+            "terminal_info": _HOUSE_TERMINAL,
+            "account_info": _HOUSE_ACCOUNT,
+        },
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    # ⭐ WR-03 root cause (review round 2) — the post-relaunch check runs after
+    # the poll that saw the relaunch answer, finds the house session, and the
+    # recovery is `recycled` at INFO (it was UNVERIFIED while the reads were
+    # skipped).
+    assert (
+        outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED
+    )
+    assert any(
+        "escalated to a terminal" in r.getMessage() and r.levelno == logging.INFO
+        for r in _records(caplog)
+    )
+    assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR], (
+        "a recycle that WORKED produced an ERROR line"
+    )
+    assert "initialize_credentialed" not in fake.call_order
+
+
+async def test_ESCALATION_WR02_a_relaunch_the_budget_could_not_watch_is_PENDING_not_still_faulted(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When the heal budget runs out before the settle window does (here, every
+    crossing at its full rpyc ceiling), the relaunch has NOT been shown to fail.
+    The kind is `relaunch_pending` at WARNING — "not yet known" — and the next
+    reading decides; never `still_faulted`, never ERROR."""
+    _set_full_env(monkeypatch)
+    _install_client(
+        monkeypatch,
+        {**_WEDGED, "crossing_cost_s": mt5_relogin._MT5_REQUEST_TIMEOUT_S},
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert (
+        outcomes[0].escalation_kind
+        == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING
+    )
+    line = next(
+        r for r in _records(caplog) if "escalated to a terminal" in r.getMessage()
+    )
+    assert line.levelno == logging.WARNING
+
+
+async def test_ESCALATION_WR02_still_faulted_only_after_the_WHOLE_settle_window(
+    monkeypatch: pytest.MonkeyPatch, _fake_clock: "_FakeClock"
+) -> None:
+    """`still_faulted` is a claim that the relaunch was watched and did not
+    answer. It may only be made once at least `_RELAUNCH_SETTLE_S` has passed
+    since the verb returned — which is itself after the kill."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, dict(_WEDGED))
+    outcomes = _capture_outcomes(monkeypatch)
+
+    await _heal_n_times(1)
+
+    assert (
+        outcomes[0].escalation_kind
+        == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_STILL_FAULTED
+    )
+    assert sum(_fake_clock.sleeps) >= mt5_relogin._RELAUNCH_SETTLE_S
+    assert "initialize_credentialed" not in fake.call_order
+
+
+async def test_ESCALATION_SFH03_a_wedge_the_recycle_did_not_cure_is_re_raised_HOURLY(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+) -> None:
+    """⛔ SFH-03 (164.6.5 review round 1). The debounce is on the ACTION, never on
+    the ALARM. Before this, a wedge the recycle could not cure (Cause A, the
+    persisted modal dialog) was ONE ERROR at hour 0 and then INFO lines for as
+    long as it lasted — four days, on the record. Ten-minute ticks for four
+    hours must produce one ERROR per hour, each naming the elapsed time, and
+    still exactly ONE recycle."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, dict(_WEDGED))
+    _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        for _ in range(24):  # four hours of ten-minute ticks
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+
+    assert _recycle_count(fake) == 1
+    errors = [r.getMessage() for r in _records(caplog) if r.levelno >= logging.ERROR]
+    assert len(errors) == 4, (
+        f"expected the attempt's ERROR plus one per further hour, got {len(errors)}: "
+        f"{errors}"
+    )
+    # Each re-raise names the elapsed time, and none comes sooner than an hour
+    # after the one before it.
+    import re as _re
+
+    elapsed = [
+        int(m.group(1))
+        for m in (_re.search(r"PERSISTS (\d+) min", e) for e in errors[1:])
+        if m
+    ]
+    assert len(elapsed) == 3 and elapsed[0] >= 60, errors
+    assert all(b - a >= 60 for a, b in zip(elapsed, elapsed[1:])), elapsed
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        -10004,
+        -10003,
+        # ⛔ R2-SFH-02 (164.6.5 review round 2) — the alarm was an ALLOWLIST of
+        # three codes, so these read `not_healed:ipc_fault:code=N` at WARNING
+        # forever (measured by the reviewer: 48 ticks, 0 ERROR records).
+        # `-10001` / `-10002` are the IPC-internal send/receive failures
+        # `services/mt5_validation.py` already lists; `-1` stands for any
+        # terminal-internal code.
+        pytest.param(-10001, id="R2-SFH-02-ipc-internal-send"),
+        pytest.param(-10002, id="R2-SFH-02-ipc-internal-receive"),
+        pytest.param(-1, id="R2-SFH-02-a-terminal-internal-code"),
+    ],
+)
+async def test_SFH03_a_NEVER_escalated_ipc_fault_that_persists_reaches_ERROR_hourly(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+    code: int,
+) -> None:
+    """Every first-probe code other than `-6` and the `0` sentinel is never
+    escalated, so before this it never reached ERROR at all, however long it
+    lasted. A transient one (a redeploy blip) must stay quiet; one that persists
+    an hour is an ERROR, then hourly."""
+    _set_full_env(monkeypatch)
+    _install_client(
+        monkeypatch, {"initialize": False, "last_error": (code, "No IPC connection")}
+    )
+    _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        for _ in range(5):  # 40 minutes: transient, no ERROR
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+        assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR]
+        for _ in range(13):  # to ~3 h
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+
+    errors = [r.getMessage() for r in _records(caplog) if r.levelno >= logging.ERROR]
+    assert len(errors) == 2 and all("PERSISTED" in e for e in errors), errors
+
+
+async def test_R2_SFH02_the_zero_sentinel_never_starts_a_persistence_run(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+) -> None:
+    """The other side of R2-SFH-02's inversion: `0` is `_raise_last`'s sentinel
+    for "last_error() itself failed" and measured NOTHING, so three hours of it
+    must not page. (Its persistence is the blind-run escalation's job.)"""
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": False, "last_error": (0, "unknown")})
+    _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        for _ in range(18):
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+
+    assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR]
+    assert mt5_session_episodes._IPC_FAULT_RUN_SINCE is None
+
+
+async def test_SFH03_the_terminal_answering_ends_the_persistence_run(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+) -> None:
+    """A run of faults the terminal answered in the middle of is TWO runs: the
+    elapsed time must not accumulate across a recovery."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch, {"initialize": False, "last_error": (-10004, "No IPC")}
+    )
+    _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        for _ in range(5):
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+        fake._scenario["initialize"] = True  # the bridge is back
+        await _heal_n_times(1)
+        fake._scenario["initialize"] = False
+        for _ in range(5):
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+
+    assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR]
+
+
+def _job_path_login() -> None:
+    """A job, on its own client for the SAME terminal, logs in successfully: its
+    bare `initialize()` answered, so the terminal's answered-count moves."""
+    healthy = _FakeMt5({"initialize": True, "login": True})
+    Mt5Client(_FAKE_HOST, int(_FAKE_PORT), _connect=lambda **_k: healthy).login(
+        int(_FAKE_LOGIN), _FAKE_PASSWORD, _FAKE_SERVER
+    )
+
+
+@pytest.mark.parametrize(
+    "first_code",
+    [
+        pytest.param(_IPC_TIMEOUT, id="after-a-recycle-that-did-not-cure"),
+        pytest.param(-10004, id="after-a-never-escalated-blip"),
+    ],
+)
+async def test_R2_WR02_a_recovery_ONLY_the_job_path_saw_ENDS_the_persistence_run(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+    first_code: int,
+) -> None:
+    """⛔ WR-02 / R2-SFH-03 (164.6.5 review round 2). The job path's answer used to
+    re-arm the recycle GATE but leave the persistence ALARM's run and last-alarm
+    stamp alone. So a transient `-10004` hours later (a gateway redeploy, which
+    round 1 promised "stays quiet") found an hour-old stamp and paged on its FIRST
+    reading, telling the operator nothing automatic would clear a fault a redeploy
+    was already clearing — over a terminal that had answered throughout."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {"initialize": False, "last_error": (first_code, "No IPC connection")},
+    )
+    _capture_outcomes(monkeypatch)
+
+    await _heal_n_times(1)  # the first fault (for -10005: recycled, still faulted)
+    _job_path_login()  # ...and then the terminal answered a job
+    _fake_clock.now += 2 * 3600.0
+
+    fake.recycled = False
+    fake._scenario["last_error"] = (-10004, "No IPC connection")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR], (
+        "the first reading of a NEW fault paged, because the run the job path's "
+        "answer should have ended was still open (WR-02 / R2-SFH-03): "
+        f"{[r.getMessage() for r in _records(caplog)]}"
+    )
+
+
+def test_R2_WR02_a_fence_refusal_does_NOT_end_the_persistence_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ WR-02 (164.6.5 review round 2). "Undo the claim" and "the terminal
+    answered" are two events. A refusal by the recycle verb's own fence runs in a
+    ZOMBIE thread after the `wait_for` fired and measured NOTHING, so it may give
+    the attempt back but must not erase the alarm's memory of the fault."""
+    from services.mt5_client import Mt5SessionAbandoned, bump_mt5_terminal_epoch
+
+    fake = _FakeMt5(dict(_WEDGED))
+    client = _escalation_client(fake)
+    real_capture = mt5_relogin._capture_wedge_evidence
+
+    def _capture_then_release(c, env_server, deadline):
+        c._assert_live("bind")  # first touch binds the generation (the first probe, in production)
+        line = real_capture(c, env_server, deadline)
+        bump_mt5_terminal_epoch(c.terminal_key)
+        return line
+
+    monkeypatch.setattr(mt5_relogin, "_capture_wedge_evidence", _capture_then_release)
+    with pytest.raises(Mt5SessionAbandoned) as refused:
+        mt5_relogin._escalate_ipc_fault(client, _IPC_TIMEOUT, _FAKE_SERVER)
+    assert refused.value.stage == mt5_relogin._RECYCLE_FENCE_STAGE
+
+    assert mt5_session_episodes._IPC_FAULT_RUN_SINCE is not None, (
+        "a fence refusal that measured nothing ENDED the persistence run"
+    )
+    assert mt5_session_episodes.ipc_fault_escalation_armed(), (
+        "the refused attempt was not given back"
+    )
+
+
+@pytest.mark.parametrize(
+    "terminal,account,expected_kind,expected_level,expected_fragment",
+    [
+        pytest.param(
+            {"connected": True},
+            {"login": int(_FAKE_LOGIN), "server": _FAKE_SERVER},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED,
+            logging.INFO,
+            "post_relaunch: connected=True session_account_matches_env=True "
+            "session_server_matches_env=True",
+            id="house-account-connected",
+        ),
+        pytest.param(
+            {"connected": True},
+            {"login": int(_FAKE_LOGIN) + 1, "server": _FAKE_SERVER},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_DEGRADED,
+            logging.WARNING,
+            "session_account_matches_env=False",
+            id="relaunched-on-ANOTHER-account",
+        ),
+        pytest.param(
+            {"connected": False},
+            {"login": int(_FAKE_LOGIN), "server": _FAKE_SERVER},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_DEGRADED,
+            logging.WARNING,
+            "connected=False",
+            id="relaunched-DISCONNECTED",
+        ),
+        # ⛔ SFH-08 (164.6.5 review round 2) — a login number is only unique per
+        # server, so a server mismatch is a definite degradation too.
+        pytest.param(
+            {"connected": True},
+            {"login": int(_FAKE_LOGIN), "server": "Another-Broker-Server"},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_DEGRADED,
+            logging.WARNING,
+            "session_server_matches_env=False",
+            id="SFH08-relaunched-on-ANOTHER-server",
+        ),
+        # ⛔ SFH-08 — a check that could NOT complete is not "nothing for anyone
+        # to do": it is unverified, at WARNING, under its own kind.
+        pytest.param(
+            None,
+            None,
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
+            logging.WARNING,
+            "connected=not_captured (terminal_info failed",
+            id="SFH08-terminal_info-FAILED",
+        ),
+        pytest.param(
+            {"connected": True},
+            {"server": _FAKE_SERVER},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
+            logging.WARNING,
+            "session_account_matches_env=not_captured (no login)",
+            id="SFH08-account-NOT-captured",
+        ),
+    ],
+)
+async def test_ESCALATION_SFH07_authorized_after_a_relaunch_says_WHICH_account_and_whether_connected(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    terminal: dict | None,
+    account: dict | None,
+    expected_kind: str,
+    expected_level: int,
+    expected_fragment: str,
+) -> None:
+    """⛔ SFH-07 (164.6.5 review round 1). The D-05 record MEASURED a relaunched
+    terminal coming back on whichever account the last service call had logged
+    in to — a DIFFERENT one in run 2 — and a bare `initialize()` returning True
+    does not show a trade-server connection either. `recycled` at INFO over a
+    terminal on a client's account, or disconnected, says the house session was
+    restored when it was not. The account is an EQUALITY VERDICT, never a value:
+    no account number may reach the line.
+
+    ⛔ WR-04 / SFH-08 (164.6.5 review round 2) — THE KIND, NOT ONLY THE LEVEL.
+    Round 1 raised the level and kept `ipc_fault_recycled`, so every structured
+    consumer of `escalation_kind` saw a clean recovery. A definite mismatch is
+    `recycled_degraded`; a check that could not complete is
+    `recycled_unverified`; only a verified house session is `recycled`."""
+    _set_full_env(monkeypatch)
+    _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "initialize_after_recycle": True,
+            "terminal_info": (
+                None
+                if terminal is None
+                else _info_tuple("TerminalInfo", 2, build=6182, **terminal)
+            ),
+            "account_info": (
+                None if account is None else _info_tuple("AccountInfo", 2, **account)
+            ),
+        },
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert outcomes[0].escalation_kind == expected_kind
+    line = next(
+        r for r in _records(caplog) if "escalated to a terminal" in r.getMessage()
+    )
+    assert expected_fragment in line.getMessage()
+    assert line.levelno == expected_level
+    if account is not None and "login" in account:
+        assert str(account["login"]) not in line.getMessage(), (
+            "an account number reached the line"
+        )
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+@pytest.mark.parametrize("short_by", [pytest.param(1.0, id="one-second-short"), pytest.param(0.0, id="exactly-one-crossing")])
+def test_ESCALATION_SFH07_the_post_relaunch_reads_never_outlive_the_budget(
+    _fake_clock: "_FakeClock", short_by: float
+) -> None:
+    """The post-relaunch check is OPTIONAL, so it is budget-gated like the rest
+    (WR-04): it is started only if one full crossing still fits before the
+    deadline, else recorded `not_read` without touching the terminal.
+
+    ⭐ WR-03 ROOT CAUSE (164.6.5 review round 2) — driven at the gate itself.
+    Through the heal the gate can no longer bite at a realistic cost: the check
+    runs only after an ANSWERING relaunch reading, which is one crossing of the
+    two every reading reserves, so the check always has its crossing left
+    (`test_R2_WR03_RC_the_capture_and_the_post_relaunch_check_RUN_at_the_
+    default_budget`). The gate stays as WR-04's defence against a crossing that
+    outruns its ceiling, and both sides of its boundary are pinned here."""
+    fake = _FakeMt5(
+        {
+            "terminal_info": _info_tuple("TerminalInfo", 2, connected=True),
+            "account_info": _info_tuple(
+                "AccountInfo", 2, login=int(_FAKE_LOGIN), server=_FAKE_SERVER
+            ),
+        }
+    )
+    client = _escalation_client(fake)
+    deadline = _fake_clock.now + mt5_relogin._MT5_REQUEST_TIMEOUT_S - short_by
+
+    line, status = mt5_relogin._read_post_relaunch_state(
+        client, int(_FAKE_LOGIN), _FAKE_SERVER, deadline
+    )
+
+    if short_by:
+        assert line == "post_relaunch=not_read (the heal budget left cannot cover it)"
+        assert status == mt5_relogin._POST_RELAUNCH_UNVERIFIED
+        assert fake.round_trips == [], "a read the budget cannot cover was started"
+    else:
+        assert status == mt5_relogin._POST_RELAUNCH_VERIFIED, line
+        assert fake.round_trips == ["session_snapshot"]
+
+
+@pytest.mark.parametrize("kind", _ESCALATION_KINDS)
+def test_ESCALATION_every_escalation_kind_degrades_to_NOT_MEASURED(kind: str) -> None:
+    """An escalation ACTS on the terminal; it does not measure the session. If
+    one of its kinds ever reached the classifier, it must not claim a state."""
+    reading = mt5_session_episodes.classify_reading(kind, None)
+    assert reading.state == mt5_session_episodes.STATE_NOT_MEASURED
+
+
+async def test_the_budget_covers_the_ESCALATION_path_too(
+    monkeypatch: pytest.MonkeyPatch, _fake_clock: "_FakeClock"
+) -> None:
+    """⛔ WR-04 (164.6.5 review round 1) — THE BUDGET IS THE MINIMUM THAT COVERS THE
+    ESCALATION'S UNCONDITIONAL PATH, MEASURED WITH EVERY RPYC CROSSING AT ITS FULL
+    CEILING — the one condition the budget exists for.
+
+    Plan 05 counted the recycle's remote call as ONE round-trip and asserted
+    `>=`. Its `_remote_call` makes THREE crossings (execute, the namespace
+    netref lookup, the call), and the double recorded none of the extra two, so
+    the gate counted 8 because the double under-reported; honestly counted the
+    path was 310 s against the 300 s ceiling. `>=` also stayed green for any
+    over-provision, which lengthens the unbounded lease wait batch jobs pay.
+
+    ⛔ WR-03 (164.6.5 review round 2) — the capture and the post-relaunch reads
+    cost one crossing per field, so they were skipped and the path was 7.
+    ⭐ WR-03 ROOT CAUSE (same day) — they are ONE bridge-side crossing each now
+    (`Mt5Client.session_snapshot`), and BOTH are on the path again. The four
+    shapes that matter are driven: the capture answering or not, and the
+    relaunch probe answering (then the post-relaunch check runs) or not (then
+    its `last_error()` does). Each must make exactly the derived count."""
+    ceiling = mt5_relogin._MT5_REQUEST_TIMEOUT_S
+    monkeypatch.delenv("MT5_RELOGIN_BUDGET_S", raising=False)
+    budget = mt5_relogin._relogin_budget_s()
+    _set_full_env(monkeypatch)
+
+    answered = {"terminal_info": _HOUSE_TERMINAL, "account_info": _HOUSE_ACCOUNT}
+    relaunch_answers = {"initialize_after_recycle": True}
+    relaunch_no_account = {
+        "initialize_after_recycle": False,
+        "last_error_after_recycle": (-6, "Terminal: Authorization failed"),
+    }
+    head = ["initialize", "last_error", "session_snapshot"]
+    recycle = ["recycle_execute", "recycle_lookup", "recycle"]
+    expected = {
+        "capture_unanswered_relaunch_answers": (
+            {**relaunch_answers},
+            head + recycle + ["initialize", "session_snapshot"],
+        ),
+        "capture_answers_relaunch_answers": (
+            {**answered, **relaunch_answers},
+            head + recycle + ["initialize", "session_snapshot"],
+        ),
+        "capture_unanswered_relaunch_no_account": (
+            {**relaunch_no_account},
+            head + recycle + ["initialize", "last_error"],
+        ),
+        "capture_answers_relaunch_no_account": (
+            {**answered, **relaunch_no_account},
+            head + recycle + ["initialize", "last_error"],
+        ),
+    }
+    measured: dict[str, int] = {}
+    for shape, (extra, path) in expected.items():
+        mt5_session_episodes._reset_session_episode_state_for_tests()
+        fake, _c = _install_client(
+            monkeypatch, {**_WEDGED, **extra, "crossing_cost_s": ceiling}
+        )
+        _capture_outcomes(monkeypatch)
+        started = _fake_clock.now
+
+        await _heal_n_times(1)
+
+        assert _recycle_count(fake) == 1, f"{shape}: the recycle did not run"
+        elapsed = _fake_clock.now - started
+        assert elapsed <= budget, (
+            f"{shape}: the path took {elapsed}s of rpyc ceilings against a "
+            f"{budget}s budget — the `wait_for` fires MID-escalation (WR-03 class)"
+        )
+        assert fake.round_trips == path, (
+            f"{shape}: the escalation path changed shape: {fake.round_trips}"
+        )
+        measured[shape] = len(fake.round_trips)
+    assert set(measured.values()) == {mt5_relogin._MT5_RELOGIN_ROUND_TRIPS}, (
+        f"the budget is derived from {mt5_relogin._MT5_RELOGIN_ROUND_TRIPS} "
+        f"crossings and the unconditional paths make {measured}. It must be "
+        "EXACTLY the worst: fewer lets the `wait_for` fire mid-recycle, more "
+        "lengthens the unbounded wait batch jobs pay."
+    )
+    assert budget <= mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S
+
+
+@pytest.mark.parametrize(
+    "scenario,expected",
+    [
+        pytest.param({}, ("terminal_unanswered",), id="terminal-unanswered"),
+        pytest.param(
+            {"terminal_info": _HOUSE_TERMINAL},
+            ("account_unanswered",),
+            id="account-unanswered",
+        ),
+        pytest.param(
+            {"terminal_info": _HOUSE_TERMINAL, "account_info": _HOUSE_ACCOUNT},
+            ("answered",),
+            id="answered",
+        ),
+    ],
+)
+def test_R2_WR03_RC_a_session_snapshot_is_ONE_crossing_on_every_shape(
+    scenario: dict, expected: tuple
+) -> None:
+    """⛔ WR-03 ROOT CAUSE (164.6.5 review round 2). The unit is the rpyc
+    crossing. `terminal_info()` / `account_info()` materialized on this side
+    cost one crossing per field, which is why the heal could never afford them.
+    `session_snapshot` reads both on the FAR side in one `conn.eval` and gets a
+    tuple of scalars back by value. This drives the REAL client and the REAL
+    committed source against the netref-shaped double, which charges every
+    attribute, call, `__iter__` and `next()` on a netref as a crossing, and
+    requires the declared charge to equal what the read crossed, on every shape
+    — the unanswered ones included, whose `last_error()` is read far-side.
+
+    ⚠️ Positive control first: the SAME double charges the per-field read its
+    per-field cost, so a double that could not see crossings cannot pass this."""
+    per_field = _FakeMt5({"terminal_info": _HOUSE_TERMINAL})
+    _escalation_client(per_field).terminal_info()
+    assert len(per_field.round_trips) > 22, per_field.round_trips
+
+    fake = _FakeMt5({**_WEDGED, **scenario})
+    client = _escalation_client(fake)
+
+    snapshot = client.session_snapshot(
+        expected_login=int(_FAKE_LOGIN), expected_server=_FAKE_SERVER
+    )
+
+    assert fake.round_trips == ["session_snapshot"], fake.round_trips
+    assert len(fake.round_trips) == mt5_relogin._SESSION_SNAPSHOT_CROSSINGS
+    tag = expected[0]
+    if tag == "terminal_unanswered":
+        assert snapshot.terminal_code == _IPC_TIMEOUT
+        assert snapshot.account_read is False
+        assert "account_info" not in fake.call_order
+    elif tag == "account_unanswered":
+        assert (snapshot.build, snapshot.connected) == (6182, True)
+        assert snapshot.account_code == _IPC_TIMEOUT
+        assert snapshot.login_matches is None and snapshot.server_matches is None
+    else:
+        assert (snapshot.build, snapshot.connected) == (6182, True)
+        assert (snapshot.login_matches, snapshot.server_matches) == (True, True)
+    assert int(_FAKE_LOGIN) not in snapshot and _FAKE_SERVER not in snapshot, (
+        f"an account number or server name was returned: {snapshot}"
+    )
+
+
+async def test_R2_WR03_RC_the_capture_and_the_post_relaunch_check_RUN_at_the_default_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+) -> None:
+    """⭐ WR-03 ROOT CAUSE (164.6.5 review round 2). Round 2's WR-03 fix left the
+    pre-recycle evidence capture and the SFH-07 post-relaunch check SKIPPED on
+    every run, so criterion 1's evidence was never read and a working recycle
+    could only ever report `ipc_fault_recycled_unverified`. At the DERIVED
+    DEFAULT budget, with EVERY crossing at its full rpyc ceiling (the one
+    condition the budget exists for), both must now run, say what they read,
+    and a verified house session must come back `ipc_fault_recycled` at INFO."""
+    _set_full_env(monkeypatch)
+    monkeypatch.delenv("MT5_RELOGIN_BUDGET_S", raising=False)
+    budget = mt5_relogin._relogin_budget_s()
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "initialize_after_recycle": True,
+            "terminal_info": _HOUSE_TERMINAL,
+            "account_info": _HOUSE_ACCOUNT,
+            "crossing_cost_s": mt5_relogin._MT5_REQUEST_TIMEOUT_S,
+        },
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+    started = _fake_clock.now
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert _fake_clock.now - started <= budget
+    assert fake.round_trips.count("session_snapshot") == 2, fake.round_trips
+    recycle_at = fake.round_trips.index("recycle")
+    assert fake.round_trips.index("session_snapshot") < recycle_at
+    messages = [r.getMessage() for r in _records(caplog)]
+    evidence = next(m for m in messages if "pre-recycle wedge evidence" in m)
+    assert (
+        "build=6182 connected=True session_server_matches_env=True" in evidence
+    ), evidence
+    assert "skipped" not in evidence, evidence
+    line = next(r for r in _records(caplog) if "escalated to a terminal" in r.getMessage())
+    assert (
+        "post_relaunch: connected=True session_account_matches_env=True "
+        "session_server_matches_env=True" in line.getMessage()
+    ), line.getMessage()
+    assert outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED
+    assert line.levelno == logging.INFO
+    assert _FAKE_LOGIN not in line.getMessage()
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+async def test_WR04_a_recycle_the_budget_cannot_finish_is_never_started(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ WR-04 / SFH-06. With `MT5_RELOGIN_BUDGET_S` set below its derived default
+    (a Railway override still sized for the old 5-trip path, say), killing the
+    shared terminal and then being abandoned before the relaunch probe is the
+    worst outcome this heal has. The recycle must not START unless the time left
+    covers it and its relaunch — and the attempt must not be spent."""
+    _set_full_env(monkeypatch)
+    monkeypatch.setenv("MT5_RELOGIN_BUDGET_S", "160")
+    fake, _c = _install_client(
+        monkeypatch,
+        {**_WEDGED, "crossing_cost_s": mt5_relogin._MT5_REQUEST_TIMEOUT_S},
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert _recycle_count(fake) == 0
+    # ⭐ SFH-09 (164.6.5 review round 2) — the step RAN and DECLINED, so it has
+    # its own kind; `None` is "this step never ran".
+    assert (
+        outcomes[0].escalation_kind
+        == mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET
+    )
+    assert any(
+        "recycle was NOT attempted" in r.getMessage() and r.levelno == logging.WARNING
+        for r in _records(caplog)
+    )
+    monkeypatch.delenv("MT5_RELOGIN_BUDGET_S")
+    fake._scenario["crossing_cost_s"] = 0.0
+    await _heal_n_times(1)
+    assert _recycle_count(fake) == 1, "the skipped attempt was spent anyway"
+
+
+async def test_R2_WR01_a_budget_that_can_NEVER_afford_the_recycle_reaches_ERROR(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+) -> None:
+    """⛔ WR-01 / R2-SFH-01 (164.6.5 review round 2). The budget-short skip was
+    the ONE exit on the recycle-reachable path that never consulted the
+    persistence alarm. The budget comes from the same variable every tick, so a
+    Railway override below the derived default skips on EVERY wedge: "the next
+    reading will try again" never comes true, and the four-day shape (a WARNING
+    per tick, no recycle, no ERROR) was back — the reviewer measured 48 ticks,
+    0 recycles, 0 ERROR. Eighty minutes of ten-minute ticks must produce an
+    ERROR that names the variable, and still no recycle."""
+    _set_full_env(monkeypatch)
+    monkeypatch.setenv("MT5_RELOGIN_BUDGET_S", "160")
+    fake, _c = _install_client(
+        monkeypatch,
+        {**_WEDGED, "crossing_cost_s": mt5_relogin._MT5_REQUEST_TIMEOUT_S},
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        for _ in range(8):
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+
+    assert _recycle_count(fake) == 0
+    assert {o.escalation_kind for o in outcomes} == {
+        mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET
+    }
+    errors = [r.getMessage() for r in _records(caplog) if r.levelno >= logging.ERROR]
+    assert len(errors) == 1, errors
+    assert "MT5_RELOGIN_BUDGET_S" in errors[0] and "160" not in errors[0], errors
+
+
+def test_R2_SFH01_a_budget_below_its_derived_default_is_WARNED_once_by_NAME(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ R2-SFH-01, the read-time half. A value inside the accepted window but
+    below the derived default can never run the escalation, so it is named at
+    WARNING once per process when it is read — the variable's NAME, never its
+    value (T-164.6.2-12). The default and anything at or above it stay quiet."""
+    monkeypatch.delenv("MT5_RELOGIN_BUDGET_S", raising=False)
+    default = mt5_relogin._relogin_budget_s()
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert mt5_relogin._relogin_budget_s() == default
+        monkeypatch.setenv("MT5_RELOGIN_BUDGET_S", str(default))
+        assert mt5_relogin._relogin_budget_s() == default
+        assert not _records(caplog), "the derived default itself was warned about"
+
+        monkeypatch.setenv("MT5_RELOGIN_BUDGET_S", "161")
+        assert mt5_relogin._relogin_budget_s() == 161.0
+        assert mt5_relogin._relogin_budget_s() == 161.0
+
+    warnings = [r for r in _records(caplog) if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    message = warnings[0].getMessage()
+    assert "MT5_RELOGIN_BUDGET_S" in message and "161" not in message, message
+
+
+def test_HealOutcome_escalation_field_is_appended_and_defaults_to_never_ran() -> None:
+    """⛔ APPENDED, so every positional construction that predates it keeps its
+    meaning, and DEFAULTED to `None` — 'this step never ran'."""
+    fields = mt5_session_episodes.HealOutcome._fields
+    assert fields[-1] == "escalation_kind"
+    assert fields[:-1] == (
+        "verdict",
+        "first_kind",
+        "first_code",
+        "final_kind",
+        "final_code",
+    )
+    legacy = mt5_session_episodes.HealOutcome("v", "k", None, None, None)
+    assert legacy.escalation_kind is None
 
 
 async def test_a_heal_the_broker_did_not_honour_is_NOT_reported_as_healed(
@@ -1956,7 +3990,14 @@ async def test_a_hung_terminal_is_abandoned_at_the_budget_and_raises_nothing(
     with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         assert await mt5_relogin.heal_mt5_terminal_session() is None
 
-    records = _outcome_records(caplog)
+    # ⭐ R2-SFH-01 (164.6.5 review round 2) — a budget below the derived default
+    # is now NAMED once at WARNING when it is read. That line is a correct
+    # configuration note about this test's own tiny budget, not an outcome.
+    records = [
+        r
+        for r in _outcome_records(caplog)
+        if "below its derived default" not in r.getMessage()
+    ]
     assert len(records) == 1, [r.getMessage() for r in records]
     record = records[0]
     message = record.getMessage()

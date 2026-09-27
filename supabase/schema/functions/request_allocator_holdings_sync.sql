@@ -2,11 +2,22 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260422122720_reconstruct_per_api_key_gate.sql
--- ==========================================================================
--- STEP 1: Replace request_allocator_holdings_sync with per-api_key gate
--- ==========================================================================
-CREATE OR REPLACE FUNCTION request_allocator_holdings_sync(p_api_key_id UUID)
+-- source migration: 20260924233749_allocator_sync_restore_inflight_prefetch.sql
+-- --------------------------------------------------------------------------
+-- 076's body, verbatim, plus 075's disconnected-key refusal and 067's
+-- in-flight prefetch (see the header for the exact edits). Returns one of:
+--   {already_inflight: true, next_attempt_at}  a live poll job exists;
+--   {ok: true, job_id}                         a poll job was enqueued (or a
+--                                              concurrent caller's was reused);
+--   raises 42501 not_authenticated / api_key_not_found_or_not_owned, or
+--   raises P0001 api_key_disconnected for a soft-disconnected key.
+--
+-- ⚠️ SCHEMA-QUALIFIED DELIBERATELY. An unqualified CREATE OR REPLACE resolves
+-- against the SESSION search_path. Under a search_path that does not put public
+-- first, it CREATES a second function in another schema, and a new function
+-- arrives with default privileges (see the mig 118 note in the header).
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.request_allocator_holdings_sync(p_api_key_id UUID)
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -15,6 +26,7 @@ AS $$
 DECLARE
   v_uid                UUID := auth.uid();
   v_owner              UUID;
+  v_disconnected       TIMESTAMPTZ;
   v_job_id             UUID;
   v_next_attempt       TIMESTAMPTZ;
   v_prior_reconstruct  BOOLEAN;
@@ -24,7 +36,7 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  SELECT user_id INTO v_owner
+  SELECT user_id, disconnected_at INTO v_owner, v_disconnected
     FROM api_keys
     WHERE id = p_api_key_id;
   IF v_owner IS NULL OR v_owner <> v_uid THEN
@@ -32,28 +44,43 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  -- Existing poll enqueue (preserve semantics exactly — Phase 06 / D-14).
-  BEGIN
-    v_job_id := enqueue_compute_job(
-      p_strategy_id := NULL,
-      p_kind        := 'poll_allocator_positions',
-      p_api_key_id  := p_api_key_id
-    );
-  EXCEPTION WHEN unique_violation THEN
-    -- f8: surface next_attempt_at so the UI can render deferred-cooldown
-    -- state on a per-exchange rate-limit contagion event.
-    SELECT next_attempt_at INTO v_next_attempt
-      FROM compute_jobs
-      WHERE api_key_id = p_api_key_id
-        AND kind = 'poll_allocator_positions'
-        AND status IN ('pending','running','done_pending_children')
-      ORDER BY next_attempt_at DESC
-      LIMIT 1;
+  -- Migration 075: reject sync on soft-disconnected keys. Checked after
+  -- ownership, so a non-owner never learns the key's state, and before the
+  -- in-flight look-up, so a disconnected key is never reported as queued.
+  IF v_disconnected IS NOT NULL THEN
+    RAISE EXCEPTION 'api_key_disconnected'
+      USING ERRCODE = 'P0001';
+  END IF;
+
+  -- Migration 067: look for a live poll job BEFORE enqueuing. The enqueue
+  -- helper answers a duplicate by returning the existing id, and raises
+  -- nothing, so this look-up is the only way the caller can learn that its
+  -- request collapsed onto a job that was already queued.
+  SELECT next_attempt_at INTO v_next_attempt
+    FROM compute_jobs
+    WHERE api_key_id = p_api_key_id
+      AND kind = 'poll_allocator_positions'
+      AND status IN ('pending', 'running', 'done_pending_children')
+    ORDER BY next_attempt_at DESC
+    LIMIT 1;
+
+  IF v_next_attempt IS NOT NULL THEN
+    -- f8: surface queued state to the UI, which renders the exchange-cooldown
+    -- helper from next_attempt_at.
     RETURN jsonb_build_object(
       'already_inflight', true,
       'next_attempt_at', v_next_attempt
     );
-  END;
+  END IF;
+
+  -- No live job, so enqueue a fresh one. Two concurrent calls that both got
+  -- past the look-up collapse onto one row inside the enqueue helper, and the
+  -- loser receives the winner's id (the accepted race, see the file header).
+  v_job_id := enqueue_compute_job(
+    p_strategy_id := NULL,
+    p_kind        := 'poll_allocator_positions',
+    p_api_key_id  := p_api_key_id
+  );
 
   -- Per-api_key reconstruction gate (replaces migration 070's allocator-
   -- scoped snapshot-count check). Skip enqueue ONLY if THIS key has

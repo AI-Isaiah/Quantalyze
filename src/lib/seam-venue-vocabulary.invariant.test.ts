@@ -762,6 +762,14 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   "MT5_GATEWAY_UNCONFIGURED",
   "MT5_GATEWAY_UNREACHABLE",
   "MT5_MASTER_PASSWORD",
+  // 164.6.5 / criterion 5 (D-12/D-13) — minted by `_validate_mt5_key_probe`'s
+  // `Mt5ClientError` handler when the client error's code is one of MT5's IPC
+  // transport codes (our own terminal bridge, never the exchange). Takes a
+  // KEY_MT5_TERMINAL_UNRESPONSIVE verdict row, 500/retryable=false. Added here
+  // because this roster is the ARRIVAL gate: a new Python error_code with no
+  // TypeScript disposition falls through the substring cascade, which is what
+  // this file exists to prevent.
+  "MT5_TERMINAL_UNRESPONSIVE",
   // 164.5.3 / MT5CREDS — minted by `rotate_key_secret`'s probe-invariant
   // assertion; takes a SEAM_INTERNAL_FAULT verdict row (a code fault, not a
   // setting). Added here because this roster is the ARRIVAL gate: a new
@@ -803,6 +811,10 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * reads as protection while measuring nothing, and `it.each([])` is zero cases,
  * which is a passing suite.
  *
+ * 24 → 25 (2026-09-22, Phase 164.6.5 / criterion 5): one further arrival
+ * (`MT5_TERMINAL_UNRESPONSIVE`) puts the measured population at 42 codes;
+ * 0.6 × 42 = 25.2, floored to 25.
+ *
  * 23 → 24 (2026-09-16, Phase 164.5.1 review fix): 0.6 × 40 measured codes
  * = 24.0 exactly, floored to 24 — same rule, one further arrival
  * (`CURSOR_UNAVAILABLE`). ⚠️ The product is a whole number at this population,
@@ -832,6 +844,13 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * row. The lineage prose above this constant's neighbours had already
  * drifted once at 41 members (it said "0.6 × 40"); corrected to 42 here
  * rather than left to drift a second time.
+ *
+ * 25 stays 25 (MERGE 2026-09-23, origin/main into
+ * feat/164.6.5-mt5validatewedge): the two notes above each counted ONE arrival
+ * onto the same 41-code base and each read 42. The merged roster holds BOTH
+ * (`MT5_TERMINAL_UNRESPONSIVE` and `SIGN_IN_FAILED`), 43 codes, and the
+ * set-equality assertion below agrees with the derived emitter set at 43.
+ * 0.6 × 43 = 25.8, floored to 25 — same rule, no move.
  */
 const DERIVED_FLOOR = 25;
 

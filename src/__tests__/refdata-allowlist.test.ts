@@ -21,7 +21,7 @@
  * ⛔ UNLIKE the VAC-08 test, this one IMPORTS the extractor's parser and
  * classifier rather than re-deriving them. That is deliberate and it is the
  * plan's instruction: the artifact under test here is the ALLOWLIST, and the
- * question is whether its 22 human judgements still describe the corpus. A
+ * question is whether its 22 INSERT judgements and 10 C5 lines (6 until the 164.9.2 review round 1) still describe the corpus. A
  * second, divergent parser would answer a different question — "do two parsers
  * agree" — and would let the allowlist rot behind a parser that the RESTORE
  * does not use. The classifier's own non-vacuity is carried by the AIM block
@@ -30,8 +30,11 @@
  *
  * ── WHAT CAN AND CANNOT FAIL TODAY ─────────────────────────────────────────
  *   LIVE — every assertion in this file can fail against the repo as it stands:
- *     the AIM block (non-empty synthetic answers); ENTRY_COUNT in both
- *     directions; the per-entry count agreement (calibrated ±1 in-memory); the
+ *     the AIM block (non-empty synthetic answers); ENTRY_COUNT (INSERT lines)
+ *     and C5_ENTRY_COUNT (update:/decline: lines, Phase 164.9.2) in both
+ *     directions; the per-entry count agreement, branched on the line's class
+ *     (calibrated ±1 in-memory for INSERT and update:, +1 for decline:); the
+ *     UPDATE-NOT-COUNTED pin over the REAL emission (calibrated); the
  *     basename/schema existence checks; the two masthead-sentence assertions;
  *     the four workflow-wiring assertions (each calibrated by mutating a copy
  *     of the workflow text).
@@ -44,10 +47,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   matchTable,
+  matchUpdate,
   parseAllowlist,
   prepareFile,
   schemaAllowed,
+  updateLiteralCheck,
 } from "../../scripts/extract-reference-inserts.mjs";
+import { spawnSync } from "node:child_process";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ALLOWLIST_PATH = join(REPO_ROOT, "scripts", "restore-test-refdata-allowlist.txt");
@@ -76,8 +82,29 @@ const RESTORE_WF = join(REPO_ROOT, ".github", "workflows", "test-restore-from-ba
  * carries two entries", which accounts for ONE of the three surplus entries:
  * 20260515095804 carries THREE. Wrong arithmetic in a comment that forbids
  * arithmetic in comments.)
+ *
+ * ⛔ SPLIT 2026-09-25 (Phase 164.9.2). ENTRY_COUNT keeps its meaning: the INSERT
+ * lines (field 3 a bare integer, C1-C4). The C5 lines (`update:<n>` /
+ * `decline:<n>`) are pinned separately by C5_ENTRY_COUNT below, so a C5 line
+ * can never be mistaken for, or net out against, an INSERT line.
  */
 export const ENTRY_COUNT = 22;
+
+/**
+ * PINNED C5 LINE COUNT (Phase 164.9.2): 4 `update:` + 2 `decline:` lines. Same
+ * two-direction rule as ENTRY_COUNT. GREW — a migration added a top-level UPDATE
+ * on a replayed table; SHRANK — a line was deleted, which `--audit` refuses
+ * because every such UPDATE must be accounted for.
+ *
+ * ⛔ RE-MEASURED 2026-09-25 (164.9.2 review round 1, WR-02 / SFH-02): 4 `update:`
+ * + 6 `decline:` = 10. The four new decline: lines account for DO-body writes
+ * on replayed public tables, which `--audit` could not see until it told a DO
+ * body (executed at apply time) from a CREATE FUNCTION body (only defined):
+ * 20260407164606 (profiles), 20260602183000 (profiles, strategies) and
+ * 20260713120000 (profiles). Counted with
+ * `grep -cE $'\t(update|decline):[0-9]+\t' scripts/restore-test-refdata-allowlist.txt`.
+ */
+export const C5_ENTRY_COUNT = 10;
 
 const SELF_TEST_CMD = "node scripts/extract-reference-inserts.mjs --self-test";
 const AUDIT_CMD = "node scripts/extract-reference-inserts.mjs --audit";
@@ -90,11 +117,13 @@ interface Entry {
   table: string;
   count: number;
   consumer: string;
+  kind: "insert" | "update" | "decline";
 }
 interface MatchResult {
   ok: { line: number; sql: string }[];
   body: { line: number }[];
-  rejected: { line: number; reason: string }[];
+  rejected: { line: number; reason: string; nonLiteral?: boolean }[];
+  doWrites?: { line: number; verb: string; declinable: boolean; reason: string }[];
 }
 
 /** Classify one file against one table, failing loud rather than returning empty. */
@@ -104,6 +133,55 @@ function measure(src: string, qualified: string, label: string): MatchResult {
     throw new Error(`${label} could not be lexed: ${prepared.error} (line ${prepared.line})`);
   }
   return matchTable(src, prepared, qualified) as MatchResult;
+}
+
+/** C5: classify one file's top-level UPDATEs against one table. */
+function measureUpdate(src: string, qualified: string, label: string): MatchResult {
+  const prepared = prepareFile(src);
+  if ("error" in prepared) {
+    throw new Error(`${label} could not be lexed: ${prepared.error} (line ${prepared.line})`);
+  }
+  return matchUpdate(src, prepared, qualified) as MatchResult;
+}
+
+/**
+ * What a line's pinned count is measured AGAINST, by its class: INSERT lines
+ * against top-level literal INSERTs, `update:` lines against top-level literal
+ * UPDATEs, `decline:` lines against top-level NON-literal UPDATEs plus the writes
+ * a DO body runs on the table at apply time (164.9.2 review WR-02 / SFH-02).
+ * ⛔ Since review round 2 (WR-01 / SFH R2-01) only a DECLINABLE DO-body write
+ * counts toward a decline:; one that is not (a literal UPDATE, an unproven DELETE
+ * or upsert, a TRUNCATE / MERGE / COPY) is a hard refusal, as at top level.
+ */
+function measuredFor(e: Entry): { n: number; refused: string | null } {
+  const src = readFileSync(join(MIGRATIONS_DIR, e.file), "utf8");
+  if (e.kind === "insert") {
+    const m = measure(src, e.qualified, e.file);
+    return { n: m.ok.length, refused: m.rejected[0]?.reason ?? null };
+  }
+  const m = measureUpdate(src, e.qualified, e.file);
+  const hard = [
+    ...m.rejected.filter((r) => !r.nonLiteral),
+    ...(m.doWrites ?? []).filter((w) => !w.declinable),
+  ];
+  if (hard.length > 0) return { n: -1, refused: hard[0].reason };
+  return {
+    n:
+      e.kind === "update"
+        ? m.ok.length
+        : m.rejected.length + (m.doWrites ?? []).filter((w) => w.declinable).length,
+    refused: null,
+  };
+}
+
+/** The `-- refdata-expect: <table>=<n>` trailers of an emission, as a map. */
+function expectTrailers(emission: string): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const l of emission.split("\n")) {
+    const m = /^-- refdata-expect: ([a-z_.]+)=([0-9]+)$/.exec(l);
+    if (m) out.set(m[1], Number(m[2]));
+  }
+  return out;
 }
 
 /**
@@ -190,6 +268,38 @@ describe("AIM — the parser and the classifier actually classify", () => {
     expect(m.rejected[0].reason).toMatch(/SELECT\/FROM/);
   });
 
+  it("C5: the parser separates an update: line, a decline: line and a NAMED malformed auth.users update: line", () => {
+    const text = [
+      "20260101000000_fx_a.sql\tpublic.fx_ref\t1\t# consumer: an INSERT line",
+      "20260102000000_fx_b.sql\tpublic.fx_ref\tupdate:2\t# reason: replayed",
+      "20260103000000_fx_c.sql\tpublic.fx_ref\tdecline:1\t# reason: a join",
+      "20260104000000_fx_d.sql\tauth.users\tupdate:1\t# reason: must be refused",
+    ].join("\n");
+    const parsed = parseAllowlist(text) as {
+      entries: Entry[];
+      malformed: { lineNo: number; reason: string }[];
+    };
+    expect(parsed.entries.map((e) => [e.kind, e.count])).toEqual([
+      ["insert", 1],
+      ["update", 2],
+      ["decline", 1],
+    ]);
+    expect(parsed.malformed).toHaveLength(1);
+    expect(parsed.malformed[0].lineNo).toBe(4);
+    // auth.users survives the DROP: C3's exception is INSERT-only and never C5's.
+    expect(parsed.malformed[0].reason).toMatch(/C5 targets public only/);
+  });
+
+  it("C5: updateLiteralCheck refuses a FROM join and a current_setting( call, and admits a literal SET … WHERE … IN (…)", () => {
+    expect(updateLiteralCheck("UPDATE fx_ref p SET a = TRUE FROM fx_other o WHERE o.id = p.id")).toMatch(/FROM/);
+    expect(updateLiteralCheck("UPDATE fx_ref SET a = current_setting(       ) WHERE id = 1")).toMatch(
+      /current_setting\(/,
+    );
+    expect(
+      updateLiteralCheck("UPDATE fx_ref SET a =           WHERE a <>            AND role IN (         ,       )"),
+    ).toBeNull();
+  });
+
   it("the classifier is TABLE-specific — it does not match a different table", () => {
     const m = measure(AIM_SQL, "public.fx_other", "AIM_SQL");
     expect(m.ok).toHaveLength(0);
@@ -219,13 +329,36 @@ describe("the live allowlist still describes the migration corpus", () => {
     ).toEqual([]);
   });
 
-  it(`holds exactly ${ENTRY_COUNT} entries`, () => {
+  const inserts = parsed.entries.filter((e) => e.kind === "insert");
+  const c5 = parsed.entries.filter((e) => e.kind !== "insert");
+
+  it(`holds exactly ${ENTRY_COUNT} INSERT entries`, () => {
     expect(
-      parsed.entries.length,
-      parsed.entries.length > ENTRY_COUNT
+      inserts.length,
+      inserts.length > ENTRY_COUNT
         ? "GREW: a reference statement was added — cite its consumer in the entry and raise ENTRY_COUNT in the same commit"
         : "SHRANK: a consumer went away — say which one in the commit message; an entry is never deleted to make something go green",
     ).toBe(ENTRY_COUNT);
+  });
+
+  it(`holds exactly ${C5_ENTRY_COUNT} C5 lines, 4 update: + 6 decline:`, () => {
+    expect(
+      c5.length,
+      c5.length > C5_ENTRY_COUNT
+        ? "C5 GREW: a migration added a top-level UPDATE on a replayed table — its update:/decline: line is right, so raise C5_ENTRY_COUNT in the same commit and say which UPDATE"
+        : "C5 SHRANK: a C5 line was deleted — `--audit` refuses an unaccounted UPDATE, so restore the line rather than lower this pin",
+    ).toBe(C5_ENTRY_COUNT);
+    expect(
+      c5.filter((e) => e.kind === "update").length,
+      "the update: lines (replayed) moved — re-measure with --audit",
+    ).toBe(4);
+    expect(
+      c5.filter((e) => e.kind === "decline").length,
+      "the decline: lines (D-02, accounted for and not replayed) moved — re-measure with --audit",
+    ).toBe(6);
+    for (const e of c5) {
+      expect(e.schema, `:${e.lineNo} is a C5 line on ${e.qualified}; C5 is public-only`).toBe("public");
+    }
   });
 
   it("every entry names a migration that exists and a schema the restore needs replayed", () => {
@@ -246,17 +379,22 @@ describe("the live allowlist still describes the migration corpus", () => {
   it("every pinned count agrees with the real migration bytes, in BOTH directions", () => {
     const disagreements: string[] = [];
     for (const e of parsed.entries) {
-      const src = readFileSync(join(MIGRATIONS_DIR, e.file), "utf8");
-      const m = measure(src, e.qualified, e.file);
-      if (m.rejected.length > 0) {
+      const { n, refused } = measuredFor(e);
+      // A decline: line is MEANT to sit on a statement the literal check refuses;
+      // for it only a hard (non-declinable) refusal is a disagreement.
+      if (refused && e.kind !== "decline") {
         disagreements.push(
-          `:${e.lineNo} ${e.file} [${e.qualified}] carries ${m.rejected.length} top-level statement(s) this allowlist claims are reference data but the classifier refuses: ${m.rejected[0].reason}`,
+          `:${e.lineNo} ${e.file} [${e.qualified}] (${e.kind}) carries top-level statement(s) this allowlist claims are replayable but the classifier refuses: ${refused}`,
         );
         continue;
       }
-      if (m.ok.length !== e.count) {
+      if (refused) {
+        disagreements.push(`:${e.lineNo} ${e.file} [${e.qualified}] (decline) hard refusal: ${refused}`);
+        continue;
+      }
+      if (n !== e.count) {
         disagreements.push(
-          `:${e.lineNo} ${e.file} [${e.qualified}] pins ${e.count} but ${m.ok.length} were measured`,
+          `:${e.lineNo} ${e.file} [${e.qualified}] (${e.kind}) pins ${e.count} but ${n} were measured`,
         );
       }
     }
@@ -266,20 +404,84 @@ describe("the live allowlist still describes the migration corpus", () => {
     ).toEqual([]);
   });
 
+  const agrees = (entries: Entry[]) =>
+    entries.every((e) => {
+      const { n, refused } = measuredFor(e);
+      return (refused === null || e.kind === "decline") && n === e.count;
+    });
+
   it("CALIBRATION — a count off by one in EITHER direction is caught", () => {
-    const agrees = (entries: Entry[]) =>
-      entries.every((e) => {
-        const src = readFileSync(join(MIGRATIONS_DIR, e.file), "utf8");
-        return measure(src, e.qualified, e.file).ok.length === e.count;
-      });
     expect(agrees(parsed.entries)).toBe(true);
+    const first = parsed.entries.findIndex((e) => e.kind === "insert");
     for (const delta of [1, -1]) {
-      const mutated = parsed.entries.map((e, i) => (i === 0 ? { ...e, count: e.count + delta } : e));
+      const mutated = parsed.entries.map((e, i) => (i === first ? { ...e, count: e.count + delta } : e));
       expect(
         agrees(mutated),
         `a pinned count ${delta > 0 ? "raised" : "lowered"} by one still agreed — the re-measurement is not measuring`,
       ).toBe(false);
     }
+  });
+
+  it("C5 CALIBRATION — an update: count off by one in EITHER direction, and a decline: count raised by one, are caught", () => {
+    const upd = parsed.entries.findIndex((e) => e.kind === "update");
+    const dec = parsed.entries.findIndex((e) => e.kind === "decline");
+    expect(upd, "no update: line to calibrate against").toBeGreaterThan(-1);
+    expect(dec, "no decline: line to calibrate against").toBeGreaterThan(-1);
+    for (const [idx, delta] of [
+      [upd, 1],
+      [upd, -1],
+      [dec, 1],
+    ] as const) {
+      const mutated = parsed.entries.map((e, i) => (i === idx ? { ...e, count: e.count + delta } : e));
+      expect(
+        agrees(mutated),
+        `a ${parsed.entries[idx].kind}: count moved by ${delta} still agreed — the C5 re-measurement is not measuring`,
+      ).toBe(false);
+    }
+  });
+
+  // ⛔ LASTING UPDATE-NOT-COUNTED PIN (plan-checker W2). The restore's count
+  // floor is built from `-- refdata-expect:` trailers and asserts count(*) >=
+  // expected. An UPDATE adds no row, so if C5 blocks ever fed those trailers
+  // `public.profiles` would read SHORT (1 row against 5) and EVERY restore would
+  // abort. The restore self-test's fixture arithmetic cannot see this leak, so
+  // this pin runs the REAL extractor over the REAL allowlist and migrations.
+  it("the real emission's refdata-expect trailers count INSERTs only — never a C5 UPDATE", () => {
+    const r = spawnSync(process.execPath, [join(REPO_ROOT, "scripts", "extract-reference-inserts.mjs")], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    });
+    expect(r.status, `the extractor's emit mode failed: ${r.stderr}`).toBe(0);
+    expect(r.stdout, "the emission carries no C5 UPDATE block — the pin below would be vacuous").toMatch(
+      /^-- refdata-update: /m,
+    );
+    const insertCount = new Map<string, number>();
+    for (const e of inserts) {
+      const src = readFileSync(join(MIGRATIONS_DIR, e.file), "utf8");
+      insertCount.set(e.qualified, (insertCount.get(e.qualified) ?? 0) + measure(src, e.qualified, e.file).ok.length);
+    }
+    const holds = (emission: string) => {
+      const t = expectTrailers(emission);
+      if (t.get("public.profiles") !== 1 || t.get("public.strategies") !== 1) return false;
+      for (const [table, n] of t) if (n > (insertCount.get(table) ?? 0)) return false;
+      return t.size > 0;
+    };
+    const t = expectTrailers(r.stdout);
+    expect(
+      t.get("public.profiles"),
+      "public.profiles' refdata-expect is not its INSERT count (1) — counting its 4 replayed UPDATEs would read 5",
+    ).toBe(1);
+    expect(
+      t.get("public.strategies"),
+      "public.strategies' refdata-expect is not its INSERT count (1) — counting its 2 replayed UPDATEs would read 3",
+    ).toBe(1);
+    expect(holds(r.stdout), "a refdata-expect value exceeds the table's measured INSERT count").toBe(true);
+    calibrate(
+      "an UPDATE counted into refdata-expect is caught",
+      r.stdout,
+      (s) => s.replace("-- refdata-expect: public.profiles=1", "-- refdata-expect: public.profiles=5"),
+      holds,
+    );
   });
 
   it("states the same ledger-presence fact as the VAC-08 masthead, word for word", () => {

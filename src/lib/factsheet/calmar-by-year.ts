@@ -4,7 +4,7 @@ export type CalmarYearRow = {
   year: string;
   ret: number;     // year-of-year compounded return
   max_dd: number;  // worst drawdown within the year (≤ 0)
-  calmar: number;  // ret / |max_dd|
+  calmar: number;  // ret / |max_dd|; NaN when the year has no drawdown (D7)
   days: number;    // observed trading days within the year
 };
 
@@ -30,7 +30,11 @@ export function calmarByYear(rets: number[], dates: string[]): CalmarYearRow[] {
       const dd = drawdowns(eq);
       const yearRet = eq[eq.length - 1] - 1;
       const maxDd = Math.min(...dd);
-      const calmar = maxDd !== 0 ? yearRet / Math.abs(maxDd) : 0;
+      // A year with no drawdown has no Calmar: the ratio would be infinite,
+      // which means "does not exist", not 0. NaN renders "—", as compute's
+      // headline Calmar does for the same book (founder decision D7; review
+      // round 3 HI3-02).
+      const calmar = maxDd !== 0 ? yearRet / Math.abs(maxDd) : NaN;
       out.push({ year, ret: yearRet, max_dd: maxDd, calmar, days: yrRets.length });
     });
   return out;

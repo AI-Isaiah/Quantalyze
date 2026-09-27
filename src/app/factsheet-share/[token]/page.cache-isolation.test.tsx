@@ -24,9 +24,11 @@
  * request left behind. The sequence — poison, then probe, on uncleared spies —
  * is the property.
  *
- * ⛔ ZERO IS THE ONLY ACCEPTABLE COUNT, not "a different key" (SL-1a). The
- * `::computedAt` suffix the id route passes is split off and DISCARDED, so the
- * effective key is id-ONLY. Any safety argument of the form "we vary the cache
+ * ⛔ ZERO IS THE ONLY ACCEPTABLE COUNT, not "a different key" (SL-1a). When
+ * this was written the `::computedAt` suffix the id route passed was split off
+ * and DISCARDED, so the effective key was id-ONLY. Since 167.2.1-REVIEW WR-02
+ * the key is the id plus the row's `computed_at`, which is still nothing about
+ * the viewer or the token. Any safety argument of the form "we vary the cache
  * key" is wrong by construction, and an assertion of the form "the token lane
  * uses a different key" would encode that wrong argument. The token lane must
  * produce zero cache reads and zero cache writes.
@@ -55,7 +57,7 @@
  * ═══ ANTI-VACUITY — DEMONSTRATED, NOT ASSERTED ═══
  *
  * NEUTER-D, RUN 2026-08-28. The token page's payload fetch was temporarily
- * rewired through a `unstable_cache(..., ["factsheet-v2-payload-v6", id])`
+ * rewired through a `unstable_cache(..., ["factsheet-v2-payload-vN", id])`
  * wrapper — the exact poisoning D-01's structural argument prevents — and TWO
  * INDEPENDENT DETECTORS went red on the same tree:
  *
@@ -150,7 +152,7 @@ const GENERATION = 1;
 
 /** The shape-versioned key prefix, typed HERE by hand. Never imported from the
  *  page: an oracle read out of the module under test cannot fail. */
-const EXPECTED_KEY_PREFIX = "factsheet-v2-payload-v6";
+const EXPECTED_KEY_PREFIX = "factsheet-v2-payload-v7";
 
 const CASH_DAILY = [
   { date: "2025-08-01", value: 0.01 },
@@ -379,7 +381,7 @@ describe("SHARE-02 — the ORDERED adversarial cache isolation", () => {
     ).toHaveBeenCalledTimes(0);
   });
 
-  it("3. the token lane does not shift the PUBLIC lane's key shape — a published sibling still caches under its own id alone", async () => {
+  it("3. the token lane does not shift the PUBLIC lane's key shape — a published sibling still caches under its own id and analytics run alone", async () => {
     givenPrivateStrategyWithLiveShare();
 
     // ── FIRST: the private token render, again uncleared.
@@ -404,7 +406,10 @@ describe("SHARE-02 — the ORDERED adversarial cache isolation", () => {
 
     // keyParts is the SECOND argument of unstable_cache(cb, keyParts, opts).
     const keyParts = vi.mocked(unstable_cache).mock.calls[0][1] as string[];
-    expect(keyParts).toEqual([EXPECTED_KEY_PREFIX, PUBLISHED_ID]);
+    // 167.2.1-REVIEW WR-02 (2026-09-26): the sibling's own `computed_at` is a
+    // keyParts member, so the entry answers for the run it was built from. It
+    // is a property of the sibling's row, never of the viewer or the token.
+    expect(keyParts).toEqual([EXPECTED_KEY_PREFIX, PUBLISHED_ID, "2026-07-01T00:00:00.000Z"]);
     // ⛔ The private id must appear NOWHERE in the key — not as a part, not as
     // a suffix, not concatenated into one.
     expect(keyParts.join("|")).not.toContain(PRIVATE_ID);

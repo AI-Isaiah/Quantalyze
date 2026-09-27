@@ -918,9 +918,14 @@ export function ScenarioComposer({
     strategies,
     equityDailyPoints,
     snapshotCount,
+    // Phase 167.1.2 review round 2 (WR-02): names the derived source of the
+    // own-book series for the rebuilding disclosure below.
+    equityCurveSource,
     allKeysStale,
     minHistoryDepthMonths,
     activeVenues,
+    // Phase 167.1.2 / D-02: read below as fail-closed, matching the Overview.
+    equityHistoryState,
   } = payload as MyAllocationDashboardPayload & {
     existingOutcomesByHoldingRef?: Record<string, unknown>;
   };
@@ -1018,10 +1023,18 @@ export function ScenarioComposer({
   // (empty-until-added) scenario overlay. Gate the baseline + stamps the same
   // single-switch way. A no-book allocator already renders with an empty
   // baseline, so blank mode just reproduces that already-handled state.
+  //
+  // Phase 167.1.2 / D-02 ("Hide it until correct"): the same switch withholds
+  // the own-book series while the equity history is rebuilt, which also leaves
+  // `scenarioOwnBookDelta` undefined (it needs >= 2 levels). The live-book KPIs
+  // (`liveBaselineMetrics`) are a separate field and stay (D-03).
   const isBlankMode = entryMode === "blank";
+  // Fail-closed: ONLY an explicit "ready" may show the own-book series. A
+  // missing field, null, "" or any later state all read as rebuilding.
+  const isOwnBookRebuilding = equityHistoryState !== "ready";
   const baselineEquityDailyPoints = useMemo(
-    () => (isBlankMode ? [] : equityDailyPoints),
-    [isBlankMode, equityDailyPoints],
+    () => (isBlankMode || isOwnBookRebuilding ? [] : equityDailyPoints),
+    [isBlankMode, isOwnBookRebuilding, equityDailyPoints],
   ) as typeof equityDailyPoints;
 
   const scenario = useScenarioState({
@@ -5497,6 +5510,29 @@ export function ScenarioComposer({
           // absent) when there is no live book series.
           scenarioOwnBookDelta={scenarioOwnBookDelta}
         />
+        {/* Phase 167.1.2 / D-02: the own-book comparison is withheld while the
+            equity history is rebuilt; say so rather than leave a silent gap.
+            Not in blank mode, where there is no own book to compare with.
+            Review round 1 (SFH-05): the producer sends [] for every allocator,
+            so the series cannot tell "withheld" from "none". Two fields are
+            computed before the history is withheld, and together they can.
+            The candidate series has TWO sources: the trustworthy derived curve,
+            which `equityCurveSource === "derived"` names, and the legacy
+            snapshots, which `snapshotCount > 0` names. With neither there is
+            no own-book history to withhold, and the sentence would explain an
+            absence D-02 did not cause. Review round 2 (WR-02): gating on the
+            legacy count alone hid the disclosure from a derived-only book. */}
+        {isOwnBookRebuilding &&
+          !isBlankMode &&
+          (snapshotCount > 0 || equityCurveSource === "derived") && (
+          <p
+            data-testid="scenario-ownbook-rebuilding"
+            className="mt-2 text-fixed-11 text-text-muted"
+          >
+            Your book&apos;s own history is being rebuilt, so the comparison
+            with your current book is not shown.
+          </p>
+        )}
         {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted line
             swatch via the `--color-chart-benchmark` token (UI-SPEC §Copywriting
             / §Color). Disabled when the

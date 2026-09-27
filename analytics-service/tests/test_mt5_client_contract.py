@@ -41,6 +41,7 @@ Regression gates — WHY each case matters (Rule 9):
 from __future__ import annotations
 
 import ast
+import json
 import pathlib
 import re
 import sys
@@ -1595,6 +1596,17 @@ def test_public_surface_is_exactly_the_contract():
         # raw-surface attribute — that prohibition is untouched and still bites.
         "assert_session_authorized",
         "initialize_with_credentials",
+        # 164.6.5 / D-05 — the TERMINAL-PROCESS recycle. It wraps no mt5linux
+        # trade or read surface: it ends the terminal process through ONE
+        # committed remote constant and relaunches it with the same bare
+        # `initialize()` the detector above uses. Named apart from `restart`,
+        # which reconnects the rpyc SOCKET and never touches the terminal.
+        "recycle_terminal_process",
+        # 164.6.5 review round 2, WR-03 root cause — the heal's session read. It
+        # reads what `terminal_info` / `account_info` read (no new MT5 call) in
+        # ONE crossing through a committed remote expression, and returns
+        # equality verdicts only.
+        "session_snapshot",
     }
 
 
@@ -3822,3 +3834,1121 @@ def test_CREDENTIAL_REDACTION_the_falsy_arm_is_SYMMETRIC_across_both_drivable_ve
         "redaction. Only the freeform TEXT may be rewritten — a failure that lost "
         "its code is undebuggable from a log."
     )
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.5 / D-05 (Option 2, founder-ratified 2026-09-25) — THE TERMINAL RECYCLE
+#
+# WHY these matter (Rule 9). The rpyc classic channel is the unauthenticated
+# arbitrary-remote-code channel Phase 134 recorded as T-134-03. D-05 makes it a
+# production RECOVERY path, which is safe only while every property below holds:
+# the command it carries is FIXED in the source (nothing assembled at run time),
+# the verb cannot be handed a credential, an abandoned session cannot fire it,
+# a dead transport can never read as a success, a remote traceback is scrubbed,
+# and the remote source can never touch the Wine prefix that holds the saved
+# terminal state (D-07, ONE-WAY).
+#
+# Every test here carries the token `TERMINAL_RECYCLE` in its name so the CI
+# verify can filter on it and assert a NON-ZERO count.
+#
+# ⛔ The function name and stage name are HAND-TYPED here, never read from the
+# module: an oracle derived from the thing under test cannot fail a rename.
+# --------------------------------------------------------------------------- #
+
+_RECYCLE_FN_NAME = "_qz_recycle_terminal_process"
+_RECYCLE_STAGE = "terminal_recycle"
+
+
+def _install_recycle_double(conn, *, returns=None, raises=None):
+    """Wrap the fake rpyc `execute` so the REAL committed source is still exec'd —
+    proving it compiles and binds the hand-typed name — and then swap the bound
+    function for a recording stub.
+
+    The swap is unavoidable offline: the real body drives Win32 through `ctypes`
+    and exists only in the gateway's Windows interpreter. What CAN be proven
+    offline is proven for real: the exact string that crossed, the argument it
+    was called with, and everything the client does around the crossing.
+    """
+    record: dict = {"sources": [], "calls": []}
+    real_execute = conn.execute
+
+    def _execute(src):
+        record["sources"].append(src)
+        real_execute(src)
+        assert _RECYCLE_FN_NAME in conn.namespace, (
+            "the committed recycle source did not bind the hand-typed name "
+            f"{_RECYCLE_FN_NAME!r} — the client would call a name that does not exist"
+        )
+
+        def _stub(*args):
+            record["calls"].append(args)
+            record["order"] = record.get("order", []) + ["remote"]
+            if raises is not None:
+                raise raises
+            return returns
+
+        dict.__setitem__(conn.namespace, _RECYCLE_FN_NAME, _stub)
+
+    conn.execute = _execute
+    return record
+
+
+def _recycle_verdict(
+    matched=1,
+    terminated=1,
+    exited=1,
+    open_errors=(),
+    terminate_errors=(),
+    file_versions=None,
+    file_version_errors=None,
+):
+    return json.dumps(
+        dict(
+            matched=matched,
+            terminated=terminated,
+            exited=exited,
+            open_errors=list(open_errors),
+            terminate_errors=list(terminate_errors),
+            file_versions=(
+                [[5, 0, 0, 6182]] * matched if file_versions is None else file_versions
+            ),
+            file_version_errors=(
+                [0] * matched if file_version_errors is None else file_version_errors
+            ),
+            # Round 2 (R2-SFH-04 / -06 / -07, WR-06) — the fields the committed
+            # source now also returns, at their no-surprise values.
+            attempted=terminated,
+            unprocessed=0,
+            enumerated=matched + 1,
+            enumerate_error=0,
+            pid_errors=[],
+            file_version_exc=[None] * matched,
+        )
+    )
+
+
+class _FakeWin32:
+    """The Win32 surface `_REMOTE_TERMINAL_RECYCLE_SRC` drives, faked so the
+    COMMITTED source itself can be executed offline (164.6.5 review round 1).
+
+    ⭐ WHY: every other recycle gate swaps the remote function for a stub, so the
+    body that ends the terminal — counting, refusal handling, the codes it
+    returns — had never executed anywhere, offline or live. Here the real string
+    is exec'd with real `ctypes` structures; only `WinDLL` and `get_last_error`
+    (Windows-only) are supplied. ``procs`` is ``[(pid, image), ...]``;
+    ``open_refused`` / ``terminate_refused`` map a pid to the error code the
+    refusal leaves in `GetLastError`; ``not_exiting`` is the pids whose wait
+    times out.
+    """
+
+    WAIT_TIMEOUT = 0x00000102
+
+    def __init__(
+        self,
+        procs,
+        *,
+        open_refused=None,
+        terminate_refused=None,
+        not_exiting=(),
+        version=(5, 0, 0, 6182),
+        query_refused=None,
+        terminate_raises=None,
+        terminate_cost_ms=0,
+        first_fails_with=None,
+        version_dll_raises=None,
+    ) -> None:
+        self.procs = list(procs)
+        # R2-SFH-04 — a pid whose `TerminateProcess` RAISES (a ctypes marshalling
+        # error, say) rather than returning FALSE.
+        self.terminate_raises = dict(terminate_raises or {})
+        # WR-06 — modelled cost of each `TerminateProcess` (a slow Wine call).
+        self.terminate_cost_ms = terminate_cost_ms
+        # R2-SFH-06 — `Process32FirstW` fails and leaves this in GetLastError.
+        self.first_fails_with = first_fails_with
+        # R2-SFH-07 — `WinDLL("version")` itself raises (a missing version.dll).
+        self.version_dll_raises = version_dll_raises
+        # WR-06 — the modelled clock the committed source reads through
+        # `time.monotonic`: only a timed-out wait and a costed terminate move it.
+        self.elapsed_ms = 0
+        self.wait_ms: list[int] = []
+        self.open_refused = dict(open_refused or {})
+        self.terminate_refused = dict(terminate_refused or {})
+        self.not_exiting = set(not_exiting)
+        self.query_refused = dict(query_refused or {})
+        self.version = version
+        self.opened_for_query: list[int] = []
+        self.last_error = 0
+        self.terminated: list[int] = []
+        self._cursor = 0
+        self.kernel32 = types.SimpleNamespace()
+        for name in (
+            "CreateToolhelp32Snapshot",
+            "Process32FirstW",
+            "Process32NextW",
+            "OpenProcess",
+            "TerminateProcess",
+            "WaitForSingleObject",
+            "CloseHandle",
+            "QueryFullProcessImageNameW",
+        ):
+            setattr(self.kernel32, name, self._fn(getattr(self, "_" + name)))
+        self.version_dll = types.SimpleNamespace()
+        for name in (
+            "GetFileVersionInfoSizeW",
+            "GetFileVersionInfoW",
+            "VerQueryValueW",
+        ):
+            setattr(self.version_dll, name, self._fn(getattr(self, "_" + name)))
+        self._fixed = None
+
+    @staticmethod
+    def _fn(impl):
+        def call(*args):
+            return impl(*args)
+
+        return call
+
+    def _fill(self, ref) -> int:
+        if self._cursor >= len(self.procs):
+            return 0
+        pid, image = self.procs[self._cursor]
+        self._cursor += 1
+        ref._obj.th32ProcessID = pid
+        ref._obj.szExeFile = image
+        return 1
+
+    def _CreateToolhelp32Snapshot(self, flags, pid):
+        return 4242
+
+    def _Process32FirstW(self, snapshot, ref):
+        self._cursor = 0
+        if self.first_fails_with is not None:
+            self.last_error = self.first_fails_with
+            return 0
+        return self._fill(ref)
+
+    def _Process32NextW(self, snapshot, ref):
+        return self._fill(ref)
+
+    def _OpenProcess(self, access, inherit, pid):
+        if access == 0x1000:  # PROCESS_QUERY_LIMITED_INFORMATION — the version read
+            self.opened_for_query.append(pid)
+            if pid in self.query_refused:
+                self.last_error = self.query_refused[pid]
+                return 0
+            return 20_000 + pid
+        if pid in self.open_refused:
+            self.last_error = self.open_refused[pid]
+            return 0
+        return 10_000 + pid
+
+    def _TerminateProcess(self, handle, code):
+        pid = handle - 10_000
+        self.elapsed_ms += self.terminate_cost_ms
+        if pid in self.terminate_raises:
+            raise self.terminate_raises[pid]
+        if pid in self.terminate_refused:
+            self.last_error = self.terminate_refused[pid]
+            return 0
+        self.terminated.append(pid)
+        return 1
+
+    def _WaitForSingleObject(self, handle, ms):
+        self.wait_ms.append(ms)
+        if handle - 10_000 in self.not_exiting:
+            self.elapsed_ms += ms  # a timed-out wait costs its whole bound
+            return self.WAIT_TIMEOUT
+        return 0
+
+    def _CloseHandle(self, handle):
+        return 1
+
+    def _QueryFullProcessImageNameW(self, handle, flags, buf, size_ref):
+        buf.value = "C:/terminal/terminal64.exe"
+        return 1
+
+    def _GetFileVersionInfoSizeW(self, path, _handle):
+        return 64
+
+    def _GetFileVersionInfoW(self, path, _zero, length, data):
+        return 1
+
+    def _VerQueryValueW(self, data, sub_block, block_ref, len_ref):
+        import ctypes
+        from ctypes import wintypes
+
+        # ⚠️ `wintypes.DWORD`, not `c_uint32`: off Windows it is `c_ulong` (8 bytes
+        # on this platform), and the struct the committed source casts to is
+        # built from it — a mismatched layout reads zeros (measured).
+        a, b, c, d = self.version
+        self._fixed = (wintypes.DWORD * 4)(
+            0xFEEF04BD, 0x10000, (a << 16) | b, (c << 16) | d
+        )
+        block_ref._obj.value = ctypes.addressof(self._fixed)
+        return 1
+
+    def _win_dll(self, name, **_kwargs):
+        if name == "version":
+            if self.version_dll_raises is not None:
+                raise self.version_dll_raises
+            return self.version_dll
+        return self.kernel32
+
+    def run(self, monkeypatch, exit_wait_ms=5000) -> dict:
+        import ctypes
+        import time
+
+        monkeypatch.setattr(ctypes, "WinDLL", self._win_dll, raising=False)
+        monkeypatch.setattr(ctypes, "get_last_error", lambda: self.last_error, raising=False)
+        namespace: dict = {}
+        exec(mt5_client_mod._REMOTE_TERMINAL_RECYCLE_SRC, namespace)  # noqa: S102
+        # The modelled clock is patched ONLY around the one call, and restored at
+        # once, so nothing else in the test process reads a frozen clock.
+        real_monotonic = time.monotonic
+        base = real_monotonic()
+        time.monotonic = lambda: base + self.elapsed_ms / 1000.0
+        try:
+            return json.loads(namespace[_RECYCLE_FN_NAME](exit_wait_ms))
+        finally:
+            time.monotonic = real_monotonic
+
+
+def test_TERMINAL_RECYCLE_a_live_session_sends_the_committed_source_then_relaunches():
+    """The whole recycle, in order: the COMMITTED constant crosses once, is called
+    with the by-value exit wait, and only THEN is the bare bounded `initialize()`
+    issued that relaunches the terminal (what the founder's 2026-09-25 spike
+    MEASURED relaunching it, unattended, twice).
+
+    The order matters: an `initialize()` issued BEFORE the terminate would attach
+    to the wedged terminal that is about to be killed and report on the wrong
+    process.
+    """
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    conn = fake._MetaTrader5__conn
+    record = _install_recycle_double(conn, returns=_recycle_verdict())
+    real_initialize = fake.initialize
+
+    def _ordered_initialize(**kwargs):
+        record["order"] = record.get("order", []) + ["initialize"]
+        return real_initialize(**kwargs)
+
+    fake.initialize = _ordered_initialize
+
+    with capture_logs() as captured:
+        verdict = client.recycle_terminal_process()
+
+    events = _stage_events(captured, _RECYCLE_STAGE)
+    assert len(events) == 1 and events[0]["ok"] is True, (
+        f"the recycle crossing emitted no timed stage event: {captured}"
+    )
+    assert verdict == {
+        "matched": 1,
+        "terminated": 1,
+        "exited": 1,
+        "attempted": 1,
+        "unprocessed": 0,
+        "enumerated": 2,
+        "enumerate_error": 0,
+        "open_errors": [],
+        "terminate_errors": [],
+        "pid_errors": [],
+        "file_versions": [[5, 0, 0, 6182]],
+        "file_version_errors": [0],
+        "file_version_exc": [None],
+        "authorized": True,
+        "relaunch_code": None,
+    }
+    assert record["sources"] == [mt5_client_mod._REMOTE_TERMINAL_RECYCLE_SRC], (
+        "something other than the committed constant crossed the wire"
+    )
+    assert record["calls"] == [(5000,)], (
+        "the exit wait must cross as ONE by-value int argument — never as text"
+    )
+    assert record["order"] == ["remote", "initialize"]
+    # The relaunch is the detector's own bare, bounded call — timeout only.
+    assert fake.initialize_kwargs == [{"timeout": MT5_INITIALIZE_TIMEOUT_MS}]
+    assert fake.login_calls == []
+
+
+def test_TERMINAL_RECYCLE_a_relaunch_that_is_not_yet_authorized_is_recorded_not_raised():
+    """By the time the relaunch runs the process is already gone. A raise there
+    would hide that from the caller, so the relaunch's answer is RECORDED with
+    its code preserved: `-6` (terminal up, no account yet) is a different next
+    step from an IPC code, and a verdict that lost the code is undebuggable.
+    `authorized` is False — never a success shape the verb did not measure."""
+    connect, fake, _rec = _make(
+        {"initialize": False, "last_error": (-6, "Authorization failed")}
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    _install_recycle_double(
+        fake._MetaTrader5__conn, returns=_recycle_verdict(1, 1, 1)
+    )
+
+    verdict = client.recycle_terminal_process()
+
+    assert verdict["terminated"] == 1
+    assert verdict["authorized"] is False
+    assert verdict["relaunch_code"] == -6
+
+
+def test_TERMINAL_RECYCLE_the_COMMITTED_remote_body_counts_and_names_every_refusal(
+    monkeypatch,
+):
+    """⭐ SFH-01 / SFH-09 (164.6.5 review round 1). The committed source, EXECUTED:
+    it matches only `terminal64.exe` (case-insensitively), counts what it ended,
+    and a refused open or terminate is COUNTED as not-terminated AND carries its
+    `GetLastError()` code — so the first live run can tell "access denied" (5)
+    from "the process is already gone" (87). Without the code, both read as a
+    smaller `terminated` and nothing else."""
+    win32 = _FakeWin32(
+        [
+            (11, "terminal64.exe"),
+            (12, "explorer.exe"),
+            (13, "TERMINAL64.EXE"),
+            (14, "terminal64.exe"),
+            (15, "terminal64.exe"),
+        ],
+        open_refused={13: 5},
+        terminate_refused={14: 87},
+        not_exiting={15},
+    )
+
+    verdict = win32.run(monkeypatch)
+
+    assert {k: verdict[k] for k in (
+        "matched", "terminated", "exited", "open_errors", "terminate_errors"
+    )} == {
+        "matched": 4,
+        "terminated": 2,
+        "exited": 1,
+        "open_errors": [5],
+        "terminate_errors": [87],
+    }
+    assert win32.terminated == [11, 15], "a non-terminal process was ended"
+
+
+def test_TERMINAL_RECYCLE_SFH04_the_BUILD_is_read_bridge_side_before_the_terminate(
+    monkeypatch,
+):
+    """⭐ SFH-04 (164.6.5 review round 1). On a true `-10005` the heal's own
+    `terminal_info()` crosses the dead terminal IPC and is `not_captured`, so the
+    D-03a build hypothesis never got evidence. The executable's file version
+    does not need that IPC: the committed source reads it per matched process,
+    BEFORE ending it, as four ints and never the image path. A failed read is
+    an int code and must not stop the terminate."""
+    win32 = _FakeWin32(
+        [(31, "terminal64.exe"), (32, "terminal64.exe")],
+        version=(5, 0, 0, 6182),
+        query_refused={32: 5},
+    )
+
+    verdict = win32.run(monkeypatch)
+
+    assert verdict["file_versions"] == [[5, 0, 0, 6182], None]
+    assert verdict["file_version_errors"] == [0, 5]
+    assert win32.terminated == [31, 32], (
+        "a failed version read stopped the terminate that follows it"
+    )
+    assert "terminal64" not in json.dumps(verdict), "the image path left the bridge"
+
+
+def test_TERMINAL_RECYCLE_the_COMMITTED_remote_body_reports_matching_NOTHING(monkeypatch):
+    """`matched=0` must come back as a count, never as a success shape: an
+    image-name difference under Wine would otherwise read as a recycle."""
+    verdict = _FakeWin32([(21, "wineserver.exe")]).run(monkeypatch)
+
+    assert verdict["matched"] == 0 and verdict["terminated"] == 0
+
+
+def test_TERMINAL_RECYCLE_the_refusal_codes_reach_the_verdict():
+    """The verb carries the remote codes into its verdict as INTS, so the caller's
+    log line can name them."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    _install_recycle_double(
+        fake._MetaTrader5__conn,
+        returns=_recycle_verdict(2, 0, 0, open_errors=[5], terminate_errors=[87]),
+    )
+
+    verdict = client.recycle_terminal_process()
+
+    assert verdict["open_errors"] == [5]
+    assert verdict["terminate_errors"] == [87]
+
+
+def test_TERMINAL_RECYCLE_SFH06_the_counts_are_logged_even_when_the_relaunch_is_abandoned(
+    caplog,
+):
+    """⛔ SFH-06 (164.6.5 review round 1). The lease can release WHILE the remote
+    terminate is in flight (the heal's budget fired). The relaunch probe's fence
+    then raises `Mt5SessionAbandoned`, the verdict dict is discarded, and the only
+    evidence that the shared terminal was ENDED and not relaunched by us goes with
+    it — unless the counts were logged the moment they were parsed."""
+    import logging
+
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    record = _install_recycle_double(
+        fake._MetaTrader5__conn, returns=_recycle_verdict(1, 1, 0, terminate_errors=[])
+    )
+    client.assert_session_authorized()  # first touch binds the generation
+    real_execute = fake._MetaTrader5__conn.execute
+
+    def _execute_then_lease_releases(src):
+        real_execute(src)
+        bump_mt5_terminal_epoch(client.terminal_key)
+
+    fake._MetaTrader5__conn.execute = _execute_then_lease_releases
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        with pytest.raises(Mt5SessionAbandoned):
+            client.recycle_terminal_process()
+
+    assert record["calls"] == [(5000,)], "the terminate did not cross"
+    counts = [
+        r.getMessage()
+        for r in caplog.records
+        if "terminate crossed" in r.getMessage()
+    ]
+    assert counts and "matched=1 terminated=1 exited=0" in counts[0], (
+        "the relaunch was abandoned and the terminate counts never reached the "
+        "log — a killed shared terminal is invisible (SFH-06)"
+    )
+
+
+def test_TERMINAL_RECYCLE_the_remote_source_is_a_committed_literal_with_no_interpolation():
+    """T-164.6.5-06. The command that crosses an arbitrary-remote-code channel
+    must be FIXED in this file. Asserted structurally on the source file itself:
+    the module-level assignment is an AST string CONSTANT — not an f-string, not
+    a `.format`, not a concatenation — so nothing assembled at run time can reach
+    the container. The prober asserts the same property one layer over on its own
+    probe body (no `${` marker); the Python analog is no brace at all, which also
+    rules out `str.format` placeholders.
+    """
+    source = pathlib.Path(mt5_client_mod.__file__).read_text()
+    tree = ast.parse(source)
+    assigned = [
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(t, ast.Name) and t.id == "_REMOTE_TERMINAL_RECYCLE_SRC"
+            for t in node.targets
+        )
+    ]
+    assert len(assigned) == 1, "the recycle source must be assigned exactly once"
+    value = assigned[0]
+    assert isinstance(value, ast.Constant) and isinstance(value.value, str), (
+        f"the recycle source is a {type(value).__name__}, not a plain string "
+        "literal — something is assembled at run time (T-164.6.5-06)"
+    )
+    src = value.value
+    assert src == mt5_client_mod._REMOTE_TERMINAL_RECYCLE_SRC
+    for marker in ("{", "}", "%(", "%s", "%d"):
+        assert marker not in src, f"interpolation marker {marker!r} in the recycle source"
+    assert f"def {_RECYCLE_FN_NAME}(" in src
+    assert mt5_client_mod._REMOTE_TERMINAL_RECYCLE_FN == _RECYCLE_FN_NAME
+    compile(src, "<recycle>", "exec")
+
+
+def test_TERMINAL_RECYCLE_the_remote_source_can_only_end_a_process():
+    """T-164.6.5-09 (D-07, ONE-WAY) and T-164.6.5-05. The remote source may end a
+    process and do nothing else. A body that learned to delete, move or rewrite
+    files could wipe the Wine prefix whose saved state made both measured
+    unattended recoveries possible; restoring it takes a human at the VNC console.
+    A body that learned to log in, trade or `shutdown()` the shared IPC would be a
+    different verb wearing this one's name.
+
+    ⚠️ Positive control at the end: a body that stopped calling `TerminateProcess`
+    would pass every absence above while recycling nothing.
+    """
+    src = mt5_client_mod._REMOTE_TERMINAL_RECYCLE_SRC
+    forbidden = (
+        # filesystem mutation — the D-07 prefix
+        "shutil", "rmtree", "remove", "unlink", "rename", "replace(", "open(",
+        "DeleteFile", "MoveFile", "RemoveDirectory", ".wine", "drive_c", "config",
+        # process launch / shell — no Linux-side command is sent
+        "subprocess", "system(", "popen", "CreateProcess", "ShellExecute",
+        # credentials and the MT5 surface
+        "login", "password", "server", "MetaTrader5", "shutdown", "order_",
+    )
+    lowered = src.lower()
+    present = [token for token in forbidden if token.lower() in lowered]
+    assert not present, f"the recycle source reaches beyond ending a process: {present}"
+    assert "TerminateProcess" in src and "terminal64.exe" in src
+
+
+def test_TERMINAL_RECYCLE_the_verb_structurally_cannot_accept_a_credential():
+    """T-164.6.5-05. Asserted on the SIGNATURE, not the body: a verb that takes no
+    parameter cannot be handed a login, password or server by any future caller,
+    and so can never carry one into a remote-executed source on a public repo.
+    The terminal re-authorizes from its own persistent state or the next per-call
+    login — never from this verb."""
+    import inspect
+
+    params = inspect.signature(Mt5Client.recycle_terminal_process).parameters
+    assert list(params) == ["self"], (
+        f"recycle_terminal_process grew parameters {list(params)[1:]} — it must "
+        "take none, so no credential can ever be routed into it"
+    )
+
+
+def test_TERMINAL_RECYCLE_an_abandoned_session_is_refused_before_anything_crosses():
+    """WIZFORM-ABANDON / D-36. A recycle fired from work that outlived its lease
+    would kill the terminal under whoever holds it NOW. Oracled on the fake's
+    recorded crossings, never on the exception alone — the harm is a crossing
+    LANDING, not an exception going unraised."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    conn = fake._MetaTrader5__conn
+    record = _install_recycle_double(conn, returns=_recycle_verdict())
+
+    client.assert_session_authorized()  # first touch binds the generation
+    initialize_before = fake.initialize_calls
+    bump_mt5_terminal_epoch(client.terminal_key)  # the lease released
+
+    with capture_logs() as captured:
+        with pytest.raises(Mt5SessionAbandoned):
+            client.recycle_terminal_process()
+
+    assert record["sources"] == [], "the refused recycle still sent its source"
+    assert record["calls"] == [], "the refused recycle still ran the terminate"
+    assert fake.initialize_calls == initialize_before, (
+        "the refused recycle still issued the relaunch"
+    )
+    assert _stage_events(captured, _RECYCLE_STAGE) == [], (
+        "a fence refusal is not a round-trip and must emit no stage event"
+    )
+
+
+def test_TERMINAL_RECYCLE_an_absent_transport_raises_and_never_reports_success():
+    """No rpyc transport ⇒ nothing was sent and nothing was ended. The verb must
+    say so with the module's typed error — a success-shaped verdict here would
+    tell the caller the terminal was recycled when it was never reached."""
+    connect, fake, _rec = _make({"no_transport": True, "initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.recycle_terminal_process()
+
+    assert type(exc_info.value) is Mt5ClientError
+    assert "not reachable" in str(exc_info.value)
+    assert fake.initialize_calls == 0, "a relaunch ran after a recycle that never happened"
+
+
+def test_TERMINAL_RECYCLE_a_malformed_remote_verdict_raises_and_skips_the_relaunch():
+    """The remote answer is a by-value JSON string. Anything else means we do not
+    know what happened on the far side, and a verdict built from it would be
+    invented — typed raise, and no relaunch claimed on top of an unknown."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    _install_recycle_double(fake._MetaTrader5__conn, returns="not json at all")
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.recycle_terminal_process()
+
+    assert "malformed" in str(exc_info.value)
+    assert fake.initialize_calls == 0
+
+
+def test_TERMINAL_RECYCLE_a_remote_traceback_is_scrubbed_typed_and_timed():
+    """T-164.6.5-08. A remote failure arrives as a traceback carrying the executed
+    source and whatever the far side printed; raw, it would reach a public Actions
+    log or Sentry. It must leave as a scrubbed, typed `Mt5ClientError` — and the
+    failing crossing must still emit its stage event, or the recycle's failures
+    would be censored out of the timing population."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    _install_recycle_double(
+        fake._MetaTrader5__conn,
+        raises=RuntimeError(
+            "remote traceback in _qz_recycle_terminal_process; apikey=SUPERSECRET"
+        ),
+    )
+
+    with capture_logs() as captured:
+        with pytest.raises(Mt5ClientError) as exc_info:
+            client.recycle_terminal_process()
+
+    assert type(exc_info.value) is Mt5ClientError
+    assert "SUPERSECRET" not in str(exc_info.value)
+    assert fake.initialize_calls == 0
+    events = _stage_events(captured, _RECYCLE_STAGE)
+    assert len(events) == 1 and events[0]["ok"] is False
+    assert events[0]["error_class"] == "RuntimeError"
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.5 review round 2 — Topic B, the remote recycle source.
+# --------------------------------------------------------------------------- #
+
+
+def test_TERMINAL_RECYCLE_R2SFH04_a_malformed_DIAGNOSTIC_field_keeps_the_counts_and_relaunch(
+    caplog,
+):
+    """⛔ R2-SFH-04. By the time the payload is parsed every `TerminateProcess` has
+    already run. The diagnostic fields come from Win32 code that has never run
+    live, so a shape surprise in ONE of them used to fail the whole parse: the
+    counts never reached the log, the relaunch was never issued, and the caller
+    logged "whether the process was ended is not known" about a process that WAS
+    ended. A malformed diagnostic field must become a named placeholder; the
+    counts and the relaunch must survive it."""
+    import logging
+
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    _install_recycle_double(
+        fake._MetaTrader5__conn,
+        returns=_recycle_verdict(
+            2, 2, 1, file_versions=[["x", "y"], None], file_version_errors="garbage"
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        verdict = client.recycle_terminal_process()
+
+    assert (verdict["matched"], verdict["terminated"], verdict["exited"]) == (2, 2, 1)
+    assert verdict["file_versions"] == "unparsed"
+    assert verdict["file_version_errors"] == "unparsed"
+    assert verdict["open_errors"] == [], "one bad field took a good one down with it"
+    assert fake.initialize_calls == 1, "the relaunch was skipped over a diagnostic field"
+    lines = [r.getMessage() for r in caplog.records if "terminate crossed" in r.getMessage()]
+    assert lines and "matched=2 terminated=2 exited=1" in lines[0], (
+        "the counts did not reach the log when a diagnostic field was malformed"
+    )
+
+
+def test_TERMINAL_RECYCLE_R2SFH04_a_malformed_ESSENTIAL_count_still_raises():
+    """The other half of the split: the three counts ARE the verdict. When they
+    cannot be read the verb does not know what happened, and it says so."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    _install_recycle_double(
+        fake._MetaTrader5__conn, returns=json.dumps(dict(matched=1, terminated="two"))
+    )
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.recycle_terminal_process()
+
+    assert "malformed" in str(exc_info.value)
+    assert fake.initialize_calls == 0
+
+
+def test_TERMINAL_RECYCLE_R2SFH04_a_raise_after_the_first_terminate_is_COUNTED_in_the_bridge(
+    monkeypatch,
+):
+    """⛔ R2-SFH-04. A remote raise on a LATER pid (a ctypes marshalling error, for
+    example) used to escape the function after the first terminate had landed.
+    `_guarded_read` then turned it into a code-0 error and the verdict read as
+    "not known", while a terminal was already down. The committed body now
+    catches per process, keeps going, and returns the counts with the failing
+    exception's CLASS NAME, so "terminate attempted" survives."""
+    import ctypes
+
+    win32 = _FakeWin32(
+        [(41, "terminal64.exe"), (42, "terminal64.exe"), (43, "terminal64.exe")],
+        terminate_raises={42: ctypes.ArgumentError("argument 1: bad handle")},
+    )
+
+    verdict = win32.run(monkeypatch)
+
+    assert verdict["matched"] == 3
+    assert verdict["attempted"] == 3, "the raising terminate was not counted as attempted"
+    assert verdict["terminated"] == 2
+    assert verdict["pid_errors"] == ["ArgumentError"]
+    assert win32.terminated == [41, 43], "one raising pid stopped the rest"
+    assert "bad handle" not in json.dumps(verdict), "remote free text left the bridge"
+
+
+def test_TERMINAL_RECYCLE_WR06_many_stray_terminals_cannot_overrun_the_rpyc_bound(
+    monkeypatch,
+):
+    """⛔ WR-06. The loop runs inside ONE rpyc request. Each timed-out exit wait
+    used to cost the full per-process bound, so eight stray `terminal64.exe`
+    processes modelled 8 x 5 s = 40 s against a 30 s `sync_request_timeout`: the
+    request timed out, the counts were lost, and a terminate that LANDED read as
+    "not known". Every process must still be ended, and the modelled runtime
+    must stay under half the bound (three exit waits' worth)."""
+    procs = [(50 + i, "terminal64.exe") for i in range(8)]
+    win32 = _FakeWin32(procs, not_exiting={pid for pid, _ in procs})
+
+    verdict = win32.run(monkeypatch, exit_wait_ms=5000)
+
+    assert win32.terminated == [pid for pid, _ in procs], "a stray terminal was left running"
+    assert verdict["terminated"] == 8 and verdict["exited"] == 0
+    assert verdict["unprocessed"] == 0
+    assert win32.elapsed_ms <= 3 * 5000, (
+        f"the remote body modelled {win32.elapsed_ms} ms of waiting inside one rpyc "
+        "request bounded at 30 s — several strays overrun it (WR-06)"
+    )
+
+
+def test_TERMINAL_RECYCLE_WR06_slow_win32_calls_stop_the_loop_and_report_partial_counts(
+    monkeypatch,
+):
+    """WR-06, the other way to overrun: the Win32 calls themselves are slow under
+    Wine (unmeasured). The body stops starting new processes once its budget is
+    spent and REPORTS how many it never reached, so `matched != terminated` reads
+    as a partial recycle and not as a timeout that lost everything."""
+    procs = [(60 + i, "terminal64.exe") for i in range(6)]
+    win32 = _FakeWin32(procs, terminate_cost_ms=6000)
+
+    verdict = win32.run(monkeypatch, exit_wait_ms=5000)
+
+    assert verdict["matched"] == 6
+    assert verdict["attempted"] == 3 and verdict["terminated"] == 3
+    assert verdict["unprocessed"] == 3
+    assert win32.wait_ms == [0, 0, 0], "an exhausted budget still waited"
+
+
+def test_TERMINAL_RECYCLE_WR06_the_exit_wait_shrinks_with_the_instance_request_timeout():
+    """WR-06. The in-bridge budget is three exit waits, so the exit wait that
+    crosses must be at most a sixth of THIS client's `sync_request_timeout` — a
+    client built with a shorter bound must not inherit the 30 s arithmetic."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(
+        _TERMINAL_HOST, _TERMINAL_PORT, _connect=connect, request_timeout_s=24
+    )
+    record = _install_recycle_double(fake._MetaTrader5__conn, returns=_recycle_verdict())
+
+    client.recycle_terminal_process()
+
+    assert record["calls"] == [(4000,)]
+    assert 6 * mt5_client_mod._TERMINAL_EXIT_WAIT_MS <= MT5_REQUEST_TIMEOUT_S * 1000, (
+        "the default exit wait no longer fits three waits in half the default bound"
+    )
+
+
+def test_TERMINAL_RECYCLE_R2SFH06_a_failed_enumeration_is_not_zero_matches(monkeypatch):
+    """⛔ R2-SFH-06. `Process32FirstW` failing (a `dwSize` Wine rejects, say) and
+    "no terminal running" both produced `matched=0`. The body now returns how many
+    processes it WALKED and the first call's `GetLastError()`, as ints."""
+    procs = [(71, "wineserver.exe"), (72, "services.exe")]
+
+    failed = _FakeWin32(procs, first_fails_with=24).run(monkeypatch)
+    empty = _FakeWin32(procs).run(monkeypatch)
+
+    assert (failed["matched"], failed["enumerated"], failed["enumerate_error"]) == (0, 0, 24)
+    assert (empty["matched"], empty["enumerated"], empty["enumerate_error"]) == (0, 2, 0)
+
+
+def test_TERMINAL_RECYCLE_R2SFH07_a_raising_version_read_names_its_exception_class(
+    monkeypatch,
+):
+    """⛔ R2-SFH-07. `except Exception` in the version read kept only `-1`, so a
+    missing `version.dll` under Wine and a ctypes signature mismatch read the
+    same. It now keeps the exception's CLASS NAME (bridge-local, never remote free
+    text) beside the `-1`, and the terminate that follows still runs."""
+    win32 = _FakeWin32(
+        [(81, "terminal64.exe")], version_dll_raises=OSError("version.dll not found")
+    )
+
+    verdict = win32.run(monkeypatch)
+
+    assert verdict["file_version_errors"] == [-1]
+    assert verdict["file_version_exc"] == ["OSError"]
+    assert "not found" not in json.dumps(verdict)
+    assert win32.terminated == [81]
+
+
+def test_TERMINAL_RECYCLE_R2SFH07_a_free_text_exception_field_never_reaches_the_verdict():
+    """The class-name fields are strings, so the client admits only an identifier
+    shape. Anything else — a message, a path — becomes the placeholder."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    payload = json.loads(_recycle_verdict())
+    payload["file_version_exc"] = ["C:/users/someone/terminal64.exe not found"]
+    payload["pid_errors"] = ["ArgumentError"]
+    _install_recycle_double(fake._MetaTrader5__conn, returns=json.dumps(payload))
+
+    verdict = client.recycle_terminal_process()
+
+    assert verdict["file_version_exc"] == "unparsed"
+    assert verdict["pid_errors"] == ["ArgumentError"]
+
+
+def test_TERMINAL_RECYCLE_IN01_every_Win32_function_called_has_its_signature_declared(
+    monkeypatch,
+):
+    """IN-01. Under the faked `WinDLL` an `argtypes` / `restype` assignment is a
+    plain attribute write, so a function called WITHOUT one passes every offline
+    gate and marshals with ctypes' int defaults on the live bridge: a HANDLE
+    truncated to 32 bits, a DWORD read as a signed int. This asserts, on the
+    EXECUTED body, that every function the source calls had `argtypes` set, and
+    that every function returning something other than BOOL had `restype` set.
+
+    ⚠️ It proves the declarations exist. It does NOT prove they are right under
+    Wine — live marshalling is still unmeasured (WINDOWS.md entry 68).
+    """
+    import re
+
+    src = mt5_client_mod._REMOTE_TERMINAL_RECYCLE_SRC
+    called = {
+        (dll, fn)
+        for dll, fn in re.findall(r"\b(kernel32|ver)\.([A-Za-z0-9]+)\(", src)
+    }
+    assert ("kernel32", "TerminateProcess") in called, "the call scan found nothing"
+    win32 = _FakeWin32(
+        [(91, "terminal64.exe")],
+    )
+
+    win32.run(monkeypatch)
+
+    dlls = {"kernel32": win32.kernel32, "ver": win32.version_dll}
+    missing_argtypes = sorted(
+        f"{dll}.{fn}" for dll, fn in called if not hasattr(getattr(dlls[dll], fn), "argtypes")
+    )
+    assert not missing_argtypes, f"called without argtypes: {missing_argtypes}"
+    non_bool = {
+        "CreateToolhelp32Snapshot",
+        "OpenProcess",
+        "WaitForSingleObject",
+        "GetFileVersionInfoSizeW",
+    }
+    missing_restype = sorted(
+        fn
+        for dll, fn in called
+        if fn in non_bool and not hasattr(getattr(dlls[dll], fn), "restype")
+    )
+    assert not missing_restype, f"non-BOOL return without restype: {missing_restype}"
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.5 review round 2, WR-03 ROOT CAUSE — the session snapshot
+#
+# The terminal heal's pre-recycle evidence capture and its post-relaunch house-
+# session check read `terminal_info` / `account_info`, which cost one rpyc
+# crossing per field when materialized client-side, so the heal skipped them on
+# every run. `session_snapshot` reads them on the FAR side in one `conn.eval` of a
+# committed expression. What must hold: the expression is fixed text that can only
+# READ; it returns plain scalars; the client hands back VERDICTS, never an account
+# number or a server name; and every failure is typed and scrubbed.
+# --------------------------------------------------------------------------- #
+
+_SNAPSHOT_ALLOWED_MT5_CALLS = frozenset({"terminal_info", "account_info", "last_error"})
+
+
+def test_SESSION_SNAPSHOT_the_remote_source_is_a_committed_literal_that_can_only_read():
+    """T-134-03 / T-164.6.5-06 class. The expression crosses the arbitrary-remote-
+    code channel, so it must be an AST string CONSTANT with no interpolation
+    marker (the recycle source's rule), must parse as ONE expression, and its
+    only calls on `mt5` may be the three reads. Anything else it calls must be a
+    local lambda or `getattr` / `isinstance` / `str`: no import, no dunder, no
+    login, no `initialize`, no trade verb."""
+    source = pathlib.Path(mt5_client_mod.__file__).read_text()
+    assigned = [
+        node.value
+        for node in ast.parse(source).body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(t, ast.Name) and t.id == "_REMOTE_SESSION_SNAPSHOT_SRC"
+            for t in node.targets
+        )
+    ]
+    assert len(assigned) == 1
+    value = assigned[0]
+    assert isinstance(value, ast.Constant) and isinstance(value.value, str)
+    src = value.value
+    assert src == mt5_client_mod._REMOTE_SESSION_SNAPSHOT_SRC
+    for marker in ("{", "}", "%(", "%s", "%d", "__", "import"):
+        assert marker not in src, f"{marker!r} in the snapshot source"
+
+    tree = ast.parse(src, mode="eval")
+    lambda_params = {
+        arg.arg
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Lambda)
+        for arg in node.args.args
+    }
+    mt5_calls: set[str] = set()
+    other_calls: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "mt5"
+        ):
+            mt5_calls.add(func.attr)
+        elif isinstance(func, ast.Name):
+            other_calls.add(func.id)
+        elif isinstance(func, ast.Lambda):
+            other_calls.add("<lambda>")
+        else:
+            other_calls.add(ast.dump(func))
+    assert mt5_calls == _SNAPSHOT_ALLOWED_MT5_CALLS, mt5_calls
+    assert other_calls <= lambda_params | {"<lambda>", "getattr", "isinstance", "str"}, (
+        other_calls
+    )
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert names <= lambda_params | {
+        "mt5", "getattr", "isinstance", "str", "bool", "int", "float"
+    }, names
+
+
+class _SnapshotBridge:
+    """The `mt5` the committed expression reads through, far-side."""
+
+    def __init__(self, terminal, account, last_error=(-10005, "IPC timeout")):
+        self.terminal, self.account, self.error = terminal, account, last_error
+        self.calls: list[str] = []
+
+    def terminal_info(self):
+        self.calls.append("terminal_info")
+        return self.terminal
+
+    def account_info(self):
+        self.calls.append("account_info")
+        return self.account
+
+    def last_error(self):
+        self.calls.append("last_error")
+        return self.error
+
+
+class _SnapshotTerminal(NamedTuple):
+    build: object
+    connected: object
+
+
+class _SnapshotAccount(NamedTuple):
+    login: object
+    server: object
+
+
+def _snapshot_client(bridge, *, evaluate=None):
+    connect, fake, _rec = _make({})
+    conn = fake._MetaTrader5__conn
+    evaluated: list[str] = []
+
+    def _eval(src):
+        evaluated.append(src)
+        if evaluate is not None:
+            return evaluate(src)
+        return eval(src, {"mt5": bridge})  # noqa: S307 — the committed source, offline
+
+    conn.eval = _eval
+    return Mt5Client("host", 18812, _connect=connect), evaluated
+
+
+@pytest.mark.parametrize(
+    "terminal,account,expected",
+    [
+        pytest.param(
+            None,
+            None,
+            dict(terminal_code=-10005, account_read=False, build=None),
+            id="terminal-unanswered-account-NOT-read",
+        ),
+        pytest.param(
+            _SnapshotTerminal(6182, True),
+            None,
+            dict(terminal_code=None, account_code=-10005, build=6182, connected=True),
+            id="account-unanswered",
+        ),
+        pytest.param(
+            _SnapshotTerminal(6182, False),
+            _SnapshotAccount(4242, "House-Server"),
+            dict(connected=False, login_matches=True, server_matches=True),
+            id="house-session",
+        ),
+        pytest.param(
+            _SnapshotTerminal(6182, True),
+            _SnapshotAccount(4243, "Another-Server"),
+            dict(login_matches=False, server_matches=False),
+            id="another-account-and-server",
+        ),
+        pytest.param(
+            _SnapshotTerminal(object(), "yes"),
+            _SnapshotAccount(None, ""),
+            dict(build=None, connected=None, login_matches=None, server_matches=None),
+            id="fields-not-captured",
+        ),
+    ],
+)
+def test_SESSION_SNAPSHOT_returns_verdicts_never_values(terminal, account, expected):
+    """The committed expression is evaluated against a far-side double, and the
+    client must reduce it to verdicts: an account number or a server name never
+    comes back. A terminal that does not answer is not asked `account_info`, and
+    `last_error()` is read right after the `None`."""
+    bridge = _SnapshotBridge(terminal, account)
+    client, evaluated = _snapshot_client(bridge)
+
+    snapshot = client.session_snapshot(expected_login=4242, expected_server="House-Server")
+
+    assert evaluated == [mt5_client_mod._REMOTE_SESSION_SNAPSHOT_SRC]
+    for key, value in expected.items():
+        assert getattr(snapshot, key) == value, (key, snapshot)
+    assert 4242 not in snapshot and "House-Server" not in snapshot
+    assert 4243 not in snapshot and "Another-Server" not in snapshot
+    if terminal is None:
+        assert bridge.calls == ["terminal_info", "last_error"]
+    elif account is None:
+        assert bridge.calls == ["terminal_info", "account_info", "last_error"]
+    else:
+        assert bridge.calls == ["terminal_info", "account_info"]
+
+
+def test_SESSION_SNAPSHOT_the_far_side_result_is_plain_scalars():
+    """rpyc's brine copies a tuple BY VALUE only when every item is a scalar; one
+    non-scalar turns the whole result into a netref whose every index is another
+    crossing. The expression coerces, so a non-scalar field arrives as a string."""
+    bridge = _SnapshotBridge(_SnapshotTerminal(object(), True), _SnapshotAccount(1, "s"))
+    raw = eval(mt5_client_mod._REMOTE_SESSION_SNAPSHOT_SRC, {"mt5": bridge})  # noqa: S307
+
+    def _by_value(v):
+        return v is None or isinstance(v, (bool, int, float, str)) or (
+            type(v) is tuple and all(_by_value(i) for i in v)
+        )
+
+    assert type(raw) is tuple and _by_value(raw), raw
+    assert isinstance(raw[1], str)
+
+
+@pytest.mark.parametrize(
+    "returned",
+    [
+        pytest.param(["answered", 1, True, 1, "s"], id="a-list-a-netref-would-look-like"),
+        pytest.param(("answered", 1, True), id="short"),
+        pytest.param(("surprise", 1), id="unknown-tag"),
+        pytest.param((), id="empty"),
+    ],
+)
+def test_SESSION_SNAPSHOT_a_malformed_result_raises_typed(returned):
+    client, _ = _snapshot_client(None, evaluate=lambda _src: returned)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.session_snapshot(expected_login=1, expected_server="s")
+    assert exc_info.value.code == 0
+
+
+def test_SESSION_SNAPSHOT_a_transport_raise_is_scrubbed_and_typed():
+    """Like every read: a raw remote traceback never escapes unscrubbed."""
+
+    def _boom(_src):
+        raise RuntimeError("remote traceback: password='hunter2' server='Broker'")
+
+    client, _ = _snapshot_client(None, evaluate=_boom)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.session_snapshot(expected_login=1, expected_server="s")
+    assert "hunter2" not in str(exc_info.value)
+
+
+def test_SESSION_SNAPSHOT_without_a_transport_fails_loud_and_is_fenced():
+    """No `_MetaTrader5__conn` means nothing can be read bridge-side, and falling
+    back to the per-field reads would re-open WR-03 invisibly: it RAISES. And an
+    abandoned session is refused at the fence before anything crosses."""
+    connect, _fake, _rec = _make({"no_transport": True})
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError):
+        client.session_snapshot(expected_login=1, expected_server="s")
+
+    bridge = _SnapshotBridge(None, None)
+    fenced, evaluated = _snapshot_client(bridge)
+    fenced.session_snapshot(expected_login=1, expected_server="s")  # binds
+    bump_mt5_terminal_epoch(fenced.terminal_key)
+    with pytest.raises(Mt5SessionAbandoned):
+        fenced.session_snapshot(expected_login=1, expected_server="s")
+    assert len(evaluated) == 1, "the abandoned read crossed the wire"

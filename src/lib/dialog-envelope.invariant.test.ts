@@ -809,7 +809,16 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog envelope population", () => 
     // FOURTH census the mint moves, beside the two `EXPECTED_TABLE_SIZE`
     // literals and `EXPECTED_EMITTED_CODES` in
     // `seam-venue-vocabulary.invariant.test.ts`.
-    expect(checked).toBe(33);
+    //
+    // 33 -> 34 at 164.6.5 review round 1 / CR-02 (CONTEXT D-17): the
+    // rotate-secret roster gained KEY_MT5_TERMINAL_UNRESPONSIVE — wire
+    // MT5_TERMINAL_UNRESPONSIVE, minted by the same `_validate_mt5_key_probe`
+    // `rotate_key_secret` runs, and reached through the same `seamCode`.
+    // 14 -> 15 on that one roster, 33 -> 34 overall. MEASURED: this assertion
+    // read `expected 34 to be 33` with the row added and the pin unmoved. The
+    // copy entry and the `VENUE_WIRE_CODE_TO_VERDICT` row already existed, so
+    // no other census moved (the three sibling suites stayed green).
+    expect(checked).toBe(34);
   });
 
   it("B. no rostered code is the generic terminal — that would defeat the roster", () => {
