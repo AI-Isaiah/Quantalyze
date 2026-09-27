@@ -123,7 +123,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9: TESTISOLATION — a run's assertions against the shared TEST project stop being unreliable: per-run isolation replaces global truth** (INSERTED)
 - [x] **Phase 164.9.1: JOBRPCTRUTH — the compute-job RPC surface does what its own comments say** (INSERTED) — verification: passed (completed 2026-09-27)
 - [x] **Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD** (INSERTED)
-- [ ] **Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim** (INSERTED) — not yet verified
+- [x] **Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim** (INSERTED) — verification: passed (completed 2026-09-27, PR #890, v0.109.0.0)
 - [ ] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — not yet verified
 - [ ] **Phase 164.9.3.2: DEFER40001 — a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end** (INSERTED) — not yet verified
 - [ ] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — not yet verified
@@ -3189,7 +3189,7 @@ Plans:
 **Goal:** A due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim.
 **Requirements**: TODOS `[164.9.3-CLAIM-PAIR-23505]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 6/6 plans executed
+**Plans:** 6/6 plans complete
 
 ⭐ **Inserted 2026-09-26 by orchestrator decision** (routed from the Phase 167.1.2 PR B review). It is a separate topic from 164.9.1 JOBRPCTRUTH and 164.9.2 REFDATAUPDATES.
 
@@ -4375,7 +4375,7 @@ kept verbatim.
 | 164.9 TESTISOLATION | 11/11 | Complete | #837 |
 | 164.9.1 JOBRPCTRUTH | 14/14 | Complete — verification passed 2026-09-27 (last browser check closed) | v0.93.0.0 · #860 |
 | 164.9.2 REFDATAUPDATES | 5/5 | Complete | v0.93.0.1 · #862 |
-| 164.9.3 CLAIMPAIR | 0/? | Queued — blocker | - |
+| 164.9.3 CLAIMPAIR | 6/6 | Complete    | 2026-09-27 |
 | 164.9.3.1 FANINGRAPH | 0/? | Queued — blocker, after 164.9.3 | - |
 | 164.9.3.2 DEFER40001 | 0/? | Queued — blocker, beside 164.9.3 (founder 2026-09-27) | - |
 | 164.9.4 CIOFFMUTEX | planned, not on main | In progress — draft PR #880 (measurement run) | - |

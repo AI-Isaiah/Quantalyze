@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "166.3"
 current_phase_name: RECOMPUTE
 status: executing
-stopped_at: Phase 166.4 complete; 166.3 resumes (founder census next)
+stopped_at: Phases 166.4 and 164.9.3 complete; 166.3 resumes (founder census next)
 last_updated: "2026-09-27T16:45:49.492Z"
 last_activity: 2026-09-27
 last_activity_desc: Phase 166.4 complete; 166.3 RECOMPUTE resumes with the widened set
 state_head: a8137e4a8837396874a67c99e9d3a91649a2b1a5
 progress:
   total_phases: 80
-  completed_phases: 41
+  completed_phases: 43
   total_plans: 360
   completed_plans: 351
-  percent: 51
+  percent: 54
 ---
 
 ## ⭐ STATE lineage
@@ -182,6 +182,8 @@ is decided by verification status, never by plan counts.**
 Phase: 166.3 (RECOMPUTE) — RESUMING after 166.4
 Plan: Not started
 Phase: 169.2 (BENCHFRESH) — shipped; post-deploy check after the 00:10 UTC refresh
+Phase: 164.9.3 (CLAIMPAIR) — COMPLETE 2026-09-27 (verification passed; PR #890 merged, v0.109.0.0)
+Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
 Phase: 166.4 (BENCHALIGN) — PLANNED 2026-09-27 (4 plans, 4 waves; on branch feat/166.4-benchalign)
 Plan: 0 of 4
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
@@ -969,7 +971,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [█████░░░░░] 51%
+Progress: [█████░░░░░] 54%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
