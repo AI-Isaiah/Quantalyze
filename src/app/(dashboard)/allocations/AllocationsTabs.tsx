@@ -23,6 +23,11 @@ import type { SavedScenarioRow } from "./components/ScenarioComposer";
 import { TweaksProvider, useTweakValue } from "./context/TweaksContext";
 import { TweaksToggle } from "./components/TweaksToggle";
 import { Tweaks } from "./components/Tweaks";
+import { computeTabStripScroll } from "@/lib/tab-strip-scroll";
+
+// Plan 170-08 imports the scroll math from the lib module. Re-exported here
+// so the existing test import from this file keeps working unchanged.
+export { computeTabStripScroll } from "@/lib/tab-strip-scroll";
 // Phase 116 / ADDALLOC-02 — the real-data onboarding overlay. Hosted at the
 // tab level so the context-aware header "+ Allocation" button can open it on
 // Holdings / Overview (where ScenarioComposer, its other host, is not mounted).
@@ -344,35 +349,6 @@ const TAB_COUNT_BADGE_ACTIVE =
   "rounded-sm bg-accent/15 px-1.5 py-0.5 text-fixed-10 font-mono leading-none text-accent";
 const TAB_COUNT_BADGE_INACTIVE =
   "rounded-sm bg-page px-1.5 py-0.5 text-fixed-10 font-mono leading-none text-text-muted";
-
-/**
- * NAV-02 (Phase 45) — pure horizontal-scroll math for the <sm tab strip.
- *
- * Given the active tab's content-box left/width and the strip's visible window
- * (scrollLeft + clientWidth), return the strip scrollLeft target that brings the
- * tab fully into view, plus the motion to use, or `null` when it is already
- * visible (the no-op case). This deliberately models ONLY the horizontal axis:
- * the prior `scrollIntoView({ block: "nearest" })` also moved the nearest
- * VERTICAL scroll container, which yanked the page back up to the strip after a
- * user had scrolled down — defeating `changeTab`'s intentional
- * `router.replace(..., { scroll: false })`. Keeping the math pure here makes the
- * reduced-motion branch (WCAG — never animate a forced scroll for reduce users)
- * and the already-visible no-op directly unit-testable without a layout engine.
- */
-export function computeTabStripScroll(args: {
-  elLeft: number;
-  elWidth: number;
-  viewLeft: number;
-  viewWidth: number;
-  prefersReducedMotion: boolean;
-}): { left: number; behavior: ScrollBehavior } | null {
-  const { elLeft, elWidth, viewLeft, viewWidth, prefersReducedMotion } = args;
-  const behavior: ScrollBehavior = prefersReducedMotion ? "auto" : "smooth";
-  if (elLeft < viewLeft) return { left: elLeft, behavior };
-  const elRight = elLeft + elWidth;
-  if (elRight > viewLeft + viewWidth) return { left: elRight - viewWidth, behavior };
-  return null; // already in view — no scroll, and never any vertical movement
-}
 
 export function AllocationsTabs(
   // Phase 100 / 100-04 — `favorites` / `optimizer` / `note` are ADDITIVE props
