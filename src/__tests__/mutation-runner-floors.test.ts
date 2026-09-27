@@ -692,7 +692,11 @@ describe("corpus re-derivation", () => {
     // Over the common base of 449: +4 (L1-L4, this branch) and +38 (origin/main:
     // 37 in test_api_keys_account_identity.sql, 6f CCXT). MEASURED by one full lane
     // run on the merged tree: `arms: 491/491/0`, `biting: 491`.
-    expect(totalAnchored).toBe(491);
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 491 -> 506. FIFTEEN new arms,
+    // all in the NEW gate supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql.
+    // MEASURED: this file's own run read `expected 506 to be 491`, and one full lane
+    // run printed `arms: 506/506/0`, `biting: 506`.
+    expect(totalAnchored).toBe(506);
   });
 });
 
@@ -1648,7 +1652,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // never read as a FULL run. The runner prints exactly one per corpus run,
     // BEFORE any lane, in this position (plan 07's FULL-after log). The
     // denominator equals the `coverage:` numerator below, as a real FULL run's does.
-    "scope: FULL 52/52 annotated files",
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52/52 -> 53/53, copied from one
+    // full lane run (the gate file joined the annotated set).
+    "scope: FULL 53/53 annotated files",
     "  baseline  supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
     "  arm SHAPE 1                  exit   3  RED (identity ok)  (1.7s)",
     "  restore   supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
@@ -1665,7 +1671,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // identity row 7 -> 8 (arm 6f CCXT), copied from one full measured run.
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 51/78 -> 52/79,
     // both new files, copied from one full lane run on the merged tree.
-    "coverage: files 52/79",
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52/79 -> 53/80, the arrival of
+    // test_claim_compute_jobs_failed_retry_pending_pair.sql, copied from one full lane run.
+    "coverage: files 53/80",
     // 164.4-01: the exclusion, named. Two synthetic basenames rather than the
     // real 27 — the arms below mutate the COUNT against the NAMES, and a
     // fixture carrying the live corpus would have to move on every batch.
@@ -1908,9 +1916,15 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // The THREE DELIBERATE MISMATCHES keep their gap of one: lane-invocations 492
     // against 491, biting 492 against executed 491, and rows summing to 490
     // against an aggregate of 491.
-    "arms: 491/491/0   (executed/annotated/waived)",
-    "biting: 491   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
-    "lane-invocations: 491   (arm lanes actually spawned — tallied inside runLane, independent of the 491 the verdict loop counted; plus 52 baseline / 52 restore leg(s))",
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 491 -> 506 in
+    // arms/biting/lane-invocations and the leg counts 52 -> 53; ONE row is ADDED below
+    // (test_claim_compute_jobs_failed_retry_pending_pair.sql, 15). Copied from ONE full
+    // lane run (see run.mjs ARMS_FLOOR). The THREE DELIBERATE MISMATCHES keep their
+    // gap of one: lane-invocations 507 against 506, biting 507 against executed 506,
+    // and rows summing to 505 against an aggregate of 506.
+    "arms: 506/506/0   (executed/annotated/waived)",
+    "biting: 506   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 506   (arm lanes actually spawned — tallied inside runLane, independent of the 506 the verdict loop counted; plus 53 baseline / 53 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -1967,6 +1981,11 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_api_keys_venue_identity_uniq.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8",
     "  file test_capital_ownership_allocation_guard.sql: sections 10 / judged 10 / annotated 10 / waived 0 / biting 10",
     "  file test_capital_ownership_column.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
+    // ⭐ ADDED 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): the gate for migration
+    // 20260927120000, fifteen arms, copied from the full run's own per-file line. It
+    // ends `biting 15`, not `biting 45`, so the row-sum arm's `biting 45$` regex still
+    // matches only the strategy_shares row.
+    "  file test_claim_compute_jobs_failed_retry_pending_pair.sql: sections 9 / judged 15 / annotated 15 / waived 0 / biting 15",
     "  file test_compute_jobs_error_kind_copy_parity.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
     "  file test_create_wizard_strategy_for_key.sql: sections 9 / judged 9 / annotated 9 / waived 0 / biting 9",
     "  file test_cron_runs_rls.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
@@ -2013,7 +2032,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_wizard_composite_fence.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_wizard_composite_members.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     "  file test_wizard_session_idempotency.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
-    "per-arm lane time: mean 1.1s over 491 arm run(s)",
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): copied from the full run that
+    // measured the floors.
+    "per-arm lane time: mean 1.2s over 506 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -2035,7 +2056,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 4): 485 -> 486.
     // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round-4 fixes): 486 -> 487.
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 491.
-    expect(r.out).toContain("491 arm lane(s) spawned");
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 491 -> 506.
+    expect(r.out).toContain("506 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -2241,7 +2263,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // 52/51, one more real per-file row (test_api_keys_account_identity.sql).
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 52/51 -> 53/52,
     // BOTH new per-file rows.
-    expect(r.out).toContain("printed 53 per-file row(s) but reported 52 annotated file(s)");
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 53/52 -> 54/53,
+    // one more real per-file row (test_claim_compute_jobs_failed_retry_pending_pair.sql).
+    expect(r.out).toContain("printed 54 per-file row(s) but reported 53 annotated file(s)");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2280,8 +2304,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // 486/487, both halves together, so the gap stays exactly one.
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 490/491,
     // both halves together, so the gap stays exactly one.
-    expect(r.out).toContain("rows sum to 490 biting arm(s) but the aggregate");
-    expect(r.out).toContain("reports 491");
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 490/491 -> 505/506,
+    // both halves together, so the gap stays exactly one (offset -1 kept).
+    expect(r.out).toContain("rows sum to 505 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 506");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2310,14 +2336,16 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round-4 fixes): 486 -> 487 in the
     // NEEDLE and in `executed`/`biting`; the severed value stays 0.
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 491 in the NEEDLE; the severed value stays 0.
-    const severed = GREEN_LOG.replace(/^lane-invocations: 491 /m, "lane-invocations: 0 ");
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 491 -> 506 in the NEEDLE and
+    // in `executed`/`biting`; the severed value stays 0.
+    const severed = GREEN_LOG.replace(/^lane-invocations: 506 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
     expect(r.out).toContain("GATE failing, not the corpus");
     // ⭐ CURRENCY 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): 449 -> 453 in the
     // NEEDLE and in `executed`/`biting`; the severed value stays 0.
-    expect(r.out).toContain("executed=491 lane-invocations=0 biting=491");
+    expect(r.out).toContain("executed=506 lane-invocations=0 biting=506");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2347,10 +2375,12 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // and DELIBERATE MISMATCH 487 -> 488, both halves, gap of one kept.
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): NEEDLE 491 and
     // DELIBERATE MISMATCH 492, both halves, gap of one kept.
-    const extra = GREEN_LOG.replace(/^lane-invocations: 491 /m, "lane-invocations: 492 ");
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): NEEDLE 491 -> 506 and
+    // DELIBERATE MISMATCH 492 -> 507, both halves, gap of one kept (offset +1).
+    const extra = GREEN_LOG.replace(/^lane-invocations: 506 /m, "lane-invocations: 507 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("executed=491 lane-invocations=492 biting=491");
+    expect(r.out).toContain("executed=506 lane-invocations=507 biting=506");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
@@ -2362,7 +2392,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 4): 485 -> 486.
     // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round-4 fixes): 486 -> 487.
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 491.
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 491 /m, "lane-invocations: abc ");
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 491 -> 506.
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 506 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -2398,7 +2429,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // BOTH the needle and the replacement; only the W field differs.
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 491 in
     // BOTH the needle and the replacement; only the W field differs.
-    const waived = GREEN_LOG.replace(/^arms: 491\/491\/0 /m, `arms: 491/491/${WAIVED_CEILING + 1} `);
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 491 -> 506 in BOTH the
+    // needle and the replacement; only the W field differs.
+    const waived = GREEN_LOG.replace(/^arms: 506\/506\/0 /m, `arms: 506/506/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -2451,14 +2484,18 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 491, moved
     // INDIVIDUALLY: executed-is-zero keeps its literal 0; the biting-above-executed
     // arm's NEEDLE 491 and MISMATCH 492.
-    const zero = GREEN_LOG.replace(/^arms: 491\/491\/0 /m, "arms: 0/491/0 ");
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 491 -> 506, moved
+    // INDIVIDUALLY: executed-is-zero keeps its literal 0 and moves only the annotated
+    // field; the biting-above-executed arm's NEEDLE 491 -> 506 and MISMATCH 492 -> 507
+    // (offset +1 kept).
+    const zero = GREEN_LOG.replace(/^arms: 506\/506\/0 /m, "arms: 0/506/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
-    const spliced = GREEN_LOG.replace(/^biting: 491 /m, "biting: 492 ");
+    const spliced = GREEN_LOG.replace(/^biting: 506 /m, "biting: 507 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
-    expect(s.out).toContain("biting (492) exceeds executed (491)");
+    expect(s.out).toContain("biting (507) exceeds executed (506)");
   });
 
   // ── 164.4.2-09, DECISION D: the step judges WHAT THE RUN COVERED ─────────
@@ -2479,9 +2516,13 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 2/51 -> 2/52.
     // Both sides moved this 50 -> 51 for their own new file; the union carries both, so 52,
     // agreeing with the coverage line below (the recheck MEASURE_FAILs on a disagreement).
-    "scope: SUBSET 2/52 annotated files: test_allocator_equity_derived_rls.sql test_allocator_equity_pre_terminus_flag.sql",
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 2/52 -> 2/53, agreeing
+    // with the coverage line below (the recheck MEASURE_FAILs on a disagreement).
+    "scope: SUBSET 2/53 annotated files: test_allocator_equity_derived_rls.sql test_allocator_equity_pre_terminus_flag.sql",
     "",
-    "coverage: files 52/79",
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52/79 -> 53/80, agreeing with
+    // GREEN_LOG's coverage line and the SUBSET scope denominator above.
+    "coverage: files 53/80",
     "unreachable: 2 file(s) raise outside the runner's identity idiom — a.sql b.sql (TODOS [REDUNDER-NONIDIOM])",
     "lane-blocked: 2 file(s) probe pg_extension for pg_cron and are NOT yet annotated — d.sql e.sql (the lane hosts pg_cron since Phase 164.4.1, so a non-empty class here is STALE — see the lane-probe line)",
     "lane-probe: pg_cron absent — lane-blocked class is current",
@@ -2516,7 +2557,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     for (const env of [PUSH, PR]) {
       const r = runCountRecheck(GREEN_LOG, env);
       expect(r.status, `${env.GITHUB_EVENT_NAME}\n${r.out}`).toBe(0);
-      expect(r.out).toContain("scope: FULL 52/52 annotated files");
+      // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52/52 -> 53/53.
+      expect(r.out).toContain("scope: FULL 53/53 annotated files");
       expect(r.out).toContain("both floors and the waiver ceiling hold");
       // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 426 -> 428.
       // The right-hand side is ARMS_FLOOR as the step re-reads it from run.mjs.
@@ -2529,7 +2571,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 4): 485 -> 486.
       // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round-4 fixes): 486 -> 487.
       // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 491.
-      expect(r.out).toContain("biting arms 491 >= 491");
+      // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 491 -> 506.
+      expect(r.out).toContain("biting arms 506 >= 506");
     }
   });
 
@@ -2567,7 +2610,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
   });
 
   it("RED: a SUBSET count that disagrees with the names it prints fails, quoting both", () => {
-    const lying = SUBSET_LOG.replace("scope: SUBSET 2/52 ", "scope: SUBSET 3/52 ");
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): the NEEDLE follows
+    // SUBSET_LOG's scope line 2/52 -> 2/53; the lie stays one file more (3/53).
+    const lying = SUBSET_LOG.replace("scope: SUBSET 2/53 ", "scope: SUBSET 3/53 ");
     expect(lying).not.toBe(SUBSET_LOG);
     const r = runCountRecheck(lying, PR);
     expect(r.status, r.out).toBe(1);
@@ -2641,7 +2686,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // row-count arm, not waved through as a subset.
     const mislabelled = SUBSET_LOG.replace(
       /^scope: SUBSET .*$/m,
-      "scope: FULL 52/52 annotated files (subset fallback: no listed file is annotated: test_x.sql)",
+      // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52/52 -> 53/53.
+      "scope: FULL 53/53 annotated files (subset fallback: no listed file is annotated: test_x.sql)",
     );
     expect(mislabelled).not.toBe(SUBSET_LOG);
     const r = runCountRecheck(mislabelled, PR);
@@ -2653,7 +2699,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // 51/78 with the new gate file; the 2 printed rows are unchanged.
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 51 -> 52, from
     // SUBSET_LOG's coverage line, which moved to 52/79 with both new files.
-    expect(r.out).toContain("printed 2 per-file row(s) but reported 52 annotated file(s)");
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52 -> 53, from
+    // SUBSET_LOG's coverage line, which moved to 53/80 with the new gate file.
+    expect(r.out).toContain("printed 2 per-file row(s) but reported 53 annotated file(s)");
   });
 
   it("RED: two scope lines, or a DIAGNOSTIC one, are not this gate", () => {
@@ -2662,11 +2710,13 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // become no-ops and the arm stops exercising anything.
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): the NEEDLE follows
     // GREEN_LOG's scope line 51/51 -> 52/52.
-    const twice = GREEN_LOG.replace("scope: FULL 52/52 annotated files", "scope: FULL 52/52 annotated files\nscope: FULL 52/52 annotated files");
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): the NEEDLE follows
+    // GREEN_LOG's scope line 52/52 -> 53/53, or both replaces below become no-ops.
+    const twice = GREEN_LOG.replace("scope: FULL 53/53 annotated files", "scope: FULL 53/53 annotated files\nscope: FULL 53/53 annotated files");
     const t = runCountRecheck(twice, PUSH);
     expect(t.status, t.out).toBe(1);
     expect(t.out).toContain("printed 2 'scope:' lines");
-    const diag = GREEN_LOG.replace("scope: FULL 52/52 annotated files", "scope: DIAGNOSTIC supabase/tests/test_x.sql");
+    const diag = GREEN_LOG.replace("scope: FULL 53/53 annotated files", "scope: DIAGNOSTIC supabase/tests/test_x.sql");
     const d = runCountRecheck(diag, PUSH);
     expect(d.status, d.out).toBe(1);
     expect(d.out).toContain("is neither the FULL nor the SUBSET form");

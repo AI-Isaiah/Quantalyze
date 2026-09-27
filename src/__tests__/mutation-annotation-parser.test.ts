@@ -1034,8 +1034,15 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // (449 / 464) this branch added 4 arms / 12 steps (L1-L4) and origin/main added
     // 38 arms / 28 steps (test_api_keys_account_identity.sql and 6f CCXT); the two
     // sides touch disjoint gate files. MEASURED on the merged tree by this file's own run.
-    expect(armsSeen).toBe(491);
-    expect(stepsSeen).toBe(504);
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): `armsSeen` 491 -> 506
+    // and `stepsSeen` 504 -> 534. FIFTEEN new arms, all in the NEW gate
+    // supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql; each layered
+    // twin carries TWO `find`-bearing steps (the production edit, then the body's
+    // self-verify anchor stood down), so the two pins move by different amounts.
+    // MEASURED: this file's own run read `expected 506 to be 491`, and the needle
+    // census below read `expected 534 to be 504`.
+    expect(armsSeen).toBe(506);
+    expect(stepsSeen).toBe(534);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1937,7 +1944,10 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // 491 -> 492, one new `edit` step, one needle. MEASURED: `expected 492 to be 491`.
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 504, moving WITH
     // `stepsSeen`: 464 + 12 (this branch) + 28 (origin/main), one needle each.
-    expect(needles.length).toBe(504);
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 504 -> 534, moving WITH
+    // `stepsSeen`: thirty new `find`-bearing steps (two per CLAIMPAIR twin), one
+    // needle each. MEASURED: `expected 534 to be 504` at the pre-move pin.
+    expect(needles.length).toBe(534);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2509,7 +2519,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 78 -> 79. BOTH new
     // files are in the corpus (test_mark_rpc_bridge_advisory_lock.sql and
     // test_api_keys_account_identity.sql), so 77 + 1 + 1 = 79.
-    expect(corpus.filesTotal).toBe(79);
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 79 -> 80. The one
+    // added is supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql, a
+    // NEW file (the gate for migration 20260927120000, fifteen arms), and the five
+    // classes still sum to it: annotated 53 + pending 0 + unreachable 27 + inert 0 +
+    // lane-blocked 0 = 80. MEASURED: this file's own run read `expected 80 to be 79`.
+    expect(corpus.filesTotal).toBe(80);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2562,7 +2577,11 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 51 -> 52, with the
     // denominator and the by-name list below, which carries BOTH new files.
     // MEASURED off the full lane run on the merged tree: `coverage: files 52/79`.
-    expect(corpus.filesAnnotated).toBe(52);
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52 -> 53, with the
+    // denominator and the by-name list below. The one added is
+    // supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql. MEASURED
+    // off the full lane run: `coverage: files 53/80`.
+    expect(corpus.filesAnnotated).toBe(53);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2591,6 +2610,10 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_api_keys_venue_identity_uniq.sql",
       "test_capital_ownership_allocation_guard.sql",
       "test_capital_ownership_column.sql",
+      // ⭐ ADDED 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05) — the FIFTY-THIRD
+      // annotated file: a due failed_retry job beside a pending twin of the same
+      // (kind, partition) never makes a claim entry point raise 23505 (15 arms).
+      "test_claim_compute_jobs_failed_retry_pending_pair.sql",
       "test_compute_jobs_error_kind_copy_parity.sql",
       "test_create_wizard_strategy_for_key.sql",
       // ⭐ ADDED 2026-09-24 (Phase 164.6 review fix round 1) — the FIFTIETH
@@ -3043,7 +3066,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 78 -> 79 and 51 -> 52.
     // BOTH added gate files. MEASURED off the full lane run on the merged tree:
     // annotated 52 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 79.
-    expect(corpus.filesTotal).toBe(79);
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 79 -> 80. The one
+    // added is supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql, a
+    // NEW file (the gate for migration 20260927120000, fifteen arms), and the five
+    // classes still sum to it: annotated 53 + pending 0 + unreachable 27 + inert 0 +
+    // lane-blocked 0 = 80. MEASURED: this file's own run read `expected 80 to be 79`.
+    expect(corpus.filesTotal).toBe(80);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3056,7 +3084,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ 50 -> 51 (Phase 164.5.2 BRIDGELOCK plan 03, test_mark_rpc_bridge_advisory_lock.sql).
     // ⭐ 50 -> 51 (Phase 167.1.2 plan 03, test_api_keys_account_identity.sql).
     // ⭐ 51 -> 52 (merge of origin/main into Phase 164.5.2: both new files).
-    expect(corpus.annotatedFiles).toHaveLength(52);
+    // ⭐ 52 -> 53 (Phase 164.9.3 CLAIMPAIR plan 05, test_claim_compute_jobs_failed_retry_pending_pair.sql).
+    expect(corpus.annotatedFiles).toHaveLength(53);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {
