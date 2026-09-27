@@ -3252,7 +3252,7 @@ Plans:
 **Goal:** A compute-job RPC called through PostgREST never raises SQLSTATE 40001, so PostgREST never re-runs the call in a loop. A preempted worker's `defer_compute_job` (and any sibling RPC with the same errcode) fails once, with an error the caller can read.
 **Requirements**: TODOS-style id `[164.9.4-DEFER-40001-RETRY-HANG]` (owned here)
 **Depends on:** none in code. ⭐ It is a BLOCKER in the ratified 2026-09-27 order: it sits in the blockers group beside Phase 164.9.3, and Phase 164.9.4's SC-3 cannot pass until it lands.
-**Plans:** 6 plans
+**Plans:** 8 plans
 
 ⭐ **Founder decision, 2026-09-27 (AskUserQuestion, "New blocker phase (Recommended)"):** the 40001 retry loop gets its own blocker phase, not a fold into 164.9.4.
 
@@ -3276,20 +3276,25 @@ Plans:
 **Wave 1**
 
 - [ ] 164.9.3.2-01-PLAN.md — MEASURE: each 40001 raise site probed through the lane's PostgREST on today's code (four fence raises, enqueue A1/A2), ending in founder decision ENQ-SCOPE (lane: local-stack)
-- [ ] 164.9.3.2-02-PLAN.md — the fix migration (three functions re-based, four fence raises on 55006, messages byte-identical) and its both-lanes SQL gate, RED without and GREEN with; [BLOCKING] schema proof by local-stack replay, never a push (lanes: pg-lane, local-stack)
+- [ ] 164.9.3.2-02-PLAN.md — the fix migration (three functions re-based, four fence raises on 55006, messages byte-identical), its both-lanes SQL gate RED without and GREEN with, and the regenerated snapshots (lanes: pg-lane, local-stack)
 
 **Wave 2** *(blocked on plan 02)*
 
 - [ ] 164.9.3.2-03-PLAN.md — SC-2 PostgREST proof: four live-DB arms bounded by abortSignal, RED on a lane without the fix, GREEN with it (lane: local-stack)
 - [ ] 164.9.3.2-04-PLAN.md — Python classifiers on 55006 with the literal fallback; live fence tests assert 55006; SC-2 Python half proven locally, skip match unchanged (lane: local-stack)
+- [ ] 164.9.3.2-05-PLAN.md — the migration completed (COMMENTs re-issued, three earned prod-body-acks) and the [BLOCKING] schema proof on its final bytes by local-stack replay, never a push (lanes: local-stack, pg-lane)
 
-**Wave 3** *(blocked on plans 01-04)*
+**Wave 3** *(blocked on plans 01-05)*
 
-- [ ] 164.9.3.2-05-PLAN.md — census on the merged tree, TODOS entry landed then closed, release commit, push (lane: pg-lane)
+- [ ] 164.9.3.2-06-PLAN.md — census on the merged tree: mutation-runner floors and every corpus pin, read off one run (lane: pg-lane)
 
-**Wave 4** *(blocked on plan 05)*
+**Wave 4** *(blocked on plan 06)*
 
-- [ ] 164.9.3.2-06-PLAN.md — gates: three pre-merge migration reviewers, SC-3 founder question, MERGE-GATE (lane: none)
+- [ ] 164.9.3.2-07-PLAN.md — TODOS entry landed then closed, ENQ-SCOPE recorded in this ROADMAP entry, release commit, push (lane: none)
+
+**Wave 5** *(blocked on plan 07)*
+
+- [ ] 164.9.3.2-08-PLAN.md — REVIEW-GATE: three pre-merge migration reviewers (blocking), SC-3 asked alongside without blocking, ship condition under the founder's green-then-merge rule (lane: none)
 
 ### Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner (INSERTED)
 
