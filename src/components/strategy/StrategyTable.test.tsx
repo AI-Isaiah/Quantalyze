@@ -21,6 +21,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrategyTable } from "./StrategyTable";
+import { EMPTY_ADVANCED_FILTERS, StrategyFilters } from "./StrategyFilters";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
 
@@ -1078,5 +1079,102 @@ describe("StrategyTable — RANK-02 3M filter reads the alias AND the blob", () 
     // the arm above.
     expect(screen.queryByText("Alias Only Row")).not.toBeInTheDocument();
     expect(screen.queryByText("Blob Only Row")).not.toBeInTheDocument();
+  });
+});
+
+describe("StrategyTable — N-TABLE sticky header and whole words (170-10)", () => {
+  it("isolates the table so its sticky header z-index stays local", () => {
+    // WHY: the sticky th z-20/z-30 painted over the Sort selects. isolate
+    // keeps that stacking context inside the table (N-TABLE).
+    render(<StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />);
+    const root = document.querySelector("[data-strategy-table]");
+    expect(root).not.toBeNull();
+    expect(root!.className.split(/\s+/)).toContain("isolate");
+  });
+
+  it("keeps the name link's text equal to the name, each word nowrap", () => {
+    // WHY: a hyphenated word must not break at the hyphen (AD-13), and
+    // textContent must stay equal to the name (PC-5 / noteOf).
+    const name = "Alpha Long-Short Beta";
+    render(
+      <StrategyTable
+        strategies={[
+          makeStrategy({
+            id: STRATEGY_ID_A,
+            name,
+            strategy_types: ["Long-Short"],
+          }),
+        ]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    const link = screen.getByRole("link", { name });
+    expect(link.textContent).toBe(name);
+    expect(
+      [...link.querySelectorAll("span")].map((span) => ({
+        text: span.textContent,
+        nowrap: span.className.split(/\s+/).includes("whitespace-nowrap"),
+      })),
+    ).toEqual([
+      { text: "Alpha", nowrap: true },
+      { text: "Long-Short", nowrap: true },
+      { text: "Beta", nowrap: true },
+    ]);
+  });
+
+  it("wraps the tag row and keeps each tag badge on one line", () => {
+    // WHY: tags move whole to the next line, the same rule as /strategies (l).
+    render(
+      <StrategyTable
+        strategies={[
+          makeStrategy({
+            id: STRATEGY_ID_A,
+            name: "Alpha Stellar",
+            strategy_types: ["Long-Short", "Market Neutral"],
+          }),
+        ]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    const nameCell = screen.getByRole("link", { name: "Alpha Stellar" }).closest("td")!;
+    const badges = ["Long-Short", "Market Neutral"].map((label) =>
+      within(nameCell).getByText(label),
+    );
+    const tagRow = badges[0].parentElement!;
+    expect(badges[1].parentElement).toBe(tagRow);
+    expect(tagRow.className.split(/\s+/)).toEqual(
+      expect.arrayContaining(["flex", "flex-wrap", "gap-1"]),
+    );
+    for (const badge of badges) {
+      expect(badge.className.split(/\s+/)).toContain("whitespace-nowrap");
+    }
+  });
+
+  it("sticks the filter bar under the 48px mobile top bar, and at the top from md", () => {
+    // WHY: MobileTopBar is h-12 sticky z-20 below md. A bare top-0 bar
+    // slides under it and the Sort selects stop receiving clicks (N-TABLE).
+    render(
+      <StrategyFilters
+        search=""
+        onSearchChange={() => {}}
+        showExamples
+        onToggleExamples={() => {}}
+        sortKey="sharpe"
+        onSortKeyChange={() => {}}
+        sortDir="desc"
+        onSortDirChange={() => {}}
+        viewMode="table"
+        onViewModeChange={() => {}}
+        advancedFilters={EMPTY_ADVANCED_FILTERS}
+        onAdvancedFiltersChange={() => {}}
+      />,
+    );
+    const sort = screen.getByRole("combobox", { name: "Sort by" });
+    const bar = sort.closest(".sticky") as HTMLElement | null;
+    expect(bar).not.toBeNull();
+    const tokens = bar!.className.split(/\s+/);
+    expect(tokens).toContain("top-12");
+    expect(tokens).toContain("md:top-0");
+    expect(tokens).not.toContain("top-0");
   });
 });
