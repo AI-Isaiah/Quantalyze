@@ -2569,3 +2569,91 @@ describe("AllocatorExchangeManager — round-2 review: state crossing sections",
     ).not.toBeDisabled();
   });
 });
+
+// SC2-PROFILE (N-PROFILE). A nowrap row inside overflow-hidden is clipped,
+// not scrolled, so Disconnect sits past a phone viewport. Both key rows wrap,
+// and each row's actions share one group that takes its own line below sm.
+describe("AllocatorExchangeManager — key rows wrap so Disconnect is reachable (SC2-PROFILE)", () => {
+  function surfaceRow(el: HTMLElement): HTMLElement {
+    let node: HTMLElement | null = el;
+    while (node && !/\bbg-surface\b/.test(node.className)) {
+      node = node.parentElement;
+    }
+    if (!node) throw new Error("key row not found");
+    return node;
+  }
+
+  function expectActionGroup(el: HTMLElement) {
+    for (const token of [
+      "basis-full",
+      "sm:basis-auto",
+      "sm:ml-auto",
+      "flex-wrap",
+      "gap-2",
+    ]) {
+      expect(el.className, token).toContain(token);
+    }
+  }
+
+  it("wraps active and disconnected rows, and groups Disconnect with Sync now", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey(),
+          makeKey({
+            id: "key-mt5-1",
+            exchange: "mt5",
+            label: "My MT5",
+            venue_account_id: "1001",
+          }),
+          makeKey({
+            id: "key-okx-gone",
+            exchange: "okx",
+            label: "Old OKX",
+            disconnected_at: "2026-04-22T09:00:00Z",
+          }),
+        ]}
+      />,
+    );
+
+    const disconnect = screen.getByRole("button", {
+      name: "Disconnect binance key",
+    });
+    const sync = screen.getByRole("button", { name: "Sync binance now" });
+    const group = disconnect.parentElement;
+    expect(group).not.toBeNull();
+    expectActionGroup(group!);
+    expect(sync.parentElement).toBe(group);
+
+    const activeRow = surfaceRow(disconnect);
+    expect(activeRow).not.toBe(group);
+    expect(activeRow.className).toContain("flex-wrap");
+
+    const update = screen.getByRole("button", {
+      name: "Update password for mt5 key",
+    });
+    const mt5Disconnect = screen.getByRole("button", {
+      name: "Disconnect mt5 key",
+    });
+    expect(update.parentElement).toBe(mt5Disconnect.parentElement);
+    expectActionGroup(mt5Disconnect.parentElement!);
+    expect(surfaceRow(mt5Disconnect).className).toContain("flex-wrap");
+
+    const reconnect = screen.getByRole("button", { name: "Reconnect okx key" });
+    const disconnectedGroup = reconnect.parentElement;
+    expect(disconnectedGroup).not.toBeNull();
+    expectActionGroup(disconnectedGroup!);
+    const disconnectedRow = surfaceRow(reconnect);
+    expect(disconnectedRow).not.toBe(disconnectedGroup);
+    expect(disconnectedRow.className).toContain("flex-wrap");
+    expect(disconnectedRow.className).toContain("opacity-75");
+
+    for (const button of [disconnect, sync, update, mt5Disconnect, reconnect]) {
+      expect(button.className).toContain("min-h-[44px]");
+      expect(button.className).toContain("px-4");
+      expect(button.className).toContain("py-2.5");
+      expect(button.className).toContain("text-body");
+    }
+  });
+});
