@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.106.1.0] - 2026-09-27 — APPURL guard: a Production build refuses a non-canonical NEXT_PUBLIC_APP_URL
+
+### Fixed
+- **Share links came back on the vercel.app alias.** A factsheet share link minted from the canonical domain on 2026-09-27 pointed at the vercel.app alias instead. The same variable feeds every absolute link the app mints: scenario share, emails, PDFs, alert acks. A wrong value there is a link on the wrong host that someone has already been sent.
+
+### Root cause
+- **The Vercel Production value of `NEXT_PUBLIC_APP_URL` was the vercel.app alias.** The share route's `resolveAppUrl` prefers that variable over the request origin by design, so the code did what it was told. Nothing checked the value.
+
+### Changed
+- **Outside the repo: the Vercel Production value was set to the canonical origin on 2026-09-27** by the orchestrator, on founder approval. It takes effect on the next production build.
+- **`next.config.ts` now exports `assertCanonicalAppUrl` and calls it when the config loads.** On a `VERCEL_ENV=production` build it throws, naming the variable, when the value is unset, not a URL, not https, a vercel.app host, or localhost. Preview and development builds are unaffected, since preview deploys legitimately live on vercel.app hosts. The guard refuses and never substitutes a host.
+
+### Tests
+- **`src/__tests__/app-url-guard.test.ts`** pins four cases: production with a vercel.app host throws, production unset throws, production on an https canonical host passes, and preview on a vercel.app host passes. Observed RED with the guard absent (4 failed), GREEN with it present.
+
+### Notes
+- Verified with Next's own config loader for the build phase: it loads with `VERCEL_ENV` unset, with preview on a vercel.app host, and with production on an https host, and throws for production on a vercel.app host.
+
 ## [0.106.0.2] - 2026-09-27 — record the TEST restore and re-dump evidence; 164.9.2 and 164.5.2 close
 
 ### Notes
