@@ -371,7 +371,7 @@ nullified if 140.2 gets it wrong.
 
 ---
 
-## 7. The full S-01…S-27 site map
+## 7. The full S-01…S-28 site map
 
 The authoritative enumeration of every 5xx-capable site reachable from the seam.
 `140.2` can diff its assumptions against this table.
@@ -384,7 +384,7 @@ one place a reader diffs assumptions against, so a 3b site earns a row on the sa
 footing as a 3a one even though the table's own opening sentence predates that case.
 
 **Legend.** *Plan* is the Phase 140.1 plan that owns the edit, except where a
-later phase is named. `✅` = implemented. All **24 explicit sites are ✅**; the
+later phase is named. `✅` = implemented. All **25 explicit sites are ✅**; the
 three remaining rows (S-21, S-22, S-24) are `n/a` by construction, not pending.
 
 ⛔ **The `routers/match.py` rows cite by SYMBOL, not by `file:line`.** They read
@@ -423,15 +423,17 @@ reviewer diffs their assumptions against.
 | S-25 | `routers/match.py` `recompute()`, the `_kill_switch_state == KILL_SWITCH_UNAVAILABLE` arm | `/api/match/recompute` | — (new) | the kill-switch read exhausted `db_read_with_retry` — the engine stops FAIL-CLOSED rather than guessing | SERVICE-TRANSIENT | **503** `KILL_SWITCH_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | **164.5.1** | ✅ |
 | S-26 | `routers/match.py` `cron_recompute()`, the `except` around `_read_cron_cursor()` | `/api/match/cron-recompute` | **500 `text/plain`** (unhandled) | the batching-cursor read exhausted `db_read_with_retry` | SERVICE-TRANSIENT | **503** `CURSOR_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | **164.5.1** | ✅ |
 | S-27 | `routers/exchange.py` `_validate_mt5_key_probe()`, the `except Mt5ClientError` transient tail (also reached via `rotate_key_secret`'s `_validate_mt5_key` call) | `/api/validate-key`, `/internal/keys/{id}/rotate-secret` | 424 `NETWORK_UNAVAILABLE` | `classify_mt5_login_error` classified the caught `Mt5ClientError` `transient` AND `is_mt5_login_refusal` holds — the terminal answered the sign-in itself falsy with a code outside `_LOGIN_STAGE_NOT_A_REFUSAL_CODES` (the `-10000`…`-10004` IPC-infrastructure family and the success code `1`), and never told us why. A login-stage `-10005` IS such a refusal (D-17: the modal login dialog D-08 measured for a wrong password). **167 WR-01 / D-17:** a post-login read failure, an `initialize()` failure, or a login-stage `-10000`…`-10004` / `1` reaching the same arm keeps the pre-167 424 `NETWORK_UNAVAILABLE`, `recoverable:true` | CALLER'S EXCHANGE (3b FLAT — §2.1) | **424** `SIGN_IN_FAILED`, **`recoverable:false`** — DIVERGES from this class's `recoverable:true` default: a retry re-sends the same credential to a terminal that refused it, or that a wrong password put behind a modal login dialog (D-08, D-17) | **167-CREDTRUST plan 01** | ✅ |
+| S-28 | `routers/cron.py` `benchmark_refresh()` and `_benchmark_refresh_once()`, all six failure arms | `/api/benchmark-refresh` | raw `500` `{detail:"<string>"}` (Phase 169.2 as first shipped) | the BTC refresh returned no series, a stale or empty series, or raised; the stored-date read-back raised or is older than yesterday (UTC); or the 80 s `_BENCHMARK_REFRESH_DEADLINE_S` expired | SERVICE-PERMANENT (W2: never 503, so a stale benchmark cannot trip the shared breaker) | **500** `BENCHMARK_REFRESH_FAILED`, `retryable:false`, no `dependency` | **169.2** | ✅ |
 
-**Tally:** 27 rows = **24 explicit editable sites** (S-01…S-20 plus S-25/S-26
-`HTTPException` raises, plus S-23 the `JSONResponse` literal, plus S-27 the
+**Tally:** 28 rows = **25 explicit editable sites** (S-01…S-20 plus S-25/S-26
+`HTTPException` raises, plus S-28 the six `benchmark-refresh` arms counted as one site because they share one code, plus S-23 the `JSONResponse` literal, plus S-27 the
 `VenueTransientHTTPException` `SIGN_IN_FAILED` raise Phase 167 split out of the existing
 MT5 transient-client-error arm — a new raise, not a new failure) + 2 implicit
 unhandled-500s (S-21, S-22, no edit possible or needed) + 1 deliberately unchanged
 (S-24). A `raise HTTPException` grep sweep over these rows finds **22** of the 24, not
 24: it misses S-23, which is not an `HTTPException` at all, and S-27, whose raise is
-spelled `raise VenueTransientHTTPException`.
+spelled `raise VenueTransientHTTPException`. That sweep predates S-28 and is not re-measured here; S-28's arms are spelled
+`raise service_error(`.
 
 **S-25 and S-26 were added by Phase 164.5.1**, and both are the same shape: a
 Supabase read that has already exhausted `db_read_with_retry`'s gateway-timeout
