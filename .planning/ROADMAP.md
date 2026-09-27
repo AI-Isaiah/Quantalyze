@@ -3185,13 +3185,13 @@ Plans:
 **Goal:** A due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim.
 **Requirements**: TODOS `[164.9.3-CLAIM-PAIR-23505]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 0 plans
+**Plans:** 6 plans
 
 ⭐ **Inserted 2026-09-26 by orchestrator decision** (routed from the Phase 167.1.2 PR B review). It is a separate topic from 164.9.1 JOBRPCTRUTH and 164.9.2 REFDATAUPDATES.
 
 **Evidence, measured 2026-09-26 on the pg-lane by the 167.1.2 PR B fixer.**
 - **Repro:** seed a `failed_retry` `derive_allocator_equity` row whose `next_attempt_at` is in the past, plus a `pending` row for the same allocator. All three claim entry points then raise `23505` on `compute_jobs_one_inflight_per_kind_allocator`:
-  - `claim_compute_jobs_with_priority`, 6-arg overload;
+  - `claim_compute_jobs_with_priority`, 6-arg overload; ⛔ **CORRECTED 2026-09-27 (164.9.3 research):** it has **5** parameters `(integer, text, boolean, text[], text[])`, latest body in `20260719073701_claim_kind_filter.sql`. The 2-arg overload's pre-fix result is `42725` (every call form is ambiguous), not `23505`; its own 23505 is reachable only with the 5-arg dropped. "6-arg" is kept as lineage.
   - `claim_compute_jobs_with_priority`, 2-arg overload;
   - `claim_compute_jobs`.
 - **The claim guard:** C39 skips a candidate only when a `running` or `done_pending_children` sibling exists, not when a `pending` one does.
@@ -3211,16 +3211,39 @@ Plans:
 - **The result:** `claim_compute_jobs` and `claim_compute_jobs_with_priority` both raise 23505 on `compute_jobs_one_inflight_per_kind_api_key`. The batch `UPDATE ... SET status = 'running'` is ONE statement, so no job of ANY kind is claimed until the pair clears. Loud, not silent.
 - **Measured:** 2026-09-25 on the local-stack lane at the 164.9.1 release head, in one transaction ending in `ROLLBACK`. The full repro recipe is kept verbatim as lineage in Phase 164.5.2's section and in `TODOS.md` `[164.9.3-CLAIM-PAIR-23505]`.
 - **Fix options recorded there, not decided:** (a) add `'pending'` to each guard's `x.status` list with `x.id <> ranked.id`; (b) fold the enqueue into, or supersede, the outstanding `failed_retry`. Criterion 2 above already leaves that choice to the planner.
+- ⭐ **DECIDED 2026-09-27 (164.9.3 CONTEXT D-08, from lane measurements in 164.9.3-RESEARCH.md): neither (a) nor (b).** Option (a) was measured to turn the loud 23505 into a SILENT permanent wedge (C39 runs after ranking) and to starve `compute_intro_snapshot`. The fix drops a `failed_retry` candidate whose partition already holds a `pending` job BEFORE ranking, in all three claim bodies; the enqueue side is unchanged.
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9.3 to break down)
+**Wave 1**
+
+- [ ] 164.9.3-01-PLAN.md — red-first gate: 15 arms (12 partition arms across the 3 claim entry points + W-LOST, W-INTRO, P2-C39) observed RED on the pre-fix local-stack lane before any migration exists (D-03)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 164.9.3-02-PLAN.md — the ONE migration: pre-rank exclusion in all three claim bodies + C39 port into the 2-arg, green on the replayed local-stack lane (D-08); edits none of the DEFER40001 or enqueue symbols (D-05)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 164.9.3-03-PLAN.md — [BLOCKING] D-09 lane apply: whole non-LANE-ONLY corpus on the replayed local-stack lane + the gate's pg-lane apply list (split from plan 02 on 2026-09-27 for the context budget)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 164.9.3-04-PLAN.md — layered RED-UNDER-M twins (runner biting 15), regenerated function snapshots, three earned VAC-04 acks
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 164.9.3-05-PLAN.md — census pins moved by grep of one full mutation run (D-06)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 164.9.3-06-PLAN.md — merge origin/main; TODOS entry closed; one CHANGELOG entry + byte-equal VERSION bump (D-07); SC3 opened as a ship precondition in `164.9.3-MIGRATION-REVIEW.md` (three reviewers before merge, D-01)
 
 ### Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock (INSERTED)
 
 **Goal:** The compute-job fan-in graph and the bridge's decision cascade never strand a job, raise a spurious 23505, or deadlock: a fan-in child whose parent fails reaches a terminal state, a `match_decisions` delete cascades without a unique violation, and a fan-in diamond cannot deadlock on the parent lock.
 **Requirements**: TODOS `[164.9.3.1-FANIN-GRAPH-RESIDUALS]` (owned here)
-**Depends on:** Phase 164.9.3 (the same compute-job RPC surface; CLAIMPAIR's migration re-bases `_enqueue_compute_job_internal` and the claim RPCs first, and this phase re-bases on it)
+**Depends on:** Phase 164.9.3 (the same compute-job RPC surface; CLAIMPAIR's migration re-bases `_enqueue_compute_job_internal` and the claim RPCs first, and this phase re-bases on it) ⛔ **CORRECTED 2026-09-27 (164.9.3 CONTEXT D-05/D-08):** CLAIMPAIR's migration re-bases ONLY the three claim bodies (`claim_compute_jobs`, both `claim_compute_jobs_with_priority` overloads). It edits NONE of `_enqueue_compute_job_internal`, `defer_compute_job`, `mark_compute_job_done` or `mark_compute_job_failed`, so this phase re-bases those on whatever is latest at its own plan time. The sentence before this note is kept as lineage.
 **Plans:** 0 plans
 
 ⛔ **BOOKED 2026-09-26 UNDER THE NEW-PHASE FREEZE — NOT STARTED.** Founder decision (AskUserQuestion, "Re-route, don't start"): items (1), (2) and (3) of Phase 164.5.2's routed list leave 164.5.2 and land here. This phase gets no discuss, plan or execute step until the founder lifts the freeze for it.

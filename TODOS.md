@@ -1499,7 +1499,8 @@ true for 146 and half of 142–145, and **false for 141**.
       on the pg-lane by the Phase 167.1.2 PR B fixer).**
       **Repro, measured 2026-09-26.** Seed a `failed_retry` `derive_allocator_equity` row with
       `next_attempt_at` in the past and a `pending` row for the same allocator. Then
-      `claim_compute_jobs_with_priority` (6-arg and 2-arg) and `claim_compute_jobs` all raise
+      `claim_compute_jobs_with_priority` (6-arg and 2-arg; ⛔ CORRECTED 2026-09-27: 5-arg, and the
+      2-arg's pre-fix result is 42725 not 23505, see 164.9.3 CONTEXT) and `claim_compute_jobs` all raise
       `23505` on `compute_jobs_one_inflight_per_kind_allocator`.
       **Why.** The claim's C39 guard skips a candidate only for a `running` or
       `done_pending_children` sibling, not a `pending` one. `_enqueue_compute_job_internal`'s dedup
