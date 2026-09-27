@@ -49,8 +49,9 @@ review it BEFORE the merge. Their verdicts are recorded in the phase's
   column comment names `low` as the post-deploy backfill class.
 - **An apply-time `DO $verify$` block that reads catalogs only.** It pins each pre-rank clause
   between the `ranked` CTE and `deduped`, so a clause moved post-rank fails at apply, and pins the
-  probe block inside each throttle probe. It also pins the C39 port, SECURITY DEFINER, the
-  `search_path` and the ACL, and never calls a claim RPC, so
+  probe block inside each throttle probe. It also pins the C39 guard on all four partitions, in
+  order, inside `deduped` in all three bodies, SECURITY DEFINER, the `search_path`, the closed ACL
+  and the `service_role` grant the worker needs, and never calls a claim RPC, so
   it cannot refuse on TEST's empty tables.
 
 ### Root cause

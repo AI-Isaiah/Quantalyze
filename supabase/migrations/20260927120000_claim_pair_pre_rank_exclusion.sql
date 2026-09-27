@@ -852,8 +852,11 @@ BEGIN
   IF v_ccj_body !~* 'status\s+IN\s*\(\s*''pending''\s*,\s*''failed_retry''\s*\)' THEN
     RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs lost status IN (pending, failed_retry) candidacy';
   END IF;
-  IF v_ccj_body !~* 'done_pending_children' THEN
-    RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs lost the C39 done_pending_children guard';
+  -- The C39 guard at full strength (review round 1, WR-03): all four
+  -- partition clauses, in order, inside `deduped`. The word alone survived
+  -- the deletion of three of the four clauses.
+  IF v_ccj_body !~ c_c39_re THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs lost the C39 running / done_pending_children guard on at least one of its four partitions (all four, in order, inside its dedupe)';
   END IF;
   IF v_ccj_body !~* 'claim_token\s*=\s*gen_random_uuid' THEN
     RAISE EXCEPTION 'claim-pair-pre-rank: claim_compute_jobs lost the claim_token = gen_random_uuid() P97 fence';
@@ -886,6 +889,11 @@ BEGIN
   IF has_function_privilege('anon', v_ccj_oid, 'EXECUTE')
      OR has_function_privilege('authenticated', v_ccj_oid, 'EXECUTE') THEN
     RAISE EXCEPTION 'claim-pair-pre-rank: anon or authenticated holds EXECUTE on the SECURITY DEFINER claim_compute_jobs — ACL drifted open. The PUBLIC probe above already passed, so this is a grant held by the named role directly.';
+  END IF;
+  -- The worker's role must still HOLD it (review round 1, WR-03): a REVOKE
+  -- that over-reached would pass every closed-ACL probe above.
+  IF NOT has_function_privilege('service_role', v_ccj_oid, 'EXECUTE') THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: service_role does not hold EXECUTE on claim_compute_jobs, so the worker cannot claim through it';
   END IF;
 
   -- ===== claim_compute_jobs_with_priority, 5-arg (the worker's path) =====
@@ -936,8 +944,8 @@ BEGIN
   IF v_p5_body !~* 'cj\.status\s+IN\s*\(\s*''pending''\s*,\s*''failed_retry''\s*\)' THEN
     RAISE EXCEPTION 'claim-pair-pre-rank: the 5-arg claim_compute_jobs_with_priority lost the inner cj.status re-check';
   END IF;
-  IF v_p5_body !~* 'done_pending_children' THEN
-    RAISE EXCEPTION 'claim-pair-pre-rank: the 5-arg claim_compute_jobs_with_priority lost the C39 done_pending_children guard';
+  IF v_p5_body !~ c_c39_re THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: the 5-arg claim_compute_jobs_with_priority lost the C39 running / done_pending_children guard on at least one of its four partitions (all four, in order, inside its dedupe)';
   END IF;
   IF v_p5_body !~* 'v_high_pending\s*:=\s*CASE\s+WHEN\s+EXISTS' OR v_p5_body ~* '\mcount\s*\(' THEN
     RAISE EXCEPTION 'claim-pair-pre-rank: the 5-arg claim_compute_jobs_with_priority throttle is not the CASE WHEN EXISTS short-circuit (M-1133)';
@@ -974,6 +982,9 @@ BEGIN
   IF has_function_privilege('anon', v_p5_oid, 'EXECUTE')
      OR has_function_privilege('authenticated', v_p5_oid, 'EXECUTE') THEN
     RAISE EXCEPTION 'claim-pair-pre-rank: anon or authenticated holds EXECUTE on the SECURITY DEFINER 5-arg claim_compute_jobs_with_priority — ACL drifted open. The PUBLIC probe above already passed, so this is a grant held by the named role directly.';
+  END IF;
+  IF NOT has_function_privilege('service_role', v_p5_oid, 'EXECUTE') THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: service_role does not hold EXECUTE on the 5-arg claim_compute_jobs_with_priority, so the worker cannot claim through it';
   END IF;
 
   -- ===== claim_compute_jobs_with_priority, 2-arg =====
@@ -1038,7 +1049,10 @@ BEGIN
      OR has_function_privilege('authenticated', v_p2_oid, 'EXECUTE') THEN
     RAISE EXCEPTION 'claim-pair-pre-rank: anon or authenticated holds EXECUTE on the SECURITY DEFINER 2-arg claim_compute_jobs_with_priority — ACL drifted open. The PUBLIC probe above already passed, so this is a grant held by the named role directly.';
   END IF;
+  IF NOT has_function_privilege('service_role', v_p2_oid, 'EXECUTE') THEN
+    RAISE EXCEPTION 'claim-pair-pre-rank: service_role does not hold EXECUTE on the 2-arg claim_compute_jobs_with_priority';
+  END IF;
 
-  RAISE NOTICE 'claim-pair-pre-rank: claim_compute_jobs and both claim_compute_jobs_with_priority overloads drop, before ranking, a failed_retry candidate beside a pending twin on all four partitions (strategy with the intro carve-out); the throttle probe of neither priority overload counts a retry held back that way; the 2-arg carries the C39 guard on all four partitions; carried-forward invariants (5-arg and claim_compute_jobs), SECURITY DEFINER, the exact search_path pin and the ACL intact for all three.';
+  RAISE NOTICE 'claim-pair-pre-rank: claim_compute_jobs and both claim_compute_jobs_with_priority overloads drop, before ranking, a failed_retry candidate beside a pending twin on all four partitions (strategy with the intro carve-out); the throttle probe of neither priority overload counts a retry held back that way; the 2-arg carries the C39 guard on all four partitions; carried-forward invariants (5-arg and claim_compute_jobs), SECURITY DEFINER, the exact search_path pin, the closed ACL and the service_role grant intact for all three.';
 END
 $verify$;
