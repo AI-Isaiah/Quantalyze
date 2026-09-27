@@ -16924,3 +16924,73 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 170 / SC1-LAYERS (C1-A2, 2026-09-28) — the scenario KPI strip stops
+// being a second free-standing KPI layer. It is the last row of one square
+// Blend-window data panel under a non-comparative "Scenario blend" eyebrow.
+// KpiStrip is mocked in this file, so the case pins the shell and the
+// variant passthrough; cell values, pills and sub-lines stay in KpiStrip's
+// own suites (which this phase does not edit).
+// ---------------------------------------------------------------------------
+
+function classTokens(className: string): string[] {
+  return className.split(/\s+/).filter(Boolean);
+}
+
+/** The square Blend-window panel: border + surface, no radius. */
+function blendWindowPanel(from: HTMLElement): HTMLElement {
+  let el: HTMLElement | null = from;
+  while (el) {
+    const tokens = classTokens(el.className || "");
+    if (
+      tokens.includes("border") &&
+      tokens.includes("border-border") &&
+      tokens.includes("bg-surface") &&
+      !tokens.some((token) => token.startsWith("rounded"))
+    ) {
+      return el;
+    }
+    el = el.parentElement;
+  }
+  throw new Error("blend window panel not found");
+}
+
+describe("ScenarioComposer — Phase 170 SC1-LAYERS blend window (C1-A2)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    cleanup();
+  });
+
+  it("the scenario KPI strip sits in one square panel under a non-comparative Scenario blend eyebrow", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const eyebrow = screen.getByText("Scenario blend");
+    const kpi = screen.getByTestId("kpi-strip-mock");
+    // The eyebrow is immediately above the KPI group, not a sibling section.
+    expect(eyebrow.nextElementSibling).toBe(kpi);
+    expect(eyebrow.className).toContain("text-micro");
+    expect(eyebrow.className).toContain("font-mono");
+    expect(eyebrow.className).toContain("uppercase");
+    expect(eyebrow.className).toContain("tracking-[0.18em]");
+    expect(eyebrow.className).toContain("text-text-muted");
+    // Frozen 170.1 COPY item (b): the eyebrow does not say what deltas compare
+    // against. The row's only words are the label itself.
+    expect(eyebrow.textContent).toBe("Scenario blend");
+    expect(eyebrow.parentElement?.textContent?.trim()).toBe("Scenario blend");
+    const panel = blendWindowPanel(kpi);
+    expect(panel).toContainElement(eyebrow);
+    expect(classTokens(panel.className).some((token) => token.startsWith("rounded"))).toBe(
+      false,
+    );
+    const props = vi.mocked(KpiStrip).mock.calls.at(-1)?.[0];
+    expect(props?.mode).toBe("scenario");
+    expect(props?.variant).toBe("panel");
+  });
+});
