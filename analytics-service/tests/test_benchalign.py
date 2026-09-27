@@ -61,6 +61,7 @@ import pandas as pd
 import pytest
 
 from services.basis_series import derive_basis_series
+from services.broker_dailies import gap_fill_daily_returns
 from services.metrics import (
     DEFAULT_PERIODS_PER_YEAR,
     _annualized_vol_sharpe,
@@ -74,6 +75,7 @@ from services.metrics import (
     compute_all_metrics,
     strategy_calendar_is_sparse,
 )
+from tests.benchalign_fixtures import DENSE_CASE_IDS, dense_case
 from tests.test_metrics import (
     _Q166_ROLLING_WINDOW,
     _Q166_WRITTEN_TOLERANCE,
@@ -570,3 +572,130 @@ def test_benchalign_derive_basis_broker_nan_benchmark_family_is_the_inner_join(c
     )
     assert _fanout_warnings(caplog) == []
     _assert_family_is_the_inner_join(result.metrics_json, result.sibling_kinds, strategy, benchmark, 365)
+
+
+def test_benchalign_derive_basis_zero_fill_benchmark_family_is_the_inner_join(caplog):
+    """SC5 / SC4 (166.4 D-A): the stitch_composite cash path keeps a benchmark family bit-identical to the inner join.
+
+    ``run_stitch_composite_job``'s composite cash derive passes
+    ``scalar_returns=gap_fill_daily_returns(stitched_cash)`` with
+    ``densify_policy="zero_fill"``. The fixture is composite-shaped: stitched
+    member returns with absent days (no member covered them) and one in-index
+    member-guard NaN, then ``gap_fill_daily_returns``, which fills the absent
+    days with 0.0 and keeps the NaN.
+    """
+    benchmark = _contiguous_btc(166404)
+    _assert_contiguous(benchmark)
+    raw_idx = pd.date_range(benchmark.index[250], periods=420, freq="D")
+    stitched = pd.Series(np.random.default_rng(166405).normal(0.0004, 0.015, len(raw_idx)), index=raw_idx)
+    stitched = stitched.drop(stitched.index[[20, 21, 22, 190, 305]])
+    stitched.iloc[100] = np.nan
+    scalar = gap_fill_daily_returns(stitched)
+    # Preconditions: the absent days are now 0.0, the member-guard NaN is kept,
+    # the densified calendar is dense, and it sits strictly inside coverage.
+    assert len(scalar) == len(raw_idx) and len(stitched) == len(raw_idx) - 5
+    assert int(scalar.isna().sum()) == 1
+    assert strategy_calendar_is_sparse(scalar.index) is False
+    assert scalar.index[0] > benchmark.index[0] and scalar.index[-1] < benchmark.index[-1]
+
+    caplog.set_level(logging.WARNING, logger=_METRICS_LOGGER)
+    result = derive_basis_series(
+        stitched,
+        benchmark,
+        periods_per_year=365,
+        cumulative_method="geometric",
+        day_basis="calendar",
+        benchmark_symbol="BTC",
+        scalar_returns=scalar,
+        densify_policy="zero_fill",
+    )
+    assert _fanout_warnings(caplog) == []
+    _assert_family_is_the_inner_join(result.metrics_json, result.sibling_kinds, scalar, benchmark, 365)
+
+
+def _dense_parity_case(name: str, request) -> tuple[pd.Series, pd.Series]:
+    """(strategy, benchmark) for one SC4 case, each asserting its own precondition first."""
+    if name == "golden":
+        strategy = request.getfixturevalue("golden_returns")
+        benchmark = request.getfixturevalue("benchmark_returns")
+        # The golden pair is on ONE business-day calendar, so the benchmark is
+        # not 7-day contiguous. The analogous precondition: both legs share one
+        # calendar, so every strategy interval holds exactly one benchmark
+        # return and both endpoints are closes.
+        assert strategy.index.equals(benchmark.index)
+        return strategy, benchmark
+    strategy, benchmark = dense_case(name)
+    _assert_contiguous(benchmark)
+    assert strategy_calendar_is_sparse(strategy.index) is False
+    if name == "older_than_window":
+        assert strategy.index[0] < benchmark.index[0] and strategy.index[-1] > benchmark.index[-1]
+        # 166.4 D-07: the base close keeps the first in-window pair, so the pair
+        # is exactly as long as the inner join.
+        r, _ = _benchmark_pair(strategy, benchmark)
+        r_ij, _ = _inner_join_pair(strategy, benchmark)
+        assert len(r) == len(r_ij) == len(benchmark), (len(r), len(r_ij), len(benchmark))
+    if name == "nan_guard_days":
+        assert int(strategy.isna().sum()) == 3
+    return strategy, benchmark
+
+
+@pytest.mark.parametrize("case", (*DENSE_CASE_IDS, "golden"))
+def test_benchalign_dense_parity_bit_identical(case, request, caplog):
+    """SC4 (166.4 D-A, D-05, D-07): dense series keep a benchmark family bit-identical to the daily inner join.
+
+    alpha, beta, correlation, info_ratio, treynor, btc_rolling_correlation_90d
+    and the rolling_alpha / rolling_beta siblings of ``compute_all_metrics`` are
+    ``==`` to the same mirrors on the inner-join pair, for a strategy inside
+    the benchmark's coverage, one older than the benchmark window (the D-07
+    base close and the D-05 index-0 convention make it hold), one with NaN
+    guard days, and the golden pair. r_squared is the stated exception (D-06).
+    """
+    strategy, benchmark = _dense_parity_case(case, request)
+    caplog.set_level(logging.WARNING, logger=_METRICS_LOGGER)
+    result = compute_all_metrics(strategy, benchmark)
+    assert _fanout_warnings(caplog) == []
+    _assert_family_is_the_inner_join(
+        result.metrics_json, result.sibling_kinds, strategy, benchmark, DEFAULT_PERIODS_PER_YEAR
+    )
+
+
+# 166.4 D-06: r_squared the PRE-CHANGE engine produced on these fixtures,
+# MEASURED by running base commit c1b4bc062's ``compute_all_metrics`` on
+# ``tests/benchalign_fixtures.py`` (never transcribed from a re-implemented
+# oracle). Written from the recorded ``repr`` strings.
+_R_SQUARED_BEFORE_166_4_MEASURED_ON_BASE = {
+    "inside_coverage": 0.00010582832055343811,
+    "older_than_window": 0.001937851398314801,
+}
+
+
+@pytest.mark.parametrize("case", ("inside_coverage", "older_than_window"))
+def test_benchalign_dense_r_squared_moves_by_construction(case, caplog):
+    """166.4 D-06 (2026-09-27, ratified by the founder 2026-09-27): r_squared is the ONE dense value that moves.
+
+    It is now the square of the pair's correlation, and it differs from the
+    value the pre-change engine produced on the same fixture. Measured on base
+    commit c1b4bc062 against this module's fixtures, and on the 166.4 engine:
+
+    - inside_coverage: 0.00010582832055343811 -> 5.812609307917895e-05
+      (the whole move is index 0, which the old reindex zero-filled)
+    - older_than_window: 0.001937851398314801 -> 0.0019729955639240094
+      (the old reindex back-filled every pre-window strategy day with a 0
+      benchmark return, and zero-filled the day after the last close)
+
+    correlation and beta were unchanged on both fixtures in the same base
+    measurement. The move is small in absolute terms, so the inequality uses
+    rel 1e-9, not a 1e-6 threshold. These are the magnitudes 166.4-04's
+    CHANGELOG cites.
+    """
+    strategy, benchmark = dense_case(case)
+    _assert_contiguous(benchmark)
+    caplog.set_level(logging.WARNING, logger=_METRICS_LOGGER)
+    mj = compute_all_metrics(strategy, benchmark)["metrics_json"]
+    assert _fanout_warnings(caplog) == []
+    assert mj["r_squared_status"] == "ok"
+    assert mj["r_squared"] == pytest.approx(mj["correlation"] ** 2, rel=1e-12, abs=0.0)
+    old = _R_SQUARED_BEFORE_166_4_MEASURED_ON_BASE[case]
+    assert mj["r_squared"] != pytest.approx(old, rel=1e-9, abs=0.0), (
+        f"r_squared={mj['r_squared']!r} did not move from the base-measured {old!r} on {case}"
+    )
