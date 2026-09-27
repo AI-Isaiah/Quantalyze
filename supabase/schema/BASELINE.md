@@ -441,7 +441,7 @@ Read-only, from a checkout linked to production, DSN never committed or echoed:
 
 ```
 supabase db dump --linked -f supabase/schema/baseline.sql
-grep -anE 'postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase|\\connect|ALTER DATABASE|eyJ[A-Za-z0-9_-]{10,}' supabase/schema/baseline.sql
+grep -anE 'postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase|\\connect|ALTER DATABASE|eyJ[A-Za-z0-9_-]{10,}|sb_secret_[A-Za-z0-9_-]{16,}|(^|[^_A-Za-z])[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]("? *(:=|=| ) *[Ee]?[^ -&(-~][!-&(-~]|"? *: *"[!#-~]|=[!-&(-~]|=[^ -&(-~]{2}[!-&(-~])' supabase/schema/baseline.sql
 ```
 
 Any hit on the second command means **do not commit**.
@@ -468,6 +468,56 @@ different dump. That refusal is the point.
 set into the marker, so the set the lane replays shrinks back toward zero. Refreshing the dump is
 therefore periodic upkeep, **not** a per-migration founder action: between regenerations a new
 migration simply replays on the lane.
+
+⭐ **AUTOMATED 2026-09-26 (Phase 164.9.5 AUTOREDUMP).** The procedure above now runs by itself.
+After `supabase-migrate.yml`'s `apply` job succeeds on `main`, the `redump-dump` job re-dumps
+PRODUCTION read-only with the same credential set as `apply`, and the `redump-pr` job proposes
+the result as ONE pull request from the fixed branch `automation/baseline-redump`, reused across
+applies. The logic lives in `scripts/baseline-redump.mjs`: `--gate-dump` runs in the credentialed
+job, `--compose`, `--check-bot-branch` and `--open-or-edit-pr` in the write-token job, so the
+PROD credential and the write token never share a job. It REFUSES, and proposes nothing, on any
+of: a hit of the secret scan above (the five classes, a Supabase `sb_secret_` key, or a password
+in a credential form, in any case: a quoted string after the word, a JSON `"password":` member,
+or `password=` in a connection string, a quoted value as pg_dump doubles it (`password=''…''`) included,
+while `WHERE password = x` and `password = ''` are not hits; only the count and line numbers are printed, never the
+line); a gitleaks finding over the dump (explicit `.gitleaks.toml`, redacted, inline allow
+comments ignored, a missing or empty dump refused rather than read as clean); a NUL byte, a
+`SET client_encoding` count other than one, or a home-directory path; zero tables or any data
+statement; a dump that lost a `CREATE EXTENSION` name the committed dump carries (the same check
+reads `CREATE SCHEMA` names too, but that half is forward-looking only: the committed dump has 0
+`CREATE SCHEMA` lines, so it covers nothing today);
+a `main` that lacks a migration the merge carries (it would pair PROD with a marker that
+disagrees with it; a re-run attempt is NOT refused by its number, because this listing check
+already judges it, D-32); a marker not taken from the tree of the
+applied merge; an artifact whose merge is not an ancestor
+of `main`, or whose marker omits a migration `main`'s marker carries and `main`'s checkout still
+holds (a migration renamed or deleted on `main` is exempted and named in a `::notice::`); a red currency, content-drift
+or staleness gate on the composed tree; the skip trailer in the commit message or the PR text;
+a proposal already on the bot branch whose marker carries a migration the composed commit lacks
+and `main`'s checkout holds (a re-run of an older run's `redump-pr` never replaces a newer open
+proposal); and a commit on the bot branch that the bot did not author, while an open pull request has that
+branch as its head (once that pull request is merged or closed, the next run resets the branch). It writes only the six paths PR #864
+changed (the dump, the marker, this file, `CHANGELOG.md`, `VERSION`, `package.json`), with
+measured values only. It never writes the "what it adds" column; the PR body asks the reviewer
+to add it. ⛔ **It never merges.** Its CI runs wait for a human to click
+**Approve workflows to run**, and because branch protection is off, a merge with zero completed
+checks is possible: read each head-SHA run's conclusion before merging. When the dump and marker
+are byte-identical to the committed pair, it opens nothing and prints a `::notice::` instead.
+It does the same, and leaves the baseline alone, when `main` already carries a migration the
+applied merge lacks (D-31): PROD has not applied that later migration yet, so this dump would be
+superseded, and that migration's own apply run re-dumps. That verdict is taken BEFORE the
+`CREATE EXTENSION` completeness check, so a superseded re-run is skipped and never refused by it
+(R3-01); the secret, gitleaks, integrity and data-statement refusals still run first.
+**Recorded limits (D-33).** A dump truncated after its `CREATE EXTENSION` lines is NOT refused:
+those lines sit near the top of the file, and the tail-count floor that tried to catch a
+truncated dump was reverted by founder decision D-33 because it refused correct dumps (a
+`DROP COLUMN` removes column-level `GRANT` lines with no `REVOKE`). Such a dump reaches only the
+bot pull request, where the reviewer sees a large deletion; nothing merges without a human. And an
+extension dropped on PROD outside a migration (a dashboard or CLI change) makes the next dump
+one `CREATE EXTENSION` short, so the completeness check refuses it, and every later migration
+merge's re-dump refuses too, until a hand re-dump through `## Regenerating` commits a dump without it.
+The manual procedure above REMAINS the fallback, for a refusal that needs a human reading of the
+dump, or when the automation is unavailable.
 
 ⚠️ **SP-M03 — the CLAIM used to exceed the COMMAND.** The certification above names five
 classes (DSN, `\connect`, `ALTER DATABASE`, JWT, project ref); this grep matched only three
