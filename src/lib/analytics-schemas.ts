@@ -43,8 +43,18 @@ import { exchangeEnum } from "./closed-sets";
 // accept (blank, over 128 characters, not a string) becomes null: the key
 // connects unstamped, exactly as for a venue that reports no id, instead of the
 // whole parse and so the whole connect failing. A blank still never reaches the
-// write, because it becomes null rather than "". The warning names the issue
+// write, because it becomes null rather than "". The log line names the issue
 // codes only, never the value, which is an account identifier.
+//
+// 167.1.2 REVIEW-R2 SF2-M1 — the line is `console.error`, not `warn`. The
+// service's `_normalise` never sends a blank, over-long or non-string id, so
+// reaching this `.catch` is a contract break, and the key it belongs to
+// connects without its duplicate-account identity. This is the level and the shape
+// the seam's other contract break (`parseResponse` in analytics-client.ts)
+// uses: `console.error`, no Sentry helper. ⚠️ Measured, not assumed: the
+// Sentry setup (`src/instrumentation.ts`, the only Sentry init in the repo)
+// registers no console integration, so
+// neither line reaches Sentry; both reach the runtime's error-level logs only.
 export const ValidateKeyResponseSchema = z.object({
   valid: z.boolean(),
   read_only: z.boolean(),
@@ -58,7 +68,7 @@ export const ValidateKeyResponseSchema = z.object({
     .nullable()
     .optional()
     .catch((ctx) => {
-      console.warn(
+      console.error(
         "[analytics-schemas] /api/validate-key venue_account_id refused, connecting unstamped:",
         ctx.error.issues.map((issue) => issue.code).join(","),
       );

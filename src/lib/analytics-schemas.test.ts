@@ -665,28 +665,44 @@ describe("[140.3-03 / SEAMUX-07] KeyPermissionsPayloadSchema", () => {
 describe("ValidateKeyResponseSchema.venue_account_id fails soft", () => {
   const base = { valid: true, read_only: true };
 
+  // 167.1.2 REVIEW-R2 SF2-M1 — a refused id is a CONTRACT BREAK with the
+  // service (its `_normalise` never sends blank, over-long or non-string), and
+  // the key connects without its duplicate-account identity. So it is reported
+  // at `console.error`, the level the seam's other contract break
+  // (`parseResponse` in analytics-client.ts) uses, never at `warn`. The
+  // `warn` spy stays so a revert to `warn` reds here. The line carries the zod
+  // issue codes only: the value is
+  // an account identifier, and a number or an over-long string must not reach
+  // the log in any form.
   it.each([
     ["129 characters", "9".repeat(129)],
     ["whitespace only", "   "],
     ["empty", ""],
-  ])("an id that is %s becomes null and the validation still parses", (_name, id) => {
+    ["a number", 100000001],
+  ])("an id that is %s becomes null, the validation still parses, and the break is logged at error", (_name, id) => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const parsed = ValidateKeyResponseSchema.parse({ ...base, venue_account_id: id });
       expect(parsed.valid).toBe(true);
       expect(parsed.read_only).toBe(true);
       expect(parsed.venue_account_id).toBeNull();
-      expect(warn).toHaveBeenCalledTimes(1);
-      if (id.trim() !== "") {
-        expect(JSON.stringify(warn.mock.calls)).not.toContain(id);
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(warn).not.toHaveBeenCalled();
+      const logged = JSON.stringify(error.mock.calls);
+      expect(logged).toContain("venue_account_id");
+      if (String(id).trim() !== "") {
+        expect(logged).not.toContain(String(id));
       }
     } finally {
       warn.mockRestore();
+      error.mockRestore();
     }
   });
 
-  it("keeps a well-formed id, trimmed, and warns nothing", () => {
+  it("keeps a well-formed id, trimmed, and logs nothing", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       expect(
         ValidateKeyResponseSchema.parse({ ...base, venue_account_id: " 100000001 " })
@@ -696,8 +712,10 @@ describe("ValidateKeyResponseSchema.venue_account_id fails soft", () => {
         .toBeNull();
       expect(ValidateKeyResponseSchema.parse(base).venue_account_id).toBeUndefined();
       expect(warn).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
+      error.mockRestore();
     }
   });
 });
