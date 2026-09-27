@@ -4193,7 +4193,7 @@ phase's newest plans live only on an open branch, the count says "on main". The 
 table (measured at `733a55f5`, 33 rows) is superseded by this one; its still-accurate rows are
 kept verbatim.
 
-**Totals: 40 of 73 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).**
+**Totals: 41 of 79 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).** Recounted 2026-09-27 from this table's own rows after adding the 169 split (169.1, 169.2, 169.4, 169.4.1) and 164.9.1's close; the earlier "40 of 73" was taken before those rows existed.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -4232,7 +4232,7 @@ kept verbatim.
 | 164.6.3 CIDOCSPATH | 5/5 | Complete | v0.77.40.0 · #791 |
 | 164.6.4 MT5KEEPALIVE | 5/5 | Complete | #800 |
 | 164.6.5 MT5VALIDATEWEDGE | 8/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.96.0.0 · #863 |
-| 164.6.6 MT5TERMINALISOLATION | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
+| 164.6.6 MT5TERMINALISOLATION | 0/? | Queued — data-integrity tier: moved up 2026-09-27 (founder), planning beside 166.4; live MT5 verification joins the founder queue | - |
 | 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.105.0.0 · #869 |
 | 164.6.8 OUTAGEALERT | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 7/7 | Complete — finalized v0.77.32.1; its 33 stranded artifacts restored to main by PR #785. Row said `0/? Queued 2nd` until 2026-09-12 | v0.77.32.1 |
@@ -4268,8 +4268,12 @@ kept verbatim.
 | 167.2 KEYCARDSYNC | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.88.0.0 · #851 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | #866 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 03 is the founder's live retry | v0.97.0.0 · #867 |
-| 169. PAGETRUTH | 0/? | Queued — feature; needs a replan (cache-key anchor moved) | - |
-| 169.3 SMALLFIXES | 1/1 on main | In progress — plan 01 shipped (v0.97.0.1, #868); plans 02–05 next | - |
+| 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 8 plans on `feat/169-pagetruth`, not on main | Queued — feature; plans being rebuilt (cache-key anchor moved); waits for 167.1.2 PR C | - |
+| 169.1 ZOOMKPIS | 9 plans on `feat/169-pagetruth`, not on main | Queued — feature; split order runs it last, after 169 and 169.4 | - |
+| 169.2 BENCHFRESH | 3/3 | Shipped — verification `human_needed` (14/16, 2 routed to human checks): post-deploy checks pending, not closed | v0.107.0.0 · #879 |
+| 169.3 SMALLFIXES | 1/5 (plan 01 on main; 02–05 on `feat/169-pagetruth`) | In progress — plan 01 shipped (v0.97.0.1, #868); plans 02–05 next, 03/04 gated on 167.1.2 PR C | - |
+| 169.4 ALLOCTRUTH | 3 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 169, 169.2 and 167.1.2 PR C | - |
+| 169.4.1 OGSHARPE | 2 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 166.2 and 169 | - |
 | 170. LAYOUT | 0/? | Queued — feature | - |
 | 170.1 COPY | 0/? | Queued — feature, after 170 | - |
 
