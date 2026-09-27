@@ -3189,7 +3189,7 @@ Plans:
 **Goal:** A due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim.
 **Requirements**: TODOS `[164.9.3-CLAIM-PAIR-23505]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 5/6 plans executed
+**Plans:** 6/6 plans executed
 
 ⭐ **Inserted 2026-09-26 by orchestrator decision** (routed from the Phase 167.1.2 PR B review). It is a separate topic from 164.9.1 JOBRPCTRUTH and 164.9.2 REFDATAUPDATES.
 
@@ -3241,7 +3241,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 164.9.3-06-PLAN.md — merge origin/main; TODOS entry closed; one CHANGELOG entry + byte-equal VERSION bump (D-07); SC3 opened as a ship precondition in `164.9.3-MIGRATION-REVIEW.md` (three reviewers before merge, D-01)
+- [x] 164.9.3-06-PLAN.md — merge origin/main; TODOS entry closed; one CHANGELOG entry + byte-equal VERSION bump (D-07); SC3 opened as a ship precondition in `164.9.3-MIGRATION-REVIEW.md` (three reviewers before merge, D-01)
 
 ### Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock (INSERTED)
 
