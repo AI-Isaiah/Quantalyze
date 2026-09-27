@@ -1185,9 +1185,12 @@ def _interval_matched_benchmark(index: pd.DatetimeIndex, benchmark: pd.Series) -
     dated t_{k-1} AND a close dated t_k. It is the pairing rule of the D-58
     amendment of Phase 169.5 BENCHCOMPARE, whose TypeScript twin is
     ``src/lib/factsheet/align.ts``; the two implementations cite each other
-    (166.4 D-A, D-02). They agree for every k >= 1 and differ at index 0 only:
-    169.5 keeps index 0 = 0 per its D-54 parity convention, while this helper
-    pairs index 0 with the benchmark return dated t_0 (166.4 D-05).
+    (166.4 D-A, D-02). They differ in two places. At index 0, 169.5 keeps
+    index 0 = 0 per its D-54 parity convention, while this helper pairs index
+    0 with the benchmark return dated t_0 (166.4 D-05). For k >= 1, this helper
+    also unpairs an interval that is missing a date of the benchmark's own
+    calendar strictly inside it (INTERIOR GAPS below, review WR-01). The
+    TypeScript twin has no such rule; adopting it there is a 169.5 decision.
 
     VALUE: exactly one benchmark return inside the interval is used VERBATIM
     (recomputing it as ``(1 + x) - 1`` breaks dense bit-identity at 1e-16); two

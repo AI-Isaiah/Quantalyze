@@ -18,9 +18,12 @@ otherwise, never a fabricated 0.
 
 Cross-citation (D-02): the TypeScript comparator of Phase 169.5 BENCHCOMPARE,
 ``src/lib/factsheet/align.ts``, applies the same pairing rule (its D-58
-amendment). The two differ at index 0 only: 169.5 keeps index 0 = 0 (its D-54
-parity convention), while this engine pairs index 0 with the benchmark return
-dated t_0 (166.4 D-05).
+amendment). The two differ in two places. At index 0, 169.5 keeps index 0 = 0
+(its D-54 parity convention), while this engine pairs index 0 with the benchmark
+return dated t_0 (166.4 D-05). For k >= 1, this engine also unpairs an interval
+missing a date of the benchmark's own calendar strictly inside it (review
+WR-01); the TypeScript twin has no such rule, and adopting it there is a 169.5
+decision.
 
 Every oracle here is written from the definition (price ratios of the
 benchmark's own closes, ``np.cov``), never from the helper under test. The
