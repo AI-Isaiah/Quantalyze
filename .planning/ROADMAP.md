@@ -99,7 +99,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.5.1.2: FANOUTSIBLINGS — the daily position poll never runs for a single real strategy, and the sync constant lets the cursor lie: measure, then decide** (INSERTED)
 - [x] **Phase 164.5.1.3: SYNCADMIT — admit the owner-only status to the trade-sync constant, or prove it must not be: 5 of 5 private keys are never synced and their trades are never stored** (INSERTED)
 - [x] **Phase 164.5.1.4: SYNCCURSOR — the sync cursor is per-KEY while stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies trade window** (INSERTED)
-- [ ] **Phase 164.5.2: BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required** (INSERTED) — not yet verified
+- [x] **Phase 164.5.2: BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required** (INSERTED)
 - [ ] **Phase 164.5.3: MT5CREDS — show the MT5 account number on the key card and add a credential-update path** (INSERTED) — verification: human_needed
 - [x] **Phase 164.5.4: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently** (INSERTED)
 - [x] **Phase 164.6: GATE-HYGIENE — every gate-hygiene item that left 164.1: the OPS-08 residue, the composite-stamp twin, the reviewer execution-status rule, the RED-UNDER convention's discoverability and the audit allowlist** (INSERTED)
