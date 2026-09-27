@@ -57,15 +57,15 @@
 -- creates, and nothing that can RAISE precedes arm Z1. On migration 075's body
 -- the full file must fail with arm Z1 first; with Z1's marked block deleted it
 -- must fail with arm Z2. Keep Z1 and Z2 the FIRST TWO assertions in the file.
--- On 075's body R, N3c, N4, N4d, N6, N7, MX, C, S, X1, X2, X2t, X3, X4 and
--- G can also fail, so none of them may move ahead of Z1 or between Z1 and Z2. Every
+-- On 075's body R, N3c, N4, N4d, N4r, N6, N7, MX, C, S, X1, X2, X2t, X3, X4
+-- and G can also fail, so none of them may move ahead of Z1 or between Z1 and Z2. Every
 -- later group seeds its own fixtures and makes its own call(s) after Z2,
 -- never before.
 --
 -- ⭐ ORDER IS LOAD-BEARING. Each arm must be the FIRST failure under its own
 -- mutation (scripts/mutation-runner). File order, fixed:
---   Z1, Z2, N1, R, N2, N3, N3b, N3c, N4, N4d, N5, N6, E, N7, MX, M1, M2, M3,
---   M4, M5, M6, B, F, C, S, X1, X2, X2t, X3, X4, G.
+--   Z1, Z2, N1, R, N2, N3, N3b, N3c, N4, N4d, N4r, N5, N6, E, N7, MX, M1, M2,
+--   M3, M4, M5, M6, B, F, C, S, X1, X2, X2t, X3, X4, G.
 -- MATCHED PAIRS: every negative-control key (N1, R, N2, N3, N3b, N3c, N6, N7
 -- and the mixed book's M1 to M6 keys) differs from a qualifying key in
 -- exactly ONE attribute, the one its arm's mutation removes; everything else
@@ -98,7 +98,12 @@
 --        right after its own first call.
 --   N4d  Z to N4: no earlier fixture has a done reconstruct row; N4's retry
 --        row is pending, which the edited list still counts.
---   N5   Z to N4d: R's snapshot book has no qualifying key; the rest are
+--   N4r  Z to N4d: no earlier fixture has a failed_retry row; N4's retry row
+--        is pending and N4d's row is done, both still counted by the edited
+--        lists. Under N4d's mutation N4r's failed_retry row still counts.
+--        Later mutations of the bk* copy (B, F, MX) leave N4r's book
+--        bootstrapped, so its one refresh is unchanged.
+--   N5   Z to N4r: R's snapshot book has no qualifying key; the rest are
 --        zero-snapshot books already; foreign snapshot books rank behind the
 --        century-ahead seeds.
 --   N6   Z to N5: no earlier Deribit key.
@@ -530,6 +535,54 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (N4d): a key with a DONE reconstruct on a zero-snapshot book got % refresh job(s) and now has % reconstruct row(s), expected 1 and the 1 seeded. A finished reconstruct must not be repeated by the daily fan-out, and its book is bootstrapped.', v_ref, v_rec;
   END IF;
 END $grpn4d$;
+
+-- ==========================================================================
+-- GROUP N4r — a key whose reconstruct is FAILED_RETRY (scheduled for another
+-- attempt), on a zero-snapshot book: the row is in flight, so the key gets NO
+-- second reconstruct, and its book is bootstrapped, so the key gets the
+-- refresh (review SFH-R2-04).
+-- ==========================================================================
+DO $grpn4r$
+DECLARE
+  v_run  text := replace(gen_random_uuid()::text, '-', '');
+  v_base timestamptz := now() + INTERVAL '100 years' + INTERVAL '7 days' + INTERVAL '18 hours';
+  uid    uuid := gen_random_uuid();
+  k_n4r  uuid := gen_random_uuid();
+  v_ref  int;
+  v_rec  int;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000', 'test-fanout-boot-n4r-' || v_run || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email)
+  VALUES (uid, 'fanout boot N4r', 'test-fanout-boot-n4r-' || v_run || '@quantalyze.test')
+  ON CONFLICT (id) DO NOTHING;
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, created_at)
+  VALUES (k_n4r, uid, 'okx', 'fanout boot N4r', 'enc', true, v_base);
+  -- A failed_retry row is outside the in-flight partial unique index and the
+  -- enqueue helper's pre-check (both list pending, running and
+  -- done_pending_children only), so a fan-out that ignored it really inserts
+  -- a second reconstruct while the first is scheduled for its retry.
+  INSERT INTO compute_jobs (kind, api_key_id, status)
+  VALUES ('reconstruct_allocator_history', k_n4r, 'failed_retry');
+
+  PERFORM public.enqueue_refresh_allocator_equity_for_all();
+
+  -- ----- N4r: a reconstruct scheduled for retry is in flight ---------------
+  -- RED-UNDER: drop 'failed_retry' from the status list of BOTH
+  --            reconstruct-loop copies (bqj, rkj) in migration
+  --            20260927120000. The cron then enqueues a second 30-minute
+  --            reconstruct while the first is scheduled for its retry, and
+  --            nothing else stops the duplicate.
+  -- RED-UNDER-M: {"arm": "N4r", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "bqj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done')", "replace": "bqj.status IN ('pending', 'running', 'done_pending_children', 'done')", "occurrences": 1}, {"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "rkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done')", "replace": "rkj.status IN ('pending', 'running', 'done_pending_children', 'done')", "occurrences": 1}]}
+  SELECT count(*) FILTER (WHERE kind = 'refresh_allocator_equity_daily'),
+         count(*) FILTER (WHERE kind = 'reconstruct_allocator_history')
+    INTO v_ref, v_rec
+    FROM compute_jobs
+   WHERE api_key_id = k_n4r;
+  IF v_ref <> 1 OR v_rec <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (N4r): a key whose reconstruct is scheduled for retry (failed_retry), on a zero-snapshot book, got % refresh job(s) and now has % reconstruct row(s), expected 1 and the 1 seeded. A reconstruct awaiting its retry is in flight: a second one doubles a 30-minute crawl.', v_ref, v_rec;
+  END IF;
+END $grpn4r$;
 
 -- ==========================================================================
 -- GROUP N5 — a key with NO reconstruct row on a book WITH snapshots gets the
