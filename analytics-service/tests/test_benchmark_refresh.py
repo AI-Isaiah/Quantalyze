@@ -34,8 +34,11 @@ both places the code looks the client up; the real-path cases run the real
 
 from __future__ import annotations
 
+import asyncio
+import re
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -51,8 +54,18 @@ from services import benchmark as benchmark_mod
 ROUTE = "/api/benchmark-refresh"
 
 
+# Review-fix round 2 (REVIEW IN-02): the clock is PINNED, through the one
+# wall-clock read ``services.benchmark._utc_now`` that both the fetcher and the
+# handler use, so no case can flip across 00:00 UTC. The pin is in the PAST on
+# purpose: a handler that read ``datetime.now`` instead would compute a
+# yesterday years after every seeded row and answer 500 on every 200 case, so
+# the pin itself proves the handler reads the pinnable clock.
+_NOW = datetime(2020, 1, 2, 0, 10, tzinfo=timezone.utc)
+_TODAY = _NOW.date()
+
+
 def _yesterday() -> date:
-    return datetime.now(timezone.utc).date() - timedelta(days=1)
+    return _TODAY - timedelta(days=1)
 
 
 def _returns_ending(last: date, n: int = 3) -> pd.Series:
@@ -66,9 +79,8 @@ def _prices_ending(last: date, n: int = 6) -> pd.Series:
     """Upstream daily closes ending on ``last``, plus a partial row for today
     (which the real fetcher drops before caching)."""
     days = [last - timedelta(days=n - 1 - i) for i in range(n)]
-    today = datetime.now(timezone.utc).date()
-    if last < today:
-        days.append(today)
+    if last < _TODAY:
+        days.append(_TODAY)
     idx = pd.DatetimeIndex([pd.Timestamp(d) for d in days])
     return pd.Series(
         [40_000.0 + 100.0 * i for i in range(len(days))], index=idx, name="BTC"
@@ -164,6 +176,7 @@ def table(monkeypatch: pytest.MonkeyPatch) -> _FakeTable:
     """Rows through yesterday by default, installed where the handler reads the
     table (``routers.cron.get_supabase``) and where the real fetcher reads and
     writes it (``services.benchmark.get_supabase``)."""
+    monkeypatch.setattr(benchmark_mod, "_utc_now", lambda: _NOW)
     fake = _FakeTable()
     fake.seed_through(_yesterday())
     monkeypatch.setattr(cron_mod, "get_supabase", lambda: fake)
@@ -199,6 +212,8 @@ def test_current_series_answers_200_with_through(client, monkeypatch):
     }
     mock.assert_awaited_once()
     assert mock.await_args.args[0] == "BTC"
+    # REVIEW WR-02: the refresh is the one caller that must see a failed write.
+    assert mock.await_args.kwargs["require_persist"] is True
 
 
 def test_none_refresh_answers_exactly_500(client, monkeypatch):
@@ -289,7 +304,13 @@ def test_failed_upsert_through_the_real_fetcher_answers_500(client, monkeypatch,
     ``get_benchmark_returns``: the upstream fetch succeeds, the cache upsert
     raises, the fetcher swallows it at warning level and returns
     ``(series, False)``. The table never moved, so the cron must NOT read
-    green. Before the fix this answered 200 with ``through`` = yesterday."""
+    green. Before the fix this answered 200 with ``through`` = yesterday.
+
+    Since review-fix round 2 (REVIEW WR-02) the refresh passes
+    ``require_persist=True``, so the lost write is named directly
+    (``BenchmarkCacheWriteError``) before the table read-back is reached. The
+    read-back itself stays pinned by
+    ``test_through_is_reported_from_the_table_not_the_series``."""
     table.store.clear()
     stored = _yesterday() - timedelta(days=3)
     table.seed_through(stored)
@@ -304,7 +325,7 @@ def test_failed_upsert_through_the_real_fetcher_answers_500(client, monkeypatch,
 
     assert resp.status_code == 500, resp.text
     assert resp.status_code != 503
-    assert stored.isoformat() in resp.text
+    assert "BenchmarkCacheWriteError" in resp.text
     assert table.newest() == stored.isoformat()
 
 
@@ -401,6 +422,155 @@ def test_table_read_failure_answers_500_type_only_and_captured(client, monkeypat
     assert any("RuntimeError" in m for m in messages), messages
     assert not any("read-canary" in m for m in messages), messages
     capture.assert_called_once_with(raised)
+
+
+# --- Review-fix round 2 --------------------------------------------------------
+
+
+def _seed_with_gap(table: _FakeTable, *, days: int = 1000) -> str:
+    """``days + 1`` calendar days through yesterday with ONE middle day removed:
+    the newest ``days`` rows then span ``days`` calendar days, so
+    ``_cache_miss_reason`` reports a GAP (not too few rows, not a stale newest
+    day). Returns the removed date."""
+    table.store.clear()
+    table.seed_through(_yesterday(), n=days + 1)
+    hole = (_yesterday() - timedelta(days=days // 2)).isoformat()
+    del table.store[("BTC", hole)]
+    return hole
+
+
+def test_gap_refetch_with_failed_upsert_answers_500(client, monkeypatch, table, caplog):
+    """REVIEW WR-02. The newest stored day is ALREADY yesterday, so the table
+    read-back alone reads green. The cache has a mid-window gap, so the fetcher
+    refetches; the upsert that would fill the gap fails. Before the fix the
+    fetcher swallowed that at warning level and the refresh answered 200 while
+    the gap stayed in the table."""
+    hole = _seed_with_gap(table)
+    assert benchmark_mod._cache_miss_reason(
+        [date.fromisoformat(d) for (_s, d) in table.store],
+        days=1000,
+        yesterday=_yesterday(),
+    ).startswith("gaps between"), "precondition: the cache miss must be the GAP arm"
+    raised = RuntimeError("permission denied: write-canary")
+    table.upsert_error = raised
+    monkeypatch.setattr(
+        benchmark_mod,
+        "fetch_btc_daily_prices",
+        AsyncMock(return_value=_prices_ending(_yesterday(), n=1001)),
+    )
+    capture = MagicMock()
+    monkeypatch.setattr(cron_mod.sentry_sdk, "capture_exception", capture)
+
+    with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+        resp = client.post(ROUTE)
+
+    assert resp.status_code == 500, resp.text
+    assert resp.status_code != 503
+    assert "BenchmarkCacheWriteError" in resp.text
+    assert "write-canary" not in resp.text
+    assert not any("write-canary" in r.getMessage() for r in caplog.records)
+    # The newest day was current all along and the hole is still there: this
+    # is a persist failure, not a freshness one.
+    assert table.newest() == _yesterday().isoformat()
+    assert ("BTC", hole) not in table.store
+    capture.assert_called_once()
+    sent = capture.call_args.args[0]
+    assert isinstance(sent, benchmark_mod.BenchmarkCacheWriteError)
+    assert sent.__cause__ is raised
+
+
+def test_too_few_rows_refetch_with_failed_upsert_answers_500(client, monkeypatch, table):
+    """REVIEW WR-02, the other miss arm: the default fixture holds 5 rows
+    through yesterday, far fewer than the 1000-day window, so the fetcher
+    refetches; its write fails, and the refresh must page."""
+    table.upsert_error = RuntimeError("write failed")
+    monkeypatch.setattr(
+        benchmark_mod,
+        "fetch_btc_daily_prices",
+        AsyncMock(return_value=_prices_ending(_yesterday())),
+    )
+
+    resp = client.post(ROUTE)
+
+    assert resp.status_code == 500, resp.text
+    assert resp.status_code != 503
+    assert table.newest() == _yesterday().isoformat()
+
+
+@pytest.mark.asyncio
+async def test_other_callers_keep_the_lenient_write(monkeypatch, table):
+    """``require_persist`` defaults to False: an analytics compute still gets
+    the fresh series when the cache write fails (its pre-phase behaviour)."""
+    table.upsert_error = RuntimeError("write failed")
+    monkeypatch.setattr(
+        benchmark_mod,
+        "fetch_btc_daily_prices",
+        AsyncMock(return_value=_prices_ending(_yesterday())),
+    )
+
+    series, is_stale = await benchmark_mod.get_benchmark_returns("BTC")
+
+    assert series is not None and not series.empty
+    assert is_stale is False
+
+
+def test_refresh_past_its_deadline_answers_500_and_captures(client, monkeypatch, caplog):
+    """REVIEW IN-01: a refresh that outlives its deadline is a 500 (never a
+    503), logged and captured like the other failure arms, so the service
+    answers before the TypeScript seam gives up on it."""
+    monkeypatch.setattr(cron_mod, "_BENCHMARK_REFRESH_DEADLINE_S", 0.05)
+
+    async def _hangs(*_a: Any, **_k: Any) -> Any:
+        await asyncio.sleep(5)
+        return _returns_ending(_yesterday()), False
+
+    _patch(monkeypatch, side_effect=_hangs)
+    capture = MagicMock()
+    monkeypatch.setattr(cron_mod.sentry_sdk, "capture_exception", capture)
+
+    with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+        resp = client.post(ROUTE)
+
+    assert resp.status_code == 500, resp.text
+    assert resp.status_code != 503
+    assert "deadline" in resp.text
+    assert any("deadline" in r.getMessage() for r in caplog.records)
+    capture.assert_called_once()
+    assert isinstance(capture.call_args.args[0], TimeoutError)
+
+
+def test_deadline_sits_below_the_typescript_seam_budget():
+    """REVIEW IN-01: the deadline only helps if the service answers BEFORE the
+    TypeScript seam aborts. Read ``SEAM_BUDGETS["benchmark-refresh"].timeoutMs``
+    from ``src/lib/resilient-fetch.ts`` by symbol (never a restated number) and
+    require at least 10 s of margin for the network hop."""
+    source = (
+        Path(__file__).resolve().parents[2] / "src" / "lib" / "resilient-fetch.ts"
+    ).read_text(encoding="utf-8")
+    match = re.search(r'"benchmark-refresh":\s*\{\s*timeoutMs:\s*([\d_]+)', source)
+    assert match, 'SEAM_BUDGETS["benchmark-refresh"].timeoutMs not found'
+    budget_ms = int(match.group(1).replace("_", ""))
+    deadline_ms = cron_mod._BENCHMARK_REFRESH_DEADLINE_S * 1000
+    assert 0 < deadline_ms <= budget_ms - 10_000, (deadline_ms, budget_ms)
+
+
+def test_today_is_read_once_before_the_fetch(client, monkeypatch, table):
+    """REVIEW IN-02: a run that crosses 00:00 UTC while the fetch is in flight
+    must judge freshness against the day the fetcher aimed at, not demand the
+    next one. The clock advances a day DURING the (mocked) fetch; the table
+    holds yesterday relative to the start, so the answer must be 200."""
+    after_midnight = _NOW + timedelta(days=1)
+
+    async def _crosses_midnight(*_a: Any, **_k: Any) -> Any:
+        monkeypatch.setattr(benchmark_mod, "_utc_now", lambda: after_midnight)
+        return _returns_ending(_yesterday()), False
+
+    _patch(monkeypatch, side_effect=_crosses_midnight)
+
+    resp = client.post(ROUTE)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["through"] == _yesterday().isoformat()
 
 
 @pytest.mark.asyncio

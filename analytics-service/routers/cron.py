@@ -3,7 +3,7 @@ import logging
 import re
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
 import pandas as pd
@@ -11,6 +11,7 @@ import sentry_sdk
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from services import benchmark as benchmark_service
 from services.benchmark import get_benchmark_returns
 from services.db import db_execute, get_supabase, rows
 from services.encryption import decrypt_credentials, get_kek
@@ -2341,6 +2342,18 @@ async def _stored_through(symbol: str, *, today: str) -> str | None:
     return str(stored[0]["date"])[:10] if stored else None
 
 
+# Review-fix round 2 (REVIEW IN-01) — the TOTAL wall-clock bound on one
+# refresh (fetch, cache write, table read-back). The fetcher has no total bound
+# of its own: `httpx.AsyncClient(timeout=30)` bounds each phase of a request,
+# `_fetch_from_binance` may page up to 20 times, and `db_execute` has no
+# timeout. It must stay BELOW the TypeScript seam's budget for this call,
+# `SEAM_BUDGETS["benchmark-refresh"].timeoutMs` in `src/lib/resilient-fetch.ts`,
+# with margin for the network hop, so the service always answers first and a
+# slow price source becomes this handler's 500 rather than a seam deadline.
+# `tests/test_benchmark_refresh.py` reads that budget and pins the margin.
+_BENCHMARK_REFRESH_DEADLINE_S = 80.0
+
+
 @router.post("/benchmark-refresh")
 async def benchmark_refresh() -> dict[str, Any]:
     """Refresh the cached BTC benchmark through the ONE existing fetcher.
@@ -2373,9 +2386,50 @@ async def benchmark_refresh() -> dict[str, Any]:
     price is arguably a dependency outage (W2): the TypeScript seam records a
     breaker failure for a 503 only, and that breaker is shared by every
     analytics call, so a stale benchmark must not be able to trip it.
+
+    Review-fix round 2:
+
+    * REVIEW WR-02 — the fetcher is called with ``require_persist=True``, so a
+      cache write that fails after a fresh fetch raises instead of being
+      swallowed. The table read-back proves only the NEWEST day; a refetch
+      triggered by a gap or by too few cached rows can fail its write while the
+      newest stored day is already yesterday, and that must page too.
+    * REVIEW IN-01 — the whole refresh runs under
+      ``_BENCHMARK_REFRESH_DEADLINE_S``; exceeding it is a 500, logged by type
+      and captured like the other arms. The cancelled coroutine cannot recall
+      a database call already handed to ``db_execute``'s thread, so a write
+      may still land after the 500; the next run's read-back sees it.
+    * REVIEW IN-02 — "today" is read ONCE, before the fetch, through
+      ``services.benchmark._utc_today`` (the fetcher's own pinnable clock), so
+      a run that crosses 00:00 UTC cannot demand a day the fetcher never
+      aimed at, and tests pin one clock for both.
     """
+    today = benchmark_service._utc_today()
     try:
-        series, is_stale = await get_benchmark_returns("BTC")
+        return await asyncio.wait_for(
+            _benchmark_refresh_once(today), timeout=_BENCHMARK_REFRESH_DEADLINE_S
+        )
+    except TimeoutError as exc:
+        # Every failure inside `_benchmark_refresh_once` is already an
+        # HTTPException, so a TimeoutError here is the deadline and nothing else.
+        logger.error(
+            "benchmark_refresh: exceeded the %ss deadline", _BENCHMARK_REFRESH_DEADLINE_S
+        )
+        sentry_sdk.capture_exception(exc)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Benchmark refresh failed: exceeded the "
+                f"{_BENCHMARK_REFRESH_DEADLINE_S:g}s deadline"
+            ),
+        ) from None
+
+
+async def _benchmark_refresh_once(today: date) -> dict[str, Any]:
+    """The body of ``benchmark_refresh``, run under its deadline. Every failure
+    leaves as an ``HTTPException`` (500)."""
+    try:
+        series, is_stale = await get_benchmark_returns("BTC", require_persist=True)
     except Exception as exc:  # noqa: BLE001 - any failure must page, as a 500
         # Log the exception TYPE only: an upstream message can carry URLs,
         # headers or response fragments. The exception itself, with its stack,
@@ -2403,7 +2457,6 @@ async def benchmark_refresh() -> dict[str, Any]:
             detail=f"Benchmark refresh stale: BTC prices through {series_through}",
         )
 
-    today = datetime.now(timezone.utc).date()
     yesterday = (today - timedelta(days=1)).isoformat()
     try:
         through = await _stored_through("BTC", today=today.isoformat())
