@@ -531,6 +531,121 @@ async def test_a_failed_audit_emit_does_not_fail_the_stamp(monkeypatch: pytest.M
     assert outcome == "marked_duplicate"
 
 
+async def test_a_dropped_audit_is_an_error_with_a_scrubbed_message(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Review round 1 (SF-M5). log_audit_event re-raises only what it judges
+    # serious: a permission failure or an error it does not recognise. Logging
+    # that drop at WARNING kept it out of Sentry, which events at ERROR. The
+    # line names the class, the SQLSTATE and the error's MESSAGE; the DETAIL,
+    # which can echo row values, is never read (it carries the synthetic
+    # account id here so a leak would show).
+    from services import audit as audit_module
+
+    def _denied(**_k: Any) -> None:
+        raise APIError({
+            "code": "42501",
+            "message": "permission denied for function log_audit_event_service",
+            "details": f"account {ACCOUNT_ID}",
+            "hint": None,
+        })
+
+    monkeypatch.setattr(audit_module, "log_audit_event", _denied)
+    caplog.set_level("DEBUG")
+
+    outcome = await _stamp(FakeSupabase(_composite_responder([])), _key_row(), _okx_exchange())
+
+    assert outcome == "marked_duplicate"
+    (drop,) = [r for r in caplog.records if "dropped" in r.getMessage()]
+    assert drop.levelname == "ERROR"
+    line = drop.getMessage()
+    assert "class=APIError" in line and "code=42501" in line
+    assert "permission denied for function log_audit_event_service" in line
+    assert ACCOUNT_ID not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (SF-M2 / IN-04) — the marker and its audit cannot be split
+# ---------------------------------------------------------------------------
+#
+# The marker UPDATE runs in a worker thread. ``asyncio.wait_for`` cancels the
+# coroutine awaiting it, but the thread runs on and the UPDATE commits. When
+# the audit was a separate step after that await, a budget that ran out
+# between the two left the table saying 'duplicate' and the audit log saying
+# nothing. The next poll then met an unchanged marker and skipped the audit,
+# so the transition into 'duplicate' was never recorded. These pin that the
+# write and its audit are one unit, and that a write which landed nowhere is
+# never announced.
+
+
+def _slow_marker_responder(delay_s: float) -> Callable[[_Call], Any]:
+    """The marker UPDATE sleeps past the budget, then lands (row returned)."""
+    import time
+
+    base = _composite_responder([])
+
+    def _r(call: _Call) -> Any:
+        if call.op == "update" and (call.payload or {}).get("account_share_kind") is not None:
+            time.sleep(delay_s)
+            return MagicMock(data=[{"id": KEY_ID}])
+        return base(call)
+
+    return _r
+
+
+async def test_a_marker_write_that_outlives_the_budget_is_still_audited_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import threading
+
+    from services import audit as audit_module
+
+    audited = threading.Event()
+    audit_mock = MagicMock(side_effect=lambda **_k: audited.set())
+    monkeypatch.setattr(audit_module, "log_audit_event", audit_mock)
+    sb = FakeSupabase(_slow_marker_responder(0.4))
+
+    # First poll: the budget runs out while the marker UPDATE is in flight.
+    first = await ai.stamp_account_identity(sb, _key_row(), _okx_exchange(), timeout_s=0.1)
+    assert first == "error"
+    # Bounded wait for the thread to finish, never an open-ended one.
+    await asyncio.to_thread(audited.wait, 3.0)
+    # The UPDATE still committed in its thread (the fake records it).
+    assert {"account_shared_with_api_key_id": HOLDER_ID,
+            "account_share_kind": "duplicate"} in sb.updates()
+
+    # Second poll: the row now carries the marker the first poll wrote.
+    marked = _key_row(account_shared_with_api_key_id=HOLDER_ID, account_share_kind="duplicate")
+    second = await _stamp(FakeSupabase(_composite_responder([])), marked, _okx_exchange())
+    assert second == "marked_duplicate"
+
+    # One transition, one audit event, across both polls.
+    assert audit_mock.call_count == 1
+    assert audit_mock.call_args.kwargs["metadata"] == {
+        "venue": "okx", "holder_api_key_id": HOLDER_ID,
+    }
+
+
+async def test_a_marker_update_that_matched_no_row_is_not_audited(
+    audit_mock: MagicMock,
+) -> None:
+    # The key row was deleted between the refused stamp and the marker write.
+    # Nothing was marked, so nothing is announced, and the step does not claim
+    # a marker it did not write.
+    base = _composite_responder([])
+
+    def _r(call: _Call) -> Any:
+        if call.op == "update" and (call.payload or {}).get("account_share_kind") is not None:
+            return MagicMock(data=[])
+        return base(call)
+
+    outcome = await _stamp(FakeSupabase(_r), _key_row(), _okx_exchange())
+
+    assert outcome == "error"
+    audit_mock.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Task 2 — Pitfall 4: the stamp can never harm a poll
 # ---------------------------------------------------------------------------

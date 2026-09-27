@@ -39,6 +39,7 @@ from collections.abc import Mapping
 from typing import Any, Final, Literal
 
 from services.db import db_execute
+from services.redact import scrub_freeform_string
 from services.stitch_composite import MemberWindow, windows_overlap
 
 __all__ = [
@@ -122,6 +123,9 @@ def venue_account_id_from(venue: str, raw: Mapping[str, Any]) -> str | None:
 ACCOUNT_IDENTITY_UNIQUE_INDEX: Final = "api_keys_user_exchange_venue_account_uniq"
 
 _PG_UNIQUE_VIOLATION: Final = "23505"
+
+# A logged error message is bounded, so a pathological one cannot flood a line.
+_MAX_LOGGED_MESSAGE: Final = 200
 
 StampOutcome = Literal[
     "skipped_not_ccxt",
@@ -259,13 +263,39 @@ async def _share_kind(supabase: Any, key_id: str, holder_id: str) -> str:
     return _DUPLICATE
 
 
+def _safe_message(exc: BaseException) -> str | None:
+    """A loggable message for ``exc``, or ``None``.
+
+    Only the ``message`` of a PostgREST ``APIError`` is used. It names the
+    constraint or the trigger's refusal token and never carries a value. The
+    error's ``details`` (DETAIL) echoes the row, the account id included, and
+    ``str(exc)`` of an ``APIError`` is the whole dict, DETAIL and all, so
+    neither is ever read. Any other class yields ``None``: a ccxt message can
+    embed the API key in its signature text (``routers/portfolio.py`` redacts it
+    for that reason) and can echo a venue body, so the class name and the code
+    carry the diagnosis instead. What is returned is scrubbed and bounded.
+    """
+    message = getattr(exc, "message", None)
+    if not isinstance(message, str) or not message:
+        return None
+    scrubbed = scrub_freeform_string(message)
+    text = scrubbed if isinstance(scrubbed, str) else ""
+    return text[:_MAX_LOGGED_MESSAGE] or None
+
+
 def _audit_duplicate(key_row: Mapping[str, Any], holder_id: str) -> None:
     """One ``api_key.account_duplicate_detected`` event; never raises.
 
-    ``log_audit_event`` re-raises on a permission failure by contract, and a
-    lost audit row must not undo a marker that has already landed, so the drop
-    is logged instead. Metadata carries the venue and the holder key id only:
-    never the account id, never the user id (T-167.1.2-17).
+    Synchronous by design: it runs inside the marker write's worker thread
+    (:func:`_write_marker_and_audit`), never on the event loop, so a slow audit
+    RPC cannot stall other jobs on the worker.
+
+    ``log_audit_event`` re-raises a permission failure and any unrecognised
+    error by contract, and a lost audit row must not undo a marker that has
+    already landed, so the drop is logged at ERROR, where Sentry sees it, with
+    the class, the SQLSTATE and a scrubbed message. Metadata carries the venue
+    and the holder key id only: never the account id, never the user id
+    (T-167.1.2-17).
     """
     from services import audit as audit_module
 
@@ -278,10 +308,43 @@ def _audit_duplicate(key_row: Mapping[str, Any], holder_id: str) -> None:
             metadata={"venue": key_row["exchange"], "holder_api_key_id": holder_id},
         )
     except Exception as exc:  # noqa: BLE001 — the marker stands; the drop is logged
-        logger.warning(
-            "account_identity: audit %s dropped for api_key %s: class=%s",
+        logger.error(
+            "account_identity: audit %s dropped for api_key %s: class=%s code=%s "
+            "message=%s",
             DUPLICATE_DETECTED_AUDIT_ACTION, key_row.get("id"), type(exc).__name__,
+            _error_code(exc), _safe_message(exc),
         )
+
+
+def _write_marker_and_audit(
+    supabase: Any, key_row: Mapping[str, Any], holder_id: str, kind: str
+) -> bool:
+    """Write the marker and, for a 'duplicate', its audit, as ONE thread task.
+
+    Returns whether the UPDATE landed on a row. Review round 1 (SF-M2 / IN-04):
+    the marker UPDATE runs in a worker thread, and ``asyncio.wait_for`` can
+    cancel the coroutine awaiting it without stopping the thread, so the UPDATE
+    commits anyway. When the audit was a separate step after that await, a
+    budget that ran out between the two recorded the transition in the table and
+    never in the audit log, and the next poll, meeting an unchanged marker,
+    skipped the audit for good. A synchronous callable cannot be split by a
+    cancellation: once the UPDATE lands, its audit follows in the same thread.
+    An UPDATE that matched no row marked nothing and announces nothing.
+    """
+    res = (
+        supabase.table("api_keys")
+        .update({
+            "account_shared_with_api_key_id": holder_id,
+            "account_share_kind": kind,
+        })
+        .eq("id", key_row["id"])
+        .execute()
+    )
+    if _first_row(res) is None:
+        return False
+    if kind == _DUPLICATE:
+        _audit_duplicate(key_row, holder_id)
+    return True
 
 
 async def _mark_shared(
@@ -293,7 +356,10 @@ async def _mark_shared(
     ``venue_account_id`` stays NULL, so its next poll tries the stamp again and
     succeeds once the holder has left (the self-heal). A 'duplicate' is audited
     once, on the transition into it; the daily poll meeting the same marker
-    again writes and audits nothing.
+    again writes and audits nothing. The write and its audit run as one thread
+    task (:func:`_write_marker_and_audit`); a write that matched no row raises
+    :class:`_MarkerNotWritten`, so the step never claims a marker it did not
+    write.
     """
     kind = await _share_kind(supabase, str(key_row["id"]), holder_id)
     outcome: StampOutcome = (
@@ -307,20 +373,11 @@ async def _mark_shared(
     ):
         return outcome
 
-    def _q() -> object:
-        return (
-            supabase.table("api_keys")
-            .update({
-                "account_shared_with_api_key_id": holder_id,
-                "account_share_kind": kind,
-            })
-            .eq("id", key_row["id"])
-            .execute()
-        )
+    def _q() -> bool:
+        return _write_marker_and_audit(supabase, key_row, holder_id, kind)
 
-    await db_execute(_q)
-    if kind == _DUPLICATE:
-        _audit_duplicate(key_row, holder_id)
+    if not await db_execute(_q):
+        raise _MarkerNotWritten()
     return outcome
 
 
@@ -372,6 +429,11 @@ async def _stamp(
 
 class _HolderVanished(Exception):
     """The index refused the stamp, yet no live holder was found after it."""
+
+
+class _MarkerNotWritten(Exception):
+    """The marker UPDATE matched no row: the key left between the refusal and
+    the write. Nothing was marked, so nothing was audited."""
 
 
 async def stamp_account_identity(
