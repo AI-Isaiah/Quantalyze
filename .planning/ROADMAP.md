@@ -3621,6 +3621,33 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 166.4 to break down)
 
+### Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly (INSERTED)
+
+**Goal:** The `/portfolios/[id]` analytics compute reads only `strategy_analytics` columns that exist, treats each strategy's stored series as what it is (cumulative or daily, measured, not assumed), and fails loudly when it cannot compute, so the portfolio's risk decomposition and other analytics are real numbers or an honest failure.
+**Priority:** data integrity (founder priority rule, 2026-09-27: data integrity ahead of features). Registered through `/gsd-phase --insert 166.4`; gsd-tools numbered it 166.4.1 and the number is kept. It is independent of 166.4 BENCHALIGN in code; 166.4 is only its anchor in the list.
+**Requirements**: TBD (criteria below)
+**Depends on:** nothing.
+**Plans:** 0 plans
+
+**Evidence (verified by the orchestrator, 2026-09-27; counts and verdicts only):**
+
+- **Missing columns.** `_compute_portfolio_analytics` in `analytics-service/routers/portfolio.py` selects `strategy_id, returns_series, equity_curve, total_aum` from `strategy_analytics`. `supabase/schema/baseline.sql` has neither `equity_curve` nor `total_aum` on that table (0 matches in its `CREATE TABLE`). A select naming a column that does not exist fails the whole read.
+- **Cumulative read as daily (inferred, not yet measured).** The `TODOS.md` entry `[169-PORTFOLIO-ANALYTICS-COLUMNS]` (booked by Phase 169 D-53 on `feat/169-pagetruth`) infers that the compute reads `returns_series` as daily returns while `analytics-service/services/metrics.py` writes it as a cumulative series.
+- **Is it called at all?** The analytics service logs show 0 lines of `Portfolio analytics computation failed` between 2026-09-13 and 2026-09-27. With a select that should fail, that silence means either the endpoint is not being called, or its failure is not reaching that log line. The phase's research answers this FIRST, before any fix is planned.
+- **Related:** Phase 169's RISKUNIT plan (169-09, D-49) fixes the risk-attribution display's double percent; its browser item records an empty `/portfolios/[id]` panel as this defect, not as evidence against the unit fix (169 D-53).
+
+## Success Criteria
+
+1. **Called or not, measured first.** The research states, from logs and code (no remote database command by an agent), whether and from where the `/portfolios/[id]` analytics compute is called, and why no failure line was logged between 2026-09-13 and 2026-09-27.
+2. **The reader selects only existing columns.** The `strategy_analytics` read selects only columns that exist in `supabase/schema/baseline.sql`, and every value it needed from `equity_curve` and `total_aum` comes from a real source or is dropped with its consumer; a test fails on the old select.
+3. **Cumulative vs daily is measured and fixed.** Whether the stored series the compute reads is cumulative or daily is measured against what `metrics.py` writes, and the compute converts it correctly; a test on a known cumulative fixture fails on the old handling.
+4. **A failed compute is loud.** A failed compute surfaces as an error the caller and the logs can see (never an empty or stale result that reads as success); a test fails on the old silent path.
+5. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and `/portfolios/[id]` is re-checked in the logged-in browser after deploy (desktop, 390px and desktop 200% zoom).
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 166.4.1 to break down)
+
 ### Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine (INSERTED)
 
 **Goal:** Every "drawdown improvement" number means shallower-is-positive, and ranking rewards a shallower drawdown, never a deeper one.
@@ -4179,7 +4206,7 @@ phase's newest plans live only on an open branch, the count says "on main". The 
 table (measured at `733a55f5`, 33 rows) is superseded by this one; its still-accurate rows are
 kept verbatim.
 
-**Totals: 41 of 79 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).** Recounted 2026-09-27 from this table's own rows after adding the 169 split (169.1, 169.2, 169.4, 169.4.1) and 164.9.1's close; the earlier "40 of 73" was taken before those rows existed.
+**Totals: 41 of 80 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).** Recounted 2026-09-27 from this table's own rows after adding the 169 split (169.1, 169.2, 169.4, 169.4.1) and 164.9.1's close; the earlier "40 of 73" was taken before those rows existed. 80 counts 166.4.1 PORTFOLIOANALYTICS, added 2026-09-27.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -4247,6 +4274,7 @@ kept verbatim.
 | 166.2 COMPUTEONCE | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.102.0.0 · #874 |
 | 166.3 RECOMPUTE | 0/1 | HALTED 2026-09-27 at Task 3 — resumes after 166.4 ships | - |
 | 166.4 BENCHALIGN | 0/? | Queued — data integrity | - |
+| 166.4.1 PORTFOLIOANALYTICS | 0/? | Queued — data integrity | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.89.0.0 · #852 |
 | 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
