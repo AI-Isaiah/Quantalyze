@@ -10,10 +10,13 @@
  * working holder is active, connected, and its last sync is not revoked,
  * sign_in_failed or error. A NULL sync_status counts as working.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   accountShareNote,
   isWorkingHolder,
+  NOT_WORKING_SYNC_STATUSES,
   type AccountShareNoteKey,
 } from "@/lib/account-share-note";
 
@@ -135,5 +138,33 @@ describe("accountShareNote — the remedy is true and names this card's control"
   it("says nothing when the holder is not in the caller's key list (it cannot be judged working)", () => {
     const dup = dupOf();
     expect(accountShareNote(dup, new Map([[dup.id, dup]]), "Disconnect")).toBeNull();
+  });
+});
+
+/**
+ * 167.1.2 REVIEW SF-L3 — the D-18 status list is written twice, once here in
+ * TypeScript (the key cards' note) and once in SQL (the KEY_NOT_DEPARTED test
+ * of set_departed_key_history_inclusion). If they drift, the card and the
+ * history-choice RPC disagree about which holder is working: the card says
+ * nothing while the RPC refuses a history choice, or the reverse, and the
+ * account is counted by one reader and not the other. The SQL tuple is read
+ * out of the shipped files, anchored on the `v_sync_status NOT IN` line (the
+ * same function has an unrelated `NOT IN ('include', 'exclude')`).
+ */
+describe("D-18 parity: the TypeScript not-working statuses equal the SQL tuple", () => {
+  function sqlTuple(relPath: string): string[] {
+    const text = readFileSync(join(process.cwd(), relPath), "utf8");
+    const matches = [...text.matchAll(/v_sync_status\s+NOT\s+IN\s*\(([^)]*)\)/gi)];
+    expect(matches, `exactly one v_sync_status NOT IN tuple in ${relPath}`).toHaveLength(1);
+    return [...matches[0][1].matchAll(/'([^']*)'/g)].map((m) => m[1]).sort();
+  }
+
+  it.each([
+    "supabase/migrations/20260927180000_working_holder_rule_d18.sql",
+    "supabase/schema/functions/set_departed_key_history_inclusion.sql",
+  ])("%s", (relPath) => {
+    const tuple = sqlTuple(relPath);
+    expect(tuple.length).toBeGreaterThan(0);
+    expect(tuple).toEqual([...NOT_WORKING_SYNC_STATUSES].sort());
   });
 });

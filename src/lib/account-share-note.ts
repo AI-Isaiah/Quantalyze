@@ -55,8 +55,13 @@ export interface AccountShareNoteKey {
 /** The remedy control each key card carries, named in the note's last sentence. */
 export type AccountShareNoteAction = "Disconnect" | "Delete";
 
-/** Last-sync statuses that make a holder NOT working (D-18). */
-const NOT_WORKING_SYNC_STATUSES: ReadonlySet<string> = new Set([
+/**
+ * Last-sync statuses that make a holder NOT working (D-18). The SQL twin is the
+ * `v_sync_status NOT IN (...)` tuple in set_departed_key_history_inclusion
+ * (migration 20260927180000); account-share-note.test.ts reads that tuple out
+ * of the migration and the function snapshot and asserts they equal this set.
+ */
+export const NOT_WORKING_SYNC_STATUSES: ReadonlySet<string> = new Set([
   "revoked",
   "sign_in_failed",
   "error",
