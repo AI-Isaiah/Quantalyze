@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 170
 current_phase_name: LAYOUT — page layout reads clean and holds on every page
 status: executing
-stopped_at: Completed 170-05-PLAN.md
-last_updated: "2026-09-27T21:59:30.000Z"
+stopped_at: Completed 170-06-PLAN.md
+last_updated: "2026-09-27T22:21:30.000Z"
 last_activity: 2026-09-27
-last_activity_desc: Completed 170-05-PLAN.md
-state_head: 0c6555a5294ef4e12ed215d537bfd33f342f8af4
+last_activity_desc: Completed 170-06-PLAN.md
+state_head: 338b4d61cd86944126370bb5bbecaa58e17bbe32
 progress:
   total_phases: 80
   completed_phases: 41
   total_plans: 370
-  completed_plans: 352
+  completed_plans: 353
   percent: 51
 ---
 
@@ -512,7 +512,7 @@ Status: Executing Phase 170
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-27 — Completed 170-05-PLAN.md
+Last activity: 2026-09-27 — Completed 170-06-PLAN.md
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1187,6 +1187,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 170 P03 | 5 min | 3 tasks | 7 files |
 | Phase 170 P04 | 5 min | 2 tasks | 4 files |
 | Phase 170 P05 | 12 min | 2 tasks | 6 files |
+| Phase 170 P06 | 18 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -1212,6 +1213,12 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - NowrapWords root is a display:contents div, not a span, so the word spans are the only spans and the name stays in the link's inline flow.
 - Literal space text nodes stay between those spans; dropping them makes noteOf() miss every multi-word name.
 - ShareableLink size defaults to md. Only /strategies passes sm. The discovery detail page is not edited.
+
+### Phase 170 decisions (plan 06)
+
+- Below md, readOnly is forceReadOnly or not isMd. JSX still keys off forceReadOnly so desktop does not flash hidden; CSS hidden md:* hides the write controls.
+- Button omits its base inline-flex when the caller passes a bare hidden class. Tailwind v4 emits inline-flex after hidden, so the base class would keep the control visible.
+- A display name with no email reads "by {name} · Computed {recency}". Unknown is only when both name and email are absent.
 
 ### Roadmap Evolution
 
@@ -2430,8 +2437,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-27T21:59:30.000Z
-**Stopped At:** Completed 170-05-PLAN.md
+**Last Date:** 2026-09-27T22:21:30.000Z
+**Stopped At:** Completed 170-06-PLAN.md
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
