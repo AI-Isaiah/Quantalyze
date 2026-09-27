@@ -11,6 +11,101 @@ import type { NextConfig } from "next";
 // because the payload is ~70MB — a broad glob would bloat every function.
 const CHROMIUM_BIN = ["./node_modules/@sparticuz/chromium/bin/**/*"];
 
+// Phase 164.9.4 (D-14): the host of a derived CSP source may carry only these
+// characters. `new URL()` accepts `;` and `,` in a host and decodes `%27` to
+// `'`, so without this guard an env value could inject a directive or a
+// keyword into the header. `*` fails it too, so no wildcard is ever derived.
+const DERIVED_CSP_HOST = /^[a-z0-9.-]+$/;
+
+/**
+ * Does the CSP source expression `source` already allow the origin
+ * `scheme://hostname[:port]`? Only the two host-source shapes the global
+ * `connect-src` uses are recognised: `scheme://*.domain` (a non-empty label
+ * before `.domain`, and no explicit port) and `scheme://host[:port]` (an exact
+ * match). Keyword sources such as `'self'` never match here.
+ */
+function cspSourceAllows(
+  source: string,
+  scheme: string,
+  hostname: string,
+  port: string,
+): boolean {
+  const m = /^([a-z][a-z0-9+.-]*):\/\/([^/:]+)(?::(\d+))?$/.exec(source);
+  if (!m) return false;
+  const [, srcScheme, srcHost, srcPort = ""] = m;
+  if (srcScheme !== scheme) return false;
+  if (srcHost.startsWith("*.")) {
+    const domain = srcHost.slice(2);
+    return (
+      srcPort === "" &&
+      port === "" &&
+      hostname.length > domain.length + 1 &&
+      hostname.endsWith(`.${domain}`)
+    );
+  }
+  return srcHost === hostname && srcPort === port;
+}
+
+/**
+ * Phase 164.9.4 (D-14): append the origin of the configured
+ * `NEXT_PUBLIC_SUPABASE_URL`, and its `ws:`/`wss:` twin, to the `connect-src`
+ * directive of `csp`, but ONLY for a candidate no existing source matches.
+ * A production build (`https://<ref>.supabase.co`) and the placeholder build
+ * are matched by the `*.supabase.co` sources, so they get `csp` back unchanged,
+ * byte for byte. A loopback lane build gains exactly its origin and ws twin.
+ *
+ * Reads the env WHEN CALLED, never at module scope. On any failed check (unset,
+ * empty, unparseable, a scheme other than http/https, a host outside
+ * `DERIVED_CSP_HOST`) it returns `csp` unchanged. It never throws.
+ */
+function withConfiguredSupabaseOrigin(csp: string): string {
+  const configured = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!configured) return csp;
+  let url: URL;
+  try {
+    url = new URL(configured);
+  } catch {
+    return csp;
+  }
+  const twinScheme =
+    url.protocol === "http:" ? "ws" : url.protocol === "https:" ? "wss" : null;
+  if (twinScheme === null) return csp;
+  if (!DERIVED_CSP_HOST.test(url.hostname) && url.hostname !== "[::1]") {
+    return csp;
+  }
+
+  const directive = /(^|;)(\s*connect-src\b[^;]*?)(\s*)(?=;|$)/.exec(csp);
+  if (!directive) return csp;
+  const sources = directive[2].trim().split(/\s+/).slice(1);
+
+  const scheme = url.protocol.slice(0, -1);
+  const candidates = [
+    { text: url.origin, scheme },
+    { text: `${twinScheme}://${url.host}`, scheme: twinScheme },
+  ];
+  const unmatched = candidates
+    .filter(
+      (c) =>
+        !sources.some((s) =>
+          cspSourceAllows(s, c.scheme, url.hostname, url.port),
+        ),
+    )
+    .map((c) => c.text);
+  if (unmatched.length === 0) return csp;
+
+  const [whole, lead, body, trailing] = directive;
+  const start = directive.index;
+  return (
+    csp.slice(0, start) +
+    lead +
+    body +
+    " " +
+    unmatched.join(" ") +
+    trailing +
+    csp.slice(start + whole.length)
+  );
+}
+
 const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     "/api/demo/portfolio-pdf/\\[id\\]": CHROMIUM_BIN,
@@ -52,7 +147,7 @@ const nextConfig: NextConfig = {
     ];
   },
   async headers() {
-    return [
+    const blocks = [
       {
         // Security headers — applied to every response. Next.js needs
         // 'unsafe-inline' for its script injection and 'unsafe-eval' in dev.
@@ -92,6 +187,19 @@ const nextConfig: NextConfig = {
             // CSP in only one environment. This is the Phase-25-class prod-only
             // CSP failure mode, closed pre-emptively. Adding `worker-src` only
             // relaxes the worker source list; it cannot weaken script execution.
+            // Phase 164.9.4 (D-14, 2026-09-26, orchestrator decision pending
+            // founder ratification): `headers()` passes this value through
+            // `withConfiguredSupabaseOrigin`, which appends the origin of the
+            // configured NEXT_PUBLIC_SUPABASE_URL and its ws:/wss: twin to
+            // `connect-src` ONLY when no source below already matches it. A
+            // production `https://<ref>.supabase.co` build and the placeholder
+            // build are matched by `*.supabase.co`, so their header stays
+            // byte-identical to this literal; only a loopback lane build (the
+            // seeded e2e run on a private local stack) gains an entry. An env
+            // value with a scheme other than http/https, or a host carrying a
+            // character outside [a-z0-9.-] (`;`, `'`, `,`, `*`), is refused,
+            // so the env can never inject a directive or derive a wildcard.
+            // Pinned by csp-connect-src-supabase-origin.contract.test.ts.
             key: "Content-Security-Policy",
             value:
               "default-src 'self'; worker-src 'self' blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://plausible.io; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://plausible.io",
@@ -152,6 +260,21 @@ const nextConfig: NextConfig = {
         ],
       },
     ];
+    // Phase 164.9.4 (D-14): derive the configured Supabase origin into the
+    // global CSP at return time, so the literal above stays the string after
+    // `value:` and `NEXT_PUBLIC_SUPABASE_URL` is read when headers() is called.
+    return blocks.map((block) =>
+      block.source !== "/(.*)"
+        ? block
+        : {
+            ...block,
+            headers: block.headers.map((h) =>
+              h.key === "Content-Security-Policy"
+                ? { ...h, value: withConfiguredSupabaseOrigin(h.value) }
+                : h,
+            ),
+          },
+    );
   },
 };
 
