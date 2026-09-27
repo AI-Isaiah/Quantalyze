@@ -7,6 +7,7 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // chokepoint of its own, so the caught value is wrapped here
 // (`seam-log-coverage.test.ts` enforces it for every seam route).
 import { scrubSeamError } from "@/lib/seam-redaction";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * Vercel Cron — refreshes the cached BTC benchmark once a day.
@@ -21,7 +22,9 @@ import { scrubSeamError } from "@/lib/seam-redaction";
  *
  * NON-2XX ON EVERY FAILURE. Vercel Cron alarms only on a non-2xx, so a failed,
  * stale or unreachable refresh answers 502 here, a limiter deny 429 and a
- * misconfigured limiter 503. A 200 means the service reported a current series.
+ * misconfigured limiter 503. A 200 means the service reported a series through
+ * yesterday (UTC) or later; an older `through` is refused here with a 502 even
+ * when the service answered 200.
  *
  * ORDER (D-20): the `CRON_SECRET` gate first (401, the limiter is not
  * consulted), then the `adminActionLimiter` check, then the service call.
@@ -40,8 +43,8 @@ import { scrubSeamError } from "@/lib/seam-redaction";
 export const dynamic = "force-dynamic";
 
 // Asserted against SEAM_ROUTE_BUDGETS by seam-budgets.invariant.test: one
-// `benchmark-refresh` call (60 000 ms) plus its breaker-store round fits well
-// inside 120 s.
+// `benchmark-refresh` call (100 000 ms) plus its failing-state breaker-store
+// round (12 750 ms) is 112 750 ms, inside 120 s.
 export const maxDuration = 120;
 
 async function handle(req: NextRequest): Promise<NextResponse> {
@@ -63,19 +66,50 @@ async function handle(req: NextRequest): Promise<NextResponse> {
 
   try {
     const result = await refreshBenchmark();
+    // FRESHNESS, CHECKED AGAINST THE CALENDAR (review fix WR-01 / HR-01, TS
+    // half). The service's `stale: false` means only "the fetcher did not fall
+    // back to the cache"; a lagging upstream still answers 200 with an old
+    // `through`. The newest completed UTC day is yesterday, so anything older
+    // is a refresh that did not happen and must page like any other failure.
+    // Thrown, not returned, so it takes the ONE failure arm below (log, capture,
+    // 502). `YYYY-MM-DD` strings compare chronologically as strings; the schema
+    // has already enforced that shape, so do not "fix" this to `Date.parse`.
+    const yesterday = new Date(Date.now() - 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    if (result.through < yesterday) {
+      throw new Error(
+        `benchmark refresh returned stale BTC prices: through ${result.through}, expected ${yesterday} or later`,
+      );
+    }
+    // `points` is logged so a series far shorter than the fetcher's window is
+    // visible here (review fix MD-06). Dates and counts only; no error value.
+    console.info(
+      `[api/cron/refresh-benchmark] refreshed BTC through ${result.through} (${result.points} points)`,
+    );
     return NextResponse.json(
-      { ok: true, through: result.through },
+      { ok: true, through: result.through, points: result.points },
       { headers: NO_STORE_HEADERS },
     );
   } catch (err) {
     // ONE arm, no `instanceof`: a service 500 (failed or stale refresh), an
-    // unreachable service, an open breaker and a contract violation all mean
-    // the benchmark was not refreshed, and every one must page. The body stays
-    // static; the diagnosable half goes to the server log, scrubbed.
+    // unreachable service, an open breaker, a contract violation and a
+    // `through` older than yesterday all mean the benchmark was not refreshed,
+    // and every one must page. The body stays static; the diagnosable half goes
+    // to the server log, scrubbed, AND to Sentry (review fix HR-02). The
+    // console line alone reached nothing remote: none of these arms ever
+    // reaches the Python service's own Sentry. Same shape as the one sibling
+    // cron that captures, `flag-monitor` (`monitorReadFailed`): awaited, so the
+    // lambda is held until the capture settles; `captureToSentry` scrubs
+    // unconditionally and never throws.
     console.error(
       "[api/cron/refresh-benchmark] refresh failed:",
       scrubSeamError(err),
     );
+    await captureToSentry(err, {
+      tags: { route: "cron.refresh-benchmark", stage: "refresh" },
+      level: "error",
+    });
     return NextResponse.json(
       { ok: false },
       { status: 502, headers: NO_STORE_HEADERS },

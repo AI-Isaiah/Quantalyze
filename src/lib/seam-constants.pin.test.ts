@@ -124,9 +124,11 @@ const EXPECTED_TIMEOUT_MS: Record<string, number> = {
   "keys-permissions": 15_000,
   "keys-rotate-secret": 120_000,
   "process-key-unified-dormant": 60_000,
-  // Phase 169.2 / D-08 — the daily BTC benchmark refresh (the process-key-sync
-  // budget: the service waits on an upstream price fetch on a cache miss).
-  "benchmark-refresh": 60_000,
+  // Phase 169.2 / D-08 — the daily BTC benchmark refresh. Review fix WR-02
+  // (2026-09-27) moved it from 60 000: hand-computed from the fetcher, 3
+  // upstream requests x 30 s (`services/benchmark.py`, 2 Binance pages + the
+  // CoinGecko fallback) = 90 000, plus 10 000 for the cache read and upsert.
+  "benchmark-refresh": 100_000,
 };
 
 /**
