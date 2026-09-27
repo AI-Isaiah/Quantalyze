@@ -335,7 +335,7 @@ export type WizardErrorCode =
   //
   // ⚠️ AND NO INCUMBENT COULD TAKE IT, read AT THE EMITTER rather than matched
   // on names:
-  //   · `KEY_ORPHANED` — "This key is already stored, but nothing uses it."
+  //   · `KEY_ORPHANED` — "This key is already stored, but no strategy uses it."
   //     Its whole premise is that the key IS stored and IS the caller's. Here we
   //     have just measured that no live key of theirs matches, so the sentence
   //     asserts the opposite of what the reads found, and its second remedy
@@ -2424,6 +2424,27 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // whose draft was deleted" is the only way to reach this state, not a guess
   // at the likeliest one.
   //
+  // ⛔ CORRECTED 2026-09-27 (167.1.2 REVIEW WR-04 follow-up) — THAT MEASUREMENT
+  // NO LONGER HOLDS, AND THE COPY MOVED WITH THIS CORRECTION. The paragraph
+  // above is kept as lineage. The scrub trigger exempts `service_role`, so it
+  // never touched a service-role writer, and there are three writers now:
+  //   · `create_wizard_strategy`, as above;
+  //   · `keys/validate-and-encrypt`'s persist arm, a service-role INSERT that
+  //     stamps the column for MT5 (164.5.3-02) and for OKX, Bybit, Binance and
+  //     Deribit (167.1.2 plan 02). It serves the allocator Exchanges page and
+  //     the manager key card;
+  //   · the daily poll's identity stamper (`analytics-service/services/
+  //     account_identity.py`, 167.1.2 plan 04), a service-role UPDATE that
+  //     stamps allocator keys connected before plan 02.
+  // What reaches this code is what the reads measured, and no more: a live key
+  // of the caller's on this account with no `strategies.api_key_id` row
+  // (`resolveStrategiesForKey`), no composite membership and no allocator
+  // holdings (`resolveOtherKeyUse`, 167.1.2 WR-04). A key left behind by a
+  // deleted draft is one such key. An Exchanges-page key with no holdings
+  // recorded yet is another, which is the residual WR-04 recorded. So the
+  // title says "no strategy uses it" rather than "nothing uses it", and the
+  // cause names the deleted draft as one possibility among others.
+  //
   // ⛔ THE `fix` BULLETS DIVERGE FROM 161-UI-SPEC § WIZERR-03, DELIBERATELY,
   // AND THE DIVERGENCE IS A MEASUREMENT RATHER THAN A PREFERENCE. The spec's
   // first bullet was "Disconnect the unused key under Manage keys, then connect
@@ -2469,9 +2490,9 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // lets an owner of ANY role release their own stored key. 162-06 closed REUSE,
   // not release, and the last bullet keeps routing to us for it.
   KEY_ORPHANED: {
-    title: "This key is already stored, but nothing uses it.",
+    title: "This key is already stored, but no strategy uses it.",
     cause:
-      "These credentials were saved in an earlier session whose draft was deleted, leaving the key attached to nothing. A new strategy cannot be created over the leftover key, and it does not clear on its own.",
+      "A key for this exchange account is already saved on your account, and no strategy is built on it. You may have saved it in an earlier setup whose draft was later deleted, or connected it on another page. A new strategy cannot be created over that key, and it does not clear on its own.",
     fix: [
       "Connect this strategy with a different account — one whose key is not already stored here.",
       "If your account includes the My Strategies page, look for this account there under “No strategy yet”: “Finish setup” on that row builds the strategy from the key already stored, with no credentials to enter again.",

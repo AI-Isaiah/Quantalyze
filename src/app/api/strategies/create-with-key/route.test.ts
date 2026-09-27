@@ -2337,7 +2337,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       // Byte-wise, and `code` FIRST: `toEqual` on parsed JSON does not compare
       // key order, and the key order is what the invariant scanner reads.
       expect(await res.text()).toBe(
-        '{"code":"KEY_ORPHANED","error":"This key is already stored, but nothing uses it."}',
+        '{"code":"KEY_ORPHANED","error":"This key is already stored, but no strategy uses it."}',
       );
       expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     });

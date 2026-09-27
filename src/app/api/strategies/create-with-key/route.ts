@@ -1656,7 +1656,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             return NextResponse.json(
               {
                 code: "KEY_ORPHANED",
-                error: "This key is already stored, but nothing uses it.",
+                error: "This key is already stored, but no strategy uses it.",
               },
               { status: 409, headers: NO_STORE_HEADERS },
             );

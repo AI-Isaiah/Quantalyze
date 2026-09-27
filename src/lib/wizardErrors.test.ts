@@ -6234,3 +6234,33 @@ describe("[167-01 / D-05, D-07] KEY_SIGN_IN_FAILED — an ambiguous MT5 sign-in 
     ).not.toContain("fault on our side");
   });
 });
+
+// 167.1.2 REVIEW WR-04 follow-up — KEY_ORPHANED's copy has to be true for every
+// path that can reach it now, not only for the one that existed when it was
+// written. It was authored when `create_wizard_strategy` was the only writer of
+// `api_keys.venue_account_id`, so "saved in an earlier session whose draft was
+// deleted" was the only way to collide with a stored key that no strategy uses.
+// That stopped holding when `keys/validate-and-encrypt` began stamping the
+// column (MT5 in 164.5.3-02, the ccxt venues in 167.1.2 plan 02) and the daily
+// poll began stamping keys connected before that (167.1.2 plan 04). A key
+// connected on the allocator Exchanges page that has no holdings recorded yet
+// reaches this refusal too (the residual 167.1.2 WR-04 recorded), and telling
+// that owner their draft was deleted names a history they do not have.
+describe("[167.1.2 / WR-04 follow-up] KEY_ORPHANED claims only what every path to it shares", () => {
+  const entry = WIZARD_ERROR_COPY.KEY_ORPHANED;
+
+  it("names what the reads measured: a stored key on this account that no strategy uses", () => {
+    expect(entry.title).toBe("This key is already stored, but no strategy uses it.");
+    expect(entry.cause).toBe(
+      "A key for this exchange account is already saved on your account, and no strategy is built on it. You may have saved it in an earlier setup whose draft was later deleted, or connected it on another page. A new strategy cannot be created over that key, and it does not clear on its own.",
+    );
+  });
+
+  it("never asserts the deleted-draft story as the only way here, nor that nothing at all uses the key", () => {
+    const copy = `${entry.title} ${entry.cause}`;
+    // The retired sentences: each is false for a key added outside the wizard.
+    expect(copy).not.toMatch(/whose draft was deleted, leaving/);
+    expect(copy).not.toMatch(/attached to nothing/);
+    expect(copy).not.toMatch(/nothing uses it/);
+  });
+});
