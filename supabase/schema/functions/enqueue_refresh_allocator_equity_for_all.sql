@@ -25,6 +25,8 @@ DECLARE
   v_bootstrap_cap CONSTANT integer := 25;
   v_bootstrap_enqueued integer := 0;
   v_boot_key uuid;
+  v_loop_state text;
+  v_loop_msg   text;
 BEGIN
   IF NOT pg_try_advisory_lock(hashtext('daily_equity_refresh')) THEN
     RAISE NOTICE 'enqueue_refresh_allocator_equity_for_all: another run holds the lock; skipping';
@@ -102,10 +104,42 @@ BEGIN
           -- v_boot_key is the key being enqueued, or NULL when the per-key
           -- query itself failed before the first key.
           RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap of one book was rolled back and skipped; the other books continue (api_key %, SQLSTATE %)', v_boot_key, SQLSTATE;
+          -- DURABLE TRACE (review SFH-R2-02, MIG-R2-01): a WARNING lives only
+          -- in the server log, and pg_cron records the run as succeeded. One
+          -- public.cron_runs row per skipped book, the sink the ledger fan-outs
+          -- write their candidate_enqueue_failed rows to; row security lets
+          -- only platform admins and service_role read it. Deliberately NOT
+          -- wrapped: if the sink refuses this row, the error reaches the
+          -- sub-block below, which rolls this run's bootstrap back and writes
+          -- its own row, so a skip is never left with no trace at all.
+          INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+          VALUES ('equity_refresh_fanout', 'error', now(), 'bootstrap_book_skipped',
+                  jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',
+                                     'cause', 'bootstrap_book_skipped',
+                                     'owner_id', v_book.owner_id,
+                                     'api_key_id', v_boot_key,
+                                     'sqlstate', SQLSTATE,
+                                     'message', SQLERRM));
         END;
       END LOOP;
     EXCEPTION WHEN OTHERS THEN
-      RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap loop failed and was rolled back; the refresh loop still runs (SQLSTATE %: %)', SQLSTATE, SQLERRM;
+      v_loop_state := SQLSTATE;
+      v_loop_msg   := SQLERRM;
+      RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap loop failed and was rolled back; the refresh loop still runs (SQLSTATE %: %)', v_loop_state, v_loop_msg;
+      -- DURABLE TRACE (review SFH-R2-02, MIG-R2-01), the same sink as the
+      -- per-book row. Wrapped, unlike that row: this is the last handler
+      -- before the refresh loop, and a sink that refuses this row too must
+      -- not cancel the daily refresh of every allocator.
+      BEGIN
+        INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+        VALUES ('equity_refresh_fanout', 'error', now(), 'bootstrap_loop_failed',
+                jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',
+                                   'cause', 'bootstrap_loop_failed',
+                                   'sqlstate', v_loop_state,
+                                   'message', v_loop_msg));
+      EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap failure row could not be written (SQLSTATE %)', SQLSTATE;
+      END;
     END;
 
     -- The refresh loop runs AFTER the bootstrap loop on purpose: its

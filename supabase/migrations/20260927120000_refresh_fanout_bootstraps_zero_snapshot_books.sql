@@ -212,6 +212,17 @@
 --       book has no reconstruct row, so its refresh stays withheld and the
 --       next run takes it again. The sub-block of (4) remains the outer
 --       safety net, for an error outside any one book.
+--   (7) Both handlers of (4) and (6) leave a DURABLE trace (review SFH-R2-02,
+--       MIG-R2-01): one public.cron_runs row, cron_name
+--       'equity_refresh_fanout', status 'error', error
+--       'bootstrap_book_skipped' (per skipped book: owner, key, SQLSTATE,
+--       message in metadata) or 'bootstrap_loop_failed' (SQLSTATE and
+--       message). This is the ledger fan-outs' candidate_enqueue_failed
+--       sink, readable by platform admins and service_role only. The
+--       per-book write is not wrapped, so a refusing sink escalates to the
+--       sub-block, whose own write is wrapped so it can never cancel the
+--       refresh. ⚠️ No prober arm reads this cron_name yet (review SFH-03,
+--       still open): the rows are durable, not watched.
 --   Every copy of the eligible predicate, the discriminator and the
 --   qualifying test uses table aliases unique to that copy (book selection,
 --   per-key selection, refresh loop, bootstrapped subquery), so a mutation can
@@ -272,6 +283,8 @@ DECLARE
   v_bootstrap_cap CONSTANT integer := 25;
   v_bootstrap_enqueued integer := 0;
   v_boot_key uuid;
+  v_loop_state text;
+  v_loop_msg   text;
 BEGIN
   IF NOT pg_try_advisory_lock(hashtext('daily_equity_refresh')) THEN
     RAISE NOTICE 'enqueue_refresh_allocator_equity_for_all: another run holds the lock; skipping';
@@ -349,10 +362,42 @@ BEGIN
           -- v_boot_key is the key being enqueued, or NULL when the per-key
           -- query itself failed before the first key.
           RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap of one book was rolled back and skipped; the other books continue (api_key %, SQLSTATE %)', v_boot_key, SQLSTATE;
+          -- DURABLE TRACE (review SFH-R2-02, MIG-R2-01): a WARNING lives only
+          -- in the server log, and pg_cron records the run as succeeded. One
+          -- public.cron_runs row per skipped book, the sink the ledger fan-outs
+          -- write their candidate_enqueue_failed rows to; row security lets
+          -- only platform admins and service_role read it. Deliberately NOT
+          -- wrapped: if the sink refuses this row, the error reaches the
+          -- sub-block below, which rolls this run's bootstrap back and writes
+          -- its own row, so a skip is never left with no trace at all.
+          INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+          VALUES ('equity_refresh_fanout', 'error', now(), 'bootstrap_book_skipped',
+                  jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',
+                                     'cause', 'bootstrap_book_skipped',
+                                     'owner_id', v_book.owner_id,
+                                     'api_key_id', v_boot_key,
+                                     'sqlstate', SQLSTATE,
+                                     'message', SQLERRM));
         END;
       END LOOP;
     EXCEPTION WHEN OTHERS THEN
-      RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap loop failed and was rolled back; the refresh loop still runs (SQLSTATE %: %)', SQLSTATE, SQLERRM;
+      v_loop_state := SQLSTATE;
+      v_loop_msg   := SQLERRM;
+      RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap loop failed and was rolled back; the refresh loop still runs (SQLSTATE %: %)', v_loop_state, v_loop_msg;
+      -- DURABLE TRACE (review SFH-R2-02, MIG-R2-01), the same sink as the
+      -- per-book row. Wrapped, unlike that row: this is the last handler
+      -- before the refresh loop, and a sink that refuses this row too must
+      -- not cancel the daily refresh of every allocator.
+      BEGIN
+        INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+        VALUES ('equity_refresh_fanout', 'error', now(), 'bootstrap_loop_failed',
+                jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',
+                                   'cause', 'bootstrap_loop_failed',
+                                   'sqlstate', v_loop_state,
+                                   'message', v_loop_msg));
+      EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap failure row could not be written (SQLSTATE %)', SQLSTATE;
+      END;
     END;
 
     -- The refresh loop runs AFTER the bootstrap loop on purpose: its
@@ -414,7 +459,7 @@ REVOKE ALL ON FUNCTION public.enqueue_refresh_allocator_equity_for_all() FROM PU
 GRANT ALL ON FUNCTION public.enqueue_refresh_allocator_equity_for_all() TO service_role;
 
 COMMENT ON FUNCTION public.enqueue_refresh_allocator_equity_for_all() IS
-  'Daily cron fan-out for the per-allocator legacy equity store. Two arms, inside one advisory lock. (1) Bootstrap, first, in its own sub-block, one book per inner block (an error enqueueing one book rolls back and skips that book only; an error outside any book rolls back every bootstrap enqueue of the run; neither cancels the refresh, and both are logged as a WARNING): for an owner with ZERO allocator_equity_snapshots rows, one reconstruct_allocator_history job for every qualifying key with no reconstruct job in flight (pending, running, done_pending_children, failed_retry) or done, so a failed_final reconstruct is retried; qualifying = active, not revoked, sync_status not sign_in_failed or error, not disconnected, not linked to one of its owner''s non-archived strategies (strategies.api_key_id or strategy_keys, mirroring deriveStrategyLinkedKeyIds) and not Deribit. The job carries idempotency key reconstruct-alloc-<key>-initial, the RPC''s correlation label; dedupe is the in-flight partial unique index plus the in-flight-or-done gate, not that key. Whole books, newest key first, stopping before a new book once 25 keys (v_bootstrap_cap) were enqueued this call. (2) Refresh: one refresh_allocator_equity_daily job per eligible key (active, not revoked, not disconnected) whose owner has a snapshot row, or which is unlinked on a book where every qualifying key has a reconstruct job in flight or done. A lost enqueue race (serialization_failure) skips one key with a WARNING. Phase 167.1.2 D-17; re-based on migration 075.';
+  'Daily cron fan-out for the per-allocator legacy equity store. Two arms, inside one advisory lock. (1) Bootstrap, first, in its own sub-block, one book per inner block (an error enqueueing one book rolls back and skips that book only; an error outside any book rolls back every bootstrap enqueue of the run; neither cancels the refresh; both are logged as a WARNING and as one public.cron_runs row, cron_name equity_refresh_fanout, error bootstrap_book_skipped or bootstrap_loop_failed): for an owner with ZERO allocator_equity_snapshots rows, one reconstruct_allocator_history job for every qualifying key with no reconstruct job in flight (pending, running, done_pending_children, failed_retry) or done, so a failed_final reconstruct is retried; qualifying = active, not revoked, sync_status not sign_in_failed or error, not disconnected, not linked to one of its owner''s non-archived strategies (strategies.api_key_id or strategy_keys, mirroring deriveStrategyLinkedKeyIds) and not Deribit. The job carries idempotency key reconstruct-alloc-<key>-initial, the RPC''s correlation label; dedupe is the in-flight partial unique index plus the in-flight-or-done gate, not that key. Whole books, newest key first, stopping before a new book once 25 keys (v_bootstrap_cap) were enqueued this call. (2) Refresh: one refresh_allocator_equity_daily job per eligible key (active, not revoked, not disconnected) whose owner has a snapshot row, or which is unlinked on a book where every qualifying key has a reconstruct job in flight or done. A lost enqueue race (serialization_failure) skips one key with a WARNING. Phase 167.1.2 D-17; re-based on migration 075.';
 
 -- --------------------------------------------------------------------------
 -- Self-verify. CATALOGUE-ONLY: to_regprocedure, pg_get_functiondef,

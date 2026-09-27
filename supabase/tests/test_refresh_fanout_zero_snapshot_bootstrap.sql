@@ -57,15 +57,15 @@
 -- creates, and nothing that can RAISE precedes arm Z1. On migration 075's body
 -- the full file must fail with arm Z1 first; with Z1's marked block deleted it
 -- must fail with arm Z2. Keep Z1 and Z2 the FIRST TWO assertions in the file.
--- On 075's body R, N3c, N4, N4d, N6, N7, MX, C, S, X1, X3 and G can also
--- fail, so none of them may move ahead of Z1 or between Z1 and Z2. Every
+-- On 075's body R, N3c, N4, N4d, N6, N7, MX, C, S, X1, X2, X2t, X3, X4 and
+-- G can also fail, so none of them may move ahead of Z1 or between Z1 and Z2. Every
 -- later group seeds its own fixtures and makes its own call(s) after Z2,
 -- never before.
 --
 -- ⭐ ORDER IS LOAD-BEARING. Each arm must be the FIRST failure under its own
 -- mutation (scripts/mutation-runner). File order, fixed:
 --   Z1, Z2, N1, R, N2, N3, N3b, N3c, N4, N4d, N5, N6, E, N7, MX, M1, M2, M3,
---   M4, M5, M6, B, F, C, S, X1, X2, X3, G.
+--   M4, M5, M6, B, F, C, S, X1, X2, X2t, X3, X4, G.
 -- MATCHED PAIRS: every negative-control key (N1, R, N2, N3, N3b, N3c, N6, N7
 -- and the mixed book's M1 to M6 keys) differs from a qualifying key in
 -- exactly ONE attribute, the one its arm's mutation removes; everything else
@@ -129,6 +129,15 @@
 --        per-book edit cannot touch it; under X1's own mutation the 40001
 --        reaches the per-book block and rolls back the refused key's SIBLING
 --        (k_a2), which is what X1 asserts.
+--   X2t  all earlier: its mutation deletes the per-book trace row, which no
+--        earlier arm reads; X2, in the same group, asserts before it and does
+--        not read the row.
+--   X4   all earlier: its mutation deletes the sub-block's trace row, and no
+--        earlier fixture reaches the sub-block (X2's error stops at the
+--        per-book block). Under X2's or X2t's mutation X4 would also fail,
+--        but X2 and X2t come first. X4's second fixture trigger sits on
+--        public.cron_runs and matches only its own key's per-book row; both
+--        triggers are dropped before its assertion.
 --   G    all: changes a grant only; no arm but G reads grants.
 -- A reviewer fix that adds an arm or changes a fixture adds its row here and
 -- re-walks the table before re-running.
@@ -137,12 +146,13 @@
 -- unique_violation half of the fan-out's per-key handlers or changing the
 -- refresh key is inert, and an arm whose every mutation is inert cannot bite.
 -- The serialization_failure half is NOT inert and is pinned by X1 (bootstrap
--- loop) and X3 (refresh loop); the per-book skip by X2.
+-- loop) and X3 (refresh loop); the per-book skip by X2, its trace row by
+-- X2t, and the sub-block with its trace row by X4.
 --
 -- Usage:
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/test_refresh_fanout_zero_snapshot_bootstrap.sql
 --
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260922120000_api_keys_sync_status_sign_in_failed.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql","supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260922120000_api_keys_sync_status_sign_in_failed.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql","scripts/pg-lane/fixtures/33-fixture-cron-runs.sql","supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql"]}
 
 BEGIN;
 
@@ -1143,6 +1153,7 @@ DECLARE
   v_rec_b int;
   v_ref_d int;
   v_ref_c int;
+  v_trace int;
   v_err  text;
 BEGIN
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
@@ -1191,6 +1202,24 @@ BEGIN
    WHERE api_key_id IN (k_refused, k_b, k_d);
   IF v_err IS NOT NULL OR v_rec_b <> 1 OR v_ref_d <> 1 OR v_ref_c <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (X2): with one book''s reconstruct enqueue failing (P0001), the call raised SQLSTATE % (expected none), an older zero-snapshot book''s key got % reconstruct job(s) (expected 1), a key on a book WITH snapshots got % refresh job(s) (expected 1), and the refused key got % (expected 0). One failing book must skip that book only and never cancel the daily refresh.', v_err, v_rec_b, v_ref_d, v_ref_c;
+  END IF;
+
+  -- ----- X2t: the skipped book leaves a DURABLE row, not a log line only ---
+  -- RED-UNDER: delete the per-book block's public.cron_runs INSERT in
+  --            migration 20260927120000. The skip then leaves a WARNING in the
+  --            server log only, and pg_cron records the run as succeeded, so a
+  --            book skipped every day is invisible (review SFH-R2-02).
+  -- RED-UNDER-M: {"arm": "X2t", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "          INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)\n          VALUES ('equity_refresh_fanout', 'error', now(), 'bootstrap_book_skipped',\n                  jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',\n                                     'cause', 'bootstrap_book_skipped',\n                                     'owner_id', v_book.owner_id,\n                                     'api_key_id', v_boot_key,\n                                     'sqlstate', SQLSTATE,\n                                     'message', SQLERRM));", "replace": "          NULL;", "occurrences": 1}]}
+  SELECT count(*) INTO v_trace
+    FROM public.cron_runs
+   WHERE cron_name = 'equity_refresh_fanout'
+     AND status = 'error'
+     AND error = 'bootstrap_book_skipped'
+     AND metadata->>'api_key_id' = k_refused::text
+     AND metadata->>'owner_id' = uid_c::text
+     AND metadata->>'sqlstate' = 'P0001';
+  IF v_trace <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (X2t): a book skipped because its reconstruct enqueue failed (P0001) left % public.cron_runs row(s) naming it (cron_name equity_refresh_fanout, error bootstrap_book_skipped), expected exactly 1. Without it the skip exists only as a server-log WARNING while pg_cron records success.', v_trace;
   END IF;
 END $grpx2$;
 
@@ -1257,6 +1286,83 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (X3): with one key''s refresh enqueue losing a race (40001), the call raised SQLSTATE % (expected none) and another snapshot book''s key got % refresh job(s) (expected 1). One lost race must skip one key, not the daily refresh of every allocator.', v_err, v_ref_f;
   END IF;
 END $grpx3$;
+
+-- ==========================================================================
+-- GROUP X4 — an error that escapes every per-book block reaches the bootstrap
+-- SUB-BLOCK, which rolls the run's bootstrap back, still lets the refresh loop
+-- run, and leaves its own DURABLE row (reviews SFH-02, SFH-R2-02, MIG-R2-01).
+-- The route there is the one the migration names: a fixture trigger refuses
+-- one key's reconstruct (P0001), and a second fixture trigger refuses the
+-- per-book block's public.cron_runs row for that key, so the per-book
+-- handler's own write fails and the error escapes to the sub-block.
+-- ==========================================================================
+DO $grpx4$
+DECLARE
+  v_run  text := replace(gen_random_uuid()::text, '-', '');
+  v_base timestamptz := now() + INTERVAL '100 years' + INTERVAL '53 days';
+  uid_g  uuid := gen_random_uuid();
+  uid_h  uuid := gen_random_uuid();
+  k_refused uuid := gen_random_uuid();
+  k_h    uuid := gen_random_uuid();
+  v_ref_h int;
+  v_ref_g int;
+  v_trace int;
+  v_err  text;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid_g, '00000000-0000-0000-0000-000000000000', 'test-fanout-boot-x4g-' || v_run || '@quantalyze.test', now(), now()),
+         (uid_h, '00000000-0000-0000-0000-000000000000', 'test-fanout-boot-x4h-' || v_run || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email)
+  VALUES (uid_g, 'fanout boot X4 refused',  'test-fanout-boot-x4g-' || v_run || '@quantalyze.test'),
+         (uid_h, 'fanout boot X4 snapshot', 'test-fanout-boot-x4h-' || v_run || '@quantalyze.test')
+  ON CONFLICT (id) DO NOTHING;
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, created_at)
+  VALUES (k_refused, uid_g, 'okx', 'fanout boot X4 refused',  'enc', true, v_base + INTERVAL '2 hours'),
+         (k_h,       uid_h, 'okx', 'fanout boot X4 snapshot', 'enc', true, v_base + INTERVAL '1 hour');
+  INSERT INTO allocator_equity_snapshots (allocator_id, asof, value_usd, source)
+  VALUES (uid_h, DATE '2026-01-01', 100, 'exchange_primary');
+  CREATE FUNCTION public._fanout_boot_refuse() RETURNS trigger
+  LANGUAGE plpgsql AS $f$
+  BEGIN
+    RAISE EXCEPTION USING ERRCODE = TG_ARGV[0], MESSAGE = 'test_refresh_fanout_zero_snapshot_bootstrap: fixture refusal ' || TG_ARGV[1];
+  END $f$;
+  EXECUTE format('CREATE TRIGGER _fanout_boot_refuse BEFORE INSERT ON public.compute_jobs FOR EACH ROW WHEN (NEW.api_key_id = %L::uuid AND NEW.kind = %L) EXECUTE FUNCTION public._fanout_boot_refuse(%L, %L)', k_refused, 'reconstruct_allocator_history', 'P0001', 'enqueue-' || v_run);
+  EXECUTE format('CREATE TRIGGER _fanout_boot_refuse_trace BEFORE INSERT ON public.cron_runs FOR EACH ROW WHEN (NEW.error = %L AND NEW.metadata->>%L = %L) EXECUTE FUNCTION public._fanout_boot_refuse(%L, %L)', 'bootstrap_book_skipped', 'api_key_id', k_refused::text, 'P0001', 'trace-' || v_run);
+
+  v_err := NULL;
+  BEGIN
+    PERFORM public.enqueue_refresh_allocator_equity_for_all();
+  EXCEPTION WHEN OTHERS THEN
+    v_err := SQLSTATE;
+  END;
+
+  DROP TRIGGER _fanout_boot_refuse ON public.compute_jobs;
+  DROP TRIGGER _fanout_boot_refuse_trace ON public.cron_runs;
+  DROP FUNCTION public._fanout_boot_refuse();
+
+  -- ----- X4 ---
+  -- RED-UNDER: delete the bootstrap sub-block's public.cron_runs INSERT in
+  --            migration 20260927120000. An error outside every book then
+  --            rolls the whole run's bootstrap back with nothing but a
+  --            server-log WARNING, while pg_cron records success, so a cause
+  --            that recurs every day disables the bootstrap silently.
+  -- RED-UNDER-M: {"arm": "X4", "apply": [{"kind": "edit", "file": "supabase/migrations/20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "        INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)\n        VALUES ('equity_refresh_fanout', 'error', now(), 'bootstrap_loop_failed',\n                jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',\n                                   'cause', 'bootstrap_loop_failed',\n                                   'sqlstate', v_loop_state,\n                                   'message', v_loop_msg));", "replace": "        NULL;", "occurrences": 1}]}
+  SELECT count(*) FILTER (WHERE api_key_id = k_h AND kind = 'refresh_allocator_equity_daily'),
+         count(*) FILTER (WHERE api_key_id = k_refused AND kind = 'refresh_allocator_equity_daily')
+    INTO v_ref_h, v_ref_g
+    FROM compute_jobs
+   WHERE api_key_id IN (k_refused, k_h);
+  SELECT count(*) INTO v_trace
+    FROM public.cron_runs
+   WHERE cron_name = 'equity_refresh_fanout'
+     AND status = 'error'
+     AND error = 'bootstrap_loop_failed'
+     AND metadata->>'sqlstate' = 'P0001'
+     AND metadata->>'message' LIKE '%trace-' || v_run || '%';
+  IF v_err IS NOT NULL OR v_ref_h <> 1 OR v_ref_g <> 0 OR v_trace <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (X4): with an error escaping the per-book block, the call raised SQLSTATE % (expected none), a key on a book WITH snapshots got % refresh job(s) (expected 1), the refused key got % (expected 0), and % public.cron_runs row(s) recorded the rolled-back bootstrap (cron_name equity_refresh_fanout, error bootstrap_loop_failed; expected exactly 1). A failure of the whole bootstrap must leave a durable row, never only a server-log WARNING.', v_err, v_ref_h, v_ref_g, v_trace;
+  END IF;
+END $grpx4$;
 
 -- ==========================================================================
 -- GROUP G — the grants: anon and authenticated cannot EXECUTE the fan-out;
