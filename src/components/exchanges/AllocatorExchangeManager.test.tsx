@@ -2658,9 +2658,27 @@ describe("AllocatorExchangeManager — duplicate-account note and reconnect refu
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
 
+  // The duplicate's own row. A holder in 'error' or 'sign_in_failed' renders a
+  // status line of its own, so the note is judged inside this row, by its text.
+  function dupRow(): HTMLElement {
+    const row = screen
+      .getByText("Second Binance")
+      .closest("[data-testid='allocator-key-row']") as HTMLElement | null;
+    expect(row).not.toBeNull();
+    return row as HTMLElement;
+  }
+
+  // D-18 (founder, 2026-09-27): a holder is WORKING only while it is active,
+  // connected, and its last sync is not revoked, sign_in_failed or error. A
+  // holder that is not working does not count the account, so the marked key
+  // counts on its own and must not be told to disconnect: telling the owner to
+  // drop the one key that still works would leave the account counted by nobody.
   it.each([
     ["disconnected", { disconnected_at: "2026-09-20T00:00:00Z" }],
     ["revoked", { sync_status: "revoked" }],
+    ["sign_in_failed", { sync_status: "sign_in_failed" }],
+    ["error", { sync_status: "error" }],
+    ["inactive", { is_active: false }],
   ])(
     "shows nothing once the holder is %s (the reader rule: the marked key then counts on its own)",
     (_name, holderOverrides) => {
@@ -2670,7 +2688,25 @@ describe("AllocatorExchangeManager — duplicate-account note and reconnect refu
           initialKeys={[holderKey(holderOverrides), dupKey()]}
         />,
       );
-      expect(screen.queryByRole("note")).not.toBeInTheDocument();
+      // Neither the named sentence nor its 'another of your keys' fallback.
+      expect(within(dupRow()).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    ["idle", { sync_status: "idle" }],
+    ["complete", { sync_status: "complete" }],
+    ["never synced (NULL)", { sync_status: null }],
+  ])(
+    "names the holder while it is working, last sync %s",
+    (_name, holderOverrides) => {
+      render(
+        <AllocatorExchangeManager
+          hasHoldings={true}
+          initialKeys={[holderKey(holderOverrides), dupKey()]}
+        />,
+      );
+      expect(within(dupRow()).getByText(DUP_SENTENCE)).toBeInTheDocument();
     },
   );
 

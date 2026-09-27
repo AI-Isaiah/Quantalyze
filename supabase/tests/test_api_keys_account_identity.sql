@@ -15,7 +15,11 @@
 --     caller's recompose is running rather than fold into it;
 --   * a NAMED refusal in reconnect_allocator_api_key when a live sibling already
 --     holds the same (user, exchange, venue_account_id) (Pitfall 5), and a
---     reset of history_inclusion on every successful reconnect.
+--     reset of history_inclusion on every successful reconnect;
+--   * D-18 (migration 20260927180000, plan 16): only a WORKING key (active,
+--     connected, last sync NULL or not revoked, sign_in_failed or error) is
+--     refused KEY_NOT_DEPARTED, so an inactive or failing key gets a history
+--     choice. Its RPC-body arms edit that migration, the last in the list.
 --
 -- pgTAP is not set up in this project, so every assertion RAISEs
 -- `TEST FAILED (<arm>)` on failure and a clean run prints NOTICEs only.
@@ -36,6 +40,10 @@
 --   * HIST-tenant is judged before HIST-retry on the same call: under its twin
 --     user A's own row stays failed_retry, which HIST-retry would otherwise
 --     report first;
+--   * the four D-18 arms (HIST-signin, HIST-error, HIST-inactive,
+--     HIST-nullstatus) sit after HIST-live, whose IF-FALSE twin must be the
+--     first failure, and before HIST-running, after which user A's recompose
+--     is running and every accepting call is refused 55006;
 --   * HIST-requeued runs LAST in $hist$: it installs a test-local trigger on
 --     compute_jobs for one call and drops it before any assertion, so no
 --     other arm ever runs with the trigger in place;
@@ -495,6 +503,9 @@ DECLARE
   k_gone     uuid := gen_random_uuid();   -- user A, soft-disconnected
   k_rev      uuid := gen_random_uuid();   -- user A, revoked, never disconnected
   k_signin   uuid := gen_random_uuid();   -- user A, connected, active, sign_in_failed (D-18)
+  k_err      uuid := gen_random_uuid();   -- user A, connected, active, error (D-18)
+  k_inactive uuid := gen_random_uuid();   -- user A, connected, is_active false, idle (D-18)
+  k_nullst   uuid := gen_random_uuid();   -- user A, connected, active, never synced (NULL)
   v_err      text;
   v_msg      text;
   v_con      text;
@@ -516,7 +527,10 @@ BEGIN
   VALUES (k_live, uid_a, 'okx',     'hist live',    'enc', true, NULL,  'idle'),
          (k_gone, uid_a, 'bybit',   'hist gone',    'enc', true, now(), 'idle'),
          (k_rev,  uid_a, 'binance', 'hist revoked', 'enc', true, NULL,  'revoked'),
-         (k_signin, uid_a, 'deribit', 'hist signin', 'enc', true, NULL, 'sign_in_failed');
+         (k_signin, uid_a, 'deribit', 'hist signin', 'enc', true, NULL, 'sign_in_failed'),
+         (k_err,      uid_a, 'okx',   'hist error',    'enc', true,  NULL, 'error'),
+         (k_inactive, uid_a, 'bybit', 'hist inactive', 'enc', false, NULL, 'idle'),
+         (k_nullst,   uid_a, 'okx',   'hist null',     'enc', true,  NULL, NULL);
 
   -- ----- HIST-check: history_inclusion outside the set is REFUSED -------------
   -- RED-UNDER: drop api_keys_history_inclusion_valid on the LIVE database.
@@ -670,6 +684,59 @@ BEGIN
   SELECT history_inclusion INTO v_val FROM api_keys WHERE id = k_signin;
   IF v_err IS NOT NULL OR v_val IS DISTINCT FROM 'exclude' THEN
     RAISE EXCEPTION 'TEST FAILED (HIST-signin): a connected, active key whose last sync was sign_in_failed was not accepted as departed (SQLSTATE %, message %, stored %). D-18: a failing key is not a working key.', v_err, v_msg, v_val;
+  END IF;
+
+  -- ----- HIST-error: a connected, ACTIVE key whose last sync was error is departed
+  -- D-18: a key whose last sync failed is not working, so its owner has a
+  -- history choice for it.
+  -- RED-UNDER: drop 'error' from the departed test's failing-status list in
+  --            migration 20260927180000, so an error key is refused as working.
+  -- RED-UNDER-M: {"arm":"HIST-error","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"v_sync_status NOT IN ('revoked', 'sign_in_failed', 'error')","replace":"v_sync_status NOT IN ('revoked', 'sign_in_failed')","occurrences":1}]}
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    v_ret := public.set_departed_key_history_inclusion(k_err, 'exclude');
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  SELECT history_inclusion INTO v_val FROM api_keys WHERE id = k_err;
+  IF v_err IS NOT NULL OR v_val IS DISTINCT FROM 'exclude' THEN
+    RAISE EXCEPTION 'TEST FAILED (HIST-error): a connected, active key whose last sync was error was not accepted as departed (SQLSTATE %, message %, stored %). D-18: a failing key is not a working key.', v_err, v_msg, v_val;
+  END IF;
+
+  -- ----- HIST-inactive: a connected key with is_active false is departed -----
+  -- D-18: a working key is ACTIVE. An inactive key does not count, so its owner
+  -- has a history choice for it, even with a healthy last sync ('idle').
+  -- RED-UNDER: drop the is_active conjunct from the departed test in migration
+  --            20260927180000, so an inactive key is refused as working.
+  -- RED-UNDER-M: {"arm":"HIST-inactive","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"  IF v_is_active AND v_disconnected IS NULL","replace":"  IF v_disconnected IS NULL","occurrences":1}]}
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    v_ret := public.set_departed_key_history_inclusion(k_inactive, 'exclude');
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  SELECT history_inclusion INTO v_val FROM api_keys WHERE id = k_inactive;
+  IF v_err IS NOT NULL OR v_val IS DISTINCT FROM 'exclude' THEN
+    RAISE EXCEPTION 'TEST FAILED (HIST-inactive): a connected key with is_active false was not accepted as departed (SQLSTATE %, message %, stored %). D-18: an inactive key is not a working key.', v_err, v_msg, v_val;
+  END IF;
+
+  -- ----- HIST-nullstatus: an active key that has NEVER synced is WORKING -----
+  -- A NULL sync_status counts as working (as in the eligible-key predicate), so
+  -- the call is refused 55000 KEY_NOT_DEPARTED and nothing is written. Without
+  -- the NULL leg the status test is NULL, IF reads it as false, and a
+  -- never-synced key would silently be accepted as departed.
+  -- RED-UNDER: drop the NULL leg of the departed test in migration
+  --            20260927180000.
+  -- RED-UNDER-M: {"arm":"HIST-nullstatus","apply":[{"kind":"edit","file":"supabase/migrations/20260927180000_working_holder_rule_d18.sql","find":"(v_sync_status IS NULL OR v_sync_status NOT IN","replace":"(v_sync_status NOT IN","occurrences":1}]}
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    v_ret := public.set_departed_key_history_inclusion(k_nullst, 'exclude');
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  SELECT history_inclusion INTO v_val FROM api_keys WHERE id = k_nullst;
+  IF v_err IS DISTINCT FROM '55000' OR v_msg IS DISTINCT FROM 'KEY_NOT_DEPARTED' OR v_val IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (HIST-nullstatus): an active, connected key with a NULL sync_status was not refused with 55000 KEY_NOT_DEPARTED, or a value was written (SQLSTATE %, message %, stored %). A key that has not synced yet is working.', v_err, v_msg, v_val;
   END IF;
 
   -- ----- HIST-value: a value outside include / exclude / NULL is REFUSED 22023 -
@@ -896,7 +963,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (HIST-requeued): a pending recompose inserted for the caller under the reuse''s flip was not refused with 55006 HISTORY_RECOMPOSE_REQUEUED, or something was written (SQLSTATE %, message %, returned %; stored %, expected exclude; caller''s recompose rows %, expected 1: the failed_retry row %, unchanged and due at %).', v_err, v_msg, v_ret, v_val, v_jobs, v_retry_id, v_due;
   END IF;
 
-  RAISE NOTICE 'PASS (HIST behavioural): bad value refused by CHECK; exclude stored on a disconnected key with exactly one recompose job; NULL resets; revoked key accepted; live key refused 55000 KEY_NOT_DEPARTED; bad value refused 22023; cross-tenant refused 42501 with nothing written; a toggle while the recompose runs refused 55006 with nothing written or queued; a toggle beside a failed_retry recompose puts that same row back to pending, due now, with no twin; another tenant''s failed_retry row is left untouched; a pending twin inserted under the reuse''s flip is refused 55006 HISTORY_RECOMPOSE_REQUEUED with nothing written.';
+  RAISE NOTICE 'PASS (HIST behavioural): bad value refused by CHECK; exclude stored on a disconnected key with exactly one recompose job; NULL resets; revoked key accepted; live key refused 55000 KEY_NOT_DEPARTED; sign_in_failed, error and inactive keys accepted and a never-synced key refused 55000 (D-18); bad value refused 22023; cross-tenant refused 42501 with nothing written; a toggle while the recompose runs refused 55006 with nothing written or queued; a toggle beside a failed_retry recompose puts that same row back to pending, due now, with no twin; another tenant''s failed_retry row is left untouched; a pending twin inserted under the reuse''s flip is refused 55006 HISTORY_RECOMPOSE_REQUEUED with nothing written.';
 
   DELETE FROM compute_jobs WHERE allocator_id IN (uid_a, uid_b);
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);

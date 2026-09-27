@@ -56,4 +56,27 @@ describe("isWorkingHolder (D-18)", () => {
     expect(isWorkingHolder(holder)).toBe(true);
     expect(noteFor(holder)).toBe(DUP_SENTENCE);
   });
+
+  it.each<[string, Partial<AccountShareNoteKey>]>([
+    ["idle", { sync_status: "idle" }],
+    ["complete", { sync_status: "complete" }],
+    ["rate_limited", { sync_status: "rate_limited" }],
+    ["never synced (NULL)", { sync_status: null }],
+  ])("WORKING: an active, connected holder whose last sync is %s still counts the account", (_name, overrides) => {
+    const holder = key(overrides);
+    expect(isWorkingHolder(holder)).toBe(true);
+    expect(noteFor(holder)).toBe(DUP_SENTENCE);
+  });
+
+  it.each<[string, Partial<AccountShareNoteKey>]>([
+    ["revoked", { sync_status: "revoked" }],
+    ["sign_in_failed", { sync_status: "sign_in_failed" }],
+    ["error", { sync_status: "error" }],
+    ["inactive (is_active false, last sync complete)", { is_active: false }],
+    ["disconnected", { disconnected_at: "2026-09-20T00:00:00Z" }],
+  ])("NOT WORKING: a holder that is %s does not count the account, so the duplicate shows no note", (_name, overrides) => {
+    const holder = key(overrides);
+    expect(isWorkingHolder(holder)).toBe(false);
+    expect(noteFor(holder)).toBeNull();
+  });
 });
