@@ -86,8 +86,8 @@ replay it, and boot green on a schema missing it. A full list cannot make that m
 |---|---|
 | Taken | 2026-09-27 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
-| Supabase CLI | 2.84.2 (CI pins 2.98.2 — see the caveat below) |
-| sha256 | `5a32d248b240cc1141d4ce15b15d39d8577944a3b1d23f66d686deaa93f52211` |
+| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `36340841055`) |
+| sha256 | `6ea5065ad2aa48c03f33a92c64c5224e9cee3496b040ddd6c0058f9db2d6a835` |
 | Shape | 63 tables, 155 policies, 125 function statements (123 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
@@ -95,6 +95,26 @@ Secret-scanned before commit with the exact pattern recorded in
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-09-27 — automated re-dump after Supabase Migrate run 36340841055
+
+Taken read-only by the `redump-dump` job of Supabase Migrate run `36340841055`, after that run's `apply` job applied merge `5ce71a98` to PRODUCTION, and composed onto `main` by the `redump-pr` job. Every value below is measured.
+
+**Which migrations the new dump now carries** — from the marker diff:
+
+- `20260927120000_claim_pair_pre_rank_exclusion.sql`
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Taken | 2026-09-27 |
+| Supabase CLI | 2.98.2 |
+| Shape | tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123 |
+| Data statements | 0 → 0 |
+| sha256 | `5a32d248…` → `6ea5065a…` |
+| Currency gate | `baseline-currency: carried=280 replay=0 marker-sha=match defects=0` |
+| Body drift | `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`; `baseline-content-drift: findings 0` |
 
 ### Regenerated 2026-09-27 — the #870 and #873 applies, two migrations, two new functions
 
