@@ -2518,6 +2518,23 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       const [, rpcArgs] = rpcMock.mock.calls[0];
       expect(rpcArgs as Record<string, unknown>).not.toHaveProperty("p_venue_account_id");
     });
+
+    // 167.1.2 REVIEW IN-05: the terminal catch wraps encryptKey, which runs
+    // AFTER the validator's id is known. Every other sink in the route scrubs
+    // venueAccountId; a throw that echoes it must not carry it into the log.
+    it("the outer catch's log line is scrubbed of the account id a thrown error echoes", async () => {
+      encryptKeyMock.mockRejectedValueOnce(
+        new Error(`encrypt failed for account ${OKX_UID} on okx`),
+      );
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const POST = await importPost();
+      await POST(makeReq(OKX_RECONNECT_BODY));
+
+      const logged = JSON.stringify(consoleErr.mock.calls);
+      expect(logged).toContain("caught exception");
+      expect(logged).not.toContain(OKX_UID);
+    });
   });
 });
 

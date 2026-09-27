@@ -1725,9 +1725,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // property of a DIFFERENT file's catch ordering, not of this route. Any
     // direct throw, any `AnalyticsUpstreamError` echoing a request field, or any
     // refactor of that client re-opens it.
+    // 167.1.2 REVIEW IN-05: `venueAccountId` too, as every other sink in this
+    // route scrubs it. It is set from the validator before `encryptKey` runs,
+    // so a throw from here on can echo it.
     console.error(
       "[strategies/create-with-key] caught exception:",
-      scrubSeamError(err, [api_key, apiSecretNormalized, passphraseOrNull]),
+      scrubSeamError(err, [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId]),
     );
 
     // Classify into a stable wizardErrors code so the client never sees the raw
