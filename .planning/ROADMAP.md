@@ -3862,6 +3862,7 @@ Plans:
 4. A strategy's CAGR and Sharpe are identical on discovery, recommendations, my-strategies and its factsheet (one computation, one stored value), or a surface that must differ says why.
 5. A factsheet's header date, its "track record through" date and its stated record length agree, and record length is stated one way.
 6. 3-year and 5-year rows are not shown for a record shorter than that period.
+   *Widened 2026-09-27 by `/gsd-phase --edit` (measured by the orchestrator and the founder in the logged-in browser on PROD, main at `320fba4e`/`e6c196d5`):* the scenario "Cumulative return metrics" panel on `/allocations?tab=scenario`, for a record shorter than six months, shows 6 Month = Year-to-date = 1 Year = the same value (the since-inception figure relabelled). The period-row gating this criterion asks for must cover the 6-month and 1-year rows too, not only 3Y and 5Y.
 9. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and each page is re-checked in the logged-in browser after deploy.
 
 *(Criteria 1, 2, 7, 8 and 10 moved on 2026-09-26 to Phases 169.3, 169.4 and 169.1, verbatim with their numbers; criteria 3, 4 and 9 are also served by other phases of the split.)*

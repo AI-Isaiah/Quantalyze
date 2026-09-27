@@ -1329,6 +1329,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 170 edited: edited fields: goal, success_criteria (390px decision; narrow-width findings 2026-09-27)
 - Phase 170.1 edited: edited fields: success_criteria (390px decision; scenario copy findings 2026-09-27)
 - Phase 170 edited: edited fields: success_criteria (profile exchanges tab row and Disconnect clipped, 2026-09-27)
+- Phase 169 edited: edited fields: success_criteria (SC-6 period-row gating widened to 6M and 1Y, 2026-09-27)
 
 ### Decisions
 
