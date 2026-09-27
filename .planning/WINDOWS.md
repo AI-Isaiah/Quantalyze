@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 50
+open_count: 51
 waived_count: 0
 fixed_count: 18
-total_count: 68
-last_updated: 2026-09-26T06:30:00.000Z
+total_count: 69
+last_updated: 2026-09-27T13:27:33.109Z
 ---
 
 # Broken Windows Ledger
@@ -83,6 +83,7 @@ last_updated: 2026-09-26T06:30:00.000Z
 | 66 | 167 | todo | src/lib/queries.ts |  | Phase 167 review round 1, SFH-M2 follow-up: the headline AUM (emptyLiveBaselineMetrics / liveBaselineMetricsFromPerKeyDailies, totalAum = holdingsSummary.reduce) sums holdings from untrusted keys (revoked, sign_in_failed) with no key-status test, while HoldingsTable hides those rows by default. The false comment claiming the predicate kept them out of the AUM was corrected; the money number was NOT changed. Follow-up: flag the AUM as partial (or disclose the contribution) when an untrusted key contributes — a money-number change with its own blast radius, needs its own decision. | fixed | Resolved by Phase 167.1 (D-14): disclosed, not changed. The composer live-holdings total and the Open Positions footer name the untrusted part; no money number changed (D-03). D-06 (a revoked key holdings absent from the book-mode composer AUM) answered by the founder with option (b) on 2026-09-24. | 2026-09-22T20:10:03.968Z | 2026-09-24T06:11:04.977Z |
 | 67 | 164.6.5 | deviation | src/lib/wizard/wizard-correlation.test.ts |  | gsd_run check tdd-red-evidence misclassifies vitest TAP output as zero_tests_discovered (its parser expects node --test's # tests/# pass/# fail summary footer and only matches un-indented TAP lines, never vitest's indented nested subtests) - RED evidence for plan 07's TDD tasks was established via manual inspection of named per-test failures plus the neuter-observe-restore + cp/cmp Proven-Able-to-Fail convention already used by sibling plan 04, not via the automated classifier | open |  | 2026-09-22T03:51:41.979Z |  |
 | 68 | 164.6.5 | unrun-verify | analytics-service/services/mt5_client.py |  | Two remote paths over the rpyc bridge have never run against the live gateway. (1) Mt5Client.recycle_terminal_process: the over-channel TerminateProcess half of _REMOTE_TERMINAL_RECYCLE_SRC, including its per-image file_versions read (the 2026-09-25 spike used a Linux-side kill). (2) Mt5Client.session_snapshot: the first live conn.eval of _REMOTE_SESSION_SNAPSHOT_SRC, which must resolve mt5 in the bridge namespace and return a by-value tuple of verdict-only fields (widened 2026-09-26, plan 164.6.5-08, from the verifier's anti-pattern finding; before this the entry named only the terminate step). Closes only when BOTH are read from the analytics log at the first live recycle: terminated equals matched and at least 1, exit confirmed, relaunch authorized unattended, and the snapshot line carrying its fields rather than an error. A terminate-only reading does not close it | open |  | 2026-09-25T18:47:37.964Z |  |
+| 69 | 164.9.3 | stub | supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql |  | VAC-04 ACKNOWLEDGEMENT placeholder in the CLAIMPAIR migration header; plan 164.9.3-04 fills the three prod-body-ack pragmas | open |  | 2026-09-27T13:27:33.109Z |  |
 
 ````json
 [
@@ -906,6 +907,19 @@ last_updated: 2026-09-26T06:30:00.000Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-25T18:47:37.964Z",
+    "resolved_at": null,
+    "milestone": "v1.20"
+  },
+  {
+    "id": 69,
+    "kind": "stub",
+    "phase": "164.9.3",
+    "file": "supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql",
+    "line": null,
+    "description": "VAC-04 ACKNOWLEDGEMENT placeholder in the CLAIMPAIR migration header; plan 164.9.3-04 fills the three prod-body-ack pragmas",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-27T13:27:33.109Z",
     "resolved_at": null,
     "milestone": "v1.20"
   }
