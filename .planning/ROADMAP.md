@@ -4140,7 +4140,7 @@ Plans:
 - [x] 170-04: scenario footer and constituent rows (wave 2)
 - [x] 170-05: strategies row, private link, whole-word names (wave 2)
 - [x] 170-06: admin match read-only below md, owner line, intro count (wave 2)
-- [ ] 170-07: signed-in marketing header and the compare pointer (wave 2)
+- [x] 170-07: signed-in marketing header and the compare pointer (wave 2)
 - [ ] 170-08: shared tab strip on profile and admin (wave 3)
 - [ ] 170-09: blend-window panel; the scenario strip stops stacking (wave 3)
 - [ ] 170-10: strategy table sticky header, tags, and chip contrast (wave 3)

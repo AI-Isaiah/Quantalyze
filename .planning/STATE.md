@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 170
 current_phase_name: LAYOUT — page layout reads clean and holds on every page
 status: executing
-stopped_at: Completed 170-06-PLAN.md
-last_updated: "2026-09-27T22:21:30.000Z"
+stopped_at: Completed 170-07-PLAN.md
+last_updated: "2026-09-27T22:36:30.000Z"
 last_activity: 2026-09-27
-last_activity_desc: Completed 170-06-PLAN.md
-state_head: 338b4d61cd86944126370bb5bbecaa58e17bbe32
+last_activity_desc: Completed 170-07-PLAN.md
+state_head: ae616eb2d63d57c0c72a06aed6b44092896ef04c
 progress:
   total_phases: 80
   completed_phases: 41
   total_plans: 370
-  completed_plans: 353
+  completed_plans: 354
   percent: 51
 ---
 
@@ -512,7 +512,7 @@ Status: Executing Phase 170
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-27 — Completed 170-06-PLAN.md
+Last activity: 2026-09-27 — Completed 170-07-PLAN.md
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1188,6 +1188,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 170 P04 | 5 min | 2 tasks | 4 files |
 | Phase 170 P05 | 12 min | 2 tasks | 6 files |
 | Phase 170 P06 | 18 min | 2 tasks | 8 files |
+| Phase 170 P07 | 12 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -1219,6 +1220,12 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Below md, readOnly is forceReadOnly or not isMd. JSX still keys off forceReadOnly so desktop does not flash hidden; CSS hidden md:* hides the write controls.
 - Button omits its base inline-flex when the caller passes a bare hidden class. Tailwind v4 emits inline-flex after hidden, so the base class would keep the control visible.
 - A display name with no email reads "by {name} · Computed {recency}". Unknown is only when both name and email are absent.
+
+### Phase 170 decisions (plan 07)
+
+- The session read stays in the async child. The layout function stays synchronous. JSX is outside the try, because the error-boundaries lint rejects JSX built in try/catch. A failed read still renders Sign in / Sign up.
+- DEFAULT_AUTHENTICATED_ROUTE has one definition. Other copies of the same path were left in place.
+- The one-item note renders when one item resolved, including a single holding. The sentence is the Copywriting Contract literal.
 
 ### Roadmap Evolution
 
@@ -2437,8 +2444,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-27T22:21:30.000Z
-**Stopped At:** Completed 170-06-PLAN.md
+**Last Date:** 2026-09-27T22:36:30.000Z
+**Stopped At:** Completed 170-07-PLAN.md
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
