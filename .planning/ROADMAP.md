@@ -3798,6 +3798,8 @@ Plans:
 
 - [x] 167.2-06-PLAN.md — a composite's key card offers no link control; a withheld success is retired at the applied re-read (KCS-23/04)
 
+**Founder decision 2026-09-27 (recorded via `/gsd-phase --edit`):** the narrowest supported viewport is 390 px (iPhone 12) plus desktop at 200% zoom, so this phase's "320px" verification check is replaced by a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser (full decision under Phase 170 LAYOUT).
+
 ### Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build (INSERTED)
 
 **Goal:** The owner's `/strategies` list and every "has a factsheet" signal agree with what a share-link recipient actually sees. Today a strategy whose `strategy_analytics.computation_status` reads computed, but whose series cannot build (`fetchAndBuildPayload` in `src/lib/factsheet/fetch-and-build-payload.ts` returns no payload), is shown on the list as having a factsheet with no share note, while its recipient lands on the pending page. Only the service-role builder can decide buildability (the series sit behind deny-all RLS) and no owner-readable field records the outcome, so Phase 167.2 could not fix it without a migration or an admin read (167.2 review WR-02, recorded UNFIXABLE-IN-PHASE 2026-09-24). **User-facing.** Inserted 2026-09-24 under the founder's authorization to add phases.

@@ -1332,6 +1332,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 169 edited: edited fields: success_criteria (SC-6 period-row gating widened to 6M and 1Y, 2026-09-27)
 - Phase 164.6.5 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
 - Phase 167.1 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
+- Phase 167.2 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
 
 ### Decisions
 
