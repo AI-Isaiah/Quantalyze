@@ -118,8 +118,10 @@
 -- DRIFT ROW, NOT `--hash` OF THE SNAPSHOT FILE (a whole-file digest no gate
 -- ever greps). claim_compute_jobs.sql reported one DRIFT row;
 -- claim_compute_jobs_with_priority.sql holds BOTH overloads and reported two.
--- The differing lines are the marked pre-rank block (all three bodies) and the
--- marked C39 port (2-arg only).
+-- The differing lines are the marked pre-rank block (all three bodies), the
+-- marked C39 port (2-arg only) and, since review round 1, the marked probe
+-- exclusion block (both priority overloads). The acked hashes are the `live`
+-- column, PROD's body, so that later block leaves them unchanged.
 --
 -- claim_compute_jobs (2 args), the DRIFT row's `live` column:
 -- prod-body-ack: 8bdcac70bce0c9921d1e693209d3fb355c9018e6708699b1a029adb5d02edea1
