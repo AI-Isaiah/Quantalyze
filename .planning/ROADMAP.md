@@ -4134,8 +4134,8 @@ Plans:
 
 Plans:
 
-- [ ] 170-01: main-aware reflow helper and the three supported viewports (wave 1)
-- [ ] 170-02: seeded narrow-layout spec, wired into CI (wave 1)
+- [x] 170-01: main-aware reflow helper and the three supported viewports (wave 1)
+- [x] 170-02: seeded narrow-layout spec, wired into CI (wave 1)
 - [ ] 170-03: allocations tab strip and the Tweaks control (wave 2)
 - [ ] 170-04: scenario footer and constituent rows (wave 2)
 - [ ] 170-05: strategies row, private link, whole-word names (wave 2)

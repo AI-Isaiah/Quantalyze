@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: "169.2"
-current_phase_name: BENCHFRESH
+current_phase: 170
+current_phase_name: LAYOUT — page layout reads clean and holds on every page
 status: executing
-stopped_at: Phase 170 UI-SPEC approved
-last_updated: "2026-09-27T15:23:55.284Z"
-last_activity: 2026-09-26
-last_activity_desc: Phase 164.9.5 verified (human_needed, 4/6; 2 live-only) and shipped as a PR
-state_head: 78d9a9a26b944ccda947a4bb776fc70880133bfb
+stopped_at: Completed 170-02-PLAN.md
+last_updated: "2026-09-27T20:48:37.179Z"
+last_activity: 2026-09-27
+last_activity_desc: Phase 170 execution started
+state_head: 23952c8d637cdc0f2f5e7c93834eb37269e2ae2c
 progress:
-  total_phases: 73
+  total_phases: 80
   completed_phases: 41
-  total_plans: 353
-  completed_plans: 347
-  percent: 56
+  total_plans: 370
+  completed_plans: 349
+  percent: 51
 ---
 
 ## ⭐ STATE lineage
@@ -179,8 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 169.2 (BENCHFRESH) — EXECUTING
-Plan: 1 of 3
+Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — EXECUTING
+Plan: 2 of 14
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
 Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
@@ -496,7 +496,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 169.2
+Status: Executing Phase 170
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -512,7 +512,7 @@ Status: Executing Phase 169.2
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-26 — Phase 169.2 execution started
+Last activity: 2026-09-27 — Phase 170 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -966,7 +966,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [██████░░░░] 56%
+Progress: [█████░░░░░] 51%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1183,8 +1183,14 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.6 P05 | ~9 min | 2 tasks | 2 modified |
 | Phase 164.6.5 P08 | ~40 min | 2 tasks | 11 modified |
 | Phase 166.1 P09 | ~20 min | 3 tasks | 5 modified |
+| Phase 170 P02 | 8 min | 3 tasks | 4 files |
 
 ## Accumulated Context
+
+### Phase 170 decisions (plan 02)
+- Contract-first geometry spec stays RED at HEAD; assertions are not weakened to pass today.
+- N-STRAT name and tag update goes through getAdmin() via setSeededStrategyNameAndTags.
+- N-MATCH has no match-batch seed; the V960 positive control is the header action bar.
 
 ### Roadmap Evolution
 
@@ -2403,9 +2409,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-27T15:23:53.321Z
-**Stopped At:** Phase 170 UI-SPEC approved
-**Resume File:** .planning/phases/170-pagecopy/170-UI-SPEC.md
+**Last Date:** 2026-09-27T20:48:35.233Z
+**Stopped At:** Completed 170-02-PLAN.md
+**Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
 **Stopped At:** Completed 167.1-06-PLAN.md
