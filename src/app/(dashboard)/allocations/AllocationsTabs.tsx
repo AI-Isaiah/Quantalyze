@@ -809,7 +809,13 @@ export function AllocationsTabs(
             role="tab" children (axe aria-required-children, critical), so the
             tablist wraps just the tabs; the actions are siblings in the same
             flex row. */}
-        <div className="ml-auto flex items-center gap-1">
+        {/* Phase 170, item (a), 2026-09-27 PROD measurement — min-w-0 is
+            load-bearing. A flex item's default min-width is auto, so this
+            wrapper could not shrink below its content and the NAV-02
+            scroller never engaged (tab bar 682px, #main-content overflow
+            235px). max-w-full + flex-wrap lets the actions drop to their
+            own right-aligned row below sm; sm:flex-nowrap restores one row. */}
+        <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1 sm:flex-nowrap">
           {/* NAV-02 (Phase 45) — CSS-first horizontally-scrollable tab strip at
               <sm so all six surfaces stay reachable on a phone (no tab dropped).
               JOURNEY-03 is preserved: this is the SAME element with the SAME
@@ -829,7 +835,7 @@ export function AllocationsTabs(
           <div
             role="tablist"
             aria-label="Allocation surfaces"
-            className="flex flex-nowrap items-center gap-1 overflow-x-auto sm:flex-wrap sm:overflow-x-visible snap-x [scrollbar-width:none] [-webkit-overflow-scrolling:touch]"
+            className="flex flex-nowrap items-center gap-1 min-w-0 basis-full overflow-x-auto snap-x [scrollbar-width:none] [-webkit-overflow-scrolling:touch] sm:basis-auto sm:flex-wrap sm:overflow-x-visible"
           >
           {VISIBLE_TAB_KEYS.map((key) => {
             const isActive = activeTab === key;
@@ -875,7 +881,7 @@ export function AllocationsTabs(
             );
           })}
           </div>
-          <span aria-hidden className="mx-2 h-4 w-px bg-border" />
+          <span aria-hidden className="mx-2 hidden h-4 w-px bg-border sm:inline-block" />
           <button
             type="button"
             onClick={() => {
@@ -901,7 +907,7 @@ export function AllocationsTabs(
               }
               changeTab("holdings");
             }}
-            className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
             aria-label="Export"
           >
             <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -922,7 +928,7 @@ export function AllocationsTabs(
             ref={addButtonRef}
             type="button"
             onClick={handleHeaderAdd}
-            className="ml-1 inline-flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            className="ml-1 inline-flex shrink-0 items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
             aria-label={
               isScenarioTab
                 ? "Add strategy — open the strategy picker"
