@@ -3816,6 +3816,8 @@ Plans:
 - [ ] 167.2.1-03-PLAN.md — LISTTRUTH: /strategies probes computed rows and shows the D-02 unbuildable note, RED first (wave 2)
 - [ ] 167.2.1-04-PLAN.md — OWNERNOTE: the owner factsheet's S7 note uses the same derivation, and the D-03 TODOS entry (wave 3)
 
+**Founder decision 2026-09-27 (recorded via `/gsd-phase --edit`):** the narrowest supported viewport is 390 px (iPhone 12) plus desktop at 200% zoom, so this phase's "320px" verification check is replaced by a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser (full decision under Phase 170 LAYOUT).
+
 ### Phase 168: DRBOPTIONS — a Deribit options account ingests end to end
 
 **Goal:** Classify Deribit's `assignment` transaction-log type **against a captured row census rather than a guess**, so an options account ingests end to end and the realized-cash series it feeds is neither silently dropped nor double-counted.
