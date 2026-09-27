@@ -144,9 +144,10 @@ describe("buildScenarioFactsheetPayload — convention pins", () => {
     expect(p.rollingBetaWindow.enough).toBe(false);
     expect(p.strategyWorst10).toEqual([]);
     expect(p.strategyReturns).toEqual([]);
-    // Zeroed ComputeSummary (no KpiStrip in the composer).
-    expect(p.strategyMetrics.cum_ret).toBe(0);
-    expect(p.strategyMetrics.sharpe).toBe(0);
+    // No observations: every statistic is NaN, rendered "—" (D7), never a
+    // measured 0 (the composer's FactsheetBody renders these scalars).
+    expect(p.strategyMetrics.cum_ret).toBeNaN();
+    expect(p.strategyMetrics.sharpe).toBeNaN();
     expect(p.strategyMetrics.yearly).toEqual({});
     // The three comparator blocks all exist (none is the inert slot).
     expect(p.comparators.spx.cumulative).toBeNull();
@@ -258,7 +259,14 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
     // Rolling series populated for a 252-day blend (post-warmup values exist).
     expect(p.strategyRollingVol.some((v) => v != null)).toBe(true);
     expect(p.strategyRollingSharpe.some((v) => v != null)).toBe(true);
-    expect(p.strategyRollingSortino.some((v) => v != null)).toBe(true);
+    // BLEND_252 has no losing day, so no window has a Sortino: every window is a
+    // gap (null), never a drawn 0 (founder decision D7; Phase 166.2 review
+    // round 2). A 252-day blend WITH losing days populates the series.
+    expect(p.strategyRollingSortino.every((v) => v == null)).toBe(true);
+    const withLosses = buildScenarioFactsheetPayload({
+      portfolioDaily: BLEND_252.map((pt, i) => ({ ...pt, value: i % 2 === 0 ? 0.01 : -0.005 })),
+    });
+    expect(withLosses.strategyRollingSortino.some((v) => v != null && Number.isFinite(v))).toBe(true);
     // quantiles match the shared parity source.
     expect(p.quantiles).toEqual(quantileSummary(rets));
     // bootstrapCI is internally seeded → deterministic vs a fresh call.
@@ -299,8 +307,10 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
     const p = buildScenarioFactsheetPayload({
       portfolioDaily: [],
     });
-    expect(p.strategyMetrics.cum_ret).toBe(0);
-    expect(p.strategyMetrics.sharpe).toBe(0);
+    // D7: statistics over no observations are NaN; the count stays 0.
+    expect(p.strategyMetrics.cum_ret).toBeNaN();
+    expect(p.strategyMetrics.sharpe).toBeNaN();
+    expect(p.bootstrapCI.sharpe.point).toBeNaN();
     expect(p.strategyMetrics.n).toBe(0);
     expect(p.strategyMetrics.yearly).toEqual({});
     expect(p.calmarByYear).toEqual([]);
@@ -319,8 +329,10 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
       portfolioDaily: poisoned,
     });
     expect(p.strategyMetrics.n).toBe(0);
-    expect(p.strategyMetrics.ann_vol).toBe(0);
-    expect(Number.isFinite(p.strategyMetrics.ann_vol)).toBe(true);
+    // D7: the poisoned return never reaches compute(); the scalar is the
+    // "no observations" NaN ("—" on screen), not a computed or fabricated 0.
+    expect(p.strategyMetrics.ann_vol).toBeNaN();
+    expect(p.strategyReturns).toEqual([]);
     expect(p.calmarByYear).toEqual([]);
     expect(p.quantiles).toEqual({
       p05: 0,

@@ -93,6 +93,57 @@ describe("adaptPortfolioAnalytics", () => {
     ).toBe(0.18);
   });
 
+  // 166.1 D7 (founder 2026-09-26) / round-1 SFH HIGH-1: the optimizer's
+  // `find_improvement_candidates` emits None for a correlation or a Sharpe
+  // lift that does not exist. The adapter must carry null through, never 0.
+  it("keeps a null optimizer correlation and Sharpe lift null", () => {
+    const row = {
+      ...complete,
+      optimizer_suggestions: [
+        {
+          strategy_id: "s-flat-book",
+          strategy_name: "Candidate",
+          corr_with_portfolio: null,
+          sharpe_lift: null,
+          dd_improvement: 0.01,
+          score: 0.003,
+        },
+      ],
+    };
+    const parsed = adaptPortfolioAnalytics(row);
+    expect(parsed).not.toBeNull();
+    if (!parsed) return;
+    const s = parsed.optimizer_suggestions?.[0];
+    expect(s?.corr_with_portfolio).toBeNull();
+    expect(s?.sharpe_lift).toBeNull();
+    expect(s?.dd_improvement).toBe(0.01);
+  });
+
+  // 166.1 D7 / round-1 SFH MEDIUM-2: a portfolio with no risk has no risk
+  // share; the producer emits null and the adapter must not read it as 0.
+  it("keeps a null risk share and component VaR null", () => {
+    const row = {
+      ...complete,
+      risk_decomposition: [
+        {
+          strategy_id: "s-yield",
+          strategy_name: "Yield",
+          marginal_risk_pct: null,
+          standalone_vol: 0,
+          component_var: null,
+          weight_pct: 50,
+        },
+      ],
+    };
+    const parsed = adaptPortfolioAnalytics(row);
+    expect(parsed).not.toBeNull();
+    if (!parsed) return;
+    const r = parsed.risk_decomposition?.[0];
+    expect(r?.marginal_risk_pct).toBeNull();
+    expect(r?.component_var).toBeNull();
+    expect(r?.weight_pct).toBe(50);
+  });
+
   it("handles a row with benchmark_comparison set to null", () => {
     const parsed = adaptPortfolioAnalytics(partialNullBenchmark);
     expect(parsed).not.toBeNull();

@@ -57,6 +57,8 @@ const GUARD_JOB = "dispatch-ref-guard";
 const TEST_JOB = "apply-test";
 const VERDICT_JOB = "apply-test-verdict";
 const DIVERGENCE_JOB = "prod-credential-divergence-verdict";
+const REDUMP_DUMP_JOB = "redump-dump";
+const REDUMP_PR_JOB = "redump-pr";
 const APPLY_JOB = "apply";
 
 /**
@@ -308,12 +310,20 @@ function scannableTestJob(text: string): string {
  * The acquire/release exclusions stay scoped to `apply-test`, because it is the only
  * job that carries the byte-identical ci.yml copies whose legitimate `exit 0` /
  * `|| true` / `::warning` the exclusion exists for.
+ *
+ * ⛔ WIDENED 2026-09-26 (Phase 164.9.5): six jobs — the two redump jobs joined, because a
+ * softened redump job reports green on a refusal. Every refusal `redump-dump` raises
+ * (secret-shaped text, a gitleaks finding, a truncated dump) exists to be RED before a dump
+ * reaches a public PR, and `redump-pr`'s bot-branch refusal exists to be RED before a human
+ * commit is force-pushed away. The "all four jobs" heading above is kept as lineage.
  */
 const SCANNED_JOBS = [
   GUARD_JOB,
   TEST_JOB,
   VERDICT_JOB,
   DIVERGENCE_JOB,
+  REDUMP_DUMP_JOB,
+  REDUMP_PR_JOB,
 ] as const;
 
 function scannableJob(text: string, job: string): string {
@@ -895,6 +905,10 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       EXEC_TEST_TIMEOUT_MS,
     );
 
+    // ⛔ WIDENED 2026-09-26 (Phase 164.9.5): six jobs — the two redump jobs joined, because a
+    // softened redump job reports green on a refusal. The test name's "four jobs the phase
+    // added" is kept as lineage; the corpus is `SCANNED_JOBS`, and the per-job calibrations
+    // below iterate it, so both redump jobs are proven covered, not assumed.
     it("carries none of the softening tokens, in ANY of the four jobs the phase added", () => {
       expect(
         softeningOffenders(WF),

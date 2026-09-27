@@ -1104,6 +1104,8 @@ describe("Critical regression guards", () => {
        * at exactly two spaces (verified 2026-09-10: `grep -c '^  [A-Za-z_][A-Za-z0-9_-]*:'`
        * over supabase-migrate.yml returns 11 lines, all of them job keys or `concurrency`/
        * `permissions`/`on` children ABOVE `apply`, which is the last job in the file).
+       * ⛔ CORRECTED 2026-09-26 (Phase 164.9.5): now 13 lines — the `redump-dump` and
+       * `redump-pr` jobs sit ABOVE `apply`, which is still the last job.
        */
       const ANY_JOB_KEY_RE = /\n {2}[A-Za-z_][\w-]*:/;
       const applyJobBlock = (src: string, applyIdx: number): string => {

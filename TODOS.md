@@ -67,6 +67,9 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    - **DEC-4** — the advisory lock, in its own phase, with a REAL concurrency test. It touches two
      RPCs that run on every job transition for every strategy; a half-applied lock discipline reads
      as protection while providing none.
+     ⭐ **TAKEN 2026-09-26 by Phase 164.5.2 BRIDGELOCK** — migration
+     `20260926120000_mark_compute_job_bridge_advisory_lock.sql` (both RPCs in one file) and the
+     LANE-ONLY two-backend gate `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql`.
 
    **B. Detection gap found during the 2026-08-25 prod outage:**
    - **0.04 — PYAPI-06 cannot detect the outage it was built for.** The client omits `X-Service-Key`
@@ -1329,6 +1332,9 @@ true for 146 and half of 142–145, and **false for 141**.
       check is the phase's FC-1. Residuals (a parent that later fails strands its child; a 40P01
       diamond deadlock on the parent lock) are latent, recorded in M1's header and routed to
       Phase 164.5.2 BRIDGELOCK.
+      ⛔ **CORRECTED 2026-09-26 (founder decision, "Re-route, don't start"):** both residuals
+      now belong to Phase 164.9.3.1 FANINGRAPH under `[164.9.3.1-FANIN-GRAPH-RESIDUALS]`, not
+      164.5.2. The sentence above is kept as lineage.
       **THE MECHANISM, named by SYMBOL because line numbers drift
       (`[164.7-CITATION-DRIFT-01]`):** `enqueue_compute_job` routes all three of its modes to the
       **TEN-ARG** `_enqueue_compute_job_internal`, whose `INSERT` column list OMITS `status`, so
@@ -1362,6 +1368,92 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[164.6.7-RETRY-PLAIN-COMPLETE]` The transient retry keeps a factsheet published only if
+      its row was `complete_with_warnings` or warned; a plain `complete` row is not protected across
+      the retry (booked 2026-09-26, Phase 164.6.7 round-2 review WR-01 / SFH-R2-03).**
+      - **What happens.** A marked refresh whose marker re-read fails now raises
+        `RefreshMarkerRereadUnavailable` (entry read, chain edge) or, at a terminal stamp since
+        round 4, `StampIOUnavailable` through `_stamp_io`, and retries. The move to `failed_retry` runs
+        `mark_compute_job_failed`, whose bridge `sync_strategy_analytics_status` branch (a) keeps
+        `complete_with_warnings` but rewrites a plain `complete` row to `computing`. On attempt 2
+        `_read_entry_publish_state` (single-key) or `_read_existing_failed_row` inside
+        `_stamp_failed` (composite) reads `computing`, so no protection is granted and a recurring
+        failure takes the loud, un-publishing path. Both readers carry the same exposure (named
+        for both 2026-09-26, round-3 review IN-04).
+      - **Why not fixed in 164.6.7.** Keeping the attempt-1 publish state in job metadata cannot
+        close it: branch (a) has already rewritten the row before attempt 2 reads anything, and on
+        the final attempt the bridge decides in SQL with no Python running. The root fix is a
+        bridge migration (the non-terminal branch keeps a healthy publish state for a job carrying
+        a refresh marker). Migrations auto-apply to PROD on merge, so it is not a ride-along.
+      - **Reachability (dated, not re-measured).** The code comment records the live ledger cohort
+        as 0 plain `complete` and 5 `complete_with_warnings` rows, so nothing is exposed today.
+        The condition is stated at `MarkerLiveState` in `job_worker.py`, in runbook item 2 and in
+        164.6.7 CONTEXT D-10.
+      - **Destination: Phase 164.5.2 BRIDGELOCK**, the phase that already changes the terminal
+        mark RPCs fanning into this bridge (same routing as
+        `[164.6.7-COMPOSITE-REREAD-RESIDUE]` below). Dated routing line under `### Phase 164.5.2`
+        in `.planning/ROADMAP.md`.
+
+- [ ] **`[164.6.7-COMPOSITE-REREAD-RESIDUE]` A marker retraction that lands between the Python live
+      re-read and `mark_compute_job_failed` still leaves the pre-fix outcome, over a window of
+      milliseconds (booked 2026-09-25, Phase 164.6.7 COMPOSITECLAIMSNAPSHOT, decision D-03).**
+      - **What remains.** Phase 164.6.7 made the `_stamp_failed` closure of
+        `run_stitch_composite_job` re-read the live `compute_jobs` row (since round 4 through
+        `_read_refresh_marker_state` inside `_stamp_io`) before it honours the
+        `ledger-refresh-composite` marker. A
+        retraction committing AFTER that re-read and BEFORE `mark_compute_job_failed` PERFORMs the
+        SQL bridge `sync_strategy_analytics_status` still yields an error-only Python write followed by a loud SQL status: the
+        `computation_warned` residue (research H2), so a warned composite can read
+        `complete_with_warnings` again at the next bridge call over a failed run.
+      - **Both honour arms share it.** The single-key derive honour site in
+        `run_derive_broker_dailies_job`, which makes the same `_read_refresh_marker_state` read,
+        carries the identical window. A fix is one change for both.
+      - **Fix shape.** In `sync_strategy_analytics_status`, either branch (b) clears
+        `computation_warned`, or the protect/loud decision moves inside the bridge's transaction.
+        Either is a migration to a bridge every job kind shares, and a merge touching
+        `supabase/migrations/**` auto-applies to PROD, so it is not a ride-along.
+      - **Owner:** whoever next changes `sync_strategy_analytics_status`. **Trigger:** any change
+        to that function.
+      - **Not data-integrity-reachable today (2026-09-25).** The composite fan-out is unscheduled
+        (runbook precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]`, item 6 still blocking), so no
+        composite job carries the marker. Re-read this line before the composite is scheduled.
+        ⚠️ This covers the COMPOSITE arm only. The single-key arm is reachable whenever the
+        single-key fan-out is scheduled, and whether it is was not measured here (no remote
+        database is read in Phase 164.6.7).
+      - ⛔ **CORRECTED 2026-09-25 (Phase 164.6.7 round-1 review WR-04 and IN-06); the bullets
+        above are kept as lineage.**
+        - **Routed, not event-owned.** This is a data-integrity deferral, and the repo rule is
+          that one must name a phase. "Whoever next changes the function" had no date and no
+          gate, and nothing forces that change before the composite is scheduled. **Destination:
+          Phase 164.5.2 BRIDGELOCK** (dated routing line under `### Phase 164.5.2` in
+          `.planning/ROADMAP.md`), the phase that already changes the terminal mark RPCs fanning
+          into this bridge. This overrides the owner line above, which followed CONTEXT D-03.
+        - **It blocks composite scheduling, in the runbook.** "Re-read this line before the
+          composite is scheduled" is superseded. The operator's instruction now lives where it
+          is read at scheduling time: item 7 of `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in
+          `docs/runbooks/ledger-refresh-go-live.md` is ⛔ BLOCKING until this entry is closed,
+          or the founder accepts the window there with a date and a reason.
+        - **"Milliseconds" was never measured.** The window's length is unmeasured, and several
+          contributors have no bound: the error-only upsert through `db_execute`; on the
+          member-ledger-error path, the `aclose_exchange` network close in the `finally` that
+          runs after `_stamp_failed` returns; the heartbeat cancel in `main_worker`; and
+          `_safe_mark` → `db_execute` for `mark_compute_job_failed`, which can queue behind a
+          saturated `_DB_EXECUTOR`. The harm probe's zero-member driver exercises none of them.
+- [ ] **`[169-DEAD-ADMIN-JOBS-RPC]` Drop the dead `get_admin_compute_jobs` database function
+      (booked 2026-09-25, Phase 169 D-01).**
+      It raises "column reference `id` is ambiguous" on every call (its `RETURNS TABLE` declares an
+      OUT column named `id`, which collides with the admin gate's `WHERE id = auth.uid()`), and
+      under the service-role client `auth.uid()` is NULL, so even a fixed body would return nothing.
+      Phase 169 plan 01 stops calling it: `/api/admin/compute-jobs` reads the `compute_jobs_admin`
+      view after its admin gate. After that it has no caller. Evidence: `169-RESEARCH.md` root
+      cause A (a local reproduction of the error on a throwaway cluster).
+      **Why not dropped in 169:** a DROP is a migration, and merging `supabase/migrations/**`
+      auto-applies to TEST then PROD with no human gate, needs the 3-reviewer pass, and moves
+      `database.types.ts` and the census pins. None of that was needed to fix the page.
+      **Owner:** the next migration-carrying phase. **Trigger:** that phase's planning.
+      **Closed when:** a migration drops the function, `database.types.ts` loses it, and
+      `grep -rn get_admin_compute_jobs src` finds only lineage comments.
+
 - [ ] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
       queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
       **Measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).** `python` took
@@ -1373,7 +1465,7 @@ true for 146 and half of 142–145, and **false for 141**.
       `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
       evidence.
 
-- [ ] **`[164.9.5-MANUAL-BASELINE-REDUMP]` Every PROD migration apply leaves `main` red on
+- [x] **`[164.9.5-MANUAL-BASELINE-REDUMP]` Every PROD migration apply leaves `main` red on
       baseline-content-drift until someone runs a manual schema dump (booked 2026-09-26, founder
       decision).**
       **Measured 2026-09-26.** PR #864 needed a founder-run `supabase db dump --linked`. `main` was
@@ -1384,6 +1476,23 @@ true for 146 and half of 142–145, and **false for 141**.
       ✅ **Destination: Phase 164.9.5 AUTOREDUMP** — routed there 2026-09-26 via
       `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
       evidence.
+      ✅ **CLOSED 2026-09-26 by Phase 164.9.5 AUTOREDUMP.** The text above is kept as lineage.
+      `scripts/baseline-redump.mjs` reproduces the manual procedure mechanically in two halves:
+      `--gate-dump` (hash, shape counts, secret scan, gitleaks, integrity, the marker regenerated
+      from the applied merge's tree, and a no-op when nothing changed) and `--compose` (copy the
+      gated pair onto `main`, re-run the currency, content-drift and staleness gates, write the six
+      paths PR #864 changed, refuse the skip trailer), plus `--check-bot-branch` and
+      `--open-or-edit-pr`. Its self-tests are `node scripts/baseline-redump.mjs --self-test`
+      (prints `baseline-redump self-test OK: <n> assertion(s)`) and
+      `node scripts/baseline-redump.mjs --self-test --with-gitleaks` (the same line followed by
+      `... (with gitleaks)`); regenerate the count by running the command. The `redump-dump` and
+      `redump-pr` jobs in `.github/workflows/supabase-migrate.yml` run it after every successful
+      PROD `apply` on `main`, the PROD credential and the write token never sharing a job, and
+      the one bot PR is never merged by the bot. `src/__tests__/baseline-redump-wiring.test.ts`
+      pins the wiring, and `supabase/schema/BASELINE.md` "## Regenerating" documents the
+      automation beside the manual procedure, which stays the fallback. Live proof is post-merge
+      and human-run: dispatch `supabase-migrate.yml` on main and expect a no-op or one bot PR,
+      and approve the workflows on the first bot PR.
 
 - [ ] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
       same (kind, allocator) makes every claim entry point raise `23505` (booked 2026-09-26, found
@@ -1403,6 +1512,32 @@ true for 146 and half of 142–145, and **false for 141**.
       ✅ **Destination: Phase 164.9.3 CLAIMPAIR** — routed there 2026-09-26 via
       `/gsd-phase --insert` (orchestrator decision). The ROADMAP section holds the success
       criteria; this entry is the evidence.
+      ⭐ **WIDENED 2026-09-26 by founder decision ("Re-route, don't start"): this entry now also
+      carries the `(kind, api_key_id)` partition**, item (4) of the list Phase 164.5.2 held. It
+      was measured 2026-09-25 on the local-stack lane by the 164.9.1 pre-push silent-failure-hunter:
+      a `poll_allocator_positions` `failed_retry` plus a `pending` twin on one `api_key_id` make
+      both claim RPCs raise 23505 on `compute_jobs_one_inflight_per_kind_api_key`, and no job of
+      any kind is claimed until the pair clears. The full repro is kept verbatim in the Phase
+      164.5.2 ROADMAP section as lineage. **Owner: Phase 164.9.3 CLAIMPAIR**, whose criterion 4
+      now covers all four partitions (api_key_id, portfolio, strategy, allocator).
+
+- [ ] **`[164.9.3.1-FANIN-GRAPH-RESIDUALS]` Three latent or loud defects on the fan-in graph and
+      the bridge's decision cascade (booked 2026-09-26; routed 2026-09-25 from the Phase 164.9.1
+      review round 1 to Phase 164.5.2, re-routed 2026-09-26 by founder decision).**
+      (1) **Stranded child:** a fan-in child whose parent is still open at enqueue and later
+      ends `failed_final` stays in `done_pending_children` forever. Latent: no caller passes
+      parents today.
+      (2) **Cascade 23505:** a second `match_decisions` delete can raise 23505 through the
+      `ON DELETE SET NULL` cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null`.
+      Pre-existing and loud; the admin decisions route issues these deletes.
+      (3) **Diamond deadlock:** the fan-in parent lock `FOR SHARE ... ORDER BY id` can deadlock
+      (40P01) against `mark_compute_job_done` when a child's parents include another waiting
+      child. Latent. Whoever first passes parents must treat 40P01 as retryable on both the
+      enqueue and the worker's mark path.
+      (1) and (3) are recorded in the header of M1, `20260924230827_fanin_initial_status_10param.sql`.
+      ✅ **Destination: Phase 164.9.3.1 FANINGRAPH**, inserted 2026-09-26 via `/gsd-phase --insert`
+      and booked under the new-phase freeze, NOT started. The ROADMAP section holds one success
+      criterion per defect; this entry is the evidence.
 
 - [ ] **`[STRATTABLE-DESC-01]` The strategy list shows only the NAME, so two strategies
       with the same name are indistinguishable — the `description` that disambiguates them is
@@ -5126,10 +5261,14 @@ The sentence above is kept as lineage.
   (c) still needs an operator reading taken before the heal's next monitor tick recycles the
   terminal (`MT5_SESSION_POLL_INTERVAL_S`, 600 s by default).
 
-**Owner:** Phase 164.6.6 (MT5TERMINALISOLATION). It owns the shared-terminal ownership model that
-makes a switch happen at all, and the mechanism decides between its isolation options.
+**Owner:** Phase 164.6.8 (OUTAGEALERT). ⛔ **CORRECTED 2026-09-26:** moved from Phase 164.6.6 by the
+founder's one-topic-per-phase split, with `MT5-PROBER-WEDGE-CALIBRATION-01`, because both close only on
+the same next-wedge capture. The original owner text is kept as lineage: *Phase 164.6.6
+(MT5TERMINALISOLATION). It owns the shared-terminal ownership model that makes a switch happen at
+all, and the mechanism decides between its isolation options.* The verdict still informs 164.6.6's
+isolation choice.
 **Trigger:** the next `-10005` that has Journal silence after a `disconnected` line, or the start of
-164.6.6 planning, whichever comes first.
+164.6.8 planning, whichever comes first (was: 164.6.6 planning).
 ⛔ **Not a close:** a retry, a sleep, a serialisation or the automatic recycle making the symptom go
 away (D-02). Those are mitigations, not a mechanism.
 ⚠️ **Also recorded, not reconciled:** on 2026-09-25 the Journal showed the terminal `disconnected`
@@ -5154,8 +5293,10 @@ came apart:
   captured from a wedge, and is unchanged since Phase 164.8.3. So the arm's `-10005` branch is proven only against the shape
   we believe a wedge prints, never against one.
 
-**Owner:** Phase 164.6.6 (MT5TERMINALISOLATION). It already owns `MT5-SWITCH-WEDGE-CAUSE-01`
-directly above, whose close needs the same next-wedge capture.
+**Owner:** Phase 164.6.8 (OUTAGEALERT). ⛔ **CORRECTED 2026-09-26:** moved from Phase 164.6.6 by the
+founder's one-topic-per-phase split. It was: *Phase 164.6.6 (MT5TERMINALISOLATION). It already owns
+`MT5-SWITCH-WEDGE-CAUSE-01` directly above, whose close needs the same next-wedge capture.* Both
+items moved together.
 **Trigger:** the next live `-10005` (Journal silent after `disconnected`), captured BEFORE the
 heal recycles the terminal. A founder-supervised induced wedge also qualifies.
 **Gate (what closes it):** a real-wedge transcript, scrubbed of every account-shaped digit run,
@@ -7940,6 +8081,45 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       **Closed when:** each item's verdict is written into `167-UAT.md` (verdict and counts only —
       no key id, account number or server name).
 
+## Phase 167.1.2 (ACCOUNTTRUTH) — PR B review round 4, routed items (logged 2026-09-26)
+
+- [ ] **`[167.1.2-REUSED-RETRY-ENDS-FAILED-FINAL]` A toggle can report success while the recompose
+      it reused ends `failed_final` and the curve never shows the change (booked 2026-09-26, from
+      the PR B round-4 silent-failure-hunter, finding F-4, LOW).**
+      **What happens.** `set_departed_key_history_inclusion` reuses the caller's `failed_retry`
+      `derive_allocator_equity` row when it is the only recompose row: it goes back to `pending`,
+      due now, with `attempts` untouched, so the toggle grants no retry budget. A row one attempt
+      short of `max_attempts` that fails once more ends `failed_final`. The RPC has already
+      returned success by then, so the owner sees the toggle accepted and a curve that still
+      reads the old value. The next toggle enqueues a fresh job, but nothing tells the owner to
+      make one.
+      **Why not fixed in PR B.** It is not a database-side refusal the RPC can make: the outcome
+      is decided after commit, by the worker. What the owner sees about a failed recompose is a
+      client question (the departed-keys overview and its status line).
+      **Owner: Phase 167.1.2 PR C (plan 04)**, the client half that calls this RPC and renders the
+      departed-keys overview. It decides whether that surface shows a failed recompose, and how.
+      No earlier `TODOS.md` entry names PR C (grep `PR C`: 0 hits on 2026-09-26), so this entry
+      is its first.
+      **Trigger:** PR C's planning, or any client code that calls
+      `set_departed_key_history_inclusion`, whichever is first.
+
+- [ ] **`[167.1.2-SECOND-FAILED-RETRY-ROW-STAYS]` A second, older `failed_retry` recompose row
+      beside the caller's pending one is left in place by the toggle (booked 2026-09-26, from the
+      PR B round-4 migration-reviewer, INFO-3).**
+      **What happens.** The reuse only fires when a `failed_retry` row is the caller's ONLY
+      in-flight-or-retry recompose row. When a pre-existing `pending` or `done_pending_children`
+      row sits beside it, the RPC does not flip it (the flip would collide on
+      `compute_jobs_one_inflight_per_kind_allocator`) and folds into the in-flight row through the
+      enqueue's dedup. The `failed_retry` row stays. The RPC did not create that pairing, but it
+      does not clear it either, and once the row is due it is the claim-wedge pairing.
+      **Owner: Phase 164.9.3 CLAIMPAIR**, which owns the pairing class
+      (`[164.9.3-CLAIM-PAIR-23505]`: a due `failed_retry` row plus a `pending` twin of the same
+      (kind, allocator) makes every claim entry point raise 23505). This is one more way the pair
+      can already exist when a caller arrives; the class fix there covers it. ⚠️ At the time of
+      writing, the 164.9.3 ROADMAP section and its `TODOS.md` entry live on the unmerged docs
+      branch that inserted the phase, not on this branch.
+      **Trigger:** Phase 164.9.3 planning.
+
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
 - **"Do NOT implement" landmines (keep documented, do not touch):** bridge-scoring precompute;
@@ -9472,6 +9652,22 @@ follows is what was deliberately left, with the reason.
   - **Not done in 161.1:** both files are outside the phase's declared scope, and a half-applied
     lock discipline (one RPC locking, the other not) is worse than a documented window — it reads
     as protection while providing none. Wants its own phase and its own concurrency test.
+  - ✅ CLOSED 2026-09-26 by Phase 164.5.2 BRIDGELOCK. Migration
+    `20260926120000_mark_compute_job_bridge_advisory_lock.sql` makes BOTH `mark_compute_job_done`
+    and `mark_compute_job_failed` take `pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'),
+    hashtext(<strategy id>))` inside their strategy guard, before the bridge call, in ONE
+    migration, so the half-applied discipline this entry warned about never exists. Evidence, per
+    the plan 01 SUMMARY: the LANE-ONLY two-backend gate
+    `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql` went RED naming arm L1 with the done
+    lock line removed and RED naming arm L2 with the failed lock line removed, and GREEN with each
+    restored byte-identically. ⚠️ The key is the TWO-integer form, not the single-key
+    `hashtext(p_strategy_id::text)` the fix shape above suggested, so a mark never queues behind a
+    trade sync. ⚠️ **What stays OPEN:** the lock covers terminal-mark against terminal-mark only.
+    The bridge's non-mark callers and the other writers of the rows it reads (the Python deferred
+    bridge call, both claim RPCs, `reset_stalled_compute_jobs`, the orphan terminalizer, enqueue,
+    a cross-strategy fan-in release, the refresh-marker retraction) stay unserialized, and a lock
+    inside the bridge itself is routed to **Phase 164.5.2.1 BRIDGERESIDUE**. The bridge's
+    read-order pins stay load-bearing.
 
 161.1-D2. **⚠️ A systematic enqueue failure in either fan-out is indistinguishable from "nothing
   was stale".** Both `enqueue_ledger_refresh_for_strategies` and `enqueue_ledger_composite_refresh`
@@ -9605,6 +9801,20 @@ follows is what was deliberately left, with the reason.
     protection, and its failure is suppressed exactly as the single-key case was.
   - ⚠️ The composite fan-out ships DORMANT, so this is not reachable on production until the
     schedule is registered — but it must be closed BEFORE that founder-gated go-live op, not after.
+  - ✅ **CLOSED 2026-09-25, in two halves.** The retraction call at the two TypeScript
+    `stitch_composite` enqueue sites closed in **Phase 164.6 plan 02**. ⛔ The "*honouring* side is
+    covered" sentence above was WRONG for the composite until **Phase 164.6.7
+    COMPOSITECLAIMSNAPSHOT**: the composite honour site read the claim-time snapshot, so a
+    retraction landing after the claim was never seen by the Python stamp. Since Phase 164.6.7,
+    the `_stamp_failed` closure of `run_stitch_composite_job` re-reads the live `compute_jobs` row
+    through `_refresh_marker_still_on_row` before it honours the marker, and the regression is
+    `TestPostClaimRetractionTakesTheLoudPath`. The text above is kept as lineage. A residual window
+    of milliseconds remains and is booked as `[164.6.7-COMPOSITE-REREAD-RESIDUE]` (FIX MID-TERM).
+    ⛔ CORRECTED 2026-09-25 (round-1 review IN-06): the window's length is unmeasured, not
+    "milliseconds"; that entry lists its unbounded contributors and is routed to Phase 164.5.2.
+    The residue is also runbook item 7, which blocks the composite schedule alongside item 6.
+    The composite schedule itself is still blocked by item 6 of the runbook precondition
+    `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` (its own runs are not yet watched).
 
 161.1-D14. **The redact pre-push guard cries wolf on migration timestamps — INVESTIGATED, nothing
   to fix, do not re-investigate.** `gstack-redact` flags 14-digit migration timestamps as
@@ -9670,6 +9880,10 @@ follows is what was deliberately left, with the reason.
   half-applied lock discipline reads as protection while providing none. 164.1 is otherwise guards
   and observability (low blast radius); this would dominate its risk profile. Needs a test that
   genuinely exercises concurrent bridge calls, not a unit test.
+  ⭐ **TAKEN 2026-09-26 by Phase 164.5.2 BRIDGELOCK** — its own phase, as decided: migration
+  `20260926120000_mark_compute_job_bridge_advisory_lock.sql` locks both RPCs in one file, and the
+  gate `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql` drives two real backends over
+  `dblink` on the lane (LANE-ONLY), which is the concurrent test this decision asked for.
 
 161.1-D4. **Prose/derivation nits, non-blocking.**
   - `analytics-service/tests/test_computing_started_at_stamp.py:649` — census docstring
@@ -10230,9 +10444,25 @@ a prose id. The fourth is owned by the founder outright and needs no phase.
 deliberately NOT here — it is in `## 🔴 FIX NOW`**, because a live data-integrity defect filed in
 a tail residual section is the same disappearance this residue exists to prevent.
 
-- [ ] **`[164.9-CRIT8-RESTORE-DISPATCH-RECORD]` the ROADMAP criterion 8 restore dispatch is
+- [x] **`[164.9-CRIT8-RESTORE-DISPATCH-RECORD]` the ROADMAP criterion 8 restore dispatch is
       POST-MERGE BY CONSTRUCTION, and the act of RECORDING its result is what makes the founder's
       Option A honest (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 11).**
+      ✅ **CLOSED 2026-09-26: the gate is met.** Its evidence arrived through Phase 164.9.2
+      REFDATAUPDATES criterion 4. Both committing dispatches were made by the founder with the
+      confirm token. The text below is kept as lineage.
+      - preflight run `36235362126` at `06cbe2030`: **success**, restore self-test 41/41 arms, marker names TEST.
+      - restore attempt run `36237060668`: **refused by the activity gate** (2 non-idle sessions besides the holder); nothing was written.
+      - restore run `36242946174` at `ea4167a3f`: **success**, marker names TEST, activity gate quiet (holder only, idle x16).
+      - The committing run's printed summary line, VERBATIM:
+        `restore: tables=63 policies=155 functions=121 ledger_rows=277 survivors=2/2 filtered=1 mode=restore`.
+      **The guards ran.** `restore_mode` prints that line only after `check_extension_guard` and
+      the ownership-list comparison pass. The value-pinning leg runs inside the transaction
+      that committed, and the same run printed its C5 replay: 6 UPDATEs in filename order. Both
+      guards are silent when clean, so per the reading rule below this is "the run reached the
+      point past it". The first criterion-8 preflight, `35662948549`, refused on a stale dump
+      and stays on the record. ⚠️ The limit below still holds: in `mode=restore` the extension
+      guard LABELS an outcome after COMMIT and does not PREVENT one. Recorded in the ROADMAP
+      criterion 8 block, `### Phase 164.9.2` criterion 4 and `164.9-11-SUMMARY.md`.
       Owner: **THE FOUNDER — the human who merges this phase.** Not a phase. Not an agent.
       ⭐ **AMENDED 2026-09-21 — THE FOUNDER EXPLICITLY DELEGATED BOTH ACTS TO THE AGENT**, in
       session, in these words: *"I authorize you to do this: the post-merge

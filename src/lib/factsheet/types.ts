@@ -31,6 +31,8 @@ export type ComputeResult = {
   cum_ret: number;
   cagr: number;
   ann_vol: number;
+  /** NaN when the Sharpe does not exist (no dispersion, or a non-finite return);
+   *  null after a JSON cache round-trip. Renders "—" (D7). */
   sharpe: number;
   sortino: number;
   calmar: number;
@@ -84,7 +86,10 @@ export type ComputeResult = {
 /** Compute result minus the heavy eq/dd arrays — used at server→client boundaries. */
 export type ComputeSummary = Omit<ComputeResult, "eq" | "dd">;
 
-/** Strategy-vs-comparator joint metrics (only meaningful when bench != null). */
+/** Strategy-vs-comparator joint metrics (only meaningful when bench != null).
+ *  A ratio that does not exist (beta, corr, r2, info_ratio, treynor, alpha, or a
+ *  capture ratio with no benchmark move to divide by) is NaN, or null after a
+ *  JSON cache round-trip, and renders "—" (founder decision D7, 2026-09-26). */
 export type JointMetrics = {
   alpha: number;
   beta: number;
@@ -136,7 +141,7 @@ export type StreakPayload = {
   maxLen: number;
 };
 
-/** Per-year Calmar (year return / |year max DD|). */
+/** Per-year Calmar (year return / |year max DD|); NaN (or null after a JSON cache) for a year with no drawdown (D7). */
 export type CalmarYearPayload = {
   year: string;
   ret: number;
@@ -150,8 +155,10 @@ export type BootstrapMetricHist = { lo: number; hi: number; bins: number[]; dege
 
 /** Block-bootstrap 95% CIs + resample-distribution histograms. */
 export type BootstrapCIPayload = {
-  sharpe: { point: number; lo: number; hi: number; hist: BootstrapMetricHist };
-  sortino: { point: number; lo: number; hi: number; hist: BootstrapMetricHist };
+  /** `n_valid`: the resamples that have the ratio (see `BootstrapCISummary`);
+   *  absent on a payload cached before it existed, read as `n_resamples`. */
+  sharpe: { point: number; lo: number; hi: number; hist: BootstrapMetricHist; n_valid?: number };
+  sortino: { point: number; lo: number; hi: number; hist: BootstrapMetricHist; n_valid?: number };
   max_dd: { point: number; lo: number; hi: number; hist: BootstrapMetricHist };
   n_resamples: number;
   block_len: number;
@@ -174,6 +181,7 @@ export type StyleDriftPayload = {
 /** Peer percentile summary — demo cohort + MM's percentile in each dimension. */
 export type PeerPercentilePayload = {
   cohortSize: number;
+  /** NaN (null after a JSON round-trip) when the strategy has no Sharpe: no rank (D7). */
   sharpe: number;
   sortino: number;
   max_dd: number;
@@ -238,6 +246,7 @@ export type AllocatorPortfolioPayload = {
   ann_vol: number;
   cum_ret: number;
   max_dd: number;
+  /** NaN (null after a JSON round-trip) when the correlation is undefined (D7). */
   corr: number;
   sleeve_pct: number;
   blend_vol: number;

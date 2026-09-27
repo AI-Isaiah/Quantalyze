@@ -648,8 +648,13 @@ SELECT completed_at,
   - ⚠️ **What is NOT watched.** The COMPOSITE fan-out's own runs. Its failure rows share the
     `cron_name` and are counted, but the prober reads only the `ledger_refresh_fanout` job's runs,
     so a failed or stuck composite run is invisible. The composite is dormant today; closing this
-    is a scheduling precondition, see item 6 of `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` below. Also
+    is a scheduling precondition, and since Phase 164.6.7 (2026-09-25) it is the ONLY one still
+    blocking: see item 6 of `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` below. Also
     not watched: the two-fault case in the "Zero rows" bullet above (L1).
+    ⛔ **CORRECTED 2026-09-25 (Phase 164.6.7 round-1 review WR-04):** "the ONLY one still
+    blocking" was wrong. TWO preconditions still block the composite schedule: item 6 (its runs
+    are not watched) and item 7 (the re-read residue `[164.6.7-COMPOSITE-REREAD-RESIDUE]`). The
+    sentence above is kept as lineage.
   - **A failed candidate is skipped for 20 hours.** The candidate query excludes any strategy named
     in a failure row written in the last 20 hours, the same window as the attempt cooldown, so a
     poisoned candidate no longer takes the same slot every tick and a healthy candidate takes it.
@@ -913,29 +918,438 @@ here, but this precondition sits here because this is where a reader would go to
 1. **Where it stands.** `public.enqueue_ledger_composite_refresh()` is DORMANT. No `cron.schedule`
    registration names it, and no migration may add one (the rule under Step 2 applies to it
    unchanged).
-2. ⛔ **BLOCKING.** No schedule naming `public.enqueue_ledger_composite_refresh()` may be
-   registered until `run_stitch_composite_job` in `analytics-service/services/job_worker.py`
-   re-reads the LIVE `compute_jobs` row's `metadata->>'source'` before it honours the
-   `ledger-refresh-composite` marker. The single-key honour sites already do this through
-   `_refresh_marker_still_on_row`. The composite guard today compares against the claim-time
-   `job.get("metadata")` snapshot instead.
-3. **Why.** A user-initiated composite resync (the `stitch_composite` enqueues in
+2. ✅ **MET by Phase 164.6.7 COMPOSITECLAIMSNAPSHOT (2026-09-25).** The `_stamp_failed` closure
+   of `run_stitch_composite_job` in `analytics-service/services/job_worker.py` now re-reads the
+   LIVE `compute_jobs` row through `_refresh_marker_still_on_row` before it honours the
+   `ledger-refresh-composite` marker, the same helper the single-key honour sites use. The
+   claim-time snapshot is still the first filter, and the live read can only narrow it: a marker
+   retracted after the claim, a missing row, or a re-read that fails all take the loud path.
+   ⚠️ **Changed 2026-09-25 (round-1 silent-failure review SFH-01, orchestrator decision, CONTEXT
+   D-09), and it narrows the sentence above.** The line is drawn between a read that FAILED and a
+   read that ANSWERED. `_refresh_marker_still_on_row` now returns a `MarkerLiveState`, and it
+   reads through `db_read_with_retry`, so a gateway 504 is retried inside that helper's budget
+   first. If the read still raises, the state is `READ_ERROR`. It is logged at ERROR and sent to
+   Sentry. The composite honour site in `_stamp_failed` then writes NOTHING to
+   `strategy_analytics` and raises `RefreshMarkerRereadUnavailable`, which `classify_exception`
+   maps to TRANSIENT, so the queue retries the whole job. If the retry budget runs out, the job
+   ends `failed_final` with no terminal stamp from this site. Every DEFINITIVE answer other than
+   `PRESENT` still takes the loud path, and that loud path is an un-publish: `RETRACTED`,
+   `OTHER_SOURCE` (another source, no source, or non-dict metadata), `NO_ROW` and `NO_ID`. Only
+   `RETRACTED` is logged as a user-initiated retraction. `NO_ROW` and `NO_ID` go out at ERROR as
+   invariant breaches. ⚠️ This is the COMPOSITE site only. The single-key stamp closure in
+   `run_derive_broker_dailies_job` still takes the loud path on `READ_ERROR`. ⛔ At scheduling
+   time, read the `READ_ERROR` arm of the composite honour site on the DEPLOYED commit. On a
+   commit older than this change, "a re-read that fails" above still means the loud path, which
+   is an un-publish.
+   ⛔ **CORRECTED 2026-09-26 (orchestrator decision, CONTEXT D-09 amendment), the scope sentence
+   above ("This is the COMPOSITE site only …") kept as lineage.** The single-key stamp closure
+   `_stamp_strategy_analytics_failed` in `run_derive_broker_dailies_job` now does the same: on
+   `READ_ERROR` it writes nothing to `strategy_analytics` (neither the error-only write nor the
+   destructive stamp) and raises `RefreshMarkerRereadUnavailable`, so that job retries too. Every
+   caller of the closure was traced to `dispatch` with no handler that catches the raise (164.6.7
+   REVIEW-FIX, "Round 1 — single-key completion"). The two single-key sites that do not stamp are
+   unchanged: on `READ_ERROR` the chain-edge forward still sends hop 2 no marker, and the tail
+   mirror only logs. The deploy-time instruction above now covers both stamps: on the DEPLOYED
+   commit, find the `READ_ERROR` arm in `_stamp_failed` AND in
+   `_stamp_strategy_analytics_failed`.
+   ⛔ **CORRECTED 2026-09-26 (round-2 review, orchestrator decisions, CONTEXT D-10). Both
+   paragraphs above are kept as lineage. One of their sentences is superseded and two overclaim.**
+   - **Superseded: "the chain-edge forward still sends hop 2 no marker".** On `READ_ERROR`, the
+     REUSE-01 forward in `run_derive_broker_dailies_job` now raises `RefreshMarkerRereadUnavailable`
+     BEFORE `_enqueue_csv_analytics`. No follow-on is enqueued, and the marker stays on hop 1's
+     row, so the job retries TRANSIENT. The tail mirror still only logs. On the DEPLOYED commit,
+     confirm the raise sits before `_enqueue_csv_analytics`; a commit that predates it still
+     drops the marker. The orchestrator REJECTED the alternative of forwarding the marker with
+     an "unverified" flag, for two reasons.
+     First, the failures are correlated, not independent: a read that still fails after
+     `db_read_with_retry` means the database is unhealthy, and hop 2 runs against the same
+     database. Second, re-crawling on a transient already has a precedent in this worker:
+     `run_stitch_composite_job` returns transient after two complete crawls when its smoothed
+     pass diverges.
+     **End state when every chain-edge retry fails (round-3 review SFH-R3-04).** The row is
+     MIXED-GENERATION, not untouched. Before the chain edge, hop 1 has already written
+     `_prestamp_dq_flags` (`data_quality_flags` replaced wholesale, `series_completeness`,
+     `metrics_json_by_basis`) and persisted or healed the MTM series. Hop 2 never runs, so the
+     headline `metrics_json` is still the previous hop 2's. On a `complete_with_warnings` /
+     warned row, branch (b-prime) keeps the row published (a plain `complete` row is
+     un-published instead, see the overclaim bullet below), so the factsheet shows hop 1's flags, verdict and by-basis values next to the
+     previous hop 2's headline metrics. This is the same class as a protected hop-2 failure,
+     which D-15 already accepts. The upserts make the retry safe; they do not make the terminal
+     row consistent.
+   - **Extended (round 3, SFH-R3-01 / WR-03): D-09 now covers the composite stamp's own status
+     read.** `_stamp_failed` reads `strategy_analytics` (`_read_existing_failed_row`) before it
+     decides anything, for every composite terminal stamp, marked or not, a user's own stitch
+     included. If that read still fails after `db_read_with_retry`, the handler's curated cause
+     is logged at ERROR beside the read's failure kind, nothing is written, and the job fails
+     TRANSIENT with the cause in `last_error`. Before this, the read's exception left the
+     handler as itself: `last_error` named only the read, the cause was logged nowhere, and the
+     job was filed `unknown`.
+   - **Log level (round 3, WR-01).** When D-15 does protect a row (the live re-read answers
+     `PRESENT`), that outcome is logged at WARNING only and produces no Sentry event. The cause
+     goes out at ERROR on the failure arms (`READ_ERROR`, a failed stamp status read) and on the
+     loud stamp over a live row after a definitive not-marked answer. Round 2 logged it at ERROR
+     before every re-read, which paged once per protected strategy per refresh tick.
+   - **Extended: D-09 now covers the entry publish-state read.** `_read_entry_publish_state` at
+     the top of `run_derive_broker_dailies_job` reads through `db_read_with_retry`. If a marked
+     refresh's read still fails, the job fails TRANSIENT (`RefreshMarkerRereadUnavailable`)
+     before any crawl or write. Before this change, a failed entry read left the publish state
+     unknown, logged only at WARNING, and sent a live factsheet down the destructive path at
+     both hops.
+   - **Overclaim: "the queue retries the whole job" does not mean the factsheet is protected
+     for every row.** When the job goes to `failed_retry`, `mark_compute_job_failed` PERFORMs
+     `sync_strategy_analytics_status`, and the bridge's non-terminal branch (a) rewrites the
+     row's status. It KEEPS `complete_with_warnings`, and any row with
+     `computation_warned = TRUE`. It REWRITES a plain `complete` to `computing`. **So the retry's
+     protection holds for `complete_with_warnings` / warned rows only, unless the DEPLOYED commit
+     carries a fix that persists the attempt-1 publish state somewhere the bridge cannot
+     overwrite (round-2 review WR-01 / SFH-R2-03).** Confirm that on the deployed commit; do not
+     assume it. Without that fix, a plain-`complete` row is unprotected in two ways. Attempt 2
+     reads `computing`, which is not terminal-success, so a recurrence of the original failure
+     stamps loudly. And if the retry budget runs out instead, branch (b) sees an unhealthy row
+     and un-publishes it.
+     ⛔ **CORRECTED 2026-09-26 (164.6.7 verification W-1), the bold sentence and "Confirm that on
+     the deployed commit; do not assume it" above kept as lineage.** There is no such fix to look
+     for. Round-2 fixer A took the qualify option, and keeping the attempt-1 publish state in job
+     metadata cannot close the gap anyway, because branch (a) rewrites the row before attempt 2
+     reads anything. So the condition is flat: **the retry protects `complete_with_warnings` /
+     `computation_warned` rows only. A plain-`complete` row is unprotected across the retry, in
+     both ways described above.** The gap is `TODOS.md` `[164.6.7-RETRY-PLAIN-COMPLETE]`, routed
+     to Phase 164.5.2 BRIDGELOCK; its fix is a bridge migration. Until that phase ships, do not
+     go looking for the fix on the deployed commit.
+   - **Overclaim: "ends `failed_final` with no terminal stamp from this site" is true of Python
+     and says nothing about the bridge.** If the re-read also fails on the FINAL attempt, the job
+     ends `failed_final` with `last_error_kind = 'transient'`. Its `last_error` should carry the
+     curated cause sentence the stamp was about to write (round-2 review WR-03 / SFH-R2-01).
+     Check that on the deployed commit by reading the `RefreshMarkerRereadUnavailable` raises;
+     a commit that predates that fix records only the read failure. What the account holder
+     then sees is decided by the bridge from the live marker and the live status. If the marker
+     is still present and the row is still healthy, branch (b-prime) keeps the factsheet
+     PUBLISHED BUT STALE, and overwrites `computation_error` with
+     `computation_error_copy('transient')`, the generic "automatic retries" sentence, even when
+     the underlying cause was permanent. If the marker was retracted, branch (b) takes the loud
+     path, which is the right answer.
+   - **Alert volume, a known property.** `init_sentry` does not disable the default
+     `LoggingIntegration`, so every `logger.error` is a Sentry event. One failed re-read at a
+     stamp site or at the chain edge produces 3 events: the helper's ERROR line, its explicit
+     `capture_exception` (the only event with the traceback, and it carries no job tag), and the
+     call site's ERROR line. A failed entry publish-state read produces 2. At most one read fails
+     per attempt, because each failure ends the attempt, so with the default `max_attempts` of 3
+     one job produces **at most 9 events**. A database outage multiplies that by the number of
+     marked refreshes in flight. Global Sentry config is deliberately unchanged in this phase. If
+     the deployed commit adds an ERROR line on this path, re-count the bound.
+     ⛔ **CORRECTED 2026-09-26 (round-3 review WR-02 / SFH-R3-03), the bullet above kept as
+     lineage.** Its count was stale when it landed: the round-2 pre-read cause line made a
+     stamp-site read failure 4 events (12 per job), and every D-15 suppression 1. Round 3
+     removed that line (WR-01), so the table below is re-counted from the code, by symbol, at
+     the round-3 fix commit. An event is one `logger.error` (the default `LoggingIntegration`
+     turns it into a Sentry event) or one `capture_exception`. A `logger.warning` is a
+     breadcrumb and counts 0. Every capture now carries a `compute_job_id` tag
+     (`_capture_read_failure`).
+
+     | path, per attempt | ERROR lines | captures | events | attempt ends |
+     |---|---|---|---|---|
+     | D-15 protects (`PRESENT`), either stamp | 0 (D-15 line is WARNING) | 0 | **0** | permanent, terminal |
+     | marker re-read `READ_ERROR` at either stamp | 2: `_refresh_marker_live_state`, `_log_marker_not_confirmed` (`READ_ERROR` arm, carries the cause) | 1 | **3** | transient |
+     | composite stamp status read fails (`_read_existing_failed_row`) | 1 (carries the cause) | 1 | **2** | transient |
+     | chain edge `READ_ERROR` | 2: helper, `_log_marker_not_confirmed` | 1 | **3** | transient |
+     | entry publish-state read fails | 1 | 1 | **2** | transient |
+     | entry read raises a programming error (`_READ_PROGRAMMING_ERRORS`) | 1 | 1 | **2** | `unknown` |
+     | marked row, `RETRACTED` / `OTHER_SOURCE` → loud stamp | 1 (the "no longer protects it" line; the state line is WARNING) | 0 | **1** | permanent, terminal |
+     | marked row, `NO_ID` / `NO_ROW` → loud stamp | 2 (breach line + "no longer protects it") | 0 | **2** | permanent, terminal |
+     | tail mirror `READ_ERROR` (after hop 2 is enqueued) | 2: helper, `_log_marker_not_confirmed` | 1 | **3** | job DONE |
+
+     **Derivation of the bound.** Every read failure except the tail mirror's raises, so it ends
+     the attempt, and no attempt reaches two of the rows above: the entry read precedes the
+     crawl, the chain edge precedes the tail mirror, and the composite status read precedes its
+     marker re-read. The tail mirror runs only on an attempt that reached the chain edge
+     cleanly. So one attempt produces **at most 3 events**, and with the default `max_attempts`
+     of 3 one job produces **at most 9** (for example two chain-edge `READ_ERROR`s, then a DONE
+     attempt whose tail mirror read fails). A database outage multiplies that by the number of
+     marked refreshes in flight. **A protected failure produces none.** Scope: these are the
+     lines in this phase's read and stamp code. The handler arm that calls a stamp may log its
+     own failure before it does, and the worker loop logs every failed job at WARNING (`Job %s
+     failed`); both predate this phase and are the same on every row. If the deployed commit adds
+     an ERROR line or a capture on any of these paths, re-count.
+     Every row except the tail mirror's is PINNED by an exact `log.error.call_count` (and, where
+     a capture is expected, `capture_exception.call_count`) in its driving test in
+     `tests/test_ledger_refresh_composite_nondestructive.py` or
+     `tests/test_ledger_refresh_reuse_collision.py`, each marked "pins this path's row of the
+     runbook's alert-volume table". A change to the count turns the test RED, so this table
+     cannot go stale silently the way the bullet above did. The tail-mirror row has no dispatch
+     driver and is counted from the code only.
+     ⛔ **CORRECTED 2026-09-26 (round-4 review SFH-R4-01 / SFH-R4-02 / IN-01), the table above
+     kept as lineage.** Its "D-15 protects → 0" row was silent, not zero, when the protected
+     error-only write failed: that write had no handler, so the curated cause reached no ERROR
+     line, no capture and not `last_error`. Round 4 closed the class, not the site. Every
+     database read and write inside `_stamp_strategy_analytics_failed` and the composite
+     `_stamp_failed` now goes through ONE wrapper, `_stamp_io`. That covers the composite status
+     read, the live marker re-read, the D-15 error-only write and the loud stamp write. A
+     failure there logs ONE ERROR carrying the operation kind and the cause, makes ONE capture
+     tagged `compute_job_id`, and raises `StampIOUnavailable` (TRANSIENT, the cause in its text).
+     A `_READ_PROGRAMMING_ERRORS` member is logged and captured the same way, then re-raised
+     unchanged (`unknown`). So a stamp-site marker re-read failure is now 2 events, not 3: the
+     site no longer holds a `READ_ERROR`. `_refresh_marker_live_state` (the chain edge and the
+     tail mirror) splits programming errors off the same way. The "no longer protects it" line
+     now fires only after the loud stamp has LANDED, so a failed loud write carries its cause on
+     one ERROR line, not two. The stamp-site raise type is `StampIOUnavailable`, not
+     `RefreshMarkerRereadUnavailable`; both subclass `HandlerIOUnavailable`, which
+     `classify_exception` maps to TRANSIENT. Read those raises when checking a deployed commit's
+     `last_error`. Re-counted from the code, by symbol, at the round-4 fix commit, with the same
+     event definition as the table above:
+
+     | path, per attempt | ERROR lines | captures | events | attempt ends | pinned by |
+     |---|---|---|---|---|---|
+     | D-15 protects (`PRESENT`), both stamp calls succeed | 0 (D-15 line is WARNING) | 0 | **0** | permanent, terminal | `test_the_protected_path_emits_no_error_and_no_capture` (both files), `test_the_protected_path_with_nothing_failing_pages_nobody` |
+     | any `_stamp_io` call fails (composite status read, marker re-read, D-15 error-only write, loud write after `RETRACTED` / `OTHER_SOURCE` / an unmarked stamp) | 1 (`_stamp_io`, carries the cause) | 1 | **2** | transient | `test_a_failing_stamp_call_keeps_the_cause_and_files_transient` (every discovered call), `test_every_io_call_in_a_stamp_closure_is_inside_stamp_io`, `TestTransientReReadFailureRetries`, `TestAFailedStampReadKeepsTheCause`, `TestReReadFailsSafe` |
+     | loud write fails after `NO_ID` / `NO_ROW` | 2 (breach line + `_stamp_io`) | 1 | **3** | transient | `test_a_failing_stamp_call_keeps_the_cause_and_files_transient`, the `loud-over-missing-row` upsert cases |
+     | any `_stamp_io` call raises a programming error | 1, or 2 after a `NO_ROW` breach line | 1 | **2** / **3** | `unknown` | `test_a_programming_error_in_a_stamp_call_is_unknown_and_captured` |
+     | a `_stamp_io` call is CANCELLED (the handler deadline, or a shutdown) | 1 (`_stamp_io`'s CANCELLED line, carries the cause), or 2 after a `NO_ROW` breach line | 0 | **1** / **2** | transient, `last_error` "Handler exceeded timeout" | `test_a_stamp_call_cut_off_by_the_handler_deadline_logs_the_cause` |
+     | marked row, `RETRACTED` / `OTHER_SOURCE` → loud stamp lands | 1 (the landed "no longer protects it" line; the state line is WARNING) | 0 | **1** | permanent, terminal | `test_the_loud_stamp_over_a_live_row_logs_its_cause_at_error` (both files), `test_a_different_live_source_is_not_called_a_retraction`, `test_the_loud_stamp_over_another_source_logs_one_error` |
+     | marked row, `NO_ID` / `NO_ROW` → loud stamp lands | 2 (breach line + landed line) | 0 | **2** | permanent, terminal | `test_a_missing_row_or_id_is_an_error_not_a_retraction`, `test_stamp_closure_calls_a_missing_row_an_error` |
+     | single-key series heal fails after a landed loud stamp | +1 (the heal's ERROR: scrubbed failure text, job id, the stamp's cause) | +1 | **+2** | permanent, terminal | `test_a_failing_post_stamp_call_keeps_the_landed_stamp` |
+     | single-key series heal raises a programming error after a landed loud stamp | +1 (the same line, labelled "a programming error") | +1 | **+2** | permanent, terminal | `test_a_programming_error_in_a_post_stamp_call_keeps_the_landed_stamp` |
+     | composite stamp's status read answers a non-object `data_quality_flags` | +1 (job id, type, bounded scrubbed `repr`) | +1 (`capture_message`) | **+2**, added to whatever row the same attempt then reaches | that row's | `test_a_non_object_flags_value_is_stamped_once_not_restamped_by_f5` |
+     | composite SUCCESS-path persist reads a non-object `data_quality_flags` | 1 | 1 (`capture_message`) | **2** | the persist continues (job DONE) | `test_a_non_object_flags_value_on_the_composite_success_path_is_dropped_loudly` |
+     | entry publish-state read fails | 1 | 1 | **2** | transient | `test_a_failed_entry_read_fails_transient_before_the_crawl` |
+     | entry read raises a programming error | 1 | 1 | **2** | `unknown` | `test_a_programming_error_is_not_relabelled_transient` |
+     | chain edge `READ_ERROR` | 2 (`_refresh_marker_live_state`, `_log_marker_not_confirmed`) | 1 | **3** | transient | `test_a_raising_chain_edge_reread_enqueues_nothing_and_fails_transient` |
+     | chain edge re-read raises a programming error | 1 | 1 | **2** | `unknown`, nothing enqueued | `test_at_the_chain_edge_it_is_unknown_and_enqueues_nothing` |
+     | chain edge `NO_ID` / `NO_ROW` (marker dropped, hop 2 enqueued unmarked) | 1 (breach line) | 0 | **1** | job DONE | `test_chain_edge_calls_a_missing_row_an_error` |
+     | tail mirror `READ_ERROR` (after hop 2 is enqueued) | 2 (helper, `_log_marker_not_confirmed`) | 1 | **3** | job DONE | `test_a_failed_tail_mirror_read_logs_and_the_job_is_done` |
+     | tail mirror re-read raises a programming error | 2 (the helper's programming-error line, `_log_marker_not_confirmed`) | 1 | **3** | job DONE | `test_at_the_tail_mirror_it_is_logged_and_the_job_is_done` |
+     | tail mirror `NO_ID` / `NO_ROW` | 1 (breach line, "enqueued job") | 0 | **1** | job DONE | `test_mirror_does_not_call_a_missing_tail_row_a_dedup` |
+
+     **Derivation of the bound, round 4, re-derived in round 5.** ⛔ Superseded by the round-6
+     derivation below; kept as lineage. Five rules decide it:
+     - A stamp ends its attempt, whether it returns permanent or `_stamp_io` raises. No stamp
+       follows the chain edge.
+     - The single-key series heal is the one step that can follow a LANDED loud stamp in the
+       same attempt, and it adds at most one ERROR and one capture.
+     - The entry read precedes the crawl, and every failure of it raises.
+     - The chain edge raises on `READ_ERROR` and on a programming error. On a definitive
+       non-`PRESENT` answer it drops the marker, so the tail mirror does not run.
+     - The tail mirror runs only after a clean chain edge, and it never raises for a failed
+       read (only a future `MarkerLiveState` member with no logging arm can raise there).
+
+     So one attempt reaches at most one row, plus the heal row after a landed single-key loud
+     stamp. The largest is **4 events**: a loud stamp that lands after a `NO_ROW` breach line (2)
+     followed by a failed heal (2). Every other row is at most 3. An infrastructure heal failure
+     ends the job permanent, so it can only be the LAST attempt. A heal programming error is
+     filed `unknown` and retried, so with the default `max_attempts` of 3 one job produces
+     **at most 12** (it was 9 before round 5). A protected failure whose calls all succeed
+     produces **none**.
+     ⚠️ **One pre-existing addition, outside this phase's code** (reworded in round 5, R5
+     IN-05; the round-4 wording said the line was added only when the re-issue also failed,
+     which understated it). `upsert_or_drop_provenance` (Phase 164.2) logs one ERROR when the
+     database refuses the provenance marker pair (a 23514 on a marker CHECK, or a `PGRST204` in
+     the deploy window). It logs BEFORE it re-issues the write without the markers, so it adds 1
+     to any row whose write meets a marker refusal, whether or not the re-issue lands. So in
+     the deploy window "D-15 protects → 0" reads 1, and every landed-stamp row gains 1. The worst
+     case is **5 events in one attempt**: breach line, the provenance line, the landed "no longer
+     protects it" line, then the heal's ERROR and capture. It needs a marker refusal on the loud
+     write AND a heal failure. A heal programming error retries it, so the per-job ceiling in
+     that case is 15 (round 5; superseded by the round-6 derivation below). A failed re-issue instead (breach line, provenance line, `_stamp_io`'s
+     ERROR, its capture) is still 4.
+     Each row's count is pinned by the named test with an exact `log.error.call_count` (and,
+     where a capture is expected, `capture_exception.call_count`). No row is counted from the
+     code only any more.
+     ⛔ **CORRECTED 2026-09-26 (round 5, R5 IN-01 / SFH-R5-02).** This sentence used to say that
+     the exhaustive stamp test "derives its cases from the fake client's call log, so a database
+     call added to either stamp closure later is held to the 2-event row without editing the
+     test". That was false in two ways. The call log covers only the scenario paths, and a call
+     on the composite `OTHER_SOURCE` branch passed every case. It also misses a call issued off
+     the closure's thread (`asyncio.to_thread`, `run_in_executor`, `create_task`). What holds
+     now in `analytics-service/tests/test_stamp_io_exhaustive.py`:
+     - Discovery covers the calls on its 12 scenario paths, including `OTHER_SOURCE` and a marked
+       job over an unpublished row in each closure.
+     - A static scan, `test_every_io_call_in_a_stamp_closure_is_inside_stamp_io`, reads every
+       line of both closures. It fails on any database call outside `_stamp_io`, on any branch,
+       on or off the thread. `_heal_delete_basis_series` is the one named exemption.
+     - ⛔ **CORRECTED 2026-09-26 (round 6, R6-03), the bullet above kept as lineage.** "Any
+       database call" overstated it: the scan matched a hand-written name list, so a direct
+       `await` of `_refresh_marker_live_state`, `_refresh_marker_still_on_row` or
+       `sync_strategy_analytics_status` in a closure passed it. The names are now DERIVED
+       (`_derive_io_call_names`): the base names (`db_execute`, `db_read_with_retry`,
+       `.execute()`, `get_supabase`, `to_thread`, `run_in_executor`, `create_task`,
+       `ensure_future`) plus every module-level function in `analytics-service/services/` that
+       calls one of them, directly or through another such function. What the scan proves: no
+       call through a base or derived I/O name sits outside `_stamp_io` in either closure, on
+       any branch. What it cannot see: a method call (`self.x()`), a function defined outside
+       `services/`, and I/O reached only through a callable passed in.
+     ⭐ **Round 5 changes to the table, with their round-4 values as lineage:**
+     - The heal row went from **+0** (WARNING only, raw exception) to **+2**, and a heal
+       programming error went from permanent to `unknown` (SFH-R5-03).
+     - The tail-mirror programming-error row went from **2** events, filed `unknown` after the
+       enqueue, to **3** events with the job DONE (R5 IN-02 / LOW-2). A job whose work already
+       landed and whose hop 2 is enqueued is no longer failed. A retry would re-crawl the venue,
+       and a `failed_final` derive is one `sync_strategy_analytics_status` reads as a live
+       failure over the row hop 2 just published.
+     - The cancelled-call row is new (SFH-R5-01). Before round 5 a cancelled stamp call logged
+       NOTHING carrying the cause.
+     - The first failed-call row no longer lists "loud write after `PRESENT`". `PRESENT` always
+       takes the D-15 error-only write and returns (R5 IN-04).
+     - A composite row whose `data_quality_flags` is not a JSON object now lands its failed
+       stamp once, with a WARNING, and ends permanent (SFH-R5-05). Before, `dict()` raised: F-5
+       re-stamped it under the chain-break cause, and the job was filed `unknown` with no stamp.
+
+     ⛔ **CORRECTED 2026-09-26 (round 6, R6-01 / R6-02 / R6-05), re-counted from the code by
+     symbol.** Round 5's heal programming-error row was wrong in its disposition, not its count.
+     The `unknown` raise retried the job, `mark_compute_job_failed` moved it to `failed_retry`,
+     and `sync_strategy_analytics_status` branch (a) counts that as non-terminal: it wrote
+     `computing` over the stamp that had just landed and NULLed its cause for the whole backoff
+     window. A retry that took another path lost the cause for good. ⭐ **Round 6 changes to the
+     table, with their round-5 values as lineage:**
+     - The heal programming-error row went from `unknown` (retried) to **permanent, terminal**.
+       Still +2 events. The heal never raises now, and its ERROR line carries the stamp's cause
+       and the job id (R6-01). Branch (b) keeps the writer's cause.
+     - The composite stamp's non-object `data_quality_flags` drop went from a WARNING (0 events)
+       to **+2**: one ERROR naming the job, one tagged `capture_message` (R6-02). It sits after
+       the status read and BEFORE the marker re-read and the write, so it adds to whichever row
+       that attempt then reaches.
+     - The composite success path's read of the same column is new: before round 6 `dict()`
+       raised there on every re-stitch and the job ended `failed_final` with no curated stamp.
+       Now it is **2** events and the persist lands (R6-05).
+
+     **Derivation of the bound, round 6.** The five rules above still hold, with one change:
+     - The single-key series heal NEVER raises, so a heal row always ends the job permanent. It
+       can only be on the LAST attempt.
+     - New: the composite flags drop is logged BEFORE the composite write. If that write then
+       fails, nothing has replaced the value, so the next attempt logs it again.
+
+     *Single-key job, or a composite whose flags are an object:*
+     - A retried attempt is at most **3** events: a loud write that fails after a `NO_ROW`
+       breach line, or a chain-edge `READ_ERROR`.
+     - The last attempt is at most **4**: a loud stamp that lands after a breach line (2), then
+       a failed heal (2).
+     - So one job produces **at most 10** (3 + 3 + 4). Round 5's figure was 12.
+     - With a provenance marker refusal (below), a retried attempt is at most **4** (breach
+       line, provenance line, `_stamp_io`'s ERROR, its capture) and the last at most **5**, so
+       **at most 13**. Round 5's figure was 15.
+
+     *Composite whose `data_quality_flags` is not an object:*
+     - Every attempt pays the +2 drop until a write lands. A retried attempt is at most **5**:
+       the drop (2), the breach line, `_stamp_io`'s ERROR and its capture.
+     - The last attempt is also at most 5. Either the write fails again, or it lands after a
+       breach line (drop 2, breach, landed line = 4).
+     - So one job produces **at most 15**, and with a provenance refusal on the write (6 per
+       attempt) **at most 18**. These are the new per-job ceilings.
+     - They need a malformed flags value AND a marked job whose row is gone AND the write
+       failing on every attempt. A write that lands overwrites the value, so the drop cannot
+       repeat after it.
+     - The success-path drop (2) precedes no stamp, so it adds nothing to the stamp rows.
+
+     Every row's count is still pinned by an exact `log.error.call_count` in the named test. The
+     two flags rows also pin `capture_message.call_count == 1`. 📜 The round-6 review computed
+     10 (13) and did not count the R6-02 capture it recommended; the composite 15 (18) is this
+     fix round's own count, from the code.
+   📜 *Lineage, superseded 2026-09-25:* "⛔ **BLOCKING.** No schedule naming
+   `public.enqueue_ledger_composite_refresh()` may be registered until `run_stitch_composite_job`
+   in `analytics-service/services/job_worker.py` re-reads the LIVE `compute_jobs` row's
+   `metadata->>'source'` before it honours the `ledger-refresh-composite` marker. The single-key
+   honour sites already do this through `_refresh_marker_still_on_row`. The composite guard today
+   compares against the claim-time `job.get("metadata")` snapshot instead."
+   ⛔ **CORRECTED 2026-09-26 (164.6.7 re-verification W-3, after review rounds 3–7), every
+   deploy-time instruction above that names a `READ_ERROR` arm or `_refresh_marker_still_on_row`
+   inside a stamp closure is kept as lineage and superseded.** Since round 4 neither stamp closure
+   holds a `READ_ERROR` arm. On the DEPLOYED commit, check instead that `_stamp_failed` (inside
+   `run_stitch_composite_job`) and `_stamp_strategy_analytics_failed` (inside
+   `run_derive_broker_dailies_job`) read the live marker through
+   `_stamp_io(lambda: _read_refresh_marker_state(...), op=_STAMP_OP_MARKER_READ)`, and that a
+   failed read raises `StampIOUnavailable`, which `classify_exception` files transient. The static
+   test `test_every_io_call_in_a_stamp_closure_is_inside_stamp_io` pins that every database call in
+   both closures sits inside `_stamp_io`.
+3. **Why it was blocking.** A user-initiated composite resync (the `stitch_composite` enqueues in
    `src/app/api/keys/sync/route.ts` and `src/app/api/strategies/finalize-wizard/route.ts`) can
    dedup onto a fan-out job that already carries the marker. Since Phase 164.6 those TypeScript
-   sites retract the marker. A retraction that lands BEFORE the worker claims the job is fully
-   effective. A retraction that lands AFTER the claim is not: that run's Python guard still sees
-   the stale marker in its snapshot, treats the run as a protected ledger refresh, and suppresses
-   the user's failure. That is a silent data-integrity failure on a funded account, and the
-   schedule is what makes it reachable.
-4. **How to check it is met.** Read `run_stitch_composite_job`: a live re-read of the row (through
-   `_refresh_marker_still_on_row` or an equivalent) must sit before its composite-marker
-   comparison. A test must go RED when that re-read is removed. Both must be true on the commit
-   the worker is deployed from. A code comment promising it does not count.
-5. **Owner.** Phase 164.6 did NOT implement this. The Python change belongs to **Phase 164.6.7
-   COMPOSITECLAIMSNAPSHOT** (inserted into the ROADMAP on `main` by PR #849, 2026-09-24). This
-   precondition stays BLOCKING
-   until that phase ships. `TODOS.md` `161.1-D13` already requires the composite twin of the reuse
-   collision to be closed before this go-live op, not after.
+   sites retract the marker. A retraction that landed BEFORE the worker claimed the job was fully
+   effective. A retraction that landed AFTER the claim was not: that run's Python guard still saw
+   the stale marker in its snapshot, treated the run as a protected ledger refresh, and suppressed
+   the user's failure, while the SQL status bridge (`sync_strategy_analytics_status`), which reads
+   the live row, called the same job unprotected. The two layers disagreed about one job.
+   **What that was measured to do**, on the local loopback lane (2026-09-25, lane only; no
+   remote database was read). The quoted line is **the verdict recorded in the Phase 164.6.7
+   plan 02 SUMMARY**, derived from the harm probe's per-arm `HARM-PROBE verdict:` lines. The
+   three bullets under it transcribe those readings; they are not probe output.
+   > HARM-VERDICT: end-state harm shown on the lane for retracted-warned, retracted-warned-inflight; scoped to the lane, production cohort unmeasured
+
+   - **retracted-warned:** before the fix, the failed run ended `failed` with `computation_warned`
+     still set, and the next bridge call brought back `complete_with_warnings` over it; after the
+     fix it ends `failed` with the flag cleared and reads `computing` after the next bridge call.
+   - **retracted-unwarned:** `failed`, then `computing`, both before and after the fix; only the
+     decision differed.
+   - **retracted-warned-inflight** (modelled, another job in flight): before the fix, terminal
+     success (`complete_with_warnings`) straight after the failed run; after the fix, `computing`.
+
+   Whether production composite rows carry `computation_warned = TRUE` is unmeasured, so no
+   production cohort is claimed. ⚠️ A residual window remains: a retraction landing in the
+   milliseconds between the live re-read and `mark_compute_job_failed` still leaves the old
+   outcome, and the single-key derive honour site shares it. It is recorded, with its fix shape
+   and owner, as `TODOS.md` `[164.6.7-COMPOSITE-REREAD-RESIDUE]`.
+   ⛔ **CORRECTED 2026-09-25 (round-1 review IN-01 and IN-06), two sentences above kept as
+   lineage.** (a) This item used to credit the quoted verdict to "the Phase 164.6.7 harm probe",
+   which reads as if the probe printed it. At plan 02 it did not: the probe printed only
+   `HARM-PROBE` lines, and the `HARM-VERDICT:` sentence was composed from them by hand. A
+   round-1 review fix makes the probe derive and print a `HARM-VERDICT:` line itself. If a
+   re-run on your lane prints one that disagrees with the quote above, the run is right and the
+   quote is stale. If the probe you run prints none, the quote above is the only record.
+   (b) "In the milliseconds" was asserted, not measured. The window's length is **unmeasured**,
+   and several of its contributors have no bound: the error-only upsert through `db_execute`; on
+   the member-ledger-error path, the `aclose_exchange` network close in the `finally` that runs
+   after `_stamp_failed` returns; the heartbeat cancel in `main_worker`; and `_safe_mark` →
+   `db_execute` for `mark_compute_job_failed`, which can queue behind a saturated `_DB_EXECUTOR`.
+   The harm probe's zero-member driver exercises none of them. Item 7 makes the residue a
+   scheduling precondition.
+4. ✅ **MET in the tree; ⚠️ the deploy-time check is still yours.** The regression is
+   `TestPostClaimRetractionTakesTheLoudPath` in
+   `analytics-service/tests/test_ledger_refresh_composite_nondestructive.py`: its retraction, no-row
+   and failing-re-read tests were each observed RED with the re-read neutered and GREEN restored.
+   The harm probe, `analytics-service/scripts/probe_composite_claimtime.py`, is a recorded local run
+   on the loopback lane, not a CI gate. ⚠️ **Merging the fix does not satisfy this item on its
+   own.** At the moment the composite is scheduled, confirm the commit the worker is DEPLOYED from
+   carries the live re-read: read `run_stitch_composite_job` at that commit and find the
+   `_refresh_marker_still_on_row` call inside `_stamp_failed` before the marker is honoured. A code
+   comment promising it does not count.
+   ⛔ **CORRECTED 2026-09-26, the "failing-re-read" clause above kept as lineage.** That test
+   (`test_live_reread_that_raises_takes_the_loud_path`) no longer exists. Round 1 of the 164.6.7
+   review (SFH-01, CONTEXT D-09) reversed what a raising re-read does, so the raising case now
+   lives in `TestTransientReReadFailureRetries` in the same file. It asserts the opposite
+   outcome: no write to `strategy_analytics` and a TRANSIENT job failure. It was observed RED
+   with the composite `READ_ERROR` arm neutered (the read error falling through to the loud
+   stamp) and GREEN restored. The retraction and no-row tests in
+   `TestPostClaimRetractionTakesTheLoudPath` still pin the loud path for a DEFINITIVE answer.
+   ⛔ **CORRECTED 2026-09-26 (round-2 review WR-01 / SFH-R2-03), the paragraph above kept as
+   lineage.** "No write to `strategy_analytics` and a TRANSIENT job failure" is what the test
+   pins for ONE attempt against a fake. It does not show that the factsheet stays published
+   across the retry. The bridge rewrites a plain-`complete` row to `computing` on `failed_retry`,
+   so the protection holds for `complete_with_warnings` / warned rows only, under the condition
+   stated in item 2's 2026-09-26 correction. No test drives one marked job through the Python
+   `READ_ERROR` raise, the bridge on `failed_retry` and the next attempt in a single run; the
+   `supabase/tests` corpus exercises the bridge on `failed_retry` on its own. Item 4 is met for the Python decision. Do not read it as met for the end state.
+   ⛔ **CORRECTED 2026-09-26 (164.6.7 verification W-1), "under the condition stated in item 2's
+   2026-09-26 correction" above kept as lineage.** That condition pointed at a fix that does not
+   exist. There is no condition: the protection holds for `complete_with_warnings` /
+   `computation_warned` rows only, and a plain-`complete` row is not protected across the retry.
+   The gap is `TODOS.md` `[164.6.7-RETRY-PLAIN-COMPLETE]`, routed to Phase 164.5.2 BRIDGELOCK.
+   ⛔ **CORRECTED 2026-09-26 (164.6.7 re-verification W-3), the deploy-time check above ("find
+   the `_refresh_marker_still_on_row` call inside `_stamp_failed`") kept as lineage.** Round 4
+   removed that call from the closure. On the DEPLOYED commit, find instead, inside `_stamp_failed`
+   before the marker is honoured, `_stamp_io(lambda: _read_refresh_marker_state(...),
+   op=_STAMP_OP_MARKER_READ)`, and confirm that a failed read raises `StampIOUnavailable`. The
+   routing sentence above also moved: `[164.6.7-RETRY-PLAIN-COMPLETE]` now belongs to Phase
+   164.5.2.1 BRIDGERESIDUE, split from 164.5.2 on 2026-09-26.
+   📜 *Lineage, superseded 2026-09-25:* "**How to check it is met.** Read
+   `run_stitch_composite_job`: a live re-read of the row (through `_refresh_marker_still_on_row` or
+   an equivalent) must sit before its composite-marker comparison. A test must go RED when that
+   re-read is removed. Both must be true on the commit the worker is deployed from. A code comment
+   promising it does not count."
+5. ✅ **Owner: shipped.** Phase 164.6 did NOT implement the Python change; **Phase 164.6.7
+   COMPOSITECLAIMSNAPSHOT** (inserted into the ROADMAP on `main` by PR #849, 2026-09-24) did. This
+   precondition is now blocked ONLY by item 6. `TODOS.md` `161.1-D13` is closed on the same basis.
+   ⛔ **CORRECTED 2026-09-25 (round-1 review WR-04):** not "ONLY by item 6". Items 6 AND 7 both
+   block. The sentence above is kept as lineage.
+   📜 *Lineage, superseded 2026-09-25:* "This precondition stays BLOCKING until that phase ships.
+   `TODOS.md` `161.1-D13` already requires the composite twin of the reuse collision to be closed
+   before this go-live op, not after."
 6. ⛔ **BLOCKING: the composite's runs must be watched before it is scheduled** (review WR-03).
    The prod prober's cron-obs arm reads only the `ledger_refresh_fanout` job's runs. The composite's
    failure rows are already counted, because they share its `cron_name`, but a failed, stuck or
@@ -944,6 +1358,20 @@ here, but this precondition sits here because this is where a reader would go to
    together with that extension. ⛔ Never add it as a second statement of `ledger_refresh_fanout`'s
    command: pg_cron runs a multi-statement command as one transaction, so one fan-out's error
    would roll back the other's enqueues.
+7. ⛔ **BLOCKING: the re-read residue must be closed, or accepted by the founder with a date,
+   before the composite is scheduled** (added 2026-09-25, round-1 review WR-04). The residue is
+   `TODOS.md` `[164.6.7-COMPOSITE-REREAD-RESIDUE]`: a retraction that commits after the live
+   re-read (item 2) and before `mark_compute_job_failed` PERFORMs `sync_strategy_analytics_status`
+   still yields an error-only Python write followed by a loud SQL status, so a warned composite
+   can read `complete_with_warnings` again over a failed run. That is a data-integrity outcome on
+   a funded account, and the window is unmeasured (item 3). Today it is unreachable only because
+   the composite is unscheduled. Scheduling the composite is what makes it reachable, so this is
+   the document that has to stop you. **Closed** means the fix shape in that entry has shipped:
+   the bridge's branch (b) clears `computation_warned`, or the protect/loud decision moves inside
+   the bridge's transaction. It is routed to **Phase 164.5.2 BRIDGELOCK** in `ROADMAP.md`, the
+   phase that already changes the terminal mark RPCs fanning into that bridge. **Accepted** means
+   a founder decision recorded here, with its date and reason, before the schedule is
+   registered. Neither exists as of 2026-09-25.
 
 ---
 
@@ -952,7 +1380,10 @@ here, but this precondition sits here because this is where a reader would go to
 - **The deribit composite.** The fan-out excludes composites by an explicit conjunct; deribit's
   sole live strategy is a composite, so it gets zero coverage from *this* mechanism. Its coverage
   is owed to the separate composite arm on `stitch_composite`. See `TODOS.md` item **0.3**.
-  ⛔ That arm's schedule is blocked by the precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in
-  the section directly above.
+  ⛔ That arm's schedule is blocked by item 6 (the composite's own runs are not yet watched) of
+  the precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in the section directly above.
+  ⛔ **CORRECTED 2026-09-25 (round-1 review WR-04):** and by item 7 of the same precondition
+  (the re-read residue `[164.6.7-COMPOSITE-REREAD-RESIDUE]`). The
+  claim-time snapshot that gave the section its id was closed by Phase 164.6.7 (2026-09-25).
 - **The ccxt sibling defect.** ccxt strategies with no new fills also never recompute — a different
   venue class and a different mechanism, out of scope here. See `TODOS.md` item **0.2**.

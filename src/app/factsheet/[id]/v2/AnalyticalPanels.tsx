@@ -331,6 +331,26 @@ export function BootstrapCIPanel() {
   const view = useBasisSeriesView(usePayload());
   const b = view.bootstrapCI;
   const lowN = b.n < 252;
+  // A resample with no Sharpe (no dispersion) or no Sortino (no losing day) is
+  // dropped, not counted as 0 (founder decision D7). Say how many were used
+  // whenever that is fewer than all of them (review round 2, SFH-R2-M2). A
+  // payload cached before `n_valid` existed reads as "all of them".
+  const sharpeUsed = b.sharpe.n_valid ?? b.n_resamples;
+  const sortinoUsed = b.sortino.n_valid ?? b.n_resamples;
+  const droppedNote = (
+    [
+      ["Sharpe", sharpeUsed],
+      ["Sortino", sortinoUsed],
+    ] as const
+  )
+    .filter(([, used]) => used < b.n_resamples)
+    .map(([label, used]) =>
+      // None survived: say so plainly, as degenerateNote does, never "from 0 of
+      // 2,000 resamples (the rest have no …)" (review round 3 IN3-01).
+      used === 0
+        ? `no resample has a ${label}`
+        : `${label} from ${used.toLocaleString()} of ${b.n_resamples.toLocaleString()} resamples (the rest have no ${label})`,
+    );
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
@@ -361,13 +381,14 @@ export function BootstrapCIPanel() {
           density, not just the CI bounds. Sharpe = primary (accent), Sortino
           + Max-DD stacked below in muted tones. */}
       <div className="mt-3 flex flex-col gap-2.5">
-        <BootHist title="Sharpe" hist={b.sharpe.hist} point={b.sharpe.point} ci={[b.sharpe.lo, b.sharpe.hi]} fmt={n => n.toFixed(2)} accent />
-        <BootHist title="Sortino" hist={b.sortino.hist} point={b.sortino.point} ci={[b.sortino.lo, b.sortino.hi]} fmt={n => n.toFixed(2)} />
+        <BootHist title="Sharpe" hist={b.sharpe.hist} point={b.sharpe.point} ci={[b.sharpe.lo, b.sharpe.hi]} fmt={n => n.toFixed(2)} nValid={sharpeUsed} nTotal={b.n_resamples} accent />
+        <BootHist title="Sortino" hist={b.sortino.hist} point={b.sortino.point} ci={[b.sortino.lo, b.sortino.hi]} fmt={n => n.toFixed(2)} nValid={sortinoUsed} nTotal={b.n_resamples} />
         <BootHist title="Max DD" hist={b.max_dd.hist} point={b.max_dd.point} ci={[b.max_dd.lo, b.max_dd.hi]} fmt={n => `${(n * 100).toFixed(1)}%`} />
       </div>
 
       <p className="mt-2 text-micro italic text-text-muted">
         {b.n_resamples.toLocaleString()} stationary block-bootstrap resamples · {b.block_len}-day block length · 95% CI
+        {droppedNote.map(note => ` · ${note}`).join("")}
       </p>
     </section>
   );
@@ -379,6 +400,8 @@ function BootHist({
   point,
   ci,
   fmt,
+  nValid,
+  nTotal,
   accent,
 }: {
   title: string;
@@ -386,6 +409,9 @@ function BootHist({
   point: number;
   ci: [number, number];
   fmt: (n: number) => string;
+  /** Resamples that have this metric, out of `nTotal`; both omitted = all of them. */
+  nValid?: number;
+  nTotal?: number;
   accent?: boolean;
 }) {
   const isMobile = useBreakpoint() === "mobile";
@@ -398,12 +424,29 @@ function BootHist({
   const plotW = W - PAD.left - PAD.right;
   const plotH = H - PAD.top - PAD.bottom;
   const degenerate = hist.bins.length === 0 || hist.hi === hist.lo;
+  // An absent value (NaN, or null after a JSON cache round-trip) is "—": the
+  // Sharpe of a series with no dispersion, or a Sharpe CI with too few
+  // resamples that have one (founder decision D7, 2026-09-26). `fmt` is only
+  // ever called on a finite number.
+  const show = (v: number | null) => (v != null && Number.isFinite(v) ? fmt(v) : "—");
+  const ciKnown = Number.isFinite(ci[0]) && Number.isFinite(ci[1]);
   const maxCount = degenerate ? 1 : Math.max(1, ...hist.bins);
   const barW = degenerate ? 0 : plotW / hist.bins.length;
   const span = hist.hi - hist.lo;
   const X = (v: number) => (span > 0 ? PAD.left + ((v - hist.lo) / span) * plotW : PAD.left + plotW / 2);
   const color = accent ? "var(--color-accent)" : "var(--color-text-muted)";
   if (degenerate) {
+    if (!Number.isFinite(point)) {
+      return (
+        <div>
+          <div className="flex items-baseline justify-between text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
+            <span>{title}</span>
+            <span className="normal-case tracking-normal text-text-muted">—</span>
+          </div>
+          <div className="h-[36px]" aria-hidden="true" />
+        </div>
+      );
+    }
     return (
       <div>
         <div className="flex items-baseline justify-between text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
@@ -411,7 +454,7 @@ function BootHist({
           <span className="normal-case tracking-normal text-text-muted">no variance</span>
         </div>
         <div className="h-[36px] flex items-center justify-center text-micro text-text-muted italic">
-          all resamples produced {fmt(point)}
+          {degenerateNote(title, nValid, nTotal, fmt(point))}
         </div>
       </div>
     );
@@ -421,21 +464,23 @@ function BootHist({
       <div className="flex items-baseline justify-between text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
         <span>{title}</span>
         <span className="normal-case tracking-normal">
-          <span className="text-text-2">{fmt(ci[0])}</span> ·{" "}
-          <span className="text-text-primary font-semibold">{fmt(point)}</span> ·{" "}
-          <span className="text-text-2">{fmt(ci[1])}</span>
+          <span className="text-text-2">{show(ci[0])}</span> ·{" "}
+          <span className="text-text-primary font-semibold">{show(point)}</span> ·{" "}
+          <span className="text-text-2">{show(ci[1])}</span>
         </span>
       </div>
       <ResponsiveChartFrame width={W} height={H} role="img" aria-label={`${title} bootstrap distribution`}>
-        {/* CI shaded band */}
-        <rect
-          x={X(ci[0])}
-          y={PAD.top}
-          width={Math.max(0, X(ci[1]) - X(ci[0]))}
-          height={plotH}
-          fill={color}
-          fillOpacity={0.08}
-        />
+        {/* CI shaded band (omitted when the interval is absent) */}
+        {ciKnown && (
+          <rect
+            x={X(ci[0])}
+            y={PAD.top}
+            width={Math.max(0, X(ci[1]) - X(ci[0]))}
+            height={plotH}
+            fill={color}
+            fillOpacity={0.08}
+          />
+        )}
         {hist.bins.map((c, i) => {
           if (c === 0) return null;
           const h = (c / maxCount) * plotH;
@@ -451,18 +496,32 @@ function BootHist({
             />
           );
         })}
-        {/* Point estimate vertical line */}
-        <line
-          x1={X(point)}
-          x2={X(point)}
-          y1={PAD.top}
-          y2={PAD.top + plotH + 2}
-          stroke="var(--color-text-primary)"
-          strokeWidth={1.4}
-        />
+        {/* Point estimate vertical line (omitted when the point is absent) */}
+        {Number.isFinite(point) && (
+          <line
+            x1={X(point)}
+            x2={X(point)}
+            y1={PAD.top}
+            y2={PAD.top + plotH + 2}
+            stroke="var(--color-text-primary)"
+            strokeWidth={1.4}
+          />
+        )}
       </ResponsiveChartFrame>
     </div>
   );
+}
+
+/**
+ * The line under a no-variance histogram. "all resamples produced X" is true
+ * only when every resample has the metric (IN-01, review round 2). When some
+ * were dropped (no Sharpe or no Sortino, D7) it names how many the value rests
+ * on, and when none has it, it says so.
+ */
+function degenerateNote(title: string, nValid: number | undefined, nTotal: number | undefined, shown: string): string {
+  if (nValid == null || nTotal == null || nValid >= nTotal) return `all resamples produced ${shown}`;
+  if (nValid === 0) return `no resample has a ${title}`;
+  return `all ${nValid.toLocaleString()} of ${nTotal.toLocaleString()} resamples with a ${title} produced ${shown}`;
 }
 
 function Row({ label, point, ci }: { label: string; point: string; ci: string }) {

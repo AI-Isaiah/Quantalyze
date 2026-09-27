@@ -82,8 +82,12 @@ export function computeBiggestRisk(
   }
 
   // Rule 2: concentration risk — top contributor's risk share dwarfs its capital share.
-  const risk = analytics.risk_decomposition;
-  if (risk && risk.length > 0) {
+  // 166.1 D7: a row whose risk share does not exist (null) cannot be the
+  // concentrated one; only rows with a share are compared.
+  const risk = (analytics.risk_decomposition ?? []).flatMap((r) =>
+    r.marginal_risk_pct === null ? [] : [{ ...r, marginal_risk_pct: r.marginal_risk_pct }],
+  );
+  if (risk.length > 0) {
     const top = risk.reduce((max, r) =>
       r.marginal_risk_pct > max.marginal_risk_pct ? r : max,
     );

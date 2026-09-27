@@ -1,4 +1,5 @@
 import { annualizationPeriods, calendarYears } from "@/lib/closed-sets";
+import { sharpe as sharpeRatio } from "@/lib/return-stats";
 
 /**
  * Headline metrics for the dynamic OG factsheet card, extracted verbatim from
@@ -45,10 +46,10 @@ export function computeOgHeadline(
     // clock (elapsed days / 365.25) and is asset-class-invariant. Matches
     // compute.ts and metrics.py (TWR-05).
     const periodsPerYear = annualizationPeriods(assetClass);
-    const m = values.reduce((a, x) => a + x, 0) / values.length;
-    const v = values.reduce((a, x) => a + (x - m) ** 2, 0) / values.length;
-    const s = Math.sqrt(v);
-    sharpe = s > 0 ? (m * periodsPerYear) / (s * Math.sqrt(periodsPerYear)) : NaN;
+    // Population sd through the shared module: a residue sd (a compounding
+    // constant yield) is no dispersion, so the card hides the Sharpe exactly as
+    // for an all-zero series (Phase 166.1 D-07). NaN is the card's hide value.
+    sharpe = sharpeRatio(values, { periodsPerYear, ddof: 0 }) ?? NaN;
 
     let cum = 1;
     let peak = 1;

@@ -286,7 +286,10 @@ describe("computeAlphaBeta — periodsPerYear knob (#597 part 2)", () => {
   it("alpha scales by exactly 365/252 (alpha = excess·periodsPerYear)", () => {
     const at252 = computeAlphaBeta(r, b, 252);
     const at365 = computeAlphaBeta(r, b, 365);
-    expect(at365.alpha).toBeCloseTo(at252.alpha * (365 / 252), 12);
+    // A dispersing benchmark, so alpha exists at both bases (non-null asserted
+    // first: computeAlphaBeta returns null alpha only when beta is undefined).
+    expect(at252.alpha).not.toBeNull();
+    expect(at365.alpha).toBeCloseTo(at252.alpha! * (365 / 252), 12);
   });
 });
 
