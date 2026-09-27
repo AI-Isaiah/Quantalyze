@@ -225,9 +225,10 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     ).toBeDefined();
     // The table contains the strategy name link cells; once empty-watchlist
     // takes over, those links are gone.
-    expect(screen.queryByText("Alpha Stellar")).toBeNull();
-    expect(screen.queryByText("Beta Voyager")).toBeNull();
-    expect(screen.queryByText("Gamma Pioneer")).toBeNull();
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(screen.queryByRole("link", { name: "Alpha Stellar" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Beta Voyager" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Gamma Pioneer" })).toBeNull();
   });
 
   it("Case 6: scope='watchlist' with initialWatchedSet of 2 strategies renders only those 2", async () => {
@@ -244,9 +245,10 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
 
     // Table is still rendered (watchedSet is non-empty); only the two
     // starred strategies appear.
-    expect(screen.getByText("Alpha Stellar")).toBeDefined();
-    expect(screen.getByText("Beta Voyager")).toBeDefined();
-    expect(screen.queryByText("Gamma Pioneer")).toBeNull();
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(screen.getByRole("link", { name: "Alpha Stellar" })).toBeDefined();
+    expect(screen.getByRole("link", { name: "Beta Voyager" })).toBeDefined();
+    expect(screen.queryByRole("link", { name: "Gamma Pioneer" })).toBeNull();
     // EmptyWatchlist is NOT rendered when the set is non-empty.
     expect(screen.queryByText("Your watchlist is empty")).toBeNull();
   });
@@ -292,9 +294,10 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     render(
       <StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />,
     );
-    expect(screen.getByText("Alpha Stellar")).toBeDefined();
-    expect(screen.getByText("Beta Voyager")).toBeDefined();
-    expect(screen.getByText("Gamma Pioneer")).toBeDefined();
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(screen.getByRole("link", { name: "Alpha Stellar" })).toBeDefined();
+    expect(screen.getByRole("link", { name: "Beta Voyager" })).toBeDefined();
+    expect(screen.getByRole("link", { name: "Gamma Pioneer" })).toBeDefined();
   });
 
   it("Save preferences applies the new hide_examples value to the rendered table immediately", async () => {
@@ -321,10 +324,11 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     );
 
     // After hydration the example strategy is hidden (hide_examples=true).
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
     await waitFor(() => {
-      expect(screen.queryByText("Example Demo Strategy")).toBeNull();
+      expect(screen.queryByRole("link", { name: "Example Demo Strategy" })).toBeNull();
     });
-    expect(screen.getByText("Alpha Stellar")).toBeDefined();
+    expect(screen.getByRole("link", { name: "Alpha Stellar" })).toBeDefined();
 
     // Open the Customize drawer.
     fireEvent.click(
@@ -343,7 +347,8 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
 
     // The example strategy is now visible without a reload.
     await waitFor(() => {
-      expect(screen.getByText("Example Demo Strategy")).toBeDefined();
+      // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+      expect(screen.getByRole("link", { name: "Example Demo Strategy" })).toBeDefined();
     });
   });
 
@@ -650,7 +655,8 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
 
   it("the sticky first DATA column stays solid bg-surface and does NOT take the translucent row hover (Pitfall 5)", () => {
     render(<StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />);
-    const nameLink = screen.getByText("Alpha Stellar");
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    const nameLink = screen.getByRole("link", { name: "Alpha Stellar" });
     const firstCell = nameLink.closest("td");
     expect(firstCell).not.toBeNull();
     expect(firstCell!.className).toContain("sticky");
@@ -976,7 +982,8 @@ describe("StrategyTable — renders correctly on the RANK-02 projected row shape
         categorySlug="crypto-sma"
       />,
     );
-    expect(screen.getByText("Alpha Stellar")).toBeInTheDocument();
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(screen.getByRole("link", { name: "Alpha Stellar" })).toBeInTheDocument();
     // Each of these is a rendered cell fed by ONE projected column. Drop that
     // column from the projection and the cell degrades to "—" — the quiet
     // failure mode, since nothing throws. Asserted by VALUE for that reason.
@@ -1060,12 +1067,13 @@ describe("StrategyTable — RANK-02 3M filter reads the alias AND the blob", () 
 
     // 0.09 → 9%, inside 5–15. A row whose 3M read broke reads as 0% and is
     // dropped here, so each expectation names the branch it guards.
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
     expect(
-      screen.queryByText("Alias Only Row"),
+      screen.queryByRole("link", { name: "Alias Only Row" }),
       "the aliased three_month key must be read (anon /browse + /discovery)",
     ).toBeInTheDocument();
     expect(
-      screen.queryByText("Blob Only Row"),
+      screen.queryByRole("link", { name: "Blob Only Row" }),
       "the metrics_json fallback must be read (owner /my-strategies)",
     ).toBeInTheDocument();
   });
@@ -1077,8 +1085,9 @@ describe("StrategyTable — RANK-02 3M filter reads the alias AND the blob", () 
     // 9% > 5%, so both go. A broken read (0%) would satisfy `to: 5` and SURVIVE
     // — which is what makes this arm a real detector and not a restatement of
     // the arm above.
-    expect(screen.queryByText("Alias Only Row")).not.toBeInTheDocument();
-    expect(screen.queryByText("Blob Only Row")).not.toBeInTheDocument();
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(screen.queryByRole("link", { name: "Alias Only Row" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Blob Only Row" })).not.toBeInTheDocument();
   });
 });
 
