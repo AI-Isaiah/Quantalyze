@@ -2614,7 +2614,31 @@ export const FILES_FLOOR = 53;
 //    re-run at 508: the runner's own `bitingArms < armsFloor` comparison is
 //    unchanged and was separated at 507 against 506 in plan 05.
 //    WAIVED_CEILING stays 0 — no waiver was added.
-export const ARMS_FLOOR = 507;
+//
+// ⭐ RE-DERIVED 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01,
+//    founder decision D-11): 507 -> 509, TWO new arms, W-C39SIB and
+//    W-C39INTRO, in the ALREADY-ANNOTATED
+//    supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql
+//    (16 -> 18), so FILES_FLOOR stays 53. Their layered twins revert the
+//    5-arg throttle probe's allocator widening and re-add the intro carve-out
+//    in front of its strategy EXISTS (the literal-widening form), each with
+//    v_p5_probe_anchored stood down. MEASURED via ONE full lane run with no
+//    file edited during it, the constant still at 507: `scope: FULL 53/53
+//    annotated files`, `coverage: files 53/80`, `arms: 509/509/0`, `biting:
+//    509`, `lane-invocations: 509` (the two independent tallies AGREE, plus 53
+//    baseline / 53 restore legs), `lane-blocked: 0 file(s)`, `lane-probe:
+//    pg_cron AVAILABLE`, `unreachable: 27 file(s)`, `per-arm lane time: mean
+//    1.2s over 509 arm run(s)`, `✅ No defects. Every annotated arm bit its own
+//    arm first.`, exit 0. Per-file line:
+//    `test_claim_compute_jobs_failed_retry_pending_pair.sql: sections 12 /
+//    judged 18 / annotated 18 / waived 0 / biting 18`.
+//    Stale-low direction OBSERVED at 507: src/__tests__/mutation-runner-floors.test.ts
+//    FAILS with `The corpus declares 509 twin(s) of which 0 are waivers, so a
+//    green run bites 509. ARMS_FLOOR is 507.` The too-high direction was NOT
+//    re-run at 510: the runner's own `bitingArms < armsFloor` comparison is
+//    unchanged and was separated at 507 against 506 in plan 05.
+//    WAIVED_CEILING stays 0 — no waiver was added.
+export const ARMS_FLOOR = 509;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
