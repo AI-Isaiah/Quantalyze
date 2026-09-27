@@ -183,6 +183,10 @@ Phase: 164.9.3 (CLAIMPAIR) — EXECUTING
 Plan: 6 of 6 (01 done: the CLAIMPAIR gate, pre-fix census 14 arms RED with 23505, W-INTRO GREEN; 02 done: the pre-rank exclusion migration, all 15 arms GREEN on the replayed local-stack lane; 03 done: D-09 lane proof, corpus 78 of 78 on the replayed local-stack lane, the gate green on the pg-lane from its own SETUP list; 04 done: all 15 arms bite on the pg-lane through layered twins, runner biting 15; snapshots regenerated; three VAC-04 acks earned; 05 done: FILES_FLOOR 52 -> 53 and ARMS_FLOOR 491 -> 506 from one full run, coverage 53/80, separated in both directions, every census pin moved to its measured value; 06 done: origin/main merged again with the migration still sorting last, TODOS [164.9.3-CLAIM-PAIR-23505] closed, CHANGELOG [0.108.0.0] with VERSION/package.json at 0.108.0.0, SC3 record opened with three PENDING reviewer rows)
 Phase: 169.2 (BENCHFRESH) — EXECUTING
 Plan: 1 of 3
+Phase: 166.4 (BENCHALIGN) — EXECUTING
+Plan: 1 of 4
+Phase: 166.4 (BENCHALIGN) — PLANNED 2026-09-27 (4 plans, 4 waves; on branch feat/166.4-benchalign)
+Plan: 0 of 4
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
 Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING

@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.108.0.0] - 2026-09-27 — CLAIMPAIR: a failed_retry job beside a pending twin no longer makes every claim raise 23505
+## [0.109.0.0] - 2026-09-27 — CLAIMPAIR: a failed_retry job beside a pending twin no longer makes every claim raise 23505
 
 ⭐ **What changed for whoever reads this next.** A `failed_retry` compute job and a `pending` twin
 of the same `(kind, partition key)` used to make every claim entry point raise `23505` on a
@@ -16,8 +16,10 @@ allocator), in ONE forward migration (`TODOS.md` `[164.9.3-CLAIM-PAIR-23505]`, n
 `20260927120000_claim_pair_pre_rank_exclusion.sql` **auto-applies to TEST and then PROD on merge,
 with no human gate** (the `Production` reviewer was removed 2026-09-23). ROADMAP success
 criterion 3 therefore needs migration-reviewer, rls-policy-auditor and silent-failure-hunter to
-review it BEFORE the merge. Their verdicts are recorded in the phase's
-`164.9.3-MIGRATION-REVIEW.md`, which this release opens with all three rows PENDING.
+review it BEFORE the merge. All three reviewed it over three rounds, and the last round, on the
+round-3 fix, found no CRITICAL, HIGH or MEDIUM issue. Their verdicts are in the phase's
+`164.9.3-MIGRATION-REVIEW.md`. Before the merge the founder kept the probe-exclusion amendment to
+D-04 and chose to fix the round-2 C39 finding in this phase (D-11) rather than route it.
 
 ### Fixed
 - **The claim drops the retry BEFORE ranking** (plans 01-02, founder-ratified decision D-08). In
@@ -52,13 +54,14 @@ review it BEFORE the merge. Their verdicts are recorded in the phase's
   D-11). The probe still counted a due `normal`/`high` `failed_retry` beside a `running` or
   `done_pending_children` row of the same `(kind, partition)`, which C39 drops in `deduped`, so
   every due `low` job was throttled while nothing claimed the retry. Beside a fan-in
-  `done_pending_children` row whose parent is `low`, the throttle held that parent too, so the
-  hold never ended. Inside the marked probe blocks of both overloads, the portfolio, allocator and
+  `done_pending_children` row whose parent is `low`, the throttle would hold that parent too, so
+  the hold would never end. That consequence is reasoned, not measured. It is also latent twice
+  over: no caller passes `p_parent_job_ids` and no writer sets `low`. Inside the marked probe blocks of both overloads, the portfolio, allocator and
   api_key sibling tests now read `p.status IN ('pending', 'running', 'done_pending_children')`.
   The strategy test takes a split form: a `running` or `done_pending_children` sibling excludes
   regardless of kind, as C39's strategy clause does, and the `compute_intro_snapshot` carve-out
-  gates the `pending` sibling only. So the probe skips exactly the rows no claim body takes this
-  tick. Widening the strategy test literally would have left an intro retry beside a running
+  gates the `pending` sibling only. So the probe skips exactly the `failed_retry` rows no claim
+  body takes this tick (see Notes, IN-11). Widening the strategy test literally would have left an intro retry beside a running
   intro sibling counted; the arm W-C39INTRO tells the two forms apart. The apply-time anchor pins
   the new shape, and its failure text no longer names a single cause.
 - **An apply-time `DO $verify$` block that reads catalogs only.** It pins each pre-rank clause
@@ -92,8 +95,10 @@ review it BEFORE the merge. Their verdicts are recorded in the phase's
   W-INTRO was GREEN. W-LOWTWIN was written and run before the probe fix: RED with no error and 0
   of its 3 rows claimed. W-C39SIB and W-C39INTRO were written and run before the round-3 widening:
   each RED with no error, the unrelated `low` job and the retry each claimed 0 times. After the
-  fixes, all 18 arms are green in CI mode. Each partition arm also fails if the unrelated job is not claimed or the retry is claimed
-  in that tick, so a silent-wedge "fix" still reads red. Parents are seeded as real rows, because
+  fixes, all 18 arms are green in CI mode. Each partition arm also fails if the unrelated job is
+  not claimed or the retry is claimed in that tick, so a silent-wedge "fix" still reads red.
+  Review round 1 made each arm's failure text name the SQLSTATE it actually caught, so the text
+  no longer claims a 23505 for every error. Parents are seeded as real rows, because
   the claim's own UPDATE re-checks the foreign keys of rows inserted in the same transaction.
 - **D-09 lane proof, with no remote database touched** (plan 03). A fresh local-stack lane
   replayed the migration on top of the dump, and the whole non-LANE-ONLY `supabase/tests` corpus
@@ -145,10 +150,168 @@ review it BEFORE the merge. Their verdicts are recorded in the phase's
 - ⚠️ **Red on the PR by construction:** VAC-08 (`test-db-drift`) and the baseline-currency check
   stay red until apply-on-merge and the re-dump bot's baseline PR. This is expected and is not a
   verdict on the change.
-- **Phase artifacts.** The phase's context, research, patterns, validation, six plans and their
-  summaries, the D-08 ratification, STATE and ROADMAP progress, and the SC3 review record are
-  under `.planning/`. Two integration merges of `origin/main` carry no change of their own (the
-  first resolved a STATE-only conflict, the second brought a docs-only ROADMAP routing commit).
+- **Phase artifacts.** The following are under `.planning/`:
+  - the phase's context, research, patterns and validation, and the six plans and their summaries;
+  - the D-08 ratification and the 2026-09-27 founder decisions (the D-04 amendment kept, and D-11);
+  - three code-review rounds with their fix reports;
+  - the SC3 migration-review record for all three rounds;
+  - the security verification;
+  - the phase verification (`passed` once both founder items were resolved), its UAT record, and
+    STATE and ROADMAP progress.
+- **Integration merges and version.** Three integration merges of `origin/main` carry no change of
+  their own. The first resolved a STATE-only conflict. The second brought a docs-only ROADMAP
+  routing commit. The third brought Phase 166.4 BENCHALIGN, which shipped as `0.108.0.0` first, so
+  this entry, first written as `0.108.0.0`, ships as `0.109.0.0`. It is still a minor bump,
+  because the claim path's behaviour on PROD changes.
+
+## [0.108.0.0] - 2026-09-27 — BENCHALIGN: a sparser-calendar strategy is compared to BTC over the same holding interval, in every benchmark-relative metric (review rounds folded in)
+
+⭐ **What changed for whoever reads this next.** Phase 166.4 BENCHALIGN (founder decision D-A)
+pairs each strategy return with BTC's return over the SAME holding interval. A weekday strategy's
+Monday return is now paired with BTC's Friday-to-Monday move, not its Sunday-to-Monday move. One
+pairing, `_benchmark_pair` in `analytics-service/services/metrics.py`, now feeds alpha, beta,
+correlation, information ratio, Treynor, r_squared, the 90-day rolling correlation and the rolling
+alpha/beta, so r_squared equals correlation squared again. An interval without a BTC close at both
+ends, or with a BTC date missing inside it, is left unpaired, never back- or forward-filled.
+
+⚠️ **This is a minor bump because values users can see change, on purpose.** Measured by running
+the phase-base engine (merge base `8eafe105`) and the release engine side by side on the same
+committed fixtures:
+
+| fixture | metric | before | after |
+|---|---|---|---|
+| SC3 weekday strategy vs 7-day BTC (`_q166_calendar_mismatch`) | beta | +0.012560995909126458 | **−0.0074239186416205985** (sign flip) |
+| same | alpha | 0.13859455190461534 | 0.13883648147122388 |
+| same | correlation | 0.03145618628996794 | −0.022291552331747115 |
+| same | treynor | 10.244913675949753 | −17.334015226339694 |
+| same | r_squared | 0.0005305518445182663 | 0.0004969133053590204 |
+| M1's test fixture (daily strategy vs business-day benchmark) | alpha | −0.37475915258336256 | −0.3258865239753311 |
+| same | beta | 0.04181777191266626 | −0.013651163018416783 |
+
+⛔ **No PRODUCTION row was recomputed, and this release carries no migration.** A stored value
+changes only on that strategy's next compute. Phase 166.3 RECOMPUTE owns the recompute and may
+resume once this merges and the worker is deployed, with the widened set recorded in its
+`### Phase 166.3` ROADMAP section: every benchmarked strategy (166.4 D-06).
+
+### Root cause
+- **M1 `d16b2fb4c` (v0.24.9.31, #323, 2026-05-27) split the pairing.** It moved alpha and beta
+  onto a daily inner join, which pairs a weekday strategy's Monday return with BTC's
+  Sunday-to-Monday move. r_squared kept a back-filled reindex, which zero-filled the first
+  benchmark point. So beta could flip sign while r_squared did not move. Phase 166 reproduced M1's
+  pairing exactly; it did not cause it. Phase 166.3's tracer recompute (R1) surfaced it.
+
+### Fixed
+- **One interval-matched benchmark pair for the scalar fan-out** (`0f8fd291f`, red-first in
+  `cdbd84072`). `_interval_matched_benchmark` returns, per strategy date, BTC's return over
+  (t_{k-1}, t_k]: a single return verbatim, several compounded, unpaired when either endpoint has
+  no close. `compute_all_metrics` builds `_benchmark_pair` once and feeds it to alpha, beta,
+  correlation, information ratio and Treynor.
+- **The rolling greeks, the rolling correlation and r_squared read the same pair; the fill arms
+  are retired; a sparse-calendar predicate is public** (`4a55d4ba9`, red-first in `4bc1f75cd`).
+  `_rolling_alpha_beta`, `_r_squared` and `_r_squared_pair_varies` read `_benchmark_pair`.
+  `_align_benchmark_like_qs` keeps only its equal-index path and raises a ValueError naming 166.4
+  D-A on an unequal pair, so a caller that skips the pairing fails loud. Phase 166's "the reindex
+  branch is kept on purpose" rationale is superseded by D-A (166.4 D-01). A naive strategy against
+  a zone-aware benchmark now degrades inside `compute_all_metrics` instead of raising from the
+  rolling leg. `strategy_calendar_is_sparse` is the predicate Phase 166.3 selects on (166.4 D-03).
+- **A BTC date missing inside a multi-day interval now unpairs that interval** (`d1d1fc077`,
+  review round 1 WR-01, red-first). Before this, a weekday strategy's Friday-to-Monday interval
+  was still paired when BTC's Saturday return row was missing, and the missing day's move was
+  silently dropped, which is a fill across a gap that D-A forbids. The production shape that
+  reaches it is one NaN BTC close, which `prices_to_returns` turns into two dropped return rows.
+  The helper now pairs an interval only when every date of the benchmark's own calendar inside it
+  carries a return; it infers that calendar from the weekdays the benchmark carries (all seven for
+  BTC, Monday to Friday for a business-day series), so business-day pairs keep their Mondays and
+  SC4 dense parity is unchanged.
+- **A strategy return of plus or minus infinity is read as a missing value once, in
+  `_benchmark_pair`** (`a4cbd5969`, review round 1 WR-02). `_r_squared` and
+  `_r_squared_pair_varies` used to drop that row while alpha, beta, correlation and information
+  ratio did not, so r_squared could be defined while correlation was not. Now every benchmark
+  metric drops the same row, and r_squared equals correlation squared on that input too.
+
+### Changed
+- **Sparse user-CSV strategies:** every benchmark-relative metric moves on the next compute.
+  Only a user-CSV series can have a sparse calendar in production.
+- **Dense strategies:** alpha, beta, correlation, information ratio, Treynor and the rolling
+  series are bit-identical, pinned by the SC4 parity test on four dense shapes. r_squared moves on
+  EVERY benchmarked row, by construction (166.4 D-06): the old value zero-filled the first
+  benchmark point. Measured on base commit `c1b4bc062` against the release engine, on two committed
+  synthetic dense fixtures: 0.00010582832055343811 → 5.812609307917895e-05 and
+  0.001937851398314801 → 0.0019729955639240094, with correlation and beta unchanged in both.
+- **Single-key broker and `stitch_composite` paths (SC5):** both hand the engine a dense series, so
+  nothing but r_squared moves. The single-key broker cash basis carries no benchmark. The
+  `stitch_composite` cash basis is benchmarked, zero_fill-densified and dense, so the same dense
+  statement covers it. When BTC itself has a gap (the stale-fallback path), the day after the gap
+  is now unpaired instead of paired with a two-day BTC move.
+- **Sparse strategies across a BTC gap (`d1d1fc077`):** a sparse interval that spans any missing
+  BTC date is now unpaired. That includes a missing BTC PRICE row, whose next return used to
+  telescope correctly across the gap; the helper receives returns, so it cannot tell a missing
+  price from a missing return and treats both as a gap. The full 7-day BTC series production
+  serves has no such gap in the normal case.
+- **Strategies with a plus or minus infinity return (`a4cbd5969`):** alpha, beta, correlation and
+  information ratio are now computed on the remaining rows instead of being absent, matching
+  r_squared. The headline metrics (CAGR, volatility, Sharpe) on such a series are still absent.
+- **Phase 166.3's ROADMAP section carries the handoff** (`a57e81c32`): the sparse subset named by
+  `strategy_calendar_is_sparse`, the widened recompute set (every benchmarked strategy, every
+  class), two read-only counts-only queries for the founder, R1 re-entering the set, and the resume
+  condition.
+
+### Tests
+- **New `analytics-service/tests/test_benchalign.py` and `tests/benchalign_fixtures.py`**
+  (`cdbd84072`, `4bc1f75cd`, `77cd87bdb`, `42a4bb1bd`, `6d15ed80a`). They cover the SC3
+  Friday-to-Monday beta, the one-pairing checks (r_squared equals correlation squared, the rolling
+  greeks and rolling correlation are computed on the interval pair), the zone-degrade test, the D-04,
+  D-05 and D-07 conventions, the sparse predicate, SC4 dense parity, the SC5 broker_nan and
+  zero_fill paths through `derive_basis_series`, the D-06 r_squared move, and the SC2 gap tests (an
+  absent, NaN or infinite interior close unpairs both adjacent intervals).
+- **Review-round tests** (`d1d1fc077`, `a4cbd5969`):
+  `test_benchalign_gap_missing_row_inside_a_weekday_interval_unpairs_it` (a missing BTC row
+  strictly inside a weekday interval unpairs exactly that interval; every other pair matches a
+  price-ratio oracle), and a plus-infinity and a minus-infinity case added to the r_squared equals
+  correlation squared test. All three went RED on the pre-fix engine.
+- **Four existing tests re-expressed, exactly the four the research predicted:** M1's
+  `test_benchmark_metrics_share_single_aligned_sample_on_calendar_mismatch` keeps its intent
+  assertions with its oracle rebuilt on the shared pair (166.4 D-04); the greeks parity
+  `calendar_mismatch` case moved to the SC3 test; and the two r_squared parity cases are
+  re-anchored on correlation squared. `tests/qstats_gate.py`'s mirrored reason strings name the
+  166.4 D-A pair. The golden 252-day parity file is unedited and green.
+- **Neuters N1-N7 each went RED and were restored byte-identical:** the pre-166.4 inner join
+  (N1), the t_{k-1} close check (N2), the D-05 index-0 block (N3, N7), a zero-fill in
+  `_r_squared` (N4), the sparse predicate (N5) and the D-07 base close (N6).
+- Full analytics suite: 7093 passed, 90 skipped, 0 failed. mypy with CI's exact line: no issues.
+
+### Notes
+- **D-04, D-05, D-06 and D-07 were ratified by the founder on 2026-09-27** (`cfc2c18b5`). D-04:
+  the both-endpoints rule also applies when BTC is the sparser leg, so a daily strategy's Monday
+  against a business-day benchmark is unpaired. D-05: the first strategy date pairs with BTC's
+  return dated that day, so a sparse series that starts on a Monday gets one daily-shaped first
+  pair; Phase 169.5 BENCHCOMPARE adopts this day-one rule before it executes. D-06: Phase 166.3
+  recomputes every benchmarked strategy, so stored r_squared agrees with correlation squared
+  everywhere. D-07: BTC's base close is the day before its first stored return, so a dense
+  strategy older than the BTC window keeps its first in-window pair; it assumes the stored BTC
+  series is contiguous (research assumption A1).
+- **Two review rounds, then verification and security** (`a7bc6da79`, `75930bc21`, `623d801cd`,
+  `501435fcc`). Round 1 found two warnings, fixed in `d1d1fc077` and `a4cbd5969`, with
+  `288cc5019` updating the D-02 cross-citation in the helper and test module docstrings. Round 2,
+  and the silent-failure review run beside each round, found no HIGH or CRITICAL. Two round-2
+  warnings are recorded rather than fixed, because production does not reach either: the benchmark
+  calendar is inferred from the weekdays present rather than declared (a weekday-only slice of BTC
+  would still get the Sunday-to-Monday pairing; production always passes the full 7-day series),
+  and a pair whose two legs share a zone like Europe/London that crosses UTC midnight between
+  seasons loses intervals silently. Verification passed 7 of 7 success criteria; the security audit
+  closed 15 of 15 threats.
+- **The Python and TypeScript pairings now differ in two places** (`288cc5019`): the D-05 index-0
+  rule and the interior-gap rule above. Phase 169.5 BENCHCOMPARE decides whether to adopt the
+  interior-gap rule as well.
+- **Planning and tracking commits:** phase context, research, pattern map and plans
+  (`e37a4ddea`, `5b322f435`, `b19f25b3e`, `b96c076cc`); the plan summaries (`5050a0108`,
+  `130c0d2c1`, `d0f8ef169`, `4e6e50f27`, `718efbd77`); and the orchestrator's tracking updates
+  after waves 1 to 4 (`fe267ed9e`, `bc16d1d58`, `daccc1035`, `92b345157`). `c1b4bc062` and
+  `e286f427e` merge `origin/main` into the branch and carry no change of their own. `ec8a1420e`
+  was the first release commit; this entry replaces it.
+- **Same-class sites found outside this phase's scope,** each read from `.planning/ROADMAP.md` and `TODOS.md` on 2026-09-27:
+  - `analytics-service/routers/portfolio.py` `benchmark_comparison` (an inner-join correlation, and BTC's own TWR drops weekend moves): routed to Phase 166.4.1
+  - `src/app/(dashboard)/allocations/lib/scenario-benchmark.ts` `innerJoinByDate` (the allocations scenario benchmark): routed to Phase 169.4
 
 ## [0.107.1.0] - 2026-09-27 — APPURL guard: a Production build refuses a non-canonical NEXT_PUBLIC_APP_URL
 

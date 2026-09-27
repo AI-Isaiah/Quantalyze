@@ -136,7 +136,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
 - [ ] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — planned (1 plan); HALTED 2026-09-27 at Task 3; resumes after Phase 166.4 ships
-- [ ] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — not yet planned; data integrity, ahead of features
+- [ ] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [ ] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed
 - [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
@@ -3618,12 +3618,53 @@ Plans:
 
 ⛔ **HALTED 2026-09-27 at Task 3 (see `166.3-01-SUMMARY.md` in this phase's directory, on branch `feat/166.3-recompute`).** The tracer recompute (R1) failed A2c: its beta changed sign and its treynor moved, while its r² did not. The cause is not Phase 166. It is the M1 alignment change (`d16b2fb4c`, v0.24.9.31, #323), reproduced locally. R2..R6 were NOT enqueued: rows computed before the M1 deploy still hold the pre-M1 beta, and recomputing them on today's code would degrade them. **Resumes after Phase 166.4 BENCHALIGN ships** (founder decision D-B, 2026-09-27), with its recompute set WIDENED to every sparse-calendar strategy computed since the M1 deploy (2026-05-27). R1 is a private row and must be recomputed again after the fix.
 
+⭐ **HANDOFF FROM PHASE 166.4 BENCHALIGN, 2026-09-27 (founder D-B; 166.4 D-03; 166.4 D-06 ratified by the founder 2026-09-27).** Phase 166.4 fixes the pairing this phase halted on. Every benchmark-relative metric (alpha, beta, correlation, information ratio, Treynor, r_squared, the 90-day rolling correlation and the rolling alpha/beta) now pairs each strategy return with BTC's return over the SAME holding interval, compounded from the strategy's previous date to its current one. An interval without a BTC close at both ends is left unpaired, never filled (166.4 D-A). What this phase needs in order to resume:
+
+- **The recompute set, in two layers.** (1) The SPARSE subset (D-B): every user-CSV strategy whose stored series has a sparse calendar and whose benchmark-bearing row was computed on or after the M1 deploy (2026-05-27). These are the rows whose beta, alpha and correlation also move, together with information ratio, Treynor, the rolling series and r_squared. "Sparse calendar" is the engine's own predicate `strategy_calendar_is_sparse` in `analytics-service/services/metrics.py`: some two consecutive strategy dates are more than one calendar day apart. Broker and composite series are densified before compute and cannot be sparse (166.4 SC5). (2) The WIDENED set (166.4 D-06), which is the whole recompute scope: per the founder's 2026-09-27 ratification of D-06 ("recompute all benchmarked strategies"), this phase recomputes EVERY benchmarked strategy, dense rows included, in every class (`user_csv`, `single_key_broker`, `composite`), so that stored r_squared agrees with correlation squared everywhere. On a dense row only r_squared moves; alpha, beta, correlation, information ratio, Treynor and the rolling series stay bit-identical (166.4 SC4). Measured on two committed synthetic dense fixtures, base commit `c1b4bc062` against the fixed engine (166.4-02-SUMMARY): r_squared 0.00010582832055343811 → 5.812609307917895e-05 and 0.001937851398314801 → 0.0019729955639240094, with correlation and beta unchanged in both. This CLOSES the dense-r_squared open question the 166.4 plans had recorded.
+- **No version stamp to select on.** `strategy_analytics` carries no engine or version stamp, and `computed_at` is re-stamped on every job transition, so `computed_at >= 2026-05-27` is a lower bound that over-includes. That is harmless once the fix is deployed: recomputing any benchmarked row yields the correct value. The widened set needs no date bound.
+- **Two read-only, counts-only queries.** The founder runs them (read-only; run the which-database marker query from CLAUDE.md first; never through the repo's linked CLI for any write). The first counts the sparse subset, the second the widened set by class.
+
+```sql
+-- READ-ONLY. user_csv strategies whose stored series has a >1-day gap, with a benchmark-bearing row.
+SELECT count(*)
+  FROM public.strategies s
+  JOIN public.strategy_analytics sa ON sa.strategy_id = s.id
+ WHERE NOT EXISTS (SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy_id = s.id)
+   AND s.api_key_id IS NULL
+   AND sa.computed_at >= TIMESTAMPTZ '2026-05-27 00:00:00+00'
+   AND jsonb_typeof(sa.metrics_json->'beta') = 'number'
+   AND EXISTS (
+     SELECT 1 FROM (
+       SELECT c.date - lag(c.date) OVER (ORDER BY c.date) AS gap_days
+         FROM public.csv_daily_returns c WHERE c.strategy_id = s.id
+     ) g WHERE g.gap_days > 1);
+```
+
+```sql
+-- READ-ONLY. Every strategy with a benchmark-bearing analytics row (166.4 D-06: the whole recompute set), by class.
+SELECT CASE WHEN EXISTS (SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy_id = s.id)
+            THEN 'composite'
+            WHEN s.api_key_id IS NOT NULL THEN 'single_key_broker'
+            ELSE 'user_csv' END AS class,
+       count(*)
+  FROM public.strategies s
+  JOIN public.strategy_analytics sa ON sa.strategy_id = s.id
+ WHERE jsonb_typeof(sa.metrics_json->'beta') = 'number'
+    OR jsonb_typeof(sa.metrics_json->'r_squared') = 'number'
+ GROUP BY 1
+ ORDER BY 1;
+```
+
+- **R1 re-enters the set.** Its stored beta is the M1-era value, so it must be recomputed again after the fix is deployed.
+- **Resume condition.** Phase 166.3 may resume after Phase 166.4 merges and its worker is deployed.
+- **Ratified the same day.** The founder also ratified 166.4 D-04 (the both-endpoints rule applies when BTC is the sparser leg too), D-05 (the first strategy date pairs with BTC's same-day return) and D-07 (BTC's base close is the day before its first stored return) on 2026-09-27. Phase 169.5 BENCHCOMPARE adopts D-05's day-one rule before it executes.
+
 ### Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric (INSERTED)
 
 **Goal:** For a strategy whose date index is sparser than BTC's 7-day calendar (for example weekday-only), every benchmark-relative metric pairs each strategy return with the BTC return over the SAME holding interval, so alpha, beta, correlation, information ratio, Treynor, r² and the rolling greeks and correlation describe the strategy's real co-movement with BTC, and r² equals correlation² again.
 **Requirements**: TBD (criteria below)
 **Depends on:** nothing. **Priority:** data integrity, ahead of features (founder priority rule, 2026-09-27).
-**Plans:** 0 plans
+**Plans:** 4/4 plans executed in 4 waves, linear (planned 2026-09-27; plan-check 3 rounds, 0 blockers). Decisions in `166.4-CONTEXT.md`: D-A, D-B (founder), D-01 to D-07 (orchestrator; D-04 to D-07 were orchestrator readings, ratified by the founder 2026-09-27). No migration.
 
 **Evidence (orchestrator, 2026-09-27; the reproduction was re-run locally against main-level code; counts and verdicts only):**
 
@@ -3651,7 +3692,10 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 166.4 to break down)
+- [x] 166.4-01-PLAN.md — W1 engine: one interval-matched pair feeds every benchmark-relative metric; red-first Fri→Mon beta; r² on the shared pair; the fill arm retired; sparse-calendar predicate (SC1, SC2, SC3, SC7)
+- [x] 166.4-02-PLAN.md — W2 dense parity and the broker and stitch_composite trace, tests only (SC4, SC5)
+- [x] 166.4-03-PLAN.md — W3 gap tests and the neuters, tests only (SC1, SC2)
+- [x] 166.4-04-PLAN.md — W4 the Phase 166.3 handoff paragraph and the release entry naming M1 (SC5, SC6, SC7)
 
 ### Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly (INSERTED)
 
@@ -4345,7 +4389,7 @@ kept verbatim.
 | 166.1.1 DDSIGN | 0/? | Queued — feature | - |
 | 166.2 COMPUTEONCE | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.102.0.0 · #874 |
 | 166.3 RECOMPUTE | 0/1 | HALTED 2026-09-27 at Task 3 — resumes after 166.4 ships | - |
-| 166.4 BENCHALIGN | 0/? | Queued — data integrity | - |
+| 166.4 BENCHALIGN | 4/4 | Executed — review and verification pending | - |
 | 166.4.1 PORTFOLIOANALYTICS | 0/? | Queued — data integrity | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.89.0.0 · #852 |
