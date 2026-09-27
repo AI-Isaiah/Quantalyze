@@ -2084,7 +2084,11 @@ function ControlBar({
   };
   return (
     <section className="factsheet-v2-no-print mt-6 flex flex-wrap items-center justify-start lg:justify-end gap-x-3 sm:gap-x-6 gap-y-3 border-b border-border pb-3">
-      {leverageEligible && (
+      {/* Phase 167.1.2 plan 07: never inside the composer (scenarioMode). Its
+          payload now carries periodsPerYear, which makes it leverage-eligible,
+          but the composer already levers each constituent, and a whole-blend
+          multiplier on top would lever the blend a second time. */}
+      {!scenarioMode && leverageEligible && (
         <div className="mr-auto flex flex-col items-start gap-1">
           <div className="flex items-center gap-2">
             <label

@@ -135,10 +135,14 @@ function v5SingleKey(): FactsheetPayload {
 
 // v4-shaped single-key (no periodsPerYear) — fail-closed: control hidden.
 function v4SingleKey(): FactsheetPayload {
-  return buildScenarioFactsheetPayload({
+  // Phase 167.1.2 plan 07: the scenario builder now CARRIES periodsPerYear, so
+  // the stale-v4 shape (no basis) is made by omitting the key explicitly.
+  const { periodsPerYear: _omit, ...v4 } = buildScenarioFactsheetPayload({
     portfolioDaily: makeReturnsSeries(300),
     benchmark: null,
   });
+  void _omit;
+  return v4 as FactsheetPayload;
 }
 
 const MTM_SCALARS = {
@@ -295,10 +299,14 @@ function v4Composite(): FactsheetPayload {
   } as unknown as FactsheetPayload;
 }
 
+// Phase 167.1.2 plan 07: mounted WITHOUT scenarioMode. The leverage input is
+// the real factsheet's control and ControlBar now hides it in scenarioMode (the
+// composer levers each constituent itself), so these arms render the surface
+// the control actually lives on.
 function renderBody(payload: FactsheetPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+      <FactsheetBody payload={payload} hideAllocatorSection />
     </FactsheetProvider>,
   );
 }

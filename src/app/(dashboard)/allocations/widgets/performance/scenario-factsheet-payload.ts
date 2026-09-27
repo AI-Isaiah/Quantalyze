@@ -517,5 +517,10 @@ export function buildScenarioFactsheetPayload(
     correlationMatrix: { labels: [], matrix: [] },
     stressWindows: body.stressWindows,
     quantiles: body.quantiles,
+    // Phase 167.1.2 plan 07 (W2) — the SAME basis every compute() call above
+    // used (the resolved arg, 252 by default; not a new default). MetricsColumn
+    // hides its observation warning on a payload with no basis, so dropping it
+    // here would blank a warning this surface has a basis for.
+    periodsPerYear,
   };
 }
