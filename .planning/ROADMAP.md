@@ -3883,8 +3883,9 @@ Plans:
 2. The Allocations Risk tab and the Overview / Scenario tabs read VaR, alpha/beta and correlation from the same series; one never says "insufficient data" while another shows a value.
 3. The BTC benchmark is current: MTD and 3-month returns, win rate, volatility and drawdown come from a benchmark series that is refreshed, and a stale benchmark is shown as stale rather than as +0.00%.
 9. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and each page is re-checked in the logged-in browser after deploy.
+11. A BTC return that spans a missing stored day is not stamped as one day's move: the allocator's consumers build the cumulative BTC overlay from closes (or levels) and the inner-joined metrics from exactly-one-day returns, with a test for each across a missing day. Routed here 2026-09-27 by Phase 169.2 D-47 (review round 3 WR-01) as TODOS `[169.2-BTC-GAP-RETURN-STAMP]`. `pricesToDailyReturns` in `src/lib/factsheet/benchmark-source.ts` still bridges such a gap into one return at the later date, because 169.2's skip-every-gap attempt made the overlay drift and was reverted.
 
-*(Moved from Phase 169 on 2026-09-26, verbatim with their original numbers, D-37.)*
+*(Moved from Phase 169 on 2026-09-26, verbatim with their original numbers, D-37.)* *(Criterion 11 is new, added 2026-09-27; it is numbered past the highest id any 169.x phase uses, so it collides with none.)*
 
 **Plans:** 3 plans in 2 waves, one PR (split 2026-09-26, D-37): W1 169.4-01 RISKTAB, 169.4-02 ALLOCBENCH; W2 169.4-03 integration run + post-deploy browser re-check. Decisions carried in `169.4-CONTEXT.md`; no migration.
 
