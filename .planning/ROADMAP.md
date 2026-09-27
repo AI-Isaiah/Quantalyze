@@ -3290,7 +3290,7 @@ Plans:
 
 **Wave 4** *(blocked on plan 06)*
 
-- [ ] 164.9.3.2-07-PLAN.md — TODOS entry landed then closed, ENQ-SCOPE recorded in this ROADMAP entry, release commit, push (lane: none)
+- [ ] 164.9.3.2-07-PLAN.md — TODOS entry landed then closed, ENQ-SCOPE recorded in this ROADMAP entry, release commit; no push, /gsd-ship pushes after the worktree merge-back (lane: none)
 
 **Wave 5** *(blocked on plan 07)*
 
