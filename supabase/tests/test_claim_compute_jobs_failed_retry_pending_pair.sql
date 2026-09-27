@@ -68,29 +68,47 @@
 --   * No completion sentinel is declared, and there is no LANE-ONLY marker:
 --     the file uses no dblink and runs in sql-tests as well as on the pg-lane.
 --
--- ARMS (file order is this order):
+-- ARMS (file order is this order). Every arm carries a LAYERED RED-UNDER-M
+-- twin in its own section banner: a production edit to ONE body of the phase
+-- migration plus the stand-down (`IF FALSE AND NOT ...`) of the migration's
+-- own self-verify anchor that edit breaks, or its DO block would abort the
+-- apply. One body and one partition per twin is what keeps every arm above
+-- a twin's own arm green, so its first raise is its own.
 --   C-KEY, C-PF, C-ST, C-AL   claim_compute_jobs, one arm per partition
 --                             (api_key, portfolio, strategy, allocator).
+--                             Twin: that partition's pre-rank clause made
+--                             always true (`OR TRUE`) in claim_compute_jobs
+--                             (match 1 of 3) + v_ccj_<partition>_anchored.
 --   P5-KEY, P5-PF, P5-ST, P5-AL
 --                             the 5-arg priority overload, same four arms,
 --                             called in the 3-argument named-default form the
---                             dedupe gate uses.
+--                             dedupe gate uses. Twin: the same `OR TRUE` edit
+--                             in the 5-arg body (match 2 of 3) +
+--                             v_p5_<partition>_anchored.
 --   W-LOST    5-arg, allocator partition, the booked repro shape: the twin is
 --             due 10 minutes in the FUTURE. Tick 1 claims the unrelated job
 --             and not the retry; the twin is made due and tick 2 claims it;
 --             the twin is set done and tick 3 claims the retry. No work lost.
+--             Twin: the 5-arg allocator clause's sibling test widened to
+--             IN ('pending', 'done'), so tick 3 never claims the retry.
 --   W-INTRO   5-arg, strategy partition: two pending and one due failed_retry
 --             compute_intro_snapshot rows on one strategy are all claimed in
 --             one tick. ⚠️ A REGRESSION ARM, NOT A RED-FIRST ARM: it is GREEN
 --             on the pre-fix tree by design (CONTEXT D-02: an arm green on
 --             today's tree is not a red-first arm). It exists to refuse a
 --             post-rank guard that starves the intro carve-out (CONTEXT D-08,
---             measured 0 of 3 claimed under that guard).
+--             measured 0 of 3 claimed under that guard). Twin: the
+--             `OR kind = 'compute_intro_snapshot'` carve-out deleted from
+--             the 5-arg strategy clause (2 of 3 claimed).
 --   P2-KEY, P2-PF, P2-ST, P2-AL
 --                             the 2-arg priority overload, same four arms.
+--                             Twin: the `OR TRUE` edit in the 2-arg body
+--                             (match 3 of 3) + v_p2_<partition>_anchored.
 --   P2-C39    2-arg, api_key partition: tick 1 claims the twin; tick 2, with
 --             the twin now running and the retry still due, raises nothing and
---             does NOT claim the retry (the 2-arg body has no C39 guard today).
+--             does NOT claim the retry (the pre-fix 2-arg body had no C39
+--             guard). Twin: the ported api_key_id C39 clause deleted from the
+--             2-arg `deduped` + v_p2_c39_anchored.
 --   The 2-arg arms are the LAST transactions in the file. Each one drops the
 --   5-arg overload by its full signature inside its own transaction, which
 --   ends in ROLLBACK, so the 2-arg body is reachable and no other arm ever
@@ -100,7 +118,9 @@
 -- The twelve partition arms, W-LOST and P2-C39 are RED on the pre-fix tree,
 -- each with SQLSTATE 23505; W-INTRO is GREEN there. That census is recorded
 -- as verdict + count in 164.9.3-01-SUMMARY.md. The machine-executable mutation
--- twins are added once the migration they edit exists (plan 164.9.3-04).
+-- twins were added once the migration they edit existed (plan 164.9.3-04);
+-- scripts/mutation-runner executes each on a throwaway pg-lane, mutating
+-- COPIES, and requires the FIRST `TEST FAILED` to name that twin's arm.
 --
 -- PG-LANE SUBSTRATE (the apply list below, read by scripts/pg-lane/run.sh and
 -- the mutation runner). It is test_enqueue_compute_job_dedupe_non_terminal.sql's
@@ -119,6 +139,17 @@
 
 -- --------------------------------------------------------------------------
 -- C-KEY — claim_compute_jobs, api_key_id partition.
+-- RED-UNDER: make the api_key_id pre-rank clause of claim_compute_jobs always
+--            true (`OR TRUE` before its NOT EXISTS) in 20260927120000_claim_pair_pre_rank_exclusion.sql,
+--            match 1 of 3 (body order claim_compute_jobs, 5-arg, 2-arg).
+--            The due failed_retry is a candidate again, ranks first in its
+--            (kind, api_key_id) partition, is flipped to running beside its
+--            pending twin and the batch raises 23505: this arm's first raise.
+--            Only this body and this partition change, so every arm above
+--            stays green. ⚠️ LAYERED: the migration's own
+--            v_ccj_api_key_anchored check would abort the apply, so it is
+--            stood down (`IF FALSE AND NOT ...`) in the same mutation.
+-- RED-UNDER-M: {"arm":"C-KEY","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND (api_key_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (","replace":"AND (api_key_id IS NULL OR status <> 'failed_retry' OR TRUE OR NOT EXISTS (","occurrences":3,"nth":1},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_ccj_api_key_anchored THEN","replace":"IF FALSE AND NOT v_ccj_api_key_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -169,6 +200,17 @@ ROLLBACK;
 
 -- --------------------------------------------------------------------------
 -- C-PF — claim_compute_jobs, portfolio partition.
+-- RED-UNDER: make the portfolio_id pre-rank clause of claim_compute_jobs always
+--            true (`OR TRUE` before its NOT EXISTS) in 20260927120000_claim_pair_pre_rank_exclusion.sql,
+--            match 1 of 3 (body order claim_compute_jobs, 5-arg, 2-arg).
+--            The due failed_retry is a candidate again, ranks first in its
+--            (kind, portfolio_id) partition, is flipped to running beside its
+--            pending twin and the batch raises 23505: this arm's first raise.
+--            Only this body and this partition change, so every arm above
+--            stays green. ⚠️ LAYERED: the migration's own
+--            v_ccj_portfolio_anchored check would abort the apply, so it is
+--            stood down (`IF FALSE AND NOT ...`) in the same mutation.
+-- RED-UNDER-M: {"arm":"C-PF","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND (portfolio_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (","replace":"AND (portfolio_id IS NULL OR status <> 'failed_retry' OR TRUE OR NOT EXISTS (","occurrences":3,"nth":1},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_ccj_portfolio_anchored THEN","replace":"IF FALSE AND NOT v_ccj_portfolio_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -219,6 +261,17 @@ ROLLBACK;
 
 -- --------------------------------------------------------------------------
 -- C-ST — claim_compute_jobs, strategy partition.
+-- RED-UNDER: make the strategy_id pre-rank clause of claim_compute_jobs always
+--            true (`OR TRUE` before its NOT EXISTS) in 20260927120000_claim_pair_pre_rank_exclusion.sql,
+--            match 1 of 3 (body order claim_compute_jobs, 5-arg, 2-arg).
+--            The due failed_retry is a candidate again, ranks first in its
+--            (kind, strategy_id) partition, is flipped to running beside its
+--            pending twin and the batch raises 23505: this arm's first raise.
+--            Only this body and this partition change, so every arm above
+--            stays green. ⚠️ LAYERED: the migration's own
+--            v_ccj_strategy_anchored check would abort the apply, so it is
+--            stood down (`IF FALSE AND NOT ...`) in the same mutation.
+-- RED-UNDER-M: {"arm":"C-ST","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND (strategy_id IS NULL OR status <> 'failed_retry' OR kind = 'compute_intro_snapshot' OR NOT EXISTS (","replace":"AND (strategy_id IS NULL OR status <> 'failed_retry' OR kind = 'compute_intro_snapshot' OR TRUE OR NOT EXISTS (","occurrences":3,"nth":1},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_ccj_strategy_anchored THEN","replace":"IF FALSE AND NOT v_ccj_strategy_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -269,6 +322,17 @@ ROLLBACK;
 
 -- --------------------------------------------------------------------------
 -- C-AL — claim_compute_jobs, allocator partition.
+-- RED-UNDER: make the allocator_id pre-rank clause of claim_compute_jobs always
+--            true (`OR TRUE` before its NOT EXISTS) in 20260927120000_claim_pair_pre_rank_exclusion.sql,
+--            match 1 of 3 (body order claim_compute_jobs, 5-arg, 2-arg).
+--            The due failed_retry is a candidate again, ranks first in its
+--            (kind, allocator_id) partition, is flipped to running beside its
+--            pending twin and the batch raises 23505: this arm's first raise.
+--            Only this body and this partition change, so every arm above
+--            stays green. ⚠️ LAYERED: the migration's own
+--            v_ccj_allocator_anchored check would abort the apply, so it is
+--            stood down (`IF FALSE AND NOT ...`) in the same mutation.
+-- RED-UNDER-M: {"arm":"C-AL","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND (allocator_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (","replace":"AND (allocator_id IS NULL OR status <> 'failed_retry' OR TRUE OR NOT EXISTS (","occurrences":3,"nth":1},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_ccj_allocator_anchored THEN","replace":"IF FALSE AND NOT v_ccj_allocator_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -318,6 +382,17 @@ ROLLBACK;
 
 -- --------------------------------------------------------------------------
 -- P5-KEY — the 5-arg claim_compute_jobs_with_priority, api_key_id partition.
+-- RED-UNDER: make the api_key_id pre-rank clause of the 5-arg claim_compute_jobs_with_priority always
+--            true (`OR TRUE` before its NOT EXISTS) in 20260927120000_claim_pair_pre_rank_exclusion.sql,
+--            match 2 of 3 (body order claim_compute_jobs, 5-arg, 2-arg).
+--            The due failed_retry is a candidate again, ranks first in its
+--            (kind, api_key_id) partition, is flipped to running beside its
+--            pending twin and the batch raises 23505: this arm's first raise.
+--            Only this body and this partition change, so every arm above
+--            stays green. ⚠️ LAYERED: the migration's own
+--            v_p5_api_key_anchored check would abort the apply, so it is
+--            stood down (`IF FALSE AND NOT ...`) in the same mutation.
+-- RED-UNDER-M: {"arm":"P5-KEY","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND (api_key_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (","replace":"AND (api_key_id IS NULL OR status <> 'failed_retry' OR TRUE OR NOT EXISTS (","occurrences":3,"nth":2},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p5_api_key_anchored THEN","replace":"IF FALSE AND NOT v_p5_api_key_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -368,6 +443,17 @@ ROLLBACK;
 
 -- --------------------------------------------------------------------------
 -- P5-PF — the 5-arg claim_compute_jobs_with_priority, portfolio partition.
+-- RED-UNDER: make the portfolio_id pre-rank clause of the 5-arg claim_compute_jobs_with_priority always
+--            true (`OR TRUE` before its NOT EXISTS) in 20260927120000_claim_pair_pre_rank_exclusion.sql,
+--            match 2 of 3 (body order claim_compute_jobs, 5-arg, 2-arg).
+--            The due failed_retry is a candidate again, ranks first in its
+--            (kind, portfolio_id) partition, is flipped to running beside its
+--            pending twin and the batch raises 23505: this arm's first raise.
+--            Only this body and this partition change, so every arm above
+--            stays green. ⚠️ LAYERED: the migration's own
+--            v_p5_portfolio_anchored check would abort the apply, so it is
+--            stood down (`IF FALSE AND NOT ...`) in the same mutation.
+-- RED-UNDER-M: {"arm":"P5-PF","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND (portfolio_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (","replace":"AND (portfolio_id IS NULL OR status <> 'failed_retry' OR TRUE OR NOT EXISTS (","occurrences":3,"nth":2},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p5_portfolio_anchored THEN","replace":"IF FALSE AND NOT v_p5_portfolio_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -418,6 +504,17 @@ ROLLBACK;
 
 -- --------------------------------------------------------------------------
 -- P5-ST — the 5-arg claim_compute_jobs_with_priority, strategy partition.
+-- RED-UNDER: make the strategy_id pre-rank clause of the 5-arg claim_compute_jobs_with_priority always
+--            true (`OR TRUE` before its NOT EXISTS) in 20260927120000_claim_pair_pre_rank_exclusion.sql,
+--            match 2 of 3 (body order claim_compute_jobs, 5-arg, 2-arg).
+--            The due failed_retry is a candidate again, ranks first in its
+--            (kind, strategy_id) partition, is flipped to running beside its
+--            pending twin and the batch raises 23505: this arm's first raise.
+--            Only this body and this partition change, so every arm above
+--            stays green. ⚠️ LAYERED: the migration's own
+--            v_p5_strategy_anchored check would abort the apply, so it is
+--            stood down (`IF FALSE AND NOT ...`) in the same mutation.
+-- RED-UNDER-M: {"arm":"P5-ST","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND (strategy_id IS NULL OR status <> 'failed_retry' OR kind = 'compute_intro_snapshot' OR NOT EXISTS (","replace":"AND (strategy_id IS NULL OR status <> 'failed_retry' OR kind = 'compute_intro_snapshot' OR TRUE OR NOT EXISTS (","occurrences":3,"nth":2},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p5_strategy_anchored THEN","replace":"IF FALSE AND NOT v_p5_strategy_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -468,6 +565,17 @@ ROLLBACK;
 
 -- --------------------------------------------------------------------------
 -- P5-AL — the 5-arg claim_compute_jobs_with_priority, allocator partition.
+-- RED-UNDER: make the allocator_id pre-rank clause of the 5-arg claim_compute_jobs_with_priority always
+--            true (`OR TRUE` before its NOT EXISTS) in 20260927120000_claim_pair_pre_rank_exclusion.sql,
+--            match 2 of 3 (body order claim_compute_jobs, 5-arg, 2-arg).
+--            The due failed_retry is a candidate again, ranks first in its
+--            (kind, allocator_id) partition, is flipped to running beside its
+--            pending twin and the batch raises 23505: this arm's first raise.
+--            Only this body and this partition change, so every arm above
+--            stays green. ⚠️ LAYERED: the migration's own
+--            v_p5_allocator_anchored check would abort the apply, so it is
+--            stood down (`IF FALSE AND NOT ...`) in the same mutation.
+-- RED-UNDER-M: {"arm":"P5-AL","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND (allocator_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (","replace":"AND (allocator_id IS NULL OR status <> 'failed_retry' OR TRUE OR NOT EXISTS (","occurrences":3,"nth":2},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p5_allocator_anchored THEN","replace":"IF FALSE AND NOT v_p5_allocator_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -519,6 +627,15 @@ ROLLBACK;
 -- W-LOST — the 5-arg claim_compute_jobs_with_priority, allocator partition: the booked repro shape (the twin
 -- is due in the FUTURE), then the twin runs, then the retry runs. No work is
 -- lost: every seeded job is claimed exactly once, in that order.
+-- RED-UNDER: widen the sibling test of the 5-arg allocator_id pre-rank clause
+--            in 20260927120000_claim_pair_pre_rank_exclusion.sql from `= 'pending'` to
+--            `IN ('pending', 'done')` (match 2 of 3). Ticks 1 and 2 behave
+--            as before (the twin is pending, then running), but at tick 3 the
+--            finished twin still counts as a sibling, so the retry is never
+--            claimed: the work is lost and tick 3's count is this arm's first
+--            raise. P5-AL has no finished row, so it stays green. ⚠️ LAYERED:
+--            v_p5_allocator_anchored is stood down in the same mutation.
+-- RED-UNDER-M: {"arm":"W-LOST","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND x.allocator_id = compute_jobs.allocator_id\n           AND x.status       = 'pending'))","replace":"AND x.allocator_id = compute_jobs.allocator_id\n           AND x.status       IN ('pending', 'done')))","occurrences":3,"nth":2},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p5_allocator_anchored THEN","replace":"IF FALSE AND NOT v_p5_allocator_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -614,6 +731,15 @@ ROLLBACK;
 -- two pending intro rows and a due failed_retry intro row may share a
 -- strategy and must all be claimed in one tick. A post-rank guard that also
 -- skips on a pending sibling starves all three (CONTEXT D-08).
+-- RED-UNDER: delete `OR kind = 'compute_intro_snapshot'` from the 5-arg
+--            strategy_id pre-rank clause in 20260927120000_claim_pair_pre_rank_exclusion.sql
+--            (match 2 of 3). The due failed_retry intro row now sees
+--            its pending intro siblings and is held back, so 2 of the 3 rows
+--            are claimed and this arm's count is its first raise. P5-ST seeds
+--            compute_analytics, which the carve-out never covered, so it stays
+--            green. ⚠️ LAYERED: v_p5_strategy_anchored (its regex pins the
+--            carve-out) is stood down in the same mutation.
+-- RED-UNDER-M: {"arm":"W-INTRO","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"OR kind = 'compute_intro_snapshot' OR NOT EXISTS (","replace":"OR NOT EXISTS (","occurrences":3,"nth":2},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p5_strategy_anchored THEN","replace":"IF FALSE AND NOT v_p5_strategy_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -658,6 +784,17 @@ ROLLBACK;
 
 -- --------------------------------------------------------------------------
 -- P2-KEY — the 2-arg claim_compute_jobs_with_priority, api_key_id partition.
+-- RED-UNDER: make the api_key_id pre-rank clause of the 2-arg claim_compute_jobs_with_priority always
+--            true (`OR TRUE` before its NOT EXISTS) in 20260927120000_claim_pair_pre_rank_exclusion.sql,
+--            match 3 of 3 (body order claim_compute_jobs, 5-arg, 2-arg).
+--            The due failed_retry is a candidate again, ranks first in its
+--            (kind, api_key_id) partition, is flipped to running beside its
+--            pending twin and the batch raises 23505: this arm's first raise.
+--            Only this body and this partition change, so every arm above
+--            stays green. ⚠️ LAYERED: the migration's own
+--            v_p2_api_key_anchored check would abort the apply, so it is
+--            stood down (`IF FALSE AND NOT ...`) in the same mutation.
+-- RED-UNDER-M: {"arm":"P2-KEY","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND (api_key_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (","replace":"AND (api_key_id IS NULL OR status <> 'failed_retry' OR TRUE OR NOT EXISTS (","occurrences":3,"nth":3},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p2_api_key_anchored THEN","replace":"IF FALSE AND NOT v_p2_api_key_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DROP FUNCTION public.claim_compute_jobs_with_priority(integer, text, boolean, text[], text[]);
@@ -709,6 +846,17 @@ ROLLBACK;
 
 -- --------------------------------------------------------------------------
 -- P2-PF — the 2-arg claim_compute_jobs_with_priority, portfolio partition.
+-- RED-UNDER: make the portfolio_id pre-rank clause of the 2-arg claim_compute_jobs_with_priority always
+--            true (`OR TRUE` before its NOT EXISTS) in 20260927120000_claim_pair_pre_rank_exclusion.sql,
+--            match 3 of 3 (body order claim_compute_jobs, 5-arg, 2-arg).
+--            The due failed_retry is a candidate again, ranks first in its
+--            (kind, portfolio_id) partition, is flipped to running beside its
+--            pending twin and the batch raises 23505: this arm's first raise.
+--            Only this body and this partition change, so every arm above
+--            stays green. ⚠️ LAYERED: the migration's own
+--            v_p2_portfolio_anchored check would abort the apply, so it is
+--            stood down (`IF FALSE AND NOT ...`) in the same mutation.
+-- RED-UNDER-M: {"arm":"P2-PF","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND (portfolio_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (","replace":"AND (portfolio_id IS NULL OR status <> 'failed_retry' OR TRUE OR NOT EXISTS (","occurrences":3,"nth":3},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p2_portfolio_anchored THEN","replace":"IF FALSE AND NOT v_p2_portfolio_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DROP FUNCTION public.claim_compute_jobs_with_priority(integer, text, boolean, text[], text[]);
@@ -760,6 +908,17 @@ ROLLBACK;
 
 -- --------------------------------------------------------------------------
 -- P2-ST — the 2-arg claim_compute_jobs_with_priority, strategy partition.
+-- RED-UNDER: make the strategy_id pre-rank clause of the 2-arg claim_compute_jobs_with_priority always
+--            true (`OR TRUE` before its NOT EXISTS) in 20260927120000_claim_pair_pre_rank_exclusion.sql,
+--            match 3 of 3 (body order claim_compute_jobs, 5-arg, 2-arg).
+--            The due failed_retry is a candidate again, ranks first in its
+--            (kind, strategy_id) partition, is flipped to running beside its
+--            pending twin and the batch raises 23505: this arm's first raise.
+--            Only this body and this partition change, so every arm above
+--            stays green. ⚠️ LAYERED: the migration's own
+--            v_p2_strategy_anchored check would abort the apply, so it is
+--            stood down (`IF FALSE AND NOT ...`) in the same mutation.
+-- RED-UNDER-M: {"arm":"P2-ST","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND (strategy_id IS NULL OR status <> 'failed_retry' OR kind = 'compute_intro_snapshot' OR NOT EXISTS (","replace":"AND (strategy_id IS NULL OR status <> 'failed_retry' OR kind = 'compute_intro_snapshot' OR TRUE OR NOT EXISTS (","occurrences":3,"nth":3},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p2_strategy_anchored THEN","replace":"IF FALSE AND NOT v_p2_strategy_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DROP FUNCTION public.claim_compute_jobs_with_priority(integer, text, boolean, text[], text[]);
@@ -811,6 +970,17 @@ ROLLBACK;
 
 -- --------------------------------------------------------------------------
 -- P2-AL — the 2-arg claim_compute_jobs_with_priority, allocator partition.
+-- RED-UNDER: make the allocator_id pre-rank clause of the 2-arg claim_compute_jobs_with_priority always
+--            true (`OR TRUE` before its NOT EXISTS) in 20260927120000_claim_pair_pre_rank_exclusion.sql,
+--            match 3 of 3 (body order claim_compute_jobs, 5-arg, 2-arg).
+--            The due failed_retry is a candidate again, ranks first in its
+--            (kind, allocator_id) partition, is flipped to running beside its
+--            pending twin and the batch raises 23505: this arm's first raise.
+--            Only this body and this partition change, so every arm above
+--            stays green. ⚠️ LAYERED: the migration's own
+--            v_p2_allocator_anchored check would abort the apply, so it is
+--            stood down (`IF FALSE AND NOT ...`) in the same mutation.
+-- RED-UNDER-M: {"arm":"P2-AL","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"AND (allocator_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (","replace":"AND (allocator_id IS NULL OR status <> 'failed_retry' OR TRUE OR NOT EXISTS (","occurrences":3,"nth":3},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p2_allocator_anchored THEN","replace":"IF FALSE AND NOT v_p2_allocator_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DROP FUNCTION public.claim_compute_jobs_with_priority(integer, text, boolean, text[], text[]);
@@ -863,6 +1033,16 @@ ROLLBACK;
 -- P2-C39 — the 2-arg claim_compute_jobs_with_priority, api_key_id partition, second tick: once the twin is
 -- running, the still-due retry must neither raise nor be claimed (the C39
 -- running / done_pending_children guard, which the 2-arg body lacks today).
+-- RED-UNDER: delete the api_key_id clause of the C39 guard ported into the
+--            2-arg `deduped` CTE in 20260927120000_claim_pair_pre_rank_exclusion.sql (the needle
+--            ends at the CLAIMPAIR C39 PORT END marker, so it matches 1).
+--            Tick 1 is unchanged (no running row yet); at tick 2 the twin is
+--            running, the pre-rank clause no longer sees a pending sibling, and
+--            the still-due retry is flipped to running beside it: 23505 is
+--            this arm's first raise. P2-KEY is one tick with no running row,
+--            so it stays green. ⚠️ LAYERED: v_p2_c39_anchored is stood down in
+--            the same mutation.
+-- RED-UNDER-M: {"arm":"P2-C39","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"      AND (api_key_id IS NULL OR NOT EXISTS (\n        SELECT 1 FROM compute_jobs x\n         WHERE x.kind       = ranked.kind\n           AND x.api_key_id = ranked.api_key_id\n           AND x.status IN ('running', 'done_pending_children')\n      ))\n      -- CLAIMPAIR C39 PORT END","replace":"      -- CLAIMPAIR C39 PORT END","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p2_c39_anchored THEN","replace":"IF FALSE AND NOT v_p2_c39_anchored THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DROP FUNCTION public.claim_compute_jobs_with_priority(integer, text, boolean, text[], text[]);
