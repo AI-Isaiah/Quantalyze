@@ -110,6 +110,23 @@
 --             with no error (a silent permanent wedge). Twin: the 5-arg
 --             CLAIMPAIR PROBE EXCLUSION block made always false (match 1
 --             of 2) + v_p5_probe_anchored.
+--   W-C39SIB  5-arg, allocator partition: a due `normal` failed_retry beside
+--             a `done_pending_children` row of the same (kind, allocator_id),
+--             plus an unrelated due `low` job on another allocator. C39 holds
+--             the retry back, so it must not trip the throttle: the
+--             unrelated job is claimed, the retry is not. Added in review
+--             round 3 (164.9.3-REVIEW.md WR-01, founder decision D-11). Twin:
+--             the 5-arg probe's allocator sibling test reverted to
+--             pending-only + v_p5_probe_anchored.
+--   W-C39INTRO 5-arg, strategy partition: a due `normal` failed_retry
+--             compute_intro_snapshot beside a `running` intro row of the same
+--             strategy, plus an unrelated due `low` job. C39 holds the retry
+--             back (its strategy clause has no intro carve-out), so the
+--             unrelated job is claimed and the retry is not. It tells the
+--             split strategy disjunct (carve-out on the pending sibling only)
+--             from the literal widening. Twin: the intro carve-out re-added
+--             in front of the 5-arg probe's strategy EXISTS (match 1 of 2) +
+--             v_p5_probe_anchored.
 --   P2-KEY, P2-PF, P2-ST, P2-AL
 --                             the 2-arg priority overload, same four arms.
 --                             Twin: the `OR TRUE` edit in the 2-arg body
@@ -130,7 +147,10 @@
 -- as verdict + count in 164.9.3-01-SUMMARY.md. W-LOWTWIN came later: it is
 -- RED against the migration as plan 02 shipped it (no error; the twin, the
 -- unrelated job and the retry each claimed 0 times), recorded as verdict +
--- count in 164.9.3-REVIEW-FIX.md. The machine-executable mutation
+-- count in 164.9.3-REVIEW-FIX.md. W-C39SIB and W-C39INTRO came in review
+-- round 3: each is RED against the migration as round 1 left it (no error;
+-- the unrelated low job and the retry each claimed 0 times), recorded as
+-- verdict + count in 164.9.3-REVIEW-FIX.md. The machine-executable mutation
 -- twins were added once the migration they edit existed (plan 164.9.3-04);
 -- scripts/mutation-runner executes each on a throwaway pg-lane, mutating
 -- COPIES, and requires the FIRST `TEST FAILED` to name that twin's arm.
@@ -865,6 +885,136 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (W-LOWTWIN): the 5-arg claim_compute_jobs_with_priority raised nothing but claimed the low pending twin % time(s), the unrelated low job % time(s) and the normal failed_retry % time(s); expected 1, 1 and 0. The throttle counted a retry the pre-rank clause holds back, so the partition and every due low job are wedged silently.', n_twin, n_other, n_retry;
   END IF;
   RAISE NOTICE 'W-LOWTWIN OK: the 5-arg claim_compute_jobs_with_priority claimed the low pending twin and the unrelated low job, held the normal failed_retry back, raised nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- W-C39SIB — the 5-arg claim_compute_jobs_with_priority, allocator partition,
+-- C39 sibling. R is a due `normal` failed_retry beside D, a
+-- `done_pending_children` row of the same (kind, allocator_id); U is an
+-- unrelated due `low` pending job on another allocator. The C39 guard in
+-- `deduped` holds R back (a running / done_pending_children sibling), so R
+-- must not trip the `normal`/`high` throttle either: U is claimed, R is not.
+-- Added in review round 3 (164.9.3-REVIEW.md WR-01, founder decision D-11).
+-- Beside a fan-in `done_pending_children` row whose parent is `low`, the
+-- counted retry throttled that parent too, so the hold never ended.
+-- Every row is seeded 10 years in the past (164.9.3-REVIEW.md IN-01), so the
+-- arm's rows sort ahead of any other due row inside the LIMIT 1000 window.
+-- The foreign normal/high push is W-LOWTWIN's: it assumes a lane private to
+-- this runner (164.9.3-REVIEW.md IN-07), and it ends in ROLLBACK.
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_sib    uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  UPDATE public.compute_jobs
+     SET next_attempt_at = now() + interval '100 years'
+   WHERE priority IN ('normal', 'high')
+     AND status IN ('pending', 'failed_retry')
+     AND next_attempt_at <= now();
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO auth.users (id)
+    VALUES (v_part), (v_part2);
+  INSERT INTO public.compute_jobs (id, kind, allocator_id, status, priority, attempts, next_attempt_at)
+    VALUES (v_sib,   'derive_allocator_equity', v_part,  'done_pending_children', 'normal', 1, now() - interval '10 years' - interval '20 minutes'),
+           (v_retry, 'derive_allocator_equity', v_part,  'failed_retry',          'normal', 1, now() - interval '10 years' - interval '10 minutes'),
+           (v_other, 'derive_allocator_equity', v_part2, 'pending',               'low',    0, now() - interval '10 years' - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate', NULL) c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (W-C39SIB): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority (%); the batch aborted.', v_err, v_msg;
+  END IF;
+  IF n_other <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (W-C39SIB): the 5-arg claim_compute_jobs_with_priority raised nothing but claimed the unrelated low job % time(s) and the normal failed_retry beside a done_pending_children sibling % time(s); expected 1 and 0. The throttle counted a retry the C39 guard holds back, so every due low job is throttled.', n_other, n_retry;
+  END IF;
+  RAISE NOTICE 'W-C39SIB OK: the 5-arg claim_compute_jobs_with_priority claimed the unrelated low job and held back the normal failed_retry beside a done_pending_children sibling, raised nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- W-C39INTRO — the 5-arg claim_compute_jobs_with_priority, strategy partition,
+-- compute_intro_snapshot, C39 sibling. R is a due `normal` failed_retry intro
+-- row beside D, a `running` intro row of the same strategy; U is an unrelated
+-- due `low` pending job on an allocator. The pre-rank clause lets R through
+-- (the intro carve-out), and C39 in `deduped` then drops it (its strategy
+-- clause has no intro carve-out), so R must not trip the throttle: U is
+-- claimed, R is not. Added in review round 3 (164.9.3-REVIEW.md WR-01, the
+-- D-11 refinement). This arm is what tells the split strategy disjunct from
+-- the literal widening: under `IN ('pending','running','done_pending_children')`
+-- behind the intro carve-out, R is still counted and U is still throttled.
+-- Rows are seeded 10 years in the past and foreign normal/high rows are
+-- pushed out, as in W-C39SIB.
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_part   uuid := gen_random_uuid();
+  v_part2  uuid := gen_random_uuid();
+  v_retry  uuid := gen_random_uuid();
+  v_sib    uuid := gen_random_uuid();
+  v_other  uuid := gen_random_uuid();
+  v_err    text;
+  v_msg    text;
+  n_retry  int;
+  n_other  int;
+BEGIN
+  SET LOCAL session_replication_role = replica;
+  UPDATE public.compute_jobs
+     SET next_attempt_at = now() + interval '100 years'
+   WHERE priority IN ('normal', 'high')
+     AND status IN ('pending', 'failed_retry')
+     AND next_attempt_at <= now();
+  -- Parent rows: the claim's UPDATE re-checks the foreign key of a row
+  -- inserted in this transaction (see the header).
+  INSERT INTO public.strategies (id, user_id, name)
+    VALUES (v_part, gen_random_uuid(), 'claimpair-gate');
+  INSERT INTO auth.users (id)
+    VALUES (v_part2);
+  INSERT INTO public.compute_jobs (id, kind, strategy_id, status, priority, attempts, next_attempt_at)
+    VALUES (v_sib,   'compute_intro_snapshot', v_part, 'running',      'normal', 1, now() - interval '10 years' - interval '20 minutes'),
+           (v_retry, 'compute_intro_snapshot', v_part, 'failed_retry', 'normal', 1, now() - interval '10 years' - interval '10 minutes');
+  INSERT INTO public.compute_jobs (id, kind, allocator_id, status, priority, attempts, next_attempt_at)
+    VALUES (v_other, 'derive_allocator_equity', v_part2, 'pending', 'low', 0, now() - interval '10 years' - interval '1 minute');
+  SET LOCAL session_replication_role = origin;
+
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    SELECT count(*) FILTER (WHERE c.id = v_retry),
+           count(*) FILTER (WHERE c.id = v_other)
+      INTO n_retry, n_other
+      FROM public.claim_compute_jobs_with_priority(1000, 'claimpair-gate', NULL) c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+
+  IF v_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (W-C39INTRO): SQLSTATE % from the 5-arg claim_compute_jobs_with_priority (%); the batch aborted.', v_err, v_msg;
+  END IF;
+  IF n_other <> 1 OR n_retry <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (W-C39INTRO): the 5-arg claim_compute_jobs_with_priority raised nothing but claimed the unrelated low job % time(s) and the normal failed_retry compute_intro_snapshot beside a running intro sibling % time(s); expected 1 and 0. The throttle counted an intro retry the C39 guard holds back, so every due low job is throttled.', n_other, n_retry;
+  END IF;
+  RAISE NOTICE 'W-C39INTRO OK: the 5-arg claim_compute_jobs_with_priority claimed the unrelated low job and held back the normal failed_retry intro row beside a running intro sibling, raised nothing.';
 END $$;
 ROLLBACK;
 
