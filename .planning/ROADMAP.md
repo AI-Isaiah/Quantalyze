@@ -3803,6 +3803,34 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1.2 to break down)
 
+### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
+
+**Goal:** Each API key's equity-history reconstruct state is recorded durably, per key, so no key's history is skipped, wiped or left unreconstructed. Today that state is inferred from allocator-wide snapshot counts.
+**Priority:** data integrity (founder priority rule, 2026-09-27: data integrity ahead of features). Registered through `/gsd-phase --insert 167.1.2`; gsd-tools numbered it 167.1.2.1 and the number is kept.
+**Requirements**: TBD (criteria below)
+**Depends on:** Phase 167.1.2 (PR C: its history rebuild changes `replace_equity_snapshots` and the per-key reconstruct path this phase builds on).
+**Plans:** 0 plans
+
+**Evidence (routed 2026-09-27 from the 167.1.2 PR C executor; one class of defect; symbols verified at `origin/main` `c052ab4d` unless noted):**
+
+- **R-12-1: a key whose first sync collided never gets a backfill.** Nothing records that a key still owes its reconstruct, so the missed backfill is never retried.
+- **R-13-1: a non-empty sole-key replace wipes sibling keys' history.** In `replace_equity_snapshots` (`analytics-service/services/equity_reconstruction.py`), a non-empty replace for one key wipes the history of disconnected sibling keys. PR C changes this function, so the symbol is cited by name only.
+- **Two-key sibling path:** when one key's reconstruct succeeds and another's fails, the allocator-wide snapshot count reads as "reconstructed", and the failed key's history is skipped.
+- **`public.request_allocator_holdings_sync(uuid)`:** its in-flight status lists (`'pending', 'running', 'done_pending_children'`, plus `'done'` in the second check) omit `failed_retry`, unlike the cron. So a key whose job sits in `failed_retry` is treated as not in flight.
+
+## Success Criteria
+
+1. **Per-key durable state.** A key's reconstruct state ("history reconstructed") is stored per key and read from there. It is never inferred from allocator-wide snapshot counts.
+2. **R-12-1:** a key whose first sync collided gets its backfill. A test fails on the old behaviour.
+3. **R-13-1:** a sole-key replace never deletes another key's snapshots, including a disconnected sibling's. A test fails on the old behaviour.
+4. **Two-key sibling path:** when one key succeeds and a sibling fails, the failed key is still recorded as owing its reconstruct and is retried. A test fails on the old behaviour.
+5. **`failed_retry` is counted:** `request_allocator_holdings_sync`'s status list includes `failed_retry`, as the cron's does. A test fails on the old list.
+6. **Migration review before merge.** Any migration this phase writes is reviewed by migration-reviewer, rls-policy-auditor and silent-failure-hunter, because a merge of `supabase/migrations/**` auto-applies to PROD.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 167.1.2.1 to break down)
+
 ### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
 
 **Goal:** On a manager's key card (`ApiKeyManager`), a sync result is only ever shown about the key it came from, and a success the card withheld beside a "Sign-in failed" pill cannot reappear through a re-read. ⭐ **Widened 2026-09-22 (167 D-19):** the `/strategies` list, where a manager lands, marks each strategy row whose feeding key is untrusted (`isUntrustedKeySyncStatus`) with the same key-level pill — no causal claim, no D-04 path. ⭐ **Widened 2026-09-23 (founder decision, folded in as a second surface): the owner's "still computing" factsheet says what is actually happening.** Observed live on a freshly created three-key composite strategy: while its first sync job was actively fetching trades (key 2 of 3, progress rows being written), the owner's factsheet (`src/app/factsheet/[id]/v2/page.tsx`, the `!payload` placeholder branch) showed fixed copy — "still computing … once the analytics service finishes the first compute pass" and "This factsheet has not been computed yet. Some strategies stay in this state, and this page is all there is until one has been computed." Founder verdict: *"This is very confusing. It should clearly say what is happening."* The placeholder cannot tell running from queued, failed, stalled or never-enqueued, although the worker already writes `set_compute_job_progress` and the wizard already reads it via `/api/strategies/[id]/sync-progress` (`SyncPreviewStep`). **In scope:** on the OWNER lane only, the pending factsheet reads the strategy's latest compute job and states its real state in authored copy — queued, fetching trades (key N of M for a composite), computing, failed (the authored reason for its error kind, never raw exception text), or stalled / never started (with what the owner can do) — and the "Some strategies stay in this state" sentence goes. **Fenced:** the PUBLIC lane stays neutral and names no internal state (Phase 164.2 criterion 9's reasoning still holds there), and no new job states are invented. Read DESIGN.md before any copy decision. ⭐ **Widened again 2026-09-23 (founder-approved): the SHARE LINK for a strategy whose compute failed or stalled must say so too.** Observed the same day: the owner could create a share link while the first compute job was running; that job then failed permanently (Phase 168's Deribit `assignment` refusal), yet the share page (`src/app/factsheet-share/[token]/page.tsx`) keeps saying "This factsheet isn't ready yet — The link works — the strategy's performance data is still being computed. Try again in a few minutes." That is a promise that will not come true. Founder: *"weird that i can already post or copy a link but cant see it."* **In scope:** the share page and the owner's share affordance tell a compute that is genuinely running apart from one that failed or stalled, and never promise "a few minutes" for a terminal failure. The viewer-facing copy stays neutral about internal causes (Phase 164.2 criterion 9) but must not claim the data is being computed when it is not. **Open, for this phase's discuss step (record it, do not assume it):** whether creating a share link should be allowed before the first successful compute at all.
@@ -4221,7 +4249,7 @@ phase's newest plans live only on an open branch, the count says "on main". The 
 table (measured at `733a55f5`, 33 rows) is superseded by this one; its still-accurate rows are
 kept verbatim.
 
-**Totals: 41 of 80 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).** Recounted 2026-09-27 from this table's own rows after adding the 169 split (169.1, 169.2, 169.4, 169.4.1) and 164.9.1's close; the earlier "40 of 73" was taken before those rows existed. 80 counts 166.4.1 PORTFOLIOANALYTICS, added 2026-09-27.
+**Totals: 41 of 81 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).** Recounted 2026-09-27 from this table's own rows after adding the 169 split (169.1, 169.2, 169.4, 169.4.1) and 164.9.1's close; the earlier "40 of 73" was taken before those rows existed. 81 counts 166.4.1 PORTFOLIOANALYTICS and 167.1.2.1 RECONMARKER, both added 2026-09-27.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -4294,6 +4322,7 @@ kept verbatim.
 | 167.1 AUMTRUST | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.89.0.0 · #852 |
 | 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
 | 167.1.2 ACCOUNTTRUTH | PR A + PR B shipped | In progress — PR A v0.92.0.0 (#859), PR B v0.103.0.0 (#870); PR C executing | - |
+| 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
 | 167.2 KEYCARDSYNC | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.88.0.0 · #851 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | #866 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 03 is the founder's live retry | v0.97.0.0 · #867 |
