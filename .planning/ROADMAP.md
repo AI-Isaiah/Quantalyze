@@ -4137,7 +4137,7 @@ Plans:
 - [x] 170-01: main-aware reflow helper and the three supported viewports (wave 1)
 - [x] 170-02: seeded narrow-layout spec, wired into CI (wave 1)
 - [x] 170-03: allocations tab strip and the Tweaks control (wave 2)
-- [ ] 170-04: scenario footer and constituent rows (wave 2)
+- [x] 170-04: scenario footer and constituent rows (wave 2)
 - [ ] 170-05: strategies row, private link, whole-word names (wave 2)
 - [ ] 170-06: admin match read-only below md, owner line, intro count (wave 2)
 - [ ] 170-07: signed-in marketing header and the compare pointer (wave 2)
@@ -4350,7 +4350,7 @@ kept verbatim.
 | 169.3 SMALLFIXES | 1/5 (plan 01 on main; 02–05 on `feat/169-pagetruth`) | In progress — plan 01 shipped (v0.97.0.1, #868); plans 02–05 next, 03/04 gated on 167.1.2 PR C | - |
 | 169.4 ALLOCTRUTH | 3 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 169, 169.2 and 167.1.2 PR C | - |
 | 169.4.1 OGSHARPE | 2 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 166.2 and 169 | - |
-| 170. LAYOUT | 3/14 | In Progress | - |
+| 170. LAYOUT | 4/14 | In Progress | - |
 | 170.1 COPY | 0/? | Queued — feature, after 170 | - |
 
 ### Requirement Coverage (v1.20)
