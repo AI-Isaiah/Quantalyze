@@ -1170,6 +1170,8 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
     for (const [where, body] of [
       ["load_baseline", liveLines(bashFunctionBody(lane, "load_baseline"))],
       ["probe_function_denial_survives", liveLines(bashFunctionBody(lane, "probe_function_denial_survives"))],
+      // Phase 164.9.4 D-04: the handoff seam is a DSN gate too, so the same rule binds it.
+      ["assert_local_handoff", liveLines(bashFunctionBody(lane, "assert_local_handoff"))],
       ["sql-tests", liveLines(CI.slice(start, end))],
     ] as const) {
       expect(
@@ -1223,6 +1225,43 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
       expect(local.status, `a loopback handoff was refused:\n${local.out}`).toBe(0);
       expect(local.out).toContain("handoff is loopback (API_URL and DB_URL), values not printed");
       noEcho("local", local.out);
+
+      // Every other refusal shape: exit 1, a FATAL printed, and no value in the output.
+      const refused: Array<[string, string[] | null]> = [
+        ["missing file", null],
+        ["no API_URL line", [`DB_URL="${LOOPBACK_DB}"`]],
+        ["no DB_URL line", ['API_URL="http://127.0.0.1:54421"']],
+        // The DB half is judged by the WR-08 probe, never by assert_local's http glob.
+        ["remote DB_URL", ['API_URL="http://127.0.0.1:54421"', 'DB_URL="postgresql://nonecho_marker_user@db.example.invalid:5432/postgres"']],
+        // libpq honours ?host=, re-pointing a loopback-looking DSN at a remote host.
+        ["?host= DB_URL override", ['API_URL="http://127.0.0.1:54421"', 'DB_URL="postgresql://nonecho_marker_user@127.0.0.1:54422/postgres?host=db.example.invalid"']],
+        // A host that only LOOKS loopback: assert_local's glob needs `http://127.0.0.1:`.
+        ["loopback-prefixed API host", ['API_URL="http://127.0.0.1.nonecho-marker.example.invalid:54421"', `DB_URL="${LOOPBACK_DB}"`]],
+      ];
+      for (const [name, lines] of refused) {
+        const r = assertHandoff(name.replace(/[^a-z]+/gi, "-"), lines);
+        expect(r.status, `${name}: accepted, or refused with the wrong status:\n${r.out}`).toBe(1);
+        expect(r.out, `AIM (${name}): a refusal was printed, so the no-echo checks read real output`).toContain("FATAL");
+        noEcho(name, r.out);
+      }
+
+      // `localhost` is the other spelling assert_local accepts; the seam must not narrow it.
+      const localhost = assertHandoff("localhost", ['API_URL="http://localhost:54421"', `DB_URL="${LOOPBACK_DB}"`]);
+      expect(localhost.status, `a localhost API_URL was refused:\n${localhost.out}`).toBe(0);
+      noEcho("localhost", localhost.out);
+
+      // REUSE, not a copy (D-04), checked AFTER the executed cases so a neutered call
+      // reds them first: the API half is the lane's own `assert_local`, so a
+      // later widening or narrowing of that one guard moves this seam with it.
+      const seam = liveLines(bashFunctionBody(read(RUN_SH), "assert_local_handoff"));
+      expect(
+        seam.some((l) => l === 'assert_local "$api_url"'),
+        "assert_local_handoff no longer calls assert_local on API_URL",
+      ).toBe(true);
+      expect(
+        seam.some((l) => l.includes("http://")),
+        "assert_local_handoff carries its own URL pattern instead of reusing assert_local",
+      ).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
