@@ -3291,7 +3291,7 @@ Plans:
 - [x] 164.9.4-07-PLAN.md — `python` moves to the local-stack lane and off the key; its pins move in the same commit
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 164.9.4-08-PLAN.md — `e2e-seeded` moves to the lane and off the key, so `ci.yml` holds no key; D-09 build-guard retarget
+- [x] 164.9.4-08-PLAN.md — `e2e-seeded` moves to the lane and off the key, so `ci.yml` holds no key; D-09 build-guard retarget
 
 **Wave 4** *(blocked on Wave 3 completion; file-disjoint)*
 - [ ] 164.9.4-09-PLAN.md — new pins the topology allows: per-job "holds and names no key", seam-before-boot rows, D-04 handoff order
