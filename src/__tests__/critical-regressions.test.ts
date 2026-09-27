@@ -1488,12 +1488,49 @@ describe("Critical regression guards", () => {
       // A key line may carry a trailing comment, and the next key may start with
       // a capital, a digit or an underscore (SFH-R2-06, same tolerance as
       // measureHolders' enumeration below).
-      const jobSlice = (src: string, job: string): string =>
+      // The lookahead also accepts END OF INPUT (Phase 164.9.4, D-06), copying
+      // measureHolders' form: a workflow's LAST job (`restore` in
+      // test-restore-from-baseline.yml) has no next job key to stop at.
+      const jobSlice = (src: string, job: string, label = "ci.yml"): string =>
         findOrFail(
           src,
-          new RegExp(`^ {2}${job}:[ \\t]*(?:#[^\\n]*)?\\n([\\s\\S]*?)(?=\\n {2}[A-Za-z0-9_])`, "m"),
-          `ci.yml: ${job} job not found`,
+          new RegExp(`^ {2}${job}:[ \\t]*(?:#[^\\n]*)?\\n([\\s\\S]*?)(?=\\n {2}[A-Za-z0-9_]|$(?![\\s\\S]))`, "m"),
+          `${label}: ${job} job not found`,
         );
+
+      // 2026-09-26, Phase 164.9.4 (D-06). The ABSOLUTE per-holder protocol
+      // pins below (ONE key, TTL, pg_sleep > TTL, the ordered GUC chain,
+      // keepalives, client_connection_check_interval, the guarded reap) used
+      // to read ci.yml's DB_JOBS only. This phase moves `python` and
+      // `e2e-seeded` off the key, so DB_JOBS empties and those loops would
+      // iterate NOTHING: a data-integrity protocol with no absolute pin, only
+      // the RELATIVE byte-identity suites, which pass when both copies drift
+      // together. These are the two takers that KEEP the key, and they stay
+      // the loops' subjects whatever DB_JOBS holds. Measured 2026-09-26 on
+      // each job's slice: timeout-minutes 90, exactly ONE
+      // pg_advisory_lock(61616158), first `SELECT pg_sleep(6000);` inside the
+      // acquire step, the ordered statement_timeout → ccci → HOLDER-BACKEND-PID
+      // → pg_advisory_lock chain, the libpq keepalive params and the guarded
+      // server-side pg_terminate_backend all present. `restore` is the LAST
+      // job of its file, which is why jobSlice accepts end of input.
+      const CI_YML = ".github/workflows/ci.yml";
+      const CROSS_FILE_HOLDERS: ReadonlyArray<readonly [string, string]> = [
+        [".github/workflows/supabase-migrate.yml", "apply-test"],
+        [".github/workflows/test-restore-from-baseline.yml", "restore"],
+      ];
+      const MUTEX_HOLDERS: ReadonlyArray<readonly [string, string]> = [
+        ...DB_JOBS.map((job): readonly [string, string] => [CI_YML, job]),
+        ...CROSS_FILE_HOLDERS,
+      ];
+      const workflowCache = new Map<string, string>();
+      const readWorkflow = (file: string): string => {
+        let text = workflowCache.get(file);
+        if (text === undefined) {
+          text = readText(file);
+          workflowCache.set(file, text);
+        }
+        return text;
+      };
 
       // The holder set is MEASURED from ci.yml, never assumed. Every job whose
       // body carries an acquire step or names the shared key must be in
@@ -2073,27 +2110,49 @@ describe("Critical regression guards", () => {
         );
       });
 
+      // 2026-09-26, Phase 164.9.4 (D-06): the seven loops above and below are
+      // the only ABSOLUTE pins of the mutex protocol. If the cross-file
+      // subjects vanished (list emptied, or a job lost its acquire step) while
+      // DB_JOBS is empty, every loop would iterate nothing and stay green.
+      it("the mutex-protocol pins keep subjects outside ci.yml: CROSS_FILE_HOLDERS is non-empty and each still acquires the key (Phase 164.9.4)", () => {
+        expect(
+          CROSS_FILE_HOLDERS.length,
+          `CROSS_FILE_HOLDERS names ${CROSS_FILE_HOLDERS.length} holder(s); it must name at least supabase-migrate.yml apply-test and test-restore-from-baseline.yml restore — once ci.yml holds no key, they are the only subjects of the absolute mutex-protocol pins, and an empty list turns every per-holder loop into a pin that cannot fail`,
+        ).toBeGreaterThanOrEqual(2);
+        expect(
+          MUTEX_HOLDERS.length,
+          `MUTEX_HOLDERS names ${MUTEX_HOLDERS.length} holder(s) — the per-holder protocol loops would iterate too little to pin anything`,
+        ).toBeGreaterThanOrEqual(2);
+        for (const [file, job] of CROSS_FILE_HOLDERS) {
+          expectMatch(
+            jobSlice(readWorkflow(file), job, file),
+            /- name: Acquire shared-test-db mutex/,
+            `${file} ${job} lost its \`Acquire shared-test-db mutex\` step — either it no longer takes the shared-test-db key (then remove it from CROSS_FILE_HOLDERS in the same commit, with its reason) or the step was renamed; the absolute protocol pins read this job`,
+          );
+        }
+      });
+
+      // Re-pointed 2026-09-26 (Phase 164.9.4, D-06): iterates MUTEX_HOLDERS, not ci.yml's DB_JOBS alone.
       it("every DB-touching holder job acquires the mutex on ONE shared advisory-lock key", () => {
-        const src = readText(".github/workflows/ci.yml");
         const keyByJob = new Map<string, string>();
-        for (const job of DB_JOBS) {
-          const body = jobSlice(src, job);
+        for (const [file, job] of MUTEX_HOLDERS) {
+          const body = jobSlice(readWorkflow(file), job, file);
           expectMatch(
             body,
             /- name: Acquire shared-test-db mutex/,
-            `ci.yml ${job} job lost its \`Acquire shared-test-db mutex\` step — it runs against the SHARED test project unserialized, so the reaper gate's LIMIT-25 assertions can be broken by a concurrent run's rows and its 5 s lock_timeout becomes a 55P03 flake on unrelated PRs (D-05)`,
+            `${file} ${job} job lost its \`Acquire shared-test-db mutex\` step — it runs against the SHARED test project unserialized, so the reaper gate's LIMIT-25 assertions can be broken by a concurrent run's rows and its 5 s lock_timeout becomes a 55P03 flake on unrelated PRs (D-05)`,
           );
           const keys = [...body.matchAll(/pg_advisory_lock\((\d+)\)/g)].map((m) => m[1]);
           expect(
             keys.length,
-            `ci.yml ${job} job: expected exactly ONE pg_advisory_lock(<key>) call (the mutex acquire), found ${keys.length} — the same-key comparison needs an unambiguous key per job`,
+            `${file} ${job} job: expected exactly ONE pg_advisory_lock(<key>) call (the mutex acquire), found ${keys.length} — the same-key comparison needs an unambiguous key per job`,
           ).toBe(1);
-          keyByJob.set(job, keys[0]);
+          keyByJob.set(`${file} ${job}`, keys[0]);
         }
         const distinctKeys = new Set(keyByJob.values());
         expect(
           distinctKeys.size,
-          `ci.yml DB-touching jobs disagree on the advisory-lock key (${[...keyByJob]
+          `the mutex-holding jobs disagree on the advisory-lock key (${[...keyByJob]
             .map(([job, key]) => `${job}=${key}`)
             .join(", ")}) — a diverged key serializes each job only against itself, which is exactly the unserialized cross-job state D-05 closed (LIMIT-25 interleaving + 55P03 flakes on the shared test project)`,
         ).toBe(1);
@@ -2104,13 +2163,13 @@ describe("Critical regression guards", () => {
       // Phase 158 introduced, both of which are one-line YAML deletions away
       // from silently regressing. That is precisely the silent-green class this
       // phase exists to kill, so they are pinned here too.
+      // Re-pointed 2026-09-26 (Phase 164.9.4, D-06): iterates MUTEX_HOLDERS, not ci.yml's DB_JOBS alone.
       it("every DB-touching holder job carries the mutex TTL (timeout-minutes)", () => {
-        const src = readText(".github/workflows/ci.yml");
-        for (const job of DB_JOBS) {
+        for (const [file, job] of MUTEX_HOLDERS) {
           expectMatch(
-            jobSlice(src, job),
+            jobSlice(readWorkflow(file), job, file),
             /^ {4}timeout-minutes: 90$/m,
-            `ci.yml ${job} lost (or changed) \`timeout-minutes: 90\` — it is the ONLY TTL on the shared-test-db advisory lock. There is deliberately NO reaper cron: the runbook states none is needed precisely because job death drops the psql session. Delete it and the job inherits GitHub's 360-minute default, so one wedged holder blocks every DB-touching CI job for six hours with no gate noticing. The value is also load-bearing in both directions: it is sized to absorb the 3600s acquire cap (CR-04) and it must stay BELOW the holder's pg_sleep (WR-01)`,
+            `${file} ${job} lost (or changed) \`timeout-minutes: 90\` — it is the ONLY TTL on the shared-test-db advisory lock. There is deliberately NO reaper cron: the runbook states none is needed precisely because job death drops the psql session. Delete it and the job inherits GitHub's 360-minute default, so one wedged holder blocks every DB-touching CI job for six hours with no gate noticing. The value is also load-bearing in both directions: it is sized to absorb the 3600s acquire cap (CR-04) and it must stay BELOW the holder's pg_sleep (WR-01)`,
           );
         }
       });
@@ -2120,27 +2179,27 @@ describe("Critical regression guards", () => {
       // relationship, not either literal: the failure it guards (holder sleep
       // expiring BEFORE the job dies) silently releases the mutex mid-job and
       // lets a second run in, which no test downstream could attribute.
+      // Re-pointed 2026-09-26 (Phase 164.9.4, D-06): iterates MUTEX_HOLDERS, not ci.yml's DB_JOBS alone.
       it("the mutex holder's pg_sleep outlives the job TTL in every DB-touching job", () => {
-        const src = readText(".github/workflows/ci.yml");
-        for (const job of DB_JOBS) {
-          const body = jobSlice(src, job);
+        for (const [file, job] of MUTEX_HOLDERS) {
+          const body = jobSlice(readWorkflow(file), job, file);
           const ttlMin = Number(
             findOrFail(
               body,
               /^ {4}timeout-minutes: (\d+)$/m,
-              `ci.yml ${job}: no timeout-minutes to compare the mutex hold against`,
+              `${file} ${job}: no timeout-minutes to compare the mutex hold against`,
             ).match(/(\d+)/)![1],
           );
           const sleepSec = Number(
             findOrFail(
               body,
               /SELECT pg_sleep\((\d+)\);/,
-              `ci.yml ${job}: no pg_sleep in the mutex acquire step`,
+              `${file} ${job}: no pg_sleep in the mutex acquire step`,
             ).match(/(\d+)/)![1],
           );
           expect(
             sleepSec,
-            `ci.yml ${job}: the mutex holder sleeps ${sleepSec}s but the job TTL is ${ttlMin}m (${ttlMin * 60}s). The holder MUST outlive the job: when pg_sleep returns, psql exits and Postgres releases the advisory lock — while the job is still doing DB work, letting a concurrent run in unserialized. Nothing detects that at runtime (158-REVIEW WR-01)`,
+            `${file} ${job}: the mutex holder sleeps ${sleepSec}s but the job TTL is ${ttlMin}m (${ttlMin * 60}s). The holder MUST outlive the job: when pg_sleep returns, psql exits and Postgres releases the advisory lock — while the job is still doing DB work, letting a concurrent run in unserialized. Nothing detects that at runtime (158-REVIEW WR-01)`,
           ).toBeGreaterThan(ttlMin * 60);
         }
       });
@@ -2165,15 +2224,15 @@ describe("Critical regression guards", () => {
       // pg_advisory_lock so the lock wait itself is exempt/covered and the
       // pid is in the log before MUTEX-ACQUIRED can be grepped — so the pin
       // asserts the whole ordered sequence, not bare membership.
+      // Re-pointed 2026-09-26 (Phase 164.9.4, D-06): iterates MUTEX_HOLDERS, not ci.yml's DB_JOBS alone.
       it("the mutex holder opens with both session GUCs and the backend-pid marker before pg_advisory_lock in every holder's acquire step", () => {
-        const src = readText(".github/workflows/ci.yml");
         const exemptHolderRe =
           /-c "SET statement_timeout = 0;" \\\n\s+-c "SET client_connection_check_interval = '30s';" \\\n\s+-c "SELECT 'HOLDER-BACKEND-PID ' \|\| pg_backend_pid\(\);" \\\n\s+-c "SELECT pg_advisory_lock\(61616158\);"/;
-        for (const job of DB_JOBS) {
+        for (const [file, job] of MUTEX_HOLDERS) {
           expectMatch(
-            jobSlice(src, job),
+            jobSlice(readWorkflow(file), job, file),
             exemptHolderRe,
-            `ci.yml ${job}: the mutex holder no longer runs \`SET statement_timeout = 0\` → \`SET client_connection_check_interval = '30s'\` → HOLDER-BACKEND-PID → pg_advisory_lock in that order — without the first, TEST's server-wide statement_timeout=120000 kills the holder ~120s after acquiring and kills a contended lock wait at 120s (158-MUTEX-01); without the second BEFORE the lock, an orphaned backend (client killed mid-sleep or mid-wait) keeps the lock with no janitor (158-MUTEX-02); without the marker before MUTEX-ACQUIRED, the release step cannot reap the backend server-side`,
+            `${file} ${job}: the mutex holder no longer runs \`SET statement_timeout = 0\` → \`SET client_connection_check_interval = '30s'\` → HOLDER-BACKEND-PID → pg_advisory_lock in that order — without the first, TEST's server-wide statement_timeout=120000 kills the holder ~120s after acquiring and kills a contended lock wait at 120s (158-MUTEX-01); without the second BEFORE the lock, an orphaned backend (client killed mid-sleep or mid-wait) keeps the lock with no janitor (158-MUTEX-02); without the marker before MUTEX-ACQUIRED, the release step cannot reap the backend server-side`,
           );
         }
       });
@@ -2186,43 +2245,45 @@ describe("Critical regression guards", () => {
       // Extracting the WHOLE acquire step from each DB job and asserting
       // pairwise string equality mechanically enforces byte-identity, subsumes
       // that count, and names the drifted site on failure.
+      // Re-pointed 2026-09-26 (Phase 164.9.4, D-06): iterates MUTEX_HOLDERS, not ci.yml's DB_JOBS alone.
+      // Byte-identity is compared WITHIN each file only: the cross-file copies
+      // legitimately carry different prefixes (plan 06's trios compare them
+      // from SUFFIX_ANCHOR). Keepalives are asserted on EVERY holder, so this
+      // `it` keeps an absolute arm when a file has a single holder.
       it("every holder's Acquire shared-test-db mutex step is byte-identical and carries libpq keepalives", () => {
-        const src = readText(".github/workflows/ci.yml");
         // From the step's `- name:` line (6-space step indent) to the next
         // sibling step or comment at that indent — everything inside the step
         // is indented deeper, so the first such line bounds the step.
         const acquireStepRe =
           /^ {6}- name: Acquire shared-test-db mutex\n[\s\S]*?(?=\n {6}[-#])/m;
-        const stepByJob = new Map<string, string>();
-        for (const job of DB_JOBS) {
-          stepByJob.set(
-            job,
-            findOrFail(
-              jobSlice(src, job),
-              acquireStepRe,
-              `ci.yml ${job}: could not extract the "Acquire shared-test-db mutex" step (name line gone, or no following step/comment at step indent to bound it) — the byte-identity pin cannot run`,
-            ),
+        const stepsByFile = new Map<string, Array<readonly [string, string]>>();
+        for (const [file, job] of MUTEX_HOLDERS) {
+          const step = findOrFail(
+            jobSlice(readWorkflow(file), job, file),
+            acquireStepRe,
+            `${file} ${job}: could not extract the "Acquire shared-test-db mutex" step (name line gone, or no following step/comment at step indent to bound it) — the byte-identity pin cannot run`,
+          );
+          stepsByFile.set(file, [...(stepsByFile.get(file) ?? []), [job, step]]);
+          // [158-MUTEX-01 F2]: during the contended pg_advisory_lock wait and
+          // the pg_sleep hold the connection carries ZERO traffic; without libpq
+          // keepalives, runner-side NAT idle expiry zombifies the holder
+          // invisibly — the backend keeps the lock after the job is gone, and
+          // the release step's dead-holder witness never fires.
+          expectMatch(
+            step,
+            /keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4/,
+            `${file} ${job}: the mutex holder DSN lost its libpq keepalive parameters (keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4) — with zero traffic during the lock wait and the idle hold, NAT idle expiry would silently zombify the holder and the lock would outlive the job (158-MUTEX-01 F2)`,
           );
         }
-        const [refJob, ...otherJobs] = DB_JOBS;
-        for (const job of otherJobs) {
-          expect(
-            stepByJob.get(job),
-            `ci.yml ${job}: its "Acquire shared-test-db mutex" step is no longer byte-identical to ${refJob}'s — every holder's acquire step is identical BY DESIGN (every mutex invariant is reasoned about once and applied to each holder), so a single-site drift means one job runs a DIFFERENT mutex protocol than the rest and every per-fragment pin here can still pass (158-MUTEX-01 review)`,
-          ).toBe(stepByJob.get(refJob));
+        for (const [file, steps] of stepsByFile) {
+          const [[refJob, refStep], ...others] = steps;
+          for (const [job, step] of others) {
+            expect(
+              step,
+              `${file} ${job}: its "Acquire shared-test-db mutex" step is no longer byte-identical to ${refJob}'s — every holder's acquire step in a file is identical BY DESIGN (every mutex invariant is reasoned about once and applied to each holder), so a single-site drift means one job runs a DIFFERENT mutex protocol than the rest and every per-fragment pin here can still pass (158-MUTEX-01 review)`,
+            ).toBe(refStep);
+          }
         }
-        // [158-MUTEX-01 F2]: during the contended pg_advisory_lock wait and
-        // the pg_sleep hold the connection carries ZERO traffic; without libpq
-        // keepalives, runner-side NAT idle expiry zombifies the holder
-        // invisibly — the backend keeps the lock after the job is gone, and
-        // the release step's dead-holder witness never fires. Presence is
-        // asserted once on the reference job; byte-identity above extends it
-        // to every holder.
-        expectMatch(
-          stepByJob.get(refJob)!,
-          /keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4/,
-          `ci.yml ${refJob}: the mutex holder DSN lost its libpq keepalive parameters (keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4) — with zero traffic during the lock wait and the idle hold, NAT idle expiry would silently zombify the holder and the lock would outlive the job (158-MUTEX-01 F2)`,
-        );
       });
 
       // [158-MUTEX-02] (run 32457330139): killing the psql CLIENT does not
@@ -2237,14 +2298,14 @@ describe("Critical regression guards", () => {
       // ~30s of the client dying. Every mutex session needs it — the
       // ci.yml holders AND the probe's contenders (a probe job timeout kills
       // a contender mid-wait the same way, leaving a zombie waiter).
+      // Re-pointed 2026-09-26 (Phase 164.9.4, D-06): iterates MUTEX_HOLDERS, not ci.yml's DB_JOBS alone.
       it("every mutex session sets client_connection_check_interval (every holder's acquire step + the probe contender)", () => {
         const ccciRe = /-c "SET client_connection_check_interval = '30s';"/;
-        const src = readText(".github/workflows/ci.yml");
-        for (const job of DB_JOBS) {
+        for (const [file, job] of MUTEX_HOLDERS) {
           expectMatch(
-            jobSlice(src, job),
+            jobSlice(readWorkflow(file), job, file),
             ccciRe,
-            `ci.yml ${job}: the mutex holder no longer sets client_connection_check_interval — an orphaned backend (psql client killed mid-pg_sleep or mid-lock-wait) keeps the advisory lock for its full 6000s sleep with NO janitor left (statement_timeout is zeroed), starving every waiter past the 3600s acquire cap (158-MUTEX-02, run 32457330139)`,
+            `${file} ${job}: the mutex holder no longer sets client_connection_check_interval — an orphaned backend (psql client killed mid-pg_sleep or mid-lock-wait) keeps the advisory lock for its full 6000s sleep with NO janitor left (statement_timeout is zeroed), starving every waiter past the 3600s acquire cap (158-MUTEX-02, run 32457330139)`,
           );
         }
         expectMatch(
@@ -2260,15 +2321,15 @@ describe("Critical regression guards", () => {
       // same pid) is what makes the terminate safe against pid recycling —
       // a bare pg_terminate_backend would not be, so the pin asserts the
       // whole guarded statement.
+      // Re-pointed 2026-09-26 (Phase 164.9.4, D-06): iterates MUTEX_HOLDERS, not ci.yml's DB_JOBS alone.
       it("every holder's release step carries the guarded server-side pg_terminate_backend of the holder backend", () => {
-        const src = readText(".github/workflows/ci.yml");
         const reapRe =
           /pg_terminate_backend\(\$\{backend\}\) FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158 AND pid = \$\{backend\};/;
-        for (const job of DB_JOBS) {
+        for (const [file, job] of MUTEX_HOLDERS) {
           expectMatch(
-            jobSlice(src, job),
+            jobSlice(readWorkflow(file), job, file),
             reapRe,
-            `ci.yml ${job}: its release step lost the guarded server-side pg_terminate_backend — killing the psql client alone leaves the server backend holding key 61616158 for its full pg_sleep (158-MUTEX-02, run 32457330139), and the pg_locks guard (advisory key + pid) is what keeps the terminate a no-op on an already-exited or recycled pid, so restore the WHOLE statement, not a bare pg_terminate_backend`,
+            `${file} ${job}: its release step lost the guarded server-side pg_terminate_backend — killing the psql client alone leaves the server backend holding key 61616158 for its full pg_sleep (158-MUTEX-02, run 32457330139), and the pg_locks guard (advisory key + pid) is what keeps the terminate a no-op on an already-exited or recycled pid, so restore the WHOLE statement, not a bare pg_terminate_backend`,
           );
         }
       });
