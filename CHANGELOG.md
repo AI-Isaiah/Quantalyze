@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.110.0.3] - 2026-09-28 — CI: actions/checkout v7.0.1
+
+### Changed
+- Every workflow pin of `actions/checkout` moves from v7.0.0 (`9c091bb2`) to v7.0.1 (`3d3c42e5`). This is the patch from Dependabot pull request #643, replayed onto current `main`.
+
 ## [0.110.0.2] - 2026-09-28 — ACCOUNTTRUTH: an empty sole-key reconstruct no longer wipes equity history
 
 ### Fixed
