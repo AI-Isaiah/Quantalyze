@@ -263,7 +263,7 @@ jobs:
     outputs:
       configured: ${{ steps.check.outputs.configured }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. The plan job uses
@@ -369,7 +369,7 @@ jobs:
     environment: Test
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -1289,7 +1289,7 @@ jobs:
     steps:
       # The default fetch depth is enough: the script reads `git ls-tree` of
       # HEAD, and on this run HEAD is the merge commit.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       # Copied from migration-drift-check.yml's assert step (Phase 164.3 / D-17):
@@ -1430,7 +1430,7 @@ jobs:
       # (D-15, RESEARCH F6), and the bot-branch check needs origin/main (D-24),
       # hence the full history. The job token is NOT persisted into .git/config:
       # the push step below authenticates explicitly, for that step only.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: main
           fetch-depth: 0
@@ -1488,7 +1488,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: Production
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. The apply job uses
