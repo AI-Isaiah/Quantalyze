@@ -204,6 +204,13 @@ AuditAction = Literal[
     # route is a Next.js write). Kept here so the TS<->Python AuditAction
     # parity test test_action_literal_matches_ts_union stays green.
     "api_key.rotate_secret",
+    # --- Phase 167.1.2 / D-01 + D-11: the daily poll's identity stamper
+    # marked this key as reading the same exchange account as a live key of
+    # the same owner (Python-only call site: services.account_identity).
+    # entity_id = the marked api_keys.id; metadata = venue and the holder's key
+    # id, never the account id. Emitted once per transition into 'duplicate'.
+    # Kept in the TS union too (test_action_literal_matches_ts_union).
+    "api_key.account_duplicate_detected",
     "trades.upload",
     "admin.partner_import",
     # --- /review follow-up (T4-C1 + T4-M6) ----------------------------------

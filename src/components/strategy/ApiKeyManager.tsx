@@ -31,6 +31,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 import type { ApiKey } from "@/lib/types";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
+import { accountShareNote } from "@/lib/account-share-note";
 import { isComputedAnalytics, isUntrustedKeySyncStatus } from "@/lib/closed-sets";
 
 interface ApiKeyManagerProps {
@@ -666,6 +667,9 @@ export function ApiKeyManager({
     keyShape === "composite"
       ? keys.filter((k) => compositeMemberKeyIds?.includes(k.id) ?? false)
       : keys;
+  // Phase 167.1.2 plan 04 — accountShareNote's holder look-up, over every key
+  // this read returned (see the render).
+  const keysById = new Map(keys.map((k) => [k.id, k]));
 
   const panelSubjectUntrusted = isUntrustedKeySyncStatus(
     keys.find((k) => k.id === lastAttemptedKeyId)?.sync_status,
@@ -1657,6 +1661,21 @@ export function ApiKeyManager({
                     MT5 account {key.venue_account_id ?? "—"}
                   </p>
                 )}
+                {/* Phase 167.1.2 plan 04 (D-01, D-11): the same duplicate
+                    sentence the allocator card shows, from the same source,
+                    beside this card's Delete. The holder is looked up in every
+                    key this read returned, not only the listed ones, so a
+                    composite's filtered list still names it. The verb is
+                    this card's own control, Delete: the manager card has no
+                    Disconnect (167.1.2 REVIEW WR-01). */}
+                {(() => {
+                  const shareNote = accountShareNote(key, keysById, "Delete");
+                  return shareNote ? (
+                    <p role="note" className="text-xs text-warning mt-0.5">
+                      {shareNote}
+                    </p>
+                  ) : null;
+                })()}
               </div>
             </div>
             <div className="flex items-center gap-2">

@@ -533,6 +533,53 @@ describe("[154-06 / TWIN-8] composite/add-key — the 23505 arm discriminates", 
     );
   });
 
+  // 167.1.2 D-04 — the composite path stays EXEMPT by construction, measured in
+  // 167.1.2-CONTEXT.md (D-04: two live composite members CAN sit on one venue
+  // account over disjoint windows, i.e. a key rotation inside a composite). Now
+  // that `/api/validate-key` returns a ccxt `venue_account_id`, this pins that
+  // the composite RPC is still handed NO identity, so the venue-identity index
+  // cannot refuse a member add, and that its 23505 arm is unchanged.
+  it("[167.1.2 D-04] a validation carrying a venue_account_id still passes NO identity to add_wizard_composite_key", async () => {
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      venue_account_id: "100000001",
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    const [rpcName, rpcArgs] = rpcMock.mock.calls[0];
+    expect(rpcName).toBe("add_wizard_composite_key");
+    expect(rpcArgs as Record<string, unknown>).not.toHaveProperty("p_venue_account_id");
+    expect(JSON.stringify(rpcArgs)).not.toContain("100000001");
+  });
+
+  it("[167.1.2 D-04] the venue-identity 23505 still takes the unreachable arm when the validation carried an id", async () => {
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      venue_account_id: "100000001",
+    });
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+      },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
+    const capture = await awaitCapture();
+    expect(capture.options.tags?.step).toBe("draft-rpc-venue-identity-unreachable");
+  });
+
   it("an UNRECOGNISED constraint fails LOUD — 500 + Sentry naming it, never the wrong 409", async () => {
     rpcMock.mockResolvedValue({
       data: null,

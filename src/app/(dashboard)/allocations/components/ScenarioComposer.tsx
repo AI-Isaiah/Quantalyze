@@ -196,6 +196,7 @@ import { StressVarSection } from "./StressVarSection";
 import { MonteCarloSection } from "./MonteCarloSection";
 import { WeightOptimizerSection } from "./WeightOptimizerSection";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import { dataSourceLabel } from "@/lib/api-key-label";
 import type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
 // ---------------------------------------------------------------------------
@@ -723,48 +724,6 @@ function buildUntrustedAumClause(summary: LiveHoldingsSummary): string {
     summary.excludedUntrusted,
     summary.excludedUnknownStatus,
   );
-}
-
-/**
- * DSRC-02 — exchange display-name lookup for the Data-sources row labels.
- *
- * Copied locally from the SyncBadge recipe (SyncBadge.tsx:21-35): a lower-cased
- * lookup with `?? exchange` fallback. The shared `EXCHANGE_DISPLAY`
- * (closed-sets.ts) carries identical values but is typed
- * `Record<SupportedExchange, string>` — a CLOSED key union — so it cannot be
- * indexed by the arbitrary `string` exchange code without a cast that defeats
- * its narrowing; the open-keyed `?? fallback` recipe stays local, matching the
- * existing local copies in SyncBadge + VerificationForm + AllocatorSyncStatus
- * rather than introducing a cast or a new shared module (surgical-change rule,
- * PATTERNS §"No Analog Found").
- */
-const EXCHANGE_LABELS: Record<string, string> = {
-  binance: "Binance",
-  okx: "OKX",
-  bybit: "Bybit",
-};
-
-/**
- * DSRC-02 — resolve a connected exchange api_key to its row label
- * `{Exchange} — {nickname}`, falling back to `{Exchange} — ••••{id.slice(-4)}`
- * when the key has no nickname. The masked tail never reveals the full id and
- * never any secret/ciphertext (T-37-03-01). Returns the structured parts so the
- * caller can render the masked tail in font-mono per UI-SPEC.
- */
-function dataSourceLabel(k: { exchange: string; label: string; id: string }): {
-  exchange: string;
-  /** nickname when present, else null (caller renders the masked tail). */
-  nickname: string | null;
-  /** masked id tail (last 4) — only meaningful when nickname is null. */
-  maskedTail: string;
-} {
-  const exchange = EXCHANGE_LABELS[k.exchange.toLowerCase()] ?? k.exchange;
-  const nick = k.label?.trim();
-  return {
-    exchange,
-    nickname: nick ? nick : null,
-    maskedTail: `••••${k.id.slice(-4)}`,
-  };
 }
 
 /** The canonical connection-failure copy — honest for a genuine network drop

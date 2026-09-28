@@ -1449,7 +1449,10 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     expect(PERSIST_STATE.inserts[0].venue_account_id).toBe("5001234");
   });
 
-  it("leaves venue_account_id NULL for a non-MT5 (ccxt) persist — byte-unchanged from before this plan", async () => {
+  // 167.1.2 (c): a ccxt validation WITHOUT an id still connects, with NULL.
+  // A missing id is venue schema drift, and blocking the connect on it would
+  // turn drift into an outage; the key is stamped later instead.
+  it("leaves venue_account_id NULL for a ccxt persist whose validation carried no id, and still connects", async () => {
     const { POST } = await import("./route");
     const res = await POST(makeReq(persistBody({ exchange: "okx" })));
 
@@ -1457,6 +1460,27 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     expect(PERSIST_STATE.inserts).toHaveLength(1);
     expect(PERSIST_STATE.inserts[0].exchange).toBe("okx");
     expect(PERSIST_STATE.inserts[0].venue_account_id).toBeNull();
+  });
+
+  // 167.1.2 (a) — D-01. The id the validator read from THIS credential is what
+  // the venue-identity unique index keys on; without it on the row, a second
+  // live key on the same OKX account is never refused and the account is
+  // summed twice everywhere keys are added together. "100000001" is synthetic.
+  it("stamps venue_account_id with the id /api/validate-key read, for a ccxt (okx) persist", async () => {
+    mockValidateKey.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      venue_account_id: "100000001",
+    });
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody({ exchange: "okx" })));
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(PERSIST_STATE.inserts[0].exchange).toBe("okx");
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe("100000001");
+    // The id is written, never echoed back to the browser.
+    expect(JSON.stringify(await res.json())).not.toContain("100000001");
   });
 
   // ── (3) NO CIPHERTEXT LEAVES THE SERVER ON THE PERSIST PATH ───────────────
@@ -1853,7 +1877,8 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
     // `code:`-first predicate.
     expect(body).toEqual({
       code: "KEY_VENUE_ALREADY_CONNECTED",
-      error: "You already have a connected key for this account.",
+      error:
+        "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
     });
     // Never the generic fallback this same PERSIST_STATE shape answers one
     // test above for a DIFFERENT constraint name.
@@ -1861,6 +1886,45 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
     expect(Object.keys(body).filter((k) => CIPHERTEXT_KEY_PATTERN.test(k))).toEqual([]);
     // Never captureToSentry — this is an expected, user-actionable fact (the
     // founder already connected this account), not an anomaly.
+    expect(captureSpy).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  // 167.1.2 (b) — D-01 for a ccxt key, and T-167.1.2-11. Now that the persist
+  // arm stamps an OKX uid, a second live key on the same OKX account trips the
+  // venue-identity index. The refusal must be the named 409, and the uid must
+  // appear NOWHERE the user or the logs can see it: not in the body, and not in
+  // the console line, even though Postgres' DETAIL echoes it. "100000001" is a
+  // synthetic uid.
+  it("a ccxt (okx) key whose uid is already connected is refused 409 KEY_VENUE_ALREADY_CONNECTED, and the uid is in no body or log line", async () => {
+    const UID = "100000001";
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true, venue_account_id: UID });
+    const RAW_PG =
+      'duplicate key value violates unique constraint ' +
+      '"api_keys_user_exchange_venue_account_uniq" (SQLSTATE 23505) ' +
+      `DETAIL: Key (user_id, exchange, venue_account_id)=(…, okx, ${UID}) already exists.`;
+    PERSIST_STATE.insertResult = {
+      data: null,
+      error: { message: RAW_PG, code: "23505" },
+    };
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody({ exchange: "okx" })));
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toEqual({
+      code: "KEY_VENUE_ALREADY_CONNECTED",
+      error:
+        "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
+    });
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(UID);
+    expect(JSON.stringify(body)).not.toContain(UID);
+    // The collision WAS logged (the arm ran), and the logged line is scrubbed.
+    const logged = JSON.stringify(consoleErr.mock.calls);
+    expect(logged).toContain("venue-identity collision");
+    expect(logged).not.toContain(UID);
     expect(captureSpy).not.toHaveBeenCalled();
     consoleErr.mockRestore();
   });

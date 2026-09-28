@@ -1,5 +1,87 @@
 # Changelog
 
+## [0.110.0.0] - 2026-09-27 — ACCOUNTTRUTH C1: one exchange account is connected once, and a duplicate key is named on both key cards
+
+⭐ **What changed for whoever reads this next.** This is the first topic PR of Phase 167.1.2 PR C, split by founder decision D-21. C2 (history rebuild), C3 (honest empties and small fixes), C4 (departed-account overview) and plan 08 follow, landed one at a time. It covers plans 02, 04 and 16.
+- A key's venue account id is now captured when the key connects (OKX, Bybit, Binance, Deribit).
+- A second live key on an account the owner already has connected is refused in words.
+- The daily poll stamps the id on keys connected before this PR and marks any sibling key on a held account as a duplicate.
+- Both key cards name the duplicate's holder.
+- D-18's "working holder" rule is decided and shipped.
+
+⚠️ **A minor bump: new behaviour at connect and in the daily poll, plus a migration.** `20260927180000_working_holder_rule_d18.sql` **auto-applies to TEST and then PROD on merge, with no human gate**. migration-reviewer, rls-policy-auditor and silent-failure-hunter all reviewed it before merge, and none found anything above LOW.
+
+### Added
+- **The venue account id is captured at connect (plan 02, D-01, D-10).**
+  - The analytics validator reads the account id from the venue with the credential being connected: OKX uid, Bybit, Binance and Deribit ids.
+  - Both connect routes (`validate-and-encrypt` and the wizard's `create-with-key`) write it to `api_keys.venue_account_id`. sFOX has no knowable identity (D-10).
+  - A second live key on the same (user, venue, account) is refused by `api_keys_user_exchange_venue_account_uniq`. The 23505 is answered in venue-neutral words.
+  - A composite key rotation stays exempt (D-04).
+  - A missing id never fails a connect: the key is saved without one, and the poll fills it later.
+- **The daily poll stamps identity and marks duplicates (plan 04, D-01, D-04, D-11).** `stamp_account_identity` runs inside `poll_allocator_positions`, bounded by the poll's remaining time.
+  - It stamps a key's account id.
+  - If a live key of the same owner already holds that account, it marks the key `account_share_kind = 'duplicate'`, naming that holder. A pair of members of one composite with disjoint windows is marked `composite_member` instead.
+  - The duplicate is audited once (`api_key.account_duplicate_detected`), and the marker clears itself once the holder leaves.
+  - It never raises, never writes a status column, and never disconnects or deletes a key.
+- **The duplicate note on both key cards (plan 04, plan 16).**
+  - The allocator card says "This key reads the same exchange account as <holder>. Disconnect one of them." The manager card says "Delete one of them.", because that card has no Disconnect control (review WR-01).
+  - It names the holder by its own label (exchange and nickname, or a masked tail), never an account or user id.
+  - It shows only when both the marked key and its holder are working (review WR-02, SF-L1).
+  - A reconnect into an occupied account slot is refused in words.
+- **D-18, the working-holder rule (plan 16, founder decision).** A holder is working when `is_active AND disconnected_at IS NULL AND (sync_status IS NULL OR sync_status NOT IN ('revoked','sign_in_failed','error'))`. "Active" is the repo's `eligible_key_predicate`.
+  - Migration `20260927180000` re-bases `set_departed_key_history_inclusion` on its latest definition (`20260925120000`). Its `KEY_NOT_DEPARTED` test now follows D-18, and the grants are re-issued unchanged.
+  - It rewrites the COMMENTs on `account_share_kind`, `history_inclusion` and the function, and drops "provisional".
+  - The rollback is byte-identical.
+  - The TS reader `isWorkingHolder` follows the same rule, and a parity test reads the status tuple out of the migration (review SF-L3).
+
+### Changed
+- **Key labels name Deribit, sFOX and MT5 by their display names** (review IN-03). The Scenario data-source rows share the helper, so they change too.
+- **The wizard's orphan refusal copy (`KEY_ORPHANED`)** now says only what every path to it shares (review WR-04 follow-up, IN-02). A collision with a composite-member key answers `KEY_VENUE_ALREADY_CONNECTED` instead of the orphan copy (review WR-04). The wizard knows that code.
+
+### Fixed
+- **Review round 1** (gsd-code-reviewer 0 critical / 5 warning / 6 info; silent-failure-hunter 0 high / 6 medium / 4 low). Every in-scope finding was fixed test-first by two topic fixers:
+  - An unacceptable `venue_account_id` (blank, over 128 characters, not a string) connects the key unstamped instead of failing the connect (IN-02/SF-M6).
+  - `venueAccountId` is scrubbed from create-with-key's terminal catch (IN-05).
+  - The debug validate route no longer returns the account id (IN-01).
+  - The duplicate marker and its audit run as one thread task, audited only when a row was actually marked (IN-04/SF-M2/SF-M5).
+  - Stamper failures log by whether a retry can clear them, never with a Postgres DETAIL or a ccxt message (SF-M3/SF-M4).
+  - A comment typo is corrected (IN-06).
+- **Review round 2 found one regression the WR-04 fix had introduced (CR-01).** Reading `allocator_holdings` made genuine orphans answer the wrong refusal, because the daily poll writes holdings for every live key. The read was reverted, and a regression pin fixes the set of tables the path reads. Riding along:
+  - The faulted-read test pins its fall-through and its log line (IN-01/SF2-L2).
+  - A refused id is logged at `console.error` with issue codes only (SF2-M1).
+  - The service caps the id at the same 128 characters (SF2-M1).
+  - `_safe_message` reads only a PostgREST `APIError` (SF2-L4).
+  - Transient database failures log at WARNING, not ERROR (WR-01/SF2-L3).
+  - A ccxt key still unstamped after 3 days escalates to ERROR (SF2-M2).
+- **Review round 3** was the confirmation round that the CRITICAL required. It found no CRITICAL or HIGH.
+
+### Tests
+- The SQL gate `test_api_keys_account_identity.sql` gains the arms HIST-signin, HIST-error, HIST-inactive and HIST-nullstatus. It was run red-first on the pg lane and on the local stack's PROD-dump lane with the migration replayed.
+- `20260922120000` joins its `RED-UNDER-SETUP` list, so the lane admits a `sign_in_failed` seed.
+- The twelve RPC-body arms were re-pointed at the new migration.
+- The mutation census `ARMS_FLOOR` moved by measurement to the union with 164.9.3 CLAIMPAIR's arms. `FILES_FLOOR` stayed 53 and `WAIVED_CEILING` stayed 0.
+- Each fix round added red-first vitest and pytest cases for its findings.
+
+### Notes
+- **Known limits, routed rather than fixed here.**
+  - **To the C2 replan of plans 05 and 10** (also recorded in `167.1.2-CONTEXT.md`):
+    - For keys connected before this PR, the duplicate marker's direction follows stamp order, so the older key can be the one marked (review WR-03).
+    - A working key behind a holder that is not working keeps a NULL id although its identity is known (SF-M1).
+    - How the history rebuild treats a still-connected key that is inactive, sign_in_failed or error is still open.
+  - **To the C4 replan of plan 09:**
+    - Resetting an owner's include/exclude choice when a failing key recovers.
+    - Plans 05, 08, 09 and 10 must depend on plan 16.
+  - **D-20 → Phase 167.1.2.1 RECONMARKER:** the durable per-key history-reconstructed marker class.
+  - **Until Phase 167.1.1 keys holdings per key**, the Open Positions table and the exposure panel can disagree.
+- **Accepted after the round-3 confirmation (MEDIUM or lower, no further round per policy):**
+  - A marked duplicate or composite-member key that hits a transient failure after day 3 logs a false "duplicate check not running" ERROR.
+  - The `no_id` outcome never escalates.
+  - A key held only by an archived composite answers `KEY_VENUE_ALREADY_CONNECTED`, while My Strategies offers Finish setup on it.
+  - Expect a one-off burst of ERRORs from pre-existing unstamped keys after deploy.
+- **Founder decision owed (WR-05):** a ccxt wizard collision with the user's own draft answers `deduped` and drops the credential just entered. This is intended and pinned by a test, and already true for MT5.
+- **Incident, recorded:** while writing the rollback, an unquoted shell heredoc ran two Supabase CLI commands as command substitutions. Both failed immediately with no project link in the worktree, and no database was contacted. Every later generated file used a quoted heredoc or the Write tool.
+- **Verification:** `167.1.2-C1-VERIFY.md` is human_needed with 22/22 must-haves verified; the open items are the browser copy checks at 390px and 200% zoom, WR-05, and the first post-deploy poll. `167.1.2-SECURITY.md` has 16 threats, 0 open.
+
 ## [0.109.0.1] - 2026-09-27 — BASELINE: automated re-dump after the PROD apply of 5ce71a98
 
 ### Changed

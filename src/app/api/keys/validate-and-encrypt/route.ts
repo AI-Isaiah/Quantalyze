@@ -759,8 +759,19 @@ async function legacyValidateAndEncryptHandler(args: {
     // login already passed the three-credential non-blank gate above, so no
     // further normalization belongs here (the SQL-side `NULLIF(btrim(...),
     // '')` lives in the RPC path, for a different reason).
+    //
+    // Phase 167.1.2 (D-01): a ccxt row now carries the venue account id that
+    // `/api/validate-key` read from the credential being connected (OKX
+    // account/config uid, Bybit query-api userID, Binance balance uid, Deribit
+    // extended account summary id). Only the NAMED schema field is read, never a
+    // spread of the response. `null` when the venue returned none: the connect
+    // proceeds and the key is stamped later. sFOX has no id and stays `null`
+    // (D-10). Stamping it is what makes the 23505 arm below reachable for a
+    // ccxt key: a second live key on one exchange account is refused there.
     const isMt5 = exchangeNormalized === "mt5";
-    const venueAccountId = isMt5 ? api_key.trim() : null;
+    const venueAccountId = isMt5
+      ? api_key.trim()
+      : (validation.venue_account_id ?? null);
 
     type EncryptedColumns = z.infer<typeof EncryptKeyResponseSchema>;
     const encryptedColumns: { [K in keyof EncryptedColumns]: EncryptedColumns[K] } = {
@@ -781,8 +792,7 @@ async function legacyValidateAndEncryptHandler(args: {
         exchange: exchangeNormalized,
         attested_venue: exchangeNormalized,
         label: labelOrDefault,
-        // 164.5.3-02 — see the `venueAccountId` derivation above. `null` for
-        // every non-MT5 row, byte-unchanged from before this plan.
+        // 164.5.3-02 / 167.1.2 — see the `venueAccountId` derivation above.
         venue_account_id: venueAccountId,
       })
       .select("id")
@@ -809,14 +819,19 @@ async function legacyValidateAndEncryptHandler(args: {
         insertError?.code === "23505" &&
         pgConstraintName(insertError) === VENUE_IDENTITY_CONSTRAINT
       ) {
+        // 167.1.2 (T-167.1.2-11): Postgres' DETAIL line echoes the colliding
+        // `venue_account_id`. For MT5 that is the login (already `api_key`);
+        // for a ccxt key it is the venue uid, so it is scrubbed by value too.
+        // The response copy names no id and is venue-neutral.
         console.error(
           "[keys/validate-and-encrypt] persist INSERT failed — venue-identity collision:",
-          scrubSeamError(insertError, [api_key, api_secret, passphrase]),
+          scrubSeamError(insertError, [api_key, api_secret, passphrase, venueAccountId]),
         );
         return NextResponse.json(
           {
             code: "KEY_VENUE_ALREADY_CONNECTED",
-            error: "You already have a connected key for this account.",
+            error:
+              "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
           },
           { status: 409, headers: NO_STORE_HEADERS },
         );
@@ -827,7 +842,9 @@ async function legacyValidateAndEncryptHandler(args: {
       // is scrubbed at BOTH sinks and NEVER placed in the response body. The
       // copy is honest about what did and did not happen: the key validated,
       // the save did not.
-      const perRequestSecrets = [api_key, api_secret, passphrase];
+      // 167.1.2: the venue account id is scrubbed too — any other 23505 or
+      // CHECK failure DETAIL can echo the row's `venue_account_id`.
+      const perRequestSecrets = [api_key, api_secret, passphrase, venueAccountId];
       const insertFault =
         insertError ?? new Error("api_keys insert returned no row");
       console.error(
