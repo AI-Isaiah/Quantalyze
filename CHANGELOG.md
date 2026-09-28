@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.110.0.2] - 2026-09-28 — ACCOUNTTRUTH: an empty sole-key reconstruct no longer wipes equity history
+
+### Fixed
+- A sole-key reconstruct that produces no rows no longer calls `replace_allocator_equity_snapshots` when `allocator_equity_snapshots` already has rows, or when that head count errors or comes back without a count. The job stays done and records the refusal on the existing `reconstruct_no_data` audit (`purge_refused`, `existing_history`, `snapshot_lookup_failed`).
+- A book with no snapshots still sends one empty payload, which is the previous behavior.
+
+### Notes
+- This is plan 167.1.2-13 only. It does not ship the history rebuild (plans 05 and 11) or the rest of PR C.
+
 ## [0.110.0.1] - 2026-09-28 — BASELINE: automated re-dump after the PROD apply of 0bea4a9d
 
 ### Changed
