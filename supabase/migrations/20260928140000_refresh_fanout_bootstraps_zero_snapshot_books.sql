@@ -248,7 +248,7 @@
 -- GRANTS ARE RE-CONVERGED, NOT ASSUMED: EXECUTE is revoked from PUBLIC, anon
 -- and authenticated and granted to service_role only, then asserted below.
 --
--- REVERSIBLE: supabase/migrations/down/20260927120000-rollback.sql restores
+-- REVERSIBLE: supabase/migrations/down/20260928140000-rollback.sql restores
 -- 075's body, grants and COMMENT. Reconstruct and refresh jobs that already ran
 -- are not undone.
 --
@@ -529,5 +529,5 @@ BEGIN
     RAISE EXCEPTION 'refresh-fanout-bootstrap: service_role lost EXECUTE on enqueue_refresh_allocator_equity_for_all';
   END IF;
 
-  RAISE NOTICE 'Migration 20260927120000: enqueue_refresh_allocator_equity_for_all bootstraps a zero-snapshot book (capped whole-book reconstruct, then the refresh); SECDEF, the exact search_path pin and the ACL (anon, authenticated refused; service_role granted) intact.';
+  RAISE NOTICE 'Migration 20260928140000: enqueue_refresh_allocator_equity_for_all bootstraps a zero-snapshot book (capped whole-book reconstruct, then the refresh); SECDEF, the exact search_path pin and the ACL (anon, authenticated refused; service_role granted) intact.';
 END $selfverify$;

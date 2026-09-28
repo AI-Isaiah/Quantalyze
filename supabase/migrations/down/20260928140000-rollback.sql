@@ -1,5 +1,5 @@
 -- ============================================================================
--- ROLLBACK for 20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql
+-- ROLLBACK for 20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql
 -- Phase 167.1.2 ACCOUNTTRUTH, plan 12 (PR C), decision D-17.
 -- ============================================================================
 -- ⚠️ JOBS ALREADY RUN ARE NOT UNDONE. Every reconstruct_allocator_history and
@@ -20,10 +20,10 @@
 --
 -- ⚠️ THE MIGRATION LEDGER ROW IS LEFT IN PLACE. This file does not touch
 -- supabase_migrations.schema_migrations, so after it runs the ledger still
--- records version 20260927120000 as applied while the function body is 075's.
+-- records version 20260928140000 as applied while the function body is 075's.
 -- To re-apply the migration, delete that ledger row in the same change that
 -- re-applies it (or mark it reverted with `supabase migration repair --status
--- reverted 20260927120000` against the intended database, after the marker
+-- reverted 20260928140000` against the intended database, after the marker
 -- query in CLAUDE.md names that database).
 --
 -- The DO block at the end is catalogue-only: it RAISEs, and so aborts the
@@ -95,16 +95,16 @@ DECLARE
   v_body text;
 BEGIN
   IF v_oid IS NULL THEN
-    RAISE EXCEPTION 'Rollback 20260927120000: public.enqueue_refresh_allocator_equity_for_all() is missing after the restore';
+    RAISE EXCEPTION 'Rollback 20260928140000: public.enqueue_refresh_allocator_equity_for_all() is missing after the restore';
   END IF;
   v_body := regexp_replace(regexp_replace(pg_get_functiondef(v_oid), '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
   IF v_body IS NULL OR position('v_bootstrap_cap' in v_body) > 0 THEN
-    RAISE EXCEPTION 'Rollback 20260927120000: the restored body is unreadable or still declares the bootstrap cap, so 075''s body was not restored';
+    RAISE EXCEPTION 'Rollback 20260928140000: the restored body is unreadable or still declares the bootstrap cap, so 075''s body was not restored';
   END IF;
   IF has_function_privilege('anon', v_oid, 'EXECUTE') OR has_function_privilege('authenticated', v_oid, 'EXECUTE') THEN
-    RAISE EXCEPTION 'Rollback 20260927120000: anon or authenticated can EXECUTE enqueue_refresh_allocator_equity_for_all after the restore';
+    RAISE EXCEPTION 'Rollback 20260928140000: anon or authenticated can EXECUTE enqueue_refresh_allocator_equity_for_all after the restore';
   END IF;
-  RAISE NOTICE 'Rollback 20260927120000: migration 075''s body, COMMENT and grants restored.';
+  RAISE NOTICE 'Rollback 20260928140000: migration 075''s body, COMMENT and grants restored.';
 END
 $postverify$;
 

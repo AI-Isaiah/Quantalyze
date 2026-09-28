@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260927120000_refresh_fanout_bootstraps_zero_snapshot_books.sql
+-- source migration: 20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql
 -- ⚠️ SCHEMA-QUALIFIED DELIBERATELY. An unqualified CREATE OR REPLACE resolves
 -- against the SESSION search_path and could create a second function in
 -- another schema, with default privileges.
