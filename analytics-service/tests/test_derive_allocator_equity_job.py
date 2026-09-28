@@ -1475,6 +1475,13 @@ def test_account_identity_collisions_intervals() -> None:
         row("b", venue_account_id=None),
     ])
     assert unknown == []
+    # A blank id is not a shared account (pitfall 2). It collides with nothing,
+    # including another blank.
+    blank = account_identity_collisions([
+        row("a", venue_account_id="  "),
+        row("b", venue_account_id=""),
+    ])
+    assert blank == []
 
     departed = account_identity_collisions([
         row("a", first_counted_day="2026-01-01", last_counted_day="2026-03-01"),
