@@ -962,6 +962,175 @@ def test_c6_unrecognised_code_still_offers_a_retry_affordance(
 
 
 # --------------------------------------------------------------------------- #
+# Phase 167.1.2 (D-01) — the ccxt SUCCESS path carries the venue account id.
+#
+# Why: `api_keys_user_exchange_venue_account_uniq` refuses a second live key on
+# one exchange account, but only for a row whose `venue_account_id` is written,
+# and the connect routes can only write what this response carries. A venue
+# whose id never reaches this body is a venue where one account behind two keys
+# is summed twice by every consumer that adds keys together.
+#
+# These drive the REAL `validate_key_permissions` (only `create_exchange` and
+# `aclose_exchange` are stubbed), so the oracle is the whole chain: the venue
+# response the validator already fetches, the detector or balance read, the
+# result dict and the router's return. Each fake answers like the venue does,
+# including Deribit's: `id` is present ONLY when `extended` is passed.
+# Every id is synthetic. These are NOT `_assert_flat_venue_body` cases and add
+# no fixture trigger.
+# --------------------------------------------------------------------------- #
+
+_UID = "100000001"
+
+
+def _fake_ccxt(venue: str, uid: object, *, trade_scope: bool = False) -> MagicMock:
+    """A ccxt exchange double answering the calls the validator already makes."""
+    ex = MagicMock(name=f"ccxt-{venue}")
+    ex.id = venue
+    ex.apiKey = "synthetic-key"
+    ex.secret = "synthetic-secret"
+    ex.load_markets = AsyncMock(return_value={})
+    if venue == "okx":
+        perm = "read_only,trade" if trade_scope else "read_only"
+        ex.private_get_account_config = AsyncMock(
+            return_value={"code": "0", "data": [{"perm": perm, "uid": uid, "mainUid": "100000000"}]}
+        )
+        ex.fetch_balance = AsyncMock(return_value={"info": {"code": "0", "data": []}})
+    elif venue == "bybit":
+        ex.private_get_v5_user_query_api = AsyncMock(
+            return_value={
+                "retCode": 0,
+                "result": {
+                    "readOnly": "0" if trade_scope else "1",
+                    "permissions": {"Spot": ["SpotTrade"]} if trade_scope else {},
+                    "userID": uid,
+                    "parentUid": "100000000",
+                    "isMaster": False,
+                },
+            }
+        )
+        ex.fetch_balance = AsyncMock(return_value={"info": {"retCode": 0, "result": {}}})
+    elif venue == "binance":
+        ex.sapi_get_account_apirestrictions = AsyncMock(
+            return_value={
+                "enableReading": True,
+                "enableSpotAndMarginTrading": trade_scope,
+                "enableFutures": False,
+                "enableWithdrawals": False,
+            }
+        )
+        ex.fetch_balance = AsyncMock(
+            return_value={"info": {"accountType": "SPOT", "balances": [], "uid": uid}}
+        )
+    elif venue == "deribit":
+        scope = "trade:read_write account:read" if trade_scope else (
+            "trade:read account:read wallet:read custody:read block_trade:read"
+        )
+        ex.public_get_auth = AsyncMock(return_value={"result": {"scope": scope}})
+
+        async def _deribit_balance(params: dict[str, Any] | None = None) -> dict[str, Any]:
+            # private/get_account_summaries returns `id` only with extended=true.
+            info: dict[str, Any] = {"summaries": []}
+            if (params or {}).get("extended") is True:
+                info["id"] = uid
+            return {"info": info}
+
+        ex.fetch_balance = AsyncMock(side_effect=_deribit_balance)
+    else:  # pragma: no cover - guards a typo in the parametrisation
+        raise AssertionError(f"no fake for {venue}")
+    return ex
+
+
+def _arrange_real_validator(monkeypatch: pytest.MonkeyPatch, ex: MagicMock) -> None:
+    g = _handler_globals("/api/validate-key")
+    monkeypatch.setitem(g, "create_exchange", MagicMock(return_value=ex))
+    monkeypatch.setitem(g, "aclose_exchange", AsyncMock(return_value=None))
+
+
+@pytest.mark.parametrize(
+    ("venue", "uid"),
+    [
+        ("okx", _UID),
+        ("bybit", int(_UID)),  # Bybit documents userID as an integer
+        ("binance", int(_UID)),
+        ("deribit", int(_UID)),
+    ],
+)
+def test_ccxt_success_carries_the_venue_account_id(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, venue: str, uid: object
+) -> None:
+    ex = _fake_ccxt(venue, uid)
+    _arrange_real_validator(monkeypatch, ex)
+
+    r = _post_validate_key(app_client, exchange=venue)
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {"valid": True, "read_only": True, "venue_account_id": _UID}
+
+
+def test_deribit_asks_for_the_extended_account_summary(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One query parameter on the call the validator already makes: no new
+    request, no new scope (DRB-03 already requires account:read)."""
+    ex = _fake_ccxt("deribit", _UID)
+    _arrange_real_validator(monkeypatch, ex)
+
+    r = _post_validate_key(app_client, exchange="deribit")
+
+    assert r.status_code == 200, r.text
+    assert ex.fetch_balance.await_count == 1
+    assert ex.fetch_balance.await_args.args == ({"extended": True},)
+
+
+def test_bybit_never_reads_parent_uid_as_the_identity(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Bybit sub-account has its own userID; parentUid is the master's.
+    Reading parentUid would make every sub-account look like its master and
+    refuse a genuinely different account."""
+    ex = _fake_ccxt("bybit", None)
+    _arrange_real_validator(monkeypatch, ex)
+
+    r = _post_validate_key(app_client, exchange="bybit")
+
+    assert r.status_code == 200, r.text
+    assert r.json()["venue_account_id"] is None
+
+
+@pytest.mark.parametrize("venue", ["okx", "bybit", "binance", "deribit"])
+@pytest.mark.parametrize("uid", [None, "", "   "])
+def test_a_missing_or_blank_id_never_fails_validation(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, venue: str, uid: object
+) -> None:
+    """Venue schema drift must not become a connect outage: the key stays
+    valid and read-only, and the id is null (never '')."""
+    ex = _fake_ccxt(venue, uid)
+    _arrange_real_validator(monkeypatch, ex)
+
+    r = _post_validate_key(app_client, exchange=venue)
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {"valid": True, "read_only": True, "venue_account_id": None}
+
+
+@pytest.mark.parametrize("venue", ["okx", "bybit", "binance", "deribit"])
+def test_a_failure_path_carries_no_account_id(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, venue: str
+) -> None:
+    """A refused key (write scope) answers the flat venue body: no
+    `venue_account_id` key, and the uid appears nowhere in it."""
+    ex = _fake_ccxt(venue, _UID, trade_scope=True)
+    _arrange_real_validator(monkeypatch, ex)
+
+    r = _post_validate_key(app_client, exchange=venue)
+
+    assert r.status_code == EXPECTED_STATUS, r.text
+    body = r.json()
+    assert set(body) == EXPECTED_BODY_KEYS
+    assert _UID not in r.text
+
+
+# --------------------------------------------------------------------------- #
 # C7 — the verify-strategy collapse (DEAD ROUTE, closed for CLASS INTEGRITY)
 # --------------------------------------------------------------------------- #
 

@@ -1227,7 +1227,20 @@ export interface ApiKey {
   // passed", never "what the venue confirmed" — see the column's own
   // COMMENT. Rendered on both key cards for exchange === "mt5" only.
   venue_account_id: string | null;
+  // Migration 20260925120000 (Phase 167.1.2 D-11). The live key of the same
+  // owner that already holds the exchange account this key reads, and why.
+  // Both-or-neither in the database. Written only by the service-role
+  // identity stamper. Read through accountShareNote, which applies the column
+  // COMMENT's reader rule (the holder must still be working).
+  account_shared_with_api_key_id: string | null;
+  account_share_kind: ApiKeyAccountShareKind | null;
+  // Same migration (D-05 / D-09). The owner's include/exclude choice for a
+  // departed key's history; NULL = the default rule.
+  history_inclusion: "include" | "exclude" | null;
 }
+
+/** Phase 167.1.2 D-11 / D-04 — the closed set of `api_keys.account_share_kind`. */
+export type ApiKeyAccountShareKind = "duplicate" | "composite_member";
 
 /**
  * audit-2026-05-07 M-0583: trust-boundary parser for `api_keys` rows.
@@ -1262,6 +1275,9 @@ export const ApiKeyRowSchema = z
     last_429_at: _isoTimestampNullable,
     disconnected_at: _isoTimestampNullable,
     venue_account_id: z.string().nullable(),
+    account_shared_with_api_key_id: z.string().nullable(),
+    account_share_kind: z.enum(["duplicate", "composite_member"]).nullable(),
+    history_inclusion: z.enum(["include", "exclude"]).nullable(),
   })
   .strict() satisfies z.ZodType<ApiKey>;
 

@@ -9009,6 +9009,14 @@ def _sync_status_write_failure_cause(exc: BaseException) -> str:
     )
 
 
+# Phase 167.1.2 plan 04 — the account identity stamp's bounds. One venue call
+# plus up to three small writes; the timeout keeps a stuck venue from holding
+# the poll, and the margin keeps the step clear of the handler's own
+# TIMEOUT_PER_KIND ceiling, so the step can never time a completed poll out.
+_IDENTITY_STAMP_TIMEOUT_S: Final[float] = 20.0
+_IDENTITY_STAMP_MARGIN_S: Final[float] = 10.0
+
+
 async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResult:
     """INGEST-03: poll allocator holdings (spot + derivatives) via CCXT
     and upsert into allocator_holdings.
@@ -9029,7 +9037,16 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
     strategy-side poll_positions — if it's cooling down, preflight
     returns DispatchResult(outcome=DEFERRED) and we pass it straight
     through without touching api_keys (the job stays queued).
+
+    Phase 167.1.2 plan 04 (D-01 / D-11): after the holdings persist, and while
+    the exchange session is still open (the outer ``finally`` closes it after
+    the DONE return), ``stamp_account_identity`` stamps a ccxt key's venue
+    account id or marks it as sharing an account with a live sibling. The step
+    never raises, writes no status column and is bounded by what is left of
+    this handler's timeout, so the DispatchResult is the one the poll would
+    return without it (Pitfall 4).
     """
+    from services import account_identity
     from services.allocator_positions import (
         AllocatorHoldingsSyncTransientError,
         fetch_allocator_holdings,
@@ -9038,6 +9055,9 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
         _map_exception_to_sync_status,
     )
 
+    # The handler's own start, for the identity stamp's budget below. The
+    # worker's wait_for starts its clock at the same call.
+    handler_started = asyncio.get_running_loop().time()
     ctx = await _allocator_key_preflight(job, "run_poll_allocator_positions_job")
     if isinstance(ctx, DispatchResult):
         # f8: DEFERRED passes through unchanged; api_keys.sync_status
@@ -9247,135 +9267,148 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
                 error_message=sanitized,
                 error_kind=error_kind,
             )
+
+        # Persist + success status update.
+        # NEW-C12-03: wrap in a try/except that stamps sync_status='error' on
+        # failure so the UI doesn't spin forever on 'syncing'. Pre-fix a
+        # persist_allocator_holdings raise propagated to the compute_jobs FAILED
+        # handler but sync_status was never moved off 'syncing'. A failed
+        # _update_ok was previously a swallowed warning leaving the same stuck state.
+        try:
+            count = await persist_allocator_holdings(
+                ctx.supabase, rows, allocator_id, api_key_id, today_str
+            )
+
+            spot_count = sum(1 for r in rows if r.get("holding_type") == "spot")
+            deriv_count = sum(1 for r in rows if r.get("holding_type") == "derivative")
+
+            final_status = "complete_with_warnings" if warning else "complete"
+
+            # 151 review WR-03 — the LAST-LINE length cap. `sync_error` is rendered
+            # verbatim in the browser and every SIBLING write arm here truncates at
+            # [:500]; this success arm did not, so any producer whose warning
+            # interpolates venue-controlled text (an sFOX book of 100+ unpriced
+            # assets, say) could write a multi-kilobyte string into a user-visible
+            # column — a storage-poison surface as well as unreadable copy. Capping
+            # at the WRITE SITE means no future producer can bypass it by forgetting.
+            capped_warning = warning[:500] if warning else warning
+
+            def _update_ok() -> None:
+                # Return value discarded by the caller; drop it (see
+                # _update_rate_limited / _update_persist_err).
+                ctx.supabase.table("api_keys").update({
+                    "sync_status": final_status,
+                    "sync_error": capped_warning,
+                    "last_sync_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", api_key_id).execute()
+
+            # NEW-C12-03: treat _update_ok failure as a hard error (not a swallowed
+            # warning) — a missed sync_status write leaves the UI spinner stuck on
+            # 'syncing' with no recovery path since allocator jobs have no strategy_id
+            # bridge to the dispatch UI.
+            await db_execute(_update_ok)
+        except Exception as persist_exc:  # noqa: BLE001
+            sanitized_persist = str(persist_exc)[:200]
+            logger.exception(
+                "poll_allocator_positions: persist/update failed for allocator %s "
+                "(api_key %s) — stamping sync_status='error' to unblock UI: %s",
+                allocator_id, api_key_id, sanitized_persist,
+            )
+            # Best-effort: stamp sync_status so the UI exits the spinner.
+            #
+            # AUM-02 write boundary — the third and last arm that writes this
+            # column. `sanitized_persist` is a raw PostgREST/DB exception string
+            # (schema-cache misses, constraint names, connection errors): the same
+            # raw-Python-as-product-copy defect, just sourced from our own storage
+            # layer instead of a venue. It stays in the log and the audit metadata.
+            try:
+                def _update_persist_err() -> None:
+                    ctx.supabase.table("api_keys").update(
+                        {
+                            "sync_status": "error",
+                            "sync_error": sync_error_copy("error", venue),
+                        }
+                    ).eq("id", api_key_id).execute()
+                await db_execute(_update_persist_err)
+            except Exception as stamp_exc:  # noqa: BLE001
+                # 167 SFH-M3 — ERROR with the traceback: this write is the only
+                # thing that moves the key off 'syncing' after a persist failure.
+                logger.error(
+                    "poll_allocator_positions: failed to stamp sync_status='error' "
+                    "for api_key %s after persist failure",
+                    api_key_id,
+                    exc_info=stamp_exc,
+                )
+            _emit_audit(
+                allocator_id, api_key_id, "allocator.holdings.persist_failed",
+                {"sanitized_message": sanitized_persist},
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=sanitized_persist,
+                error_kind="permanent",
+            )
+
+        _emit_audit(
+            allocator_id, api_key_id, "allocator.holdings.sync_completed",
+            {
+                "row_count": count,
+                "holding_type_counts": {"spot": spot_count, "derivative": deriv_count},
+            },
+        )
+
+        # Phase 11 / Plan 03 / D-13 / ONBOARD-05 — stamp first_sync_success_at
+        # marker via the SECURITY DEFINER RPC shipped by Plan 01 migration 084.
+        # The RPC is idempotent (writes only when the marker is absent), so
+        # subsequent successful syncs are a no-op for this side effect. The
+        # /allocations Server Component reader fires the PostHog
+        # `first_sync_success` event on the next dashboard request.
+        #
+        # Non-blocking: a stamp failure must not affect the compute job. The
+        # RPC failure path is logged via logger.warning per the analytics-service
+        # convention (services/audit.py error handling).
+        def _stamp_first_sync() -> None:
+            # Return value discarded by the caller; drop it (see
+            # _update_rate_limited / _update_persist_err).
+            ctx.supabase.rpc(
+                "stamp_first_sync_success",
+                {"p_user_id": allocator_id},
+            ).execute()
+
+        try:
+            await db_execute(_stamp_first_sync)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "poll_allocator_positions: failed to stamp first_sync_success_at "
+                "for allocator %s: %s",
+                allocator_id, exc,
+            )
+
+        logger.info(
+            "poll_allocator_positions: persisted %d rows for allocator %s "
+            "(spot=%d, derivative=%d, status=%s)",
+            count, allocator_id, spot_count, deriv_count, final_status,
+        )
+
+        # Phase 167.1.2 plan 04 — the account identity stamp. Its token is
+        # logged by the step itself and read by nothing here: the return below
+        # does not depend on it.
+        identity_budget_s = min(
+            _IDENTITY_STAMP_TIMEOUT_S,
+            TIMEOUT_PER_KIND["poll_allocator_positions"]
+            - (asyncio.get_running_loop().time() - handler_started)
+            - _IDENTITY_STAMP_MARGIN_S,
+        )
+        await account_identity.stamp_account_identity(
+            ctx.supabase, ctx.key_row, ctx.exchange, timeout_s=identity_budget_s
+        )
+
+        return DispatchResult(outcome=DispatchOutcome.DONE)
     finally:
         try:
             await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup
             pass
-
-    # Persist + success status update.
-    # NEW-C12-03: wrap in a try/except that stamps sync_status='error' on
-    # failure so the UI doesn't spin forever on 'syncing'. Pre-fix a
-    # persist_allocator_holdings raise propagated to the compute_jobs FAILED
-    # handler but sync_status was never moved off 'syncing'. A failed
-    # _update_ok was previously a swallowed warning leaving the same stuck state.
-    try:
-        count = await persist_allocator_holdings(
-            ctx.supabase, rows, allocator_id, api_key_id, today_str
-        )
-
-        spot_count = sum(1 for r in rows if r.get("holding_type") == "spot")
-        deriv_count = sum(1 for r in rows if r.get("holding_type") == "derivative")
-
-        final_status = "complete_with_warnings" if warning else "complete"
-
-        # 151 review WR-03 — the LAST-LINE length cap. `sync_error` is rendered
-        # verbatim in the browser and every SIBLING write arm here truncates at
-        # [:500]; this success arm did not, so any producer whose warning
-        # interpolates venue-controlled text (an sFOX book of 100+ unpriced
-        # assets, say) could write a multi-kilobyte string into a user-visible
-        # column — a storage-poison surface as well as unreadable copy. Capping
-        # at the WRITE SITE means no future producer can bypass it by forgetting.
-        capped_warning = warning[:500] if warning else warning
-
-        def _update_ok() -> None:
-            # Return value discarded by the caller; drop it (see
-            # _update_rate_limited / _update_persist_err).
-            ctx.supabase.table("api_keys").update({
-                "sync_status": final_status,
-                "sync_error": capped_warning,
-                "last_sync_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", api_key_id).execute()
-
-        # NEW-C12-03: treat _update_ok failure as a hard error (not a swallowed
-        # warning) — a missed sync_status write leaves the UI spinner stuck on
-        # 'syncing' with no recovery path since allocator jobs have no strategy_id
-        # bridge to the dispatch UI.
-        await db_execute(_update_ok)
-    except Exception as persist_exc:  # noqa: BLE001
-        sanitized_persist = str(persist_exc)[:200]
-        logger.exception(
-            "poll_allocator_positions: persist/update failed for allocator %s "
-            "(api_key %s) — stamping sync_status='error' to unblock UI: %s",
-            allocator_id, api_key_id, sanitized_persist,
-        )
-        # Best-effort: stamp sync_status so the UI exits the spinner.
-        #
-        # AUM-02 write boundary — the third and last arm that writes this
-        # column. `sanitized_persist` is a raw PostgREST/DB exception string
-        # (schema-cache misses, constraint names, connection errors): the same
-        # raw-Python-as-product-copy defect, just sourced from our own storage
-        # layer instead of a venue. It stays in the log and the audit metadata.
-        try:
-            def _update_persist_err() -> None:
-                ctx.supabase.table("api_keys").update(
-                    {
-                        "sync_status": "error",
-                        "sync_error": sync_error_copy("error", venue),
-                    }
-                ).eq("id", api_key_id).execute()
-            await db_execute(_update_persist_err)
-        except Exception as stamp_exc:  # noqa: BLE001
-            # 167 SFH-M3 — ERROR with the traceback: this write is the only
-            # thing that moves the key off 'syncing' after a persist failure.
-            logger.error(
-                "poll_allocator_positions: failed to stamp sync_status='error' "
-                "for api_key %s after persist failure",
-                api_key_id,
-                exc_info=stamp_exc,
-            )
-        _emit_audit(
-            allocator_id, api_key_id, "allocator.holdings.persist_failed",
-            {"sanitized_message": sanitized_persist},
-        )
-        return DispatchResult(
-            outcome=DispatchOutcome.FAILED,
-            error_message=sanitized_persist,
-            error_kind="permanent",
-        )
-
-    _emit_audit(
-        allocator_id, api_key_id, "allocator.holdings.sync_completed",
-        {
-            "row_count": count,
-            "holding_type_counts": {"spot": spot_count, "derivative": deriv_count},
-        },
-    )
-
-    # Phase 11 / Plan 03 / D-13 / ONBOARD-05 — stamp first_sync_success_at
-    # marker via the SECURITY DEFINER RPC shipped by Plan 01 migration 084.
-    # The RPC is idempotent (writes only when the marker is absent), so
-    # subsequent successful syncs are a no-op for this side effect. The
-    # /allocations Server Component reader fires the PostHog
-    # `first_sync_success` event on the next dashboard request.
-    #
-    # Non-blocking: a stamp failure must not affect the compute job. The
-    # RPC failure path is logged via logger.warning per the analytics-service
-    # convention (services/audit.py error handling).
-    def _stamp_first_sync() -> None:
-        # Return value discarded by the caller; drop it (see
-        # _update_rate_limited / _update_persist_err).
-        ctx.supabase.rpc(
-            "stamp_first_sync_success",
-            {"p_user_id": allocator_id},
-        ).execute()
-
-    try:
-        await db_execute(_stamp_first_sync)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "poll_allocator_positions: failed to stamp first_sync_success_at "
-            "for allocator %s: %s",
-            allocator_id, exc,
-        )
-
-    logger.info(
-        "poll_allocator_positions: persisted %d rows for allocator %s "
-        "(spot=%d, derivative=%d, status=%s)",
-        count, allocator_id, spot_count, deriv_count, final_status,
-    )
-
-    return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
 async def run_reconcile_strategy_job(job: dict[str, Any]) -> DispatchResult:
