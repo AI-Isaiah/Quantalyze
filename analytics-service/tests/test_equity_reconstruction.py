@@ -4366,6 +4366,127 @@ async def test_item7b_purge_refused_keeps_existing_history(monkeypatch, caplog):
     _assert_item7b_no_seeded_usd(caplog, audit_mock)
 
 
+@pytest.mark.asyncio
+async def test_item7b_purge_refused_empty_book_calls_rpc(monkeypatch, caplog):
+    """Positive control: a book with no snapshots still calls the RPC once.
+
+    p_rows is empty. The audit is reconstruct_no_data and does not carry
+    purge_refused — the refusal did not fire.
+    """
+    from services.job_worker import DispatchOutcome
+
+    fake = FakeSupabaseClient()
+    audit_mock = _install_item7b_empty_replay(monkeypatch, fake)
+
+    with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics.equity_reconstruction"):
+        result = await run_reconstruct_allocator_history_job({
+            "id": "item7b-empty",
+            "kind": "reconstruct_allocator_history",
+            "api_key_id": API_KEY_ID_1,
+        })
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    replace_calls = [
+        c for c in fake.rpc_calls if c[0] == "replace_allocator_equity_snapshots"
+    ]
+    assert len(replace_calls) == 1, fake.rpc_calls
+    assert replace_calls[0][1]["p_rows"] == []
+    assert fake.rows_for("allocator_equity_snapshots") == []
+    meta = _item7b_no_data_meta(audit_mock)
+    assert "purge_refused" not in meta
+    assert "existing_history" not in meta
+    assert "snapshot_lookup_failed" not in meta
+    _assert_item7b_no_seeded_usd(caplog, audit_mock)
+
+
+def _fail_snapshot_head_count(fake: FakeSupabaseClient) -> None:
+    """Raise on an allocator_equity_snapshots SELECT only; writes stay intact."""
+    original_table = fake.table
+
+    def table(name: str):
+        tbl = original_table(name)
+        if name != "allocator_equity_snapshots":
+            return tbl
+        original_execute = tbl.execute
+
+        def execute():
+            if getattr(tbl, "_pending_op", None) == "select":
+                raise RuntimeError("snapshot presence lookup failed")
+            return original_execute()
+
+        tbl.execute = execute
+        return tbl
+
+    fake.table = table
+
+
+@pytest.mark.asyncio
+async def test_item7b_purge_refused_lookup_failed(monkeypatch, caplog):
+    """A raised snapshot lookup refuses the purge and keeps the seeded rows.
+
+    Fail-safe: present is treated as unknown, so the RPC does not run.
+    existing_history in the audit is false (not confirmed); snapshot_lookup_failed
+    is why the purge was still refused.
+    """
+    from services.job_worker import DispatchOutcome
+
+    fake = FakeSupabaseClient()
+    asofs = _seed_item7b_history(fake)
+    audit_mock = _install_item7b_empty_replay(monkeypatch, fake)
+    _fail_snapshot_head_count(fake)
+
+    with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics.equity_reconstruction"):
+        result = await run_reconstruct_allocator_history_job({
+            "id": "item7b-lookup-failed",
+            "kind": "reconstruct_allocator_history",
+            "api_key_id": API_KEY_ID_1,
+        })
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert not any(
+        name == "replace_allocator_equity_snapshots" for name, _ in fake.rpc_calls
+    ), fake.rpc_calls
+    survivors = fake.rows_for("allocator_equity_snapshots")
+    assert sorted(r["asof"] for r in survivors) == asofs, survivors
+    meta = _item7b_no_data_meta(audit_mock)
+    assert meta.get("purge_refused") is True
+    assert meta.get("snapshot_lookup_failed") is True
+    assert meta.get("existing_history") is False
+    presence_warnings = [
+        r.getMessage() for r in caplog.records
+        if "presence lookup failed" in r.getMessage()
+    ]
+    assert len(presence_warnings) == 1, [r.getMessage() for r in caplog.records]
+    assert ALLOCATOR_ID not in presence_warnings[0]
+    assert API_KEY_ID_1 not in presence_warnings[0]
+    _assert_item7b_no_seeded_usd(caplog, audit_mock, extra=presence_warnings[0])
+
+
+@pytest.mark.asyncio
+async def test_item7b_purge_refused_helper_raises(caplog):
+    """replace_equity_snapshots([], ...) over seeded rows raises and deletes nothing."""
+    from services.equity_reconstruction import (
+        EmptyReplaceRefusedError,
+        replace_equity_snapshots,
+    )
+
+    fake = FakeSupabaseClient()
+    _seed_item7b_history(fake)
+    with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics.equity_reconstruction"):
+        with pytest.raises(EmptyReplaceRefusedError) as raised:
+            await replace_equity_snapshots(fake, [], ALLOCATOR_ID, None)
+    exc = raised.value
+    assert exc.existing_history is True
+    assert exc.lookup_failed is False
+    assert "813579" not in str(exc)
+    assert ALLOCATOR_ID not in str(exc)
+    assert len(fake.rows_for("allocator_equity_snapshots")) == 3
+    assert not any(
+        name == "replace_allocator_equity_snapshots" for name, _ in fake.rpc_calls
+    ), fake.rpc_calls
+    _assert_item7b_no_seeded_usd(caplog, MagicMock(), extra=str(exc))
+
+
 # ---- M-1029 - Purge failure bubbles -------------------------------------
 
 @pytest.mark.asyncio
