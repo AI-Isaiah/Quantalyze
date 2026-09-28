@@ -49,7 +49,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 
 import ccxt
@@ -10151,6 +10151,107 @@ async def run_rescore_allocator_job(job: dict[str, Any]) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+# Open interval sentinels. ISO dates sort lexicographically; these sit strictly
+# outside any real YYYY-MM-DD so None (unbounded) compares without a branch.
+_OPEN_INTERVAL_START = "0000-01-01"
+_OPEN_INTERVAL_END = "9999-12-31"
+
+
+@dataclass(frozen=True)
+class AccountIdentityCollision:
+    """One group of counted keys whose known account intervals overlap.
+
+    Counts only. No key id and no venue account id — a log of this object cannot
+    leak another tenant's identity (T-167.1.2-22).
+    """
+
+    n_keys: int
+
+
+def _counted_day(value: object, *, open_end: bool) -> str:
+    """A real ISO day, or the open-interval sentinel when the bound is absent."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return _OPEN_INTERVAL_END if open_end else _OPEN_INTERVAL_START
+
+
+def account_identity_collisions(
+    counted: Sequence[Mapping[str, Any]],
+) -> list[AccountIdentityCollision]:
+    """Groups of counted keys that share a known account on an overlapping day.
+
+    Each item carries ``id``, ``exchange``, ``venue_account_id``,
+    ``first_counted_day`` and ``last_counted_day``. ``last_counted_day is None``
+    is an open (still-live) end; ``first_counted_day is None`` is an open start.
+    Two keys collide when their closed intervals overlap and the
+    ``(exchange, venue_account_id)`` pair is the same and the venue id is
+    non-NULL. A NULL or blank venue id is unknown identity (plan 09 case 3) and
+    never collides here. A rotation whose intervals were already clipped to
+    non-overlapping days does not collide. Pure: returns counts, logs nothing.
+
+    Plan 09 passes departed-and-included keys through this same helper. This
+    plan's caller passes the eligible live keys as open intervals.
+    """
+    by_account: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for row in counted:
+        venue_id = row.get("venue_account_id")
+        if not isinstance(venue_id, str) or not venue_id.strip():
+            continue
+        exchange = row.get("exchange")
+        exchange_key = exchange.strip() if isinstance(exchange, str) else ""
+        by_account.setdefault((exchange_key, venue_id.strip()), []).append(row)
+
+    collisions: list[AccountIdentityCollision] = []
+    for group in by_account.values():
+        size = len(group)
+        if size < 2:
+            continue
+        parent = list(range(size))
+
+        def _find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def _union(left: int, right: int) -> None:
+            root_left, root_right = _find(left), _find(right)
+            if root_left != root_right:
+                parent[root_right] = root_left
+
+        bounds = [
+            (
+                _counted_day(row.get("first_counted_day"), open_end=False),
+                _counted_day(row.get("last_counted_day"), open_end=True),
+            )
+            for row in group
+        ]
+        for left in range(size):
+            left_first, left_last = bounds[left]
+            for right in range(left + 1, size):
+                right_first, right_last = bounds[right]
+                if left_first <= right_last and right_first <= left_last:
+                    _union(left, right)
+        component_size: dict[int, int] = {}
+        for index in range(size):
+            root = _find(index)
+            component_size[root] = component_size.get(root, 0) + 1
+        for count in component_size.values():
+            if count >= 2:
+                collisions.append(AccountIdentityCollision(n_keys=count))
+    return collisions
+
+
+def _holder_is_working(holder: Mapping[str, Any] | None) -> bool:
+    """READER RULE on api_keys.account_share_kind: a marked key is counted through
+    its holder only while that holder has ``disconnected_at IS NULL`` and
+    ``sync_status <> 'revoked'``. ``is_active`` is not part of the rule. A missing
+    holder is not working — the marked key then counts on its own."""
+    if holder is None:
+        return False
+    return holder.get("disconnected_at") is None and holder.get("sync_status") != "revoked"
+
+
 async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult:
     """Phase 115.1 (RD-3 Option B) — CRAWL-FREE, DECRYPTION-FREE allocator
     $-equity compose.
@@ -10202,7 +10303,11 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         return cast(
             list[dict[str, Any]],
             supabase.table("api_keys")
-            .select("id,is_active,sync_status,disconnected_at")
+            .select(
+                "id,is_active,sync_status,disconnected_at,"
+                "exchange,venue_account_id,"
+                "account_shared_with_api_key_id,account_share_kind"
+            )
             .eq("user_id", allocator_id)
             .execute()
             .data
@@ -10211,6 +10316,70 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
 
     key_rows = await db_execute(_load_keys)
     eligible_ids = {r["id"] for r in key_rows if eligible_key_predicate(r)}
+    rows_by_id = {r["id"]: r for r in key_rows}
+
+    # D-04: a composite_member non-holder whose holder is also eligible is the
+    # same venue account. Drop it from the COUNTED set before any loader runs so
+    # its series cannot be summed on top of the holder. Do NOT treat its
+    # key_inputs row as an orphan — the key is still eligible; only the compose
+    # skips it. The holder stays.
+    excluded_composite: set[str] = set()
+    for row in key_rows:
+        if row["id"] not in eligible_ids:
+            continue
+        if row.get("account_share_kind") != "composite_member":
+            continue
+        holder_id = row.get("account_shared_with_api_key_id")
+        if (
+            isinstance(holder_id, str)
+            and holder_id
+            and holder_id != row["id"]
+            and holder_id in eligible_ids
+        ):
+            excluded_composite.add(row["id"])
+    counted_ids = eligible_ids - excluded_composite
+    counted_rows = [row for row in key_rows if row["id"] in counted_ids]
+
+    # Identity gate over the COUNTED set (open intervals: these are the eligible
+    # live keys). A 'duplicate' counts as a duplicate only while its holder is
+    # working; a departed holder leaves the marked key ordinary, and a same-id
+    # overlap with another counted key is then a collision, not a duplicate.
+    # Checked BEFORE loading returns so a double-counted book never composes.
+    duplicate_keys = [
+        row
+        for row in counted_rows
+        if row.get("account_share_kind") == "duplicate"
+        and _holder_is_working(rows_by_id.get(row.get("account_shared_with_api_key_id")))
+    ]
+    collisions = account_identity_collisions(
+        [
+            {
+                "id": row["id"],
+                "exchange": row.get("exchange"),
+                "venue_account_id": row.get("venue_account_id"),
+                "first_counted_day": None,
+                "last_counted_day": None,
+            }
+            for row in counted_rows
+        ]
+    )
+    if duplicate_keys or collisions:
+        await _delete_equity_curve_row()
+        # Reason token + counts only. No key id, no venue id, no USD (T-167.1.2-22).
+        reason = (
+            "account_duplicate" if duplicate_keys else "account_identity_collision"
+        )
+        logger.info(
+            "derive_allocator_equity: %s for allocator %s "
+            "(counted_keys=%d duplicate_keys=%d colliding_groups=%d) — "
+            "deleted any stale equity_curve row",
+            reason,
+            allocator_id,
+            len(counted_rows),
+            len(duplicate_keys),
+            len(collisions),
+        )
+        return DispatchResult(outcome=DispatchOutcome.DONE)
 
     # ── 2. Per-key returns — ISO-STRING day index built DIRECTLY from the
     #      'date' column (carry-in #3). NEVER pd.to_datetime / DatetimeIndex:
@@ -10259,7 +10428,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     _grouped: dict[str, list[dict[str, Any]]] = {}
     for r in csv_rows:
         k = r.get("api_key_id")
-        if k is not None and k in eligible_ids:
+        if k is not None and k in counted_ids:
             _grouped.setdefault(k, []).append(r)
     returns_by_key: dict[str, pd.Series] = {}
     try:
@@ -10312,6 +10481,11 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 # below.
                 orphan_kinds.append(kind)
                 continue
+            if api_key_id not in counted_ids:
+                # Composite non-holder: still eligible, so the row stays. The
+                # account is counted through its holder; this series is not an
+                # input.
+                continue
             key_inputs_ids.add(api_key_id)
             payload = row.get("payload") or {}
             flows_by_key[api_key_id] = [
@@ -10362,7 +10536,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # anchored-without-returns → DROPPED_KEY → untrustworthy (B3). This gate is for
     # the strictly-invisible key (no returns AND no key_inputs — its derive has not
     # run yet). Self-healing: each sibling derive re-enqueues the compose.
-    missing_ids = eligible_ids - (set(returns_by_key) | key_inputs_ids)
+    missing_ids = counted_ids - (set(returns_by_key) | key_inputs_ids)
     if missing_ids:
         await _delete_equity_curve_row()
         logger.info(
@@ -10379,7 +10553,15 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # ── 4. The ONLY derivation call — the frozen-core composition layer. ──────
     try:
         payload = compose_allocator_equity(
-            returns_by_key, flows_by_key, anchors_by_key, null_anchor_reasons
+            returns_by_key,
+            flows_by_key,
+            anchors_by_key,
+            null_anchor_reasons,
+            benign_flag_tokens=(
+                ["composite_shared_account_counted_once"]
+                if excluded_composite
+                else None
+            ),
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3

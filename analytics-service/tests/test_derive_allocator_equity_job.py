@@ -93,6 +93,15 @@ class _FakeTable:
 
     # --- read chain -------------------------------------------------------------
     def select(self, *_a: Any, **_k: Any) -> "_FakeTable":
+        # A read of the legacy store is the duplicate-writer date reaching the
+        # compose. Refuse it the same way a write is refused (BACKBONE-03).
+        if self._name == LEGACY_TABLE:
+            raise _LegacyWriteError(
+                f"BACKBONE-03: read of {LEGACY_TABLE!r} is forbidden — the compose "
+                "must not see the duplicate-writer date"
+            )
+        if _a:
+            self._store.selects.append((self._name, _a[0]))
         return self
 
     def eq(self, col: str, val: Any) -> "_FakeTable":
@@ -141,6 +150,7 @@ class _FakeSupabase:
         self.rows = rows
         self.upserts: list[tuple[str, Any, Any]] = []
         self.deletes: list[tuple[str, dict, int]] = []
+        self.selects: list[tuple[str, Any]] = []
 
     def table(self, name: str) -> _FakeTable:
         return _FakeTable(name, self)
@@ -1340,6 +1350,373 @@ async def test_one_key_deposit_persists_version_2_returns() -> None:
     curve = {point["date"]: point["equity_usd"] for point in payload["curve"]}
     level_ratio = curve["2026-06-03"] / curve["2026-06-02"] - 1.0
     assert abs(level_ratio - by_date["2026-06-03"]) > 1e-4
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2-05 task 2 — identity gate over the counted set, and one account once.
+# MUTATION-FALSIFIABLE: drop the duplicate branch (treat 'duplicate' as ordinary
+# when the holder is working, and the keys do not share a venue id) → the
+# duplicate test upserts a curve and goes RED.
+# ---------------------------------------------------------------------------
+
+
+def _gate_key(key_id: str, alloc: str, **extra: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "id": key_id,
+        "user_id": alloc,
+        "is_active": True,
+        "sync_status": "connected",
+        "disconnected_at": None,
+        "exchange": "binance",
+        "venue_account_id": None,
+        "account_shared_with_api_key_id": None,
+        "account_share_kind": None,
+    }
+    row.update(extra)
+    return row
+
+
+def _stale_curve(alloc: str) -> dict[str, Any]:
+    return {
+        "allocator_id": alloc,
+        "kind": "equity_curve",
+        "payload": {
+            "curve": [{"date": "2026-01-01", "equity_usd": 1.0}],
+            "is_trustworthy": True,
+        },
+    }
+
+
+def _series_rows(alloc: str, key_id: str, anchor: float) -> tuple[list[dict], dict]:
+    """Three flat days and a key_inputs row so a single counted key can compose."""
+    days = ["2026-06-01", "2026-06-02", "2026-06-03"]
+    csv = [
+        {
+            "api_key_id": key_id,
+            "allocator_id": alloc,
+            "date": day,
+            "daily_return": 0.0,
+        }
+        for day in days
+    ]
+    ki = {
+        "allocator_id": alloc,
+        "kind": f"key_inputs:{key_id}",
+        "payload": {
+            "flows": [],
+            "anchor_usd": anchor,
+            "anchor_asof": days[-1],
+            "venue": "binance",
+        },
+    }
+    return csv, ki
+
+
+async def _run_gate(fake: _FakeSupabase, alloc: str):
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    job = {"id": "j-gate", "kind": "derive_allocator_equity", "allocator_id": alloc}
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        return await run_derive_allocator_equity_job(job)
+
+
+def _curve_upserts(fake: _FakeSupabase) -> list:
+    return [
+        u for u in fake.upserts
+        if u[0] == DERIVED_TABLE and _is_equity_curve_upsert(u[1])
+    ]
+
+
+def _curve_deletes(fake: _FakeSupabase, alloc: str) -> list:
+    return [
+        d for d in fake.deletes
+        if d[0] == DERIVED_TABLE
+        and d[1].get("kind") == "equity_curve"
+        and d[1].get("allocator_id") == alloc
+    ]
+
+
+def test_account_identity_collisions_intervals() -> None:
+    """The helper is pure and interval-based. Overlap collides; a clipped
+    rotation does not; NULL ids do not; two departed keys that share an id and
+    an end day do. That last shape is what plan 09 feeds in."""
+    from services.job_worker import account_identity_collisions
+
+    def row(key_id: str, **extra: Any) -> dict[str, Any]:
+        base = {
+            "id": key_id,
+            "exchange": "binance",
+            "venue_account_id": "acct-1",
+            "first_counted_day": "2026-01-01",
+            "last_counted_day": "2026-03-01",
+        }
+        base.update(extra)
+        return base
+
+    overlap = account_identity_collisions([
+        row("a", last_counted_day="2026-02-01"),
+        row("b", first_counted_day="2026-01-15", last_counted_day="2026-04-01"),
+    ])
+    assert len(overlap) == 1 and overlap[0].n_keys == 2
+    # Counts only — the group carries no id a log could leak.
+    assert "acct-1" not in repr(overlap[0])
+    assert "a" not in repr(overlap[0])
+
+    clipped = account_identity_collisions([
+        row("a", last_counted_day="2026-01-04"),
+        row("b", first_counted_day="2026-01-05", last_counted_day="2026-02-01"),
+    ])
+    assert clipped == []
+
+    unknown = account_identity_collisions([
+        row("a", venue_account_id=None),
+        row("b", venue_account_id=None),
+    ])
+    assert unknown == []
+
+    departed = account_identity_collisions([
+        row("a", first_counted_day="2026-01-01", last_counted_day="2026-03-01"),
+        row("b", first_counted_day="2026-02-01", last_counted_day="2026-03-01"),
+    ])
+    assert len(departed) == 1 and departed[0].n_keys == 2
+
+    live = account_identity_collisions([
+        row("a", first_counted_day=None, last_counted_day=None),
+        row("b", first_counted_day=None, last_counted_day=None),
+    ])
+    assert len(live) == 1 and live[0].n_keys == 2
+
+    other_venue = account_identity_collisions([
+        row("a", exchange="okx"),
+        row("b", exchange="binance"),
+    ])
+    assert other_venue == []
+
+
+@pytest.mark.asyncio
+async def test_duplicate_with_working_holder_deletes_curve(caplog: pytest.LogCaptureFixture) -> None:
+    """A marked duplicate whose holder is still connected is not counted on its
+    own. The marker alone refuses the curve — the two keys need not share a
+    venue id — and the log is the token plus counts, never an id."""
+    import logging
+
+    alloc = "alloc-dup"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    csv, ki = _series_rows(alloc, "key-D", 1_000.0)
+    _, holder_ki = _series_rows(alloc, "key-H", 1_000.0)
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key(
+                "key-D", alloc,
+                venue_account_id="venue-dup",
+                account_share_kind="duplicate",
+                account_shared_with_api_key_id="key-H",
+            ),
+            _gate_key("key-H", alloc, venue_account_id="venue-holder"),
+        ],
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: [ki, holder_ki, _stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    assert _curve_upserts(fake) == []
+    assert len(_curve_deletes(fake, alloc)) == 1
+    assert "account_duplicate" in caplog.text
+    assert "account_identity_collision" not in caplog.text
+    assert "key-D" not in caplog.text
+    assert "venue-dup" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_duplicate_with_revoked_holder_is_a_collision(caplog: pytest.LogCaptureFixture) -> None:
+    """A revoked holder is not working, so the marked key counts on its own. The
+    same venue id as another counted key is then a collision, not a duplicate."""
+    import logging
+
+    alloc = "alloc-revoked"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key(
+                "key-D", alloc,
+                venue_account_id="venue-shared",
+                account_share_kind="duplicate",
+                account_shared_with_api_key_id="key-H",
+            ),
+            _gate_key("key-H", alloc, sync_status="revoked", venue_account_id="venue-shared"),
+            _gate_key("key-X", alloc, venue_account_id="venue-shared"),
+        ],
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [_stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    assert _curve_upserts(fake) == []
+    assert len(_curve_deletes(fake, alloc)) == 1
+    assert "account_identity_collision" in caplog.text
+    assert "account_duplicate" not in caplog.text
+    assert "key-D" not in caplog.text
+    assert "venue-shared" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_duplicate_with_disconnected_holder_is_a_collision(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A disconnected holder is the same reader rule as a revoked one: the marked
+    key is ordinary, and a shared venue id with another counted key collides."""
+    import logging
+
+    alloc = "alloc-disc"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key(
+                "key-D", alloc,
+                venue_account_id="venue-shared",
+                account_share_kind="duplicate",
+                account_shared_with_api_key_id="key-H",
+            ),
+            _gate_key(
+                "key-H", alloc,
+                disconnected_at="2026-05-01T00:00:00+00:00",
+                venue_account_id="venue-shared",
+            ),
+            _gate_key("key-X", alloc, venue_account_id="venue-shared"),
+        ],
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [_stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    assert _curve_upserts(fake) == []
+    assert "account_identity_collision" in caplog.text
+    assert "account_duplicate" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_duplicate_with_revoked_holder_counts_when_alone() -> None:
+    """With the holder gone and no other counted key on the account, the marked
+    key is an ordinary key: the curve is composed, not refused as a duplicate."""
+    alloc = "alloc-alone"
+    csv, ki = _series_rows(alloc, "key-D", 4_000.0)
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key(
+                "key-D", alloc,
+                venue_account_id="venue-only",
+                account_share_kind="duplicate",
+                account_shared_with_api_key_id="key-H",
+            ),
+            _gate_key("key-H", alloc, sync_status="revoked", venue_account_id="venue-only"),
+        ],
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: [ki],
+        LEGACY_TABLE: [],
+    })
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    upserts = _curve_upserts(fake)
+    assert len(upserts) == 1
+    payload = _extract_payload(upserts[0][1])
+    assert payload.get("version") == 2
+    assert payload.get("is_trustworthy") is True
+
+
+@pytest.mark.asyncio
+async def test_two_keys_same_venue_without_marker_collide(caplog: pytest.LogCaptureFixture) -> None:
+    """No duplicate marker, but two eligible keys share (exchange, venue id).
+    Open intervals overlap, so the curve is deleted with the collision token."""
+    import logging
+
+    alloc = "alloc-collide"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key("key-A", alloc, venue_account_id="venue-shared"),
+            _gate_key("key-B", alloc, venue_account_id="venue-shared"),
+        ],
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [_stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    assert _curve_upserts(fake) == []
+    assert len(_curve_deletes(fake, alloc)) == 1
+    assert "account_identity_collision" in caplog.text
+    assert "key-A" not in caplog.text
+    assert "venue-shared" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_composite_member_counted_once_and_trustworthy() -> None:
+    """A composite_member non-holder is left out of the compose. The holder stays,
+    the shared account is flagged, and the payload stays trustworthy. The member's
+    key_inputs row is not deleted — the key is still eligible."""
+    alloc = "alloc-comp"
+    csv_h, ki_h = _series_rows(alloc, "key-H", 100_000.0)
+    csv_m, ki_m = _series_rows(alloc, "key-M", 100_000.0)
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key("key-H", alloc, venue_account_id="venue-shared"),
+            _gate_key(
+                "key-M", alloc,
+                venue_account_id="venue-shared",
+                account_share_kind="composite_member",
+                account_shared_with_api_key_id="key-H",
+            ),
+        ],
+        "csv_daily_returns": csv_h + csv_m,
+        DERIVED_TABLE: [ki_h, ki_m],
+        LEGACY_TABLE: [],
+    })
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    upserts = _curve_upserts(fake)
+    assert len(upserts) == 1, fake.upserts
+    payload = _extract_payload(upserts[0][1])
+    assert "composite_shared_account_counted_once" in payload["flags"]
+    assert payload["is_trustworthy"] is True
+    assert payload["inputs"]["n_keys"] == 1
+    terminal = payload["curve"][-1]["equity_usd"]
+    assert terminal == pytest.approx(100_000.0, rel=1e-6)
+    assert terminal < 150_000.0
+    kinds = [row["kind"] for row in fake.rows[DERIVED_TABLE]]
+    assert "key_inputs:key-M" in kinds
+    assert "key_inputs:key-H" in kinds
+
+
+@pytest.mark.asyncio
+async def test_compose_does_not_read_legacy_snapshots() -> None:
+    """The fake raises on any read of allocator_equity_snapshots. The job still
+    composes — that table is not an input, so a duplicate-writer date cannot
+    reach the curve."""
+    alloc = "alloc-deposit"
+    fake = _FakeSupabase(_seed_one_key_deposit())
+    # Prove the fake itself refuses the read, then that the job never trips it.
+    with pytest.raises(_LegacyWriteError):
+        fake.table(LEGACY_TABLE).select("date").execute()
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    upserts = _curve_upserts(fake)
+    assert len(upserts) == 1
+    payload = _extract_payload(upserts[0][1])
+    assert payload.get("version") == 2
+    selects = [name for name, _cols in fake.selects]
+    assert LEGACY_TABLE not in selects
+    assert any(
+        name == "api_keys" and "account_share_kind" in str(cols)
+        and "venue_account_id" in str(cols)
+        and "exchange" in str(cols)
+        and "account_shared_with_api_key_id" in str(cols)
+        for name, cols in fake.selects
+    )
 
 
 # ---------------------------------------------------------------------------
