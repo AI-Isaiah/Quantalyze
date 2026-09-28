@@ -3050,15 +3050,13 @@ describe("115.1 equity display-repoint", () => {
 
   // Review round 1 (SFH-04): D-02 makes `equityDailyPoints` [] for EVERY input,
   // so asserting on it alone can no longer fail. The content these cases exist
-  // for (direct mapping, never NaN, malformed and empty curves degrade to the
-  // legacy fallback) is decided by `extractTrustworthyDerivedCurve`, the one
-  // function the producer calls on the derived row. Assert on it directly with
-  // the exact payload the producer read. `null` means "the legacy fallback".
-  // The legacy adapter's own content is pinned in
-  // allocation-helpers.equity-adapter.test.ts.
-  async function candidateDerivedCurve() {
-    const { extractTrustworthyDerivedCurve } = await import("./queries");
-    return extractTrustworthyDerivedCurve(
+  // for (direct mapping, never NaN, malformed and empty curves are not a
+  // display series) is decided by `extractTrustworthyDerivedSeries`. A pre-v2
+  // row is null. The snapshot adapter's own content is pinned in
+  // allocation-helpers.equity-adapter.test.ts; plan 11 no longer renders it.
+  async function candidateDerivedSeries() {
+    const { extractTrustworthyDerivedSeries } = await import("./queries");
+    return extractTrustworthyDerivedSeries(
       state.allocatorEquityDerived[0]?.payload ?? null,
     );
   }
@@ -3113,9 +3111,9 @@ describe("115.1 equity display-repoint", () => {
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
     // regression in the trust gate while the curve is hidden.
-    expect(await candidateDerivedCurve()).toEqual(
-      P1151_DERIVED_CURVE.map((p) => ({ date: p.date, value: p.equity_usd })),
-    );
+    // Plan 11: this fixture is pre-v2 (no version, no returns), so it is not
+    // the display series. A v2 row is pinned below.
+    expect(await candidateDerivedSeries()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3135,7 +3133,7 @@ describe("115.1 equity display-repoint", () => {
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
     // regression in the trust gate while the curve is hidden.
-    expect(await candidateDerivedCurve()).toBeNull();
+    expect(await candidateDerivedSeries()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3166,7 +3164,7 @@ describe("115.1 equity display-repoint", () => {
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
     // regression in the trust gate while the curve is hidden.
-    expect(await candidateDerivedCurve()).toBeNull();
+    expect(await candidateDerivedSeries()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3200,7 +3198,7 @@ describe("115.1 equity display-repoint", () => {
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
     // regression in the trust gate while the curve is hidden.
-    expect(await candidateDerivedCurve()).toBeNull();
+    expect(await candidateDerivedSeries()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3237,7 +3235,7 @@ describe("115.1 equity display-repoint", () => {
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
     // regression in the trust gate while the curve is hidden.
-    expect(await candidateDerivedCurve()).toBeNull();
+    expect(await candidateDerivedSeries()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3267,63 +3265,94 @@ describe("115.1 equity display-repoint", () => {
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
     // regression in the trust gate while the curve is hidden.
-    expect(await candidateDerivedCurve()).toBeNull();
+    expect(await candidateDerivedSeries()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
-  it("MALFORMED (T-115.1-18): a curve point missing `date` or `equity_usd`, or a non-object point → legacy fallback", async () => {
-    // Each malformed point shape must poison the whole derived curve to legacy —
-    // extractTrustworthyDerivedCurve returns null on the first bad point.
-    const { extractTrustworthyDerivedCurve } = await import("./queries");
-    // point missing `date`
+  it("MALFORMED (T-115.1-18 / T-167.1.2-21): a bad curve or returns point is not a series", async () => {
+    // Each payload is otherwise a valid version-2 series, so deleting the
+    // shape check for the broken field would return a series and this fails.
+    // Moved from extractTrustworthyDerivedCurve (plan 11).
+    const { extractTrustworthyDerivedSeries } = await import("./queries");
+    const base = {
+      version: 2,
+      is_trustworthy: true,
+      returns: [{ date: "2026-03-11", r: 0.01 }],
+    };
     expect(
-      extractTrustworthyDerivedCurve({
-        is_trustworthy: true,
+      extractTrustworthyDerivedSeries({
+        ...base,
         curve: [{ equity_usd: 100 }],
       }),
     ).toBeNull();
-    // point missing `equity_usd`
     expect(
-      extractTrustworthyDerivedCurve({
-        is_trustworthy: true,
+      extractTrustworthyDerivedSeries({
+        ...base,
         curve: [{ date: "2026-03-10" }],
       }),
     ).toBeNull();
-    // non-object point
     expect(
-      extractTrustworthyDerivedCurve({
-        is_trustworthy: true,
+      extractTrustworthyDerivedSeries({
+        ...base,
         curve: [42],
       }),
     ).toBeNull();
-    // empty date string
     expect(
-      extractTrustworthyDerivedCurve({
-        is_trustworthy: true,
+      extractTrustworthyDerivedSeries({
+        ...base,
         curve: [{ date: "", equity_usd: 100 }],
       }),
     ).toBeNull();
-    // F4a: a non-empty but MALFORMED date string (not YYYY-MM-DD) must degrade to
-    // legacy — a garbage date would otherwise reach parseISO/SVG as NaN coords.
     expect(
-      extractTrustworthyDerivedCurve({
-        is_trustworthy: true,
+      extractTrustworthyDerivedSeries({
+        ...base,
         curve: [{ date: "not-a-date", equity_usd: 100 }],
       }),
     ).toBeNull();
     expect(
-      extractTrustworthyDerivedCurve({
-        is_trustworthy: true,
+      extractTrustworthyDerivedSeries({
+        ...base,
         curve: [{ date: "2026/03/10", equity_usd: 100 }],
       }),
     ).toBeNull();
-    // A well-formed YYYY-MM-DD date still passes.
+    // Returns shape: non-finite, reordered, empty, and a non-numeric version.
+    const curve = [
+      { date: "2026-03-10", equity_usd: 100 },
+      { date: "2026-03-11", equity_usd: 101 },
+    ];
     expect(
-      extractTrustworthyDerivedCurve({
-        is_trustworthy: true,
+      extractTrustworthyDerivedSeries({
+        ...base,
+        curve,
+        returns: [{ date: "2026-03-11", r: Number.NaN }],
+      }),
+    ).toBeNull();
+    expect(
+      extractTrustworthyDerivedSeries({
+        ...base,
+        curve,
+        returns: [
+          { date: "2026-03-12", r: 0.01 },
+          { date: "2026-03-11", r: 0.02 },
+        ],
+      }),
+    ).toBeNull();
+    expect(
+      extractTrustworthyDerivedSeries({ ...base, curve, returns: [] }),
+    ).toBeNull();
+    expect(
+      extractTrustworthyDerivedSeries({ ...base, version: "2", curve }),
+    ).toBeNull();
+    // A well-formed version-2 series still passes, curve mapped directly.
+    expect(
+      extractTrustworthyDerivedSeries({
+        ...base,
         curve: [{ date: "2026-03-10", equity_usd: 100 }],
       }),
-    ).toEqual([{ date: "2026-03-10", value: 100 }]);
+    ).toEqual({
+      curve: [{ date: "2026-03-10", value: 100 }],
+      returns: [{ date: "2026-03-11", value: 0.01 }],
+    });
   });
 });
 

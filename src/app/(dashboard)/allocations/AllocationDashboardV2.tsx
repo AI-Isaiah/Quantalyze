@@ -74,6 +74,8 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // factsheet KPI computed from it renders.
     equityHistoryState,
     equityCurveSource,
+    // D-06: the factsheet's return series. Empty while rebuilding.
+    equityDailyReturns = [],
   } = props;
   // Fail-closed: ONLY an explicit "ready" may show the curve. A missing field,
   // null, "" or any state added later (a destructuring default fires on
@@ -104,10 +106,12 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             markets: activeVenues,
             startDate: equityDailyPoints[0]?.date ?? null,
             aum: analytics?.total_aum ?? null,
+            dailyReturns: equityDailyReturns,
           }),
     [
       isRebuilding,
       equityDailyPoints,
+      equityDailyReturns,
       props.allocator_id,
       portfolio,
       analytics,

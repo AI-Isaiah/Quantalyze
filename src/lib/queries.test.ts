@@ -197,7 +197,7 @@ import {
   derivePhase07Fields,
   deriveStrategyLinkedKeyIds,
   deriveStrategylessKeys,
-  extractTrustworthyDerivedCurve,
+  extractTrustworthyDerivedSeries,
 } from "./queries";
 import type { SupportedExchange } from "./utils";
 
@@ -1368,7 +1368,7 @@ describe("getStrategyDetailV2 — METRICS-15 path-extraction perf contract", () 
 // The two cases feed a BYTE-IDENTICAL derived curve differing ONLY in the
 // persisted `is_trustworthy` flag, so the flip is attributable to that flag
 // alone. Deleting the `is_trustworthy !== true` guard in
-// extractTrustworthyDerivedCurve would make the FAIL case render 'derived' —
+// trustworthyDerivedCurve would make the FAIL case render 'derived' —
 // neuter-proof.
 // ---------------------------------------------------------------------------
 describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLIPRETRY-03)", () => {
@@ -1433,11 +1433,12 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     // history is rebuilt, so it is [] here. What it WOULD show (the payload
     // mapped DIRECTLY, no snapshot forward-fill) is pinned on the extractor the
     // producer calls (review round 1 SFH-04), so this case still bites.
-    expect(extractTrustworthyDerivedCurve(derivedRow(true).payload)).toEqual(
-      DERIVED_CURVE.map((p) => ({ date: p.date, value: p.equity_usd })),
-    );
+    // Plan 11: this fixture has no version and no returns, so it is not the
+    // display series. The source stamp above is what still proves the curve gate.
+    expect(extractTrustworthyDerivedSeries(derivedRow(true).payload)).toBeNull();
     expect(result.equityHistoryState).toBe("rebuilding");
     expect(result.equityDailyPoints).toEqual([]);
+    expect(result.equityDailyReturns).toEqual([]);
     expect(result.derivedCurveComputedAt).toBe(COMPUTED_AT);
   });
 
@@ -1448,14 +1449,46 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     // Phase 167.1.2 / D-02: the producer withholds the display series while the
     // history is rebuilt, so it is [] here. The trust gate's verdict on this
     // byte-identical curve is pinned on the extractor (review round 1 SFH-04).
-    // The legacy render's CONTENT is not observable while hidden; it is pinned
-    // in allocation-helpers.equity-adapter.test.ts and retires with the legacy
-    // branch in plan 11.
-    expect(extractTrustworthyDerivedCurve(derivedRow(false).payload)).toBeNull();
+    // Plan 11 removed the snapshot display fallback. The curve content lives in
+    // allocation-helpers.equity-adapter.test.ts; this case pins the source stamp.
+    expect(extractTrustworthyDerivedSeries(derivedRow(false).payload)).toBeNull();
     expect(result.equityHistoryState).toBe("rebuilding");
     expect(result.equityDailyPoints).toEqual([]);
     // computed_at is suppressed when the curve is not shown.
     expect(result.derivedCurveComputedAt).toBeNull();
+  });
+
+  it("a version-2 row with well-formed returns is ready and the factsheet series is those returns", () => {
+    const returns = [
+      { date: "2026-03-11", r: 0.01 },
+      { date: "2026-03-12", r: -0.004 },
+    ];
+    const row = derivedRow(true);
+    row.payload.version = 2;
+    row.payload.returns = returns;
+    const result = callWith(row);
+    const series = extractTrustworthyDerivedSeries(row.payload);
+    expect(series).toEqual({
+      curve: DERIVED_CURVE.map((p) => ({ date: p.date, value: p.equity_usd })),
+      returns: returns.map((p) => ({ date: p.date, value: p.r })),
+    });
+    expect(result.equityHistoryState).toBe("ready");
+    expect(result.equityDailyPoints).toEqual(series!.curve);
+    expect(result.equityDailyReturns).toEqual(series!.returns);
+    expect(result.equityCurveSource).toBe("derived");
+  });
+
+  it("a version-1 trustworthy curve stays rebuilding (the display series requires version 2)", () => {
+    const row = derivedRow(true);
+    row.payload.version = 1;
+    row.payload.returns = [{ date: "2026-03-11", r: 0.01 }];
+    const result = callWith(row);
+    expect(extractTrustworthyDerivedSeries(row.payload)).toBeNull();
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityDailyPoints).toEqual([]);
+    expect(result.equityDailyReturns).toEqual([]);
+    // The curve itself is still well-formed, so the source stamp stays derived.
+    expect(result.equityCurveSource).toBe("derived");
   });
 });
 

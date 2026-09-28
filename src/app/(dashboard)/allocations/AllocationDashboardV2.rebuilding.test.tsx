@@ -49,7 +49,8 @@ vi.mock("@/app/factsheet/[id]/v2/FactsheetView", () => ({
   ),
 }));
 vi.mock("@/lib/factsheet/allocator-portfolio-payload", () => ({
-  buildAllocatorPortfolioFactsheetPayload: () => buildPayloadSpy(),
+  buildAllocatorPortfolioFactsheetPayload: (...args: unknown[]) =>
+    buildPayloadSpy(...args),
 }));
 
 const baseProps = {
@@ -321,11 +322,25 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
   // the same fixture DOES render the curve and the factsheet, so the absences
   // asserted above are the gate, not a broken fixture.
   it("ready: the curve and the factsheet render and the rebuilding panel does not", () => {
-    render(<AllocationDashboardV2 {...baseProps} equityHistoryState="ready" />);
+    const equityDailyReturns = [
+      { date: "2026-03-11", value: 0.01 },
+      { date: "2026-03-12", value: -0.02 },
+    ];
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        equityHistoryState="ready"
+        equityDailyReturns={equityDailyReturns}
+      />,
+    );
     expect(screen.getByTestId("overview-equity-curve")).toBeInTheDocument();
     expect(screen.getByTestId("mock-factsheet-body")).toBeInTheDocument();
     expect(screen.getByText("Sharpe")).toBeInTheDocument();
     expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
-    expect(buildPayloadSpy).toHaveBeenCalled();
+    // D-06: the builder receives the persisted returns, not a curve-derived series.
+    expect(buildPayloadSpy).toHaveBeenCalledWith(
+      baseProps.equityDailyPoints,
+      expect.objectContaining({ dailyReturns: equityDailyReturns }),
+    );
   });
 });

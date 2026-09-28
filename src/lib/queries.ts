@@ -14,7 +14,6 @@ import {
 } from "./closed-sets";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
-import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
 import {
   buildDateMapCache,
   computeScenario,
@@ -2877,31 +2876,30 @@ export interface MyAllocationDashboardPayload {
   /** True when any active api_key has sync_status='syncing'. */
   hasSyncing: boolean;
   /**
-   * Per VOICES-ACCEPTED f7: DailyPoint[] derived from equitySnapshots
-   * via equitySnapshotsToDailyPoints. Consumed by EquityCurve /
-   * DrawdownChart through the parallel-prop path (prefer this over
-   * strategies-derived compute when provided).
+   * The allocator $-equity curve (EquityCurve / DrawdownChart parallel-prop).
+   * Phase 167.1.2 plan 11: the version-2 derived curve when `"ready"`, else
+   * `[]`. Not built from `equitySnapshots`.
    */
   equityDailyPoints: DailyPoint[];
   /**
-   * Phase 115.1 / BACKBONE-02 (RD-1 + RD-2). Provenance of `equityDailyPoints`:
-   *   - `"derived"`: the series came from the NEW keyed `allocator_equity_derived`
-   *     surface (worker-side flow-aware $-curve), used ONLY when a row exists AND
-   *     its `payload.is_trustworthy === true` AND `payload.curve` is well-formed.
-   *   - `"legacy"`: the series came from the legacy `allocator_equity_snapshots`
-   *     `value_usd` path via `equitySnapshotsToDailyPoints` (the pre-115.1
-   *     rendering, byte-unchanged).
+   * Phase 167.1.2 / D-06. Flow-neutral book returns from
+   * `allocator_equity_derived.payload.returns` when the row is version 2,
+   * mapped `{ date, value: r }`. Empty unless `equityHistoryState` is
+   * `"ready"`. Factsheet KPIs and the Scenario own-book delta read this,
+   * never ratios of `equityDailyPoints`.
+   */
+  equityDailyReturns: DailyPoint[];
+  /**
+   * Phase 115.1 / BACKBONE-02, narrowed by Phase 167.1.2 plan 11.
+   *   - `"derived"`: a trustworthy, well-formed `payload.curve` was present.
+   *     The DISPLAY series (`equityDailyPoints`) is that curve only when the
+   *     row is also a version-2 returns series and the book is `"ready"`.
+   *   - `"legacy"`: no such curve. Snapshots are not rendered as the curve
+   *     (plan 11 removed that fallback). The label stays because the union
+   *     is pinned and the warm-up / disclosure gates still read it.
    *
-   * This is repointed at the ONE producer site (`derivePhase07Fields`) so ALL
-   * downstream consumers — the equity chart, the V2 Overview factsheet
-   * (`buildAllocatorPortfolioFactsheetPayload`), and the ScenarioComposer
-   * baseline — deliberately share the SAME basis (RD-1: one producer, all
-   * consumers). The legacy fallback is LOAD-BEARING until the founder-gated
-   * per-key backfill runs: all 517 prod allocator keys currently have zero
-   * per-key rows, so a hard cutover would blank every dashboard (the A1 census
-   * safety invariant). The UI renders an honest provenance indicator off this
-   * field — a legacy-fallback curve is NEVER presented as `api_verified`-grade
-   * (RD-2 / DESIGN.md Numbers Contract honesty).
+   * While rebuilding, the chart does not read this field. The Overview
+   * warm-up gate and the Scenario disclosure do.
    */
   equityCurveSource: "derived" | "legacy";
   /**
@@ -2918,8 +2916,8 @@ export interface MyAllocationDashboardPayload {
    * so the curve and every ratio built from it are unreliable. Consumers render
    * an honest "being rebuilt" state instead and are fail-closed: every value
    * other than an explicit `"ready"` (a missing field, `null`, `""`, a state
-   * added later) reads as `"rebuilding"`. `"ready"` is defined by plan 11 of
-   * Phase 167.1.2; until then the producer never emits it.
+   * added later) reads as `"rebuilding"`. `"ready"` requires a version-2
+   * trustworthy series whose `returns` are well-formed (Phase 167.1.2 plan 11).
    */
   equityHistoryState: "rebuilding" | "ready";
   /**
@@ -3600,27 +3598,14 @@ export function buildPerKeyReturnsByApiKeyId(
   return result;
 }
 
+const DERIVED_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
 /**
- * Phase 115.1 / BACKBONE-02 (RD-1). The derived-curve trust gate + malformed-
- * payload defence for the $-equity display repoint.
- *
- * Returns the derived $-curve as `DailyPoint[]` ONLY when the row is present,
- * `payload.is_trustworthy === true`, AND `payload.curve` is a well-formed dense
- * array of `{ date: string, equity_usd: finite number }`. Any other shape —
- * absent row, untrustworthy flag, non-array curve, a single malformed/NaN point
- * — returns `null`, which drives the LEGACY fallback at the producer site. This
- * is the safety invariant: a corrupt worker-written JSONB payload must degrade
- * to the legacy snapshot render, never crash SSR and never surface a NaN
- * coordinate to the chart (T-115.1-18). The JSONB is worker-written but treated
- * as an UNTRUSTED shape here (the DB→SSR trust boundary).
- *
- * The derived curve is already dense per the interfaces contract, so it maps
- * DIRECTLY to `{ date, value }` — NO `equitySnapshotsToDailyPoints` forward-fill
- * adapter, NO `new Date()` re-parsing.
+ * The pre-167.1.2 curve gate: trustworthy + a non-empty well-formed curve.
+ * Does NOT require version 2. `equityCurveSource` still uses it. The display
+ * series does not — see `extractTrustworthyDerivedSeries`.
  */
-export function extractTrustworthyDerivedCurve(
-  payload: unknown,
-): DailyPoint[] | null {
+function trustworthyDerivedCurve(payload: unknown): DailyPoint[] | null {
   if (payload === null || typeof payload !== "object") return null;
   const p = payload as Record<string, unknown>;
   if (p.is_trustworthy !== true) return null;
@@ -3634,20 +3619,51 @@ export function extractTrustworthyDerivedCurve(
     const equityUsd = point.equity_usd;
     // F4a: require a strict YYYY-MM-DD calendar day — a non-empty but malformed
     // date string (e.g. "not-a-date", "2026/03/10") would otherwise reach
-    // parseISO / the SVG x-scale as a NaN coordinate. Degrade to legacy instead.
-    if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    // parseISO / the SVG x-scale as a NaN coordinate.
+    if (typeof date !== "string" || !DERIVED_DAY.test(date)) return null;
     if (typeof equityUsd !== "number" || !Number.isFinite(equityUsd)) {
       return null;
     }
     points.push({ date, value: equityUsd });
   }
-  // B2 (115.1-close): an EMPTY curve is not a renderable series. A zero-anchored-
-  // keys allocator (every prod allocator today) composes { curve: [],
-  // is_trustworthy: true } — the honest-empty tokens are BENIGN in the frozen
-  // core. Returning [] here would keep `[] ?? legacy === []` and stamp the source
-  // "derived", blanking the chart while suppressing the legacy render that has
-  // real data. Degrade an empty curve to null → legacy fallback.
+  // B2 (115.1-close): an EMPTY curve is not a renderable series.
   return points.length > 0 ? points : null;
+}
+
+/**
+ * Phase 167.1.2 plan 11 (D-06, T-167.1.2-21). The display series.
+ *
+ * Returns the curve and the persisted flow-neutral returns ONLY when
+ * `version === 2`, `is_trustworthy === true`, the curve is well-formed as
+ * `trustworthyDerivedCurve`, and `returns` is a non-empty array of
+ * `{ date: YYYY-MM-DD, r: finite number }` in strictly ascending date order.
+ * Any other shape — a v1 row, a missing or reordered returns array, one
+ * non-finite `r` — returns null. The JSONB is worker-written and untrusted.
+ */
+export function extractTrustworthyDerivedSeries(
+  payload: unknown,
+): { curve: DailyPoint[]; returns: DailyPoint[] } | null {
+  if (payload === null || typeof payload !== "object") return null;
+  const p = payload as Record<string, unknown>;
+  if (p.version !== 2) return null;
+  const curve = trustworthyDerivedCurve(payload);
+  if (!curve) return null;
+  const returns = p.returns;
+  if (!Array.isArray(returns) || returns.length === 0) return null;
+  const points: DailyPoint[] = [];
+  let prevDate = "";
+  for (const raw of returns) {
+    if (raw === null || typeof raw !== "object") return null;
+    const point = raw as Record<string, unknown>;
+    const date = point.date;
+    const r = point.r;
+    if (typeof date !== "string" || !DERIVED_DAY.test(date)) return null;
+    if (prevDate !== "" && date <= prevDate) return null;
+    if (typeof r !== "number" || !Number.isFinite(r)) return null;
+    prevDate = date;
+    points.push({ date, value: r });
+  }
+  return { curve, returns: points };
 }
 
 /**
@@ -3709,6 +3725,7 @@ export function derivePhase07Fields(
   | "lastSyncAt"
   | "hasSyncing"
   | "equityDailyPoints"
+  | "equityDailyReturns"
   | "equityCurveSource"
   | "derivedCurveComputedAt"
   | "equityHistoryState"
@@ -3735,35 +3752,24 @@ export function derivePhase07Fields(
   const lastSyncAt = freshness.lastSyncAt;
   const hasSyncing = freshness.syncing;
 
-  // Phase 115.1 / BACKBONE-02 (RD-1) — the ONE producer site for the allocator
-  // $-equity display series (chart + V2 factsheet + composer baseline all read
-  // this). Repoint rule (the safety invariant, verbatim): a derived row that
-  // exists AND is `is_trustworthy` AND carries a well-formed dense curve →
-  // render the derived curve (already dense — mapped DIRECTLY, NO forward-fill
-  // adapter). ELSE the legacy `equitySnapshotsToDailyPoints(...)` render,
-  // byte-unchanged. A malformed/untrusted/absent derived row degrades to legacy
-  // (see extractTrustworthyDerivedCurve) — never crashes SSR, never renders NaN.
-  // The legacy fallback is load-bearing until the founder-gated per-key backfill
-  // runs (all 517 prod keys currently have zero per-key rows — the A1 census).
-  const derivedCurve = extractTrustworthyDerivedCurve(
-    derivedEquityRow?.payload ?? null,
-  );
-  // f7 adapter (legacy path): DailyPoint[] for EquityCurve/DrawdownChart
-  // parallel-prop.
-  const candidateEquityDailyPoints =
-    derivedCurve ??
-    equitySnapshotsToDailyPoints(
-      equitySnapshots.map((s) => ({ asof: s.asof, value_usd: s.value_usd })),
-    );
-  // Phase 167.1.2 / D-02 ("Hide it until correct"): the curve is withheld here,
-  // at its one producer, for every allocator; plan 11 owns the "ready" condition.
-  const equityHistoryState: "rebuilding" | "ready" = "rebuilding";
-  const equityDailyPoints: DailyPoint[] =
-    equityHistoryState === "rebuilding" ? [] : candidateEquityDailyPoints;
+  // Phase 167.1.2 plan 11 — the ONE producer of the display series. A version-2
+  // trustworthy row with well-formed returns is "ready" and its curve and
+  // returns are shown. Anything else is "rebuilding" and both arrays are empty.
+  // Identity conditions are applied on top of this in the same plan. Snapshots
+  // are not a display fallback (the pre-115.1 branch is gone).
+  const derivedPayload = derivedEquityRow?.payload ?? null;
+  const series = extractTrustworthyDerivedSeries(derivedPayload);
+  // Source stamp: the pre-167.1.2 curve gate, not the version-2 series. While
+  // rebuilding the chart does not read it; the warm-up gate and the composer
+  // disclosure do, so a v1 trustworthy curve still reads as "derived".
+  const curveForSource = trustworthyDerivedCurve(derivedPayload);
+  const equityHistoryState: "rebuilding" | "ready" = series ? "ready" : "rebuilding";
+  const equityDailyPoints: DailyPoint[] = series ? series.curve : [];
+  const equityDailyReturns: DailyPoint[] = series ? series.returns : [];
   const equityCurveSource: "derived" | "legacy" =
-    derivedCurve !== null ? "derived" : "legacy";
+    curveForSource !== null ? "derived" : "legacy";
   const derivedCurveComputedAt =
-    derivedCurve !== null ? (derivedEquityRow?.computed_at ?? null) : null;
+    curveForSource !== null ? (derivedEquityRow?.computed_at ?? null) : null;
 
   // f9: min non-null history_depth_months across snapshots. Null when
   // every snapshot's column is NULL (e.g. pure CoinGecko-fallback).
@@ -3833,6 +3839,7 @@ export function derivePhase07Fields(
     lastSyncAt,
     hasSyncing,
     equityDailyPoints,
+    equityDailyReturns,
     equityCurveSource,
     derivedCurveComputedAt,
     equityHistoryState,
