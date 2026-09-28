@@ -4463,6 +4463,47 @@ async def test_item7b_purge_refused_lookup_failed(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
+async def test_item7b_missing_head_count_refuses_purge():
+    """A head count with no count is not an empty book.
+
+    ``select(..., head=True)`` returns no rows. Falling through to
+    ``len(data)`` would read that as absent and the empty replace would
+    wipe. A missing count is the same fail-safe as a raised lookup.
+    """
+    from services.equity_reconstruction import (
+        EmptyReplaceRefusedError,
+        replace_equity_snapshots,
+    )
+
+    class _Res:
+        count = None
+        data: list = []
+
+    class _Tbl:
+        def select(self, *_a, **_k):
+            return self
+
+        def eq(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            return _Res()
+
+    class _Client:
+        def table(self, _name):
+            return _Tbl()
+
+        def rpc(self, *_a, **_k):
+            raise AssertionError("empty replace must not call the RPC")
+
+    with pytest.raises(EmptyReplaceRefusedError) as raised:
+        await replace_equity_snapshots(_Client(), [], ALLOCATOR_ID, None)
+    assert raised.value.lookup_failed is True
+    assert raised.value.existing_history is None
+    assert ALLOCATOR_ID not in str(raised.value)
+
+
+@pytest.mark.asyncio
 async def test_item7b_purge_refused_helper_raises(caplog):
     """replace_equity_snapshots([], ...) over seeded rows raises and deletes nothing."""
     from services.equity_reconstruction import (

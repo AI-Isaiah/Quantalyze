@@ -1577,11 +1577,16 @@ async def _allocator_has_equity_snapshots(
             scrub_freeform_string(str(exc)),
         )
         return SnapshotPresence(present=True, lookup_failed=True)
+    # head=True returns no rows. A missing count is not an empty book —
+    # treating it as absent would purge. Same fail-safe as a raised lookup.
     count = getattr(res, "count", None)
-    if count is not None:
-        return SnapshotPresence(present=int(count) > 0)
-    data = getattr(res, "data", None) or []
-    return SnapshotPresence(present=len(data) > 0)
+    if count is None:
+        logger.warning(
+            "allocator_equity_snapshots presence lookup returned no count — "
+            "refusing empty replace (item 7b, fail-safe)",
+        )
+        return SnapshotPresence(present=True, lookup_failed=True)
+    return SnapshotPresence(present=int(count) > 0)
 
 
 async def replace_equity_snapshots(
