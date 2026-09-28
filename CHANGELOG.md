@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.110.0.1] - 2026-09-28 — BASELINE: automated re-dump after the PROD apply of 0bea4a9d
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `36391461817`, after the PROD apply of merge `0bea4a9d`: sha256 `6ea5065a…` → `af1760aa…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20260927180000_working_holder_rule_d18.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-09-28` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.110.0.0 → 0.110.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=281 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `36391461817` succeeded, and this entry was composed by the `redump-pr` job. Run `36391461817` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.110.0.0] - 2026-09-27 — ACCOUNTTRUTH C1: one exchange account is connected once, and a duplicate key is named on both key cards
 
 ⭐ **What changed for whoever reads this next.** This is the first topic PR of Phase 167.1.2 PR C, split by founder decision D-21. C2 (history rebuild), C3 (honest empties and small fixes), C4 (departed-account overview) and plan 08 follow, landed one at a time. It covers plans 02, 04 and 16.
