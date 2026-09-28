@@ -2563,16 +2563,6 @@ export const FILES_FLOOR = 53;
 //    biting 8`.
 //    WAIVED_CEILING stays 0 — no waiver was added.
 //
-// ⭐ REBASE NOTE 2026-09-27 (Phase 167.1.2 plan 16, D-18, onto origin/main
-//    after CLAIMPAIR): the incoming commit measured 491 -> 495, FOUR new arms
-//    in the already-annotated test_api_keys_account_identity.sql (HIST-signin,
-//    HIST-error, HIST-inactive, HIST-nullstatus) against migration
-//    20260927180000. origin/main had already moved the same base 491 -> 509
-//    (CLAIMPAIR). The union is 509 + 4 = 513, but this rebase does not invent
-//    that floor. ARMS_FLOOR stays at main's measured 509 until one full lane
-//    run on this merged tree prints the union. A stale-low floor is caught by
-//    mutation-runner-floors.test.ts; a guessed 513 would fail the runner if
-//    the count is anything else.
 // ⭐ RE-DERIVED 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 491 -> 506,
 //    FIFTEEN new arms (C-KEY, C-PF, C-ST, C-AL, P5-KEY, P5-PF, P5-ST, P5-AL,
 //    W-LOST, W-INTRO, P2-KEY, P2-PF, P2-ST, P2-AL, P2-C39), all in the NEW file
@@ -2648,7 +2638,21 @@ export const FILES_FLOOR = 53;
 //    re-run at 510: the runner's own `bitingArms < armsFloor` comparison is
 //    unchanged and was separated at 507 against 506 in plan 05.
 //    WAIVED_CEILING stays 0 — no waiver was added.
-export const ARMS_FLOOR = 509;
+// ⭐ RE-DERIVED 2026-09-27 (Phase 167.1.2 ACCOUNTTRUTH, PR C1, merge of origin/main
+//    after 164.9.3 CLAIMPAIR): 509 -> 513, the UNION of two branches' arms. C1
+//    added FOUR arms to supabase/tests/test_api_keys_account_identity.sql (37 ->
+//    41: HIST-signin, HIST-error, HIST-inactive, HIST-nullstatus, plan 16, D-18);
+//    CLAIMPAIR's 509 already counts its eighteen. FILES_FLOOR stays 53 (C1 added no
+//    gate file). MEASURED via ONE full lane run on the merged tree, no file edited
+//    during it: `scope: FULL 53/53 annotated files`, `coverage: files 53/80`,
+//    `arms: 513/513/0`, `biting: 513`, `lane-invocations: 513` (plus 53 baseline /
+//    53 restore legs), `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`,
+//    `unreachable: 27 file(s)`, `per-arm lane time: mean 1.2s over 513 arm run(s)`,
+//    `✅ No defects. Every annotated arm bit its own arm first.`, exit 0. Per-file
+//    lines: `test_api_keys_account_identity.sql: ... biting 41` and
+//    `test_claim_compute_jobs_failed_retry_pending_pair.sql: ... biting 18`.
+//    WAIVED_CEILING stays 0.
+export const ARMS_FLOOR = 513;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

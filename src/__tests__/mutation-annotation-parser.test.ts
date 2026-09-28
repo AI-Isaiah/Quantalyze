@@ -1049,8 +1049,11 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // 507 -> 509 and `stepsSeen` 536 -> 540: TWO new arms, W-C39SIB and W-C39INTRO, in the
     // same gate file, each with one layered twin of two `find` steps. MEASURED: this file's own
     // run read `expected 509 to be 507`, and the needle census below read `expected 540 to be 536`.
-    expect(armsSeen).toBe(509);
-    expect(stepsSeen).toBe(540);
+    // ⭐ CURRENCY 2026-09-27 (merge of origin/main into Phase 167.1.2 PR C1): `armsSeen`
+    // 509 -> 513 and `stepsSeen` 540 -> 544, C1's four D-18 arms (one `edit` step each)
+    // joining CLAIMPAIR's count. MEASURED on the merged tree.
+    expect(armsSeen).toBe(513);
+    expect(stepsSeen).toBe(544);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1959,7 +1962,9 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // new twin of two steps. MEASURED: `expected 536 to be 534` at the pre-move pin.
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01 / D-11): 536 -> 540, two
     // new twins of two steps each. MEASURED: `expected 540 to be 536` at the pre-move pin.
-    expect(needles.length).toBe(540);
+    // ⭐ CURRENCY 2026-09-27 (merge into Phase 167.1.2 PR C1): 540 -> 544, moving WITH
+    // `stepsSeen`. MEASURED on the merged tree.
+    expect(needles.length).toBe(544);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

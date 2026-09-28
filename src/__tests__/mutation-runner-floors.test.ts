@@ -702,7 +702,7 @@ describe("corpus re-derivation", () => {
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01 / D-11): 507 -> 509. TWO new
     // arms, W-C39SIB and W-C39INTRO, in the same gate file (16 -> 18). MEASURED: this file's own
     // run read `expected 509 to be 507`, and one full lane run printed `arms: 509/509/0`, `biting: 509`.
-    expect(totalAnchored).toBe(509);
+    expect(totalAnchored).toBe(513);
   });
 });
 
@@ -1938,9 +1938,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // 12 / 18. Copied from ONE full lane run. The THREE DELIBERATE MISMATCHES keep their gap
     // of one: lane-invocations 510 against 509, biting 510 against executed 509, and rows
     // summing to 508 against an aggregate of 509.
-    "arms: 509/509/0   (executed/annotated/waived)",
-    "biting: 509   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
-    "lane-invocations: 509   (arm lanes actually spawned — tallied inside runLane, independent of the 509 the verdict loop counted; plus 53 baseline / 53 restore leg(s))",
+    "arms: 513/513/0   (executed/annotated/waived)",
+    "biting: 513   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 513   (arm lanes actually spawned — tallied inside runLane, independent of the 513 the verdict loop counted; plus 53 baseline / 53 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -2058,7 +2058,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // that measured the floor.
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01 / D-11): copied from the
     // full run that measured the floor.
-    "per-arm lane time: mean 1.2s over 509 arm run(s)",
+    "per-arm lane time: mean 1.2s over 513 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -2083,7 +2083,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 491 -> 506.
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 1, WR-01): 506 -> 507.
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01 / D-11): 507 -> 509.
-    expect(r.out).toContain("509 arm lane(s) spawned");
+    expect(r.out).toContain("513 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -2336,8 +2336,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // 506/507, both halves together, so the gap stays exactly one (offset -1 kept).
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01 / D-11): 506/507 ->
     // 508/509, both halves together, so the gap stays exactly one (offset -1 kept).
-    expect(r.out).toContain("rows sum to 508 biting arm(s) but the aggregate");
-    expect(r.out).toContain("reports 509");
+    expect(r.out).toContain("rows sum to 512 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 513");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2372,14 +2372,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // in `executed`/`biting`; the severed value stays 0.
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01 / D-11): 507 -> 509 in the
     // NEEDLE and in `executed`/`biting`; the severed value stays 0.
-    const severed = GREEN_LOG.replace(/^lane-invocations: 509 /m, "lane-invocations: 0 ");
+    const severed = GREEN_LOG.replace(/^lane-invocations: 513 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
     expect(r.out).toContain("GATE failing, not the corpus");
     // ⭐ CURRENCY 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): 449 -> 453 in the
     // NEEDLE and in `executed`/`biting`; the severed value stays 0.
-    expect(r.out).toContain("executed=509 lane-invocations=0 biting=509");
+    expect(r.out).toContain("executed=513 lane-invocations=0 biting=513");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2415,10 +2415,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // DELIBERATE MISMATCH 507 -> 508, both halves, gap of one kept (offset +1).
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01 / D-11): NEEDLE 507 -> 509 and
     // DELIBERATE MISMATCH 508 -> 510, both halves, gap of one kept (offset +1).
-    const extra = GREEN_LOG.replace(/^lane-invocations: 509 /m, "lane-invocations: 510 ");
+    const extra = GREEN_LOG.replace(/^lane-invocations: 513 /m, "lane-invocations: 514 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("executed=509 lane-invocations=510 biting=509");
+    expect(r.out).toContain("executed=513 lane-invocations=514 biting=513");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
@@ -2433,7 +2433,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 491 -> 506.
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 1, WR-01): 506 -> 507.
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01 / D-11): 507 -> 509.
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 509 /m, "lane-invocations: abc ");
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 513 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -2475,7 +2475,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // needle and the replacement; only the W field differs.
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01 / D-11): 507 -> 509 in BOTH the
     // needle and the replacement; only the W field differs.
-    const waived = GREEN_LOG.replace(/^arms: 509\/509\/0 /m, `arms: 509/509/${WAIVED_CEILING + 1} `);
+    const waived = GREEN_LOG.replace(/^arms: 513\/513\/0 /m, `arms: 513/513/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -2540,14 +2540,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // INDIVIDUALLY: executed-is-zero keeps its literal 0 and moves only the annotated
     // field; the biting-above-executed arm's NEEDLE 507 -> 509 and MISMATCH 508 -> 510
     // (offset +1 kept).
-    const zero = GREEN_LOG.replace(/^arms: 509\/509\/0 /m, "arms: 0/509/0 ");
+    const zero = GREEN_LOG.replace(/^arms: 513\/513\/0 /m, "arms: 0/513/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
-    const spliced = GREEN_LOG.replace(/^biting: 509 /m, "biting: 510 ");
+    const spliced = GREEN_LOG.replace(/^biting: 513 /m, "biting: 514 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
-    expect(s.out).toContain("biting (510) exceeds executed (509)");
+    expect(s.out).toContain("biting (514) exceeds executed (513)");
   });
 
   // ── 164.4.2-09, DECISION D: the step judges WHAT THE RUN COVERED ─────────
@@ -2626,7 +2626,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 491 -> 506.
       // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 1, WR-01): 506 -> 507.
       // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01 / D-11): 507 -> 509.
-      expect(r.out).toContain("biting arms 509 >= 509");
+      expect(r.out).toContain("biting arms 513 >= 513");
     }
   });
 
