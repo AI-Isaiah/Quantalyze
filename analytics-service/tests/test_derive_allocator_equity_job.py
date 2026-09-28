@@ -1247,6 +1247,102 @@ async def test_pin_m2_negative_equity_persists_null_anchor() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 167.1.2-05 — the persisted payload carries D-06 returns (version 2).
+# The compose dict is upserted unchanged, so a deposit that steps the $-curve
+# does not step the stored return. MUTATION-FALSIFIABLE: drop ``returns`` from
+# the upserted payload → this test RED.
+# ---------------------------------------------------------------------------
+
+
+def _seed_one_key_deposit() -> dict[str, list[dict]]:
+    """One eligible key, three days, a deposit on day 3. Hand-derivable."""
+    alloc = "alloc-deposit"
+    days = ["2026-06-01", "2026-06-02", "2026-06-03"]
+    returns = [0.0, 0.0, 0.02]
+    return {
+        "api_keys": [
+            {
+                "id": "key-A",
+                "user_id": alloc,
+                "is_active": True,
+                "sync_status": "connected",
+                "disconnected_at": None,
+                "exchange": "binance",
+                "venue_account_id": "venue-A",
+            },
+        ],
+        "csv_daily_returns": [
+            {
+                "api_key_id": "key-A",
+                "allocator_id": alloc,
+                "date": day,
+                "daily_return": ret,
+            }
+            for day, ret in zip(days, returns)
+        ],
+        DERIVED_TABLE: [
+            {
+                "allocator_id": alloc,
+                "kind": "key_inputs:key-A",
+                "payload": {
+                    "flows": [{"utc_day_iso": "2026-06-03", "usd_signed": 1000.0}],
+                    "anchor_usd": 5100.0,
+                    "anchor_asof": "2026-06-03",
+                    "venue": "binance",
+                },
+            },
+        ],
+        LEGACY_TABLE: [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_one_key_deposit_persists_version_2_returns() -> None:
+    """The upserted equity_curve payload is the compose payload: version 2 and a
+    returns list of ISO dates and finite floats, ascending, whose day-3 entry is
+    the key's own r (the deposit is not a return)."""
+    import math
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(_seed_one_key_deposit())
+    job = {
+        "id": "j-deposit",
+        "kind": "derive_allocator_equity",
+        "allocator_id": "alloc-deposit",
+    }
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "DONE"
+    curve_upserts = [
+        u for u in fake.upserts
+        if u[0] == DERIVED_TABLE and _is_equity_curve_upsert(u[1])
+    ]
+    assert len(curve_upserts) == 1, fake.upserts
+    payload = _extract_payload(curve_upserts[0][1])
+    assert payload.get("version") == 2
+    returns = payload.get("returns")
+    assert isinstance(returns, list) and returns, payload
+    dates = [row["date"] for row in returns]
+    assert dates == sorted(dates)
+    assert all(
+        isinstance(row["date"], str) and len(row["date"]) == 10 and row["date"][4] == "-"
+        for row in returns
+    )
+    assert all(isinstance(row["r"], float) and math.isfinite(row["r"]) for row in returns)
+    by_date = {row["date"]: row["r"] for row in returns}
+    assert "2026-06-01" not in by_date
+    assert by_date["2026-06-03"] == pytest.approx(0.02, abs=1e-12)
+    curve = {point["date"]: point["equity_usd"] for point in payload["curve"]}
+    level_ratio = curve["2026-06-03"] / curve["2026-06-02"] - 1.0
+    assert abs(level_ratio - by_date["2026-06-03"]) > 1e-4
+
+
+# ---------------------------------------------------------------------------
 # helpers — tolerant of the exact upsert payload shape plan 04 chooses (a single
 # dict row or a one-element list); assert on the CONTRACT fields, not the wrapper.
 # ---------------------------------------------------------------------------

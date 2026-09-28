@@ -31,6 +31,8 @@ metrics from the unified ledger.
 """
 from __future__ import annotations
 
+import logging
+import math
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
 from typing import Any
@@ -39,6 +41,7 @@ import pandas as pd
 
 from services.allocator_equity_derive import (
     DegradeReason,
+    KeyEquity,
     LedgerScalars,
     _is_trustworthy,
     allocator_equity_curve,
@@ -50,6 +53,12 @@ from services.allocator_equity_derive import (
 )
 from services.external_flows import ExternalFlow
 from services.nav_twr import NavReconstructionError
+
+logger = logging.getLogger(__name__)
+
+# Benign (does not flip is_trustworthy). A day whose prior-capital denominator is
+# not positive has no return — emitting one would invent a number from no capital.
+_SKIPPED_NONPOSITIVE_DENOMINATOR = "skipped_nonpositive_denominator"
 
 
 def _bool_flag_tokens(flags: Mapping[str, Any]) -> set[str]:
@@ -78,11 +87,122 @@ def _current_equity_weights(
     return {k: raw[k] / total for k in keys}
 
 
+def portfolio_returns(
+    per_key_equity: Mapping[str, KeyEquity],
+    per_key_returns: Mapping[str, pd.Series],
+) -> tuple[list[dict[str, Any]], int]:
+    """D-06 book returns: ``r_t = Σ_k E_{k,t−1}·r_{k,t} / Σ_k E_{k,t−1}``.
+
+    Sums only keys that have a level on both the previous union day and ``t``.
+    A key's first day is a join (no prior level, so it is not in the sum). A
+    non-rotated key whose own series has ended keeps its last level with
+    ``r = 0`` (stale-mark carry — never a drop to $0, and never a return). A
+    rotated-out key (disjoint coverage seam, the same classification the $-curve
+    uses) stops: no level after its last day, so a departure is not a return.
+    A day whose denominator is not positive is omitted; the returned count is
+    that omission (the caller logs it and raises a benign flag). Pure: no I/O.
+    """
+    level_by_key: dict[str, dict[str, float]] = {}
+    equity_by_key: dict[str, pd.Series] = {}
+    first_day: dict[str, str] = {}
+    last_day: dict[str, str] = {}
+    for key, key_equity in per_key_equity.items():
+        series = key_equity.equity
+        if series is None or len(series) == 0:
+            continue
+        day_map = {str(day): float(level) for day, level in series.items()}
+        if not day_map:
+            continue
+        ordered = sorted(day_map)
+        level_by_key[key] = day_map
+        equity_by_key[key] = series
+        first_day[key] = ordered[0]
+        last_day[key] = ordered[-1]
+    if not level_by_key:
+        return [], 0
+
+    return_by_key: dict[str, dict[str, float]] = {
+        key: {str(day): float(value) for day, value in series.items()}
+        for key, series in per_key_returns.items()
+    }
+    # Same seam rule as allocator_equity_curve with no explicit seams: only a
+    # DISJOINT coverage handoff is a rotation. An overlapped key that ends early
+    # is still held, so its level carries (r = 0). A rotated-out key does not.
+    rotated_out: set[str] = set()
+    for seam in segment_coverage(equity_by_key).seams:
+        rotated_out.update(seam.prev_keys)
+
+    def _level_on(key: str, day: str) -> float | None:
+        day_map = level_by_key[key]
+        if day < first_day[key]:
+            return None
+        if day in day_map:
+            return day_map[day]
+        if day > last_day[key]:
+            if key in rotated_out:
+                return None
+            return day_map[last_day[key]]
+        prior = [known for known in day_map if known <= day]
+        if not prior:
+            return None
+        return day_map[max(prior)]
+
+    def _return_on(key: str, day: str) -> float:
+        # Past the key's own series the level is carried and the return is 0.
+        # A flow-only day inside the series also has no return row: r = 0.
+        if day not in level_by_key[key]:
+            return 0.0
+        raw = return_by_key.get(key, {}).get(day)
+        if raw is None:
+            return 0.0
+        return raw
+
+    union = sorted({day for day_map in level_by_key.values() for day in day_map})
+    rows: list[dict[str, Any]] = []
+    skipped = 0
+    for index in range(1, len(union)):
+        prev, day = union[index - 1], union[index]
+        numer = 0.0
+        denom = 0.0
+        poison = False
+        for key in level_by_key:
+            equity_prev = _level_on(key, prev)
+            equity_day = _level_on(key, day)
+            if equity_prev is None or equity_day is None:
+                continue
+            ret = _return_on(key, day)
+            if (
+                not math.isfinite(equity_prev)
+                or not math.isfinite(equity_day)
+                or not math.isfinite(ret)
+            ):
+                poison = True
+                break
+            numer += equity_prev * ret
+            denom += equity_prev
+        if (
+            poison
+            or not math.isfinite(denom)
+            or not math.isfinite(numer)
+            or not (denom > 0.0)
+        ):
+            skipped += 1
+            continue
+        value = numer / denom
+        if not math.isfinite(value):
+            skipped += 1
+            continue
+        rows.append({"date": day, "r": value})
+    return rows, skipped
+
+
 def compose_allocator_equity(
     returns_by_key: Mapping[str, pd.Series],
     flows_by_key: Mapping[str, list[ExternalFlow]],
     anchors_by_key: Mapping[str, float | None],
     null_anchor_reasons: Mapping[str, str] | None = None,
+    *,
+    benign_flag_tokens: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Compose the allocator display-row payload from real per-key inputs.
 
@@ -231,8 +351,28 @@ def compose_allocator_equity(
     # extractTrustworthyDerivedCurve and NEVER renders these scalars. If a future
     # surface DOES render them, it MUST gate on a minimum window / sanity bound and
     # never show the raw value — otherwise it prints a nonsense headline return.
+
+    # D-06: the book curve's own returns. Not _current_equity_weights (static D1
+    # shares weight history by today's mix). ``version`` 2 is the contract the
+    # reader accepts; a payload without it is still the pre-D-06 $-curve.
+    returns_rows, skipped_days = portfolio_returns(per_key_equity, anchored_returns)
+    if skipped_days:
+        flag_tokens.add(_SKIPPED_NONPOSITIVE_DENOMINATOR)
+        logger.info(
+            "compose: portfolio returns skipped %d day(s) with a non-positive "
+            "denominator",
+            skipped_days,
+        )
+    for token in benign_flag_tokens or ():
+        # Caller-supplied benign tokens (the composite shared-account flag). Never
+        # a degrade reason — the number stays trustworthy when the account is
+        # counted once on purpose.
+        if token:
+            flag_tokens.add(token)
     return {
         "curve": curve_rows,
+        "returns": returns_rows,
+        "version": 2,
         "flags": sorted(flag_tokens),
         "degrade_reasons": sorted(r.value for r in reasons),
         "is_trustworthy": _is_trustworthy(frozenset(reasons)),
