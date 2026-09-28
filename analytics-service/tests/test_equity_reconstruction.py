@@ -4255,6 +4255,117 @@ async def test_h1168_reconstruct_no_data_emits_distinct_audit_kind(
     assert "allocator.equity.reconstruct_complete" not in actions
 
 
+# ---- Item 7 (b): an empty sole-key replay must not wipe existing history --
+#
+# The sole-key test counts only CONNECTED siblings (D-05). A book whose other
+# keys were disconnected still takes replace_allocator_equity_snapshots, and
+# that RPC deletes every legacy row before inserting. An empty replay has
+# nothing to insert, so today's helper purges then writes zero. These arms
+# refuse that purge. The seeded USD digit sequence must not appear in logs
+# or audit metadata (no figure, no holdings).
+
+_ITEM7B_SEEDED_USD = 813579.17
+_ITEM7B_SEEDED_USD_DIGITS = "813579"
+
+
+def _seed_item7b_history(fake: FakeSupabaseClient, n: int = 3) -> list[str]:
+    asofs: list[str] = []
+    for i in range(n):
+        asof = f"2024-01-{i + 1:02d}"
+        asofs.append(asof)
+        fake.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID,
+            "asof": asof,
+            "value_usd": _ITEM7B_SEEDED_USD,
+            "breakdown": {"USDT": _ITEM7B_SEEDED_USD},
+        }
+    return asofs
+
+
+def _install_item7b_empty_replay(monkeypatch, fake_supabase: FakeSupabaseClient):
+    """H-1168 harness: sole key, no trades, no deposits, no positions, empty balance."""
+    audit_mock = _install_fake_audit(monkeypatch)
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "is_active": True, "disconnected_at": None, "sync_status": "ok",
+    }
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(return_value=[])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=[])
+    mock_exchange.fetch_balance = AsyncMock(return_value={"total": {}})
+    mock_exchange.fetch_positions = AsyncMock(return_value=[])
+    mock_exchange.close = AsyncMock()
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+    return audit_mock
+
+
+def _item7b_no_data_meta(audit_mock) -> dict:
+    hits = [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action") == "allocator.equity.reconstruct_no_data"
+    ]
+    assert len(hits) == 1, [c.kwargs.get("action") for c in audit_mock.call_args_list]
+    meta = hits[0].kwargs.get("metadata") or {}
+    assert isinstance(meta, dict)
+    return meta
+
+
+def _assert_item7b_no_seeded_usd(caplog, audit_mock, extra: str = "") -> None:
+    """The seeded USD digit sequence must not leak into logs or audit values."""
+    blob = caplog.text + extra
+    for call in audit_mock.call_args_list:
+        blob += str(call.kwargs.get("metadata"))
+    assert _ITEM7B_SEEDED_USD_DIGITS not in blob, blob
+
+
+@pytest.mark.asyncio
+async def test_item7b_purge_refused_keeps_existing_history(monkeypatch, caplog):
+    """Empty sole-key reconstruct over existing history leaves every row.
+
+    Outcome is DONE. The replace RPC is not called. The audit stays
+    reconstruct_no_data and records the refusal. RED against today's helper,
+    which purges then inserts zero.
+    """
+    from services.job_worker import DispatchOutcome
+
+    fake = FakeSupabaseClient()
+    asofs = _seed_item7b_history(fake)
+    audit_mock = _install_item7b_empty_replay(monkeypatch, fake)
+
+    with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics.equity_reconstruction"):
+        result = await run_reconstruct_allocator_history_job({
+            "id": "item7b-keep",
+            "kind": "reconstruct_allocator_history",
+            "api_key_id": API_KEY_ID_1,
+        })
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert not any(
+        name == "replace_allocator_equity_snapshots" for name, _ in fake.rpc_calls
+    ), fake.rpc_calls
+    survivors = fake.rows_for("allocator_equity_snapshots")
+    assert sorted(r["asof"] for r in survivors) == asofs, survivors
+    assert all(r["value_usd"] == _ITEM7B_SEEDED_USD for r in survivors)
+    meta = _item7b_no_data_meta(audit_mock)
+    assert meta.get("purge_refused") is True
+    assert meta.get("existing_history") is True
+    assert meta.get("snapshot_lookup_failed") is False
+    _assert_item7b_no_seeded_usd(caplog, audit_mock)
+
+
 # ---- M-1029 - Purge failure bubbles -------------------------------------
 
 @pytest.mark.asyncio

@@ -1518,6 +1518,72 @@ async def _purge_allocator_equity_snapshots(
     return _result_row_count(res)
 
 
+class EmptyReplaceRefusedError(Exception):
+    """Item 7 (b): an empty sole-key replace would purge existing history.
+
+    ``existing_history`` is True when rows were confirmed present, and None
+    when the presence lookup itself failed. ``lookup_failed`` is that second
+    case. The message carries neither an account id nor a figure.
+    """
+
+    existing_history: bool | None
+    lookup_failed: bool
+
+    def __init__(self, *, existing_history: bool | None, lookup_failed: bool) -> None:
+        super().__init__("empty equity snapshot replace refused")
+        self.existing_history = existing_history
+        self.lookup_failed = lookup_failed
+
+
+class SnapshotPresence:
+    """Tri-state of ``_allocator_has_equity_snapshots`` (item 7 (b)).
+
+    Modelled on ``SiblingCheckResult``. ``present`` is what the empty-replace
+    gate reads. ``lookup_failed`` distinguishes a confirmed row from the
+    fail-safe 'treat as present' state a raised lookup returns, so a transient
+    read error cannot be told apart from a genuinely empty book by the purge.
+    """
+
+    __slots__ = ("present", "lookup_failed")
+
+    def __init__(self, present: bool, lookup_failed: bool = False) -> None:
+        self.present = present
+        self.lookup_failed = lookup_failed
+
+
+async def _allocator_has_equity_snapshots(
+    supabase: Any, allocator_id: str,
+) -> SnapshotPresence:
+    """Head-count ``allocator_equity_snapshots`` for this allocator.
+
+    A raised lookup returns ``present=True, lookup_failed=True`` (fail-safe:
+    keep the rows). The log is the scrubbed exception class text only — no
+    account id, no holdings, no USD figure in the format string.
+    """
+    def _sel() -> Any:
+        return (
+            supabase.table("allocator_equity_snapshots")
+            .select("id", count="exact", head=True)
+            .eq("allocator_id", allocator_id)
+            .execute()
+        )
+
+    try:
+        res = await db_execute(_sel)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "allocator_equity_snapshots presence lookup failed: %s — "
+            "refusing empty replace (item 7b, fail-safe)",
+            scrub_freeform_string(str(exc)),
+        )
+        return SnapshotPresence(present=True, lookup_failed=True)
+    count = getattr(res, "count", None)
+    if count is not None:
+        return SnapshotPresence(present=int(count) > 0)
+    data = getattr(res, "data", None) or []
+    return SnapshotPresence(present=len(data) > 0)
+
+
 async def replace_equity_snapshots(
     supabase: Any,
     rows: list[dict[str, Any]],
@@ -1541,10 +1607,22 @@ async def replace_equity_snapshots(
     NULL — so the row shape passed here only needs the four projected columns.
     """
     if not rows:
-        # Nothing to insert. The sole-key path still wants the stale rows gone,
-        # so call the RPC with an empty array — the function purges then
-        # inserts zero rows in one transaction (still atomic, no wipe-then-
-        # crash window because there is nothing to insert afterwards).
+        # Item 7 (b), D-05: _allocator_has_other_api_keys counts only CONNECTED
+        # siblings, so a book whose other keys were disconnected still looks
+        # sole-key. replace_allocator_equity_snapshots DELETEs every legacy row
+        # and then inserts the payload. An empty payload would delete departed
+        # keys' history and insert nothing. Refuse that when any
+        # allocator_equity_snapshots row exists, or when the existence lookup
+        # itself errors (fail-safe: keep the rows). A book with no snapshots
+        # keeps today's empty-payload call.
+        presence = await _allocator_has_equity_snapshots(supabase, allocator_id)
+        if presence.present or presence.lookup_failed:
+            raise EmptyReplaceRefusedError(
+                existing_history=(
+                    True if presence.present and not presence.lookup_failed else None
+                ),
+                lookup_failed=presence.lookup_failed,
+            )
         payload: list[dict[str, Any]] = []
     else:
         # Project ONLY the columns the RPC's jsonb_to_recordset reads. value_usd
@@ -2844,6 +2922,11 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
     # E4 (HIGH8): track whether the sole-key atomic-replace RPC ran so the
     # audit trail can distinguish it from the multi-key DO-NOTHING path.
     used_atomic_replace = False
+    # Item 7 (b): set only when an empty sole-key replace is refused. The
+    # three audit booleans are added only in that case — never a new kind.
+    purge_refused = False
+    purge_existing_history = False
+    purge_snapshot_lookup_failed = False
     try:
         purged = 0
         sibling_check = await _allocator_has_other_api_keys(
@@ -2884,6 +2967,18 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
             count = await persist_equity_snapshots(
                 ctx.supabase, rows, allocator_id, depth_months,
             )
+    except EmptyReplaceRefusedError as exc:
+        # The RPC did not run. Fall through to the existing taxonomy:
+        # count == 0 and not rows yields reconstruct_no_data. Outcome
+        # stays DONE (this except does not return FAILED).
+        count = 0
+        purged = 0
+        used_atomic_replace = False
+        purge_refused = True
+        # Confirmed-present only. A failed lookup leaves this false;
+        # snapshot_lookup_failed is why the purge was still refused.
+        purge_existing_history = exc.existing_history is True
+        purge_snapshot_lookup_failed = exc.lookup_failed
     except Exception as exc:  # noqa: BLE001
         # Same surfacing pattern as the fetch-window catch — log before
         # sanitisation but use warning + scrub instead of logger.exception
@@ -2951,41 +3046,48 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
     else:
         audit_kind = "allocator.equity.reconstruct_complete"
 
+    audit_metadata: dict[str, Any] = {
+        "days_written": count,
+        "stale_snapshots_purged": purged,
+        # E4 (HIGH8): True when the sole-key atomic replace_allocator_
+        # equity_snapshots RPC ran (DELETE + INSERT in one transaction)
+        # instead of the legacy separate purge + persist round-trips.
+        "atomic_replace": used_atomic_replace,
+        "history_depth_months": depth_months,
+        "okx_terminus_hit": hit_terminus,
+        "venue": venue,
+        "sibling_check_failed": sibling_check.lookup_failed,
+        # Surface replay-time observability (C-0326/9/30, M-1024).
+        # Keep the lists bounded by audit_metadata size by capping
+        # each at 50 entries; the sets only ever grow per-symbol so
+        # 50 is sufficient even for a noisy account.
+        "skipped_symbols": telemetry["skipped_symbols"][:50],
+        "unknown_perp_symbols": telemetry["unknown_perp_symbols"][:50],
+        "inverse_perp_symbols": telemetry["inverse_perp_symbols"][:50],
+        "ctval_drift_warnings": telemetry["ctval_drift_warnings"][:50],
+        # NEW-C01-11: flag propagated so dashboard can suppress
+        # absolute-level/drawdown display before the terminus.
+        "pre_terminus_balance_unknown": telemetry.get("pre_terminus_balance_unknown", False),
+        # M-1 / H-02: anchor-skip DQ flags so the admin health card can
+        # distinguish "anchor succeeded" from "anchor skipped".
+        "anchor_partial_ticker_symbols": telemetry.get("anchor_partial_ticker_symbols", []),
+        "anchor_offset_implausible": telemetry.get("anchor_offset_implausible", False),
+        # E1 (HIGH7) / E2 (MED8): anchor skipped because the replay's
+        # absolute level is untrustworthy (unknown-ctVal/inverse perps);
+        # the offset magnitude we declined to spread is auditable here.
+        "anchor_replay_unreliable": telemetry.get("anchor_replay_unreliable", False),
+        "anchor_offset_skipped_usd": telemetry.get("anchor_offset_skipped_usd", 0.0),
+    }
+    if purge_refused:
+        # Item 7 (b): booleans only, and only when the refusal fired.
+        # Same reconstruct_no_data kind — the action vocabulary is unchanged.
+        audit_metadata["purge_refused"] = True
+        audit_metadata["existing_history"] = purge_existing_history
+        audit_metadata["snapshot_lookup_failed"] = purge_snapshot_lookup_failed
     _emit_audit(
         allocator_id, api_key_id,
         audit_kind,
-        {
-            "days_written": count,
-            "stale_snapshots_purged": purged,
-            # E4 (HIGH8): True when the sole-key atomic replace_allocator_
-            # equity_snapshots RPC ran (DELETE + INSERT in one transaction)
-            # instead of the legacy separate purge + persist round-trips.
-            "atomic_replace": used_atomic_replace,
-            "history_depth_months": depth_months,
-            "okx_terminus_hit": hit_terminus,
-            "venue": venue,
-            "sibling_check_failed": sibling_check.lookup_failed,
-            # Surface replay-time observability (C-0326/9/30, M-1024).
-            # Keep the lists bounded by audit_metadata size by capping
-            # each at 50 entries; the sets only ever grow per-symbol so
-            # 50 is sufficient even for a noisy account.
-            "skipped_symbols": telemetry["skipped_symbols"][:50],
-            "unknown_perp_symbols": telemetry["unknown_perp_symbols"][:50],
-            "inverse_perp_symbols": telemetry["inverse_perp_symbols"][:50],
-            "ctval_drift_warnings": telemetry["ctval_drift_warnings"][:50],
-            # NEW-C01-11: flag propagated so dashboard can suppress
-            # absolute-level/drawdown display before the terminus.
-            "pre_terminus_balance_unknown": telemetry.get("pre_terminus_balance_unknown", False),
-            # M-1 / H-02: anchor-skip DQ flags so the admin health card can
-            # distinguish "anchor succeeded" from "anchor skipped".
-            "anchor_partial_ticker_symbols": telemetry.get("anchor_partial_ticker_symbols", []),
-            "anchor_offset_implausible": telemetry.get("anchor_offset_implausible", False),
-            # E1 (HIGH7) / E2 (MED8): anchor skipped because the replay's
-            # absolute level is untrustworthy (unknown-ctVal/inverse perps);
-            # the offset magnitude we declined to spread is auditable here.
-            "anchor_replay_unreliable": telemetry.get("anchor_replay_unreliable", False),
-            "anchor_offset_skipped_usd": telemetry.get("anchor_offset_skipped_usd", 0.0),
-        },
+        audit_metadata,
     )
     logger.info(
         "reconstruct_allocator_history: persisted %d rows for allocator %s (venue=%s, depth=%s)",
