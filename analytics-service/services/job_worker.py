@@ -49,7 +49,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 
 import ccxt
@@ -101,7 +101,6 @@ from services.db import (
     db_read_with_retry,
     get_supabase,
     one,
-    paginated_select,
     rows,
 )
 from services.encryption import decrypt_credentials, get_kek
@@ -10266,6 +10265,98 @@ def account_identity_collisions(
     return collisions
 
 
+# PostgREST clamps a response to max_rows (supabase/config.toml: 1000). The read
+# below stops on an EMPTY page, not a short one, so a server cap below this size
+# costs extra requests and never truncates.
+_DAILY_RETURNS_PAGE_SIZE: Final = 1000
+_DAILY_RETURNS_HARD_CAP_PAGES: Final = 1000
+
+
+def _load_allocator_daily_returns(
+    supabase: Any,
+    allocator_id: str,
+    key_ids: Iterable[str],
+    *,
+    page_size: int | None = None,
+    hard_cap_pages: int = _DAILY_RETURNS_HARD_CAP_PAGES,
+) -> list[dict[str, Any]]:
+    """Read an allocator's per-key ``csv_daily_returns`` with keyset pagination.
+
+    C3 round 2 (WR-01 / SFH-C3R2-01). Topic D paged this read by OFFSET under a
+    total order. Every page is a separate request with its own snapshot, and a
+    key-mode ``derive_broker_dailies`` for a sibling key runs at the same time
+    (the 05:30 UTC fan-out). It deletes its key's span and re-inserts it. When
+    that write lands between two page reads and changes the row count of a key
+    that sorts before the next offset, every later row shifts. A day is then
+    read twice (the compose takes it twice) or never read (the compose carries
+    the level at r = 0 and the curve stays trustworthy).
+
+    Keyset pagination on the total order ``(api_key_id, date)`` removes the shift.
+    It is realised as one fixed key per loop (``eq``) plus a ``date > cursor``
+    cursor, so a write can only change rows the cursor has not passed yet:
+
+    * no ``(api_key_id, date)`` pair is read twice, because the cursor strictly
+      increases within a key and the keys are read one after another;
+    * every row present for the whole read is read, because no page's start
+      depends on how many rows sort before it.
+
+    ``id`` is deliberately NOT in the cursor. ``(api_key_id, date)`` is unique
+    (``csv_daily_returns_api_key_date_key``), so a tie on it can only be the
+    same day deleted and re-inserted under a new id, which is the writer's own
+    shape; an ``id`` arm would read that day twice.
+
+    Only the keys in ``key_ids`` are read. The derive reads ``api_keys`` by owner
+    first, and every consumer of these rows looks them up by one of those ids.
+    A NULL-``api_key_id`` row is dropped by every consumer, so it is not read.
+
+    Residual this read cannot close: the writer deletes a key's span and then
+    upserts it in separate statements. A page read inside that window sees the
+    key's rows absent. The single-statement read before topic D had the same
+    window; closing it is a writer change.
+
+    Past ``hard_cap_pages`` non-empty pages it raises
+    ``PaginatedSelectTruncated`` rather than returning part of the rows, as
+    ``paginated_select`` does, so the caller's permanent disposal is unchanged.
+    """
+    size = page_size if page_size is not None else _DAILY_RETURNS_PAGE_SIZE
+    out: list[dict[str, Any]] = []
+    pages = 0
+    for key_id in sorted({str(k) for k in key_ids}):
+        cursor: str | None = None
+        while True:
+            query = (
+                supabase.table("csv_daily_returns")
+                .select("api_key_id,date,daily_return")
+                .eq("allocator_id", allocator_id)
+                .eq("api_key_id", key_id)
+            )
+            if cursor is not None:
+                query = query.gt("date", cursor)
+            chunk = cast(
+                list[dict[str, Any]],
+                query.order("date", desc=False).limit(size).execute().data or [],
+            )
+            if not chunk:
+                break
+            if pages >= hard_cap_pages:
+                logger.error(
+                    "_load_allocator_daily_returns: hit hard cap of %d pages x %d "
+                    "rows (allocator %s) — raising PaginatedSelectTruncated",
+                    hard_cap_pages,
+                    size,
+                    allocator_id,
+                )
+                raise PaginatedSelectTruncated(
+                    page_count=hard_cap_pages,
+                    page_size=size,
+                    hint=f"csv_daily_returns allocator_id={allocator_id}",
+                )
+            pages += 1
+            out.extend(chunk)
+            cursor = str(chunk[-1]["date"])
+    return out
+
+
 async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult:
     """Phase 115.1 (RD-3 Option B) — CRAWL-FREE, DECRYPTION-FREE allocator
     $-equity compose.
@@ -10381,24 +10472,20 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # response at 1000 rows (supabase/config.toml max_rows), and PROD holds an
     # allocator with 2804 rows (measured 2026-09-29), so a bare read handed the
     # stitch and the compose an arbitrary 1000 of them: a curve built on part of
-    # each key's history, still marked trustworthy. Pages neither skip nor
-    # duplicate only under a TOTAL order. (api_key_id, date) is unique
-    # (csv_daily_returns_api_key_date_key) for every row this job consumes; id,
-    # the primary key, breaks any tie a NULL api_key_id row could leave.
+    # each key's history, still marked trustworthy. C3 round 2 (WR-01 /
+    # SFH-C3R2-01): the pages are KEYSET, not offset, because a sibling key's
+    # dailies write runs concurrently and an offset shift skipped or doubled a
+    # day. See _load_allocator_daily_returns for the guarantee and its residual.
     def _load_returns() -> list[dict[str, Any]]:
-        return paginated_select(
-            supabase.table("csv_daily_returns")
-            .select("api_key_id,date,daily_return")
-            .eq("allocator_id", allocator_id),
-            order_by=(("api_key_id", False), ("date", False), ("id", False)),
-            truncation_hint=f"csv_daily_returns allocator_id={allocator_id}",
+        return _load_allocator_daily_returns(
+            supabase, allocator_id, (str(r["id"]) for r in key_rows)
         )
 
     try:
         csv_rows = await db_execute(_load_returns)
     except PaginatedSelectTruncated as trunc:
-        # The returns exceed paginated_select's hard cap, and paginated_select
-        # refuses rather than returning part of them. A retry re-reads the same
+        # The returns exceed the read's hard cap, and the read refuses rather
+        # than returning part of them. A retry re-reads the same
         # rows, and this exception would otherwise reach classify_exception's
         # catch-all as a retrying `unknown` forever (the T-74-02 class), so it
         # ends permanent. Nothing is composed from a partial read, and the stale
