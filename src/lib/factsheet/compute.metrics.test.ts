@@ -203,22 +203,116 @@ describe("compute — 169 D-11 calendar coverage for every return window", () =>
     { key: "p3y", covered: "2023-07-02", short: "2023-07-03" },
     { key: "p5y", covered: "2021-07-02", short: "2021-07-03" },
   ] as const)(
-    "boundary $key: a record starting at cutoff + 1 day shows it, cutoff + 2 days nulls it",
+    "boundary $key on a 7-day venue: a record starting at cutoff + 1 day shows it, cutoff + 2 days nulls it",
     ({ key, covered, short }) => {
+      // 169 review WR-02 (2026-09-29): these fixtures are consecutive calendar
+      // days, i.e. a 24/7 venue, so they pass the 7-day basis (365) explicitly.
+      // On that basis every day trades and "cutoff + 1 day" is exact. They used
+      // the default basis (252) until the weekday calendar below existed; under
+      // it two "short" starts here (Fri 2 Jan 2026 after the 1 Jan holiday, and
+      // Mon 3 Jul 2023 after a Saturday cutoff) are covered weekday windows.
       const coveredCount = (utc(END) - utc(covered)) / DAY + 1;
       const coveredDates = dailyDatesEndingOn(END, coveredCount);
       expect(coveredDates[0]).toBe(covered);
       const coveredRets = retsFor(coveredCount);
-      const shown = compute(coveredRets, coveredDates)[key];
+      const shown = compute(coveredRets, coveredDates, 0, 365)[key];
       // Starting the day after the cutoff, the window IS the whole record.
       expect(shown).not.toBeNull();
       expect(shown).toBeCloseTo(compoundAfter(coveredRets, coveredDates, CUTOFF[key]), 12);
 
       const shortDates = dailyDatesEndingOn(END, coveredCount - 1);
       expect(shortDates[0]).toBe(short);
-      expect(compute(retsFor(coveredCount - 1), shortDates)[key]).toBeNull();
+      expect(compute(retsFor(coveredCount - 1), shortDates, 0, 365)[key]).toBeNull();
     },
   );
+
+  /**
+   * 169 review WR-02 (2026-09-29): on a WEEKDAY venue (the 252 basis) the
+   * window's first session is not always cutoff + 1 day. A weekend, 1 January
+   * or 25 December between the cutoff and the record's first date is a day the
+   * venue did not trade, so the record misses nothing by starting after it.
+   *
+   * WHY this matters: under "cutoff + 1 day" alone a weekday strategy launched
+   * on Friday 2 January 2026 (1 January a Thursday holiday) showed YTD as the
+   * em-dash for the whole of 2026 while "Since Inception" showed the same
+   * period's return, and a Monday start after a Saturday cutoff dropped the
+   * 3 Month / 3 Year / 5 Year rows the record supports.
+   *
+   * THE OTHER HALF MATTERS AS MUCH: a record that skipped a day the venue DID
+   * trade is still not covering the window, so each case also pins the start one
+   * trading day later as null, and the same dates on the 7-day basis as null.
+   */
+  describe("weekday venues (252 basis): non-trading days at the window start do not uncover it", () => {
+    /** Weekdays from `startIso` to `endIso` inclusive, without 1 Jan and 25 Dec. */
+    function weekdayDates(startIso: string, endIso: string): string[] {
+      const out: string[] = [];
+      for (let t = utc(startIso); t <= utc(endIso); t += DAY) {
+        const iso = ymd(t);
+        const dow = new Date(t).getUTCDay();
+        if (dow === 0 || dow === 6 || iso.slice(5) === "01-01" || iso.slice(5) === "12-25") continue;
+        out.push(iso);
+      }
+      return out;
+    }
+    const weekday = (iso: string) => new Date(utc(iso)).getUTCDay();
+
+    it.each([
+      // key, END, cutoff (hand-derived), first-session start, one trading day later, what lies between
+      { key: "ytd", end: "2026-06-30", cutoff: "2025-12-31", covered: "2026-01-02", short: "2026-01-05", why: "Thu 1 Jan holiday" },
+      { key: "mtd", end: "2026-02-27", cutoff: "2026-01-31", covered: "2026-02-02", short: "2026-02-03", why: "Sat cutoff, Sun 1 Feb" },
+      { key: "p3m", end: "2026-06-26", cutoff: "2026-03-28", covered: "2026-03-30", short: "2026-03-31", why: "Sat cutoff, Sun" },
+      { key: "p6m", end: "2026-06-24", cutoff: "2025-12-24", covered: "2025-12-26", short: "2025-12-29", why: "Thu 25 Dec holiday" },
+      { key: "p1y", end: "2026-12-24", cutoff: "2025-12-24", covered: "2025-12-26", short: "2025-12-29", why: "Thu 25 Dec holiday" },
+      { key: "p3y", end: "2026-06-23", cutoff: "2023-06-24", covered: "2023-06-26", short: "2023-06-27", why: "Sat cutoff, Sun" },
+      { key: "p5y", end: "2026-06-25", cutoff: "2021-06-26", covered: "2021-06-28", short: "2021-06-29", why: "Sat cutoff, Sun" },
+    ] as const)(
+      "$key ($why): a record starting at the first session after the cutoff shows it; one trading day later nulls it",
+      ({ key, end, cutoff, covered, short }) => {
+        // Guard the fixture: every day strictly between the cutoff and `covered`
+        // is a weekend or 1 Jan / 25 Dec, and `short` skipped a real weekday.
+        for (let t = utc(cutoff) + DAY; t < utc(covered); t += DAY) {
+          const iso = ymd(t);
+          const closed = [0, 6].includes(new Date(t).getUTCDay()) || ["01-01", "12-25"].includes(iso.slice(5));
+          expect(closed, `${iso} must be a non-trading day`).toBe(true);
+        }
+        expect([0, 6]).not.toContain(weekday(covered));
+
+        const dates = weekdayDates(covered, end);
+        expect(dates[0]).toBe(covered);
+        const rets = retsFor(dates.length);
+        const shown = compute(rets, dates, 0, 252)[key];
+        expect(shown, `${key} is covered on a weekday venue`).not.toBeNull();
+        // The window is the whole record, compounded strictly after the cutoff.
+        expect(shown).toBeCloseTo(compoundAfter(rets, dates, cutoff), 12);
+        // The 7-day rule is unchanged: the same dates on a 24/7 venue skipped days that traded.
+        expect(compute(rets, dates, 0, 365)[key]).toBeNull();
+
+        const shortDates = weekdayDates(short, end);
+        expect(shortDates[0]).toBe(short);
+        expect(compute(retsFor(shortDates.length), shortDates, 0, 252)[key]).toBeNull();
+      },
+    );
+
+    it("a genuinely short weekday record (launched in March) still nulls YTD, 6 Month and 1 Year", () => {
+      const dates = weekdayDates("2026-03-02", "2026-06-30");
+      const r = compute(retsFor(dates.length), dates, 0, 252);
+      expect(r.ytd).toBeNull();
+      expect(r.p6m).toBeNull();
+      expect(r.p1y).toBeNull();
+      expect(r.p3y).toBeNull();
+      expect(r.p5y).toBeNull();
+      expect(r.mtd).not.toBeNull();
+      expect(r.p3m).not.toBeNull();
+    });
+
+    it("known limit: only weekends, 1 Jan and 25 Dec are assumed closed — a start after any other holiday is the em-dash", () => {
+      // Mon 1 Sep 2025 was US Labor Day, but many weekday venues trade that day,
+      // so the rule does not assume it: a record starting Tue 2 Sep shows no
+      // MTD for September rather than a month that may be missing a session.
+      const dates = weekdayDates("2025-09-02", "2025-09-30");
+      expect(compute(retsFor(dates.length), dates, 0, 252).mtd).toBeNull();
+    });
+  });
 
   it("3Y rides the calendar: 800 daily points (about 2.2 years) is NOT three years, though 800 > 3 x 252", () => {
     // The observation-clock error this replaces: 756 observations is three

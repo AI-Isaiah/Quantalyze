@@ -190,10 +190,39 @@ export function compute(
   // Multi-year windows are calendar days (3 x 365, 5 x 365), never an
   // observation count: 756 observations is three years on a weekday venue and
   // about two on a 24/7 one.
+  //
+  // 169 review WR-02 (2026-09-29): "cutoff plus one day" is the window's first
+  // SESSION only on a 7-day venue. On a weekday venue (the 252 basis) the first
+  // session after the cutoff is the first day that is not a Saturday, a Sunday,
+  // 1 January or 25 December, and a record starting there misses nothing. So
+  // the rule is: covered iff every UTC day strictly between the cutoff and the
+  // first observation is a day the venue did not trade. The 7-day basis has no
+  // such day, which keeps its rule exactly "cutoff + 1 day". Without this a
+  // weekday strategy launched on 2 January showed YTD as the em-dash all year,
+  // and a Monday start after a Saturday cutoff dropped rows the record covers.
+  // Only those four days are assumed closed, because every weekday venue this
+  // product carries (equities, FX / CFD via MT5) is shut on them; any other
+  // holiday differs by venue, and assuming it would admit a window missing a
+  // session that traded. Known limit: a start after another holiday (a Labor
+  // Day Monday on the 1st, an observed New Year Monday) is the em-dash.
+  // The basis is `periodsPerYear`: this codebase passes only 252 (weekday,
+  // `annualizationPeriods`, and the default) or 365 (7-day).
+  const weekdayVenue = periodsPerYear === 252;
+  const isNonTradingDay = (d: Date): boolean => {
+    if (!weekdayVenue) return false;
+    const dow = d.getUTCDay();
+    const md = d.getUTCMonth() * 100 + d.getUTCDate();
+    return dow === 0 || dow === 6 || md === 1 || md === 1125;
+  };
   const windowReturn = (cutoff: Date): number | null => {
-    const lastCoveredStart = new Date(cutoff);
-    lastCoveredStart.setUTCDate(lastCoveredStart.getUTCDate() + 1);
-    return startDate > lastCoveredStart ? null : compoundFrom(cutoff);
+    const firstSession = new Date(cutoff);
+    firstSession.setUTCDate(firstSession.getUTCDate() + 1);
+    // At most three non-trading days run together (a weekend beside 1 Jan or
+    // 25 Dec); 7 is only a bound on the loop.
+    for (let i = 0; i < 7 && isNonTradingDay(firstSession); i++) {
+      firstSession.setUTCDate(firstSession.getUTCDate() + 1);
+    }
+    return startDate > firstSession ? null : compoundFrom(cutoff);
   };
 
   const yearlyObj: Record<string, number> = {};
