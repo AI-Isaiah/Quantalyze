@@ -41,9 +41,10 @@ import { computeRetryAtSeconds } from "@/lib/allocator-cooldowns";
 import { accountShareNote } from "@/lib/account-share-note";
 import {
   accountIdentityTokens,
-  departedHistoryInclusion,
-  departedHistorySentence,
+  departedAnchorOf,
+  departedHistoryCard,
   isDepartedKey,
+  type DepartedAnchor,
   type DepartedHistoryKey,
 } from "@/lib/departed-history";
 import { AllocatorSyncStatus } from "./AllocatorSyncStatus";
@@ -264,13 +265,6 @@ function historyInclusionErrorMessage(error: {
   }
 }
 
-/** A key_inputs payload's anchor, when it is a finite number. */
-function anchorOf(payload: unknown): number | null {
-  if (payload === null || typeof payload !== "object") return null;
-  const anchor = (payload as { anchor_usd?: unknown }).anchor_usd;
-  return typeof anchor === "number" && Number.isFinite(anchor) ? anchor : null;
-}
-
 function disconnectedRefusalMessage(body: unknown): string {
   const error =
     body !== null && typeof body === "object"
@@ -398,11 +392,12 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   const [, startTransition] = useTransition();
   // Plan 09: each key's first and last csv_daily_returns day, read through the
   // owner's own client (policy csv_daily_returns_allocator_owner_select), and
-  // whether a departed key still has the balance its history is measured from.
+  // what a departed key's history is measured from: a usable anchor, no
+  // key_inputs row, or a row whose last balance read stamped a null anchor.
   const [returnsDays, setReturnsDays] = useState<
     Record<string, { first: string | null; last: string | null }>
   >({});
-  const [anchoredById, setAnchoredById] = useState<Record<string, boolean>>({});
+  const [anchorById, setAnchorById] = useState<Record<string, DepartedAnchor>>({});
   const [historyLoadFailed, setHistoryLoadFailed] = useState<Record<string, true>>({});
   const [historyPendingId, setHistoryPendingId] = useState<string | null>(null);
   const [historyNotice, setHistoryNotice] = useState<
@@ -443,7 +438,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
     .filter((id) => !(id in returnsDays) && !historyLoadFailed[id])
     .sort();
   const missingAnchorIds = [...departedIds]
-    .filter((id) => !(id in anchoredById) && !historyLoadFailed[id])
+    .filter((id) => !(id in anchorById) && !historyLoadFailed[id])
     .sort();
   const missingDaySignature = missingDayIds.join(",");
   const missingAnchorSignature = missingAnchorIds.join(",");
@@ -477,7 +472,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
             return [id, { first, last }] as const;
           }),
         );
-        const anchored: Record<string, boolean> = {};
+        const anchors: Record<string, DepartedAnchor> = {};
         if (anchorIds.length > 0) {
           const { data, error } = await client
             .from("allocator_equity_derived")
@@ -487,16 +482,14 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
               anchorIds.map((id) => `key_inputs:${id}`),
             );
           if (error) throw error;
-          const withAnchor = new Set(
-            (data ?? [])
-              .filter((row) => anchorOf(row.payload) !== null)
-              .map((row) => row.kind.replace(/^key_inputs:/, "")),
+          const rowById = new Map(
+            (data ?? []).map((row) => [row.kind.replace(/^key_inputs:/, ""), row]),
           );
-          for (const id of anchorIds) anchored[id] = withAnchor.has(id);
+          for (const id of anchorIds) anchors[id] = departedAnchorOf(rowById.get(id));
         }
         if (cancelled) return;
         setReturnsDays((prev) => ({ ...prev, ...Object.fromEntries(days) }));
-        setAnchoredById((prev) => ({ ...prev, ...anchored }));
+        setAnchorById((prev) => ({ ...prev, ...anchors }));
       } catch (err) {
         console.error(
           "[AllocatorExchangeManager] departed-history read failed:",
@@ -569,27 +562,20 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
     if (!input || !isDepartedKey(input)) return null;
     const ids = historyInputIds(keyId);
     const failed = ids.some((id) => historyLoadFailed[id]);
-    const loaded = ids.every((id) => id in returnsDays) && keyId in anchoredById;
-    const decision =
-      !failed && loaded ? departedHistoryInclusion(input, historyKeys) : null;
+    const loaded = ids.every((id) => id in returnsDays) && keyId in anchorById;
+    // The switch is ON only when the book holds the history, and live only
+    // where flipping it changes what the book holds (SFH-C4-05): see
+    // departedHistoryCard.
+    const card =
+      !failed && loaded ? departedHistoryCard(input, historyKeys, anchorById[keyId]) : null;
     const line = failed
       ? HISTORY_LOAD_FAILED
-      : decision === null
+      : card === null
         ? HISTORY_LOADING
-        : departedHistorySentence(decision, anchoredById[keyId]);
-    const included = decision?.included ?? false;
-    const next = included ? "exclude" : "include";
-    // The switch is live only where flipping it changes the decision: 'include'
-    // never lifts a known account's bound, and a key with no returns has
-    // nothing to include.
-    const alternative =
-      decision === null
-        ? null
-        : departedHistoryInclusion({ ...input, history_inclusion: next }, historyKeys);
-    const canToggle =
-      alternative !== null &&
-      alternative.included !== included &&
-      historyPendingId !== keyId;
+        : card.sentence;
+    const included = card?.checked ?? false;
+    const next = card?.toggleTo ?? null;
+    const canToggle = next !== null && historyPendingId !== keyId;
     const notice = historyNotice[keyId];
     return (
       <div data-testid={`departed-history-${keyId}`} className="mt-1">
@@ -600,7 +586,9 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
             aria-checked={included}
             aria-label="Include this account's history"
             disabled={!canToggle}
-            onClick={() => handleHistoryToggle(keyId, next)}
+            onClick={() => {
+              if (next !== null) void handleHistoryToggle(keyId, next);
+            }}
             className={`flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
               included ? "bg-accent" : "bg-border"
             }`}

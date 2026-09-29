@@ -272,20 +272,96 @@ export function departedHistoryInclusion(
 }
 
 /**
- * The one sentence a departed key's card shows for a decision (DESIGN.md
- * Voice: declarative, the limitation stated with its reason). `anchored` is
- * false when the balance the history is measured from is gone (the derive then
- * leaves the key out under `departed_history_unavailable`), so an included key
- * is never said to be in a book that cannot hold it.
+ * What the derive can level a departed key's history from: its
+ * `key_inputs:<id>` row in allocator_equity_derived. `missing` is no row (the
+ * pre-plan-09 orphan cleanup deleted it); `unusable` is a row whose last
+ * balance read stamped a null anchor with `anchor_null_reason` (SFH-C4-06).
+ * Either way the derive leaves the key out under `departed_history_unavailable`.
  */
-export function departedHistorySentence(
-  decision: DepartedHistoryDecision,
-  anchored: boolean,
-): string {
+export type DepartedAnchor =
+  | { state: "anchored" }
+  | { state: "missing" }
+  | { state: "unusable"; reason: string | null };
+
+/** The anchor state of a key_inputs row, or `missing` when there is none. */
+export function departedAnchorOf(row: { payload: unknown } | undefined): DepartedAnchor {
+  if (row === undefined) return { state: "missing" };
+  const payload =
+    row.payload !== null && typeof row.payload === "object"
+      ? (row.payload as { anchor_usd?: unknown; anchor_null_reason?: unknown })
+      : {};
+  if (typeof payload.anchor_usd === "number" && Number.isFinite(payload.anchor_usd)) {
+    return { state: "anchored" };
+  }
+  const reason = payload.anchor_null_reason;
+  return {
+    state: "unusable",
+    reason: typeof reason === "string" && reason !== "" ? reason : null,
+  };
+}
+
+/** Why a departed key's history cannot be in the book, by its real cause. */
+function unavailableSentence(anchor: DepartedAnchor): string {
+  if (anchor.state !== "unusable") {
+    return "History not available: the balance it is measured from was deleted before departed history was kept.";
+  }
+  switch (anchor.reason) {
+    case "balance_error":
+      return "History not available: the last balance read before this key stopped failed, so there is no balance to measure its history from.";
+    case "nonfinite":
+      return "History not available: the last balance read before this key stopped returned a value that is not a number, so there is no balance to measure its history from.";
+    case "nonpositive":
+      return "History not available: the last balance read before this key stopped was zero or negative, so there is no balance to measure its history from.";
+    case "dust":
+      return "History not available: the last balance read before this key stopped was too small to measure its history from.";
+    case "flow_drop":
+      return "History not available: a deposit or withdrawal on this key could not be read, so its history cannot be measured from its last balance.";
+    default:
+      return "History not available: the last balance read before this key stopped gave no usable balance to measure its history from.";
+  }
+}
+
+/** What a departed key's card shows: its line, its switch state, and the one
+ * change the switch may make (null: disabled). */
+export interface DepartedHistoryCard {
+  sentence: string;
+  checked: boolean;
+  toggleTo: "include" | "exclude" | null;
+}
+
+/**
+ * The card for one departed key. The switch is ON only when the book really
+ * holds the key's history, and it is live only where flipping it changes what
+ * the book holds (SFH-C4-05): 'include' never lifts a known account's bound, a
+ * key with no returns has nothing to include, and a key with no usable anchor
+ * is left out by the derive whatever the switch says, so its card names that
+ * cause instead of inviting a change that cannot take effect.
+ */
+export function departedHistoryCard(
+  key: DepartedHistoryKey,
+  keys: readonly DepartedHistoryKey[],
+  anchor: DepartedAnchor,
+): DepartedHistoryCard {
+  const decision = departedHistoryInclusion(key, keys);
+  const next = decision.included ? "exclude" : "include";
+  const alternative = departedHistoryInclusion({ ...key, history_inclusion: next }, keys);
+  if (anchor.state !== "anchored" && (decision.included || alternative.included)) {
+    return { sentence: unavailableSentence(anchor), checked: false, toggleTo: null };
+  }
+  return {
+    sentence: departedHistorySentence(decision),
+    checked: decision.included,
+    toggleTo: alternative.included !== decision.included ? next : null,
+  };
+}
+
+/**
+ * The one sentence a departed key's card shows for a decision (DESIGN.md
+ * Voice: declarative, the limitation stated with its reason). A key with no
+ * usable anchor takes `departedHistoryCard`'s not-available line instead.
+ */
+export function departedHistorySentence(decision: DepartedHistoryDecision): string {
   if (decision.included) {
-    if (!anchored) {
-      return "History not available: the balance it is measured from was deleted before departed history was kept.";
-    }
     switch (decision.reason) {
       case "same_account_as_connected_key":
         return `History included until ${decision.until}. From the next day a key you still have connected reads this account.`;

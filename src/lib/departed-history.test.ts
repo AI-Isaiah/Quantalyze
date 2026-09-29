@@ -15,6 +15,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   departedHistoryInclusion,
+  departedAnchorOf,
+  departedHistoryCard,
   departedHistorySentence,
   isDepartedKey,
   isLiveKey,
@@ -90,10 +92,7 @@ describe("departedHistorySentence — the card never states a false reason", () 
     // Rotation: the new key on the same account has no daily returns yet, so it
     // reads none of the departed key's days. Saying it does tells the owner a
     // falsehood about why their history vanished.
-    const line = departedHistorySentence(
-      decisionFor("13_", "k-dep"),
-      true,
-    );
+    const line = departedHistorySentence(decisionFor("13_", "k-dep"));
     expect(line).not.toContain("over these days");
     expect(line).toBe(
       "History not included yet: a key you still have connected reads the same exchange account and has no history yet. Once it has, this key counts for the days before that key's history starts.",
@@ -101,7 +100,7 @@ describe("departedHistorySentence — the card never states a false reason", () 
   });
 
   it("SFH-C4-07: a covered key names the earlier key that counts its days", () => {
-    expect(departedHistorySentence(decisionFor("18_", "k-b"), true)).toBe(
+    expect(departedHistorySentence(decisionFor("18_", "k-b"))).toBe(
       "History not included: an earlier key read the same exchange account over all of these days.",
     );
   });
@@ -122,5 +121,80 @@ describe("isLiveKey — the reader's eligible-key predicate, never a drifting co
   );
   it.each(cases)("%o", (key) => {
     expect(isLiveKey(key)).toBe(isPerKeyDailiesEligibleKey(key));
+  });
+});
+
+describe("departedHistoryCard — the switch and the line never disagree (SFH-C4-05, SFH-C4-06)", () => {
+  const knownCase = spec.cases.find((c) => c.name.startsWith("01_"))!;
+  const knownKey = knownCase.keys.find((k) => k.id === "k-dep")!;
+  const unknownCase = spec.cases.find((c) => c.name.startsWith("05_"))!;
+  const unknownKey = unknownCase.keys.find((k) => isDepartedKey(k))!;
+
+  it("reads a key_inputs payload: a finite anchor, a missing row, a stamped null", () => {
+    expect(departedAnchorOf({ payload: { anchor_usd: 1000 } })).toEqual({ state: "anchored" });
+    expect(departedAnchorOf(undefined)).toEqual({ state: "missing" });
+    expect(
+      departedAnchorOf({ payload: { anchor_usd: null, anchor_null_reason: "balance_error" } }),
+    ).toEqual({ state: "unusable", reason: "balance_error" });
+    expect(departedAnchorOf({ payload: { anchor_usd: null } })).toEqual({
+      state: "unusable",
+      reason: null,
+    });
+  });
+
+  it("an anchored included key: switch on, and it can be excluded", () => {
+    const card = departedHistoryCard(knownKey, knownCase.keys, { state: "anchored" });
+    expect(card).toEqual({
+      sentence: "History included until 2026-06-10.",
+      checked: true,
+      toggleTo: "exclude",
+    });
+  });
+
+  it("SFH-C4-05: an included key with no anchor reads OFF and cannot be flipped", () => {
+    // The derive leaves it out (departed_history_unavailable). A switch shown
+    // ON beside "not available" tells the owner two opposite things.
+    const card = departedHistoryCard(knownKey, knownCase.keys, { state: "missing" });
+    expect(card.checked).toBe(false);
+    expect(card.toggleTo).toBeNull();
+    expect(card.sentence).toBe(
+      "History not available: the balance it is measured from was deleted before departed history was kept.",
+    );
+  });
+
+  it("SFH-C4-05: an unknown-account key with no anchor never invites an include that cannot take effect", () => {
+    const card = departedHistoryCard(unknownKey, unknownCase.keys, { state: "missing" });
+    expect(card.toggleTo).toBeNull();
+    expect(card.checked).toBe(false);
+    expect(card.sentence).not.toContain("Include it");
+    expect(card.sentence.startsWith("History not available:")).toBe(true);
+  });
+
+  it("SFH-C4-06: a row whose last balance read failed is not said to be deleted", () => {
+    const card = departedHistoryCard(knownKey, knownCase.keys, {
+      state: "unusable",
+      reason: "balance_error",
+    });
+    expect(card.sentence).not.toContain("deleted");
+    expect(card.sentence).toBe(
+      "History not available: the last balance read before this key stopped failed, so there is no balance to measure its history from.",
+    );
+    for (const reason of ["nonfinite", "nonpositive", "dust", "flow_drop", null]) {
+      const line = departedHistoryCard(knownKey, knownCase.keys, {
+        state: "unusable",
+        reason,
+      }).sentence;
+      expect(line.startsWith("History not available:"), String(reason)).toBe(true);
+      expect(line, String(reason)).not.toContain("deleted");
+    }
+  });
+
+  it("a bounded key with no anchor keeps its bound's own reason", () => {
+    const c = spec.cases.find((row) => row.name.startsWith("13_"))!;
+    const card = departedHistoryCard(c.keys.find((k) => k.id === "k-dep")!, c.keys, {
+      state: "missing",
+    });
+    expect(card.sentence.startsWith("History not included yet:")).toBe(true);
+    expect(card.toggleTo).toBeNull();
   });
 });
