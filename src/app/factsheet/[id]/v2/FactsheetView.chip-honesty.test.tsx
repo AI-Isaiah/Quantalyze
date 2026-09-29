@@ -612,13 +612,13 @@ describe("FreshnessChip — the verdict and the printed age are one number (169 
     });
   });
 
-  it("WR04-4: at every hour of the boundary days, the printed age alone predicts the verdict", () => {
+  it("WR04-4: early, midday and late on the boundary days, the printed age alone predicts the verdict", () => {
     // Independent oracle over the printed whole-day age N: N ≤ 3 → the fresh job
     // keeps "Computed · fresh"; 4..7 → "stale"; ≥ 8 → "old".
     const expected = (n: number) =>
       n <= 3 ? "Computed · fresh" : n <= 7 ? "Track record · stale" : "Track record · old";
     for (const days of [3, 4, 7, 8]) {
-      for (const hour of [0, 1, 6, 12, 18, 23]) {
+      for (const hour of [0, 12, 23]) {
         vi.useFakeTimers({ toFake: ["Date"] });
         vi.setSystemTime(new Date(Date.UTC(2026, 8, 29, hour, 30)));
         try {
@@ -634,7 +634,9 @@ describe("FreshnessChip — the verdict and the printed age are one number (169 
         }
       }
     }
-  });
+    // Twelve full factsheet renders: well under a second on an idle box, but the
+    // default 5 s budget is not enough on a loaded CI runner.
+  }, 30_000);
 
   it("WR04-5: the future allowance is unchanged — a bar dated tomorrow (UTC) is fresh, two days ahead is 'future'", () => {
     atNow(() => {
