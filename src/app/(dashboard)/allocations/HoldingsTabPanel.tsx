@@ -84,14 +84,29 @@ function keyPhrase(
     : `the ${venueName(apiKey.exchange)} key`;
 }
 
+/** The UTC day before `today` (`YYYY-MM-DD`), or "" when `today` is not a day. */
+function dayBefore(today: string): string {
+  const ms = Date.parse(`${today}T00:00:00Z`);
+  if (Number.isNaN(ms)) return "";
+  return new Date(ms - 86_400_000).toISOString().slice(0, 10);
+}
+
 /**
- * Review C4 SFH-C4-08. One sentence per key whose open positions were read on
- * a day older than the newest read in the book. D-16 keeps each key's own
- * latest read on purpose ("never flat"), so a key that stopped reading (it
- * failed, or disconnected) keeps showing its last read; this says how old it
- * is. Rows without a read day (legacy payloads) say nothing. The sentence sits
- * beside the Open Positions table and names the positions it dates, since the
- * table itself carries no date column.
+ * Review C4 SFH-C4-08, made absolute by round 2 SFH-R2-03. One sentence per
+ * key whose open positions were read on a day older than either the newest
+ * read in the book, or yesterday (UTC). D-16 keeps each key's own latest read
+ * on purpose ("never flat"), so a key that stopped reading (it failed, or
+ * disconnected) keeps showing its last read; this says how old it is.
+ *
+ * Comparing only to the newest read in the book never dated a one-key book, or
+ * a book whose keys are all equally stale, so a single key failing for weeks
+ * showed undated positions. `today` is the reference that closes that. The
+ * tolerance is one day because the daily poll runs at 04:00 UTC: between
+ * midnight and the poll, a healthy key's latest read is yesterday's. So a key
+ * whose last read is yesterday is not dated; one that has missed a whole day's
+ * poll is. Rows without a read day (legacy payloads) say nothing. The sentence
+ * sits beside the Open Positions table and names the positions it dates, since
+ * the table itself carries no date column.
  */
 export function openPositionReadDayNotes(
   derivativeRows: ReadonlyArray<{
@@ -102,15 +117,20 @@ export function openPositionReadDayNotes(
   }>,
   allRows: ReadonlyArray<{ asof?: string }>,
   apiKeys: ReadonlyArray<{ id: string; exchange: string; label: string | null }>,
+  today: string,
 ): string[] {
   let newest = "";
   for (const r of allRows) {
     if (typeof r.asof === "string" && r.asof > newest) newest = r.asof;
   }
-  if (newest === "") return [];
+  // SFH-R2-03: a row is dated when it is older than the newest read in the
+  // book, or older than yesterday, whichever is later.
+  const yesterday = dayBefore(today);
+  const datedBefore = yesterday > newest ? yesterday : newest;
+  if (datedBefore === "") return [];
   const byKey = new Map<string, { asof: string; venue: string; symbols: string[] }>();
   for (const r of derivativeRows) {
-    if (typeof r.asof !== "string" || r.asof >= newest) continue;
+    if (typeof r.asof !== "string" || r.asof >= datedBefore) continue;
     const entry = byKey.get(r.api_key_id);
     if (entry) entry.symbols.push(r.symbol);
     else byKey.set(r.api_key_id, { asof: r.asof, venue: r.venue, symbols: [r.symbol] });
@@ -377,9 +397,13 @@ export function HoldingsTabPanel(
     [derivativeHoldings, keyStatusById],
   );
 
+  // SFH-R2-03: the UTC day the tab was opened, the absolute reference the
+  // read-day note dates rows against. UTC so it matches `asof`, which the poll
+  // stamps in UTC.
+  const [today] = useState(() => new Date().toISOString().slice(0, 10));
   const readDayNotes = useMemo(
-    () => openPositionReadDayNotes(derivativeHoldings, holdingsSummary, apiKeys),
-    [derivativeHoldings, holdingsSummary, apiKeys],
+    () => openPositionReadDayNotes(derivativeHoldings, holdingsSummary, apiKeys, today),
+    [derivativeHoldings, holdingsSummary, apiKeys, today],
   );
 
   const partialPositionReads = useMemo(

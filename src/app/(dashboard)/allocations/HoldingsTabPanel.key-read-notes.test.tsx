@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 
 /**
@@ -85,6 +85,15 @@ function renderPanel(
 }
 
 describe("HoldingsTabPanel: open positions say how old an older key's read is (SFH-C4-08)", () => {
+  // Pinned so the absolute arm below (SFH-R2-03) does not move with the clock.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-29T12:00:00Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("names the key, its read day and its positions when that day is older than the newest read", () => {
     renderPanel(
       [
@@ -109,6 +118,41 @@ describe("HoldingsTabPanel: open positions say how old an older key's read is (S
       [apiKey("key-a", "A"), apiKey("key-b", "B")],
     );
     expect(screen.queryByTestId("open-positions-read-day-note")).toBeNull();
+  });
+
+  it("SFH-R2-03: a one-key book whose only key last read weeks ago is dated", () => {
+    renderPanel(
+      [perp("key-a", "BTC-PERP", "2026-09-08")],
+      [apiKey("key-a", "Main", { sync_status: "error" })],
+    );
+    expect(
+      screen.getAllByTestId("open-positions-read-day-note").map((n) => n.textContent),
+    ).toEqual([
+      "Positions from the Binance key Main are as last read on 2026-09-08: BTC-PERP.",
+    ]);
+  });
+
+  it("SFH-R2-03: every key equally stale, every key dated", () => {
+    renderPanel(
+      [perp("key-a", "BTC-PERP", "2026-09-20"), perp("key-b", "ETH-PERP", "2026-09-20")],
+      [apiKey("key-a", "A"), apiKey("key-b", "B")],
+    );
+    expect(
+      screen.getAllByTestId("open-positions-read-day-note").map((n) => n.textContent),
+    ).toEqual([
+      "Positions from the Binance key A are as last read on 2026-09-20: BTC-PERP.",
+      "Positions from the Binance key B are as last read on 2026-09-20: ETH-PERP.",
+    ]);
+  });
+
+  it("SFH-R2-03: a read from yesterday is not dated (the daily poll may not have run yet)", () => {
+    renderPanel([perp("key-a", "BTC-PERP", "2026-09-28")], [apiKey("key-a", "Main")]);
+    expect(screen.queryByTestId("open-positions-read-day-note")).toBeNull();
+  });
+
+  it("SFH-R2-03: a read from two days ago is dated", () => {
+    renderPanel([perp("key-a", "BTC-PERP", "2026-09-27")], [apiKey("key-a", "Main")]);
+    expect(screen.getAllByTestId("open-positions-read-day-note")).toHaveLength(1);
   });
 
   it("says nothing for rows that carry no read day", () => {
