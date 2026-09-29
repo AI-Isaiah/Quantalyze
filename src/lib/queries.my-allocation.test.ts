@@ -1032,7 +1032,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
     // so the display series is [] for every allocator. The legacy series'
     // content is pinned on the adapter (allocation-helpers.equity-adapter.test.ts)
-    // and retires with the legacy branch, which plan 11 removes.
+    // and retired with the legacy branch, which plan 11 removed.
     expect(result.equityHistoryState).toBe("rebuilding");
     expect(result.equityDailyPoints).toEqual([]);
   });
@@ -1099,7 +1099,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
     // so the display series is [] for every allocator. The legacy series'
     // content is pinned on the adapter (allocation-helpers.equity-adapter.test.ts)
-    // and retires with the legacy branch, which plan 11 removes.
+    // and retired with the legacy branch, which plan 11 removed.
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -1261,7 +1261,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
     // so the display series is [] for every allocator. The legacy series'
     // content is pinned on the adapter (allocation-helpers.equity-adapter.test.ts)
-    // and retires with the legacy branch, which plan 11 removes.
+    // and retired with the legacy branch, which plan 11 removed.
     expect(result.equityDailyPoints).toEqual([]);
   });
 
