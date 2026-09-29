@@ -23,8 +23,14 @@ would see. They assert:
 * a sibling series on the same dates is never touched (the scope filter);
 * every ``in.(...)`` date list is bounded.
 
-Neuter: put either writer's delete back BEFORE its upsert, and the snapshot
-taken after that delete lacks the rebuilt days, so the no-hole assertions go RED.
+Neuter: restore either writer's pre-topic-H shape (a whole-span or
+whole-series delete BEFORE the upsert), and the snapshot taken after that
+delete lacks the rebuilt days, so the no-hole assertions go RED. Note what is
+NOT sufficient on its own: a delete that names only the absent days opens no
+hole in either order, because it never touches a day the payload carries. The
+NARROWING is what closes the hole; the upsert-first ORDER decides what a death
+between statements leaves behind (the new payload landed, a refused day still
+stale), which the death test below pins.
 """
 from __future__ import annotations
 
@@ -442,8 +448,13 @@ async def test_h1_a_death_after_the_upsert_leaves_a_stale_day_not_a_hole() -> No
     with pytest.raises(RuntimeError, match="simulated worker death"):
         await _run_derive(key_mode=False, store=store, returns=_derive_returns())
     after = _series(store.rows, "strategy_id", "strat-h")
-    for d in ("2024-05-01", "2024-05-02", "2024-05-04", "2024-05-05", "2024-05-06"):
+    # Days present before the write AND carried by the new payload: a death at
+    # any point must leave every one of them present.
+    for d in ("2024-04-28", "2024-05-01", "2024-05-02", "2024-05-04", "2024-05-05"):
         assert d in after, f"{d} absent after a death between statements: a hole"
+    # The upsert-first shape specifically: the payload landed whole (05-06 is
+    # new), and the refused day is still its stale self until the retry.
+    assert after["2024-05-06"] == 0.06, "the upsert must be the first statement"
     assert after["2024-05-03"] == _OLD, "the refused day is stale until the retry"
 
 
