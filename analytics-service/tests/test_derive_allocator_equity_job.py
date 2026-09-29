@@ -2227,6 +2227,31 @@ async def test_a_shared_account_whose_history_cannot_be_stitched_is_not_trustwor
 
 
 @pytest.mark.asyncio
+async def test_a_working_key_with_no_returns_yet_is_not_stitched_and_the_book_is_not_trustworthy() -> None:
+    """SFH-R2-03's hidden case, decided and pinned: the kept (working) key has
+    a key_inputs row but no returns yet (its first derive has not produced a
+    series). Its anchor is TODAY's equity; hanging it on the failing key's last
+    return day would misdate it, so nothing is stitched. The compose already
+    drops such a key as DROPPED_KEY, so the book is untrustworthy and held,
+    never "ready" over the old key's history or without the account."""
+    alloc = "alloc-stitch-no-returns"
+    fake = _rotation_pair(alloc, "duplicate")
+    fake.rows["csv_daily_returns"] = [
+        r for r in fake.rows["csv_daily_returns"] if r["api_key_id"] != "key-M"
+    ]
+    csv_o, ki_o = _series_rows(alloc, "key-O", 10_000.0)
+    fake.rows["api_keys"].append(_gate_key("key-O", alloc, venue_account_id="venue-own"))
+    fake.rows["csv_daily_returns"].extend(csv_o)
+    fake.rows[DERIVED_TABLE].append(ki_o)
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["is_trustworthy"] is False
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert "shared_account_history_stitched" not in payload["flags"]
+    assert payload["curve"][0]["date"] == "2026-06-01", payload["curve"][0]
+
+
+@pytest.mark.asyncio
 async def test_duplicate_whose_marked_key_fails_behind_a_working_holder_still_refuses() -> None:
     """Reader parity (queries.ts countsAsDuplicate): an ELIGIBLE duplicate-marked
     key whose holder is working is a duplicate, whatever the marked key's own
