@@ -158,8 +158,12 @@ export function useBasisMetrics(payload: FactsheetPayload): {
  *
  * The four guards each return `base` BY REFERENCE (no re-derive, no fabrication):
  *   1. L === 1                            — SC-4 unity short-circuit
- *   2. dataQuality.composite === true     — A2: leverage is single-key only (arithmetic
- *                                            is composite-only; composites also hide the slider)
+ *   2. dataQuality.composite === true     — A2: leverage is single-key only (composites
+ *                                            also hide the slider); since Phase 169 review
+ *                                            round 1 (SFH M-2) also a chain-broken or
+ *                                            convention-override single-key row, whose
+ *                                            stored L=1 headline the re-derive cannot
+ *                                            continue (see `leverageEligibleFor`)
  *   3. periodsPerYear == null             — fail-closed (stale cache with no annualization basis)
  *   4. MTM basis + no MTM bundle OR no     — no-fabrication: an unresolved MTM label falls back
  *      persisted MTM scalar cache            to cash data (levering it renders levered-cash as
@@ -304,6 +308,9 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     const levered = base.strategyReturns.map((r, i) => ({ date: base.dates[i], value: L * r }));
     const lb = deriveSeriesBundle(levered, {
       periodsPerYear: base.periodsPerYear!,
+      // Geometric is right here: an arithmetic payload (a composite, or since review
+      // round 1 a single-key `simple` config, SFH H-2) is leverage-ineligible, so it
+      // never reaches this re-derive.
       isArithmetic: false,
       markets: base.markets,
       strategyName: base.strategyName,
@@ -442,12 +449,26 @@ export function useAppliedLeverage(): AppliedLeverage {
  * FABRICATE the very MTM headline scalars the L=1 arm withholds. Requiring the scalar cache
  * keeps MTM leverage-ineligible in that state → the view returns base by-reference → the
  * KPIs stay "—" at every L, symmetric with guard 4. It also proves it can never disable a
- * legitimately-leverable book (a real MTM basis always has both). Cash is unaffected — it
- * carries no persisted-overlay-or-dash contract.
+ * legitimately-leverable book (a real MTM basis always has both).
+ *
+ * Phase 169 review round 1 (SFH M-2): since 169-01 the single-key cash headline at
+ * L=1 is the STORED value, and the levered arm re-derives the leverage-variant
+ * scalars (Since Inception, CAGR, volatility, drawdown) from the displayed series.
+ * D-25 (i) accepts that seam where the two agree. Two kinds of row are ineligible
+ * because they do not agree by construction, so the first step off L=1 would present
+ * the gap between them as the effect of leverage:
+ *   - `dataQuality.twrChainBroken` (SFH H-1): the stored figure covers only the
+ *     stretch after the last chain break, the re-derive the whole series;
+ *   - `dataQuality.returnsConventionOverride` (SFH H-2): the stored figure was
+ *     computed under a `simple` or active-day convention the re-derive cannot
+ *     reproduce.
+ * The view then returns `base` by reference at every L, as for a composite.
  */
 export function leverageEligibleFor(payload: FactsheetPayload, basis: Basis): boolean {
   return (
     payload.dataQuality?.composite !== true &&
+    payload.dataQuality?.twrChainBroken !== true &&
+    payload.dataQuality?.returnsConventionOverride !== true &&
     payload.periodsPerYear != null &&
     !(
       basis === "mark_to_market" &&

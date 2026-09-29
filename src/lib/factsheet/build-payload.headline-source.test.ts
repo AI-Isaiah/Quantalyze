@@ -453,6 +453,26 @@ describe("169 SFH H-2 — a single-key allocated-capital strategy draws the curv
     expect(chartEnd).toBeCloseTo(product, 12);
   });
 
+  it("SFH M-2: a config the re-derive cannot reproduce marks the payload, so the leverage what-if is withheld", async () => {
+    const row = analyticsRow();
+    const simple = await readSingleKeyBasisOpts(neverAdmin, "s", {}, null, "complete", row, SIMPLE_CONFIG);
+    expect(simple.dataQuality).toEqual({ composite: false, insufficientWindow: false, returnsConventionOverride: true });
+    // An active-day Sharpe on a geometric sum is a convention TypeScript does not compute either.
+    const active = await readSingleKeyBasisOpts(neverAdmin, "s", {}, null, "complete", row, {
+      ...SIMPLE_CONFIG,
+      cumulative_method: "geometric",
+    });
+    expect(active.dataQuality?.returnsConventionOverride).toBe(true);
+    expect("cumulativeMethod" in active).toBe(false);
+    // Geometric + calendar-day is the TypeScript convention: nothing to mark.
+    const calendar = await readSingleKeyBasisOpts(neverAdmin, "s", {}, null, "complete", row, {
+      ...SIMPLE_CONFIG,
+      cumulative_method: "geometric",
+      metrics_basis: "calendar_day",
+    });
+    expect("dataQuality" in calendar).toBe(false);
+  });
+
   it("the single-key owner resolves the method with the composite's rule", async () => {
     const row = analyticsRow();
     const simple = await readSingleKeyBasisOpts(neverAdmin, "s", {}, null, "complete", row, SIMPLE_CONFIG);

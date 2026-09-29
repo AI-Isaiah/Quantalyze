@@ -657,6 +657,14 @@ export type FactsheetCommon = {
      * a date, never invent one.
      */
     headlineCoversFrom?: string | null;
+    /**
+     * Phase 169 review round 1 (SFH M-2) — single-key only, present only when
+     * true: the stored headline was computed under a `returns_denominator_config`
+     * TypeScript does not reproduce (`cumulative_method: "simple"`, or
+     * `metrics_basis: "active_day"`). The client leverage re-derive cannot
+     * continue it from L=1, so `leverageEligibleFor` withholds the what-if.
+     */
+    returnsConventionOverride?: boolean;
   };
   /** Phase 90.5 (LEV-01/D2): #597 annualization basis (365 crypto / 252 traditional) — enables the client leverage recompute. Optional: absent (stale v4 cache drain) => leverage control hidden, fail-closed. */
   periodsPerYear?: number;

@@ -762,32 +762,55 @@ export async function readSingleKeyBasisOpts(
       : Promise.resolve(null),
   ]);
   const basisOpts = singleKeyBasisOpts(dqf, metricsJsonByBasis, computationStatus, mtmSeries, smoothedSeries);
-  const opts =
-    attributionBasisFromConfig(returnsDenominatorConfig) === "arithmetic"
-      ? { ...basisOpts, cumulativeMethod: "arithmetic" as const }
-      : basisOpts;
+  const arithmetic = attributionBasisFromConfig(returnsDenominatorConfig) === "arithmetic";
+  const opts = arithmetic ? { ...basisOpts, cumulativeMethod: "arithmetic" as const } : basisOpts;
+  // `dataQuality` is returned ONLY when this owner has something to add to it: it is
+  // the single-key opt both callers already set from `singleKeyDataQuality(dqf)` and
+  // spread this result over, so a clean row's opts stay unchanged.
+  const addedQuality: Partial<NonNullable<BuildFactsheetOpts["dataQuality"]>> = {};
+  // Review round 1 (SFH M-2): the stored headline was computed under a returns
+  // convention TypeScript does not reproduce (a `simple` sum, or an active-day
+  // Sharpe and volatility; `compute()` has no active-day basis). The client
+  // leverage re-derive could not continue it from L=1, so the payload says so and
+  // `leverageEligibleFor` withholds the what-if, as it does for a composite.
+  if (arithmetic || activeDayMetricsBasis(returnsDenominatorConfig)) addedQuality.returnsConventionOverride = true;
   const cashHeadline = persistedCashHeadline(strategyId, persistedRow, metricsJsonByBasis, computationStatus);
-  if (!cashHeadline) return opts;
-  const withHeadline = { ...opts, metricsByBasis: { ...(opts.metricsByBasis ?? {}), cash_settlement: cashHeadline } };
+  const withHeadline = cashHeadline
+    ? { ...opts, metricsByBasis: { ...(opts.metricsByBasis ?? {}), cash_settlement: cashHeadline } }
+    : opts;
   // Review round 1 (SFH H-1): on a chain-broken row the stored headline covers only
   // the stretch after the last break, and it is still the value shown (D-25, SC4).
-  // Name the start of that span from the stored cash series, so the page can say
-  // it. `dataQuality` is returned ONLY here: it is the single-key opt both callers
-  // already set from `singleKeyDataQuality(dqf)` and spread this result over, so a
-  // clean row's opts stay unchanged.
-  if (dqf?.twr_chain_broken !== true) return withHeadline;
-  const headlineCoversFrom = await readHeadlineCoversFrom(resolveAdmin(), strategyId);
-  if (headlineCoversFrom === null) {
-    console.warn(
-      "[factsheet] readSingleKeyBasisOpts — a chain-broken headline's covered span cannot be named from the stored cash series",
-      { strategyId },
-    );
-    captureToSentry(new Error("factsheet: chain-broken headline span cannot be named"), {
-      level: "warning",
-      tags: { stage: "factsheet-persisted-headline", reason: "covered_span_unnamed", strategy_id: strategyId },
-    });
+  // Name the start of that span from the stored cash series, so the page can say it.
+  if (cashHeadline && dqf?.twr_chain_broken === true) {
+    const headlineCoversFrom = await readHeadlineCoversFrom(resolveAdmin(), strategyId);
+    if (headlineCoversFrom === null) {
+      console.warn(
+        "[factsheet] readSingleKeyBasisOpts — a chain-broken headline's covered span cannot be named from the stored cash series",
+        { strategyId },
+      );
+      captureToSentry(new Error("factsheet: chain-broken headline span cannot be named"), {
+        level: "warning",
+        tags: { stage: "factsheet-persisted-headline", reason: "covered_span_unnamed", strategy_id: strategyId },
+      });
+    }
+    addedQuality.headlineCoversFrom = headlineCoversFrom;
   }
-  return { ...withHeadline, dataQuality: { ...singleKeyDataQuality(dqf), headlineCoversFrom } };
+  if (Object.keys(addedQuality).length === 0) return withHeadline;
+  return { ...withHeadline, dataQuality: { ...singleKeyDataQuality(dqf), ...addedQuality } };
+}
+
+/**
+ * Review round 1 (SFH M-2) — the `returns_denominator_config` asks for active-day
+ * risk metrics (`metrics_basis: "active_day"`, the analytics service's
+ * `metrics_day_basis` → `active`): volatility, Sharpe and Sortino over non-zero
+ * days only. Strict literal match, as {@link attributionBasisFromConfig} is.
+ */
+function activeDayMetricsBasis(raw: unknown): boolean {
+  return (
+    raw !== null &&
+    typeof raw === "object" &&
+    (raw as { metrics_basis?: unknown }).metrics_basis === "active_day"
+  );
 }
 
 /**
