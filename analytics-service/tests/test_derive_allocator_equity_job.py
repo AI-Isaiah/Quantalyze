@@ -1501,6 +1501,16 @@ def test_account_identity_collisions_intervals() -> None:
     ])
     assert other_venue == []
 
+    # C2 round 2, IN-02 (round-1 IN-01): the venue is compared case-blind, as
+    # every other reader of api_keys.exchange in this phase compares it
+    # (_polled_empty_since, the refresh's identity rule, the TS reader). One
+    # account behind "Binance" and "binance " is still one account.
+    mixed_case = account_identity_collisions([
+        row("a", exchange="Binance"),
+        row("b", exchange="binance "),
+    ])
+    assert len(mixed_case) == 1 and mixed_case[0].n_keys == 2
+
 
 @pytest.mark.asyncio
 async def test_duplicate_with_working_holder_deletes_curve(caplog: pytest.LogCaptureFixture) -> None:

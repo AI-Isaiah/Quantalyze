@@ -10204,7 +10204,10 @@ def account_identity_collisions(
         if not isinstance(venue_id, str) or not venue_id.strip():
             continue
         exchange = row.get("exchange")
-        exchange_key = exchange.strip() if isinstance(exchange, str) else ""
+        # C2 round 2, IN-02: case-blind, like every other exchange comparison
+        # in this phase (the refresh's emptiness proof and identity rule, the TS
+        # reader's ACCOUNT_IDENTITY_EXCHANGES check).
+        exchange_key = exchange.strip().lower() if isinstance(exchange, str) else ""
         by_account.setdefault((exchange_key, venue_id.strip()), []).append(row)
 
     collisions: list[AccountIdentityCollision] = []
