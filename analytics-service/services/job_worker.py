@@ -10491,13 +10491,17 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # D-18: an account none of whose keys works is still counted once,
         # through the key whose history starts first, so its history stays; its
         # series stops on the day the keys started failing and carries flat
-        # after it. Counts only (no key id, no venue id, no USD — T-167.1.2-22).
+        # after it, diluting the book's return with frozen capital. C2 round 2
+        # (SFH-R2-04): that is a BLOCKING degrade reason, so the book is held
+        # (the reader shows an untrustworthy row as rebuilding), never "ready".
+        # Counts only (no key id, no venue id, no USD — T-167.1.2-22).
         logger.warning(
             "derive_allocator_equity: %d shared account(s) for allocator %s have "
             "no working key — each is counted once, through a failing key whose "
-            "series may have stopped (flag shared_account_no_working_key)",
+            "series may have stopped; the curve is untrustworthy (%s)",
             no_working_groups,
             allocator_id,
+            DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY.value,
         )
 
     # ── 2. Per-key returns — ISO-STRING day index built DIRECTLY from the
@@ -10727,17 +10731,20 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 for token, raised in (
                     ("composite_shared_account_counted_once", composite_counted_once),
                     ("duplicate_shared_account_counted_once", duplicate_counted_once),
-                    ("shared_account_no_working_key", no_working_groups > 0),
                     ("shared_account_history_stitched", stitched_accounts > 0),
                 )
                 if raised
             ]
             or None,
-            degrade_reasons=(
-                [DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED]
-                if truncated_accounts
-                else None
-            ),
+            degrade_reasons=[
+                reason
+                for reason, raised in (
+                    (DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED, truncated_accounts > 0),
+                    (DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY, no_working_groups > 0),
+                )
+                if raised
+            ]
+            or None,
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3

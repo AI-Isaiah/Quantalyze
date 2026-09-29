@@ -126,6 +126,12 @@ class DegradeReason(str, Enum):
     # starts at the counted member's first day, so the book's window is shorter
     # than its history. Round 1 marked this with a benign flag; it is not.
     SHARED_ACCOUNT_HISTORY_TRUNCATED = "shared_account_history_truncated"
+    # 167.1.2 C2 round 2 (SFH-R2-04): a shared account none of whose keys works.
+    # It is counted once, but its series stopped the day its keys began failing
+    # and is carried flat at r = 0 while the rest of the book moves, diluting the
+    # book's return with frozen capital. Round 1 raised a benign flag of the
+    # same name that nothing reads, so the book read "ready".
+    SHARED_ACCOUNT_NO_WORKING_KEY = "shared_account_no_working_key"
 
 
 # The BLOCKING subset: any of these present -> ``is_trustworthy`` is False.
@@ -137,6 +143,7 @@ _BLOCKING_REASONS: frozenset[DegradeReason] = frozenset(
         DegradeReason.DROPPED_KEY,
         DegradeReason.NONFINITE_RETURN,
         DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED,
+        DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY,
     }
 )
 

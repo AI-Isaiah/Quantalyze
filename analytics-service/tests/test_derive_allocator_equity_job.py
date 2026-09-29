@@ -1860,8 +1860,13 @@ async def test_shared_account_with_no_working_key_is_counted_once_and_loudly(
 ) -> None:
     """Neither key of the pair is working (both eligible, both failing). The
     account is still counted exactly once — through the holder, whose history is
-    kept — never twice and never as $0, and the job says so at WARNING with a
-    flag on the payload."""
+    kept — never twice and never as $0, and the job says so at WARNING.
+
+    C2 round 2, SFH-R2-04: the account's series stopped when its keys began
+    failing and is carried flat at r = 0 while the rest of the book moves, so
+    the book's return is diluted by frozen capital. Round 1 raised a BENIGN
+    flag nobody reads and the book read "ready". It is now a BLOCKING degrade
+    reason: the curve is untrustworthy and the reader holds the book."""
     import logging
 
     alloc = "alloc-none-working"
@@ -1875,7 +1880,9 @@ async def test_shared_account_with_no_working_key_is_counted_once_and_loudly(
     payload = _composed_payload(fake)
     assert payload["inputs"]["n_keys"] == 1
     assert payload["curve"][-1]["equity_usd"] == pytest.approx(HOLDER_ANCHOR, rel=1e-6)
-    assert "shared_account_no_working_key" in payload["flags"]
+    assert "shared_account_no_working_key" in payload["degrade_reasons"]
+    assert "shared_account_no_working_key" not in payload["flags"]
+    assert payload["is_trustworthy"] is False
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("no working key" in r.getMessage() for r in warnings), caplog.text
     assert "key-H" not in caplog.text and "venue-shared" not in caplog.text
