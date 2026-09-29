@@ -1829,6 +1829,9 @@ class _LatestHoldings:
 
     rows: list[dict[str, Any]]
     eligible_keys: int
+    # Accounts (groups) with at least one eligible key: the ones the day's row
+    # is meant to cover. SFH-R2-02 compares emptied_accounts against it.
+    counted_accounts: int
     carried_keys: int
     excluded_shared_keys: int
     no_working_accounts: int
@@ -2018,6 +2021,7 @@ async def _fetch_latest_holdings_per_eligible_key(
     return _LatestHoldings(
         rows=rows,
         eligible_keys=eligible_keys,
+        counted_accounts=counted_accounts,
         carried_keys=carried,
         excluded_shared_keys=eligible_keys - counted_accounts,
         no_working_accounts=no_working,
@@ -3635,7 +3639,19 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 },
             )
 
-        if not breakdown:
+        # C2 silent-failure round 2, SFH-R2-02: an empty breakdown because
+        # EVERY counted account is proven empty is not "nothing to say today".
+        # Writing nothing left the last positive day as the book's latest
+        # snapshot for every reader of the legacy store, beside an audit that
+        # said emptied_accounts. With proof for every account the day is
+        # written as an explicit $0 (below, through the same hold and persist
+        # path). Anything less than proof for every account keeps the old
+        # no-row branch.
+        book_emptied = (
+            latest.emptied_accounts > 0
+            and latest.emptied_accounts == latest.counted_accounts
+        )
+        if not breakdown and not book_emptied:
             logger.info(
                 "refresh_allocator_equity_daily: no holdings today for allocator=%s venue=%s",
                 allocator_id, venue,
@@ -3710,10 +3726,20 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
         count = await persist_equity_snapshots(
             ctx.supabase, [row], allocator_id, depth_months,
         )
+        if book_emptied:
+            # SFH-R2-02: rare, and it zeroes the book's legacy series, so it is
+            # loud. Counts only (no key id, no USD).
+            logger.warning(
+                "refresh_allocator_equity_daily: allocator=%s every counted "
+                "account (%d) is proven empty; wrote a $0 row for today "
+                "(days_written=%d)",
+                allocator_id, latest.counted_accounts, count,
+            )
         _emit_audit(
             allocator_id, api_key_id,
             "allocator.equity.refresh_complete",
             {
+                **({"reason": "book_emptied"} if book_emptied else {}),
                 "days_written": count,
                 "history_depth_months": depth_months,
                 "venue": venue,

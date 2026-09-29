@@ -753,6 +753,75 @@ async def test_account_without_proof_of_emptiness_is_carried(
     assert metadata["carried_keys"] == 1
 
 
+def _seed_snapshot(fake: FakeSupabaseClient, asof: date, value_usd: float) -> None:
+    fake.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof.isoformat()))] = {
+        "allocator_id": ALLOCATOR_ID,
+        "asof": asof.isoformat(),
+        "value_usd": value_usd,
+        "breakdown": {"BTC": value_usd},
+        "source": "exchange_primary",
+        "pre_terminus_balance_unknown": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_book_whose_every_account_is_proven_empty_writes_a_zero_row(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C2 silent-failure round 2, SFH-R2-02. The book's only account is proven
+    empty. Round 1 took the "no holdings today" branch and wrote NOTHING, so
+    the latest persisted snapshot stayed at yesterday's positive balance for
+    every reader of the legacy store (match.py, the compare adapter, the GDPR
+    export), while the same audit said emptied_accounts=1. With proof in hand
+    the day is written as an explicit $0, with its own audit reason, and the
+    job logs it at WARNING (counts only)."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.equity_reconstruction")
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "BTC", TODAY - timedelta(days=3), 500.0)
+    _seed_snapshot(fake, TODAY - timedelta(days=1), 500.0)
+    _seed_poll_outcome(fake, API_KEY_ID_1, _at(TODAY))
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    row = _today_row(fake)
+    assert row["value_usd"] == 0.0
+    assert row["breakdown"] == {}
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["reason"] == "book_emptied"
+    assert metadata["emptied_accounts"] == 1
+    assert metadata["days_written"] == 1
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("proven empty" in r.getMessage() for r in warnings), caplog.text
+    assert "500" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_book_with_an_account_it_cannot_read_is_not_written_as_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The $0 row needs proof for EVERY counted account. One proven empty and
+    one that has never polled is not an empty book: nothing is written, as
+    before, under the no_holdings_today reason."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="complete", venue_account_id="b-1")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "BTC", TODAY - timedelta(days=3), 500.0)
+    _seed_poll_outcome(fake, API_KEY_ID_1, _at(TODAY))
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    assert [
+        r for r in fake.rows_for("allocator_equity_snapshots") if r["asof"] == TODAY.isoformat()
+    ] == []
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["reason"] == "no_holdings_today"
+    assert metadata["emptied_accounts"] == 1
+    assert metadata["never_polled_keys"] == 1
+
+
 @pytest.mark.asyncio
 async def test_eligible_key_that_never_polled_is_counted_not_silent(
     monkeypatch: pytest.MonkeyPatch,
