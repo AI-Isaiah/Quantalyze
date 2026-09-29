@@ -38,7 +38,12 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { buildFactsheetPayload, deriveIngestSource, hasBuildableSeries, MIN_FACTSHEET_SERIES_POINTS } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
-import { readCompositeFactsheet, singleKeyDataQuality, readSingleKeyBasisOpts } from "./composite-read-path";
+import {
+  CompositeSeriesReadError,
+  readCompositeFactsheet,
+  singleKeyDataQuality,
+  readSingleKeyBasisOpts,
+} from "./composite-read-path";
 import { resolveDailyReturnSeries } from "./allocator-portfolio-payload";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload, IngestSource } from "./types";
@@ -392,12 +397,44 @@ async function resolveFactsheetInputs(
     // helper carries C-1 (config-driven method), F1/H-1 (headline gate), F2/M-1
     // (MTM gate) and the FS-01/02 markers. A null result = data defect → the
     // "still computing" placeholder below.
-    const composite = await readCompositeFactsheet(supabase, {
-      strategyId: id,
-      dqf,
-      metricsJsonByBasis: analytics?.metrics_json_by_basis,
-      returnsDenominatorConfig: strategy.returns_denominator_config,
-    });
+    let composite: Awaited<ReturnType<typeof readCompositeFactsheet>>;
+    try {
+      composite = await readCompositeFactsheet(supabase, {
+        strategyId: id,
+        dqf,
+        metricsJsonByBasis: analytics?.metrics_json_by_basis,
+        returnsDenominatorConfig: strategy.returns_denominator_config,
+      });
+    } catch (err) {
+      // Phase 169 (D-41 / R3, routed from 167.2.1 D-07): a FAILED
+      // `csv_daily_returns` read is an outage, not a fact about the row, so it
+      // is `read_error` with its code, exactly as the strategies read above,
+      // never `composite_unbuildable`. The public cached callback throws on
+      // `read_error`, so the outage is never stored for the analytics run.
+      // Captured for a BUILD only (WR-01); a probe returns the code. Any other
+      // throw is not this stage's to answer.
+      if (!(err instanceof CompositeSeriesReadError)) throw err;
+      const code = err.code;
+      console.error(`[factsheet] resolve(${caller}) — composite csv_daily_returns read failed`, {
+        id,
+        caller,
+        errorMessage: typeof err.cause === "string" ? err.cause : undefined,
+        errorCode: code,
+      });
+      if (caller === "build") {
+        captureToSentry(new Error(`factsheet resolve: composite csv_daily_returns read failed (${code})`), {
+          tags: {
+            stage: "factsheet-resolve",
+            caller,
+            reason: "read_error",
+            code,
+            strategy_id: id,
+            read: "csv_daily_returns",
+          },
+        });
+      }
+      return notBuildable("read_error", { code });
+    }
     if (!composite) return compositeUnbuildable(id, caller, "headline");
     dailyReturns = composite.dailyReturns;
     compositeBuildOpts = composite.buildOpts;
