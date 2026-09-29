@@ -10474,9 +10474,22 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # services/audit.py and src/lib/audit.ts (test_action_literal_matches_ts_union),
         # and this derive has no api_key to anchor it on; recorded in the
         # 167.1.2 REVIEW-FIX report rather than half-added here.
+        # Round 2 (SFH-07 remainder): a WARNING reaches Sentry only as a
+        # breadcrumb (the SDK's default LoggingIntegration events at ERROR), so
+        # the refusal is also captured explicitly, once, at level warning:
+        # tagged with the job and the token, one static message per token so
+        # Sentry groups them, and no key id, venue id or USD figure.
         reason = (
             "account_duplicate" if duplicate_keys else "account_identity_collision"
         )
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("compute_job_id", str(job.get("id")))
+            scope.set_tag("derive_refusal", reason)
+            sentry_sdk.capture_message(
+                f"derive_allocator_equity: {reason} — the equity curve was "
+                "refused and deleted; the book shows the rebuilding panel",
+                level="warning",
+            )
         logger.warning(
             "derive_allocator_equity: %s for allocator %s "
             "(counted_keys=%d duplicate_keys=%d colliding_groups=%d) — "

@@ -1950,6 +1950,65 @@ async def test_identity_refusal_is_a_warning_not_info(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("keys", "token"),
+    [
+        pytest.param(
+            [
+                _gate_key(
+                    "key-D", "alloc-refuse-sentry",
+                    account_share_kind="duplicate",
+                    account_shared_with_api_key_id="key-H",
+                ),
+                _gate_key("key-H", "alloc-refuse-sentry", venue_account_id="venue-holder"),
+            ],
+            "account_duplicate",
+            id="duplicate",
+        ),
+        pytest.param(
+            [
+                _gate_key("key-A", "alloc-refuse-sentry", venue_account_id="venue-shared"),
+                _gate_key("key-B", "alloc-refuse-sentry", venue_account_id="venue-shared"),
+            ],
+            "account_identity_collision",
+            id="collision",
+        ),
+    ],
+)
+async def test_identity_refusal_reaches_sentry_as_an_event(
+    keys: list[dict[str, Any]], token: str
+) -> None:
+    """C2 silent-failure SFH-07 remainder (round 2). The WARNING log alone never
+    reaches Sentry as an event: sentry_init.py keeps the SDK's default
+    LoggingIntegration, whose event_level is ERROR, so a WARNING is only a
+    breadcrumb and the refusal was visible in Railway logs only. The refusal is
+    captured explicitly, at level warning, tagged with the job and the reason
+    token, and the message carries no key id and no venue id."""
+    from unittest.mock import patch
+
+    alloc = "alloc-refuse-sentry"
+    fake = _FakeSupabase({
+        "api_keys": keys,
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [_stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    with patch("services.job_worker.sentry_sdk") as sentry:
+        assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    assert sentry.capture_message.call_count == 1
+    args, kwargs = sentry.capture_message.call_args
+    message = args[0]
+    assert token in message
+    assert kwargs.get("level") == "warning"
+    for secret in ("key-D", "key-H", "key-A", "key-B", "venue-holder", "venue-shared"):
+        assert secret not in message
+    scope = sentry.new_scope.return_value.__enter__.return_value
+    tags = {call.args[0]: call.args[1] for call in scope.set_tag.call_args_list}
+    assert tags.get("compute_job_id") == "j-gate"
+    assert tags.get("derive_refusal") == token
+
+
+@pytest.mark.asyncio
 async def test_composite_pair_keeps_the_key_whose_history_starts_first() -> None:
     """C2 review WR-01 (C1 WR-03): the marker's direction follows stamp order,
     not seniority, so during the backfill window the HOLDER is often the newer
