@@ -12,6 +12,8 @@
  * rather than silently changing what a money surface accepts or renders.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   isValidDollar,
@@ -192,5 +194,54 @@ describe("[169 D-50] signAtCents — the one rounding decision the text sign and
   it("has no sign for a missing value", () => {
     expect(signAtCents(null)).toBeNull();
     expect(signAtCents(Number.NaN)).toBeNull();
+  });
+});
+
+/**
+ * 2026-09-29, Phase 169 review round 1 IN-04. DESIGN.md's Currency row names
+ * this module as the one money formatter, but `HoldingDetail.tsx` and
+ * `AllocatorExchangeManager.tsx` kept private `formatUsd` copies: the first
+ * duplicated this body, the second rendered balances in a compact "$12.3k"
+ * form no other amount uses. A reader trusting "one module" would miss them.
+ *
+ * The factsheet is its own surface family and owns `src/app/factsheet/[id]/v2/
+ * format.ts` (DESIGN.md: "one formatter module per surface family"), so that
+ * subtree is out of this scan. Everything else must import `formatUsd`.
+ */
+describe("[169 IN-04] formatUsd single-source contract", () => {
+  const SRC_ROOT = path.resolve(__dirname, "..");
+  const MODULE = path.join(SRC_ROOT, "lib", "dollar-validation.ts");
+  const FACTSHEET_FAMILY = path.join(SRC_ROOT, "app", "factsheet") + path.sep;
+  const DECLARATION_RE =
+    /^\s*(?:export\s+)?(?:function\s+formatUsd\s*\(|const\s+formatUsd\s*[:=])/;
+
+  function* walk(dir: string): Generator<string> {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.name === ".next") continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) yield* walk(full);
+      else if (
+        entry.isFile() &&
+        /\.tsx?$/.test(entry.name) &&
+        !entry.name.endsWith(".d.ts")
+      ) {
+        yield full;
+      }
+    }
+  }
+
+  it("no source file outside the money module (and the factsheet's own family) declares a private formatUsd", () => {
+    const violations: string[] = [];
+    for (const file of walk(SRC_ROOT)) {
+      if (file === MODULE || file.startsWith(FACTSHEET_FAMILY)) continue;
+      fs.readFileSync(file, "utf8")
+        .split("\n")
+        .forEach((line, idx) => {
+          if (DECLARATION_RE.test(line)) {
+            violations.push(`src/${path.relative(SRC_ROOT, file)}:${idx + 1}`);
+          }
+        });
+    }
+    expect(violations).toEqual([]);
   });
 });
