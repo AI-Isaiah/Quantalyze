@@ -357,8 +357,10 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       "We are confirming which exchange account each key reads. Each daily sync checks it again.",
     ],
     [
+      // Review C2 round 2 IN-04: with no key list to name from (a payload
+      // without the ids), the line stays true for any number of keys.
       "key_not_syncing",
-      "One of your keys is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+      "A key is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
     ],
     [
       "awaiting_derivation",
@@ -369,8 +371,9 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       "The latest rebuild of your history did not pass its checks, so it is not shown.",
     ],
     [
+      // Review C2 round 2 IN-05: active voice (DESIGN.md Voice).
       "history_read_failed",
-      "Your history could not be loaded just now. Reload the page to try again.",
+      "We could not load your history just now. Reload the page to try again.",
     ],
   ] as const)("rebuilding reason %s renders its one line", (reason, line) => {
     render(
@@ -388,5 +391,65 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
         "/profile?tab=exchanges",
       );
     }
+  });
+
+  // Review C2 round 2 IN-04. The key_not_syncing line names the key when there
+  // is exactly one, with the label the Exchanges page and the Scenario rows
+  // use (`{Exchange} — {nickname}`, or the masked id tail when the key has no
+  // nickname). Two or more keys get a plural line, never "one of your keys".
+  const notSyncing = (id: string, exchange: string, label: string) => ({
+    id,
+    exchange,
+    label,
+    is_active: true,
+    sync_status: "error",
+    last_sync_at: null,
+    account_balance_usdt: null,
+    created_at: "2026-01-01T00:00:00Z",
+    sync_error: null,
+    last_429_at: null,
+    disconnected_at: null,
+  });
+  it.each([
+    [
+      "one key with a nickname is named",
+      [notSyncing("k-bad-0001", "okx", "Main")],
+      ["k-bad-0001"],
+      "Your key OKX — Main is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+    ],
+    [
+      "one key with no nickname is named by its masked tail",
+      [notSyncing("k-bad-7f3a", "bybit", "  ")],
+      ["k-bad-7f3a"],
+      "Your key Bybit — ••••7f3a is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+    ],
+    [
+      "two keys get the plural line",
+      [notSyncing("k-a", "okx", "Main"), notSyncing("k-b", "binance", "Spare")],
+      ["k-a", "k-b"],
+      "Some of your keys are not syncing, so we cannot confirm which exchange accounts they read. Check them on the Exchanges page.",
+    ],
+    [
+      "an id missing from the key list falls back to the unnamed line",
+      [notSyncing("k-a", "okx", "Main")],
+      ["k-gone"],
+      "A key is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+    ],
+  ])("key_not_syncing: %s", (_label, apiKeys, ids, line) => {
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        apiKeys={apiKeys as never}
+        equityHistoryState="rebuilding"
+        equityHistoryRebuildReason="key_not_syncing"
+        equityHistoryNotSyncingKeyIds={ids}
+      />,
+    );
+    const panel = screen.getByTestId("overview-equity-rebuilding");
+    expect(panel.textContent).toContain(line);
+    expect(screen.getByRole("link", { name: "Exchanges page" })).toHaveAttribute(
+      "href",
+      "/profile?tab=exchanges",
+    );
   });
 });

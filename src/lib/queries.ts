@@ -1,4 +1,5 @@
 import { cache } from "react";
+import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { castRow } from "@/lib/supabase/cast";
@@ -2930,6 +2931,14 @@ export interface MyAllocationDashboardPayload {
    */
   equityHistoryRebuildReason: EquityHistoryRebuildReason | null;
   /**
+   * Review C2 round 2 IN-04. When the reason is `key_not_syncing`, the ids of
+   * the keys it is about (eligible, account unknown, failing to sync), so the
+   * line can name the key when there is exactly one. `[]` under every other
+   * reason. Optional so a payload built without it (a stale cache, a hand-built
+   * fixture) renders the unnamed line rather than a wrong name.
+   */
+  equityHistoryNotSyncingKeyIds?: string[];
+  /**
    * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
    * allocator's snapshots, or null when every snapshot's column is
    * NULL (e.g., pure CoinGecko-fallback data). Drives the venue-
@@ -3677,6 +3686,31 @@ export function extractTrustworthyDerivedSeries(
   return { curve, returns: points };
 }
 
+/**
+ * Review C2 round 2 SFH-R2-05. Schedule a derived-row capture so it survives
+ * the response flush. `captureToSentry` returns its import chain for exactly
+ * this: a discarded chain can be reaped on a cold finish and the alert is lost.
+ * `after()` hands it to the platform's `waitUntil` (Next 16 docs: usable from
+ * Server Components, which is where `getMyAllocationDashboard` runs).
+ *
+ * The fallback is NOT optional (same shape as `ratelimit.ts`'s
+ * `scheduleLimiterCapture`): `after()` throws synchronously outside a request
+ * scope, and an observability call must never throw into the dashboard read.
+ * The console line before each capture is the local trace either way.
+ */
+function scheduleDerivedRowCapture(capture: Promise<void>): void {
+  try {
+    after(() => capture.catch(() => {}));
+  } catch {
+    console.warn(
+      "[queries.getMyAllocationDashboard] scheduling capture via queueMicrotask fallback (non-request scope)",
+    );
+    queueMicrotask(() => {
+      void capture.catch(() => {});
+    });
+  }
+}
+
 /** Why the reader refused a PRESENT derived row. A token, never a value. */
 export type DerivedPayloadRejection = "not_version_2" | "untrustworthy" | "malformed";
 
@@ -3684,8 +3718,10 @@ export type DerivedPayloadRejection = "not_version_2" | "untrustworthy" | "malfo
  * Review C2 SFH-05 (reader half). `null` when `extractTrustworthyDerivedSeries`
  * accepts the payload, else the first thing it refuses: a pre-v2 row, a row the
  * writer marked untrustworthy, or any other shape defect. The reader uses it
- * to report a present-but-rejected row (token only) and to tell that outcome
- * apart from "no row yet", which is the only one a daily recompute answers.
+ * to report a present-but-rejected row (token only) and to tell the outcomes
+ * the daily recompute answers (no row yet, or a pre-v2 row, which the daily
+ * compose rewrites as v2: review C2 round 2 R2-CR-03) apart from the ones it
+ * does not.
  */
 export function derivedPayloadRejection(
   payload: unknown,
@@ -3732,9 +3768,12 @@ export type EquityHistoryRebuildReason =
 
 /**
  * Why there is no display series, once the key list is clear. Only
- * `awaiting_derivation` (no row yet) is answered by the daily recompute.
- * Review C2 SFH-05 / SFH-06: a row the reader rejected, or a read that failed,
- * must not be shown as a wait.
+ * `awaiting_derivation` is answered by the daily recompute: no row yet, or a
+ * pre-v2 row. Review C2 round 2 R2-CR-03: every row written before C2 is
+ * pre-v2, and `derive-allocator-key-dailies` (05:30 UTC) re-composes each book
+ * as v2, so "recomputed once a day" is true for it. Review C2 SFH-05 / SFH-06:
+ * a v2 row the reader rejected, or a read that failed, must not be shown as a
+ * wait.
  */
 export type MissingSeriesReason = Extract<
   EquityHistoryRebuildReason,
@@ -3810,6 +3849,28 @@ function identityStillPending(
   );
 }
 
+/** Review C2 WR-02: a key whose last sync failed (D-18's not-working statuses). */
+function failingToSync(key: EquityHistoryKey): boolean {
+  return key.sync_status !== null && NOT_WORKING_SYNC_STATUSES.has(key.sync_status);
+}
+
+/**
+ * Review C2 round 2 IN-04. The keys a `key_not_syncing` reason is about:
+ * identity-pending (the same `identityStillPending` rule the readiness check
+ * uses) AND failing to sync. `equityHistoryReadiness` returns
+ * `key_not_syncing` iff this list is non-empty and no duplicate blocks first,
+ * so the renderer can name the key when there is exactly one.
+ */
+export function notSyncingIdentityPendingKeyIds(
+  apiKeys: readonly EquityHistoryKey[],
+): string[] {
+  const byId = new Map<string, EquityHistoryKey>();
+  for (const key of apiKeys) byId.set(key.id, key);
+  return apiKeys
+    .filter((key) => identityStillPending(key, byId) && failingToSync(key))
+    .map((key) => key.id);
+}
+
 /**
  * Phase 167.1.2 plan 11. Ready iff the version-2 series is present, no
  * eligible key is a duplicate of a working holder, and every eligible key on
@@ -3840,12 +3901,7 @@ export function equityHistoryReadiness(
   // `revoked`) is never stamped while it fails. The hold stays, because its
   // account really is unknown and the derive still counts it, but the reason
   // names the failing key rather than promising a sync that cannot stamp it.
-  if (
-    pending.some(
-      (key) =>
-        key.sync_status !== null && NOT_WORKING_SYNC_STATUSES.has(key.sync_status),
-    )
-  ) {
+  if (pending.some(failingToSync)) {
     return { state: "rebuilding", reason: "key_not_syncing" };
   }
   if (pending.length > 0) {
@@ -3927,6 +3983,7 @@ export function derivePhase07Fields(
   | "derivedCurveComputedAt"
   | "equityHistoryState"
   | "equityHistoryRebuildReason"
+  | "equityHistoryNotSyncingKeyIds"
   | "minHistoryDepthMonths"
   | "activeVenues"
   | "hasConnectedKeys"
@@ -3958,17 +4015,25 @@ export function derivePhase07Fields(
   const derivedRow = derivedReadFailed ? null : derivedEquityRow;
   const derivedPayload = derivedRow?.payload ?? null;
   const series = extractTrustworthyDerivedSeries(derivedPayload);
-  // Review C2 SFH-05 / SFH-06: only a missing row waits on the daily recompute.
-  // A present row the reader rejects already had its recompute, and a failed
-  // read says nothing about the history at all.
+  // Review C2 SFH-05 / SFH-06: a missing row waits on the daily recompute. A
+  // present v2 row the reader rejects already had its recompute, and a failed
+  // read says nothing about the history at all. Review C2 round 2 R2-CR-03: a
+  // pre-v2 row is a wait too. It passed every check its writer ran; only the
+  // reader's contract moved, and the daily compose rewrites it as v2.
+  const rejection =
+    derivedRow !== null ? derivedPayloadRejection(derivedRow.payload) : null;
   const missingSeriesReason: MissingSeriesReason = derivedReadFailed
     ? "history_read_failed"
-    : derivedRow !== null && series === null
-      ? "derivation_rejected"
-      : "awaiting_derivation";
+    : rejection === null || rejection === "not_version_2"
+      ? "awaiting_derivation"
+      : "derivation_rejected";
   const readiness = equityHistoryReadiness(apiKeys, series, missingSeriesReason);
   const equityHistoryState = readiness.state;
   const equityHistoryRebuildReason = readiness.reason;
+  const equityHistoryNotSyncingKeyIds =
+    equityHistoryRebuildReason === "key_not_syncing"
+      ? notSyncingIdentityPendingKeyIds(apiKeys)
+      : [];
   const equityDailyPoints: DailyPoint[] =
     equityHistoryState === "ready" && series ? series.curve : [];
   const equityDailyReturns: DailyPoint[] =
@@ -4059,6 +4124,7 @@ export function derivePhase07Fields(
     derivedCurveComputedAt,
     equityHistoryState,
     equityHistoryRebuildReason,
+    equityHistoryNotSyncingKeyIds,
     minHistoryDepthMonths,
     activeVenues,
     hasConnectedKeys,
@@ -4312,13 +4378,15 @@ export const getMyAllocationDashboard = cache(
             "[queries.getMyAllocationDashboard] allocator_equity_derived read failed (rendering the history as rebuilding, reason history_read_failed):",
             res.error,
           );
-          captureToSentry(res.error, {
-            tags: {
-              op: "getMyAllocationDashboard",
-              reason: "derived_row_read_failed",
-            },
-            level: "error",
-          });
+          scheduleDerivedRowCapture(
+            captureToSentry(res.error, {
+              tags: {
+                op: "getMyAllocationDashboard",
+                reason: "derived_row_read_failed",
+              },
+              level: "error",
+            }),
+          );
           return DERIVED_ROW_READ_FAILED;
         }
         const row = (res.data ?? null) as {
@@ -4327,22 +4395,35 @@ export const getMyAllocationDashboard = cache(
         } | null;
         if (row !== null) {
           const rejection = derivedPayloadRejection(row.payload);
-          if (rejection !== null) {
+          if (rejection === "not_version_2") {
+            // Review C2 round 2 R2-CR-03: every row written before C2 is
+            // pre-v2, and the daily compose rewrites it. That is a normal
+            // transition, not a fault, so it is logged and NOT sent to Sentry:
+            // a capture here fired once per dashboard load for every book on
+            // deploy day. Residual (recorded, not captured): a book whose
+            // compose never runs keeps its v1 row and reads
+            // awaiting_derivation; this log line is its only trace.
+            console.warn(
+              "[queries.getMyAllocationDashboard] allocator_equity_derived row is pre-version-2 (not_version_2); rendering the history as rebuilding, reason awaiting_derivation, until the daily compose rewrites it",
+            );
+          } else if (rejection !== null) {
             console.error(
               `[queries.getMyAllocationDashboard] allocator_equity_derived row rejected (${rejection}); rendering the history as rebuilding, reason derivation_rejected`,
             );
-            captureToSentry(
-              new Error(`allocator_equity_derived row rejected: ${rejection}`),
-              {
-                tags: {
-                  op: "getMyAllocationDashboard",
-                  reason: "derived_row_rejected",
-                  rejection,
+            scheduleDerivedRowCapture(
+              captureToSentry(
+                new Error(`allocator_equity_derived row rejected: ${rejection}`),
+                {
+                  tags: {
+                    op: "getMyAllocationDashboard",
+                    reason: "derived_row_rejected",
+                    rejection,
+                  },
+                  // A writer's own untrustworthy verdict is a data state; a
+                  // malformed row is a writer bug.
+                  level: rejection === "malformed" ? "error" : "warning",
                 },
-                // A pre-v2 row or a writer's own untrustworthy verdict is a
-                // data state; a malformed row is a writer bug.
-                level: rejection === "malformed" ? "error" : "warning",
-              },
+              ),
             );
           }
         }

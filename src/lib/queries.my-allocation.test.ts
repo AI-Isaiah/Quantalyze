@@ -420,6 +420,19 @@ vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({ from: (table: string) => buildChain(table) }),
 }));
 
+// Review C2 round 2 SFH-R2-05: the derived-row captures are scheduled with
+// next/server's `after()` so a cold finish cannot drop them. The mock records
+// the callbacks; a test runs them to prove the capture is what they wait on.
+// Outside these tests nothing runs them, which matches a request whose
+// response has not finished yet.
+const afterCallbacks = vi.hoisted(() => [] as Array<() => unknown>);
+vi.mock("next/server", async (importActual) => ({
+  ...(await importActual<typeof import("next/server")>()),
+  after: (cb: () => unknown) => {
+    afterCallbacks.push(cb);
+  },
+}));
+
 // ------------------------------------------------------------------
 // Tests
 // ------------------------------------------------------------------
@@ -3147,13 +3160,57 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
     captureSpy.mockRestore();
   });
 
-  // Review C2 SFH-05 (reader half). A PRESENT row the reader rejects used to be
-  // shown as "recomputed once a day" with nothing logged. It is now its own
-  // reason, and the rejection is reported with its token only (no values).
-  it("SFH-05: a present row the reader rejects is derivation_rejected and reported with its rejection token", async () => {
+  // Review C2 round 2 R2-CR-03 (deploy day). `version: 2` is new in C2, so
+  // every row written before the deploy is pre-v2. Such a row passed every
+  // check its writer ran; only the reader's contract moved, and the daily
+  // compose (`derive-allocator-key-dailies`, 05:30 UTC) rewrites it as v2. So
+  // it reads `awaiting_derivation` ("recomputed once a day" is TRUE for it)
+  // and it is NOT sent to Sentry: a warning per dashboard load for every book
+  // on deploy day would report a normal transition as a fault.
+  it("R2-CR-03: a pre-v2 row is awaiting_derivation, logged with its token, and not sent to Sentry", async () => {
     state.portfolios = [P1151_PORTFOLIO];
     state.apiKeys = [identifiedKey()];
     state.allocatorEquityDerived = [derivedRow(true)]; // no version: pre-v2
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
+    expect(captureSpy).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tags: expect.objectContaining({ reason: "derived_row_rejected" }),
+      }),
+    );
+    // The local trace stays: the token, and never a curve value.
+    const warned = JSON.stringify(warnSpy.mock.calls);
+    expect(warned).toContain("not_version_2");
+    expect(warned).toContain("awaiting_derivation");
+    expect(warned).not.toContain("100500");
+    expect(JSON.stringify(errSpy.mock.calls)).not.toContain("allocator_equity_derived row");
+    warnSpy.mockRestore();
+    errSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  // Review C2 SFH-05 (reader half), kept for rows that ARE version 2. A v2 row
+  // its writer marked untrustworthy (for example the shared account with no
+  // working key, which fixer A makes a non-benign outcome) already had its
+  // recompute, so it is `derivation_rejected` and reported with its token only.
+  it("SFH-05: a v2 row the writer marked untrustworthy is derivation_rejected and reported with its rejection token", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    const row = v2Row();
+    row.payload.is_trustworthy = false;
+    row.payload.flags = ["shared_account_no_working_key"];
+    state.allocatorEquityDerived = [row];
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const sentry = await import("./sentry-capture");
     const captureSpy = vi
@@ -3170,14 +3227,76 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
       expect.objectContaining({
         tags: expect.objectContaining({
           reason: "derived_row_rejected",
-          rejection: "not_version_2",
+          rejection: "untrustworthy",
         }),
+        level: "warning",
       }),
     );
     // Token only: the curve's dollar values never reach the log.
     const logged = JSON.stringify(errSpy.mock.calls);
-    expect(logged).toContain("not_version_2");
+    expect(logged).toContain("untrustworthy");
     expect(logged).not.toContain("100500");
+    errSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  // Review C2 round 2 SFH-R2-05. `captureToSentry` returns its import chain so
+  // a server caller can hold the request open until the capture settles. A
+  // discarded chain can be reaped on a cold finish and the alert is lost. Both
+  // derived-row captures are therefore handed to `after()`, and the scheduled
+  // work settles only when the capture does.
+  it.each([
+    [
+      "a failed read",
+      () => {
+        state.allocatorEquityDerived = [v2Row()];
+        state.tableErrors["allocator_equity_derived"] = { message: "connection reset (test)" };
+      },
+      "derived_row_read_failed",
+    ],
+    [
+      "a v2 row the writer marked untrustworthy",
+      () => {
+        const row = v2Row();
+        row.payload.is_trustworthy = false;
+        state.allocatorEquityDerived = [row];
+      },
+      "derived_row_rejected",
+    ],
+  ] as const)("SFH-R2-05: the capture for %s is scheduled with after() and awaited", async (_label, arrange, reason) => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    arrange();
+    afterCallbacks.length = 0;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let release!: () => void;
+    const capture = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(() => capture);
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    await getMyAllocationDashboard("user-1");
+
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ tags: expect.objectContaining({ reason }) }),
+    );
+    const scheduled = afterCallbacks.map((cb) => Promise.resolve(cb()));
+    expect(scheduled.length).toBeGreaterThan(0);
+    let settled = false;
+    void Promise.all(scheduled).then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Still pending: the scheduled work is holding the capture, not dropping it.
+    expect(settled).toBe(false);
+    release();
+    await Promise.all(scheduled);
+    expect(settled).toBe(true);
     errSpy.mockRestore();
     captureSpy.mockRestore();
   });
