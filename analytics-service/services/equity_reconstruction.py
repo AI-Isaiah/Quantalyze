@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import ccxt.async_support as ccxt
 import httpx
 import pandas as pd
+import sentry_sdk
 
 from services.account_identity import VENUES_WITH_ACCOUNT_ID
 from services.allocator_equity_derive import (
@@ -1878,7 +1879,12 @@ async def _fetch_latest_holdings_per_eligible_key(
     ``allocator.holdings.sync_completed`` audit event for a member of the
     group, created on a day after the group's latest ``asof``, whose metadata
     says ``final_status`` ``complete`` and ``row_count`` 0 (see
-    ``_polled_empty_since``). The key's CURRENT ``sync_status`` is not read:
+    ``_polled_empty_since``), AND, since round 3 (SFH-R3-01), that key's own
+    live equity read (its ``key_inputs`` anchor, taken at or after the poll)
+    finding no material capital: zero rows means "nothing the poll reads",
+    and a funded account can read that way, so the empty poll alone is not
+    proof, and Deribit (spot never read) never supplies one. The key's
+    CURRENT ``sync_status`` is not read:
     it moves on after the poll (a later 429 writes ``rate_limited``, a manual
     sync writes ``syncing``), and round 1's gate on it re-carried a
     proven-empty account's old balance on such a day. Only a ccxt venue can
@@ -1889,7 +1895,9 @@ async def _fetch_latest_holdings_per_eligible_key(
     trades, every tick, and writes no ``sync_status``, so it would read a
     merely-late poll as an empty account. No proof (no recorded poll, a poll on
     the rows' own day, an outcome with warnings, an event from before
-    ``final_status`` was recorded, a dropped audit row) keeps the D-07 carry.
+    ``final_status`` was recorded, a dropped audit row, a live equity read
+    that is missing, failed, older than the poll or finds capital) keeps the
+    D-07 carry.
     Residual: the 167.1.1 index defect (another ACCOUNT on the same venue
     overwriting this account's (venue, symbol, asof) row) can make a real poll
     look empty here, as it already makes that symbol vanish from the day.
@@ -1980,7 +1988,7 @@ async def _fetch_latest_holdings_per_eligible_key(
             continue
 
         if latest < today_iso and await _polled_empty_since(
-            supabase, eligible, latest
+            supabase, allocator_id, eligible, latest
         ):
             # C2 silent-failure round 2, SFH-R2-01: the asof read and the proof
             # read are two round trips. A poll that persisted rows between them
@@ -2060,32 +2068,92 @@ def _identity_unknown_and_not_working(
 _POLL_COMPLETED_ACTION = "allocator.holdings.sync_completed"
 _POLL_OUTCOME_READ_LIMIT = 200
 
+# Venues whose clean, empty poll can never prove an empty account.
+# NON_CCXT_VENUES record no such poll (MT5 writes its own empty-equity row,
+# sFOX and unsupported venues return no rows with a warning). Deribit polls
+# 'complete' with 0 rows whenever it has no open positions, because its spot
+# read is skipped before any network call: zero rows there means "no open
+# positions", not "no collateral" (C2 silent-failure round 3, SFH-R3-01).
+# A local set, not an edit to NON_CCXT_VENUES, which means "not ccxt" elsewhere.
+_NO_EMPTINESS_PROOF_VENUES: frozenset[str] = NON_CCXT_VENUES | frozenset({"deribit"})
+
+# The key_inputs anchor tokens that mean the key's live equity read found no
+# material capital (job_worker's key-mode derive epilogue: a non-positive
+# equity, or one at or under DUST_NAV_FLOOR). Every other state is capital or
+# an unknown: a present anchor_usd is material by construction (the writer
+# nulls it at or under the floor), balance_error and nonfinite are failed
+# reads, and flow_drop is stamped only above the floor.
+_NO_CAPITAL_ANCHOR_REASONS: frozenset[str] = frozenset({"dust", "nonpositive"})
+
+
+def _parse_utc_instant(value: Any) -> datetime | None:
+    """An ISO timestamp as an aware UTC instant, or None when it is not one.
+    A naive value is read as UTC (both writers stamp UTC)."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
 
 async def _polled_empty_since(
-    supabase: Any, eligible: Sequence[Mapping[str, Any]], latest_asof: str
+    supabase: Any,
+    allocator_id: str,
+    eligible: Sequence[Mapping[str, Any]],
+    latest_asof: str,
 ) -> bool:
     """True when a holdings poll of a ccxt member of ``eligible`` RECORDED a
-    clean, empty outcome on a day after ``latest_asof``.
+    clean, empty outcome on a day after ``latest_asof``, AND that key's own
+    live equity read, taken at or after that poll, found no material capital.
 
-    The record is the ``allocator.holdings.sync_completed`` audit event the
-    poll handler emits on its success path (``run_poll_allocator_positions_job``),
-    whose metadata carries the poll's own ``final_status`` and ``row_count``.
-    Round 2 (R2-CR-01) replaced round 1's evidence, a ``done`` job row plus the
-    key's CURRENT ``sync_status == 'complete'``: that status belongs to the key,
-    not to the poll, and moves on after it, so a transient 429 or a manual sync
-    re-carried a proven-empty account's old balance. ``compute_jobs`` records no
-    outcome (``mark_compute_job_done`` takes none), so the job row cannot carry
-    the proof.
+    The poll's record is the ``allocator.holdings.sync_completed`` audit event
+    the poll handler emits on its success path
+    (``run_poll_allocator_positions_job``), whose metadata carries the poll's
+    own ``final_status`` and ``row_count``. Round 2 (R2-CR-01) replaced round
+    1's evidence, a ``done`` job row plus the key's CURRENT
+    ``sync_status == 'complete'``: that status belongs to the key, not to the
+    poll, and moves on after it, so a transient 429 or a manual sync re-carried
+    a proven-empty account's old balance. ``compute_jobs`` records no outcome
+    (``mark_compute_job_done`` takes none), so the job row cannot carry it.
 
-    A proof needs, among the events created on or after the day after
-    ``latest_asof``:
-      * at least one with ``final_status == 'complete'`` and ``row_count == 0``
-        (``complete_with_warnings`` means a read failed, so empty spot rows do
-        not prove an empty account; an event without ``final_status`` predates
-        this round and its outcome is unknown);
-      * none with ``row_count > 0``: rows were persisted after the latest
+    Among the events created on or after the day after ``latest_asof``:
+      * any with ``row_count > 0`` VETOES: rows were persisted after the latest
         ``asof`` this refresh read, so the account is not empty (the caller's
-        re-read then counts them, SFH-R2-01).
+        re-read then counts them, SFH-R2-01);
+      * a candidate is one with ``final_status == 'complete'`` and
+        ``row_count == 0`` (``complete_with_warnings`` means a read failed, so
+        empty spot rows do not prove an empty account; an event without
+        ``final_status`` predates round 2 and its outcome is unknown).
+
+    Round 3 (C2 silent-failure SFH-R3-01): a candidate event is NOT proof on
+    its own. ``row_count`` is ``len(holdings)``, so 0 means "nothing this poll
+    reads", not "no money": a funded Bybit UTA account whose CCXT spot
+    ``total`` comes back empty when the fallback misses, a Deribit account with
+    no open positions, a flat derivatives account whose margin sits in a
+    wallet the spot read does not cover. Round 2's proof became permanent
+    (a 2-year audit log, a first-writer-wins $0 row), so it now also needs the
+    key's INDEPENDENT live equity read, the ``anchor_usd`` /
+    ``anchor_null_reason`` / ``anchor_asof`` its key-mode derive persists as
+    ``allocator_equity_derived`` ``key_inputs:<api_key_id>``
+    (``fetch_account_equity_and_upnl_usd``):
+      * PROOF: a key with a candidate event whose read is stamped
+        ``_NO_CAPITAL_ANCHOR_REASONS`` at an ``anchor_asof`` at or after that
+        event. A read older than every candidate event of its key predates the
+        empty poll and proves nothing about it.
+      * CONTRADICTION: any candidate member whose read, taken at or after the
+        group's first candidate event, found capital (a present
+        ``anchor_usd``). No proof, and a WARNING (no key id, no USD), because
+        that is the parse-empty defect this rule exists for.
+      * Anything else (no read, a failed read, an older read) is no proof.
+    Consequence of the cron order (poll 04:00, refresh 05:00, key-mode derive
+    05:30): the refresh on the first empty day sees the previous day's read,
+    older than that day's poll, so the account is carried one more day and the
+    $0 lands the day after. That is the safe direction.
+
     A failed read raises, like every read of this refresh. An audit row the
     poll failed to write (``_emit_audit`` never fails the poll) means no proof,
     which keeps the carry: the safe direction."""
@@ -2094,7 +2162,7 @@ async def _polled_empty_since(
         for r in eligible
         if isinstance(r.get("exchange"), str)
         and r["exchange"].strip()
-        and r["exchange"].strip().lower() not in NON_CCXT_VENUES
+        and r["exchange"].strip().lower() not in _NO_EMPTINESS_PROOF_VENUES
     )
     if not candidate_ids:
         return False
@@ -2103,7 +2171,7 @@ async def _polled_empty_since(
     def _sel_poll_outcomes() -> Any:
         return (
             supabase.table("audit_log")
-            .select("metadata, created_at")
+            .select("entity_id, metadata, created_at")
             .eq("action", _POLL_COMPLETED_ACTION)
             .eq("entity_type", "api_key")
             .in_("entity_id", candidate_ids)
@@ -2114,7 +2182,8 @@ async def _polled_empty_since(
         )
 
     events = getattr(await db_execute(_sel_poll_outcomes), "data", None) or []
-    clean_and_empty = False
+    # Per key, the instants of its clean, empty polls.
+    clean_empty_at: dict[str, list[datetime]] = {}
     for event in events:
         metadata = event.get("metadata")
         if not isinstance(metadata, Mapping):
@@ -2124,9 +2193,58 @@ async def _polled_empty_since(
             continue
         if row_count > 0:
             return False
-        if metadata.get("final_status") == "complete":
-            clean_and_empty = True
-    return clean_and_empty
+        if metadata.get("final_status") != "complete":
+            continue
+        created_at = _parse_utc_instant(event.get("created_at"))
+        if created_at is None:
+            continue
+        clean_empty_at.setdefault(str(event.get("entity_id")), []).append(created_at)
+    if not clean_empty_at:
+        return False
+
+    def _sel_live_equity_reads() -> Any:
+        return (
+            supabase.table("allocator_equity_derived")
+            .select("kind, payload")
+            .eq("allocator_id", allocator_id)
+            .in_("kind", [f"key_inputs:{key_id}" for key_id in candidate_ids])
+            .execute()
+        )
+
+    reads = getattr(await db_execute(_sel_live_equity_reads), "data", None) or []
+    first_clean_empty = min(t for times in clean_empty_at.values() for t in times)
+    proven = False
+    contradicted = False
+    for read in reads:
+        kind = read.get("kind")
+        payload = read.get("payload")
+        if not isinstance(kind, str) or not isinstance(payload, Mapping):
+            continue
+        key_id = kind.removeprefix("key_inputs:")
+        read_at = _parse_utc_instant(payload.get("anchor_asof"))
+        if read_at is None:
+            continue
+        anchor_usd = payload.get("anchor_usd")
+        if anchor_usd is not None:
+            if read_at >= first_clean_empty:
+                contradicted = True
+            continue
+        if payload.get("anchor_null_reason") in _NO_CAPITAL_ANCHOR_REASONS and any(
+            polled_at <= read_at for polled_at in clean_empty_at.get(key_id, [])
+        ):
+            proven = True
+    if contradicted:
+        # SFH-R3-01: a clean, empty poll beside a live equity read that found
+        # capital. The account is carried; this line is the only trace that a
+        # poll read a funded account as empty. Counts only: no key id, no USD.
+        logger.warning(
+            "refresh_allocator_equity_daily: allocator=%s a clean poll read an "
+            "account as empty (%d key(s)) but the key's live equity read "
+            "contradicts it; the account is carried, not zeroed",
+            allocator_id, len(clean_empty_at),
+        )
+        return False
+    return proven
 
 
 # ---------------------------------------------------------------------------
@@ -3735,6 +3853,22 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 "(days_written=%d)",
                 allocator_id, latest.counted_accounts, count,
             )
+            # C2 silent-failure round 3, SFH-R3-01: the WARNING above reaches
+            # Sentry only as a breadcrumb (sentry_init.py keeps the default
+            # LoggingIntegration, event level ERROR), so a permanent $0 day was
+            # quieter than the derive's refusal, which pages. Captured once, the
+            # way job_worker captures that refusal: tagged with the job and the
+            # outcome, one static message so Sentry groups the events, and no
+            # key id, allocator id or USD figure.
+            with sentry_sdk.new_scope() as scope:
+                scope.set_tag("compute_job_id", str(job.get("id")))
+                scope.set_tag("refresh_outcome", "book_emptied")
+                sentry_sdk.capture_message(
+                    "refresh_allocator_equity_daily: book_emptied, every counted "
+                    "account is proven empty and today's legacy snapshot was "
+                    "written as $0",
+                    level="warning",
+                )
         _emit_audit(
             allocator_id, api_key_id,
             "allocator.equity.refresh_complete",

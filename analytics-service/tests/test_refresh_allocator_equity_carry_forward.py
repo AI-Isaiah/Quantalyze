@@ -560,6 +560,16 @@ async def test_carried_key_keeps_the_deribit_skip_and_the_upnl_rule(monkeypatch:
 # row_count (always) and final_status (added in this round). Proof = such an
 # event for a ccxt member, created on a day after the account's latest row,
 # with final_status 'complete' and row_count 0.
+#
+# Round 3 (SFH-R3-01): that event alone is NOT proof. Zero rows means "nothing
+# this poll reads", and a funded account can read that way (the documented
+# Bybit UTA parse-empty class, Deribit's skipped spot read). The proving key's
+# own live equity read, the anchor its key-mode derive persists in
+# key_inputs:<api_key_id>, must ALSO show no material capital
+# (anchor_null_reason 'dust' or 'nonpositive'), and it must have been taken at
+# or after the clean, empty poll. A missing, failed or older read is no proof,
+# and a material read beside the empty poll is a contradiction, logged at
+# WARNING. Deribit never supplies the proof. _seed_empty_proof seeds both.
 # ---------------------------------------------------------------------------
 
 
@@ -596,6 +606,38 @@ def _at(day: date, hour: int = 4) -> datetime:
     return datetime(day.year, day.month, day.day, hour, 3, tzinfo=timezone.utc)
 
 
+def _seed_key_inputs(
+    fake: FakeSupabaseClient,
+    key_id: str,
+    anchor_asof: datetime,
+    *,
+    anchor_usd: float | None = None,
+    anchor_null_reason: str | None = "nonpositive",
+) -> None:
+    """The key_inputs:<key_id> row the key-mode derive persists: the key's own
+    live equity read. The defaults are a read that found no capital."""
+    kind = f"key_inputs:{key_id}"
+    fake.store[("allocator_equity_derived", (ALLOCATOR_ID, kind))] = {
+        "allocator_id": ALLOCATOR_ID,
+        "kind": kind,
+        "payload": {
+            "flows": [],
+            "anchor_usd": anchor_usd,
+            "anchor_null_reason": anchor_null_reason,
+            "anchor_asof": anchor_asof.isoformat(),
+            "venue": "bybit",
+        },
+        "computed_at": anchor_asof.isoformat(),
+    }
+
+
+def _seed_empty_proof(fake: FakeSupabaseClient, key_id: str, at: datetime) -> None:
+    """A clean, empty poll at ``at`` AND the key's live equity read, taken
+    half an hour later, finding no capital: the two halves of a proof."""
+    _seed_poll_outcome(fake, key_id, at)
+    _seed_key_inputs(fake, key_id, at + timedelta(minutes=30))
+
+
 def _seed_emptied_candidate(fake: FakeSupabaseClient, **key: Any) -> None:
     """Key 1 is a live okx account polled today. Key 2's account had BTC three
     days ago and no row since. Key 2 carries its stamped account id, so the
@@ -623,7 +665,7 @@ async def test_account_polled_empty_after_its_last_row_contributes_zero(
     days ago: the account is empty and contributes $0, and the audit counts it."""
     fake = FakeSupabaseClient()
     _seed_emptied_candidate(fake)
-    _seed_poll_outcome(fake, API_KEY_ID_2, _at(TODAY - timedelta(days=claimed_days_ago)))
+    _seed_empty_proof(fake, API_KEY_ID_2, _at(TODAY - timedelta(days=claimed_days_ago)))
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
@@ -653,7 +695,7 @@ async def test_proven_empty_account_stays_zero_whatever_the_keys_current_status(
     that ran, so the account stays at $0."""
     fake = FakeSupabaseClient()
     _seed_emptied_candidate(fake, sync_status=current_status)
-    _seed_poll_outcome(fake, API_KEY_ID_2, _at(TODAY - timedelta(days=1)))
+    _seed_empty_proof(fake, API_KEY_ID_2, _at(TODAY - timedelta(days=1)))
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
@@ -677,7 +719,7 @@ async def test_a_poll_landing_between_the_two_reads_is_counted_not_zeroed(
 
     fake = FakeSupabaseClient()
     _seed_emptied_candidate(fake)
-    _seed_poll_outcome(fake, API_KEY_ID_2, _at(TODAY - timedelta(days=1)))
+    _seed_empty_proof(fake, API_KEY_ID_2, _at(TODAY - timedelta(days=1)))
     real_proof = er._polled_empty_since
 
     async def _poll_lands_mid_refresh(*args: Any, **kwargs: Any) -> bool:
@@ -708,6 +750,12 @@ async def test_a_poll_landing_between_the_two_reads_is_counted_not_zeroed(
         pytest.param("poll_wrote_rows", id="the-poll-wrote-rows"),
         pytest.param("pre_round_event", id="event-without-final-status"),
         pytest.param("non_ccxt", id="mt5-writes-its-own-empty-marker"),
+        pytest.param("no_live_read", id="clean-empty-poll-without-a-live-equity-read"),
+        pytest.param("live_read_failed", id="live-equity-read-failed"),
+        pytest.param("live_read_flow_drop", id="live-equity-read-material-but-flows-cut"),
+        pytest.param("live_read_material", id="live-equity-read-finds-capital"),
+        pytest.param("live_read_older", id="live-equity-read-predates-the-empty-poll"),
+        pytest.param("deribit", id="deribit-never-proves-emptiness"),
     ],
 )
 async def test_account_without_proof_of_emptiness_is_carried(
@@ -722,14 +770,43 @@ async def test_account_without_proof_of_emptiness_is_carried(
     landed after the read, so the account is not empty); an event written
     before final_status was recorded (its outcome is unknown); a non-ccxt venue
     (MT5 persists an explicit empty marker row itself; sFOX and unsupported
-    venues return no rows with a warning)."""
+    venues return no rows with a warning).
+
+    Round 3 (SFH-R3-01): a clean, empty poll is not proof on its own. The
+    key's live equity read must also find no capital, at or after that poll:
+    a missing read, a failed read (balance_error), a read that found capital
+    (a present anchor, or flow_drop, which is stamped only above the dust
+    floor), and a read older than the poll all keep the carry. A Deribit poll
+    never proves emptiness: it skips spot before any network call, so zero
+    rows means no open positions, not no collateral."""
     fake = FakeSupabaseClient()
     key: dict[str, Any] = {}
     if case == "non_ccxt":
         key = {"exchange": "mt5"}
+    elif case == "deribit":
+        key = {"exchange": "deribit"}
     _seed_emptied_candidate(fake, **key)
     today_poll = _at(TODAY)
-    if case == "poll_same_day_as_rows":
+    fresh_read = today_poll + timedelta(minutes=30)
+    if case == "no_live_read":
+        _seed_poll_outcome(fake, API_KEY_ID_2, today_poll)
+    elif case == "live_read_failed":
+        _seed_poll_outcome(fake, API_KEY_ID_2, today_poll)
+        _seed_key_inputs(fake, API_KEY_ID_2, fresh_read, anchor_null_reason="balance_error")
+    elif case == "live_read_flow_drop":
+        _seed_poll_outcome(fake, API_KEY_ID_2, today_poll)
+        _seed_key_inputs(fake, API_KEY_ID_2, fresh_read, anchor_null_reason="flow_drop")
+    elif case == "live_read_material":
+        _seed_poll_outcome(fake, API_KEY_ID_2, today_poll)
+        _seed_key_inputs(
+            fake, API_KEY_ID_2, fresh_read, anchor_usd=500.0 * 400, anchor_null_reason=None
+        )
+    elif case == "live_read_older":
+        _seed_poll_outcome(fake, API_KEY_ID_2, today_poll)
+        _seed_key_inputs(fake, API_KEY_ID_2, today_poll - timedelta(hours=22))
+    elif case == "deribit":
+        _seed_empty_proof(fake, API_KEY_ID_2, today_poll)
+    elif case == "poll_same_day_as_rows":
         _seed_poll_outcome(fake, API_KEY_ID_2, _at(TODAY - timedelta(days=3), hour=23))
     elif case == "warnings":
         _seed_poll_outcome(fake, API_KEY_ID_2, today_poll, final_status="complete_with_warnings")
@@ -743,6 +820,10 @@ async def test_account_without_proof_of_emptiness_is_carried(
         _seed_poll_outcome(fake, API_KEY_ID_2, today_poll, final_status=None)
     elif case != "no_poll_outcome":
         _seed_poll_outcome(fake, API_KEY_ID_2, today_poll)
+    if not case.startswith(("live_read_", "no_live_read", "deribit")):
+        # The poll-side arms get a live read that DOES find no capital, so
+        # each arm fails on its own rule, not on a missing read.
+        _seed_key_inputs(fake, API_KEY_ID_2, fresh_read)
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
@@ -774,17 +855,25 @@ async def test_a_book_whose_every_account_is_proven_empty_writes_a_zero_row(
     every reader of the legacy store (match.py, the compare adapter, the GDPR
     export), while the same audit said emptied_accounts=1. With proof in hand
     the day is written as an explicit $0, with its own audit reason, and the
-    job logs it at WARNING (counts only)."""
+    job logs it at WARNING (counts only).
+
+    Round 3 (SFH-R3-01): a WARNING reaches Sentry only as a breadcrumb
+    (sentry_init.py keeps the default LoggingIntegration, event level ERROR),
+    so the round-2 derive refusal pages while this $0 write did not. The write
+    is now captured once, at level warning, with one static message and no
+    key id, allocator id or USD figure."""
     import logging
+    from unittest.mock import patch
 
     caplog.set_level(logging.INFO, logger="quantalyze.analytics.equity_reconstruction")
     fake = FakeSupabaseClient()
     _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
     _seed_holding(fake, API_KEY_ID_1, "okx", "BTC", TODAY - timedelta(days=3), 500.0)
     _seed_snapshot(fake, TODAY - timedelta(days=1), 500.0)
-    _seed_poll_outcome(fake, API_KEY_ID_1, _at(TODAY))
+    _seed_empty_proof(fake, API_KEY_ID_1, _at(TODAY))
 
-    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+    with patch("services.equity_reconstruction.sentry_sdk") as sentry:
+        audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
     row = _today_row(fake)
     assert row["value_usd"] == 0.0
@@ -796,6 +885,75 @@ async def test_a_book_whose_every_account_is_proven_empty_writes_a_zero_row(
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("proven empty" in r.getMessage() for r in warnings), caplog.text
     assert "500" not in caplog.text
+
+    assert sentry.capture_message.call_count == 1
+    args, kwargs = sentry.capture_message.call_args
+    message = args[0]
+    assert "book_emptied" in message
+    assert kwargs.get("level") == "warning"
+    for secret in (API_KEY_ID_1, ALLOCATOR_ID, "o-1", "500"):
+        assert secret not in message
+    scope = sentry.new_scope.return_value.__enter__.return_value
+    tags = {call.args[0]: call.args[1] for call in scope.set_tag.call_args_list}
+    assert tags.get("compute_job_id") == f"refresh-{API_KEY_ID_1}"
+    assert tags.get("refresh_outcome") == "book_emptied"
+    assert ALLOCATOR_ID not in tags.values()
+
+
+@pytest.mark.asyncio
+async def test_a_funded_account_whose_poll_reads_empty_keeps_its_carried_value(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C2 silent-failure round 3, SFH-R3-01, the reviewer's measured case. A
+    bybit key held 200,000 USDT two days ago; yesterday's snapshot is 200,000.
+    Yesterday's poll ended 'complete' with 0 rows: the documented Bybit UTA
+    parse-empty class, where CCXT's spot 'total' comes back empty for a
+    funded account and the fallback misses. Round 2 read that as proof, and
+    because it was the book's only account, wrote a permanent $0 day
+    (first-writer-wins). The key's own live equity read, taken after that
+    poll, still finds 200,000. That is a contradiction, not a proof: today
+    persists the carried 200,000, no $0 row, no book_emptied capture, and a
+    WARNING (no key id, no USD) says the empty poll was contradicted."""
+    import logging
+    from unittest.mock import patch
+
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.equity_reconstruction")
+    fake = FakeSupabaseClient()
+    _seed_key(
+        fake, API_KEY_ID_1, exchange="bybit", sync_status="complete", venue_account_id="b-1"
+    )
+    _seed_holding(fake, API_KEY_ID_1, "bybit", "USDT", TODAY - timedelta(days=2), 200_000.0)
+    _seed_snapshot(fake, TODAY - timedelta(days=1), 200_000.0)
+    yesterday_poll = _at(TODAY - timedelta(days=1))
+    _seed_poll_outcome(fake, API_KEY_ID_1, yesterday_poll)
+    _seed_key_inputs(
+        fake,
+        API_KEY_ID_1,
+        yesterday_poll + timedelta(minutes=90),
+        anchor_usd=200_000.0,
+        anchor_null_reason=None,
+    )
+
+    with patch("services.equity_reconstruction.sentry_sdk") as sentry:
+        audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    row = _today_row(fake)
+    assert row["value_usd"] == pytest.approx(200_000.0), (
+        f"a funded account read empty by its poll was zeroed: {row['value_usd']}"
+    )
+    metadata = _refresh_complete_metadata(audit)
+    assert "reason" not in metadata
+    assert metadata["emptied_accounts"] == 0
+    assert metadata["carried_keys"] == 1
+    assert sentry.capture_message.call_count == 0
+    contradicted = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "contradict" in r.getMessage()
+    ]
+    assert contradicted, caplog.text
+    for r in contradicted:
+        assert API_KEY_ID_1 not in r.getMessage()
+        assert "200000" not in r.getMessage() and "200,000" not in r.getMessage()
 
 
 @pytest.mark.asyncio
@@ -809,7 +967,7 @@ async def test_a_book_with_an_account_it_cannot_read_is_not_written_as_zero(
     _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
     _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="complete", venue_account_id="b-1")
     _seed_holding(fake, API_KEY_ID_1, "okx", "BTC", TODAY - timedelta(days=3), 500.0)
-    _seed_poll_outcome(fake, API_KEY_ID_1, _at(TODAY))
+    _seed_empty_proof(fake, API_KEY_ID_1, _at(TODAY))
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
@@ -889,3 +1047,42 @@ async def test_no_carry_records_a_zero_carry_age(monkeypatch: pytest.MonkeyPatch
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
     assert _refresh_complete_metadata(audit)["max_carry_age_days"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("member_finds_capital", [True, False])
+async def test_a_second_key_on_the_account_that_finds_capital_vetoes_the_proof(
+    monkeypatch: pytest.MonkeyPatch, member_finds_capital: bool
+) -> None:
+    """SFH-R3-01, the group half. Two keys read one bybit account. The holder's
+    poll read it empty and the holder's own live read found no capital, but
+    the marked key's live read, taken after that poll, found 200,000. Both
+    reads are of the same account, so they contradict each other: no proof,
+    and the account is carried. Without the member's read, the same setup is
+    proven and zeroed, which is what shows the veto is the rule biting."""
+    fake = FakeSupabaseClient()
+    _seed_pair(
+        fake, "duplicate",
+        holder={"exchange": "bybit", "sync_status": "complete", "venue_account_id": "b-1"},
+        marked={"exchange": "bybit", "sync_status": "complete"},
+    )
+    _seed_holding(fake, API_KEY_ID_1, "bybit", "USDT", TODAY - timedelta(days=3), 500.0)
+    today_poll = _at(TODAY)
+    _seed_empty_proof(fake, API_KEY_ID_1, today_poll)
+    if member_finds_capital:
+        _seed_key_inputs(
+            fake, API_KEY_ID_2, today_poll + timedelta(minutes=45),
+            anchor_usd=200_000.0, anchor_null_reason=None,
+        )
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    metadata = _refresh_complete_metadata(audit)
+    if member_finds_capital:
+        assert _today_row(fake)["value_usd"] == pytest.approx(500.0)
+        assert metadata["emptied_accounts"] == 0
+        assert metadata["carried_keys"] == 1
+    else:
+        assert _today_row(fake)["value_usd"] == 0.0
+        assert metadata["reason"] == "book_emptied"
+        assert metadata["emptied_accounts"] == 1
