@@ -31,6 +31,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getStrategyDetail } from "@/lib/queries";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * Phase 169 (SC4, D-10, D-25) — where the factsheet's headline CAGR and Sharpe
@@ -176,6 +177,75 @@ describe("169 D-10 / SC4 — the single-key factsheet headline reads the persist
     const p = await headlineFor(row);
     expect(p.strategyMetrics.cagr).toBe(CLIENT.strategyMetrics.cagr);
     expect(p.strategyMetrics.sharpe).toBe(CLIENT.strategyMetrics.sharpe);
+  });
+
+  /**
+   * Review round 1, WR-01 / SFH M-1. The second gate needed a FINITE stored
+   * `cumulative_return`, so a rankable row whose stored value is null (Python
+   * `_safe_float` persists null for a non-finite value) fell back to the WHOLE
+   * TypeScript headline, CAGR and Sharpe included, while the lists show the
+   * stored ones: the SC4 split D-25 removes. The gate is now structural (the
+   * seven keys present); a null stored value renders "—" under the strict
+   * overlay, as the lists do, and the defect reaches Sentry.
+   */
+  it("WR-01: a rankable row with a null stored cumulative return still renders the stored CAGR and Sharpe", async () => {
+    vi.mocked(captureToSentry).mockClear();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const p = await headlineFor(analyticsRow({ cumulative_return: null }));
+      expect(p.strategyMetrics.sharpe, "fell back to the TypeScript Sharpe").toBe(1.5);
+      expect(p.strategyMetrics.cagr, "fell back to the TypeScript CAGR").toBe(0.12);
+      // NaN before the cache, null after it: the em-dash, never the TypeScript value.
+      expect(p.strategyMetrics.cum_ret).toBeNull();
+      // A rankable row storing no cumulative return is a data defect: captured once, at warning.
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toMatchObject({
+        level: "warning",
+        tags: { reason: "non_finite_cumulative_return", strategy_id: STRATEGY.id },
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("WR-01: a lone stored null Sortino is legitimate (no losing day) and captures nothing", async () => {
+    vi.mocked(captureToSentry).mockClear();
+    const p = await headlineFor(analyticsRow({ sortino: null }));
+    expect(p.strategyMetrics.sortino).toBeNull();
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+  });
+
+  it("WR-01: an unprojected headline is refused with its real cause, and the refusal reaches Sentry", async () => {
+    vi.mocked(captureToSentry).mockClear();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const row = analyticsRow();
+      delete row.sharpe;
+      delete row.calmar;
+      const p = await headlineFor(row);
+      expect(p.strategyMetrics.sharpe).toBe(CLIENT.strategyMetrics.sharpe);
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toMatchObject({
+        tags: { reason: "missing_keys", strategy_id: STRATEGY.id },
+        extra: { missing: ["sharpe", "calmar"] },
+      });
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("SFH M-1: a lingering raw cash_settlement object is declined with a warning naming the strategy", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const p = await headlineFor(analyticsRow({ metrics_json_by_basis: { cash_settlement: { sharpe: 9 } } }));
+      expect(p.strategyMetrics.sharpe).toBe(CLIENT.strategyMetrics.sharpe);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("cash_settlement"),
+        expect.objectContaining({ strategyId: STRATEGY.id }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("RESEARCH Pitfall 1: on a clean series the persisted cumulative return equals the chart endpoint", async () => {

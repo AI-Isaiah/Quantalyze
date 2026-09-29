@@ -5,6 +5,7 @@ import { MTM_DAILY_RETURNS_SERIES_KIND, SMOOTHED_MTM_DAILY_RETURNS_SERIES_KIND }
 import { deriveSegmentMarkers } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { BASIS_KPI_MAP, hasBasisHeadline } from "./basis-metrics";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { attributionBasisFromConfig } from "@/lib/composite/compositeAttribution";
 import { isComputedAnalytics, isRankableAnalyticsRow } from "@/lib/closed-sets";
 
@@ -667,12 +668,24 @@ export async function readSingleKeyBasisOpts(
  *   - the raw `metrics_json_by_basis` already carries a `cash_settlement` object: a
  *     lingering composite→single key (SC-4 in {@link singleKeyBasisOpts}). D-10 applies
  *     the persisted headline only where that key is absent, and the raw object itself
- *     is never threaded;
- *   - the row does not carry the headline structurally ({@link hasBasisHeadline}: all
- *     seven keys present and a finite `cumulative_return`). A caller whose select did
- *     not project the scalars would otherwise overlay seven em-dashes; it is logged.
- * A per-scalar null on a row that passes (`sortino` with no losing day) is kept, and
- * the strict overlay renders it "—", as the lists do.
+ *     is never threaded. It is warned with the strategy id (SFH M-1);
+ *   - the row does not carry the seven {@link BASIS_KPI_MAP} keys: a caller whose select
+ *     stopped projecting them would otherwise overlay seven em-dashes. That is a code
+ *     defect, so it is logged with `reason: "missing_keys"` and the missing keys, and
+ *     captured to Sentry (`console.*` does not reach Sentry in this repo).
+ *
+ * Review round 1 (WR-01 / SFH M-1): the gate is STRUCTURAL only. It used to be
+ * {@link hasBasisHeadline}, which also needs a finite `cumulative_return`, so a
+ * rankable row storing a null one (Python `_safe_float` persists null for a
+ * non-finite value) fell back to the whole TypeScript headline, CAGR and Sharpe
+ * included, while the lists show the stored values: the SC4 split D-25 removes. It
+ * logged that refusal with `missing: []`, naming nothing. Now a stored null renders
+ * "—" under the strict overlay, as the lists do; a rankable row storing no finite
+ * `cumulative_return` is a data defect and is warned and captured at `warning` with
+ * the non-finite keys. A lone null `sortino` / `calmar` (no losing day, no drawdown)
+ * is legitimate and is neither warned nor captured. The discovery detail page runs
+ * this per request (it is not cached), so a defective row captures on each of its
+ * views there until Phase 169.1 plan 169.1-01 moves that page onto the shared build.
  */
 function persistedCashHeadline(
   strategyId: string,
@@ -686,14 +699,41 @@ function persistedCashHeadline(
   }
   if (metricsJsonByBasis !== null && typeof metricsJsonByBasis === "object" && !Array.isArray(metricsJsonByBasis)) {
     const rawCash = (metricsJsonByBasis as Record<string, unknown>).cash_settlement;
-    if (rawCash !== null && typeof rawCash === "object" && !Array.isArray(rawCash)) return undefined;
+    if (rawCash !== null && typeof rawCash === "object" && !Array.isArray(rawCash)) {
+      console.warn(
+        "[factsheet] readSingleKeyBasisOpts — a single-key row carries a raw metrics_json_by_basis.cash_settlement object; keeping the computed headline",
+        { strategyId },
+      );
+      return undefined;
+    }
   }
-  if (!hasBasisHeadline(persistedRow)) {
-    console.warn(
-      "[factsheet] readSingleKeyBasisOpts — rankable row carries no persisted headline; keeping the computed one",
-      { strategyId, missing: BASIS_KPI_MAP.filter(({ serverKey }) => !(serverKey in persistedRow)).map((k) => k.serverKey) },
+  const missing = BASIS_KPI_MAP.filter(({ serverKey }) => !(serverKey in persistedRow)).map((k) => k.serverKey);
+  if (missing.length > 0) {
+    console.error(
+      "[factsheet] readSingleKeyBasisOpts — the analytics select did not project the persisted headline; keeping the computed one",
+      { strategyId, reason: "missing_keys", missing },
     );
+    captureToSentry(new Error("factsheet: persisted headline not projected (missing_keys)"), {
+      tags: { stage: "factsheet-persisted-headline", reason: "missing_keys", strategy_id: strategyId },
+      extra: { missing },
+    });
     return undefined;
+  }
+  const cumulativeReturn = persistedRow.cumulative_return;
+  if (typeof cumulativeReturn !== "number" || !Number.isFinite(cumulativeReturn)) {
+    const nonFinite = BASIS_KPI_MAP.filter(({ serverKey }) => {
+      const v = persistedRow[serverKey];
+      return typeof v !== "number" || !Number.isFinite(v);
+    }).map((k) => k.serverKey);
+    console.warn(
+      "[factsheet] readSingleKeyBasisOpts — a rankable row stores no finite cumulative_return; its headline renders the em-dash there",
+      { strategyId, reason: "non_finite_cumulative_return", computationStatus, nonFinite },
+    );
+    captureToSentry(new Error("factsheet: rankable row stores a non-finite cumulative_return"), {
+      level: "warning",
+      tags: { stage: "factsheet-persisted-headline", reason: "non_finite_cumulative_return", strategy_id: strategyId },
+      extra: { computationStatus, nonFinite },
+    });
   }
   // Review round 1 (IN-02): typed as it is, `number | null`, with no cast. A
   // persisted null (a stored Sortino with no losing day) stays null on purpose,
