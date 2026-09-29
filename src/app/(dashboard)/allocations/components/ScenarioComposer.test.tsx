@@ -17094,6 +17094,34 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
   });
 
+  // Review C2 SFH-11 (b). The producer emits only finite returns, so this is a
+  // guard on a broken contract. Before, a non-finite return was filtered out
+  // silently and the Sharpe and Sortino deltas were computed on fewer
+  // observations with nothing said. Now the own-book leg is absent (as for a
+  // book with no series) and the broken contract is logged.
+  it("ready + a non-finite persisted return: no own-book delta is built, and the broken contract is logged", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          equityDailyPoints: THREE_POINT_CURVE,
+          equityDailyReturns: [
+            { date: "2026-01-02", value: 0.01 },
+            { date: "2026-01-03", value: Number.NaN },
+            { date: "2026-01-04", value: -0.0148 },
+          ],
+          equityHistoryState: "ready",
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(lastChart().scenarioOwnBookDelta).toBeUndefined();
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain("non-finite own-book return");
+    errSpy.mockRestore();
+  });
+
   it("ready (regression guard): the own-book series and delta flow as before and no disclosure renders", () => {
     const payload = makePayload({
       equityDailyPoints: THREE_POINT_CURVE,
