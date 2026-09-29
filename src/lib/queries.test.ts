@@ -199,6 +199,8 @@ import {
   deriveStrategylessKeys,
   extractTrustworthyDerivedSeries,
   equityHistoryReadiness,
+  derivedPayloadRejection,
+  DERIVED_ROW_READ_FAILED,
 } from "./queries";
 import type { SupportedExchange } from "./utils";
 
@@ -1454,6 +1456,9 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     // allocation-helpers.equity-adapter.test.ts; this case pins the source stamp.
     expect(extractTrustworthyDerivedSeries(derivedRow(false).payload)).toBeNull();
     expect(result.equityHistoryState).toBe("rebuilding");
+    // Review C2 SFH-05: a PRESENT row the reader rejects is not "awaiting" a
+    // daily recompute. The writer already ran and said no.
+    expect(result.equityHistoryRebuildReason).toBe("derivation_rejected");
     expect(result.equityDailyPoints).toEqual([]);
     // computed_at is suppressed when the curve is not shown.
     expect(result.derivedCurveComputedAt).toBeNull();
@@ -1486,10 +1491,80 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     const result = callWith(row);
     expect(extractTrustworthyDerivedSeries(row.payload)).toBeNull();
     expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("derivation_rejected");
     expect(result.equityDailyPoints).toEqual([]);
     expect(result.equityDailyReturns).toEqual([]);
     // The curve itself is still well-formed, so the source stamp stays derived.
     expect(result.equityCurveSource).toBe("derived");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review C2 SFH-05 (reader half) / SFH-06 — a series that is missing for a
+// reason no daily job will fix is not "awaiting derivation".
+// ---------------------------------------------------------------------------
+describe("derived-row outcomes — the reason says why there is no series", () => {
+  const v2 = () => ({
+    version: 2,
+    is_trustworthy: true,
+    curve: [{ date: "2026-03-10", equity_usd: 100 }],
+    returns: [{ date: "2026-03-10", r: 0.01 }],
+  });
+  const callWith = (row: Parameters<typeof derivePhase07Fields>[5]) =>
+    derivePhase07Fields([], [], 0, [], false, row);
+
+  it("derivedPayloadRejection names the first thing the reader refuses, and null for an accepted row", () => {
+    expect(derivedPayloadRejection(v2())).toBeNull();
+    expect(derivedPayloadRejection({ ...v2(), version: 1 })).toBe("not_version_2");
+    expect(derivedPayloadRejection({ ...v2(), version: undefined })).toBe("not_version_2");
+    expect(derivedPayloadRejection({ ...v2(), is_trustworthy: false })).toBe("untrustworthy");
+    expect(derivedPayloadRejection({ ...v2(), returns: [] })).toBe("malformed");
+    expect(derivedPayloadRejection({ ...v2(), curve: [{ date: "x", equity_usd: 1 }] })).toBe(
+      "malformed",
+    );
+    expect(derivedPayloadRejection(null)).toBe("malformed");
+    expect(derivedPayloadRejection("not an object")).toBe("malformed");
+  });
+
+  it("no row is awaiting_derivation; a present row the reader rejects is derivation_rejected; a failed read is history_read_failed", () => {
+    expect(callWith(null).equityHistoryRebuildReason).toBe("awaiting_derivation");
+    for (const payload of [
+      { ...v2(), version: 1 },
+      { ...v2(), is_trustworthy: false },
+      { ...v2(), returns: [{ date: "2026-03-10", r: Number.NaN }] },
+    ]) {
+      const result = callWith({ payload, computed_at: null });
+      expect(result.equityHistoryState).toBe("rebuilding");
+      expect(result.equityHistoryRebuildReason).toBe("derivation_rejected");
+    }
+    const failed = callWith(DERIVED_ROW_READ_FAILED);
+    expect(failed.equityHistoryState).toBe("rebuilding");
+    expect(failed.equityHistoryRebuildReason).toBe("history_read_failed");
+    expect(failed.equityDailyPoints).toEqual([]);
+    expect(failed.equityCurveSource).toBe("legacy");
+    expect(failed.derivedCurveComputedAt).toBeNull();
+    // Positive control: the same builder with an accepted row is ready.
+    expect(callWith({ payload: v2(), computed_at: null }).equityHistoryState).toBe(
+      "ready",
+    );
+  });
+
+  it("a key-list reason still wins over a missing series, whatever the series outcome", () => {
+    const pendingKey = {
+      id: "k-1",
+      exchange: "okx",
+      is_active: true,
+      sync_status: null,
+      last_sync_at: null,
+      disconnected_at: null,
+      venue_account_id: null,
+      account_share_kind: null,
+      account_shared_with_api_key_id: null,
+    };
+    expect(
+      derivePhase07Fields([pendingKey], [], 0, [], false, DERIVED_ROW_READ_FAILED)
+        .equityHistoryRebuildReason,
+    ).toBe("account_identity_pending");
   });
 });
 

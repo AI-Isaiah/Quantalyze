@@ -55,6 +55,12 @@ const REASON_LINE: Record<
     "We are confirming which exchange account each key reads. Each daily sync checks it again.",
   awaiting_derivation:
     "Your history is recomputed from each account's returns and cash flows once a day.",
+  // Review C2 SFH-05 / SFH-06: a row the reader refused, or a read that
+  // failed, is not a wait on the daily recompute, so neither line names one.
+  derivation_rejected:
+    "The latest rebuild of your history did not pass its checks, so it is not shown.",
+  history_read_failed:
+    "Your history could not be loaded just now. Reload the page to try again.",
 };
 
 function ExchangesPageLink() {

@@ -364,6 +364,14 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       "awaiting_derivation",
       "Your history is recomputed from each account's returns and cash flows once a day.",
     ],
+    [
+      "derivation_rejected",
+      "The latest rebuild of your history did not pass its checks, so it is not shown.",
+    ],
+    [
+      "history_read_failed",
+      "Your history could not be loaded just now. Reload the page to try again.",
+    ],
   ] as const)("rebuilding reason %s renders its one line", (reason, line) => {
     render(
       <AllocationDashboardV2
