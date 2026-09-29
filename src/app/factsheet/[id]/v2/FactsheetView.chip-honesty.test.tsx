@@ -190,6 +190,22 @@ function readChip(container: HTMLElement): ChipRead {
   };
 }
 
+/**
+ * Phase 169 D-16: the chip's own "Computed <date>" line, which appears ONLY when
+ * the series arm binds (the date line then belongs to the track record, so the
+ * compute date moves here instead of being dropped). Absent ⇒ null.
+ */
+function computedLineText(container: HTMLElement): string | null {
+  const header = container.querySelector("header");
+  const labelRow = header?.querySelector('[class*="tracking-[0.18em]"]');
+  const root = labelRow?.parentElement;
+  if (!root) return null;
+  const p = Array.from(root.querySelectorAll("p")).find((el) =>
+    (el.textContent ?? "").startsWith("Computed "),
+  );
+  return p ? (p.textContent ?? "") : null;
+}
+
 /** The 162-07 recency line, queried by its copy — absent ⇒ null. */
 function recencyLineText(container: HTMLElement): string | null {
   const header = container.querySelector("header");
@@ -350,6 +366,8 @@ describe("FreshnessChip — the badge cannot outrun the data (HONEST-02)", () =>
     expect(chip.tone).toBe(MUTED);
     expect(chip.dateLine).toBe("N/A");
     expect(chip.dateLine).not.toContain("1970");
+    // 169 D-16 leaves this arm alone: no "Computed" line under "not yet".
+    expect(computedLineText(container)).toBeNull();
   });
 
   it("C-10: a FUTURE computedAt still reads 'future — check data', not fresh (NEW-C20-07)", () => {
@@ -398,22 +416,25 @@ describe("FreshnessChip — the badge cannot outrun the data (HONEST-02)", () =>
     expect(chip.dateLine).toBe("—");
   });
 
-  it("C-12: the date line still stamps the COMPUTE date — provenance was not traded away", () => {
-    // The cheap version of this fix is to point the chip's date line at the
-    // series end. It would be self-consistent and it would cost the surface
-    // the one date only this line carries (DESIGN.md: a dated document; a
-    // metric with no provenance fails the print test), while duplicating the
-    // sentence directly below it. So: the eyebrow names the track record, the
-    // date line stamps the compute, and the line names the series end.
+  it("C-12: under 'Track record' the date line is the SERIES END, and the compute date keeps its own 'Computed' line (169 D-16)", () => {
+    // ⛔ This case pinned the OPPOSITE until Phase 169: "the date line still
+    // stamps the COMPUTE date". That kept provenance but made the chip say two
+    // things at once: an eyebrow about the TRACK RECORD over a date that was
+    // the JOB's, so "Track record · old" sat over a date an hour old. D-16
+    // (2026-09-25) binds the date line to the eyebrow's subject and keeps the
+    // provenance C-12 protected on a line that names it, so nothing is traded
+    // away: every date on the chip now says what it is a date of.
     const computedAt = isoHoursAgo(1);
     const { container } = renderFactsheet(payloadWith(89, computedAt));
 
     const chip = readChip(container);
     expect(chip.label).toBe("Track record · old");
-    // Expected string built by this file's own formatter, never the component's.
-    expect(chip.dateLine).toBe(`${usDate(computedAt)}(0d)`);
-    // …and it is NOT the series end, which the line below owns.
-    expect(chip.dateLine).not.toContain(usDate(ymdDaysAgo(89)));
+    // Expected strings built by this file's own formatter, never the component's.
+    expect(chip.dateLine).toBe(`${usDate(ymdDaysAgo(89))}(89d)`);
+    expect(chip.dateLine).not.toContain(usDate(computedAt));
+    // Provenance survives, labelled.
+    expect(computedLineText(container)).toBe(`Computed ${usDate(computedAt)}`);
+    // The recency line below is unchanged.
     expect(recencyLineText(container)).toBe(`Track record through ${usDate(ymdDaysAgo(89))}`);
   });
 
@@ -461,5 +482,74 @@ describe("FreshnessChip — the badge cannot outrun the data (HONEST-02)", () =>
     expect(chip.label).toBe("Track record · future — check data");
     expect(chip.tone).toBe(MUTED);
     expect(chip.tone).not.toBe(POSITIVE);
+  });
+});
+
+/**
+ * Phase 169 D-16 (SC5) — the chip's date line states the fact its subject names.
+ *
+ * WHY: the eyebrow switches its subject to "Track record" when the series end is
+ * the staler fact (HONEST-02). Printing the COMPUTE date under that subject told
+ * an allocator "track record: old" beside a date from this morning, which reads
+ * as a contradiction or, worse, as a recent track record. The date line now
+ * belongs to the subject; the compute date moves to a line labelled "Computed".
+ * The 3d / 7d ladder is untouched (no new threshold, no new tone).
+ */
+describe("FreshnessChip — the date line belongs to the subject (169 D-16)", () => {
+  it("D16-1: series 120 days old under a day-old job: the date line is the series end and its age, and the compute date is on its own line", () => {
+    const computedAt = isoHoursAgo(24);
+    const { container } = renderFactsheet(payloadWith(120, computedAt));
+
+    const chip = readChip(container);
+    expect(chip.label).toBe("Track record · old");
+    expect(chip.dateLine).toBe(`${usDate(ymdDaysAgo(120))}(120d)`);
+    expect(chip.dateLine).not.toContain(usDate(computedAt));
+    expect(computedLineText(container)).toBe(`Computed ${usDate(computedAt)}`);
+  });
+
+  it("D16-2: when the JOB binds, the chip renders exactly as before: the compute date, and no extra line", () => {
+    // The control that makes D16-1 falsifiable: an implementation that always
+    // prints the series end, or always adds the "Computed" line, fails here.
+    const computedAt = isoHoursAgo(24);
+    const { container } = renderFactsheet(payloadWith(1, computedAt));
+
+    const chip = readChip(container);
+    expect(chip.label).toBe("Computed · fresh");
+    expect(chip.dateLine).toBe(`${usDate(computedAt)}(1d)`);
+    expect(computedLineText(container)).toBeNull();
+  });
+
+  it("D16-3: the chip and the recency line print the SAME series-end date (one derivation)", () => {
+    const { container } = renderFactsheet(payloadWith(120, isoHoursAgo(24)));
+
+    const chipDate = readChip(container).dateLine.replace(/\(\d+d\)$/, "");
+    const line = recencyLineText(container);
+    expect(line).not.toBeNull();
+    // Both read out of the DOM; neither is produced by the component's formatter.
+    expect(chipDate).toBe(line!.slice("Track record through ".length));
+  });
+
+  it("D16-4: an UNKNOWN series end under 'Track record' prints the em dash, never the compute date", () => {
+    // The unknown arm binds too (unknown ranks above fresh). There is no series
+    // end to print, and printing the compute date would be exactly the
+    // contradiction D-16 removes, so the date line says "—", as the chip
+    // already does for an unreadable computedAt (C-11). Provenance keeps its line.
+    const computedAt = isoHoursAgo(1);
+    const { container } = renderFactsheet(emptySeriesPayload(computedAt));
+
+    const chip = readChip(container);
+    expect(chip.label).toBe("Track record · —");
+    expect(chip.dateLine).toBe("—");
+    expect(computedLineText(container)).toBe(`Computed ${usDate(computedAt)}`);
+  });
+
+  it("D16-5: a FUTURE series end prints its date with no negative age, and the compute date on its own line", () => {
+    const computedAt = isoHoursAgo(2);
+    const { container } = renderFactsheet(payloadWith(-3, computedAt));
+
+    const chip = readChip(container);
+    expect(chip.label).toBe("Track record · future — check data");
+    expect(chip.dateLine).toBe(usDate(ymdDaysAgo(-3)));
+    expect(computedLineText(container)).toBe(`Computed ${usDate(computedAt)}`);
   });
 });
