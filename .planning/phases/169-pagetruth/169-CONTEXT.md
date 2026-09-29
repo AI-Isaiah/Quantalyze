@@ -166,6 +166,16 @@ call the research left to the plan.
   Otherwise the value is `null` (em-dash).
 - `compute()` gains `p3y` and `p5y` under this rule (plan 06), so plan 07 deletes `periodReturn`
   rather than rewriting it. 3Y is 3x365 calendar days, never 3x252 observations.
+- **D-11 amended 2026-09-29 (review fix T2, WR-02; the first bullet above is kept as lineage):** "on
+  or before C plus one day" hid a covered window on a weekday venue whose record starts on the first
+  session after a weekend or a closed 1 January (YTD read the em-dash for the whole of a launch year
+  that began on 2 January). The rule is now: a window counts as covered when every UTC day strictly
+  between its cutoff and the record's first date is a non-trading day for that venue. On the weekday
+  basis (`periodsPerYear === 252`) the non-trading days are Saturday, Sunday, 1 January and
+  25 December (UTC). On the 7-day basis (365, crypto) no day is non-trading, so the rule is unchanged,
+  byte for byte, as "C plus one day". It never re-admits a window missing a session the venue traded;
+  any other holiday fails safe as the em-dash. Implemented in `compute.ts` (commit `a592a3f14`); the
+  rule chosen, the two rejected alternatives and the known limits are in `169-REVIEW-FIX-T2.md` WR-02.
 - **Reversibility:** reversible.
 
 ### D-12: Record length is stated one way (planner, 2026-09-25)
@@ -977,6 +987,18 @@ call the research left to the plan.
   169-02's `["factsheet-v2-payload-v7", id]` key pin with 167.2.1's three-part `keyParts`
   (`computed_at` added) and move 167.2.1's own KEY SHAPE test from v6 to v7. (d) D-14: no migration.
   D-25: no figure is recomputed; this changes caching, never a number.
+- **D-41 amended 2026-09-29 (review fixes T3 and T5; SFH H-3; the Decision sentence "catches the same
+  class and keeps its placeholder until 169.1-01 removes its assembly" is kept as lineage):** the
+  discovery detail page no longer keeps the KCS-10 placeholder on this outage, and no longer logs it
+  to the console only. It captures the outage to Sentry once (tags `route`, `stage`, `reason:
+  read_error`, `code`, `strategy_id`, `read`; the reader's own error, so the PostgREST message rides
+  as `cause`) and shows a read-failure line, "We could not load this strategy's factsheet right now.
+  Reload this page to try again." (T3, commit `2f1daac40`). Since T5 its single-key arm catches the
+  same class the same way: after T1 (WR-05 / M-3) `readSingleKeyBasisOpts` throws it on a failed MTM,
+  smoothed MTM or stored cash series read, and the `read` tag is the error's own discriminant on both
+  arms. Only that class is caught; any other throw stays the error boundary's. The public v2 lane is
+  unchanged: it still renders KCS-10 on `read_error`, so the two surfaces word an outage differently
+  on purpose. 169.1-01 still removes this page's assembly.
 - **Note 2026-09-26 (D-42) on (c):** D-22's named owner ("the 169 PR 1 ship step") is retired; the rebase and
   its reconciliation are owned by plan 169-08 (wave 4), and 169-07 moves to wave 5 after it.
 - **Reversibility:** reversible (one exported error class, one catch in each of two callers).
