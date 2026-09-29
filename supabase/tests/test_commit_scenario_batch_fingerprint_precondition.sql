@@ -25,8 +25,9 @@
 --      holdings committing a voluntary_add).
 --
 -- The fingerprint token format mirrors computeHoldingsFingerprint (scenario-state.ts):
--- "symbol:venue:holding_type" (symbol-first), "|"-joined, latest-asof-per-triple,
--- no value filter. Run order: AFTER 20260601120000 has been applied. BEGIN/ROLLBACK
+-- "symbol:venue:holding_type" (symbol-first), "|"-joined, no value filter, over
+-- the rows the My Allocation reader shows (tests 10-14). Run order: AFTER
+-- 20260929120000 has been applied (tests 1-9 need only 20260601120000). BEGIN/ROLLBACK
 -- so seed data does not leak. JWT-claims scaffolding (forge request.jwt.claims.sub)
 -- as in test_commit_scenario_batch_p1957_divested.sql.
 
