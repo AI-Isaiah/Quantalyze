@@ -43,7 +43,6 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     flaggedHoldings = [],
     equityDailyPoints,
     activeVenues = [],
-    snapshotCount,
     // NEW-C09-04 (B14, audit-2026-05-07): the payload already carries the
     // sync-freshness signal — `allKeysStale` is true when every active
     // api_key's `last_sync_at` is older than 24h, and `lastSyncAt` is the
@@ -225,7 +224,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       ) : (
         <>
           {equitySlot}
-          <FactsheetWarmupNote snapshotCount={snapshotCount} />
+          <FactsheetWarmupNote curveDays={equityDailyPoints.length} />
         </>
       )}
     </div>
@@ -252,8 +251,13 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
  * true then; the promise is a floor, never an early date.
  * `AllocationDashboardV2.warmup.test.tsx` measures the count against the real
  * builder, so a change to its threshold fails there.
+ *
+ * Review C3 IN-01: the count line counts the days of the curve drawn above
+ * the note, in the same unit as the threshold. It used to count legacy
+ * `allocator_equity_snapshots` rows, which since plan 11 have no relation to
+ * the derived curve on screen.
  */
-function FactsheetWarmupNote({ snapshotCount }: { snapshotCount: number }) {
+function FactsheetWarmupNote({ curveDays }: { curveDays: number }) {
   return (
     <div
       role="status"
@@ -268,9 +272,10 @@ function FactsheetWarmupNote({ snapshotCount }: { snapshotCount: number }) {
         blended equity history are available. The data flows from
         the API keys you connect on the My Allocation page.
       </p>
-      {snapshotCount > 0 && snapshotCount < 2 && (
+      {curveDays > 0 && (
         <p className="mt-2 text-fixed-11 text-text-muted">
-          {snapshotCount} snapshot recorded so far.
+          {curveDays} {curveDays === 1 ? "day" : "days"} of blended equity
+          history so far.
         </p>
       )}
     </div>

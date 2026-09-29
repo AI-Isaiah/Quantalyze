@@ -173,4 +173,27 @@ describe("AllocationDashboardV2: the ready-branch warm-up note follows the real 
       `Aggregated factsheet panels appear once at least ${word} days of blended equity history are available.`,
     );
   });
+
+  // Review C3 IN-01: the note's count line described `snapshotCount`, the
+  // LEGACY allocator_equity_snapshots row count, beside the DERIVED curve drawn
+  // above it. The two are unrelated since plan 11, so a two-day curve read
+  // "1 snapshot recorded so far" or nothing at all. The count now reads the
+  // curve on screen, in the same unit as the threshold above it.
+  it.each([0, 1, 60])(
+    "a ready 2-day curve beside %i legacy snapshots: the note counts the 2 curve days, never the snapshots",
+    (snapshotCount) => {
+      const shape = readyShape(2);
+      expect(builderOutput(shape)).toBeNull();
+      render(
+        <AllocationDashboardV2
+          {...baseProps}
+          {...shape}
+          snapshotCount={snapshotCount}
+        />,
+      );
+      const note = screen.getByTestId("overview-factsheet-warmup");
+      expect(note.textContent).toContain("2 days of blended equity history so far.");
+      expect(note.textContent).not.toMatch(/snapshot/);
+    },
+  );
 });
