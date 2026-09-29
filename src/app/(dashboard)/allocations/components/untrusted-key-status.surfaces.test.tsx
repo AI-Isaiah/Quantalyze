@@ -408,8 +408,11 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
         ]}
       />,
     );
+    // 169 review round 2 IN-R2-05 / SFH R2-5: a part whose every row is unavailable has
+    // no known amount (the 0 is the sum of nothing), so it names its count, never
+    // "$0". The "(… unavailable for N …)" count is unchanged.
     expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
-      "Includes $0.00 from keys needing attention (P&L unavailable for 1 position).",
+      "Includes 1 position from keys needing attention (P&L unavailable for 1 position).",
     );
   });
 
@@ -566,8 +569,11 @@ describe("[167.1 R2 WR-05] a holding whose key is missing from the key list", ()
         ]}
       />,
     );
+    // 169 review round 2 IN-R2-05 / SFH R2-5: a part whose every row is unavailable has
+    // no known amount (the 0 is the sum of nothing), so it names its count, never
+    // "$0". The "(… unavailable for N …)" count is unchanged.
     expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
-      "Includes +$300.00 from keys needing attention and $0.00 from keys with an unknown sync status (P&L unavailable for 1 position).",
+      "Includes +$300.00 from keys needing attention and 1 position from keys with an unknown sync status (P&L unavailable for 1 position).",
     );
   });
 
