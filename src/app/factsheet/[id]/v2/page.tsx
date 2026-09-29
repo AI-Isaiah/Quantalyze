@@ -172,7 +172,17 @@ function buildFactsheetPayloadCached(
     // but the VALUES are not. A ratio that does not exist (Sharpe, Sortino,
     // Calmar, a peer rank) is now NaN, "—", where a v6 entry holds a fabricated
     // 0; bumping serves the fix at deploy instead of after the 1h TTL drain.
-    ["factsheet-v2-payload-v7", id, computedAt],
+    // Bumped v7→v8 (Phase 169 FACTSHEETTRUTH, 169 D-62, 2026-09-27): the shape
+    // AND the values change. 169-04: the MTD / YTD / 3M / 6M / 1Y windows are
+    // nullable (a window the record does not cover is null) and `p3y` / `p5y`
+    // are added; 169-01: the single-key headline reads the persisted analytics
+    // scalars instead of the TypeScript recompute. A v7 entry lacks `p3y` /
+    // `p5y`, and 169-05's row gates omit a null row, so serving one would HIDE
+    // correct 3 Year / 5 Year rows on a long record: a wrong page, not an old
+    // figure. `revalidate` and the admin route's tag bust are both
+    // stale-while-revalidate, so only a key move stops a pre-deploy entry being
+    // served after the deploy. Phase 169.5 moves the key again (169.5-01).
+    ["factsheet-v2-payload-v8", id, computedAt],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
