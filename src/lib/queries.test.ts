@@ -197,7 +197,10 @@ import {
   derivePhase07Fields,
   deriveStrategyLinkedKeyIds,
   deriveStrategylessKeys,
-  extractTrustworthyDerivedCurve,
+  extractTrustworthyDerivedSeries,
+  equityHistoryReadiness,
+  derivedPayloadRejection,
+  DERIVED_ROW_READ_FAILED,
 } from "./queries";
 import type { SupportedExchange } from "./utils";
 
@@ -1368,7 +1371,7 @@ describe("getStrategyDetailV2 — METRICS-15 path-extraction perf contract", () 
 // The two cases feed a BYTE-IDENTICAL derived curve differing ONLY in the
 // persisted `is_trustworthy` flag, so the flip is attributable to that flag
 // alone. Deleting the `is_trustworthy !== true` guard in
-// extractTrustworthyDerivedCurve would make the FAIL case render 'derived' —
+// trustworthyDerivedCurve would make the FAIL case render 'derived' —
 // neuter-proof.
 // ---------------------------------------------------------------------------
 describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLIPRETRY-03)", () => {
@@ -1433,29 +1436,498 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     // history is rebuilt, so it is [] here. What it WOULD show (the payload
     // mapped DIRECTLY, no snapshot forward-fill) is pinned on the extractor the
     // producer calls (review round 1 SFH-04), so this case still bites.
-    expect(extractTrustworthyDerivedCurve(derivedRow(true).payload)).toEqual(
-      DERIVED_CURVE.map((p) => ({ date: p.date, value: p.equity_usd })),
-    );
+    // Plan 11: this fixture has no version and no returns, so it is not the
+    // display series. The source stamp above is what still proves the curve gate.
+    expect(extractTrustworthyDerivedSeries(derivedRow(true).payload)).toBeNull();
     expect(result.equityHistoryState).toBe("rebuilding");
     expect(result.equityDailyPoints).toEqual([]);
+    expect(result.equityDailyReturns).toEqual([]);
     expect(result.derivedCurveComputedAt).toBe(COMPUTED_AT);
   });
 
   it("FAIL: the BYTE-IDENTICAL curve with is_trustworthy=false renders 'legacy' and falls back to the snapshot render", () => {
-    const result = callWith(derivedRow(false));
+    // Review C2 round 2 R2-CR-03: version 2, so this arm really exercises the
+    // writer's untrustworthy verdict. A row with no version is pre-v2, which
+    // reads `awaiting_derivation` (see the version-1 case below).
+    const row = derivedRow(false);
+    row.payload.version = 2;
+    const result = callWith(row);
 
     expect(result.equityCurveSource).toBe("legacy");
     // Phase 167.1.2 / D-02: the producer withholds the display series while the
     // history is rebuilt, so it is [] here. The trust gate's verdict on this
     // byte-identical curve is pinned on the extractor (review round 1 SFH-04).
-    // The legacy render's CONTENT is not observable while hidden; it is pinned
-    // in allocation-helpers.equity-adapter.test.ts and retires with the legacy
-    // branch in plan 11.
-    expect(extractTrustworthyDerivedCurve(derivedRow(false).payload)).toBeNull();
+    // Plan 11 removed the snapshot display fallback. The curve content lives in
+    // allocation-helpers.equity-adapter.test.ts; this case pins the source stamp.
+    expect(extractTrustworthyDerivedSeries(derivedRow(false).payload)).toBeNull();
     expect(result.equityHistoryState).toBe("rebuilding");
+    // Review C2 SFH-05: a PRESENT v2 row the writer marked untrustworthy is not
+    // "awaiting" a daily recompute. The writer already ran and said no.
+    expect(result.equityHistoryRebuildReason).toBe("derivation_rejected");
     expect(result.equityDailyPoints).toEqual([]);
     // computed_at is suppressed when the curve is not shown.
     expect(result.derivedCurveComputedAt).toBeNull();
+  });
+
+  it("a version-2 row with well-formed returns is ready and the factsheet series is those returns", () => {
+    const returns = [
+      { date: "2026-03-11", r: 0.01 },
+      { date: "2026-03-12", r: -0.004 },
+    ];
+    const row = derivedRow(true);
+    row.payload.version = 2;
+    row.payload.returns = returns;
+    const result = callWith(row);
+    const series = extractTrustworthyDerivedSeries(row.payload);
+    expect(series).toEqual({
+      curve: DERIVED_CURVE.map((p) => ({ date: p.date, value: p.equity_usd })),
+      returns: returns.map((p) => ({ date: p.date, value: p.r })),
+    });
+    expect(result.equityHistoryState).toBe("ready");
+    expect(result.equityDailyPoints).toEqual(series!.curve);
+    expect(result.equityDailyReturns).toEqual(series!.returns);
+    expect(result.equityCurveSource).toBe("derived");
+  });
+
+  it("a version-1 trustworthy curve stays rebuilding (the display series requires version 2)", () => {
+    const row = derivedRow(true);
+    row.payload.version = 1;
+    row.payload.returns = [{ date: "2026-03-11", r: 0.01 }];
+    const result = callWith(row);
+    expect(extractTrustworthyDerivedSeries(row.payload)).toBeNull();
+    expect(result.equityHistoryState).toBe("rebuilding");
+    // Review C2 round 2 R2-CR-03: the daily compose rewrites a pre-v2 row as
+    // v2, so the daily-recompute line is the true one for it.
+    expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
+    expect(result.equityDailyPoints).toEqual([]);
+    expect(result.equityDailyReturns).toEqual([]);
+    // The curve itself is still well-formed, so the source stamp stays derived.
+    expect(result.equityCurveSource).toBe("derived");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review C2 SFH-05 (reader half) / SFH-06 — a series that is missing for a
+// reason no daily job will fix is not "awaiting derivation".
+// ---------------------------------------------------------------------------
+describe("derived-row outcomes — the reason says why there is no series", () => {
+  const v2 = () => ({
+    version: 2,
+    is_trustworthy: true,
+    curve: [{ date: "2026-03-10", equity_usd: 100 }],
+    returns: [{ date: "2026-03-10", r: 0.01 }],
+  });
+  const callWith = (row: Parameters<typeof derivePhase07Fields>[5]) =>
+    derivePhase07Fields([], [], 0, [], false, row);
+
+  it("derivedPayloadRejection names the first thing the reader refuses, and null for an accepted row", () => {
+    expect(derivedPayloadRejection(v2())).toBeNull();
+    expect(derivedPayloadRejection({ ...v2(), version: 1 })).toBe("not_version_2");
+    expect(derivedPayloadRejection({ ...v2(), version: undefined })).toBe("not_version_2");
+    expect(derivedPayloadRejection({ ...v2(), is_trustworthy: false })).toBe("untrustworthy");
+    expect(derivedPayloadRejection({ ...v2(), returns: [] })).toBe("malformed");
+    expect(derivedPayloadRejection({ ...v2(), curve: [{ date: "x", equity_usd: 1 }] })).toBe(
+      "malformed",
+    );
+    expect(derivedPayloadRejection(null)).toBe("malformed");
+    expect(derivedPayloadRejection("not an object")).toBe("malformed");
+  });
+
+  it("no row or a pre-v2 row is awaiting_derivation; a v2 row the reader rejects is derivation_rejected; a failed read is history_read_failed", () => {
+    expect(callWith(null).equityHistoryRebuildReason).toBe("awaiting_derivation");
+    // Review C2 round 2 R2-CR-03: a pre-v2 row (every row written before C2)
+    // is rewritten as v2 by the daily compose, so it is a wait, not a refusal.
+    // An untrustworthy pre-v2 row is still pre-v2: the version is read first.
+    for (const payload of [
+      { ...v2(), version: 1 },
+      { ...v2(), version: undefined },
+      { ...v2(), version: 1, is_trustworthy: false },
+    ]) {
+      const result = callWith({ payload, computed_at: null });
+      expect(result.equityHistoryState).toBe("rebuilding");
+      expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
+    }
+    for (const payload of [
+      { ...v2(), is_trustworthy: false },
+      { ...v2(), returns: [{ date: "2026-03-10", r: Number.NaN }] },
+    ]) {
+      const result = callWith({ payload, computed_at: null });
+      expect(result.equityHistoryState).toBe("rebuilding");
+      expect(result.equityHistoryRebuildReason).toBe("derivation_rejected");
+    }
+    const failed = callWith(DERIVED_ROW_READ_FAILED);
+    expect(failed.equityHistoryState).toBe("rebuilding");
+    expect(failed.equityHistoryRebuildReason).toBe("history_read_failed");
+    expect(failed.equityDailyPoints).toEqual([]);
+    expect(failed.equityCurveSource).toBe("legacy");
+    expect(failed.derivedCurveComputedAt).toBeNull();
+    // Positive control: the same builder with an accepted row is ready.
+    expect(callWith({ payload: v2(), computed_at: null }).equityHistoryState).toBe(
+      "ready",
+    );
+  });
+
+  // Review C2 round 3 R3-WR-03 / SFH-R3-04. Two blocking writer verdicts have
+  // an unlock the owner can act on or a cause the owner can be told, so the
+  // reader names them rather than "did not pass its checks". The tokens are
+  // read from the payload's `degrade_reasons` (where job_worker writes them),
+  // never from `flags` (where round 1's benign flag of the same name lived).
+  it("R3-WR-03: an untrustworthy v2 row names its shared-account cause from degrade_reasons", () => {
+    const untrusted = (degrade_reasons: unknown, extra: Record<string, unknown> = {}) =>
+      callWith({
+        payload: { ...v2(), is_trustworthy: false, degrade_reasons, ...extra },
+        computed_at: null,
+      }).equityHistoryRebuildReason;
+    expect(untrusted(["shared_account_no_working_key"])).toBe(
+      "shared_account_no_working_key",
+    );
+    expect(untrusted(["shared_account_history_truncated"])).toBe(
+      "shared_account_history_truncated",
+    );
+    // Both present: the one the owner can act on wins. The writer sorts the
+    // tokens, so "history_truncated" comes first; order must not decide.
+    expect(
+      untrusted(["shared_account_history_truncated", "shared_account_no_working_key"]),
+    ).toBe("shared_account_no_working_key");
+    // Alongside another blocker the named cause still wins.
+    expect(untrusted(["dropped_key", "shared_account_no_working_key"])).toBe(
+      "shared_account_no_working_key",
+    );
+    // Fallbacks: any other blocker, no tokens, a non-array, and the token in
+    // `flags` only all keep the generic line.
+    expect(untrusted(["dropped_key"])).toBe("derivation_rejected");
+    expect(untrusted([])).toBe("derivation_rejected");
+    expect(untrusted("shared_account_no_working_key")).toBe("derivation_rejected");
+    expect(untrusted([], { flags: ["shared_account_no_working_key"] })).toBe(
+      "derivation_rejected",
+    );
+    // Only the writer's untrustworthy verdict is read this way: a pre-v2 row
+    // waits, and a malformed v2 row stays derivation_rejected.
+    expect(
+      callWith({
+        payload: {
+          ...v2(),
+          version: 1,
+          is_trustworthy: false,
+          degrade_reasons: ["shared_account_no_working_key"],
+        },
+        computed_at: null,
+      }).equityHistoryRebuildReason,
+    ).toBe("awaiting_derivation");
+    expect(
+      callWith({
+        payload: {
+          ...v2(),
+          returns: [],
+          degrade_reasons: ["shared_account_no_working_key"],
+        },
+        computed_at: null,
+      }).equityHistoryRebuildReason,
+    ).toBe("derivation_rejected");
+  });
+
+  it("a key-list reason still wins over a missing series, whatever the series outcome", () => {
+    const pendingKey = {
+      id: "k-1",
+      exchange: "okx",
+      is_active: true,
+      sync_status: null,
+      last_sync_at: null,
+      disconnected_at: null,
+      venue_account_id: null,
+      account_share_kind: null,
+      account_shared_with_api_key_id: null,
+    };
+    expect(
+      derivePhase07Fields([pendingKey], [], 0, [], false, DERIVED_ROW_READ_FAILED)
+        .equityHistoryRebuildReason,
+    ).toBe("account_identity_pending");
+  });
+});
+
+describe("equityHistoryReadiness — plan 11 ready condition", () => {
+  const series = {
+    curve: [{ date: "2026-03-10", value: 100 }],
+    returns: [{ date: "2026-03-11", value: 0.01 }],
+  };
+  // derivePhase07Fields' key type is a superset of equityHistoryReadiness',
+  // so one builder serves both.
+  type Key = Parameters<typeof derivePhase07Fields>[0][number];
+  const key = (over: Partial<Key> = {}): Key => ({
+    id: "k-live",
+    exchange: "binance",
+    is_active: true,
+    sync_status: "ok",
+    last_sync_at: null,
+    disconnected_at: null,
+    venue_account_id: "acct-1",
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+    ...over,
+  });
+  const holderKey = (over: Partial<Key> = {}): Key =>
+    key({
+      id: "k-holder",
+      venue_account_id: "acct-holder",
+      ...over,
+    });
+
+  it("a v2 series and one identified key is ready, reason null", () => {
+    expect(equityHistoryReadiness([key()], series)).toEqual({
+      state: "ready",
+      reason: null,
+    });
+  });
+
+  it("a duplicate of a working holder is not ready, even with a v2 series", () => {
+    const marked = key({
+      id: "k-dup",
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    expect(equityHistoryReadiness([holderKey(), marked], series)).toEqual({
+      state: "rebuilding",
+      reason: "duplicate_account",
+    });
+  });
+
+  // Review C2 CR-02 / SFH-04 / WR-05. The shape production writes: the stamper
+  // marks the second key and leaves ITS venue_account_id NULL, because a live
+  // holder (disconnected_at IS NULL, whatever its status) keeps the partial
+  // unique index slot. The holder carries the shared id. The fixture this
+  // replaced gave the two keys two different ids, a state that cannot occur,
+  // and passed only because of it.
+  it("a duplicate whose holder is live but not working counts on its own: its account is the holder's, so it is identity-known", () => {
+    const marked = key({
+      id: "k-dup",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    for (const notWorking of [
+      holderKey({ venue_account_id: "acct-shared", is_active: false }),
+      holderKey({ venue_account_id: "acct-shared", sync_status: "revoked" }),
+      holderKey({ venue_account_id: "acct-shared", sync_status: "error" }),
+      holderKey({ venue_account_id: "acct-shared", sync_status: "sign_in_failed" }),
+    ]) {
+      expect(equityHistoryReadiness([notWorking, marked], series)).toEqual({
+        state: "ready",
+        reason: null,
+      });
+    }
+  });
+
+  it("a duplicate whose holder is disconnected counts on its own (the holder left the slot; the account is still the holder's)", () => {
+    const marked = key({
+      id: "k-dup",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    const departed = holderKey({
+      venue_account_id: "acct-shared",
+      disconnected_at: "2026-03-01T00:00:00Z",
+    });
+    expect(equityHistoryReadiness([departed, marked], series)).toEqual({
+      state: "ready",
+      reason: null,
+    });
+  });
+
+  it("a marked duplicate stays identity-pending when the key list cannot name its account: holder absent, or holder with no id", () => {
+    const marked = key({
+      id: "k-dup",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    // Holder not in the list: nothing here says which account the key reads.
+    expect(equityHistoryReadiness([marked], series).reason).toBe(
+      "account_identity_pending",
+    );
+    // Holder present, not working, but with no id of its own.
+    expect(
+      equityHistoryReadiness(
+        [holderKey({ venue_account_id: null, is_active: false }), marked],
+        series,
+      ).reason,
+    ).toBe("account_identity_pending");
+  });
+
+  it("a still-eligible failing holder and its healthy duplicate block nothing on identity: the writer counts the account once (fixer contract), so the reader waits only on the series", () => {
+    // `error` and `sign_in_failed` keep a holder ELIGIBLE, so it is itself a
+    // key the derive sees. The reader cannot see how the writer resolved the
+    // pair; it relies on the writer counting the account once, through the
+    // working member (CR-01 holder-drop half). With no v2 series the book
+    // stays rebuilding for the series reason, never for identity.
+    const marked = key({
+      id: "k-dup",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    const failingHolder = holderKey({
+      venue_account_id: "acct-shared",
+      sync_status: "error",
+    });
+    expect(equityHistoryReadiness([failingHolder, marked], null)).toEqual({
+      state: "rebuilding",
+      reason: "awaiting_derivation",
+    });
+  });
+
+  it("an eligible ccxt key with no account id is identity-pending; a blank id is not an id", () => {
+    expect(
+      equityHistoryReadiness([key({ venue_account_id: null })], series).reason,
+    ).toBe("account_identity_pending");
+    expect(
+      equityHistoryReadiness([key({ venue_account_id: "  " })], series).reason,
+    ).toBe("account_identity_pending");
+  });
+
+  // Review C2 WR-02. The stamper runs only after a SUCCESSFUL poll, so an
+  // eligible ccxt key in `error` or `sign_in_failed` with no id is never
+  // stamped while it fails. The hold stays (its account really is unknown, and
+  // the derive still counts it), but the reason must not promise a sync that
+  // cannot happen: it names the failing key instead.
+  it("an eligible ccxt key with no id that is failing to sync is key_not_syncing, not identity-pending", () => {
+    for (const status of ["error", "sign_in_failed"]) {
+      expect(
+        equityHistoryReadiness(
+          [key({ venue_account_id: null, sync_status: status })],
+          series,
+        ),
+      ).toEqual({ state: "rebuilding", reason: "key_not_syncing" });
+    }
+    // A working key with no id is still the ordinary pending case.
+    expect(
+      equityHistoryReadiness(
+        [key({ venue_account_id: null, sync_status: null })],
+        series,
+      ).reason,
+    ).toBe("account_identity_pending");
+    // One failing and one working key, both unstamped: the failing key is the
+    // one the owner can act on, so it is named.
+    expect(
+      equityHistoryReadiness(
+        [
+          key({ id: "k-ok", venue_account_id: null }),
+          key({ id: "k-bad", venue_account_id: null, sync_status: "error" }),
+        ],
+        series,
+      ).reason,
+    ).toBe("key_not_syncing");
+    // A failing key whose account IS known does not block on identity.
+    expect(
+      equityHistoryReadiness([key({ sync_status: "error" })], series),
+    ).toEqual({ state: "ready", reason: null });
+  });
+
+  // Review C2 round 2 IN-04. The key_not_syncing line names the key when there
+  // is exactly one, so the producer hands the renderer the ids of the keys that
+  // reason is about: eligible, account unknown, failing to sync. Nothing else,
+  // and nothing at all under any other reason, so the line can never name a
+  // key the hold is not about.
+  it("IN-04: the producer lists the failing identity-pending keys, and only under key_not_syncing", () => {
+    const call = (keys: Key[]) => derivePhase07Fields(keys, [], 0, [], false, null);
+    const one = call([
+      key({ id: "k-bad", venue_account_id: null, sync_status: "error" }),
+    ]);
+    expect(one.equityHistoryRebuildReason).toBe("key_not_syncing");
+    expect(one.equityHistoryNotSyncingKeyIds).toEqual(["k-bad"]);
+    // A working unstamped key is pending but not failing, and a failing key
+    // whose account is known holds nothing: neither is listed.
+    const mixed = call([
+      key({ id: "k-ok", venue_account_id: null }),
+      key({ id: "k-known", sync_status: "error" }),
+      key({ id: "k-bad", venue_account_id: null, sync_status: "error" }),
+      key({ id: "k-bad2", venue_account_id: null, sync_status: "sign_in_failed" }),
+    ]);
+    expect(mixed.equityHistoryRebuildReason).toBe("key_not_syncing");
+    expect(mixed.equityHistoryNotSyncingKeyIds).toEqual(["k-bad", "k-bad2"]);
+    // Any other reason lists nothing.
+    expect(
+      call([key({ venue_account_id: null })]).equityHistoryNotSyncingKeyIds,
+    ).toEqual([]);
+    expect(
+      call([
+        holderKey(),
+        key({
+          id: "k-dup",
+          venue_account_id: null,
+          account_share_kind: "duplicate",
+          account_shared_with_api_key_id: "k-holder",
+        }),
+        key({ id: "k-bad", venue_account_id: null, sync_status: "error" }),
+      ]),
+    ).toMatchObject({
+      equityHistoryRebuildReason: "duplicate_account",
+      equityHistoryNotSyncingKeyIds: [],
+    });
+  });
+
+  it("a composite member, sFOX and MT5 do not block on a missing account id", () => {
+    expect(
+      equityHistoryReadiness(
+        [key({ account_share_kind: "composite_member", venue_account_id: null })],
+        series,
+      ).state,
+    ).toBe("ready");
+    expect(
+      equityHistoryReadiness(
+        [key({ exchange: "sfox", venue_account_id: null })],
+        series,
+      ).state,
+    ).toBe("ready");
+    expect(
+      equityHistoryReadiness(
+        [key({ exchange: "mt5", venue_account_id: null })],
+        series,
+      ).state,
+    ).toBe("ready");
+  });
+
+  it("duplicate wins over a missing account id", () => {
+    const marked = key({
+      id: "k-dup",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    expect(equityHistoryReadiness([holderKey(), marked], series).reason).toBe(
+      "duplicate_account",
+    );
+  });
+
+  it("no series, and no identity problem, is awaiting_derivation", () => {
+    expect(equityHistoryReadiness([key()], null)).toEqual({
+      state: "rebuilding",
+      reason: "awaiting_derivation",
+    });
+  });
+
+  it("legacy snapshots and no derived row stay rebuilding with an empty curve (plan 11 removed the snapshot fallback)", () => {
+    const result = derivePhase07Fields(
+      [key()],
+      [
+        {
+          asof: "2026-03-10",
+          value_usd: 10_000,
+          breakdown: null,
+          source: "exchange_primary",
+          history_depth_months: 24,
+          pre_terminus_balance_unknown: false,
+        },
+      ],
+      1,
+      [],
+      false,
+      null,
+    );
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
+    expect(result.equityDailyPoints).toEqual([]);
+    expect(result.equityDailyReturns).toEqual([]);
   });
 });
 

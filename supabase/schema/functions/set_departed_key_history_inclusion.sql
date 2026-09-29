@@ -2,9 +2,9 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260925120000_api_keys_account_identity.sql
--- ─────── 3. the owner RPC for (2). Shape mirrors disconnect_allocator_api_key.
-CREATE FUNCTION public.set_departed_key_history_inclusion(
+-- source migration: 20260927180000_working_holder_rule_d18.sql
+-- ─────── 1. the owner RPC, re-based on 20260925120000; only the departed test moves
+CREATE OR REPLACE FUNCTION public.set_departed_key_history_inclusion(
   p_api_key_id uuid,
   p_inclusion  text
 )
@@ -18,6 +18,7 @@ DECLARE
   v_owner        uuid;
   v_disconnected timestamptz;
   v_sync_status  text;
+  v_is_active    boolean;
   v_previous     text;
   v_job          uuid;
   v_job_status   text;
@@ -29,8 +30,8 @@ BEGIN
   END IF;
 
   -- Scoped to the caller, so another user's row is never even locked.
-  SELECT user_id, disconnected_at, sync_status, history_inclusion
-    INTO v_owner, v_disconnected, v_sync_status, v_previous
+  SELECT user_id, disconnected_at, sync_status, history_inclusion, is_active
+    INTO v_owner, v_disconnected, v_sync_status, v_previous, v_is_active
     FROM public.api_keys
    WHERE id = p_api_key_id
      AND user_id = v_uid
@@ -50,10 +51,18 @@ BEGIN
   END IF;
 
   -- Only a departed key has an end day, so only a departed key has a choice.
-  IF v_disconnected IS NULL AND v_sync_status IS DISTINCT FROM 'revoked' THEN
+  -- D-18 (founder, 2026-09-27): a WORKING key is active, not disconnected, and
+  -- its last sync was not revoked, sign_in_failed or error. It is the same
+  -- definition as the working holder in COMMENT ON COLUMN
+  -- api_keys.account_share_kind, and the two move together. The explicit NULL
+  -- leg keeps a key that has never synced WORKING, as the allocator's
+  -- eligible-key predicate does: without it the status test is NULL for such
+  -- a key, IF treats NULL as false, and the key would be accepted as departed.
+  IF v_is_active AND v_disconnected IS NULL
+     AND (v_sync_status IS NULL OR v_sync_status NOT IN ('revoked', 'sign_in_failed', 'error')) THEN
     RAISE EXCEPTION 'KEY_NOT_DEPARTED'
       USING ERRCODE = '55000',
-            DETAIL  = 'Only a disconnected or revoked key''s history can be included or excluded; a live key always counts.';
+            DETAIL  = 'Only a key that is disconnected, inactive, or whose last sync was revoked, sign_in_failed or error has a history choice; a working key always counts.';
   END IF;
 
   -- A recompose that is already RUNNING has read (or may have read) the old

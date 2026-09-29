@@ -19,7 +19,7 @@
  * (props handed down + which path renders) without exercising the full
  * scenario-state hook + adapter pipeline (covered by ScenarioComposer.test).
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
 import type { ReadonlyURLSearchParams } from "next/navigation";
@@ -217,6 +217,8 @@ const STUB_PROPS: MyAllocationDashboardPayload & {
   equityCurveSource: "legacy",
   // Phase 167.1.2 / D-02: the producer emits "rebuilding" for every allocator.
   equityHistoryState: "rebuilding",
+  equityDailyReturns: [],
+  equityHistoryRebuildReason: null,
   derivedCurveComputedAt: null,
   minHistoryDepthMonths: null,
   equityBaselineUnknown: false,
@@ -614,6 +616,19 @@ describe("AllocationsTabs — scenario panel v2 branching (Plan 06b Task 2)", ()
 // and guard the deep-link from regressing.
 // ---------------------------------------------------------------------------
 describe("AllocationsTabs — Scenario visible tab (SURF-01)", () => {
+  // Phase 167.1.2 plan 07 (SC-5c): tab URLs go through the native History API
+  // (no RSC refetch), so these arms read history.replaceState and assert the
+  // router's replace is never called. No-op spy: jsdom's URL does not move.
+  let historyReplace: MockInstance<History["replaceState"]>;
+  const firstHistoryUrl = () => String(historyReplace.mock.calls[0]?.[2]);
+  beforeEach(() => {
+    historyReplace = vi
+      .spyOn(window.history, "replaceState")
+      .mockImplementation(() => {});
+  });
+  afterEach(() => {
+    historyReplace.mockRestore();
+  });
   beforeEach(() => {
     lsStore.clear();
     mockReplace.mockReset();
@@ -646,9 +661,10 @@ describe("AllocationsTabs — Scenario visible tab (SURF-01)", () => {
     setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
     fireEvent.click(screen.getByRole("tab", { name: "Scenario" }));
-    expect(mockReplace).toHaveBeenCalled();
-    const url = String(mockReplace.mock.calls[0][0]);
+    expect(historyReplace).toHaveBeenCalled();
+    const url = firstHistoryUrl();
     expect(url).toContain("tab=scenario");
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 
   it("keyboard arrow-nav reaches the Scenario tab (ArrowRight from Risk)", () => {
@@ -659,9 +675,10 @@ describe("AllocationsTabs — Scenario visible tab (SURF-01)", () => {
     render(<AllocationsTabs {...STUB_PROPS} />);
     const riskTab = screen.getByRole("tab", { name: "Risk" });
     fireEvent.keyDown(riskTab, { key: "ArrowRight" });
-    expect(mockReplace).toHaveBeenCalled();
-    const url = String(mockReplace.mock.calls[0][0]);
+    expect(historyReplace).toHaveBeenCalled();
+    const url = firstHistoryUrl();
     expect(url).toContain("tab=scenario");
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 
   it("End key jumps to the Scenario tab (now the last visible tab)", () => {
@@ -669,9 +686,10 @@ describe("AllocationsTabs — Scenario visible tab (SURF-01)", () => {
     render(<AllocationsTabs {...STUB_PROPS} />);
     const overviewTab = screen.getByRole("tab", { name: "Overview" });
     fireEvent.keyDown(overviewTab, { key: "End" });
-    expect(mockReplace).toHaveBeenCalled();
-    const url = String(mockReplace.mock.calls[0][0]);
+    expect(historyReplace).toHaveBeenCalled();
+    const url = firstHistoryUrl();
     expect(url).toContain("tab=scenario");
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 
   it("?tab=scenario deep-link still resolves to the Scenario panel (no regression)", async () => {

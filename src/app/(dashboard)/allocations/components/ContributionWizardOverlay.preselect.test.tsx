@@ -296,7 +296,7 @@ describe("[162-06 / D-162-3] Continue with this key — the two live populations
     }
     // …and the owner is never routed into the refusal this path exists to end.
     expect(
-      screen.queryByText(/This key is already stored, but nothing uses it\./),
+      screen.queryByText(/This key is already stored, but no strategy uses it\./),
     ).toBeNull();
   });
 

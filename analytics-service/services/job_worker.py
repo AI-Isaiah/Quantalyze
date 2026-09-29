@@ -49,7 +49,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 
 import ccxt
@@ -1380,6 +1380,9 @@ AllocatorEquityAction = Literal[
     "allocator.equity.refresh_failed",
     "allocator.equity.sibling_lookup_failed",
     "allocator.equity.perp_upnl_missing",
+    # Phase 167.1.2 plan 12, review SFH-R2-01: the daily refresh held a
+    # zero-snapshot book's first row while its reconstruct was in flight.
+    "allocator.equity.refresh_held_for_reconstruct",
 ]
 
 
@@ -9009,6 +9012,14 @@ def _sync_status_write_failure_cause(exc: BaseException) -> str:
     )
 
 
+# Phase 167.1.2 plan 04 — the account identity stamp's bounds. One venue call
+# plus up to three small writes; the timeout keeps a stuck venue from holding
+# the poll, and the margin keeps the step clear of the handler's own
+# TIMEOUT_PER_KIND ceiling, so the step can never time a completed poll out.
+_IDENTITY_STAMP_TIMEOUT_S: Final[float] = 20.0
+_IDENTITY_STAMP_MARGIN_S: Final[float] = 10.0
+
+
 async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResult:
     """INGEST-03: poll allocator holdings (spot + derivatives) via CCXT
     and upsert into allocator_holdings.
@@ -9029,7 +9040,16 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
     strategy-side poll_positions — if it's cooling down, preflight
     returns DispatchResult(outcome=DEFERRED) and we pass it straight
     through without touching api_keys (the job stays queued).
+
+    Phase 167.1.2 plan 04 (D-01 / D-11): after the holdings persist, and while
+    the exchange session is still open (the outer ``finally`` closes it after
+    the DONE return), ``stamp_account_identity`` stamps a ccxt key's venue
+    account id or marks it as sharing an account with a live sibling. The step
+    never raises, writes no status column and is bounded by what is left of
+    this handler's timeout, so the DispatchResult is the one the poll would
+    return without it (Pitfall 4).
     """
+    from services import account_identity
     from services.allocator_positions import (
         AllocatorHoldingsSyncTransientError,
         fetch_allocator_holdings,
@@ -9038,6 +9058,9 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
         _map_exception_to_sync_status,
     )
 
+    # The handler's own start, for the identity stamp's budget below. The
+    # worker's wait_for starts its clock at the same call.
+    handler_started = asyncio.get_running_loop().time()
     ctx = await _allocator_key_preflight(job, "run_poll_allocator_positions_job")
     if isinstance(ctx, DispatchResult):
         # f8: DEFERRED passes through unchanged; api_keys.sync_status
@@ -9247,135 +9270,161 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
                 error_message=sanitized,
                 error_kind=error_kind,
             )
+
+        # Persist + success status update.
+        # NEW-C12-03: wrap in a try/except that stamps sync_status='error' on
+        # failure so the UI doesn't spin forever on 'syncing'. Pre-fix a
+        # persist_allocator_holdings raise propagated to the compute_jobs FAILED
+        # handler but sync_status was never moved off 'syncing'. A failed
+        # _update_ok was previously a swallowed warning leaving the same stuck state.
+        try:
+            count = await persist_allocator_holdings(
+                ctx.supabase, rows, allocator_id, api_key_id, today_str
+            )
+
+            spot_count = sum(1 for r in rows if r.get("holding_type") == "spot")
+            deriv_count = sum(1 for r in rows if r.get("holding_type") == "derivative")
+
+            final_status = "complete_with_warnings" if warning else "complete"
+
+            # 151 review WR-03 — the LAST-LINE length cap. `sync_error` is rendered
+            # verbatim in the browser and every SIBLING write arm here truncates at
+            # [:500]; this success arm did not, so any producer whose warning
+            # interpolates venue-controlled text (an sFOX book of 100+ unpriced
+            # assets, say) could write a multi-kilobyte string into a user-visible
+            # column — a storage-poison surface as well as unreadable copy. Capping
+            # at the WRITE SITE means no future producer can bypass it by forgetting.
+            capped_warning = warning[:500] if warning else warning
+
+            def _update_ok() -> None:
+                # Return value discarded by the caller; drop it (see
+                # _update_rate_limited / _update_persist_err).
+                ctx.supabase.table("api_keys").update({
+                    "sync_status": final_status,
+                    "sync_error": capped_warning,
+                    "last_sync_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", api_key_id).execute()
+
+            # NEW-C12-03: treat _update_ok failure as a hard error (not a swallowed
+            # warning) — a missed sync_status write leaves the UI spinner stuck on
+            # 'syncing' with no recovery path since allocator jobs have no strategy_id
+            # bridge to the dispatch UI.
+            await db_execute(_update_ok)
+        except Exception as persist_exc:  # noqa: BLE001
+            sanitized_persist = str(persist_exc)[:200]
+            logger.exception(
+                "poll_allocator_positions: persist/update failed for allocator %s "
+                "(api_key %s) — stamping sync_status='error' to unblock UI: %s",
+                allocator_id, api_key_id, sanitized_persist,
+            )
+            # Best-effort: stamp sync_status so the UI exits the spinner.
+            #
+            # AUM-02 write boundary — the third and last arm that writes this
+            # column. `sanitized_persist` is a raw PostgREST/DB exception string
+            # (schema-cache misses, constraint names, connection errors): the same
+            # raw-Python-as-product-copy defect, just sourced from our own storage
+            # layer instead of a venue. It stays in the log and the audit metadata.
+            try:
+                def _update_persist_err() -> None:
+                    ctx.supabase.table("api_keys").update(
+                        {
+                            "sync_status": "error",
+                            "sync_error": sync_error_copy("error", venue),
+                        }
+                    ).eq("id", api_key_id).execute()
+                await db_execute(_update_persist_err)
+            except Exception as stamp_exc:  # noqa: BLE001
+                # 167 SFH-M3 — ERROR with the traceback: this write is the only
+                # thing that moves the key off 'syncing' after a persist failure.
+                logger.error(
+                    "poll_allocator_positions: failed to stamp sync_status='error' "
+                    "for api_key %s after persist failure",
+                    api_key_id,
+                    exc_info=stamp_exc,
+                )
+            _emit_audit(
+                allocator_id, api_key_id, "allocator.holdings.persist_failed",
+                {"sanitized_message": sanitized_persist},
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=sanitized_persist,
+                error_kind="permanent",
+            )
+
+        _emit_audit(
+            allocator_id, api_key_id, "allocator.holdings.sync_completed",
+            {
+                "row_count": count,
+                "holding_type_counts": {"spot": spot_count, "derivative": deriv_count},
+                # Phase 167.1.2 C2 round 2 (R2-CR-01): this poll's own outcome.
+                # The daily refresh reads final_status + row_count from this
+                # event as its proof that an account is empty; the key's
+                # sync_status moves on after the poll (a later 429, a manual
+                # sync) and cannot stand in for it.
+                "final_status": final_status,
+                # Round 3 (R3-WR-01): the day this poll stamped its rows with,
+                # fixed at handler start. The event is created after the
+                # fetch and persist, so for a poll that runs across 00:00 UTC
+                # created_at lands on the NEXT day; the refresh binds the event
+                # to this day instead, or rows dated D would read as a poll
+                # after D and veto every later emptiness proof.
+                "asof": today_str,
+            },
+        )
+
+        # Phase 11 / Plan 03 / D-13 / ONBOARD-05 — stamp first_sync_success_at
+        # marker via the SECURITY DEFINER RPC shipped by Plan 01 migration 084.
+        # The RPC is idempotent (writes only when the marker is absent), so
+        # subsequent successful syncs are a no-op for this side effect. The
+        # /allocations Server Component reader fires the PostHog
+        # `first_sync_success` event on the next dashboard request.
+        #
+        # Non-blocking: a stamp failure must not affect the compute job. The
+        # RPC failure path is logged via logger.warning per the analytics-service
+        # convention (services/audit.py error handling).
+        def _stamp_first_sync() -> None:
+            # Return value discarded by the caller; drop it (see
+            # _update_rate_limited / _update_persist_err).
+            ctx.supabase.rpc(
+                "stamp_first_sync_success",
+                {"p_user_id": allocator_id},
+            ).execute()
+
+        try:
+            await db_execute(_stamp_first_sync)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "poll_allocator_positions: failed to stamp first_sync_success_at "
+                "for allocator %s: %s",
+                allocator_id, exc,
+            )
+
+        logger.info(
+            "poll_allocator_positions: persisted %d rows for allocator %s "
+            "(spot=%d, derivative=%d, status=%s)",
+            count, allocator_id, spot_count, deriv_count, final_status,
+        )
+
+        # Phase 167.1.2 plan 04 — the account identity stamp. Its token is
+        # logged by the step itself and read by nothing here: the return below
+        # does not depend on it.
+        identity_budget_s = min(
+            _IDENTITY_STAMP_TIMEOUT_S,
+            TIMEOUT_PER_KIND["poll_allocator_positions"]
+            - (asyncio.get_running_loop().time() - handler_started)
+            - _IDENTITY_STAMP_MARGIN_S,
+        )
+        await account_identity.stamp_account_identity(
+            ctx.supabase, ctx.key_row, ctx.exchange, timeout_s=identity_budget_s
+        )
+
+        return DispatchResult(outcome=DispatchOutcome.DONE)
     finally:
         try:
             await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup
             pass
-
-    # Persist + success status update.
-    # NEW-C12-03: wrap in a try/except that stamps sync_status='error' on
-    # failure so the UI doesn't spin forever on 'syncing'. Pre-fix a
-    # persist_allocator_holdings raise propagated to the compute_jobs FAILED
-    # handler but sync_status was never moved off 'syncing'. A failed
-    # _update_ok was previously a swallowed warning leaving the same stuck state.
-    try:
-        count = await persist_allocator_holdings(
-            ctx.supabase, rows, allocator_id, api_key_id, today_str
-        )
-
-        spot_count = sum(1 for r in rows if r.get("holding_type") == "spot")
-        deriv_count = sum(1 for r in rows if r.get("holding_type") == "derivative")
-
-        final_status = "complete_with_warnings" if warning else "complete"
-
-        # 151 review WR-03 — the LAST-LINE length cap. `sync_error` is rendered
-        # verbatim in the browser and every SIBLING write arm here truncates at
-        # [:500]; this success arm did not, so any producer whose warning
-        # interpolates venue-controlled text (an sFOX book of 100+ unpriced
-        # assets, say) could write a multi-kilobyte string into a user-visible
-        # column — a storage-poison surface as well as unreadable copy. Capping
-        # at the WRITE SITE means no future producer can bypass it by forgetting.
-        capped_warning = warning[:500] if warning else warning
-
-        def _update_ok() -> None:
-            # Return value discarded by the caller; drop it (see
-            # _update_rate_limited / _update_persist_err).
-            ctx.supabase.table("api_keys").update({
-                "sync_status": final_status,
-                "sync_error": capped_warning,
-                "last_sync_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", api_key_id).execute()
-
-        # NEW-C12-03: treat _update_ok failure as a hard error (not a swallowed
-        # warning) — a missed sync_status write leaves the UI spinner stuck on
-        # 'syncing' with no recovery path since allocator jobs have no strategy_id
-        # bridge to the dispatch UI.
-        await db_execute(_update_ok)
-    except Exception as persist_exc:  # noqa: BLE001
-        sanitized_persist = str(persist_exc)[:200]
-        logger.exception(
-            "poll_allocator_positions: persist/update failed for allocator %s "
-            "(api_key %s) — stamping sync_status='error' to unblock UI: %s",
-            allocator_id, api_key_id, sanitized_persist,
-        )
-        # Best-effort: stamp sync_status so the UI exits the spinner.
-        #
-        # AUM-02 write boundary — the third and last arm that writes this
-        # column. `sanitized_persist` is a raw PostgREST/DB exception string
-        # (schema-cache misses, constraint names, connection errors): the same
-        # raw-Python-as-product-copy defect, just sourced from our own storage
-        # layer instead of a venue. It stays in the log and the audit metadata.
-        try:
-            def _update_persist_err() -> None:
-                ctx.supabase.table("api_keys").update(
-                    {
-                        "sync_status": "error",
-                        "sync_error": sync_error_copy("error", venue),
-                    }
-                ).eq("id", api_key_id).execute()
-            await db_execute(_update_persist_err)
-        except Exception as stamp_exc:  # noqa: BLE001
-            # 167 SFH-M3 — ERROR with the traceback: this write is the only
-            # thing that moves the key off 'syncing' after a persist failure.
-            logger.error(
-                "poll_allocator_positions: failed to stamp sync_status='error' "
-                "for api_key %s after persist failure",
-                api_key_id,
-                exc_info=stamp_exc,
-            )
-        _emit_audit(
-            allocator_id, api_key_id, "allocator.holdings.persist_failed",
-            {"sanitized_message": sanitized_persist},
-        )
-        return DispatchResult(
-            outcome=DispatchOutcome.FAILED,
-            error_message=sanitized_persist,
-            error_kind="permanent",
-        )
-
-    _emit_audit(
-        allocator_id, api_key_id, "allocator.holdings.sync_completed",
-        {
-            "row_count": count,
-            "holding_type_counts": {"spot": spot_count, "derivative": deriv_count},
-        },
-    )
-
-    # Phase 11 / Plan 03 / D-13 / ONBOARD-05 — stamp first_sync_success_at
-    # marker via the SECURITY DEFINER RPC shipped by Plan 01 migration 084.
-    # The RPC is idempotent (writes only when the marker is absent), so
-    # subsequent successful syncs are a no-op for this side effect. The
-    # /allocations Server Component reader fires the PostHog
-    # `first_sync_success` event on the next dashboard request.
-    #
-    # Non-blocking: a stamp failure must not affect the compute job. The
-    # RPC failure path is logged via logger.warning per the analytics-service
-    # convention (services/audit.py error handling).
-    def _stamp_first_sync() -> None:
-        # Return value discarded by the caller; drop it (see
-        # _update_rate_limited / _update_persist_err).
-        ctx.supabase.rpc(
-            "stamp_first_sync_success",
-            {"p_user_id": allocator_id},
-        ).execute()
-
-    try:
-        await db_execute(_stamp_first_sync)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "poll_allocator_positions: failed to stamp first_sync_success_at "
-            "for allocator %s: %s",
-            allocator_id, exc,
-        )
-
-    logger.info(
-        "poll_allocator_positions: persisted %d rows for allocator %s "
-        "(spot=%d, derivative=%d, status=%s)",
-        count, allocator_id, spot_count, deriv_count, final_status,
-    )
-
-    return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
 async def run_reconcile_strategy_job(job: dict[str, Any]) -> DispatchResult:
@@ -10115,6 +10164,100 @@ async def run_rescore_allocator_job(job: dict[str, Any]) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+# Open interval sentinels. ISO dates sort lexicographically; these sit strictly
+# outside any real YYYY-MM-DD so None (unbounded) compares without a branch.
+_OPEN_INTERVAL_START = "0000-01-01"
+_OPEN_INTERVAL_END = "9999-12-31"
+
+
+@dataclass(frozen=True)
+class AccountIdentityCollision:
+    """One group of counted keys whose known account intervals overlap.
+
+    Counts only. No key id and no venue account id — a log of this object cannot
+    leak another tenant's identity (T-167.1.2-22).
+    """
+
+    n_keys: int
+
+
+def _counted_day(value: object, *, open_end: bool) -> str:
+    """A real ISO day, or the open-interval sentinel when the bound is absent."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return _OPEN_INTERVAL_END if open_end else _OPEN_INTERVAL_START
+
+
+def account_identity_collisions(
+    counted: Sequence[Mapping[str, Any]],
+) -> list[AccountIdentityCollision]:
+    """Groups of counted keys that share a known account on an overlapping day.
+
+    Each item carries ``id``, ``exchange``, ``venue_account_id``,
+    ``first_counted_day`` and ``last_counted_day``. ``last_counted_day is None``
+    is an open (still-live) end; ``first_counted_day is None`` is an open start.
+    Two keys collide when their closed intervals overlap and the
+    ``(exchange, venue_account_id)`` pair is the same and the venue id is
+    non-NULL. A NULL or blank venue id is unknown identity (plan 09 case 3) and
+    never collides here. A rotation whose intervals were already clipped to
+    non-overlapping days does not collide. Pure: returns counts, logs nothing.
+
+    Plan 09 passes departed-and-included keys through this same helper. This
+    plan's caller passes the eligible live keys as open intervals.
+    """
+    by_account: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for row in counted:
+        venue_id = row.get("venue_account_id")
+        if not isinstance(venue_id, str) or not venue_id.strip():
+            continue
+        exchange = row.get("exchange")
+        # C2 round 2, IN-02: case-blind, like every other exchange comparison
+        # in this phase (the refresh's emptiness proof and identity rule, the TS
+        # reader's ACCOUNT_IDENTITY_EXCHANGES check).
+        exchange_key = exchange.strip().lower() if isinstance(exchange, str) else ""
+        by_account.setdefault((exchange_key, venue_id.strip()), []).append(row)
+
+    collisions: list[AccountIdentityCollision] = []
+    for group in by_account.values():
+        size = len(group)
+        if size < 2:
+            continue
+        parent = list(range(size))
+
+        def _find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def _union(left: int, right: int) -> None:
+            root_left, root_right = _find(left), _find(right)
+            if root_left != root_right:
+                parent[root_right] = root_left
+
+        bounds = [
+            (
+                _counted_day(row.get("first_counted_day"), open_end=False),
+                _counted_day(row.get("last_counted_day"), open_end=True),
+            )
+            for row in group
+        ]
+        for left in range(size):
+            left_first, left_last = bounds[left]
+            for right in range(left + 1, size):
+                right_first, right_last = bounds[right]
+                if left_first <= right_last and right_first <= left_last:
+                    _union(left, right)
+        component_size: dict[int, int] = {}
+        for index in range(size):
+            root = _find(index)
+            component_size[root] = component_size.get(root, 0) + 1
+        for count in component_size.values():
+            if count >= 2:
+                collisions.append(AccountIdentityCollision(n_keys=count))
+    return collisions
+
+
 async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult:
     """Phase 115.1 (RD-3 Option B) — CRAWL-FREE, DECRYPTION-FREE allocator
     $-equity compose.
@@ -10141,7 +10284,14 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     import pandas as pd
 
     from services.allocator_equity_compose import compose_allocator_equity
-    from services.allocator_equity_derive import eligible_key_predicate
+    from services.allocator_equity_derive import (
+        SHARED_ACCOUNT_KINDS,
+        DegradeReason,
+        account_groups,
+        eligible_key_predicate,
+        stitch_shared_account,
+        working_holder_predicate,
+    )
     from services.external_flows import ExternalFlow, validate_flow_shape
     from services.nav_twr import NavReconstructionError
     from services.redact import scrub_freeform_string
@@ -10150,8 +10300,10 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     supabase = get_supabase()
 
     async def _delete_equity_curve_row() -> None:
-        # Degrade to the clean no-row legacy fallback (the SAFETY pin's no-row
-        # case). Shared by the empty-compose (B2), incomplete-compose (F1b), and
+        # Leave NO row, so the reader renders its rebuilding panel (Phase
+        # 167.1.2 plan 11 removed the legacy-curve fallback: a missing row is no
+        # longer drawn from allocator_equity_snapshots). Shared by the identity
+        # refusal, the empty-compose (B2), incomplete-compose (F1b), and
         # permanent-failure (F2) paths so a structurally-failed / partial / empty
         # recompute can never leave a STALE trustworthy row rendering as "derived".
         def _del() -> None:
@@ -10166,7 +10318,11 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         return cast(
             list[dict[str, Any]],
             supabase.table("api_keys")
-            .select("id,is_active,sync_status,disconnected_at")
+            .select(
+                "id,is_active,sync_status,disconnected_at,"
+                "exchange,venue_account_id,"
+                "account_shared_with_api_key_id,account_share_kind"
+            )
             .eq("user_id", allocator_id)
             .execute()
             .data
@@ -10175,11 +10331,43 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
 
     key_rows = await db_execute(_load_keys)
     eligible_ids = {r["id"] for r in key_rows if eligible_key_predicate(r)}
+    rows_by_id = {r["id"]: r for r in key_rows}
 
-    # ── 2. Per-key returns — ISO-STRING day index built DIRECTLY from the
-    #      'date' column (carry-in #3). NEVER pd.to_datetime / DatetimeIndex:
-    #      the core hard-asserts a 'YYYY-MM-DD' index and a DatetimeIndex would
-    #      stringify to 'YYYY-MM-DD 00:00:00' and silently misalign flows. ──
+    # D-01 / D-04 / D-18: one exchange account is ONE counted key. Keys that read
+    # one account form a group (account_groups: a holder plus every key marked
+    # against it). Of a group's ELIGIBLE members exactly one is counted: a
+    # WORKING one (D-18) when any works, ordered as below. A failing holder is
+    # still eligible, so it must LEAVE the sum when a working marked key counts
+    # the account (the holder-drop half): the marked key's venue_account_id is
+    # NULL while the holder keeps the index slot, so the collision gate below
+    # cannot see the pair and would let one account be summed twice. When no
+    # member works, the account is still counted once (through the key whose
+    # history starts first, the holder on a tie) and the job says so at WARNING
+    # with a payload flag.
+    # A key left out here keeps its key_inputs row (it is still eligible; only
+    # the compose skips it), so it is never cleaned up as an orphan.
+    #
+    # C2 review WR-01 (C1 WR-03): among the members that qualify, the one whose
+    # returns START FIRST is counted, then the holder, then the id. The marker's
+    # direction follows stamp order, not seniority, so during the backfill
+    # window the holder is often the NEWER key; keeping it by default dropped the
+    # older key's earlier returns under a benign flag. The returns are loaded
+    # here for that ordering only: loading is not composing, and the identity
+    # gate below still refuses before anything is composed.
+    #
+    # C2 round 2, SFH-R2-03 / R2 IN-01: working-first can keep a member whose
+    # returns start LATER than a failing member's (a key rotation: the new
+    # key's reconstruct depth is shorter than the old key's history). The
+    # account is one series, so the failing member's returns are STITCHED in
+    # for the days before the kept member's first day (``stitch_shared_account``,
+    # D-09 case (2) ordering), with that member's flows for those days. Round 1
+    # dropped them under a benign flag and the book read "ready" over a
+    # shortened window. A join that cannot be made honestly (a gap between the
+    # series, no flows row, flows cut as non-finite) leaves the kept member
+    # alone under the BLOCKING SHARED_ACCOUNT_HISTORY_TRUNCATED. A kept member
+    # with no returns yet is not stitched: its anchor is today's equity, and
+    # hanging it on an older member's last day would misdate it; the compose
+    # already drops such a key as DROPPED_KEY (untrustworthy).
     def _load_returns() -> list[dict[str, Any]]:
         return cast(
             list[dict[str, Any]],
@@ -10191,6 +10379,158 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             or [],
         )
 
+    csv_rows = await db_execute(_load_returns)
+    first_return_day: dict[str, str] = {}
+    for r in csv_rows:
+        day = r.get("date")
+        k = r.get("api_key_id")
+        if k is None or day is None:
+            continue  # the strict per-row parse below disposes a corrupt row
+        if k not in first_return_day or str(day) < first_return_day[k]:
+            first_return_day[k] = str(day)
+
+    excluded_shared: set[str] = set()
+    # kept key id → the members stitched before it, in first-return-day order.
+    stitch_sources: dict[str, list[str]] = {}
+    composite_counted_once = False
+    duplicate_counted_once = False
+    no_working_groups = 0
+    for group in account_groups(key_rows):
+        members = [row for row in group if row["id"] in eligible_ids]
+        if len(members) < 2:
+            continue
+        group_ids = {str(row["id"]) for row in group}
+        working = [row for row in members if working_holder_predicate(row)]
+        if not working:
+            no_working_groups += 1
+        pool = working or members
+
+        def _is_marked_in_group(row: Mapping[str, Any]) -> bool:
+            holder_id = row.get("account_shared_with_api_key_id")
+            return (
+                row.get("account_share_kind") in SHARED_ACCOUNT_KINDS
+                and holder_id is not None
+                and str(holder_id) != str(row["id"])
+                and str(holder_id) in group_ids
+            )
+
+        kept = min(
+            pool,
+            key=lambda row: (
+                # A key with no returns yet sorts after every key that has some.
+                first_return_day.get(row["id"], "9999-12-31"),
+                _is_marked_in_group(row),
+                str(row["id"]),
+            ),
+        )
+        excluded_shared.update(row["id"] for row in members if row is not kept)
+        kept_first = first_return_day.get(kept["id"])
+        if kept_first is not None:
+            earlier = sorted(
+                (
+                    row
+                    for row in members
+                    if row is not kept
+                    and first_return_day.get(row["id"], "9999-12-31") < kept_first
+                ),
+                key=lambda row: (first_return_day[row["id"]], str(row["id"])),
+            )
+            if earlier:
+                stitch_sources[kept["id"]] = [row["id"] for row in earlier]
+        kinds = {row.get("account_share_kind") for row in group}
+        composite_counted_once = composite_counted_once or "composite_member" in kinds
+        duplicate_counted_once = duplicate_counted_once or "duplicate" in kinds
+    counted_ids = eligible_ids - excluded_shared
+    counted_rows = [row for row in key_rows if row["id"] in counted_ids]
+
+    # Identity gate. A 'duplicate' is a duplicate while its holder is WORKING
+    # (D-18) — the same rule as queries.ts countsAsDuplicate, so the writer and
+    # the reader agree — and the curve is refused, whatever the marked key's own
+    # status. A holder that is not working leaves the marked key ordinary (the
+    # group resolution above counts the account once), and a same-id overlap
+    # with another counted key is then a collision, not a duplicate. Checked
+    # BEFORE anything is composed, so a double-counted book never composes.
+    duplicate_keys = [
+        row
+        for row in key_rows
+        if row["id"] in eligible_ids
+        and row.get("account_share_kind") == "duplicate"
+        and row.get("account_shared_with_api_key_id") != row["id"]
+        and working_holder_predicate(
+            rows_by_id.get(row.get("account_shared_with_api_key_id"))
+        )
+    ]
+    collisions = account_identity_collisions(
+        [
+            {
+                "id": row["id"],
+                "exchange": row.get("exchange"),
+                "venue_account_id": row.get("venue_account_id"),
+                "first_counted_day": None,
+                "last_counted_day": None,
+            }
+            for row in counted_rows
+        ]
+    )
+    if duplicate_keys or collisions:
+        await _delete_equity_curve_row()
+        # Reason token + counts only. No key id, no venue id, no USD (T-167.1.2-22).
+        # C2 silent-failure SFH-07: WARNING, not INFO. The refusal deletes the
+        # curve and ends DONE, so this line is the only trace of why the book
+        # renders "rebuilding". An audit action for it needs a member in BOTH
+        # services/audit.py and src/lib/audit.ts (test_action_literal_matches_ts_union),
+        # and this derive has no api_key to anchor it on; recorded in the
+        # 167.1.2 REVIEW-FIX report rather than half-added here.
+        # Round 2 (SFH-07 remainder): a WARNING reaches Sentry only as a
+        # breadcrumb (the SDK's default LoggingIntegration events at ERROR), so
+        # the refusal is also captured explicitly, once, at level warning:
+        # tagged with the job and the token, one static message per token so
+        # Sentry groups them, and no key id, venue id or USD figure.
+        reason = (
+            "account_duplicate" if duplicate_keys else "account_identity_collision"
+        )
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("compute_job_id", str(job.get("id")))
+            scope.set_tag("derive_refusal", reason)
+            sentry_sdk.capture_message(
+                f"derive_allocator_equity: {reason} — the equity curve was "
+                "refused and deleted; the book shows the rebuilding panel",
+                level="warning",
+            )
+        logger.warning(
+            "derive_allocator_equity: %s for allocator %s "
+            "(counted_keys=%d duplicate_keys=%d colliding_groups=%d) — "
+            "deleted any stale equity_curve row; the book shows the rebuilding "
+            "panel until the keys are resolved",
+            reason,
+            allocator_id,
+            len(counted_rows),
+            len(duplicate_keys),
+            len(collisions),
+        )
+        return DispatchResult(outcome=DispatchOutcome.DONE)
+
+    if no_working_groups:
+        # D-18: an account none of whose keys works is still counted once,
+        # through the key whose history starts first, so its history stays; its
+        # series stops on the day the keys started failing and carries flat
+        # after it, diluting the book's return with frozen capital. C2 round 2
+        # (SFH-R2-04): that is a BLOCKING degrade reason, so the book is held
+        # (the reader shows an untrustworthy row as rebuilding), never "ready".
+        # Counts only (no key id, no venue id, no USD — T-167.1.2-22).
+        logger.warning(
+            "derive_allocator_equity: %d shared account(s) for allocator %s have "
+            "no working key — each is counted once, through a failing key whose "
+            "series may have stopped; the curve is untrustworthy (%s)",
+            no_working_groups,
+            allocator_id,
+            DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY.value,
+        )
+
+    # ── 2. Per-key returns — ISO-STRING day index built DIRECTLY from the
+    #      'date' column (carry-in #3). NEVER pd.to_datetime / DatetimeIndex:
+    #      the core hard-asserts a 'YYYY-MM-DD' index and a DatetimeIndex would
+    #      stringify to 'YYYY-MM-DD 00:00:00' and silently misalign flows. ──
     async def _permanent_corrupt_input(exc: Exception) -> DispatchResult:
         # M3: a corrupt PERSISTED value (a NULL daily_return → float(None)
         # TypeError, a non-numeric usd_signed, a non-finite flow rejected by
@@ -10199,7 +10539,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # permanent scrubbed FAILED so the admin sees a terminal state, not an
         # infinite poison-retry. Scrubbed for defence in depth (no raw value leak).
         # F2: DELETE the stale equity_curve row first so a structurally-failed
-        # recompute degrades to legacy instead of leaving a stale trustworthy row.
+        # recompute leaves no row (the book shows "rebuilding") instead of a
+        # stale trustworthy row.
         await _delete_equity_curve_row()
         import re
 
@@ -10219,21 +10560,28 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             error_kind="permanent",
         )
 
-    csv_rows = await db_execute(_load_returns)
+    stitch_source_ids = {k for ids in stitch_sources.values() for k in ids}
     _grouped: dict[str, list[dict[str, Any]]] = {}
     for r in csv_rows:
         k = r.get("api_key_id")
-        if k is not None and k in eligible_ids:
+        if k is not None and (k in counted_ids or k in stitch_source_ids):
             _grouped.setdefault(k, []).append(r)
     returns_by_key: dict[str, pd.Series] = {}
+    # SFH-R2-03: a stitch source's own series. Not an input on its own; only
+    # the days it owns join the kept member's series below.
+    source_returns: dict[str, pd.Series] = {}
     try:
         for k, rws in _grouped.items():
             rws_sorted = sorted(rws, key=lambda x: str(x["date"]))
-            returns_by_key[k] = pd.Series(
+            series = pd.Series(
                 [float(x["daily_return"]) for x in rws_sorted],
                 index=[str(x["date"]) for x in rws_sorted],
                 dtype="float64",
             )
+            if k in counted_ids:
+                returns_by_key[k] = series
+            else:
+                source_returns[k] = series
     except (ValueError, TypeError, KeyError) as exc:
         return await _permanent_corrupt_input(exc)
 
@@ -10259,6 +10607,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # omitted → a trustworthy partial curve).
     null_anchor_reasons: dict[str, str] = {}
     key_inputs_ids: set[str] = set()
+    # SFH-R2-03: a stitch source's flows, when its key_inputs row is usable.
+    source_flows: dict[str, list[ExternalFlow]] = {}
     orphan_kinds: list[str] = []
     # M3: the JSONB→python coercions below (float(usd_signed), float(anchor_usd))
     # sit OUTSIDE the compose NavReconstructionError catch — a corrupt persisted
@@ -10275,6 +10625,28 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 # deleted) keeps a stale key_inputs row — bounded orphan cleanup
                 # below.
                 orphan_kinds.append(kind)
+                continue
+            if api_key_id not in counted_ids:
+                # A shared-account key left out by the group resolution: still
+                # eligible, so the row stays. The account is counted through
+                # another key of its group; this series is not an input on its
+                # own. A stitch source's flows are kept for the days it owns,
+                # unless the epilogue cut some as non-finite (flow_drop), in
+                # which case they cannot level those days.
+                source_payload = row.get("payload") or {}
+                if (
+                    api_key_id in stitch_source_ids
+                    and source_payload.get("anchor_null_reason") != "flow_drop"
+                ):
+                    source_flows[api_key_id] = [
+                        validate_flow_shape(
+                            ExternalFlow(
+                                utc_day_iso=str(_f["utc_day_iso"]),
+                                usd_signed=float(_f["usd_signed"]),
+                            )
+                        )
+                        for _f in (source_payload.get("flows") or [])
+                    ]
                 continue
             key_inputs_ids.add(api_key_id)
             payload = row.get("payload") or {}
@@ -10298,6 +10670,36 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     except (ValueError, TypeError, KeyError) as exc:
         return await _permanent_corrupt_input(exc)
 
+    # SFH-R2-03: join each stitched account's older members onto its kept key.
+    stitched_accounts = 0
+    truncated_accounts = 0
+    for kept_id, source_ids in stitch_sources.items():
+        kept_series = returns_by_key.get(kept_id)
+        if kept_series is None:
+            continue  # the kept key's returns vanished between the two reads
+        stitched = None
+        if all(k in source_returns and k in source_flows for k in source_ids):
+            stitched = stitch_shared_account(
+                [(source_returns[k], source_flows[k]) for k in source_ids]
+                + [(kept_series, flows_by_key.get(kept_id, []))]
+            )
+        if stitched is None:
+            truncated_accounts += 1
+            continue
+        returns_by_key[kept_id], flows_by_key[kept_id] = stitched
+        stitched_accounts += 1
+    if truncated_accounts:
+        # Counts only (no key id, no venue id, no USD — T-167.1.2-22).
+        logger.warning(
+            "derive_allocator_equity: %d shared account(s) for allocator %s keep "
+            "an older member's history that could not be joined to the counted "
+            "key's (a gap, or no usable flows) — the curve starts at the counted "
+            "key's first day and is untrustworthy (%s)",
+            truncated_accounts,
+            allocator_id,
+            DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED.value,
+        )
+
     # A key with returns but no key_inputs row → anchor None (compose honestly
     # DROPS it, exactly as an unanchored key). Never fabricate an anchor.
     for k in returns_by_key:
@@ -10317,24 +10719,24 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # key_inputs row. During the founder-gated backfill the FIRST key's compose
     # runs while sibling keys still have zero rows (all 517 prod keys start empty),
     # so composing now would emit a TRUSTWORTHY curve over a SUBSET of the
-    # allocator's capital (a transient 1-of-N-capital curve labeled "Derived",
-    # suppressing a legacy curve that included every key). If ANY eligible key is
+    # allocator's capital (a transient 1-of-N-capital curve rendered as ready).
+    # If ANY eligible key is
     # absent from BOTH maps the compose is INCOMPLETE → refuse: delete the
-    # equity_curve row (degrade to legacy) rather than compose a silently-partial
+    # equity_curve row (the book shows "rebuilding") rather than compose a silently-partial
     # trustworthy curve. A key WITH a key_inputs row but no returns is NOT missing
     # here — it is visible to the compose core, which classifies it
     # anchored-without-returns → DROPPED_KEY → untrustworthy (B3). This gate is for
     # the strictly-invisible key (no returns AND no key_inputs — its derive has not
     # run yet). Self-healing: each sibling derive re-enqueues the compose.
-    missing_ids = eligible_ids - (set(returns_by_key) | key_inputs_ids)
+    missing_ids = counted_ids - (set(returns_by_key) | key_inputs_ids)
     if missing_ids:
         await _delete_equity_curve_row()
         logger.info(
             "derive_allocator_equity: INCOMPLETE compose for allocator %s "
             "(eligible_keys=%d returns_keys=%d key_inputs_keys=%d missing=%d) — "
             "an eligible key has neither returns nor key_inputs (backfill window); "
-            "deleted any stale equity_curve row, degrading to legacy until every "
-            "sibling derives (Option B, self-healing)",
+            "deleted any stale equity_curve row; the book shows the rebuilding "
+            "panel until every sibling derives (self-healing)",
             allocator_id, len(eligible_ids), len(returns_by_key),
             len(key_inputs_ids), len(missing_ids),
         )
@@ -10343,7 +10745,29 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # ── 4. The ONLY derivation call — the frozen-core composition layer. ──────
     try:
         payload = compose_allocator_equity(
-            returns_by_key, flows_by_key, anchors_by_key, null_anchor_reasons
+            returns_by_key,
+            flows_by_key,
+            anchors_by_key,
+            null_anchor_reasons,
+            benign_flag_tokens=[
+                token
+                for token, raised in (
+                    ("composite_shared_account_counted_once", composite_counted_once),
+                    ("duplicate_shared_account_counted_once", duplicate_counted_once),
+                    ("shared_account_history_stitched", stitched_accounts > 0),
+                )
+                if raised
+            ]
+            or None,
+            degrade_reasons=[
+                reason
+                for reason, raised in (
+                    (DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED, truncated_accounts > 0),
+                    (DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY, no_working_groups > 0),
+                )
+                if raised
+            ]
+            or None,
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3
@@ -10353,7 +10777,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # errors carry counts/day-indices only, still scrubbed for defence in
         # depth). F2: DELETE the stale equity_curve row first — otherwise a
         # post-liquidation poison input would leave the frozen pre-liquidation curve
-        # rendering as trustworthy FOREVER; degrade to legacy instead.
+        # rendering as trustworthy FOREVER; leave no row (the book shows
+        # "rebuilding") instead.
         await _delete_equity_curve_row()
         scrubbed = str(scrub_freeform_string(str(exc)))
         return DispatchResult(
@@ -10370,18 +10795,18 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     #      today) returns curve=[] — is_trustworthy may be True (benign honest-empty
     #      tokens: NO_ANCHORED_KEYS/ZERO_WEIGHT_MASS) OR False (all keys DROPPED_KEY
     #      post-B3); this branch keys on EMPTINESS, not on the trust flag, so both
-    #      empty shapes degrade the same. Upserting it would blank the dashboard
-    #      while suppressing the legacy render (which has real data), and a later
+    #      empty shapes degrade the same. Upserting it would render a blank
+    #      chart as the book's history, and a later
     #      structurally-empty recompute would leave a STALE trustworthy row (L1).
-    #      Instead DELETE any existing equity_curve row → degrade to the clean
-    #      no-row legacy fallback (the SAFETY pin's no-row case). The frontend
+    #      Instead DELETE any existing equity_curve row → no row, which the
+    #      reader renders as the rebuilding panel (plan 11). The frontend
     #      extractTrustworthyDerivedCurve is the paired last-line defense (B2a). ──
     if not (payload.get("curve") or []):
         await _delete_equity_curve_row()
         logger.info(
             "derive_allocator_equity: empty compose for allocator %s "
             "(eligible_keys=%d returns_keys=%d orphans_cleaned=%d) — deleted any "
-            "stale equity_curve row, degrading to the legacy fallback (Option B)",
+            "stale equity_curve row; the book shows the rebuilding panel",
             allocator_id, len(eligible_ids), len(returns_by_key), len(orphan_kinds),
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)

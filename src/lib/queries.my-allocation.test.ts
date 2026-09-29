@@ -359,6 +359,10 @@ function buildChain(table: string) {
       return chain;
     },
     maybeSingle: async () => {
+      // Review C2 SFH-06: honour an injected read failure here too, the same
+      // shape `then` resolves, so a `.maybeSingle()` read can be failed.
+      const injected = state.tableErrors[table];
+      if (injected) return { data: null, error: injected };
       const rows = rowsFor();
       const row = limitN !== null ? rows.slice(0, limitN)[0] : rows[0];
       return { data: row ?? null, error: null };
@@ -414,6 +418,19 @@ vi.mock("@/lib/supabase/server", () => ({
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({ from: (table: string) => buildChain(table) }),
+}));
+
+// Review C2 round 2 SFH-R2-05: the derived-row captures are scheduled with
+// next/server's `after()` so a cold finish cannot drop them. The mock records
+// the callbacks; a test runs them to prove the capture is what they wait on.
+// Outside these tests nothing runs them, which matches a request whose
+// response has not finished yet.
+const afterCallbacks = vi.hoisted(() => [] as Array<() => unknown>);
+vi.mock("next/server", async (importActual) => ({
+  ...(await importActual<typeof import("next/server")>()),
+  after: (cb: () => unknown) => {
+    afterCallbacks.push(cb);
+  },
 }));
 
 // ------------------------------------------------------------------
@@ -1032,7 +1049,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
     // so the display series is [] for every allocator. The legacy series'
     // content is pinned on the adapter (allocation-helpers.equity-adapter.test.ts)
-    // and retires with the legacy branch, which plan 11 removes.
+    // and retired with the legacy branch, which plan 11 removed.
     expect(result.equityHistoryState).toBe("rebuilding");
     expect(result.equityDailyPoints).toEqual([]);
   });
@@ -1099,7 +1116,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
     // so the display series is [] for every allocator. The legacy series'
     // content is pinned on the adapter (allocation-helpers.equity-adapter.test.ts)
-    // and retires with the legacy branch, which plan 11 removes.
+    // and retired with the legacy branch, which plan 11 removed.
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -1261,7 +1278,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
     // so the display series is [] for every allocator. The legacy series'
     // content is pinned on the adapter (allocation-helpers.equity-adapter.test.ts)
-    // and retires with the legacy branch, which plan 11 removes.
+    // and retired with the legacy branch, which plan 11 removed.
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -2991,7 +3008,13 @@ function derivedRow(isTrustworthy: boolean) {
 // identity is resolved), so it is the fixture here, alongside legacy snapshots.
 // ---------------------------------------------------------------------------
 describe("167.1.2 D-02 — the allocator equity curve is withheld while it is rebuilt", () => {
-  beforeEach(resetState);
+  // Review C2 round 3 R3-WR-04: the derived_row_rejected capture is throttled
+  // per (allocator, rejection) in module state, and every test here reads as
+  // user-1, so each test starts with an empty window.
+  beforeEach(async () => {
+    resetState();
+    (await import("./queries")).__resetDerivedRowCaptureThrottleForTests();
+  });
 
   it("a trustworthy derived row AND legacy snapshots both present → equityDailyPoints is [] and equityHistoryState is 'rebuilding'", async () => {
     state.portfolios = [P1151_PORTFOLIO];
@@ -3038,6 +3061,373 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
     expect(result.equityHistoryState).toBe("rebuilding");
     expect(result.equityDailyPoints).toEqual([]);
   });
+
+  // Phase 167.1.2 plan 11 (T-167.1.2-20a). The readiness rule is pinned on the
+  // pure helper in queries.test.ts; these two pin that the producer applies it
+  // to the key list getMyAllocationDashboard actually reads. The same v2 row
+  // is ready with one identified key and rebuilding once a second key reads
+  // the same account, so the difference is the marker and nothing else.
+  function v2Row() {
+    const row = derivedRow(true);
+    row.payload.version = 2;
+    row.payload.returns = [
+      { date: "2026-03-11", r: 0.0038 },
+      { date: "2026-03-12", r: 0.0011 },
+      { date: "2026-03-13", r: 0.0039 },
+    ];
+    return row;
+  }
+  const identifiedKey = (over: Record<string, unknown> = {}) => ({
+    id: "k-holder",
+    user_id: "user-1",
+    exchange: "binance",
+    label: "Binance main",
+    is_active: true,
+    sync_status: "ok",
+    last_sync_at: new Date().toISOString(),
+    disconnected_at: null,
+    account_balance_usdt: 1000,
+    created_at: "2026-04-01T00:00:00Z",
+    venue_account_id: "acct-synthetic-1",
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+    ...over,
+  });
+
+  it("plan 11: a version-2 row and one identified key read ready through getMyAllocationDashboard", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    state.allocatorEquityDerived = [v2Row()];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("ready");
+    expect(result.equityHistoryRebuildReason).toBeNull();
+    expect(result.equityDailyReturns).toHaveLength(3);
+  });
+
+  it("plan 11: the same row with a second key marked a duplicate of a working holder is rebuilding, reason duplicate_account", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [
+      identifiedKey(),
+      identifiedKey({
+        id: "k-dup",
+        label: "Binance copy",
+        account_share_kind: "duplicate",
+        account_shared_with_api_key_id: "k-holder",
+      }),
+    ];
+    state.allocatorEquityDerived = [v2Row()];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("duplicate_account");
+    expect(result.equityDailyPoints).toEqual([]);
+    expect(result.equityDailyReturns).toEqual([]);
+  });
+
+  // Review C2 SFH-06. A failed read of the derived row used to become
+  // "awaiting derivation" (a promise of a daily recompute) under a log line
+  // that claimed a legacy fallback plan 11 removed, and PGRST205 was not
+  // logged at all. The read now reports to Sentry, logs what really happens,
+  // and gives the producer a distinct outcome.
+  it.each([
+    ["a transport error", { message: "connection reset (test)" }],
+    ["PGRST205 (table missing from the schema cache)", { message: "schema cache miss (test)", code: "PGRST205" }],
+  ])("SFH-06: %s on the derived-row read is history_read_failed, logged and reported", async (_label, error) => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    state.allocatorEquityDerived = [v2Row()];
+    state.tableErrors["allocator_equity_derived"] = error as { message: string };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("history_read_failed");
+    expect(captureSpy).toHaveBeenCalledWith(
+      error,
+      expect.objectContaining({
+        tags: expect.objectContaining({ reason: "derived_row_read_failed" }),
+      }),
+    );
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain("allocator_equity_derived read failed");
+    expect(logged).not.toContain("legacy");
+    errSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  // Review C2 round 2 R2-CR-03 (deploy day). `version: 2` is new in C2, so
+  // every row written before the deploy is pre-v2. Such a row passed every
+  // check its writer ran; only the reader's contract moved, and the daily
+  // compose (`derive-allocator-key-dailies`, 05:30 UTC) rewrites it as v2. So
+  // it reads `awaiting_derivation` ("recomputed once a day" is TRUE for it)
+  // and it is NOT sent to Sentry: a warning per dashboard load for every book
+  // on deploy day would report a normal transition as a fault.
+  it("R2-CR-03: a pre-v2 row is awaiting_derivation, logged with its token, and not sent to Sentry", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    state.allocatorEquityDerived = [derivedRow(true)]; // no version: pre-v2
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
+    expect(captureSpy).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tags: expect.objectContaining({ reason: "derived_row_rejected" }),
+      }),
+    );
+    // The local trace stays: the token, and never a curve value.
+    const warned = JSON.stringify(warnSpy.mock.calls);
+    expect(warned).toContain("not_version_2");
+    expect(warned).toContain("awaiting_derivation");
+    expect(warned).not.toContain("100500");
+    expect(JSON.stringify(errSpy.mock.calls)).not.toContain("allocator_equity_derived row");
+    warnSpy.mockRestore();
+    errSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  // Review C2 SFH-05 (reader half), kept for rows that ARE version 2. A v2 row
+  // its writer marked untrustworthy already had its recompute, so it is
+  // `derivation_rejected` and reported with its token only.
+  it("SFH-05: a v2 row the writer marked untrustworthy is derivation_rejected and reported with its rejection token", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    const row = v2Row();
+    row.payload.is_trustworthy = false;
+    row.payload.degrade_reasons = ["dropped_key"];
+    state.allocatorEquityDerived = [row];
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("derivation_rejected");
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: expect.objectContaining({
+          reason: "derived_row_rejected",
+          rejection: "untrustworthy",
+        }),
+        level: "warning",
+      }),
+    );
+    // Token only: the curve's dollar values never reach the log.
+    const logged = JSON.stringify(errSpy.mock.calls);
+    expect(logged).toContain("untrustworthy");
+    expect(logged).not.toContain("100500");
+    errSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  // Review C2 round 3 R3-WR-03. The shared account with no working key is the
+  // writer's untrustworthy verdict too, so it is still captured with the same
+  // rejection token, but the owner sees its own reason, read from the
+  // persisted `degrade_reasons`, and not "did not pass its checks".
+  it("R3-WR-03: a v2 row untrustworthy for shared_account_no_working_key names that reason", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    const row = v2Row();
+    row.payload.is_trustworthy = false;
+    row.payload.degrade_reasons = ["shared_account_no_working_key"];
+    state.allocatorEquityDerived = [row];
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("shared_account_no_working_key");
+    expect(result.equityDailyPoints).toEqual([]);
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: expect.objectContaining({
+          reason: "derived_row_rejected",
+          rejection: "untrustworthy",
+        }),
+      }),
+    );
+    errSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  // Review C2 round 2 SFH-R2-05. `captureToSentry` returns its import chain so
+  // a server caller can hold the request open until the capture settles. A
+  // discarded chain can be reaped on a cold finish and the alert is lost. Both
+  // derived-row captures are therefore handed to `after()`, and the scheduled
+  // work settles only when the capture does.
+  it.each([
+    [
+      "a failed read",
+      () => {
+        state.allocatorEquityDerived = [v2Row()];
+        state.tableErrors["allocator_equity_derived"] = { message: "connection reset (test)" };
+      },
+      "derived_row_read_failed",
+    ],
+    [
+      "a v2 row the writer marked untrustworthy",
+      () => {
+        const row = v2Row();
+        row.payload.is_trustworthy = false;
+        state.allocatorEquityDerived = [row];
+      },
+      "derived_row_rejected",
+    ],
+  ] as const)("SFH-R2-05: the capture for %s is scheduled with after() and awaited", async (_label, arrange, reason) => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    arrange();
+    afterCallbacks.length = 0;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let release!: () => void;
+    const capture = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(() => capture);
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    await getMyAllocationDashboard("user-1");
+
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ tags: expect.objectContaining({ reason }) }),
+    );
+    const scheduled = afterCallbacks.map((cb) => Promise.resolve(cb()));
+    expect(scheduled.length).toBeGreaterThan(0);
+    let settled = false;
+    void Promise.all(scheduled).then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Still pending: the scheduled work is holding the capture, not dropping it.
+    expect(settled).toBe(false);
+    release();
+    await Promise.all(scheduled);
+    expect(settled).toBe(true);
+    errSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  // Review C2 round 3 R3-WR-04. `router.refresh()` re-runs this read every
+  // 30 s while the Overview is open (AllocationsTabs'
+  // PERFORMANCE_POLL_INTERVAL_MS), and an untrustworthy row can last for days
+  // (no working key, a history gap). One capture per load was ~120 Sentry
+  // events an hour per open tab and kept the issue permanently active, which
+  // defeats the alert. A given (allocator, rejection) now reports at most once
+  // per window per server instance; the console line stays on every load.
+  it("R3-WR-04: the rejected-row capture reports once per (allocator, rejection) per window; the log line stays on every load", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    const untrusted = v2Row();
+    untrusted.payload.is_trustworthy = false;
+    state.allocatorEquityDerived = [untrusted];
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+    const rejectedCaptures = (rejection: string) =>
+      captureSpy.mock.calls.filter(
+        ([, ctx]) =>
+          (ctx as { tags?: Record<string, string> } | undefined)?.tags?.reason ===
+            "derived_row_rejected" &&
+          (ctx as { tags?: Record<string, string> }).tags?.rejection === rejection,
+      ).length;
+    const rejectedLogs = () =>
+      errSpy.mock.calls.filter((c) =>
+        String(c[0]).includes("allocator_equity_derived row rejected"),
+      ).length;
+
+    const { getMyAllocationDashboard, DERIVED_ROW_CAPTURE_WINDOW_MS } = await import(
+      "./queries"
+    );
+    const t0 = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(t0);
+
+    try {
+      // Three polls inside the window: one capture, three log lines.
+      await getMyAllocationDashboard("user-1");
+      await getMyAllocationDashboard("user-1");
+      nowSpy.mockReturnValue(t0 + DERIVED_ROW_CAPTURE_WINDOW_MS - 1);
+      await getMyAllocationDashboard("user-1");
+      expect(rejectedCaptures("untrustworthy")).toBe(1);
+      expect(rejectedLogs()).toBe(3);
+
+      // A different rejection for the same allocator has its own window.
+      const malformed = v2Row();
+      malformed.payload.returns = [];
+      state.allocatorEquityDerived = [malformed];
+      await getMyAllocationDashboard("user-1");
+      expect(rejectedCaptures("malformed")).toBe(1);
+
+      // Once the window has passed, the state that is still there reports again.
+      state.allocatorEquityDerived = [untrusted];
+      nowSpy.mockReturnValue(t0 + DERIVED_ROW_CAPTURE_WINDOW_MS);
+      await getMyAllocationDashboard("user-1");
+      expect(rejectedCaptures("untrustworthy")).toBe(2);
+      expect(rejectedLogs()).toBe(5);
+    } finally {
+      nowSpy.mockRestore();
+      errSpy.mockRestore();
+      captureSpy.mockRestore();
+    }
+  });
+
+  it("SFH-05 positive control: an accepted v2 row reports nothing", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    state.allocatorEquityDerived = [v2Row()];
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("ready");
+    expect(captureSpy).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tags: expect.objectContaining({ reason: "derived_row_rejected" }),
+      }),
+    );
+    captureSpy.mockRestore();
+  });
 });
 
 describe("115.1 equity display-repoint", () => {
@@ -3050,15 +3440,13 @@ describe("115.1 equity display-repoint", () => {
 
   // Review round 1 (SFH-04): D-02 makes `equityDailyPoints` [] for EVERY input,
   // so asserting on it alone can no longer fail. The content these cases exist
-  // for (direct mapping, never NaN, malformed and empty curves degrade to the
-  // legacy fallback) is decided by `extractTrustworthyDerivedCurve`, the one
-  // function the producer calls on the derived row. Assert on it directly with
-  // the exact payload the producer read. `null` means "the legacy fallback".
-  // The legacy adapter's own content is pinned in
-  // allocation-helpers.equity-adapter.test.ts.
-  async function candidateDerivedCurve() {
-    const { extractTrustworthyDerivedCurve } = await import("./queries");
-    return extractTrustworthyDerivedCurve(
+  // for (direct mapping, never NaN, malformed and empty curves are not a
+  // display series) is decided by `extractTrustworthyDerivedSeries`. A pre-v2
+  // row is null. The snapshot adapter's own content is pinned in
+  // allocation-helpers.equity-adapter.test.ts; plan 11 no longer renders it.
+  async function candidateDerivedSeries() {
+    const { extractTrustworthyDerivedSeries } = await import("./queries");
+    return extractTrustworthyDerivedSeries(
       state.allocatorEquityDerived[0]?.payload ?? null,
     );
   }
@@ -3077,11 +3465,12 @@ describe("115.1 equity display-repoint", () => {
     // Positive control: this fixture WOULD render a non-empty legacy curve, so
     // the empty series below is the D-02 gate, not an empty input.
     expect(legacyExpectedDailyPoints().length).toBeGreaterThan(0);
-    // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
-    // every allocator). With no derived row seeded, the extractor's input is
-    // `null`, so asserting on it here would be a constant (review round 2
-    // IN-03). What this case can still fail on is the source stamp below: a
-    // producer that picked the derived branch without a row would mislabel it.
+    // Phase 167.1.2 plan 11: the snapshot fallback is gone, so a book with
+    // legacy snapshots and no derived row is rebuilding and equityDailyPoints
+    // stays []. The adapter's own content remains in
+    // allocation-helpers.equity-adapter.test.ts. What this case can still fail
+    // on is the source stamp below: a producer that picked the derived branch
+    // without a row would mislabel it.
     expect(result.equityDailyPoints).toEqual([]);
     // Neuter gap: the no-row case must ALSO stamp the source 'legacy' (only the
     // derived/untrusted pins asserted the source before) — a repoint that
@@ -3113,9 +3502,9 @@ describe("115.1 equity display-repoint", () => {
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
     // regression in the trust gate while the curve is hidden.
-    expect(await candidateDerivedCurve()).toEqual(
-      P1151_DERIVED_CURVE.map((p) => ({ date: p.date, value: p.equity_usd })),
-    );
+    // Plan 11: this fixture is pre-v2 (no version, no returns), so it is not
+    // the display series. A v2 row is pinned below.
+    expect(await candidateDerivedSeries()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3135,7 +3524,7 @@ describe("115.1 equity display-repoint", () => {
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
     // regression in the trust gate while the curve is hidden.
-    expect(await candidateDerivedCurve()).toBeNull();
+    expect(await candidateDerivedSeries()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3166,7 +3555,7 @@ describe("115.1 equity display-repoint", () => {
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
     // regression in the trust gate while the curve is hidden.
-    expect(await candidateDerivedCurve()).toBeNull();
+    expect(await candidateDerivedSeries()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3200,7 +3589,7 @@ describe("115.1 equity display-repoint", () => {
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
     // regression in the trust gate while the curve is hidden.
-    expect(await candidateDerivedCurve()).toBeNull();
+    expect(await candidateDerivedSeries()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3237,7 +3626,7 @@ describe("115.1 equity display-repoint", () => {
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
     // regression in the trust gate while the curve is hidden.
-    expect(await candidateDerivedCurve()).toBeNull();
+    expect(await candidateDerivedSeries()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3267,63 +3656,94 @@ describe("115.1 equity display-repoint", () => {
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
     // regression in the trust gate while the curve is hidden.
-    expect(await candidateDerivedCurve()).toBeNull();
+    expect(await candidateDerivedSeries()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
-  it("MALFORMED (T-115.1-18): a curve point missing `date` or `equity_usd`, or a non-object point → legacy fallback", async () => {
-    // Each malformed point shape must poison the whole derived curve to legacy —
-    // extractTrustworthyDerivedCurve returns null on the first bad point.
-    const { extractTrustworthyDerivedCurve } = await import("./queries");
-    // point missing `date`
+  it("MALFORMED (T-115.1-18 / T-167.1.2-21): a bad curve or returns point is not a series", async () => {
+    // Each payload is otherwise a valid version-2 series, so deleting the
+    // shape check for the broken field would return a series and this fails.
+    // Moved from extractTrustworthyDerivedCurve (plan 11).
+    const { extractTrustworthyDerivedSeries } = await import("./queries");
+    const base = {
+      version: 2,
+      is_trustworthy: true,
+      returns: [{ date: "2026-03-11", r: 0.01 }],
+    };
     expect(
-      extractTrustworthyDerivedCurve({
-        is_trustworthy: true,
+      extractTrustworthyDerivedSeries({
+        ...base,
         curve: [{ equity_usd: 100 }],
       }),
     ).toBeNull();
-    // point missing `equity_usd`
     expect(
-      extractTrustworthyDerivedCurve({
-        is_trustworthy: true,
+      extractTrustworthyDerivedSeries({
+        ...base,
         curve: [{ date: "2026-03-10" }],
       }),
     ).toBeNull();
-    // non-object point
     expect(
-      extractTrustworthyDerivedCurve({
-        is_trustworthy: true,
+      extractTrustworthyDerivedSeries({
+        ...base,
         curve: [42],
       }),
     ).toBeNull();
-    // empty date string
     expect(
-      extractTrustworthyDerivedCurve({
-        is_trustworthy: true,
+      extractTrustworthyDerivedSeries({
+        ...base,
         curve: [{ date: "", equity_usd: 100 }],
       }),
     ).toBeNull();
-    // F4a: a non-empty but MALFORMED date string (not YYYY-MM-DD) must degrade to
-    // legacy — a garbage date would otherwise reach parseISO/SVG as NaN coords.
     expect(
-      extractTrustworthyDerivedCurve({
-        is_trustworthy: true,
+      extractTrustworthyDerivedSeries({
+        ...base,
         curve: [{ date: "not-a-date", equity_usd: 100 }],
       }),
     ).toBeNull();
     expect(
-      extractTrustworthyDerivedCurve({
-        is_trustworthy: true,
+      extractTrustworthyDerivedSeries({
+        ...base,
         curve: [{ date: "2026/03/10", equity_usd: 100 }],
       }),
     ).toBeNull();
-    // A well-formed YYYY-MM-DD date still passes.
+    // Returns shape: non-finite, reordered, empty, and a non-numeric version.
+    const curve = [
+      { date: "2026-03-10", equity_usd: 100 },
+      { date: "2026-03-11", equity_usd: 101 },
+    ];
     expect(
-      extractTrustworthyDerivedCurve({
-        is_trustworthy: true,
+      extractTrustworthyDerivedSeries({
+        ...base,
+        curve,
+        returns: [{ date: "2026-03-11", r: Number.NaN }],
+      }),
+    ).toBeNull();
+    expect(
+      extractTrustworthyDerivedSeries({
+        ...base,
+        curve,
+        returns: [
+          { date: "2026-03-12", r: 0.01 },
+          { date: "2026-03-11", r: 0.02 },
+        ],
+      }),
+    ).toBeNull();
+    expect(
+      extractTrustworthyDerivedSeries({ ...base, curve, returns: [] }),
+    ).toBeNull();
+    expect(
+      extractTrustworthyDerivedSeries({ ...base, version: "2", curve }),
+    ).toBeNull();
+    // A well-formed version-2 series still passes, curve mapped directly.
+    expect(
+      extractTrustworthyDerivedSeries({
+        ...base,
         curve: [{ date: "2026-03-10", equity_usd: 100 }],
       }),
-    ).toEqual([{ date: "2026-03-10", value: 100 }]);
+    ).toEqual({
+      curve: [{ date: "2026-03-10", value: 100 }],
+      returns: [{ date: "2026-03-11", value: 0.01 }],
+    });
   });
 });
 
@@ -3997,5 +4417,45 @@ describe("getMyAllocationDashboard — own-capital keys stay in the allocator's 
 
     expect(result.allocatorEligibleApiKeyIds).not.toContain("k-own-direct");
     expect(result.bookEntryGateSatisfied).toBe(false);
+  });
+});
+
+// Phase 167.1.2 SC-4 caller walk (read-only for `queries.ts`, which this plan
+// does not edit): the SSR live-book blend feeds per-key equity as the weight.
+// When every key's holdings are worth 0 the blend has no weight mass, and the
+// engine now returns its honest empty shape. The helper's existing
+// `liveCM.n === 0 || equity_curve.length === 0 → emptyDefault` guard must turn
+// that into null KPIs and no curve, never a flat 1.0 wealth line at +0.00%.
+describe("liveBaselineMetricsFromPerKeyDailies — [167.1.2 SC-4] zero weight mass", () => {
+  it("every key's holdings worth 0 → null KPIs and an empty equity series (today: a flat line at +0.00%)", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    const dates = Array.from(
+      { length: 20 },
+      (_, i) => `2026-05-${String(i + 1).padStart(2, "0")}`,
+    );
+    const holdings = [
+      {
+        api_key_id: "key-A",
+        holding_type: "spot",
+        value_usd: 0,
+        unrealized_pnl_usd: null,
+      },
+      {
+        api_key_id: "key-B",
+        holding_type: "spot",
+        value_usd: 0,
+        unrealized_pnl_usd: null,
+      },
+    ] as unknown as Parameters<typeof liveBaselineMetricsFromPerKeyDailies>[0];
+    const out = liveBaselineMetricsFromPerKeyDailies(holdings, {
+      "key-A": dates.map((date, i) => ({ date, value: i % 2 ? 0.01 : -0.004 })),
+      "key-B": dates.map((date, i) => ({ date, value: i % 2 ? -0.02 : 0.015 })),
+    });
+    expect(out.ytdTwr).toBeNull();
+    expect(out.sharpe).toBeNull();
+    expect(out.maxDd).toBeNull();
+    expect(out.equity).toEqual([]);
+    expect(out.drawdown).toEqual([]);
+    expect(out.aum).toBe(0);
   });
 });

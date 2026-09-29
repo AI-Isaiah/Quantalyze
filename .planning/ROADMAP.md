@@ -136,7 +136,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
 - [ ] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — planned (1 plan); HALTED 2026-09-27 at Task 3; resumes after Phase 166.4 ships
-- [ ] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — not yet planned; data integrity, ahead of features
+- [ ] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [ ] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed
 - [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
@@ -3189,13 +3189,13 @@ Plans:
 **Goal:** A due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim.
 **Requirements**: TODOS `[164.9.3-CLAIM-PAIR-23505]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 0 plans
+**Plans:** 6/6 plans executed
 
 ⭐ **Inserted 2026-09-26 by orchestrator decision** (routed from the Phase 167.1.2 PR B review). It is a separate topic from 164.9.1 JOBRPCTRUTH and 164.9.2 REFDATAUPDATES.
 
 **Evidence, measured 2026-09-26 on the pg-lane by the 167.1.2 PR B fixer.**
 - **Repro:** seed a `failed_retry` `derive_allocator_equity` row whose `next_attempt_at` is in the past, plus a `pending` row for the same allocator. All three claim entry points then raise `23505` on `compute_jobs_one_inflight_per_kind_allocator`:
-  - `claim_compute_jobs_with_priority`, 6-arg overload;
+  - `claim_compute_jobs_with_priority`, 6-arg overload; ⛔ **CORRECTED 2026-09-27 (164.9.3 research):** it has **5** parameters `(integer, text, boolean, text[], text[])`, latest body in `20260719073701_claim_kind_filter.sql`. The 2-arg overload's pre-fix result is `42725` (every call form is ambiguous), not `23505`; its own 23505 is reachable only with the 5-arg dropped. "6-arg" is kept as lineage.
   - `claim_compute_jobs_with_priority`, 2-arg overload;
   - `claim_compute_jobs`.
 - **The claim guard:** C39 skips a candidate only when a `running` or `done_pending_children` sibling exists, not when a `pending` one does.
@@ -3215,16 +3215,40 @@ Plans:
 - **The result:** `claim_compute_jobs` and `claim_compute_jobs_with_priority` both raise 23505 on `compute_jobs_one_inflight_per_kind_api_key`. The batch `UPDATE ... SET status = 'running'` is ONE statement, so no job of ANY kind is claimed until the pair clears. Loud, not silent.
 - **Measured:** 2026-09-25 on the local-stack lane at the 164.9.1 release head, in one transaction ending in `ROLLBACK`. The full repro recipe is kept verbatim as lineage in Phase 164.5.2's section and in `TODOS.md` `[164.9.3-CLAIM-PAIR-23505]`.
 - **Fix options recorded there, not decided:** (a) add `'pending'` to each guard's `x.status` list with `x.id <> ranked.id`; (b) fold the enqueue into, or supersede, the outstanding `failed_retry`. Criterion 2 above already leaves that choice to the planner.
+- ⭐ **DECIDED 2026-09-27 (164.9.3 CONTEXT D-08, from lane measurements in 164.9.3-RESEARCH.md): neither (a) nor (b).** Option (a) was measured to turn the loud 23505 into a SILENT permanent wedge (C39 runs after ranking) and to starve `compute_intro_snapshot`. The fix drops a `failed_retry` candidate whose partition already holds a `pending` job BEFORE ranking, in all three claim bodies; the enqueue side is unchanged.
+- ⭐ **FOUNDER DECISIONS 2026-09-27 (AskUserQuestion, before merge; 164.9.3 CONTEXT):** (1) the D-04 amendment is KEPT: the `CLAIMPAIR PROBE EXCLUSION` blocks in both priority overloads ship, and D-04 reads "no bytes outside the marked CLAIMPAIR blocks". (2) D-11: round-2 review WR-01 is FIXED in this phase, not routed: the probe sibling tests widen to `IN ('pending','running','done_pending_children')` inside the marked blocks, so the throttle also skips a retry the C39 guard holds back, with a red-first arm, a mutation twin and census pins moved by measurement.
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9.3 to break down)
+**Wave 1**
+
+- [x] 164.9.3-01-PLAN.md — red-first gate: 15 arms (12 partition arms across the 3 claim entry points + W-LOST, W-INTRO, P2-C39) observed RED on the pre-fix local-stack lane before any migration exists (D-03)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 164.9.3-02-PLAN.md — the ONE migration: pre-rank exclusion in all three claim bodies + C39 port into the 2-arg, green on the replayed local-stack lane (D-08); edits none of the DEFER40001 or enqueue symbols (D-05)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 164.9.3-03-PLAN.md — [BLOCKING] D-09 lane apply: whole non-LANE-ONLY corpus on the replayed local-stack lane + the gate's pg-lane apply list (split from plan 02 on 2026-09-27 for the context budget)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 164.9.3-04-PLAN.md — layered RED-UNDER-M twins (runner biting 15), regenerated function snapshots, three earned VAC-04 acks
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [x] 164.9.3-05-PLAN.md — census pins moved by grep of one full mutation run (D-06)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [x] 164.9.3-06-PLAN.md — merge origin/main; TODOS entry closed; one CHANGELOG entry + byte-equal VERSION bump (D-07); SC3 opened as a ship precondition in `164.9.3-MIGRATION-REVIEW.md` (three reviewers before merge, D-01)
 
 ### Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock (INSERTED)
 
 **Goal:** The compute-job fan-in graph and the bridge's decision cascade never strand a job, raise a spurious 23505, or deadlock: a fan-in child whose parent fails reaches a terminal state, a `match_decisions` delete cascades without a unique violation, and a fan-in diamond cannot deadlock on the parent lock.
 **Requirements**: TODOS `[164.9.3.1-FANIN-GRAPH-RESIDUALS]` (owned here)
-**Depends on:** Phase 164.9.3 (the same compute-job RPC surface; CLAIMPAIR's migration re-bases `_enqueue_compute_job_internal` and the claim RPCs first, and this phase re-bases on it)
+**Depends on:** Phase 164.9.3 (the same compute-job RPC surface; CLAIMPAIR's migration re-bases `_enqueue_compute_job_internal` and the claim RPCs first, and this phase re-bases on it) ⛔ **CORRECTED 2026-09-27 (164.9.3 CONTEXT D-05/D-08):** CLAIMPAIR's migration re-bases ONLY the three claim bodies (`claim_compute_jobs`, both `claim_compute_jobs_with_priority` overloads). It edits NONE of `_enqueue_compute_job_internal`, `defer_compute_job`, `mark_compute_job_done` or `mark_compute_job_failed`, so this phase re-bases those on whatever is latest at its own plan time. The sentence before this note is kept as lineage.
 **Plans:** 0 plans
 
 ⛔ **BOOKED 2026-09-26 UNDER THE NEW-PHASE FREEZE — NOT STARTED.** Founder decision (AskUserQuestion, "Re-route, don't start"): items (1), (2) and (3) of Phase 164.5.2's routed list leave 164.5.2 and land here. This phase gets no discuss, plan or execute step until the founder lifts the freeze for it.
@@ -3304,6 +3328,14 @@ The wait grows with the number of open PRs, because every one of them contends f
 - `python`: `test_defer_compute_job_token_fence` fails. It is owned by Phase 164.9.3.2 DEFER40001 (F1, "New blocker phase").
 - `e2e-seeded`: the axe `color-contrast` check fails on the `No data` chip, #64748b on #f1f5f9 = 4.34:1, under the 4.5:1 AA floor at 11px. It is owned by Phase 170 LAYOUT (F2, "Book into 170 LAYOUT").
 - SC-3 cannot pass until both land. There is no waiver.
+
+⭐ **ROUTED IN 2026-09-27 (founder, AskUserQuestion "Yes, add to 164.9.4"): a docs-only push to `main` runs the full corpus.** The docs-only short path (Phase 164.6.3: the `changed-paths` job and `scripts/classify-changed-paths.mjs`) applies to `pull_request` events only. For a push, `changed-paths` hard-codes a code verdict, so every push to `main` runs the full corpus, including `python` and `e2e-seeded` on the shared-TEST key.
+- **Measured 2026-09-27:** five roadmap-only merges to `main` each ran `python` and `e2e-seeded` on push. Runs `36311440078` and `36311239974` (push, `main`) failed with `timed out after 3600s waiting for the shared-test-db advisory lock (key 61616158)`, with 8 and 7 jobs waiting.
+- **Success:**
+  - A push to `main` whose diff against its first parent is docs-only takes the short path. It still produces a recorded green CI run that Railway can wait on.
+  - A push that touches any code path runs the full corpus.
+  - A test fails on the old behaviour (a docs-only push classified as code), and a second test proves that a code-touching push is not filtered.
+  - The existing rule that `changed-paths` itself carries no `if:` is kept. The job still runs on every event, because a skipped `needs:` job skips its dependents.
 
 ## Success Criteria
 1. Neither job acquires advisory key `61616158`.
@@ -3586,12 +3618,53 @@ Plans:
 
 ⛔ **HALTED 2026-09-27 at Task 3 (see `166.3-01-SUMMARY.md` in this phase's directory, on branch `feat/166.3-recompute`).** The tracer recompute (R1) failed A2c: its beta changed sign and its treynor moved, while its r² did not. The cause is not Phase 166. It is the M1 alignment change (`d16b2fb4c`, v0.24.9.31, #323), reproduced locally. R2..R6 were NOT enqueued: rows computed before the M1 deploy still hold the pre-M1 beta, and recomputing them on today's code would degrade them. **Resumes after Phase 166.4 BENCHALIGN ships** (founder decision D-B, 2026-09-27), with its recompute set WIDENED to every sparse-calendar strategy computed since the M1 deploy (2026-05-27). R1 is a private row and must be recomputed again after the fix.
 
+⭐ **HANDOFF FROM PHASE 166.4 BENCHALIGN, 2026-09-27 (founder D-B; 166.4 D-03; 166.4 D-06 ratified by the founder 2026-09-27).** Phase 166.4 fixes the pairing this phase halted on. Every benchmark-relative metric (alpha, beta, correlation, information ratio, Treynor, r_squared, the 90-day rolling correlation and the rolling alpha/beta) now pairs each strategy return with BTC's return over the SAME holding interval, compounded from the strategy's previous date to its current one. An interval without a BTC close at both ends is left unpaired, never filled (166.4 D-A). What this phase needs in order to resume:
+
+- **The recompute set, in two layers.** (1) The SPARSE subset (D-B): every user-CSV strategy whose stored series has a sparse calendar and whose benchmark-bearing row was computed on or after the M1 deploy (2026-05-27). These are the rows whose beta, alpha and correlation also move, together with information ratio, Treynor, the rolling series and r_squared. "Sparse calendar" is the engine's own predicate `strategy_calendar_is_sparse` in `analytics-service/services/metrics.py`: some two consecutive strategy dates are more than one calendar day apart. Broker and composite series are densified before compute and cannot be sparse (166.4 SC5). (2) The WIDENED set (166.4 D-06), which is the whole recompute scope: per the founder's 2026-09-27 ratification of D-06 ("recompute all benchmarked strategies"), this phase recomputes EVERY benchmarked strategy, dense rows included, in every class (`user_csv`, `single_key_broker`, `composite`), so that stored r_squared agrees with correlation squared everywhere. On a dense row only r_squared moves; alpha, beta, correlation, information ratio, Treynor and the rolling series stay bit-identical (166.4 SC4). Measured on two committed synthetic dense fixtures, base commit `c1b4bc062` against the fixed engine (166.4-02-SUMMARY): r_squared 0.00010582832055343811 → 5.812609307917895e-05 and 0.001937851398314801 → 0.0019729955639240094, with correlation and beta unchanged in both. This CLOSES the dense-r_squared open question the 166.4 plans had recorded.
+- **No version stamp to select on.** `strategy_analytics` carries no engine or version stamp, and `computed_at` is re-stamped on every job transition, so `computed_at >= 2026-05-27` is a lower bound that over-includes. That is harmless once the fix is deployed: recomputing any benchmarked row yields the correct value. The widened set needs no date bound.
+- **Two read-only, counts-only queries.** The founder runs them (read-only; run the which-database marker query from CLAUDE.md first; never through the repo's linked CLI for any write). The first counts the sparse subset, the second the widened set by class.
+
+```sql
+-- READ-ONLY. user_csv strategies whose stored series has a >1-day gap, with a benchmark-bearing row.
+SELECT count(*)
+  FROM public.strategies s
+  JOIN public.strategy_analytics sa ON sa.strategy_id = s.id
+ WHERE NOT EXISTS (SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy_id = s.id)
+   AND s.api_key_id IS NULL
+   AND sa.computed_at >= TIMESTAMPTZ '2026-05-27 00:00:00+00'
+   AND jsonb_typeof(sa.metrics_json->'beta') = 'number'
+   AND EXISTS (
+     SELECT 1 FROM (
+       SELECT c.date - lag(c.date) OVER (ORDER BY c.date) AS gap_days
+         FROM public.csv_daily_returns c WHERE c.strategy_id = s.id
+     ) g WHERE g.gap_days > 1);
+```
+
+```sql
+-- READ-ONLY. Every strategy with a benchmark-bearing analytics row (166.4 D-06: the whole recompute set), by class.
+SELECT CASE WHEN EXISTS (SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy_id = s.id)
+            THEN 'composite'
+            WHEN s.api_key_id IS NOT NULL THEN 'single_key_broker'
+            ELSE 'user_csv' END AS class,
+       count(*)
+  FROM public.strategies s
+  JOIN public.strategy_analytics sa ON sa.strategy_id = s.id
+ WHERE jsonb_typeof(sa.metrics_json->'beta') = 'number'
+    OR jsonb_typeof(sa.metrics_json->'r_squared') = 'number'
+ GROUP BY 1
+ ORDER BY 1;
+```
+
+- **R1 re-enters the set.** Its stored beta is the M1-era value, so it must be recomputed again after the fix is deployed.
+- **Resume condition.** Phase 166.3 may resume after Phase 166.4 merges and its worker is deployed.
+- **Ratified the same day.** The founder also ratified 166.4 D-04 (the both-endpoints rule applies when BTC is the sparser leg too), D-05 (the first strategy date pairs with BTC's same-day return) and D-07 (BTC's base close is the day before its first stored return) on 2026-09-27. Phase 169.5 BENCHCOMPARE adopts D-05's day-one rule before it executes.
+
 ### Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric (INSERTED)
 
 **Goal:** For a strategy whose date index is sparser than BTC's 7-day calendar (for example weekday-only), every benchmark-relative metric pairs each strategy return with the BTC return over the SAME holding interval, so alpha, beta, correlation, information ratio, Treynor, r² and the rolling greeks and correlation describe the strategy's real co-movement with BTC, and r² equals correlation² again.
 **Requirements**: TBD (criteria below)
 **Depends on:** nothing. **Priority:** data integrity, ahead of features (founder priority rule, 2026-09-27).
-**Plans:** 0 plans
+**Plans:** 4/4 plans executed in 4 waves, linear (planned 2026-09-27; plan-check 3 rounds, 0 blockers). Decisions in `166.4-CONTEXT.md`: D-A, D-B (founder), D-01 to D-07 (orchestrator; D-04 to D-07 were orchestrator readings, ratified by the founder 2026-09-27). No migration.
 
 **Evidence (orchestrator, 2026-09-27; the reproduction was re-run locally against main-level code; counts and verdicts only):**
 
@@ -3619,7 +3692,39 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 166.4 to break down)
+- [x] 166.4-01-PLAN.md — W1 engine: one interval-matched pair feeds every benchmark-relative metric; red-first Fri→Mon beta; r² on the shared pair; the fill arm retired; sparse-calendar predicate (SC1, SC2, SC3, SC7)
+- [x] 166.4-02-PLAN.md — W2 dense parity and the broker and stitch_composite trace, tests only (SC4, SC5)
+- [x] 166.4-03-PLAN.md — W3 gap tests and the neuters, tests only (SC1, SC2)
+- [x] 166.4-04-PLAN.md — W4 the Phase 166.3 handoff paragraph and the release entry naming M1 (SC5, SC6, SC7)
+
+### Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly (INSERTED)
+
+**Goal:** The `/portfolios/[id]` analytics compute reads only `strategy_analytics` columns that exist, treats each strategy's stored series as what it is (cumulative or daily, measured, not assumed), and fails loudly when it cannot compute, so the portfolio's risk decomposition and other analytics are real numbers or an honest failure.
+**Priority:** data integrity (founder priority rule, 2026-09-27: data integrity ahead of features). Registered through `/gsd-phase --insert 166.4`; gsd-tools numbered it 166.4.1 and the number is kept. It is independent of 166.4 BENCHALIGN in code; 166.4 is only its anchor in the list.
+**Requirements**: TBD (criteria below)
+**Depends on:** nothing.
+**Plans:** 0 plans
+
+**Evidence (verified by the orchestrator, 2026-09-27; counts and verdicts only):**
+
+- **Missing columns.** `_compute_portfolio_analytics` in `analytics-service/routers/portfolio.py` selects `strategy_id, returns_series, equity_curve, total_aum` from `strategy_analytics`. `supabase/schema/baseline.sql` has neither `equity_curve` nor `total_aum` on that table (0 matches in its `CREATE TABLE`). A select naming a column that does not exist fails the whole read.
+- **Cumulative read as daily (inferred, not yet measured).** The `TODOS.md` entry `[169-PORTFOLIO-ANALYTICS-COLUMNS]` (booked by Phase 169 D-53 on `feat/169-pagetruth`) infers that the compute reads `returns_series` as daily returns while `analytics-service/services/metrics.py` writes it as a cumulative series.
+- **Is it called at all?** The analytics service logs show 0 lines of `Portfolio analytics computation failed` between 2026-09-13 and 2026-09-27. With a select that should fail, that silence means either the endpoint is not being called, or its failure is not reaching that log line. The phase's research answers this FIRST, before any fix is planned.
+- **Related:** Phase 169's RISKUNIT plan (169-09, D-49) fixes the risk-attribution display's double percent; its browser item records an empty `/portfolios/[id]` panel as this defect, not as evidence against the unit fix (169 D-53).
+- **Routed 2026-09-27, from the 166.4 BENCHALIGN research:** the `benchmark_comparison` block in `_compute_portfolio_analytics` (`analytics-service/routers/portfolio.py`) pairs the portfolio with BTC by an inner-join correlation, and BTC's own TWR there is compounded over the joined dates only, so it drops weekend moves. It must use the founder's D-A interval-matched pairing (166.4 D-A in its ROADMAP entry; D-04, D-05 and D-07 are recorded in `166.4-CONTEXT.md` on `feat/166.4-benchalign`). Found by 166.4's research as a same-class site outside 166.4's locked scope.
+
+## Success Criteria
+
+1. **Called or not, measured first.** The research states, from logs and code (no remote database command by an agent), whether and from where the `/portfolios/[id]` analytics compute is called, and why no failure line was logged between 2026-09-13 and 2026-09-27.
+2. **The reader selects only existing columns.** The `strategy_analytics` read selects only columns that exist in `supabase/schema/baseline.sql`, and every value it needed from `equity_curve` and `total_aum` comes from a real source or is dropped with its consumer; a test fails on the old select.
+3. **Cumulative vs daily is measured and fixed.** Whether the stored series the compute reads is cumulative or daily is measured against what `metrics.py` writes, and the compute converts it correctly; a test on a known cumulative fixture fails on the old handling.
+4. **A failed compute is loud.** A failed compute surfaces as an error the caller and the logs can see (never an empty or stale result that reads as success); a test fails on the old silent path.
+5. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and `/portfolios/[id]` is re-checked in the logged-in browser after deploy (desktop, 390px and desktop 200% zoom).
+6. **The BTC comparison uses the D-A pairing (added 2026-09-27).** `benchmark_comparison`'s correlation pairs each portfolio return with the BTC return over the same interval (166.4 D-A, D-04, D-05, D-07), and its BTC TWR includes the weekend moves the inner join drops. A test written first for each (the correlation, and the BTC TWR) fails on the old code.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 166.4.1 to break down)
 
 ### Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine (INSERTED)
 
@@ -3701,6 +3806,17 @@ Plans:
 ⚠️ **2026-09-24 correction (read-only root-cause trace at `96b5db4c`):** the collapse also lives in the analytics-side unique index `(allocator_id, venue, symbol, asof)` on `allocator_holdings`, and for ONE account behind several keys it merges CORRECTLY but attributes the row to whichever key polled last. Adding `api_key_id` to the key as framed above would triple-count that case. Phase 167.1.2 ACCOUNTTRUTH decides account identity first (founder: refuse a second key on the same account); re-scope this phase against it before planning.
 **Plans:** 0 plans
 
+⭐ **ROUTED IN 2026-09-27 (from the 167.1.2 PR C executor): three holdings readers still read allocator-wide instead of per key.**
+- **R-15-1:** the scenario commit route, `src/app/api/allocator/scenario/commit/route.ts` (its `allocator_holdings` lookup for the audit recompute).
+- **R-15-2:** `_load_holding_portfolio_context` in `analytics-service/routers/match.py`.
+- **R-15-3:** `getLatestExposureSnapshot` in `src/lib/portfolio-exposure.ts`.
+
+After 167.1.2 PR C ships, Open Positions (per key, latest asof) and the exposure panel will disagree about a quiet key until these three move. Success: each reads per key, with a test that fails on the allocator-wide read. Each symbol was verified at `origin/main` `c052ab4d` on 2026-09-27.
+
+⭐ **ROUTED IN 2026-09-29 (from 167.1.2 PR C2, D-13; user-facing): `/compare` per-holding metrics stay withheld until a flow-neutral per-holding source exists.**
+- `/compare`'s per-holding return, Sharpe, max drawdown and vol are computed as day-over-day ratios of dollar values (`src/app/(dashboard)/compare/lib/holding-compare-adapter.ts`), so buying more of an asset reads as a gain. Plan 11 kept them at "rebuilding" (D-13 decided, evidence in `167.1.2-11-SUMMARY.md`); plan 10 fixes new rows only and changes neither the stored rows nor that calculation.
+- Success: each per-holding metric reads a source that removes purchases, sales and transfers, with a test that fails on the dollar-ratio read; only then does `/compare` flip back to "ready".
+
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1.1 to break down)
@@ -3762,6 +3878,47 @@ Plans:
 - [ ] TBD (run /gsd-plan-phase 167.1.2 to break down)
 
 **Cross-phase note 2026-09-27 (Phase 169 D-51, D-57):** Phase 169 plan 169-05 now owns `MetricsColumn`'s period rows and record length (it was "Phase 169 plan 07" in 167.1.2-07's text). After C3 merges, 169-05 may edit only the observation-clock length assertion in C3's `MetricsColumn.periods-per-year.test.tsx` (to the calendar-year length, D-12), and may move a C3 assertion that pinned a 6 Month / 1 Year row on a too-short record to the row-absent form (D-57); its SUMMARY records each such edit. 167.1.2's own CONTEXT lives on its branch and should carry the same note.
+
+### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
+
+**Goal:** Each API key's equity-history reconstruct state is recorded durably, per key, so no key's history is skipped, wiped or left unreconstructed. Today that state is inferred from allocator-wide snapshot counts.
+**Priority:** data integrity (founder priority rule, 2026-09-27: data integrity ahead of features). Registered through `/gsd-phase --insert 167.1.2`; gsd-tools numbered it 167.1.2.1 and the number is kept.
+**Requirements**: TBD (criteria below)
+**Depends on:** Phase 167.1.2 (PR C: its history rebuild changes `replace_equity_snapshots` and the per-key reconstruct path this phase builds on).
+**Plans:** 0 plans
+
+**Evidence (routed 2026-09-27 from the 167.1.2 PR C executor; one class of defect; symbols verified at `origin/main` `c052ab4d` unless noted):**
+
+- **R-12-1: a key whose first sync collided never gets a backfill.** Nothing records that a key still owes its reconstruct, so the missed backfill is never retried.
+- **R-13-1: a non-empty sole-key replace wipes sibling keys' history.** In `replace_equity_snapshots` (`analytics-service/services/equity_reconstruction.py`), a non-empty replace for one key wipes the history of disconnected sibling keys. PR C changes this function, so the symbol is cited by name only.
+- **Two-key sibling path:** when one key's reconstruct succeeds and another's fails, the allocator-wide snapshot count reads as "reconstructed", and the failed key's history is skipped.
+- **`public.request_allocator_holdings_sync(uuid)`:** its in-flight status lists (`'pending', 'running', 'done_pending_children'`, plus `'done'` in the second check) omit `failed_retry`, unlike the cron. So a key whose job sits in `failed_retry` is treated as not in flight.
+- **The fast-fail race (routed 2026-09-27, 167.1.2-12 REVIEW-SFH-R3 M-1/M-2):** a zero-snapshot book's reconstruct reaches `failed_final` before the daily refresh (`run_refresh_allocator_equity_daily_job` in `analytics-service/services/equity_reconstruction.py`) is claimed. The refresh then sees nothing in flight, writes the book's first row, and the key's history is stranded. Claim order within one fan-out burst is by random uuid, 5 per batch, so the reconstruct and the refresh are usually claimed in different batches.
+
+## Success Criteria
+
+1. **Per-key durable state.** A key's reconstruct state ("history reconstructed") is stored per key and read from there. It is never inferred from allocator-wide snapshot counts.
+2. **R-12-1:** a key whose first sync collided gets its backfill. A test fails on the old behaviour.
+3. **R-13-1:** a sole-key replace never deletes another key's snapshots, including a disconnected sibling's. A test fails on the old behaviour.
+4. **Two-key sibling path:** when one key succeeds and a sibling fails, the failed key is still recorded as owing its reconstruct and is retried. A test fails on the old behaviour.
+5. **`failed_retry` is counted:** `request_allocator_holdings_sync`'s status list includes `failed_retry`, as the cron's does. A test fails on the old list.
+6. **Migration review before merge.** Any migration this phase writes is reviewed by migration-reviewer, rls-policy-auditor and silent-failure-hunter, because a merge of `supabase/migrations/**` auto-applies to PROD.
+7. **The fast-fail race (added 2026-09-27):** when a zero-snapshot book's reconstruct reaches `failed_final` before the daily refresh (`run_refresh_allocator_equity_daily_job`) is claimed, the key is still recorded as owing its reconstruct, the refresh's first row does not strand its history, and the history is rebuilt. A test written first reproduces the race (reconstruct failed, refresh claimed after) and fails on the old behaviour.
+
+⭐ **ROUTED IN 2026-09-29 (from 167.1.2 PR C2 review rounds 1-3; data integrity): writer-side residuals of the history rebuild.** Sources: `167.1.2-C2-REVIEW-SFH*.md`, `167.1.2-C2-REVIEW-R*.md`, `167.1.2-C2-REVIEW-FIX*.md`.
+- **SFH-05 (writer half):** the derive deletes the curve on a refusal instead of persisting why, so the reader can only name the generic reason.
+- **One failing key with a known account id** is carried flat inside a book that reads "ready", diluting its returns (two failing keys on one account now hide the history; the single-key case is not reconciled).
+- **SFH-R3-02:** the stitch drops a deposit that only the newer key lists on a day the older key owns; the curve stays trusted.
+- **SFH-R3-07 (pre-existing):** the derive reads per-key daily returns in one unordered call against the 1000-row read cap, and the stitch now chooses keys from that read.
+- **SFH-08:** a key that has never polled adds $0 to the day's persisted total; only a counter records it.
+- **SFH-09:** a carried balance has no age limit (a WARNING above 3 days only). The limit is a founder call.
+- **R2-CR-02 residual:** two WORKING keys on one account that are both still unstamped are counted twice while that lasts.
+- **R3-WR-02 (landing constraint, recorded here for the next writer change):** a deploy between the 04:00 poll and the 05:00 refresh writes one stale row per emptied account.
+- Success: each item is fixed with a test that fails on the old behaviour, or closed by a recorded founder decision.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 167.1.2.1 to break down)
 
 ### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
 
@@ -4015,8 +4172,9 @@ Plans:
 3. The BTC benchmark is current: MTD and 3-month returns, win rate, volatility and drawdown come from a benchmark series that is refreshed, and a stale benchmark is shown as stale rather than as +0.00%.
 9. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and each page is re-checked in the logged-in browser after deploy.
 11. A BTC return that spans a missing stored day is not stamped as one day's move: the allocator's consumers build the cumulative BTC overlay from closes (or levels) and the inner-joined metrics from exactly-one-day returns, with a test for each across a missing day. Routed here 2026-09-27 by Phase 169.2 D-47 (review round 3 WR-01) as TODOS `[169.2-BTC-GAP-RETURN-STAMP]`. `pricesToDailyReturns` in `src/lib/factsheet/benchmark-source.ts` still bridges such a gap into one return at the later date, because 169.2's skip-every-gap attempt made the overlay drift and was reverted.
+12. **The scenario benchmark uses the D-A pairing (routed 2026-09-27, from the 166.4 BENCHALIGN research).** `innerJoinByDate` in `src/app/(dashboard)/allocations/lib/scenario-benchmark.ts` pairs the scenario portfolio with BTC by an inner join on dates. It must use the founder's D-A interval-matched pairing and agree with Phase 166.4 BENCHALIGN (the engine) and Phase 169.5 BENCHCOMPARE (the factsheet; on branch `feat/169-pagetruth`, not yet on `origin/main`), including the founder's 2026-09-27 day-one rule: day one pairs with BTC's same-day return (166.4 D-05, ratified 2026-09-27). A test written first fails on the old inner join.
 
-*(Moved from Phase 169 on 2026-09-26, verbatim with their original numbers, D-37.)* *(Criterion 11 is new, added 2026-09-27; it is numbered past the highest id any 169.x phase uses, so it collides with none.)*
+*(Moved from Phase 169 on 2026-09-26, verbatim with their original numbers, D-37.)* *(Criterion 11 is new, added 2026-09-27; it is numbered past the highest id any 169.x phase uses, so it collides with none.)* *(Criterion 12 is new, added 2026-09-27, numbered past 11 for the same reason.)*
 
 **Plans:** 3 plans in 2 waves, one PR (split 2026-09-26, D-37): W1 169.4-01 RISKTAB, 169.4-02 ALLOCBENCH; W2 169.4-03 integration run + post-deploy browser re-check. Decisions carried in `169.4-CONTEXT.md`; no migration.
 
@@ -4215,7 +4373,7 @@ phase's newest plans live only on an open branch, the count says "on main". The 
 table (measured at `733a55f5`, 33 rows) is superseded by this one; its still-accurate rows are
 kept verbatim.
 
-**Totals: 41 of 80 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).** Recounted 2026-09-27 from this table's own rows after adding the 169 split (169.1, 169.2, 169.4, 169.4.1) and 164.9.1's close; the earlier "40 of 73" was taken before those rows existed. 80 counts 169.5 BENCHCOMPARE, added 2026-09-27 (169 D-61).
+**Totals: 41 of 82 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).** Recounted 2026-09-27 from this table's own rows after adding the 169 split (169.1, 169.2, 169.4, 169.4.1) and 164.9.1's close; the earlier "40 of 73" was taken before those rows existed. 82 counts 166.4.1 PORTFOLIOANALYTICS and 167.1.2.1 RECONMARKER, both added 2026-09-27, and 169.5 BENCHCOMPARE, added 2026-09-27 (169 D-61); the branch-side "80" and main-side "81" were each one merge short.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -4282,11 +4440,13 @@ kept verbatim.
 | 166.1.1 DDSIGN | 0/? | Queued — feature | - |
 | 166.2 COMPUTEONCE | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.102.0.0 · #874 |
 | 166.3 RECOMPUTE | 0/1 | HALTED 2026-09-27 at Task 3 — resumes after 166.4 ships | - |
-| 166.4 BENCHALIGN | 0/? | Queued — data integrity | - |
+| 166.4 BENCHALIGN | 4/4 | Executed — review and verification pending | - |
+| 166.4.1 PORTFOLIOANALYTICS | 0/? | Queued — data integrity | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.89.0.0 · #852 |
 | 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
 | 167.1.2 ACCOUNTTRUTH | PR A + PR B shipped | In progress — PR A v0.92.0.0 (#859), PR B v0.103.0.0 (#870); PR C executing | - |
+| 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
 | 167.2 KEYCARDSYNC | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.88.0.0 · #851 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | #866 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 03 is the founder's live retry | v0.97.0.0 · #867 |

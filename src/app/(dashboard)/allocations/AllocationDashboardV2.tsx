@@ -74,6 +74,12 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // factsheet KPI computed from it renders.
     equityHistoryState,
     equityCurveSource,
+    // D-06: the factsheet's return series. Empty while rebuilding.
+    equityDailyReturns = [],
+    equityHistoryRebuildReason = null,
+    // Review C2 round 2 IN-04: the keys a key_not_syncing reason is about.
+    equityHistoryNotSyncingKeyIds = [],
+    apiKeys = [],
   } = props;
   // Fail-closed: ONLY an explicit "ready" may show the curve. A missing field,
   // null, "" or any state added later (a destructuring default fires on
@@ -92,6 +98,17 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
 
   const holdingsEmpty = holdingsSummary.length === 0;
 
+  // Review C2 round 2 IN-04: resolve the producer's ids to the owner's own key
+  // rows so the key_not_syncing line can name the key. An id missing from the
+  // list makes the set unknown (null), and the line falls back to its unnamed
+  // form rather than naming a different key.
+  const notSyncingKeys = (() => {
+    if (equityHistoryNotSyncingKeyIds.length === 0) return null;
+    const byId = new Map(apiKeys.map((k) => [k.id, k]));
+    const keys = equityHistoryNotSyncingKeyIds.map((id) => byId.get(id));
+    return keys.every((k) => k !== undefined) ? keys : null;
+  })();
+
   const factsheetPayload = useMemo(
     () =>
       // D-02: no factsheet payload (so no KPI) is built while rebuilding.
@@ -104,10 +121,12 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             markets: activeVenues,
             startDate: equityDailyPoints[0]?.date ?? null,
             aum: analytics?.total_aum ?? null,
+            dailyReturns: equityDailyReturns,
           }),
     [
       isRebuilding,
       equityDailyPoints,
+      equityDailyReturns,
       props.allocator_id,
       portfolio,
       analytics,
@@ -199,7 +218,10 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         hasNoHistoryYet ? (
           <FactsheetWarmupNote snapshotCount={snapshotCount} />
         ) : (
-          <EquityHistoryRebuilding />
+          <EquityHistoryRebuilding
+            reason={equityHistoryRebuildReason}
+            notSyncingKeys={notSyncingKeys}
+          />
         )
       ) : factsheetPayload ? (
         <FactsheetProvider payload={factsheetPayload}>

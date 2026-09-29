@@ -93,6 +93,15 @@ class _FakeTable:
 
     # --- read chain -------------------------------------------------------------
     def select(self, *_a: Any, **_k: Any) -> "_FakeTable":
+        # A read of the legacy store is the duplicate-writer date reaching the
+        # compose. Refuse it the same way a write is refused (BACKBONE-03).
+        if self._name == LEGACY_TABLE:
+            raise _LegacyWriteError(
+                f"BACKBONE-03: read of {LEGACY_TABLE!r} is forbidden — the compose "
+                "must not see the duplicate-writer date"
+            )
+        if _a:
+            self._store.selects.append((self._name, _a[0]))
         return self
 
     def eq(self, col: str, val: Any) -> "_FakeTable":
@@ -141,6 +150,7 @@ class _FakeSupabase:
         self.rows = rows
         self.upserts: list[tuple[str, Any, Any]] = []
         self.deletes: list[tuple[str, dict, int]] = []
+        self.selects: list[tuple[str, Any]] = []
 
     def table(self, name: str) -> _FakeTable:
         return _FakeTable(name, self)
@@ -1243,6 +1253,1040 @@ async def test_pin_m2_negative_equity_persists_null_anchor() -> None:
     assert _persisted_null_reason(capture) == "nonpositive", (
         f"a negative equity must stamp anchor_null_reason='nonpositive'; "
         f"got {_persisted_null_reason(capture)!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2-05 — the persisted payload carries D-06 returns (version 2).
+# The compose dict is upserted unchanged, so a deposit that steps the $-curve
+# does not step the stored return. MUTATION-FALSIFIABLE: drop ``returns`` from
+# the upserted payload → this test RED.
+# ---------------------------------------------------------------------------
+
+
+def _seed_one_key_deposit() -> dict[str, list[dict]]:
+    """One eligible key, three days, a deposit on day 3. Hand-derivable."""
+    alloc = "alloc-deposit"
+    days = ["2026-06-01", "2026-06-02", "2026-06-03"]
+    returns = [0.0, 0.0, 0.02]
+    return {
+        "api_keys": [
+            {
+                "id": "key-A",
+                "user_id": alloc,
+                "is_active": True,
+                "sync_status": "connected",
+                "disconnected_at": None,
+                "exchange": "binance",
+                "venue_account_id": "venue-A",
+            },
+        ],
+        "csv_daily_returns": [
+            {
+                "api_key_id": "key-A",
+                "allocator_id": alloc,
+                "date": day,
+                "daily_return": ret,
+            }
+            for day, ret in zip(days, returns)
+        ],
+        DERIVED_TABLE: [
+            {
+                "allocator_id": alloc,
+                "kind": "key_inputs:key-A",
+                "payload": {
+                    "flows": [{"utc_day_iso": "2026-06-03", "usd_signed": 1000.0}],
+                    "anchor_usd": 5100.0,
+                    "anchor_asof": "2026-06-03",
+                    "venue": "binance",
+                },
+            },
+        ],
+        LEGACY_TABLE: [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_one_key_deposit_persists_version_2_returns() -> None:
+    """The upserted equity_curve payload is the compose payload: version 2 and a
+    returns list of ISO dates and finite floats, ascending, whose day-3 entry is
+    the key's own r (the deposit is not a return)."""
+    import math
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(_seed_one_key_deposit())
+    job = {
+        "id": "j-deposit",
+        "kind": "derive_allocator_equity",
+        "allocator_id": "alloc-deposit",
+    }
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "DONE"
+    curve_upserts = [
+        u for u in fake.upserts
+        if u[0] == DERIVED_TABLE and _is_equity_curve_upsert(u[1])
+    ]
+    assert len(curve_upserts) == 1, fake.upserts
+    payload = _extract_payload(curve_upserts[0][1])
+    assert payload.get("version") == 2
+    returns = payload.get("returns")
+    assert isinstance(returns, list) and returns, payload
+    dates = [row["date"] for row in returns]
+    assert dates == sorted(dates)
+    assert all(
+        isinstance(row["date"], str) and len(row["date"]) == 10 and row["date"][4] == "-"
+        for row in returns
+    )
+    assert all(isinstance(row["r"], float) and math.isfinite(row["r"]) for row in returns)
+    by_date = {row["date"]: row["r"] for row in returns}
+    assert "2026-06-01" not in by_date
+    assert by_date["2026-06-03"] == pytest.approx(0.02, abs=1e-12)
+    curve = {point["date"]: point["equity_usd"] for point in payload["curve"]}
+    level_ratio = curve["2026-06-03"] / curve["2026-06-02"] - 1.0
+    assert abs(level_ratio - by_date["2026-06-03"]) > 1e-4
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2-05 task 2 — identity gate over the counted set, and one account once.
+# MUTATION-FALSIFIABLE: drop the duplicate branch (treat 'duplicate' as ordinary
+# when the holder is working, and the keys do not share a venue id) → the
+# duplicate test upserts a curve and goes RED.
+# ---------------------------------------------------------------------------
+
+
+def _gate_key(key_id: str, alloc: str, **extra: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "id": key_id,
+        "user_id": alloc,
+        "is_active": True,
+        "sync_status": "connected",
+        "disconnected_at": None,
+        "exchange": "binance",
+        "venue_account_id": None,
+        "account_shared_with_api_key_id": None,
+        "account_share_kind": None,
+    }
+    row.update(extra)
+    return row
+
+
+def _stale_curve(alloc: str) -> dict[str, Any]:
+    return {
+        "allocator_id": alloc,
+        "kind": "equity_curve",
+        "payload": {
+            "curve": [{"date": "2026-01-01", "equity_usd": 1.0}],
+            "is_trustworthy": True,
+        },
+    }
+
+
+def _series_rows(alloc: str, key_id: str, anchor: float) -> tuple[list[dict], dict]:
+    """Three flat days and a key_inputs row so a single counted key can compose."""
+    days = ["2026-06-01", "2026-06-02", "2026-06-03"]
+    csv = [
+        {
+            "api_key_id": key_id,
+            "allocator_id": alloc,
+            "date": day,
+            "daily_return": 0.0,
+        }
+        for day in days
+    ]
+    ki = {
+        "allocator_id": alloc,
+        "kind": f"key_inputs:{key_id}",
+        "payload": {
+            "flows": [],
+            "anchor_usd": anchor,
+            "anchor_asof": days[-1],
+            "venue": "binance",
+        },
+    }
+    return csv, ki
+
+
+async def _run_gate(fake: _FakeSupabase, alloc: str):
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    job = {"id": "j-gate", "kind": "derive_allocator_equity", "allocator_id": alloc}
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        return await run_derive_allocator_equity_job(job)
+
+
+def _curve_upserts(fake: _FakeSupabase) -> list:
+    return [
+        u for u in fake.upserts
+        if u[0] == DERIVED_TABLE and _is_equity_curve_upsert(u[1])
+    ]
+
+
+def _curve_deletes(fake: _FakeSupabase, alloc: str) -> list:
+    return [
+        d for d in fake.deletes
+        if d[0] == DERIVED_TABLE
+        and d[1].get("kind") == "equity_curve"
+        and d[1].get("allocator_id") == alloc
+    ]
+
+
+def test_account_identity_collisions_intervals() -> None:
+    """The helper is pure and interval-based. Overlap collides; a clipped
+    rotation does not; NULL ids do not; two departed keys that share an id and
+    an end day do. That last shape is what plan 09 feeds in."""
+    from services.job_worker import account_identity_collisions
+
+    def row(key_id: str, **extra: Any) -> dict[str, Any]:
+        base = {
+            "id": key_id,
+            "exchange": "binance",
+            "venue_account_id": "acct-1",
+            "first_counted_day": "2026-01-01",
+            "last_counted_day": "2026-03-01",
+        }
+        base.update(extra)
+        return base
+
+    overlap = account_identity_collisions([
+        row("a", last_counted_day="2026-02-01"),
+        row("b", first_counted_day="2026-01-15", last_counted_day="2026-04-01"),
+    ])
+    assert len(overlap) == 1 and overlap[0].n_keys == 2
+    # Counts only — the group carries no id a log could leak.
+    assert "acct-1" not in repr(overlap[0])
+    assert "a" not in repr(overlap[0])
+
+    clipped = account_identity_collisions([
+        row("a", last_counted_day="2026-01-04"),
+        row("b", first_counted_day="2026-01-05", last_counted_day="2026-02-01"),
+    ])
+    assert clipped == []
+
+    unknown = account_identity_collisions([
+        row("a", venue_account_id=None),
+        row("b", venue_account_id=None),
+    ])
+    assert unknown == []
+    # A blank id is not a shared account (pitfall 2). It collides with nothing,
+    # including another blank.
+    blank = account_identity_collisions([
+        row("a", venue_account_id="  "),
+        row("b", venue_account_id=""),
+    ])
+    assert blank == []
+
+    departed = account_identity_collisions([
+        row("a", first_counted_day="2026-01-01", last_counted_day="2026-03-01"),
+        row("b", first_counted_day="2026-02-01", last_counted_day="2026-03-01"),
+    ])
+    assert len(departed) == 1 and departed[0].n_keys == 2
+
+    live = account_identity_collisions([
+        row("a", first_counted_day=None, last_counted_day=None),
+        row("b", first_counted_day=None, last_counted_day=None),
+    ])
+    assert len(live) == 1 and live[0].n_keys == 2
+
+    other_venue = account_identity_collisions([
+        row("a", exchange="okx"),
+        row("b", exchange="binance"),
+    ])
+    assert other_venue == []
+
+    # C2 round 2, IN-02 (round-1 IN-01): the venue is compared case-blind, as
+    # every other reader of api_keys.exchange in this phase compares it
+    # (_polled_empty_since, the refresh's identity rule, the TS reader). One
+    # account behind "Binance" and "binance " is still one account.
+    mixed_case = account_identity_collisions([
+        row("a", exchange="Binance"),
+        row("b", exchange="binance "),
+    ])
+    assert len(mixed_case) == 1 and mixed_case[0].n_keys == 2
+
+
+@pytest.mark.asyncio
+async def test_duplicate_with_working_holder_deletes_curve(caplog: pytest.LogCaptureFixture) -> None:
+    """A marked duplicate whose holder is still connected is not counted on its
+    own. The marker alone refuses the curve — the two keys need not share a
+    venue id — and the log is the token plus counts, never an id."""
+    import logging
+
+    alloc = "alloc-dup"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    csv, ki = _series_rows(alloc, "key-D", 1_000.0)
+    _, holder_ki = _series_rows(alloc, "key-H", 1_000.0)
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key(
+                "key-D", alloc,
+                venue_account_id="venue-dup",
+                account_share_kind="duplicate",
+                account_shared_with_api_key_id="key-H",
+            ),
+            _gate_key("key-H", alloc, venue_account_id="venue-holder"),
+        ],
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: [ki, holder_ki, _stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    assert _curve_upserts(fake) == []
+    assert len(_curve_deletes(fake, alloc)) == 1
+    assert "account_duplicate" in caplog.text
+    assert "account_identity_collision" not in caplog.text
+    assert "key-D" not in caplog.text
+    assert "venue-dup" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_duplicate_with_revoked_holder_is_a_collision(caplog: pytest.LogCaptureFixture) -> None:
+    """A revoked holder is not working, so the marked key counts on its own. The
+    same venue id as another counted key is then a collision, not a duplicate."""
+    import logging
+
+    alloc = "alloc-revoked"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key(
+                "key-D", alloc,
+                venue_account_id="venue-shared",
+                account_share_kind="duplicate",
+                account_shared_with_api_key_id="key-H",
+            ),
+            _gate_key("key-H", alloc, sync_status="revoked", venue_account_id="venue-shared"),
+            _gate_key("key-X", alloc, venue_account_id="venue-shared"),
+        ],
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [_stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    assert _curve_upserts(fake) == []
+    assert len(_curve_deletes(fake, alloc)) == 1
+    assert "account_identity_collision" in caplog.text
+    assert "account_duplicate" not in caplog.text
+    assert "key-D" not in caplog.text
+    assert "venue-shared" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_duplicate_with_disconnected_holder_is_a_collision(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A disconnected holder is the same reader rule as a revoked one: the marked
+    key is ordinary, and a shared venue id with another counted key collides."""
+    import logging
+
+    alloc = "alloc-disc"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key(
+                "key-D", alloc,
+                venue_account_id="venue-shared",
+                account_share_kind="duplicate",
+                account_shared_with_api_key_id="key-H",
+            ),
+            _gate_key(
+                "key-H", alloc,
+                disconnected_at="2026-05-01T00:00:00+00:00",
+                venue_account_id="venue-shared",
+            ),
+            _gate_key("key-X", alloc, venue_account_id="venue-shared"),
+        ],
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [_stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    assert _curve_upserts(fake) == []
+    assert "account_identity_collision" in caplog.text
+    assert "account_duplicate" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_duplicate_with_revoked_holder_counts_when_alone() -> None:
+    """With the holder gone and no other counted key on the account, the marked
+    key is an ordinary key: the curve is composed, not refused as a duplicate."""
+    alloc = "alloc-alone"
+    csv, ki = _series_rows(alloc, "key-D", 4_000.0)
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key(
+                "key-D", alloc,
+                venue_account_id="venue-only",
+                account_share_kind="duplicate",
+                account_shared_with_api_key_id="key-H",
+            ),
+            _gate_key("key-H", alloc, sync_status="revoked", venue_account_id="venue-only"),
+        ],
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: [ki],
+        LEGACY_TABLE: [],
+    })
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    upserts = _curve_upserts(fake)
+    assert len(upserts) == 1
+    payload = _extract_payload(upserts[0][1])
+    assert payload.get("version") == 2
+    assert payload.get("is_trustworthy") is True
+
+
+@pytest.mark.asyncio
+async def test_two_keys_same_venue_without_marker_collide(caplog: pytest.LogCaptureFixture) -> None:
+    """No duplicate marker, but two eligible keys share (exchange, venue id).
+    Open intervals overlap, so the curve is deleted with the collision token."""
+    import logging
+
+    alloc = "alloc-collide"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key("key-A", alloc, venue_account_id="venue-shared"),
+            _gate_key("key-B", alloc, venue_account_id="venue-shared"),
+        ],
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [_stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    assert _curve_upserts(fake) == []
+    assert len(_curve_deletes(fake, alloc)) == 1
+    assert "account_identity_collision" in caplog.text
+    assert "key-A" not in caplog.text
+    assert "venue-shared" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_composite_member_counted_once_and_trustworthy() -> None:
+    """A composite_member non-holder is left out of the compose. The holder stays,
+    the shared account is flagged, and the payload stays trustworthy. The member's
+    key_inputs row is not deleted — the key is still eligible."""
+    alloc = "alloc-comp"
+    csv_h, ki_h = _series_rows(alloc, "key-H", 100_000.0)
+    csv_m, ki_m = _series_rows(alloc, "key-M", 100_000.0)
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key("key-H", alloc, venue_account_id="venue-shared"),
+            _gate_key(
+                "key-M", alloc,
+                venue_account_id="venue-shared",
+                account_share_kind="composite_member",
+                account_shared_with_api_key_id="key-H",
+            ),
+        ],
+        "csv_daily_returns": csv_h + csv_m,
+        DERIVED_TABLE: [ki_h, ki_m],
+        LEGACY_TABLE: [],
+    })
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    upserts = _curve_upserts(fake)
+    assert len(upserts) == 1, fake.upserts
+    payload = _extract_payload(upserts[0][1])
+    assert "composite_shared_account_counted_once" in payload["flags"]
+    assert payload["is_trustworthy"] is True
+    assert payload["inputs"]["n_keys"] == 1
+    terminal = payload["curve"][-1]["equity_usd"]
+    assert terminal == pytest.approx(100_000.0, rel=1e-6)
+    assert terminal < 150_000.0
+    kinds = [row["kind"] for row in fake.rows[DERIVED_TABLE]]
+    assert "key_inputs:key-M" in kinds
+    assert "key_inputs:key-H" in kinds
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2 C2 review CR-01 / SFH-01..03 — the D-18 working-holder rule.
+#
+# D-18 (founder, 2026-09-27; COMMENT ON COLUMN api_keys.account_share_kind in
+# migration 20260927180000): a marked key counts through its holder only while
+# the holder is WORKING — active, not disconnected, and a last sync that is NULL
+# or not revoked / sign_in_failed / error. Before this fix the derive used the
+# superseded rule (not disconnected, not revoked), so an inactive or failing
+# holder deleted the curve as "account_duplicate". A naive predicate swap on its
+# own would then SUM a failing-but-eligible holder and its healthy marked key:
+# the marked key's venue_account_id is NULL (_mark_shared never writes it while
+# the holder keeps the index slot), so the collision gate cannot see the pair.
+#
+# Fixtures are the production shape: the marked key carries NO venue id, the
+# holder carries the shared one, and the two anchors DIFFER so the terminal
+# equity names which key the account was counted through.
+# ---------------------------------------------------------------------------
+
+HOLDER_ANCHOR = 100_000.0
+MARKED_ANCHOR = 60_000.0
+
+
+def _shared_pair(alloc: str, kind: str, *, holder: dict[str, Any], marked: dict[str, Any] | None = None) -> _FakeSupabase:
+    csv_h, ki_h = _series_rows(alloc, "key-H", HOLDER_ANCHOR)
+    csv_m, ki_m = _series_rows(alloc, "key-M", MARKED_ANCHOR)
+    return _FakeSupabase({
+        "api_keys": [
+            _gate_key("key-H", alloc, venue_account_id="venue-shared", **holder),
+            _gate_key(
+                "key-M", alloc,
+                account_share_kind=kind,
+                account_shared_with_api_key_id="key-H",
+                **(marked or {}),
+            ),
+        ],
+        "csv_daily_returns": csv_h + csv_m,
+        DERIVED_TABLE: [ki_h, ki_m, _stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+
+
+def _composed_payload(fake: _FakeSupabase) -> dict:
+    upserts = _curve_upserts(fake)
+    assert len(upserts) == 1, (
+        f"expected one composed curve, got {len(upserts)} upserts and "
+        f"{len(fake.deletes)} deletes"
+    )
+    return _extract_payload(upserts[0][1])
+
+
+def test_working_holder_predicate_is_the_d18_rule() -> None:
+    """The truth table of the D-18 rule, including the explicit NULL leg: a key
+    that has never synced is WORKING (as eligible_key_predicate treats it)."""
+    from services.allocator_equity_derive import working_holder_predicate
+
+    base = {"is_active": True, "disconnected_at": None, "sync_status": "complete"}
+    assert working_holder_predicate(base) is True
+    assert working_holder_predicate({**base, "sync_status": None}) is True
+    assert working_holder_predicate({**base, "sync_status": "complete_with_warnings"}) is True
+    assert working_holder_predicate({**base, "sync_status": "rate_limited"}) is True
+    assert working_holder_predicate({**base, "is_active": False}) is False
+    assert working_holder_predicate({**base, "disconnected_at": "2026-09-01T00:00:00Z"}) is False
+    for status in ("revoked", "sign_in_failed", "error"):
+        assert working_holder_predicate({**base, "sync_status": status}) is False, status
+    assert working_holder_predicate(None) is False
+
+
+def test_working_holder_status_set_matches_ts_and_sql() -> None:
+    """Parity: the Python set is the TS NOT_WORKING_SYNC_STATUSES set and the SQL
+    tuple in migration 20260927180000. A status added to one side only would make
+    the writer and the reader disagree on which key an account is counted through."""
+    import re
+    from pathlib import Path
+
+    from services.allocator_equity_derive import NOT_WORKING_SYNC_STATUSES
+
+    repo = Path(__file__).resolve().parents[2]
+    ts = (repo / "src/lib/account-share-note.ts").read_text()
+    ts_block = re.search(
+        r"NOT_WORKING_SYNC_STATUSES[^=]*=\s*new Set\(\[(.*?)\]\)", ts, re.S
+    )
+    assert ts_block, "NOT_WORKING_SYNC_STATUSES not found in account-share-note.ts"
+    ts_set = set(re.findall(r'"([a-z_]+)"', ts_block.group(1)))
+
+    sql = (repo / "supabase/migrations/20260927180000_working_holder_rule_d18.sql").read_text()
+    sql_tuple = re.search(r"v_sync_status NOT IN \(([^)]*)\)", sql)
+    assert sql_tuple, "the D-18 status tuple not found in migration 20260927180000"
+    sql_set = set(re.findall(r"'([a-z_]+)'", sql_tuple.group(1)))
+
+    assert set(NOT_WORKING_SYNC_STATUSES) == ts_set == sql_set == {
+        "revoked", "sign_in_failed", "error",
+    }
+
+
+@pytest.mark.asyncio
+async def test_duplicate_of_an_inactive_holder_counts_on_its_own() -> None:
+    """D-18: an inactive holder (not disconnected, not revoked) is not working.
+    It is not eligible either, so the healthy marked key is the only key that
+    can count the account. The old rule refused the curve as a duplicate."""
+    alloc = "alloc-inactive"
+    fake = _shared_pair(alloc, "duplicate", holder={"is_active": False})
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["is_trustworthy"] is True
+    assert payload["inputs"]["n_keys"] == 1
+    assert payload["curve"][-1]["equity_usd"] == pytest.approx(MARKED_ANCHOR, rel=1e-6)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["error", "sign_in_failed"])
+async def test_duplicate_of_a_failing_holder_is_counted_once_through_the_healthy_key(
+    status: str,
+) -> None:
+    """D-18 holder-drop half: a failing holder is still ELIGIBLE (active, not
+    revoked, not disconnected), so after the predicate swap it would be summed
+    beside the now-ordinary marked key — one account counted twice, with no
+    collision to catch it. The account is counted exactly once, through the
+    healthy key; the failing holder leaves the sum (its key_inputs row stays)."""
+    alloc = f"alloc-dup-{status}"
+    fake = _shared_pair(alloc, "duplicate", holder={"sync_status": status})
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 1, "one account must be ONE counted key"
+    terminal = payload["curve"][-1]["equity_usd"]
+    assert terminal == pytest.approx(MARKED_ANCHOR, rel=1e-6), (
+        f"counted through the failing holder or summed both: {terminal}"
+    )
+    assert "duplicate_shared_account_counted_once" in payload["flags"]
+    kinds = [row["kind"] for row in fake.rows[DERIVED_TABLE]]
+    assert "key_inputs:key-H" in kinds, "an eligible key's inputs are not an orphan"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "holder",
+    [
+        pytest.param({"sync_status": "error"}, id="holder-error"),
+        pytest.param({"sync_status": "sign_in_failed"}, id="holder-sign-in-failed"),
+        pytest.param({"is_active": False}, id="holder-inactive"),
+    ],
+)
+async def test_composite_member_of_a_non_working_holder_counts_through_the_member(
+    holder: dict[str, Any],
+) -> None:
+    """SFH-03: the composite branch used eligible_key_predicate, which admits a
+    failing holder, so the stale holder was counted and the healthy member's P&L
+    left the book as flat 0% days while the payload stayed trustworthy."""
+    alloc = "alloc-comp-failing"
+    fake = _shared_pair(alloc, "composite_member", holder=holder)
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 1
+    assert payload["curve"][-1]["equity_usd"] == pytest.approx(MARKED_ANCHOR, rel=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_shared_account_with_no_working_key_is_counted_once_and_loudly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Neither key of the pair is working (both eligible, both failing). The
+    account is still counted exactly once — through the holder, whose history is
+    kept — never twice and never as $0, and the job says so at WARNING.
+
+    C2 round 2, SFH-R2-04: the account's series stopped when its keys began
+    failing and is carried flat at r = 0 while the rest of the book moves, so
+    the book's return is diluted by frozen capital. Round 1 raised a BENIGN
+    flag nobody reads and the book read "ready". It is now a BLOCKING degrade
+    reason: the curve is untrustworthy and the reader holds the book."""
+    import logging
+
+    alloc = "alloc-none-working"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    fake = _shared_pair(
+        alloc, "duplicate",
+        holder={"sync_status": "error"},
+        marked={"sync_status": "sign_in_failed"},
+    )
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 1
+    assert payload["curve"][-1]["equity_usd"] == pytest.approx(HOLDER_ANCHOR, rel=1e-6)
+    assert "shared_account_no_working_key" in payload["degrade_reasons"]
+    assert "shared_account_no_working_key" not in payload["flags"]
+    assert payload["is_trustworthy"] is False
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("no working key" in r.getMessage() for r in warnings), caplog.text
+    assert "key-H" not in caplog.text and "venue-shared" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("keys", "token"),
+    [
+        pytest.param(
+            [
+                _gate_key(
+                    "key-D", "alloc-refuse",
+                    account_share_kind="duplicate",
+                    account_shared_with_api_key_id="key-H",
+                ),
+                _gate_key("key-H", "alloc-refuse", venue_account_id="venue-holder"),
+            ],
+            "account_duplicate",
+            id="duplicate",
+        ),
+        pytest.param(
+            [
+                _gate_key("key-A", "alloc-refuse", venue_account_id="venue-shared"),
+                _gate_key("key-B", "alloc-refuse", venue_account_id="venue-shared"),
+            ],
+            "account_identity_collision",
+            id="collision",
+        ),
+    ],
+)
+async def test_identity_refusal_is_a_warning_not_info(
+    caplog: pytest.LogCaptureFixture, keys: list[dict[str, Any]], token: str
+) -> None:
+    """C2 silent-failure SFH-07: the identity refusal deletes the allocator's
+    curve and ends the job DONE. At INFO nobody can find out from the logs why
+    the curve keeps disappearing. It logs at WARNING: token and counts only."""
+    import logging
+
+    alloc = "alloc-refuse"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    fake = _FakeSupabase({
+        "api_keys": keys,
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [_stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    assert len(_curve_deletes(fake, alloc)) == 1
+    refusals = [r for r in caplog.records if token in r.getMessage()]
+    assert refusals, caplog.text
+    assert all(r.levelno == logging.WARNING for r in refusals), [
+        logging.getLevelName(r.levelno) for r in refusals
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("keys", "token"),
+    [
+        pytest.param(
+            [
+                _gate_key(
+                    "key-D", "alloc-refuse-sentry",
+                    account_share_kind="duplicate",
+                    account_shared_with_api_key_id="key-H",
+                ),
+                _gate_key("key-H", "alloc-refuse-sentry", venue_account_id="venue-holder"),
+            ],
+            "account_duplicate",
+            id="duplicate",
+        ),
+        pytest.param(
+            [
+                _gate_key("key-A", "alloc-refuse-sentry", venue_account_id="venue-shared"),
+                _gate_key("key-B", "alloc-refuse-sentry", venue_account_id="venue-shared"),
+            ],
+            "account_identity_collision",
+            id="collision",
+        ),
+    ],
+)
+async def test_identity_refusal_reaches_sentry_as_an_event(
+    keys: list[dict[str, Any]], token: str
+) -> None:
+    """C2 silent-failure SFH-07 remainder (round 2). The WARNING log alone never
+    reaches Sentry as an event: sentry_init.py keeps the SDK's default
+    LoggingIntegration, whose event_level is ERROR, so a WARNING is only a
+    breadcrumb and the refusal was visible in Railway logs only. The refusal is
+    captured explicitly, at level warning, tagged with the job and the reason
+    token, and the message carries no key id and no venue id."""
+    from unittest.mock import patch
+
+    alloc = "alloc-refuse-sentry"
+    fake = _FakeSupabase({
+        "api_keys": keys,
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [_stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    with patch("services.job_worker.sentry_sdk") as sentry:
+        assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    assert sentry.capture_message.call_count == 1
+    args, kwargs = sentry.capture_message.call_args
+    message = args[0]
+    assert token in message
+    assert kwargs.get("level") == "warning"
+    for secret in ("key-D", "key-H", "key-A", "key-B", "venue-holder", "venue-shared"):
+        assert secret not in message
+    scope = sentry.new_scope.return_value.__enter__.return_value
+    tags = {call.args[0]: call.args[1] for call in scope.set_tag.call_args_list}
+    assert tags.get("compute_job_id") == "j-gate"
+    assert tags.get("derive_refusal") == token
+
+
+@pytest.mark.asyncio
+async def test_composite_pair_keeps_the_key_whose_history_starts_first() -> None:
+    """C2 review WR-01 (C1 WR-03): the marker's direction follows stamp order,
+    not seniority, so during the backfill window the HOLDER is often the newer
+    key. Keeping the holder dropped the older member's earlier returns while the
+    benign composite flag kept the shortened curve trustworthy. Of two working
+    members the one whose returns start first is counted."""
+    alloc = "alloc-comp-older-member"
+    early = ["2026-05-29", "2026-05-30", "2026-05-31", "2026-06-01", "2026-06-02", "2026-06-03"]
+    csv_h, ki_h = _series_rows(alloc, "key-H", HOLDER_ANCHOR)
+    _, ki_m = _series_rows(alloc, "key-M", MARKED_ANCHOR)
+    csv_m = [
+        {"api_key_id": "key-M", "allocator_id": alloc, "date": day, "daily_return": 0.0}
+        for day in early
+    ]
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key("key-H", alloc, venue_account_id="venue-shared"),
+            _gate_key(
+                "key-M", alloc,
+                account_share_kind="composite_member",
+                account_shared_with_api_key_id="key-H",
+            ),
+        ],
+        "csv_daily_returns": csv_h + csv_m,
+        DERIVED_TABLE: [ki_h, ki_m],
+        LEGACY_TABLE: [],
+    })
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 1
+    assert payload["curve"][0]["date"] <= "2026-05-30", payload["curve"][0]
+    assert payload["curve"][-1]["equity_usd"] == pytest.approx(MARKED_ANCHOR, rel=1e-6)
+    assert "composite_shared_account_counted_once" in payload["flags"]
+
+
+# ---------------------------------------------------------------------------
+# C2 round 2: SFH-R2-03 (high) / R2 IN-01. D-18's working-first rule keeps the
+# WORKING member of a shared account. When that member's series starts later
+# than a failing member's (a key rotation: the new key's reconstruct depth is
+# shorter than the old key's accumulated history), round 1 dropped the older
+# history under a benign *_counted_once flag, and the book read "ready" over
+# the shortened window. The account is one series: the failing member's
+# returns are used for the days BEFORE the kept member's first return day
+# (D-09 case (2) ordering), with that member's flows for those days, so the
+# history keeps its start and nothing is counted twice. Where that cannot be
+# done honestly (a gap between the two series, or no flows for the older
+# days) the book is untrustworthy, never benign.
+# ---------------------------------------------------------------------------
+
+_ROTATION_OLD_DAYS = [f"2026-05-{d:02d}" for d in range(1, 32)] + [
+    "2026-06-01", "2026-06-02", "2026-06-03",
+]
+_ROTATION_NEW_DAYS = ["2026-06-01", "2026-06-02", "2026-06-03"]
+
+
+def _rotation_pair(
+    alloc: str,
+    kind: str,
+    *,
+    old_days: list[str] | None = None,
+    old_flows: list[dict[str, Any]] | None = None,
+    new_flows: list[dict[str, Any]] | None = None,
+    old_key_inputs: bool = True,
+    old_null_reason: str | None = None,
+) -> _FakeSupabase:
+    """The SFH-R2-03 measurement: old key H (the holder, stamped) fails with
+    sign_in_failed and holds returns from 2026-05-01 through 2026-06-03; new
+    key M (marked ``kind``) works and holds returns from 2026-06-01. H's return
+    on the overlap days is 0.5, so a curve that used it there is visibly wrong."""
+    days = old_days if old_days is not None else _ROTATION_OLD_DAYS
+    csv = [
+        {
+            "api_key_id": "key-H", "allocator_id": alloc, "date": day,
+            "daily_return": 0.5 if day >= "2026-06-01" else 0.001,
+        }
+        for day in days
+    ] + [
+        {"api_key_id": "key-M", "allocator_id": alloc, "date": day, "daily_return": 0.002}
+        for day in _ROTATION_NEW_DAYS
+    ]
+    derived: list[dict[str, Any]] = [
+        {
+            "allocator_id": alloc, "kind": "key_inputs:key-M",
+            "payload": {
+                "flows": new_flows or [], "anchor_usd": MARKED_ANCHOR,
+                "anchor_asof": "2026-06-03", "venue": "binance",
+            },
+        },
+        _stale_curve(alloc),
+    ]
+    if old_key_inputs:
+        derived.append({
+            "allocator_id": alloc, "kind": "key_inputs:key-H",
+            "payload": {
+                "flows": old_flows or [],
+                "anchor_usd": None if old_null_reason else HOLDER_ANCHOR,
+                "anchor_null_reason": old_null_reason,
+                "anchor_asof": "2026-06-03", "venue": "binance",
+            },
+        })
+    return _FakeSupabase({
+        "api_keys": [
+            _gate_key(
+                "key-H", alloc, venue_account_id="venue-shared", sync_status="sign_in_failed"
+            ),
+            _gate_key(
+                "key-M", alloc,
+                account_share_kind=kind,
+                account_shared_with_api_key_id="key-H",
+            ),
+        ],
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: derived,
+        LEGACY_TABLE: [],
+    })
+
+
+def _expected_stitched_curve(flows: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """The account's one series, replayed from M's anchor: H's returns before
+    2026-06-01, M's from it, the given flows."""
+    import pandas as pd
+
+    from services.allocator_equity_derive import replay_key_equity
+
+    days = [d for d in _ROTATION_OLD_DAYS if d < "2026-06-01"] + _ROTATION_NEW_DAYS
+    returns = pd.Series(
+        [0.001 if d < "2026-06-01" else 0.002 for d in days], index=days, dtype="float64"
+    )
+    equity = replay_key_equity(returns, flows, MARKED_ANCHOR).equity
+    assert equity is not None
+    return [(str(d), float(v)) for d, v in equity.items()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["duplicate", "composite_member"])
+async def test_a_working_newer_key_is_stitched_onto_the_failing_older_keys_history(
+    kind: str,
+) -> None:
+    """SFH-R2-03, the reviewer's measurement: before the fix the curve started
+    on 2026-06-01 with n=3, trustworthy, flags only *_counted_once. The book's
+    history keeps H's start, the account is still one counted key, the terminal
+    is M's anchor, and H's overlap-day returns (0.5) are not used."""
+    alloc = f"alloc-stitch-{kind}"
+    fake = _rotation_pair(alloc, kind)
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 1
+    assert payload["curve"][0]["date"] == "2026-05-01", payload["curve"][0]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "shared_account_history_stitched" in payload["flags"]
+    got = [(row["date"], row["equity_usd"]) for row in payload["curve"]]
+    expected = _expected_stitched_curve([])
+    assert [d for d, _ in got] == [d for d, _ in expected]
+    for (day, value), (_, want) in zip(got, expected):
+        assert value == pytest.approx(want, rel=1e-9), day
+    assert payload["curve"][-1]["equity_usd"] == pytest.approx(MARKED_ANCHOR, rel=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_a_stitched_account_takes_each_days_flows_from_the_key_that_owns_the_day() -> None:
+    """One account, one set of transfers. H's flows are the account's flows
+    for H's days, M's for M's days. M's own crawl may reach back over H's days
+    and list the same May deposit; counting it from both keys would put the
+    deposit into the curve twice."""
+    alloc = "alloc-stitch-flows"
+    may_deposit = {"utc_day_iso": "2026-05-15", "usd_signed": 10_000.0}
+    june_withdrawal = {"utc_day_iso": "2026-06-02", "usd_signed": -5_000.0}
+    fake = _rotation_pair(
+        alloc, "duplicate",
+        old_flows=[may_deposit, {"utc_day_iso": "2026-06-02", "usd_signed": -99.0}],
+        new_flows=[may_deposit, june_withdrawal],
+    )
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    expected = _expected_stitched_curve([("2026-05-15", 10_000.0), ("2026-06-02", -5_000.0)])
+    got = [(row["date"], row["equity_usd"]) for row in payload["curve"]]
+    assert [d for d, _ in got] == [d for d, _ in expected]
+    for (day, value), (_, want) in zip(got, expected):
+        assert value == pytest.approx(want, rel=1e-9), day
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param("gap", id="the-older-series-ends-before-the-newer-starts"),
+        pytest.param("no_key_inputs", id="the-older-key-has-no-flows-row"),
+        pytest.param("flow_drop", id="the-older-keys-flows-were-cut"),
+    ],
+)
+async def test_a_shared_account_whose_history_cannot_be_stitched_is_not_trustworthy(
+    case: str,
+) -> None:
+    """Where the older history cannot be joined honestly, the curve keeps the
+    newer key's shorter window and says so with a BLOCKING reason, so the
+    reader holds the book instead of showing a shortened history as ready.
+    A gap between the two series leaves days whose returns nobody holds; a
+    missing or cut flow list would mis-level every older day."""
+    alloc = f"alloc-trunc-{case}"
+    if case == "gap":
+        fake = _rotation_pair(
+            alloc, "duplicate",
+            old_days=[f"2026-05-{d:02d}" for d in range(1, 21)],
+        )
+    elif case == "no_key_inputs":
+        fake = _rotation_pair(alloc, "duplicate", old_key_inputs=False)
+    else:
+        fake = _rotation_pair(alloc, "duplicate", old_null_reason="flow_drop")
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["curve"][0]["date"] == "2026-06-01", payload["curve"][0]
+    assert payload["is_trustworthy"] is False
+    assert "shared_account_history_truncated" in payload["degrade_reasons"]
+    assert "shared_account_history_stitched" not in payload["flags"]
+
+
+@pytest.mark.asyncio
+async def test_a_working_key_with_no_returns_yet_is_not_stitched_and_the_book_is_not_trustworthy() -> None:
+    """SFH-R2-03's hidden case, decided and pinned: the kept (working) key has
+    a key_inputs row but no returns yet (its first derive has not produced a
+    series). Its anchor is TODAY's equity; hanging it on the failing key's last
+    return day would misdate it, so nothing is stitched. The compose already
+    drops such a key as DROPPED_KEY, so the book is untrustworthy and held,
+    never "ready" over the old key's history or without the account."""
+    alloc = "alloc-stitch-no-returns"
+    fake = _rotation_pair(alloc, "duplicate")
+    fake.rows["csv_daily_returns"] = [
+        r for r in fake.rows["csv_daily_returns"] if r["api_key_id"] != "key-M"
+    ]
+    csv_o, ki_o = _series_rows(alloc, "key-O", 10_000.0)
+    fake.rows["api_keys"].append(_gate_key("key-O", alloc, venue_account_id="venue-own"))
+    fake.rows["csv_daily_returns"].extend(csv_o)
+    fake.rows[DERIVED_TABLE].append(ki_o)
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["is_trustworthy"] is False
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert "shared_account_history_stitched" not in payload["flags"]
+    assert payload["curve"][0]["date"] == "2026-06-01", payload["curve"][0]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_whose_marked_key_fails_behind_a_working_holder_still_refuses() -> None:
+    """Reader parity (queries.ts countsAsDuplicate): an ELIGIBLE duplicate-marked
+    key whose holder is working is a duplicate, whatever the marked key's own
+    status. The curve is refused, as before."""
+    alloc = "alloc-dup-marked-failing"
+    fake = _shared_pair(alloc, "duplicate", holder={}, marked={"sync_status": "error"})
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    assert _curve_upserts(fake) == []
+    assert len(_curve_deletes(fake, alloc)) == 1
+
+
+@pytest.mark.asyncio
+async def test_compose_does_not_read_legacy_snapshots() -> None:
+    """The fake raises on any read of allocator_equity_snapshots. The job still
+    composes — that table is not an input, so a duplicate-writer date cannot
+    reach the curve."""
+    alloc = "alloc-deposit"
+    fake = _FakeSupabase(_seed_one_key_deposit())
+    # Prove the fake itself refuses the read, then that the job never trips it.
+    with pytest.raises(_LegacyWriteError):
+        fake.table(LEGACY_TABLE).select("date").execute()
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    upserts = _curve_upserts(fake)
+    assert len(upserts) == 1
+    payload = _extract_payload(upserts[0][1])
+    assert payload.get("version") == 2
+    selects = [name for name, _cols in fake.selects]
+    assert LEGACY_TABLE not in selects
+    assert any(
+        name == "api_keys" and "account_share_kind" in str(cols)
+        and "venue_account_id" in str(cols)
+        and "exchange" in str(cols)
+        and "account_shared_with_api_key_id" in str(cols)
+        for name, cols in fake.selects
     )
 
 

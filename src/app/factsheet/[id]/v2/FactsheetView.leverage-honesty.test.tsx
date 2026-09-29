@@ -124,10 +124,12 @@ function buildSmall(): {
 }
 const SMALL = buildSmall();
 
+// Phase 167.1.2 plan 07: mounted WITHOUT scenarioMode — ControlBar hides the
+// leverage input in scenarioMode, and this is the real factsheet's control.
 function renderBody(payload: FactsheetPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+      <FactsheetBody payload={payload} hideAllocatorSection />
     </FactsheetProvider>,
   );
 }

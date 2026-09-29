@@ -119,6 +119,37 @@ def test_validate_invokes_validate_key_permissions(monkeypatch, client):
     mock_exchange.close.assert_awaited_once()
 
 
+def test_validate_never_returns_the_venue_account_id(monkeypatch, client):
+    """Phase 167.1.2 IN-01. ``validate_key_permissions`` now carries the
+    venue account id as ``account_id``. It is an account identifier, and
+    ``services.account_identity`` promises it leaves the service only as the
+    ``venue_account_id`` field of the real validate response. This debug route
+    spread the whole result into its ``detail``, so the id rode out here too.
+    The rest of the result still passes through.
+    """
+    _stub_creds(monkeypatch, "okx", with_passphrase=True)
+    monkeypatch.setattr(
+        "routers.debug_key_flow.create_exchange",
+        lambda *a, **k: _make_mock_exchange(),
+    )
+    monkeypatch.setattr(
+        "routers.debug_key_flow.validate_key_permissions",
+        AsyncMock(return_value={"valid": True, "read_only": True, "account_id": "70000001"}),
+    )
+
+    r = client.post(
+        "/internal/debug-key-flow/validate",
+        json={"broker": "okx"},
+        headers={"x-internal-token": "test-token"},
+    )
+
+    assert r.status_code == 200
+    detail = r.json()["detail"]
+    assert "account_id" not in detail
+    assert "70000001" not in r.text
+    assert detail == {"broker": "okx", "valid": True, "read_only": True}
+
+
 def test_validate_returns_error_when_permissions_invalid(monkeypatch, client):
     _stub_creds(monkeypatch, "binance")
     mock_exchange = _make_mock_exchange()
