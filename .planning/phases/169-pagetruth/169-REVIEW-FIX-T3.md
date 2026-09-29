@@ -29,15 +29,15 @@ status: all_fixed
 ### H-3: A composite outage on the discovery detail page reaches no alert, and the copy tells the user it is a permanent state
 
 **Files modified:** `src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx`, `src/app/(dashboard)/discovery/[slug]/[strategyId]/page.pending-fallback.test.tsx`
-**Commit:** `2f1daac40`
+**Commits:** `2f1daac40` (fix and tests), plus `66c256c7a` (a comment-only follow-up in `page.tsx`) that states where `cause` ends up
 **Status:** fixed
 
 **Applied fix:**
-- **Alert.** The `CompositeSeriesReadError` catch now calls `captureToSentry` from `@/lib/sentry-capture`. That is the repo's server-side helper. The other server pages call it fire-and-forget with `{ tags: { route, stage } }` (`factsheet/[id]/v2/page.tsx:370`, `factsheet-share/[token]/page.tsx:310`), so this call does the same and adds no `after()`.
+- **Alert.** The `CompositeSeriesReadError` catch now calls `captureToSentry` from `@/lib/sentry-capture`. That is the repo's server-side helper. The other server pages call it fire-and-forget with `{ tags: { route, stage } }` (`factsheet/[id]/v2/page.tsx:370`, `factsheet-share/[token]/page.tsx:310`), so this call does the same and adds no `after()`. It therefore shares those peers' cold-finish exposure, which the helper's own docblock describes (SEAMRIM-04): delivery is best effort, not guaranteed.
   - Level: `error`.
   - Tags: `route: "discovery/strategy-detail"`, `stage: "composite-read"`, `reason: "read_error"`, `code: <err.code>`, `strategy_id`, `read: "csv_daily_returns"`.
   - Identifiers: `strategy_id` is the only one. The factsheet resolve stage already sends it for the same failure (`fetch-and-build-payload.ts:427-436`).
-- **The captured object is the reader's own error.** It is not a new `Error` carrying only the code. That means the PostgREST message rides along as `cause`. SFH L-2 records the code-only event as a defect on the resolve stage, and sending the reader's error keeps this site from repeating it. The L-2 site itself is not in this topic's files and was not touched.
+- **The captured object is the reader's own error.** It is not a new `Error` carrying only the code. That means the PostgREST message rides along as `cause`. Read, not measured against a live event: `captureToSentry`'s `scrubCaptureInput` (`sentry-capture.ts:99-115`) rebuilds the error and folds a string `cause` into the message as ` [cause: <scrubbed>]`, so the Sentry event's message carries it. It does not reach Sentry as a linked exception. SFH L-2 records the code-only event as a defect on the resolve stage, and sending the reader's error keeps this site from repeating it. The L-2 site itself is not in this topic's files and was not touched.
 - **Console line.** The `console.error` line stays, because the helper's contract is that the caller logs and Sentry is additive. It now also carries `errorMessage` (the cause), as the resolve stage's line does.
 - **Copy.** A local `compositeReadFailed` flag is set only inside that catch. When it is set, the fallback `<article>` renders `COMPOSITE_READ_FAILED_SENTENCE`: "We could not load this strategy's factsheet right now. Reload this page to try again." It never renders `KCS10_PUBLIC_SENTENCE` on that branch.
   - Voice: active and declarative, with no em dash, per DESIGN.md "Voice / microcopy".
