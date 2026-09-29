@@ -1231,15 +1231,8 @@ function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; series
   // renders, so the chip and the sentence below it can never disagree about
   // where the track record ends.
   const seriesEnd = resolveSeriesEnd(seriesDates);
-  // 169 review WR-04: the series end is a UTC DATE, so its age is whole elapsed
-  // days (floor), and the tone is bucketed on the SAME number the date line
-  // prints. Bucketing the fractional age while printing the floored one read
-  // "old (7d)" and "stale (3d)" for most of each boundary day, against the
-  // ladder above. The future allowance holds: a bar dated tomorrow west of UTC
-  // is floor(-0.4) = -1, within SERIES_END_FUTURE_ALLOWANCE_DAYS; two days
-  // ahead is -2, still `future`.
   const seriesAgeDays = seriesEnd
-    ? Math.floor((nowMs - new Date(seriesEnd.iso).getTime()) / 86_400_000)
+    ? (nowMs - new Date(seriesEnd.iso).getTime()) / 86_400_000
     : NaN;
   const seriesAgeTone: FreshnessTone = seriesEnd
     ? bucketByAge(
@@ -1280,11 +1273,10 @@ function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; series
   // "Track record" it is the series end and its age, read from the same
   // `seriesEnd` the tone used (one derivation, so it matches SeriesRecencyLine
   // byte for byte); an unknown end prints "—", never the compute date. The
-  // series age is already whole elapsed days (floor, above), the same value the
-  // tone was bucketed on: Math.round would call a bar dated 120 days ago "121d"
-  // every afternoon UTC.
+  // series end is a UTC DATE, so its age is whole elapsed days (floor): Math.round
+  // would call a bar dated 120 days ago "121d" every afternoon UTC.
   const dateText = seriesIsBinding ? (seriesEnd?.formatted ?? "—") : formatIsoDate(computedAt);
-  const ageDays = seriesIsBinding ? seriesAgeDays : Math.round(days);
+  const ageDays = seriesIsBinding ? Math.floor(seriesAgeDays) : Math.round(days);
   return (
     <div>
       <div className="flex items-center justify-end gap-1.5 text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
