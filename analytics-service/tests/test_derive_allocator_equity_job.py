@@ -1968,6 +1968,188 @@ async def test_composite_pair_keeps_the_key_whose_history_starts_first() -> None
     assert "composite_shared_account_counted_once" in payload["flags"]
 
 
+# ---------------------------------------------------------------------------
+# C2 round 2: SFH-R2-03 (high) / R2 IN-01. D-18's working-first rule keeps the
+# WORKING member of a shared account. When that member's series starts later
+# than a failing member's (a key rotation: the new key's reconstruct depth is
+# shorter than the old key's accumulated history), round 1 dropped the older
+# history under a benign *_counted_once flag, and the book read "ready" over
+# the shortened window. The account is one series: the failing member's
+# returns are used for the days BEFORE the kept member's first return day
+# (D-09 case (2) ordering), with that member's flows for those days, so the
+# history keeps its start and nothing is counted twice. Where that cannot be
+# done honestly (a gap between the two series, or no flows for the older
+# days) the book is untrustworthy, never benign.
+# ---------------------------------------------------------------------------
+
+_ROTATION_OLD_DAYS = [f"2026-05-{d:02d}" for d in range(1, 32)] + [
+    "2026-06-01", "2026-06-02", "2026-06-03",
+]
+_ROTATION_NEW_DAYS = ["2026-06-01", "2026-06-02", "2026-06-03"]
+
+
+def _rotation_pair(
+    alloc: str,
+    kind: str,
+    *,
+    old_days: list[str] | None = None,
+    old_flows: list[dict[str, Any]] | None = None,
+    new_flows: list[dict[str, Any]] | None = None,
+    old_key_inputs: bool = True,
+    old_null_reason: str | None = None,
+) -> _FakeSupabase:
+    """The SFH-R2-03 measurement: old key H (the holder, stamped) fails with
+    sign_in_failed and holds returns from 2026-05-01 through 2026-06-03; new
+    key M (marked ``kind``) works and holds returns from 2026-06-01. H's return
+    on the overlap days is 0.5, so a curve that used it there is visibly wrong."""
+    days = old_days if old_days is not None else _ROTATION_OLD_DAYS
+    csv = [
+        {
+            "api_key_id": "key-H", "allocator_id": alloc, "date": day,
+            "daily_return": 0.5 if day >= "2026-06-01" else 0.001,
+        }
+        for day in days
+    ] + [
+        {"api_key_id": "key-M", "allocator_id": alloc, "date": day, "daily_return": 0.002}
+        for day in _ROTATION_NEW_DAYS
+    ]
+    derived: list[dict[str, Any]] = [
+        {
+            "allocator_id": alloc, "kind": "key_inputs:key-M",
+            "payload": {
+                "flows": new_flows or [], "anchor_usd": MARKED_ANCHOR,
+                "anchor_asof": "2026-06-03", "venue": "binance",
+            },
+        },
+        _stale_curve(alloc),
+    ]
+    if old_key_inputs:
+        derived.append({
+            "allocator_id": alloc, "kind": "key_inputs:key-H",
+            "payload": {
+                "flows": old_flows or [],
+                "anchor_usd": None if old_null_reason else HOLDER_ANCHOR,
+                "anchor_null_reason": old_null_reason,
+                "anchor_asof": "2026-06-03", "venue": "binance",
+            },
+        })
+    return _FakeSupabase({
+        "api_keys": [
+            _gate_key(
+                "key-H", alloc, venue_account_id="venue-shared", sync_status="sign_in_failed"
+            ),
+            _gate_key(
+                "key-M", alloc,
+                account_share_kind=kind,
+                account_shared_with_api_key_id="key-H",
+            ),
+        ],
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: derived,
+        LEGACY_TABLE: [],
+    })
+
+
+def _expected_stitched_curve(flows: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """The account's one series, replayed from M's anchor: H's returns before
+    2026-06-01, M's from it, the given flows."""
+    import pandas as pd
+
+    from services.allocator_equity_derive import replay_key_equity
+
+    days = [d for d in _ROTATION_OLD_DAYS if d < "2026-06-01"] + _ROTATION_NEW_DAYS
+    returns = pd.Series(
+        [0.001 if d < "2026-06-01" else 0.002 for d in days], index=days, dtype="float64"
+    )
+    equity = replay_key_equity(returns, flows, MARKED_ANCHOR).equity
+    assert equity is not None
+    return [(str(d), float(v)) for d, v in equity.items()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["duplicate", "composite_member"])
+async def test_a_working_newer_key_is_stitched_onto_the_failing_older_keys_history(
+    kind: str,
+) -> None:
+    """SFH-R2-03, the reviewer's measurement: before the fix the curve started
+    on 2026-06-01 with n=3, trustworthy, flags only *_counted_once. The book's
+    history keeps H's start, the account is still one counted key, the terminal
+    is M's anchor, and H's overlap-day returns (0.5) are not used."""
+    alloc = f"alloc-stitch-{kind}"
+    fake = _rotation_pair(alloc, kind)
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 1
+    assert payload["curve"][0]["date"] == "2026-05-01", payload["curve"][0]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "shared_account_history_stitched" in payload["flags"]
+    got = [(row["date"], row["equity_usd"]) for row in payload["curve"]]
+    expected = _expected_stitched_curve([])
+    assert [d for d, _ in got] == [d for d, _ in expected]
+    for (day, value), (_, want) in zip(got, expected):
+        assert value == pytest.approx(want, rel=1e-9), day
+    assert payload["curve"][-1]["equity_usd"] == pytest.approx(MARKED_ANCHOR, rel=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_a_stitched_account_takes_each_days_flows_from_the_key_that_owns_the_day() -> None:
+    """One account, one set of transfers. H's flows are the account's flows
+    for H's days, M's for M's days. M's own crawl may reach back over H's days
+    and list the same May deposit; counting it from both keys would put the
+    deposit into the curve twice."""
+    alloc = "alloc-stitch-flows"
+    may_deposit = {"utc_day_iso": "2026-05-15", "usd_signed": 10_000.0}
+    june_withdrawal = {"utc_day_iso": "2026-06-02", "usd_signed": -5_000.0}
+    fake = _rotation_pair(
+        alloc, "duplicate",
+        old_flows=[may_deposit, {"utc_day_iso": "2026-06-02", "usd_signed": -99.0}],
+        new_flows=[may_deposit, june_withdrawal],
+    )
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    expected = _expected_stitched_curve([("2026-05-15", 10_000.0), ("2026-06-02", -5_000.0)])
+    got = [(row["date"], row["equity_usd"]) for row in payload["curve"]]
+    assert [d for d, _ in got] == [d for d, _ in expected]
+    for (day, value), (_, want) in zip(got, expected):
+        assert value == pytest.approx(want, rel=1e-9), day
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param("gap", id="the-older-series-ends-before-the-newer-starts"),
+        pytest.param("no_key_inputs", id="the-older-key-has-no-flows-row"),
+        pytest.param("flow_drop", id="the-older-keys-flows-were-cut"),
+    ],
+)
+async def test_a_shared_account_whose_history_cannot_be_stitched_is_not_trustworthy(
+    case: str,
+) -> None:
+    """Where the older history cannot be joined honestly, the curve keeps the
+    newer key's shorter window and says so with a BLOCKING reason, so the
+    reader holds the book instead of showing a shortened history as ready.
+    A gap between the two series leaves days whose returns nobody holds; a
+    missing or cut flow list would mis-level every older day."""
+    alloc = f"alloc-trunc-{case}"
+    if case == "gap":
+        fake = _rotation_pair(
+            alloc, "duplicate",
+            old_days=[f"2026-05-{d:02d}" for d in range(1, 21)],
+        )
+    elif case == "no_key_inputs":
+        fake = _rotation_pair(alloc, "duplicate", old_key_inputs=False)
+    else:
+        fake = _rotation_pair(alloc, "duplicate", old_null_reason="flow_drop")
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["curve"][0]["date"] == "2026-06-01", payload["curve"][0]
+    assert payload["is_trustworthy"] is False
+    assert "shared_account_history_truncated" in payload["degrade_reasons"]
+    assert "shared_account_history_stitched" not in payload["flags"]
+
+
 @pytest.mark.asyncio
 async def test_duplicate_whose_marked_key_fails_behind_a_working_holder_still_refuses() -> None:
     """Reader parity (queries.ts countsAsDuplicate): an ELIGIBLE duplicate-marked

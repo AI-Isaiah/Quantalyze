@@ -120,6 +120,12 @@ class DegradeReason(str, Enum):
     # sum was non-finite. It was reported under the benign
     # skipped_nonpositive_denominator flag; a non-finite input is not benign.
     NONFINITE_RETURN = "nonfinite_return"
+    # 167.1.2 C2 round 2 (SFH-R2-03): a shared account whose counted member's
+    # series starts later than an older member's, where the older history could
+    # not be joined honestly (``stitch_shared_account`` refused). The curve then
+    # starts at the counted member's first day, so the book's window is shorter
+    # than its history. Round 1 marked this with a benign flag; it is not.
+    SHARED_ACCOUNT_HISTORY_TRUNCATED = "shared_account_history_truncated"
 
 
 # The BLOCKING subset: any of these present -> ``is_trustworthy`` is False.
@@ -130,6 +136,7 @@ _BLOCKING_REASONS: frozenset[DegradeReason] = frozenset(
         DegradeReason.OUT_OF_WINDOW_FLOW,
         DegradeReason.DROPPED_KEY,
         DegradeReason.NONFINITE_RETURN,
+        DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED,
     }
 )
 
@@ -284,6 +291,66 @@ def account_groups(
     for key_id in sorted(ids):
         grouped[_find(key_id)].append(by_id[key_id])
     return [grouped[root] for root in sorted(grouped, key=lambda r: str(grouped[r][0].get("id")))]
+
+
+def stitch_shared_account(
+    links: Sequence[tuple[pd.Series, Sequence[Any]]],
+) -> tuple[pd.Series, list[Any]] | None:
+    """One exchange account read by several keys, as ONE return series.
+
+    Phase 167.1.2 C2 round 2 (SFH-R2-03). ``links`` is the account's members,
+    each as ``(returns, flows)``, ordered by first return day with the COUNTED
+    member last. D-09 case (2) ordering: each earlier member owns the days from
+    its own first return day up to, not including, the next member's first
+    return day; the last member owns every day from its own first day on. A
+    member's flows are taken for the days it owns (the first member keeps its
+    flows dated before its first day, as any key's pre-window flow). One
+    account is one series, so nothing is counted twice, and the flows of a day
+    come from one key only: a newer key's crawl that reaches back over an older
+    key's days lists the same transfers, and taking both would double them.
+
+    Returns ``None`` when the join is not honest, and the caller then keeps the
+    counted member alone under a BLOCKING reason:
+      * a member has no returns;
+      * an earlier member's series ends before the day before its successor's
+        first day, so the days between hold nobody's returns (per-key dailies
+        are dense calendar-daily, so a series that reaches that day covers the
+        whole window it owns).
+    Pure; the ISO-day index contract is asserted on every link."""
+    if len(links) < 2:
+        return None
+    firsts: list[str] = []
+    for index, (series, _flows) in enumerate(links):
+        _assert_iso_day_index(series.index, f"stitch_shared_account[{index}]")
+        if len(series) == 0:
+            return None
+        firsts.append(min(str(d) for d in series.index))
+    days: list[str] = []
+    values: list[float] = []
+    flows_out: list[Any] = []
+    for index, (series, flows) in enumerate(links):
+        own_first = firsts[index]
+        is_last = index == len(links) - 1
+        next_first = None if is_last else firsts[index + 1]
+        if next_first is not None:
+            day_before = (date.fromisoformat(next_first) - timedelta(days=1)).isoformat()
+            if max(str(d) for d in series.index) < day_before:
+                return None
+        for day, value in sorted(
+            ((str(d), float(v)) for d, v in series.items()), key=lambda item: item[0]
+        ):
+            if day < own_first or (next_first is not None and day >= next_first):
+                continue
+            days.append(day)
+            values.append(value)
+        for flow in flows or ():
+            flow_day = str(flow[0])
+            if next_first is not None and flow_day >= next_first:
+                continue
+            if index > 0 and flow_day < own_first:
+                continue
+            flows_out.append(flow)
+    return pd.Series(values, index=days, dtype="float64"), flows_out
 
 
 def blend_concurrent_returns(

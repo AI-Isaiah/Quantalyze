@@ -10276,8 +10276,10 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     from services.allocator_equity_compose import compose_allocator_equity
     from services.allocator_equity_derive import (
         SHARED_ACCOUNT_KINDS,
+        DegradeReason,
         account_groups,
         eligible_key_predicate,
+        stitch_shared_account,
         working_holder_predicate,
     )
     from services.external_flows import ExternalFlow, validate_flow_shape
@@ -10342,6 +10344,20 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # older key's earlier returns under a benign flag. The returns are loaded
     # here for that ordering only: loading is not composing, and the identity
     # gate below still refuses before anything is composed.
+    #
+    # C2 round 2, SFH-R2-03 / R2 IN-01: working-first can keep a member whose
+    # returns start LATER than a failing member's (a key rotation: the new
+    # key's reconstruct depth is shorter than the old key's history). The
+    # account is one series, so the failing member's returns are STITCHED in
+    # for the days before the kept member's first day (``stitch_shared_account``,
+    # D-09 case (2) ordering), with that member's flows for those days. Round 1
+    # dropped them under a benign flag and the book read "ready" over a
+    # shortened window. A join that cannot be made honestly (a gap between the
+    # series, no flows row, flows cut as non-finite) leaves the kept member
+    # alone under the BLOCKING SHARED_ACCOUNT_HISTORY_TRUNCATED. A kept member
+    # with no returns yet is not stitched: its anchor is today's equity, and
+    # hanging it on an older member's last day would misdate it; the compose
+    # already drops such a key as DROPPED_KEY (untrustworthy).
     def _load_returns() -> list[dict[str, Any]]:
         return cast(
             list[dict[str, Any]],
@@ -10364,6 +10380,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             first_return_day[k] = str(day)
 
     excluded_shared: set[str] = set()
+    # kept key id → the members stitched before it, in first-return-day order.
+    stitch_sources: dict[str, list[str]] = {}
     composite_counted_once = False
     duplicate_counted_once = False
     no_working_groups = 0
@@ -10396,6 +10414,19 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             ),
         )
         excluded_shared.update(row["id"] for row in members if row is not kept)
+        kept_first = first_return_day.get(kept["id"])
+        if kept_first is not None:
+            earlier = sorted(
+                (
+                    row
+                    for row in members
+                    if row is not kept
+                    and first_return_day.get(row["id"], "9999-12-31") < kept_first
+                ),
+                key=lambda row: (first_return_day[row["id"]], str(row["id"])),
+            )
+            if earlier:
+                stitch_sources[kept["id"]] = [row["id"] for row in earlier]
         kinds = {row.get("account_share_kind") for row in group}
         composite_counted_once = composite_counted_once or "composite_member" in kinds
         duplicate_counted_once = duplicate_counted_once or "duplicate" in kinds
@@ -10502,20 +10533,28 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             error_kind="permanent",
         )
 
+    stitch_source_ids = {k for ids in stitch_sources.values() for k in ids}
     _grouped: dict[str, list[dict[str, Any]]] = {}
     for r in csv_rows:
         k = r.get("api_key_id")
-        if k is not None and k in counted_ids:
+        if k is not None and (k in counted_ids or k in stitch_source_ids):
             _grouped.setdefault(k, []).append(r)
     returns_by_key: dict[str, pd.Series] = {}
+    # SFH-R2-03: a stitch source's own series. Not an input on its own; only
+    # the days it owns join the kept member's series below.
+    source_returns: dict[str, pd.Series] = {}
     try:
         for k, rws in _grouped.items():
             rws_sorted = sorted(rws, key=lambda x: str(x["date"]))
-            returns_by_key[k] = pd.Series(
+            series = pd.Series(
                 [float(x["daily_return"]) for x in rws_sorted],
                 index=[str(x["date"]) for x in rws_sorted],
                 dtype="float64",
             )
+            if k in counted_ids:
+                returns_by_key[k] = series
+            else:
+                source_returns[k] = series
     except (ValueError, TypeError, KeyError) as exc:
         return await _permanent_corrupt_input(exc)
 
@@ -10541,6 +10580,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # omitted → a trustworthy partial curve).
     null_anchor_reasons: dict[str, str] = {}
     key_inputs_ids: set[str] = set()
+    # SFH-R2-03: a stitch source's flows, when its key_inputs row is usable.
+    source_flows: dict[str, list[ExternalFlow]] = {}
     orphan_kinds: list[str] = []
     # M3: the JSONB→python coercions below (float(usd_signed), float(anchor_usd))
     # sit OUTSIDE the compose NavReconstructionError catch — a corrupt persisted
@@ -10561,7 +10602,24 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             if api_key_id not in counted_ids:
                 # A shared-account key left out by the group resolution: still
                 # eligible, so the row stays. The account is counted through
-                # another key of its group; this series is not an input.
+                # another key of its group; this series is not an input on its
+                # own. A stitch source's flows are kept for the days it owns,
+                # unless the epilogue cut some as non-finite (flow_drop), in
+                # which case they cannot level those days.
+                source_payload = row.get("payload") or {}
+                if (
+                    api_key_id in stitch_source_ids
+                    and source_payload.get("anchor_null_reason") != "flow_drop"
+                ):
+                    source_flows[api_key_id] = [
+                        validate_flow_shape(
+                            ExternalFlow(
+                                utc_day_iso=str(_f["utc_day_iso"]),
+                                usd_signed=float(_f["usd_signed"]),
+                            )
+                        )
+                        for _f in (source_payload.get("flows") or [])
+                    ]
                 continue
             key_inputs_ids.add(api_key_id)
             payload = row.get("payload") or {}
@@ -10584,6 +10642,36 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                     null_anchor_reasons[api_key_id] = _reason
     except (ValueError, TypeError, KeyError) as exc:
         return await _permanent_corrupt_input(exc)
+
+    # SFH-R2-03: join each stitched account's older members onto its kept key.
+    stitched_accounts = 0
+    truncated_accounts = 0
+    for kept_id, source_ids in stitch_sources.items():
+        kept_series = returns_by_key.get(kept_id)
+        if kept_series is None:
+            continue  # the kept key's returns vanished between the two reads
+        stitched = None
+        if all(k in source_returns and k in source_flows for k in source_ids):
+            stitched = stitch_shared_account(
+                [(source_returns[k], source_flows[k]) for k in source_ids]
+                + [(kept_series, flows_by_key.get(kept_id, []))]
+            )
+        if stitched is None:
+            truncated_accounts += 1
+            continue
+        returns_by_key[kept_id], flows_by_key[kept_id] = stitched
+        stitched_accounts += 1
+    if truncated_accounts:
+        # Counts only (no key id, no venue id, no USD — T-167.1.2-22).
+        logger.warning(
+            "derive_allocator_equity: %d shared account(s) for allocator %s keep "
+            "an older member's history that could not be joined to the counted "
+            "key's (a gap, or no usable flows) — the curve starts at the counted "
+            "key's first day and is untrustworthy (%s)",
+            truncated_accounts,
+            allocator_id,
+            DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED.value,
+        )
 
     # A key with returns but no key_inputs row → anchor None (compose honestly
     # DROPS it, exactly as an unanchored key). Never fabricate an anchor.
@@ -10640,10 +10728,16 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                     ("composite_shared_account_counted_once", composite_counted_once),
                     ("duplicate_shared_account_counted_once", duplicate_counted_once),
                     ("shared_account_no_working_key", no_working_groups > 0),
+                    ("shared_account_history_stitched", stitched_accounts > 0),
                 )
                 if raised
             ]
             or None,
+            degrade_reasons=(
+                [DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED]
+                if truncated_accounts
+                else None
+            ),
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3

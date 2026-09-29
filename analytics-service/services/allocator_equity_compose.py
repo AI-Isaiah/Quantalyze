@@ -230,6 +230,7 @@ def compose_allocator_equity(
     null_anchor_reasons: Mapping[str, str] | None = None,
     *,
     benign_flag_tokens: Sequence[str] | None = None,
+    degrade_reasons: Sequence[DegradeReason] | None = None,
 ) -> dict[str, Any]:
     """Compose the allocator display-row payload from real per-key inputs.
 
@@ -243,8 +244,14 @@ def compose_allocator_equity(
     for the fourth reconciliation bucket (a null-anchor key ALSO absent from the
     returns axis): a ``'dust'`` such key is SILENTLY OMITTED (materiality — a dust
     key must not pin the allocator to legacy), any other reason (or a MISSING token,
-    the safe default) DEGRADES the allocator (DROPPED_KEY → legacy fallback)."""
-    reasons: set[DegradeReason] = set()
+    the safe default) DEGRADES the allocator (DROPPED_KEY → legacy fallback).
+
+    ``degrade_reasons`` (optional) are caller-supplied reasons the caller found
+    before composing (167.1.2 C2 round 2: a shared account's history that could
+    not be stitched). They join the payload's reasons like the core's own, so a
+    BLOCKING one makes the curve untrustworthy; ``benign_flag_tokens`` never
+    can."""
+    reasons: set[DegradeReason] = set(degrade_reasons or ())
     flag_tokens: set[str] = set()
     _null_reasons = null_anchor_reasons or {}
 
