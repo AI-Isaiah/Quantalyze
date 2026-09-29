@@ -1539,25 +1539,89 @@ describe("equityHistoryReadiness — plan 11 ready condition", () => {
     });
   });
 
-  it("a duplicate whose holder is disconnected or revoked counts on its own", () => {
+  // Review C2 CR-02 / SFH-04 / WR-05. The shape production writes: the stamper
+  // marks the second key and leaves ITS venue_account_id NULL, because a live
+  // holder (disconnected_at IS NULL, whatever its status) keeps the partial
+  // unique index slot. The holder carries the shared id. The fixture this
+  // replaced gave the two keys two different ids, a state that cannot occur,
+  // and passed only because of it.
+  it("a duplicate whose holder is live but not working counts on its own: its account is the holder's, so it is identity-known", () => {
     const marked = key({
       id: "k-dup",
+      venue_account_id: null,
       account_share_kind: "duplicate",
       account_shared_with_api_key_id: "k-holder",
     });
-    for (const departed of [
-      holderKey({ disconnected_at: "2026-03-01T00:00:00Z" }),
-      holderKey({ sync_status: "revoked" }),
-      holderKey({ sync_status: "error" }),
-      holderKey({ sync_status: "sign_in_failed" }),
+    for (const notWorking of [
+      holderKey({ venue_account_id: "acct-shared", is_active: false }),
+      holderKey({ venue_account_id: "acct-shared", sync_status: "revoked" }),
+      holderKey({ venue_account_id: "acct-shared", sync_status: "error" }),
+      holderKey({ venue_account_id: "acct-shared", sync_status: "sign_in_failed" }),
     ]) {
-      expect(equityHistoryReadiness([departed, marked], series).reason).not.toBe(
-        "duplicate_account",
-      );
-      expect(equityHistoryReadiness([departed, marked], series).state).toBe(
-        "ready",
-      );
+      expect(equityHistoryReadiness([notWorking, marked], series)).toEqual({
+        state: "ready",
+        reason: null,
+      });
     }
+  });
+
+  it("a duplicate whose holder is disconnected counts on its own (the holder left the slot; the account is still the holder's)", () => {
+    const marked = key({
+      id: "k-dup",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    const departed = holderKey({
+      venue_account_id: "acct-shared",
+      disconnected_at: "2026-03-01T00:00:00Z",
+    });
+    expect(equityHistoryReadiness([departed, marked], series)).toEqual({
+      state: "ready",
+      reason: null,
+    });
+  });
+
+  it("a marked duplicate stays identity-pending when the key list cannot name its account: holder absent, or holder with no id", () => {
+    const marked = key({
+      id: "k-dup",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    // Holder not in the list: nothing here says which account the key reads.
+    expect(equityHistoryReadiness([marked], series).reason).toBe(
+      "account_identity_pending",
+    );
+    // Holder present, not working, but with no id of its own.
+    expect(
+      equityHistoryReadiness(
+        [holderKey({ venue_account_id: null, is_active: false }), marked],
+        series,
+      ).reason,
+    ).toBe("account_identity_pending");
+  });
+
+  it("a still-eligible failing holder and its healthy duplicate block nothing on identity: the writer counts the account once (fixer contract), so the reader waits only on the series", () => {
+    // `error` and `sign_in_failed` keep a holder ELIGIBLE, so it is itself a
+    // key the derive sees. The reader cannot see how the writer resolved the
+    // pair; it relies on the writer counting the account once, through the
+    // working member (CR-01 holder-drop half). With no v2 series the book
+    // stays rebuilding for the series reason, never for identity.
+    const marked = key({
+      id: "k-dup",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    const failingHolder = holderKey({
+      venue_account_id: "acct-shared",
+      sync_status: "error",
+    });
+    expect(equityHistoryReadiness([failingHolder, marked], null)).toEqual({
+      state: "rebuilding",
+      reason: "awaiting_derivation",
+    });
   });
 
   it("an eligible ccxt key with no account id is identity-pending; a blank id is not an id", () => {

@@ -3729,18 +3729,49 @@ function countsAsDuplicate(
   return isWorkingHolder(holder);
 }
 
-function identityStillPending(key: EquityHistoryKey): boolean {
+/**
+ * Whether an eligible ccxt key's account is still unknown.
+ *
+ * Review C2 CR-02 / SFH-04: a key marked `duplicate` keeps a NULL
+ * `venue_account_id` for as long as its holder is live, because the holder
+ * keeps the partial unique index slot (`disconnected_at IS NULL`) whatever its
+ * status, and the stamper leaves the marked key's id NULL until the holder has
+ * left. Its account is still KNOWN: it is the holder's. So a marked duplicate
+ * whose holder is in the key list with a known id is identity-known. Reading
+ * it as unknown held the book in `account_identity_pending` for as long as a
+ * dead holder stayed connected, and no sync could ever clear that. Whether the
+ * pair then blocks "ready" is `countsAsDuplicate`'s question (a working
+ * holder), not this one.
+ */
+function identityStillPending(
+  key: EquityHistoryKey,
+  byId: ReadonlyMap<string, EquityHistoryKey>,
+): boolean {
   if (!isPerKeyDailiesEligibleKey(key)) return false;
   if (!ACCOUNT_IDENTITY_EXCHANGES.has(key.exchange.toLowerCase())) return false;
   if (key.account_share_kind === "composite_member") return false;
-  return !knownVenueAccountId(key.venue_account_id);
+  if (knownVenueAccountId(key.venue_account_id)) return false;
+  const holder = key.account_shared_with_api_key_id
+    ? byId.get(key.account_shared_with_api_key_id)
+    : undefined;
+  return !(
+    key.account_share_kind === "duplicate" &&
+    holder !== undefined &&
+    knownVenueAccountId(holder.venue_account_id)
+  );
 }
 
 /**
  * Phase 167.1.2 plan 11. Ready iff the version-2 series is present, no
  * eligible key is a duplicate of a working holder, and every eligible key on
- * okx/bybit/binance/deribit has a venue account id or is a composite member.
+ * okx/bybit/binance/deribit has a venue account id, is a composite member, or
+ * is a duplicate whose holder in the key list carries the shared id.
  * The reason names the first failing condition, in that order.
+ *
+ * ⚠️ Review C2 fix coupling: a marked duplicate behind a NOT-working holder
+ * reads as identity-known and ordinary here, so "ready" relies on the writers
+ * counting that account once, through its working member (review CR-01's
+ * holder-drop half, in the Python writers). Ship the two together.
  */
 export function equityHistoryReadiness(
   apiKeys: readonly EquityHistoryKey[],
@@ -3751,7 +3782,7 @@ export function equityHistoryReadiness(
   if (apiKeys.some((key) => countsAsDuplicate(key, byId))) {
     return { state: "rebuilding", reason: "duplicate_account" };
   }
-  if (apiKeys.some((key) => identityStillPending(key))) {
+  if (apiKeys.some((key) => identityStillPending(key, byId))) {
     return { state: "rebuilding", reason: "account_identity_pending" };
   }
   if (!series) return { state: "rebuilding", reason: "awaiting_derivation" };
