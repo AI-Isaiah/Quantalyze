@@ -94,16 +94,25 @@ type NeedsActionReason = {
 }[EquityHistoryRebuildReason];
 
 /**
- * The class of a rebuild reason. Fail-closed: null, a missing reason, or a
- * string this build does not know (a stale client, a reason added later)
- * reads as `rebuilding`, the generic wait, never as a failed read, a key to
- * fix or a hold. `Object.hasOwn` keeps a prototype key such as "constructor"
- * out.
+ * The one guard both surfaces read a reason through. A reason this build does
+ * not know (a stale client, a reason added later) or a prototype key such as
+ * "constructor" is not a reason: `Object.hasOwn` keeps both out.
+ */
+function isKnownRebuildReason(
+  reason: EquityHistoryRebuildReason | null | undefined,
+): reason is EquityHistoryRebuildReason {
+  return reason != null && Object.hasOwn(REBUILD_REASON_CLASS, reason);
+}
+
+/**
+ * The class of a rebuild reason. Fail-closed: null, a missing reason, or one
+ * `isKnownRebuildReason` refuses reads as `rebuilding`, the generic wait,
+ * never as a failed read, a key to fix or a hold.
  */
 export function equityHistoryRebuildClass(
   reason: EquityHistoryRebuildReason | null | undefined,
 ): EquityHistoryRebuildClass {
-  if (reason == null || !Object.hasOwn(REBUILD_REASON_CLASS, reason)) {
+  if (!isKnownRebuildReason(reason)) {
     return "rebuilding";
   }
   return REBUILD_REASON_CLASS[reason];
@@ -246,6 +255,10 @@ export function EquityHistoryRebuilding({
   /** Review C2 round 2 IN-04: the keys a key_not_syncing reason is about, or null when unknown. */
   notSyncingKeys?: readonly NotSyncingKey[] | null;
 }) {
+  // Review C3 round 2 IN-01: the per-reason line reads the reason through the
+  // same guard as the classifier. An unknown reason or a prototype key renders
+  // the no-reason panel, never an empty line or a non-string child.
+  const knownReason = isKnownRebuildReason(reason) ? reason : null;
   return (
     <section
       aria-labelledby={HEADING_ID}
@@ -267,13 +280,16 @@ export function EquityHistoryRebuilding({
         than one key reads it, or read a day with no sync as zero. Holdings and
         AUM on this page do not use that history.
       </p>
-      {reason && isNeedsActionReason(reason) ? (
+      {knownReason && isNeedsActionReason(knownReason) ? (
         <p className="mt-2 max-w-prose text-sm text-text-secondary">
-          <NeedsActionLine reason={reason} notSyncingKeys={notSyncingKeys} />
+          <NeedsActionLine
+            reason={knownReason}
+            notSyncingKeys={notSyncingKeys}
+          />
         </p>
-      ) : reason ? (
+      ) : knownReason ? (
         <p className="mt-2 max-w-prose text-sm text-text-secondary">
-          {REASON_LINE[reason]}
+          {REASON_LINE[knownReason]}
         </p>
       ) : null}
     </section>

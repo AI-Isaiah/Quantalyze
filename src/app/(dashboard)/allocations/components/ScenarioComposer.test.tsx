@@ -17303,6 +17303,36 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     },
   );
 
+  // Review C3 round 2 IN-01: the Overview panel fails closed through the same
+  // guard. An unknown reason or a prototype key used to reach
+  // `REASON_LINE[reason]` unguarded: an unknown string drew an empty line, and
+  // "constructor" handed React a function. It must render exactly what a book
+  // with no reason renders (the generic heading and body, no reason line).
+  it.each([
+    ["a reason this build does not know", "some_later_reason"],
+    ["a prototype key", "constructor"],
+  ] as const)(
+    "the Overview panel with reason %s renders the no-reason panel (IN-01, fail-closed)",
+    (_label, reason) => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { unmount } = render(<EquityHistoryRebuilding reason={null} />);
+        const generic = screen.getByTestId("overview-equity-rebuilding");
+        const genericText = generic.textContent;
+        const genericLines = generic.querySelectorAll("p").length;
+        unmount();
+
+        render(<EquityHistoryRebuilding reason={reason as never} />);
+        const panel = screen.getByTestId("overview-equity-rebuilding");
+        expect(panel.textContent).toBe(genericText);
+        expect(panel.querySelectorAll("p").length).toBe(genericLines);
+        expect(errorSpy).not.toHaveBeenCalled();
+      } finally {
+        errorSpy.mockRestore();
+      }
+    },
+  );
+
   // Review round 1 (WR-02): the `bookReturns.length < 2` guard in
   // `scenarioOwnBookDelta`. A 2-point book yields ONE return, and a Sharpe or
   // Sortino delta from one observation is not a number worth showing. The
