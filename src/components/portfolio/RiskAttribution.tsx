@@ -98,9 +98,13 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
               // 169 D-49: the compare stays percent against percent (both raw).
               // 169 review SFH M-5 (2026-09-29): with no weight there is
               // nothing to compare the share against, so no assessment either.
+              // 169 review round 2 WR-R2-02 (SFH L-4): a negative share is a
+              // hedge taking risk out of the book; "Balanced" would claim its
+              // risk and capital are in proportion. No assessment until a word
+              // for a hedge is chosen.
               const share = d.marginal_risk_pct;
               const weight = d.weight_pct;
-              const assessable = share !== null && weight !== null;
+              const assessable = share !== null && weight !== null && share >= 0;
               const overweight = assessable && share > weight * 1.3;
               return (
                 <tr key={d.strategy_id} className="border-b border-border/50 hover:bg-page/50 transition-colors">

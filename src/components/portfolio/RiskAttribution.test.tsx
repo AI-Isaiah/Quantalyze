@@ -269,4 +269,27 @@ describe("<RiskAttribution> — a hedge's negative risk share (169 IN-05)", () =
     const [text] = formatter(plottedDatum()["Hedge"], "Hedge");
     expect(text).toBe("-12.0%");
   });
+
+  /**
+   * Round 2, WR-R2-02 (SFH L-4). `share > weight * 1.3` is false for every
+   * negative share, so a hedge read "Balanced" in green: a claim that its risk
+   * and capital are in proportion, when it takes risk OUT of the book. Until a
+   * word for a hedge is chosen, its assessment is the colourless em-dash, the
+   * same "no claim" the null-share and null-weight rows use.
+   */
+  it("gives a negative share no assessment: a colourless dash, never Balanced", () => {
+    render(
+      <RiskAttribution
+        data={[
+          { strategy_id: "a", strategy_name: "Trend", marginal_risk_pct: 112, weight_pct: 60, standalone_vol: 0.2 },
+          { strategy_id: "b", strategy_name: "Hedge", marginal_risk_pct: -12, weight_pct: 40, standalone_vol: 0.15 },
+        ]}
+      />,
+    );
+    const hedge = cellsOf("Hedge");
+    expect(hedge[4].textContent).toBe("—");
+    expect(hedge[4].querySelector(".text-positive, .text-negative")).toBeNull();
+    // Control: the positive leg keeps its assessment (112 > 60 x 1.3 = 78).
+    expect(cellsOf("Trend")[4].textContent).toBe("Overweight risk");
+  });
 });
