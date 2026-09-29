@@ -523,3 +523,24 @@ async def test_account_without_proof_of_emptiness_is_carried(
     metadata = _refresh_complete_metadata(audit)
     assert metadata["emptied_accounts"] == 0
     assert metadata["carried_keys"] == 1
+
+
+@pytest.mark.asyncio
+async def test_eligible_key_that_never_polled_is_counted_not_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C2 silent-failure SFH-08: an eligible key with no holdings row yet (a key
+    just added, or a broken poller) adds $0 to the day's row. Holding the write
+    for it is a design call not taken here; the day is written without it, and
+    the audit says how many such keys there were."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_key(fake, API_KEY_ID_2)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["never_polled_keys"] == 1
+    assert metadata["carried_keys"] == 0

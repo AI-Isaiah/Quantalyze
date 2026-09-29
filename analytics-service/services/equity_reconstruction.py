@@ -1825,6 +1825,7 @@ class _LatestHoldings:
     excluded_shared_keys: int
     no_working_accounts: int
     emptied_accounts: int
+    never_polled_keys: int
 
 
 async def _fetch_latest_holdings_per_eligible_key(
@@ -1909,6 +1910,7 @@ async def _fetch_latest_holdings_per_eligible_key(
     carried = 0
     no_working = 0
     emptied = 0
+    never_polled = 0
     for group in account_groups(key_rows):
         eligible = [r for r in group if eligible_key_predicate(r)]
         if not eligible:
@@ -1932,7 +1934,12 @@ async def _fetch_latest_holdings_per_eligible_key(
         asof_rows = getattr(await db_execute(_sel_latest_asof), "data", None) or []
         asofs = [str(r["asof"]) for r in asof_rows if r.get("asof")]
         if not asofs:
-            # Eligible but never polled: nothing to carry, and nothing to count.
+            # Eligible but never polled: nothing to carry. C2 silent-failure
+            # SFH-08 — the day is written without this account (holding the
+            # write for it, as the plan 12 hold does for a zero-snapshot book,
+            # is a design call not taken here), and never_polled_keys says so,
+            # so a next-day step of that account's whole balance is explained.
+            never_polled += len(eligible)
             continue
         latest = max(asofs)
 
@@ -1965,6 +1972,7 @@ async def _fetch_latest_holdings_per_eligible_key(
         excluded_shared_keys=eligible_keys - counted_accounts,
         no_working_accounts=no_working,
         emptied_accounts=emptied,
+        never_polled_keys=never_polled,
     )
 
 
@@ -3521,6 +3529,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                     "excluded_shared_keys": latest.excluded_shared_keys,
                     "no_working_accounts": latest.no_working_accounts,
                     "emptied_accounts": latest.emptied_accounts,
+                    "never_polled_keys": latest.never_polled_keys,
                 },
             )
             return DispatchResult(outcome=DispatchOutcome.DONE)
@@ -3588,15 +3597,18 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 "excluded_shared_keys": latest.excluded_shared_keys,
                 "no_working_accounts": latest.no_working_accounts,
                 "emptied_accounts": latest.emptied_accounts,
+                "never_polled_keys": latest.never_polled_keys,
             },
         )
         logger.info(
             "refresh_allocator_equity_daily: upserted %d row for allocator=%s "
             "(key=%s, venue=%s, eligible_keys=%d, carried_keys=%d, "
-            "excluded_shared_keys=%d, no_working_accounts=%d, emptied_accounts=%d)",
+            "excluded_shared_keys=%d, no_working_accounts=%d, emptied_accounts=%d, "
+            "never_polled_keys=%d)",
             count, allocator_id, api_key_id, venue,
             latest.eligible_keys, latest.carried_keys, latest.excluded_shared_keys,
             latest.no_working_accounts, latest.emptied_accounts,
+            latest.never_polled_keys,
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
     except ccxt.RateLimitExceeded as exc:
