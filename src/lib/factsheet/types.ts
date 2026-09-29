@@ -639,6 +639,24 @@ export type FactsheetCommon = {
     composite: boolean;
     insufficientWindow?: boolean;
     degradedMembers?: Array<{ seq: number; venue: string }>;
+    /**
+     * Phase 169 review round 1 (SFH H-1) — single-key only, present only when
+     * true: `data_quality_flags.twr_chain_broken`, an INTERIOR chain break. The
+     * stored `cumulative_return` and CAGR then compound only the stretch after
+     * the last break, while the chart, the return windows and Years Observed
+     * cover the whole series. The headline stays the stored value (D-25, SC4);
+     * the page must say which span it covers.
+     */
+    twrChainBroken?: boolean;
+    /**
+     * Phase 169 review round 1 (SFH H-1) — present only on a chain-broken row
+     * whose persisted cash headline is overlaid: the first day (ISO date) of the
+     * span that headline covers, read from the stored `cash_settlement` series
+     * row (`deriveHeadlineCoversFrom`). `null` when the stored data cannot name
+     * it: a reader must then say the headline covers part of the record without
+     * a date, never invent one.
+     */
+    headlineCoversFrom?: string | null;
   };
   /** Phase 90.5 (LEV-01/D2): #597 annualization basis (365 crypto / 252 traditional) — enables the client leverage recompute. Optional: absent (stale v4 cache drain) => leverage control hidden, fail-closed. */
   periodsPerYear?: number;

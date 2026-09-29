@@ -181,7 +181,19 @@ export async function readSmoothedSeries(
  * `read` names which series failed. The class keeps the name of its first case,
  * because the discovery detail page and the resolve stage catch it by class.
  */
-export type FactsheetSeriesRead = "csv_daily_returns" | "mtm_daily_returns" | "smoothed_mtm_daily_returns";
+export type FactsheetSeriesRead =
+  | "csv_daily_returns"
+  | "mtm_daily_returns"
+  | "smoothed_mtm_daily_returns"
+  | typeof CASH_SETTLEMENT_SERIES_KIND;
+
+/**
+ * The `strategy_analytics_series.kind` of the persisted cash series row
+ * (`basis_series.KIND_CASH_SETTLEMENT` in the analytics service). Read only on a
+ * chain-broken single-key row, to name the span its stored headline covers
+ * (Phase 169 review round 1, SFH H-1).
+ */
+const CASH_SETTLEMENT_SERIES_KIND = "cash_settlement" as const;
 
 export class CompositeSeriesReadError extends Error {
   readonly code: string;
@@ -482,9 +494,74 @@ export async function readCompositeFactsheet(
  * composite path so a malformed dqf value can never render the caveat (T-92-05).
  */
 export function singleKeyDataQuality(
-  dqf: { insufficient_window?: unknown } | null | undefined,
+  dqf: { insufficient_window?: unknown; twr_chain_broken?: unknown } | null | undefined,
 ): NonNullable<BuildFactsheetOpts["dataQuality"]> {
-  return { composite: false, insufficientWindow: dqf?.insufficient_window === true };
+  return {
+    composite: false,
+    insufficientWindow: dqf?.insufficient_window === true,
+    // Phase 169 review round 1 (SFH H-1): present only when true, with the same
+    // strict `=== true` coercion, so a clean row's opt is unchanged.
+    ...(dqf?.twr_chain_broken === true ? { twrChainBroken: true } : {}),
+  };
+}
+
+/**
+ * Phase 169 review round 1 (SFH H-1) — the first day of the span a chain-broken
+ * single-key headline covers, read from the stored `cash_settlement` series row
+ * payload, or `null` when the stored data cannot name it.
+ *
+ * Python compounds the stored `cumulative_return` and annualizes the CAGR over
+ * `nav_twr._last_interior_break_suffix`: the maximal run of valid days that ends
+ * at the last one, i.e. everything after the LAST interior break. On the broker
+ * path the runner reindexes the series to a dense daily calendar, so a refused
+ * (guard) day is NaN, and `basis_series.derive_basis_series` persists the finite
+ * days as `rows` and every absent in-span day as `gap_spans`, echoing
+ * `conventions.densify = "broker_nan"`. Under that echo an absent day can only be
+ * a refused one, so the covered span starts at the first stored day after the
+ * last gap span: the same day, from the stored data, not a recomputation.
+ *
+ * Any other echo cannot name it, and the answer is `null`, never a guess: a
+ * `"sparse"` (user CSV) series is absent on weekends and holidays too, and a row
+ * written before Phase 105 echoes nothing. No gap, or no stored day after the
+ * last gap, is `null` as well.
+ */
+export function deriveHeadlineCoversFrom(raw: unknown): string | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const payload = raw as { rows?: unknown; gap_spans?: unknown; conventions?: unknown };
+  const conventions = payload.conventions as { densify?: unknown } | null | undefined;
+  if (conventions === null || typeof conventions !== "object" || conventions.densify !== "broker_nan") return null;
+  if (!Array.isArray(payload.gap_spans) || !Array.isArray(payload.rows)) return null;
+  let lastGapEnd: string | null = null;
+  for (const span of payload.gap_spans) {
+    const end = (span as { end?: unknown } | null)?.end;
+    if (typeof end === "string" && (lastGapEnd === null || end > lastGapEnd)) lastGapEnd = end;
+  }
+  if (lastGapEnd === null) return null;
+  let start: string | null = null;
+  for (const row of payload.rows) {
+    const date = (row as { date?: unknown } | null)?.date;
+    if (typeof date === "string" && date > lastGapEnd && (start === null || date < start)) start = date;
+  }
+  return start;
+}
+
+/**
+ * Phase 169 review round 1 (SFH H-1) — read the stored `cash_settlement` series
+ * row of a single-key strategy and name the span its headline covers. Same
+ * service-role handle and deny-all RLS posture as {@link readMtmSeries}. A missing
+ * row is a fact (`null`); a FAILED read throws {@link CompositeSeriesReadError}
+ * (`read: "cash_settlement"`), so an outage is never rendered as "the span cannot
+ * be named".
+ */
+async function readHeadlineCoversFrom(admin: SupabaseClient, strategyId: string): Promise<string | null> {
+  const { data, error } = await admin
+    .from("strategy_analytics_series")
+    .select("payload")
+    .eq("strategy_id", strategyId)
+    .eq("kind", CASH_SETTLEMENT_SERIES_KIND)
+    .maybeSingle();
+  if (error) throw new CompositeSeriesReadError(error.code || "none", error.message, CASH_SETTLEMENT_SERIES_KIND);
+  return deriveHeadlineCoversFrom((data as { payload?: unknown } | null)?.payload);
 }
 
 /**
@@ -624,8 +701,11 @@ export function singleKeyBasisOpts(
  * a failed run leaves the previous run's scalars behind and they must not render.
  * The factsheet resolve stage's G1 gate already refuses a non-computed row, so the
  * not-rankable arm is reached from the discovery detail page only, until Phase 169.1
- * plan 169.1-01 moves that page onto the shared build. It adds no read, so the admin
- * thunk posture above is unchanged. Omitting `persistedRow` keeps the pre-169 result.
+ * plan 169.1-01 moves that page onto the shared build. It adds no read for a clean
+ * row, so the admin thunk posture above is unchanged there; a chain-broken row
+ * (review round 1, SFH H-1) reads its stored `cash_settlement` series once, to name
+ * the span its headline covers, and returns `dataQuality` with that start date.
+ * Omitting `persistedRow` keeps the pre-169 result.
  *
  * Review round 1 (SFH H-2): `returnsDenominatorConfig` is the strategy's
  * `returns_denominator_config`. The Python single-key runner computes the stored
@@ -644,7 +724,10 @@ export function singleKeyBasisOpts(
 export async function readSingleKeyBasisOpts(
   getAdmin: () => SupabaseClient,
   strategyId: string,
-  dqf: { mtm_gated_reason?: unknown } | null | undefined,
+  dqf:
+    | { mtm_gated_reason?: unknown; insufficient_window?: unknown; twr_chain_broken?: unknown }
+    | null
+    | undefined,
   metricsJsonByBasis: unknown,
   computationStatus: unknown,
   persistedRow?: Record<string, unknown> | null,
@@ -652,7 +735,13 @@ export async function readSingleKeyBasisOpts(
 ): Promise<
   Pick<
     BuildFactsheetOpts,
-    "metricsByBasis" | "mtmGate" | "mtmSeries" | "smoothedGate" | "smoothedSeries" | "cumulativeMethod"
+    | "metricsByBasis"
+    | "mtmGate"
+    | "mtmSeries"
+    | "smoothedGate"
+    | "smoothedSeries"
+    | "cumulativeMethod"
+    | "dataQuality"
   >
 > {
   let admin: SupabaseClient | undefined;
@@ -679,7 +768,26 @@ export async function readSingleKeyBasisOpts(
       : basisOpts;
   const cashHeadline = persistedCashHeadline(strategyId, persistedRow, metricsJsonByBasis, computationStatus);
   if (!cashHeadline) return opts;
-  return { ...opts, metricsByBasis: { ...(opts.metricsByBasis ?? {}), cash_settlement: cashHeadline } };
+  const withHeadline = { ...opts, metricsByBasis: { ...(opts.metricsByBasis ?? {}), cash_settlement: cashHeadline } };
+  // Review round 1 (SFH H-1): on a chain-broken row the stored headline covers only
+  // the stretch after the last break, and it is still the value shown (D-25, SC4).
+  // Name the start of that span from the stored cash series, so the page can say
+  // it. `dataQuality` is returned ONLY here: it is the single-key opt both callers
+  // already set from `singleKeyDataQuality(dqf)` and spread this result over, so a
+  // clean row's opts stay unchanged.
+  if (dqf?.twr_chain_broken !== true) return withHeadline;
+  const headlineCoversFrom = await readHeadlineCoversFrom(resolveAdmin(), strategyId);
+  if (headlineCoversFrom === null) {
+    console.warn(
+      "[factsheet] readSingleKeyBasisOpts — a chain-broken headline's covered span cannot be named from the stored cash series",
+      { strategyId },
+    );
+    captureToSentry(new Error("factsheet: chain-broken headline span cannot be named"), {
+      level: "warning",
+      tags: { stage: "factsheet-persisted-headline", reason: "covered_span_unnamed", strategy_id: strategyId },
+    });
+  }
+  return { ...withHeadline, dataQuality: { ...singleKeyDataQuality(dqf), headlineCoversFrom } };
 }
 
 /**
