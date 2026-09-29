@@ -5561,8 +5561,16 @@ export function ScenarioComposer({
             Not in blank mode, where there is no own book to compare with.
             Phase 167.1.2 / D-15 (supersedes IN-01): the Overview and the
             Scenario gate on the same state. The earlier extra condition on the
-            history's size or source is removed, so a book with no snapshot yet
-            reads here as it does on the Overview's rebuilding panel. */}
+            history's size or source is removed, so in book mode a book with no
+            snapshot yet reads here as it does on the Overview's rebuilding
+            panel. Review C3 SFH-C3-04: that parity holds only in book mode. In
+            blank mode, chosen or forced (no live book, or no allocator key
+            with a per-key series yet, so `bookEntryGateSatisfied` is false),
+            no own-book line is drawn and there is no comparison to disclose.
+            That is D-15's blank-mode exception, and the Overview may still
+            show its rebuilding panel for the same book.
+            Review C3 SFH-C3-01: the sentence is picked by the class the
+            Overview gives the same reason (`equityHistoryRebuildClass`). */}
         {isOwnBookRebuilding && !isBlankMode && (
           <p
             data-testid="scenario-ownbook-rebuilding"
