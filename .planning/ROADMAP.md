@@ -3823,6 +3823,8 @@ Plans:
 
 ### Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports (INSERTED)
 
+**D-15 amended 2026-09-29 (PR C3 review fix A; recorded in 167.1.2-CONTEXT.md):** the ready-branch warm-up note now promises panels after three days of blended history, not two (the factsheet builder needs 2 returns, and N days give N-1), and counts the days of the curve on screen. The Scenario sentence and the Overview heading follow one four-class reason classifier (C3 fixes B, G, I).
+
 **Goal:** An allocator's book counts each exchange ACCOUNT exactly once, and "My Allocation" never shows an equity curve, return or ratio that the data does not support. A second key on an account that is already connected is refused. The equity history is rebuilt as one series per account from per-key returns and flows, and hidden until that series exists.
 **Requirements**: TBD. Source: founder browser UAT 2026-09-24 on the founder's own allocator book ("completely wrong, obviously"), with a read-only root-cause trace at `96b5db4c`.
 **Depends on:** Phase 167.1
