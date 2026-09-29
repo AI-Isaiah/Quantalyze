@@ -711,3 +711,36 @@ describe("167.2.1 WR-04 — NO-NULL-AFTER-RESOLVE holds by construction", () => 
     expect(src).toMatch(/export function hasBuildableSeries\(rows: DailyReturn\[\]\): rows is BuildableSeries/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review round 1 (WR-05 moved the single-key basis assembly into the resolve
+// stage; WR-01 made its persisted-headline defects reach Sentry). The probe
+// runs once per computed row on every /strategies load, so it must never
+// capture (167.2.1-REVIEW-R2 WR-01): a build captures a defect once, a probe
+// captures nothing.
+// ---------------------------------------------------------------------------
+describe("review round 1 — a persisted-headline defect is captured by a build, never by a probe", () => {
+  const SEVEN = {
+    cumulative_return: 0.05,
+    volatility: 0.12,
+    max_drawdown: -0.04,
+    cagr: 0.31,
+    sharpe: 1.4,
+    sortino: 2.1,
+    calmar: 3.0,
+  };
+
+  it.each([
+    ["the select did not project the seven scalars (missing_keys)", {}],
+    ["a rankable row stores a null cumulative_return", { ...SEVEN, cumulative_return: null }],
+  ])("%s: the build captures once, the probe captures nothing", async (_label, scalars) => {
+    seed(single({ daily_returns: points(30), ...scalars }));
+    expect(await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility)).not.toBeNull();
+    expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+
+    vi.mocked(captureToSentry).mockClear();
+    seed(single({ daily_returns: points(30), ...scalars }));
+    expect(await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility)).toEqual({ buildable: true });
+    expect(vi.mocked(captureToSentry), "the probe sent a per-row event").not.toHaveBeenCalled();
+  });
+});

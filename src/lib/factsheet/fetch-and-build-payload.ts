@@ -550,6 +550,9 @@ async function resolveFactsheetInputs(
         // SFH H-2 (review round 1): the stored headline was computed under this
         // config, so the curve is drawn on the same cumulative method.
         strategy.returns_denominator_config,
+        // A probe never captures (167.2.1-REVIEW-R2 WR-01); a build captures a
+        // persisted-headline defect once.
+        { captureDefects: caller === "build" },
       );
     } catch (err) {
       if (!(err instanceof CompositeSeriesReadError)) throw err;

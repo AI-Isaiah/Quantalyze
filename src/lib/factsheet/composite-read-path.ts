@@ -718,6 +718,12 @@ export function singleKeyBasisOpts(
  * unchanged. Omitting the config keeps the geometric default; the discovery detail
  * page does not pass it yet (reported to its owner, until 169.1-01).
  *
+ * `options.captureDefects` (default true) decides whether the persisted-headline
+ * defects below reach Sentry (review round 1, WR-01 / SFH M-1 / SFH H-1). They are
+ * always logged. The factsheet resolve stage passes `false` for a probe: /strategies
+ * probes every computed row on every load, and a per-row capture there is the
+ * event storm 167.2.1-REVIEW-R2 WR-01 removed. A build captures once.
+ *
  * @throws {CompositeSeriesReadError} when a gated MTM or smoothed series read FAILS
  *          (review round 1, WR-05); the factsheet resolve stage answers it `read_error`.
  */
@@ -732,6 +738,7 @@ export async function readSingleKeyBasisOpts(
   computationStatus: unknown,
   persistedRow?: Record<string, unknown> | null,
   returnsDenominatorConfig?: unknown,
+  options: { captureDefects?: boolean } = {},
 ): Promise<
   Pick<
     BuildFactsheetOpts,
@@ -774,7 +781,14 @@ export async function readSingleKeyBasisOpts(
   // leverage re-derive could not continue it from L=1, so the payload says so and
   // `leverageEligibleFor` withholds the what-if, as it does for a composite.
   if (arithmetic || activeDayMetricsBasis(returnsDenominatorConfig)) addedQuality.returnsConventionOverride = true;
-  const cashHeadline = persistedCashHeadline(strategyId, persistedRow, metricsJsonByBasis, computationStatus);
+  const captureDefects = options.captureDefects ?? true;
+  const cashHeadline = persistedCashHeadline(
+    strategyId,
+    persistedRow,
+    metricsJsonByBasis,
+    computationStatus,
+    captureDefects,
+  );
   const withHeadline = cashHeadline
     ? { ...opts, metricsByBasis: { ...(opts.metricsByBasis ?? {}), cash_settlement: cashHeadline } }
     : opts;
@@ -788,10 +802,12 @@ export async function readSingleKeyBasisOpts(
         "[factsheet] readSingleKeyBasisOpts — a chain-broken headline's covered span cannot be named from the stored cash series",
         { strategyId },
       );
-      captureToSentry(new Error("factsheet: chain-broken headline span cannot be named"), {
-        level: "warning",
-        tags: { stage: "factsheet-persisted-headline", reason: "covered_span_unnamed", strategy_id: strategyId },
-      });
+      if (captureDefects) {
+        captureToSentry(new Error("factsheet: chain-broken headline span cannot be named"), {
+          level: "warning",
+          tags: { stage: "factsheet-persisted-headline", reason: "covered_span_unnamed", strategy_id: strategyId },
+        });
+      }
     }
     addedQuality.headlineCoversFrom = headlineCoversFrom;
   }
@@ -847,6 +863,7 @@ function persistedCashHeadline(
   persistedRow: Record<string, unknown> | null | undefined,
   metricsJsonByBasis: unknown,
   computationStatus: unknown,
+  captureDefects: boolean,
 ): Record<string, number | null> | undefined {
   if (persistedRow == null) return undefined;
   if (!isRankableAnalyticsRow({ computation_status: computationStatus as string | null | undefined })) {
@@ -868,10 +885,12 @@ function persistedCashHeadline(
       "[factsheet] readSingleKeyBasisOpts — the analytics select did not project the persisted headline; keeping the computed one",
       { strategyId, reason: "missing_keys", missing },
     );
-    captureToSentry(new Error("factsheet: persisted headline not projected (missing_keys)"), {
-      tags: { stage: "factsheet-persisted-headline", reason: "missing_keys", strategy_id: strategyId },
-      extra: { missing },
-    });
+    if (captureDefects) {
+      captureToSentry(new Error("factsheet: persisted headline not projected (missing_keys)"), {
+        tags: { stage: "factsheet-persisted-headline", reason: "missing_keys", strategy_id: strategyId },
+        extra: { missing },
+      });
+    }
     return undefined;
   }
   const cumulativeReturn = persistedRow.cumulative_return;
@@ -884,11 +903,13 @@ function persistedCashHeadline(
       "[factsheet] readSingleKeyBasisOpts — a rankable row stores no finite cumulative_return; its headline renders the em-dash there",
       { strategyId, reason: "non_finite_cumulative_return", computationStatus, nonFinite },
     );
-    captureToSentry(new Error("factsheet: rankable row stores a non-finite cumulative_return"), {
-      level: "warning",
-      tags: { stage: "factsheet-persisted-headline", reason: "non_finite_cumulative_return", strategy_id: strategyId },
-      extra: { computationStatus, nonFinite },
-    });
+    if (captureDefects) {
+      captureToSentry(new Error("factsheet: rankable row stores a non-finite cumulative_return"), {
+        level: "warning",
+        tags: { stage: "factsheet-persisted-headline", reason: "non_finite_cumulative_return", strategy_id: strategyId },
+        extra: { computationStatus, nonFinite },
+      });
+    }
   }
   // Review round 1 (IN-02): typed as it is, `number | null`, with no cast. A
   // persisted null (a stored Sortino with no losing day) stays null on purpose,
