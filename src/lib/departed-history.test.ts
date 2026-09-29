@@ -10,16 +10,23 @@
  * live key. So both implementations are tested against every row of the same
  * file, read by path, never a copied table.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   departedHistoryInclusion,
   departedHistorySentence,
   isDepartedKey,
+  isLiveKey,
   type DepartedHistoryKey,
   type DepartedHistoryDecision,
 } from "./departed-history";
+import { isPerKeyDailiesEligibleKey } from "./queries";
+
+// queries.ts builds Supabase clients at call time only; stub the modules so the
+// pure predicate imports without environment.
+vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
+vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
 
 const FIXTURE = resolve(
   process.cwd(),
@@ -97,5 +104,23 @@ describe("departedHistorySentence — the card never states a false reason", () 
     expect(departedHistorySentence(decisionFor("18_", "k-b"), true)).toBe(
       "History not included: an earlier key read the same exchange account over all of these days.",
     );
+  });
+});
+
+describe("isLiveKey — the reader's eligible-key predicate, never a drifting copy (IN-02)", () => {
+  // The card calls a key live exactly when the My Allocation reader counts it.
+  // If they drift, the card bounds a departed key by a key the book does not
+  // count, or offers a history switch on a key the book already counts.
+  const cases = [true, false].flatMap((is_active) =>
+    [null, "complete", "error", "sign_in_failed", "revoked"].flatMap((sync_status) =>
+      [null, "2026-06-10T00:00:00Z"].map((disconnected_at) => ({
+        is_active,
+        sync_status,
+        disconnected_at,
+      })),
+    ),
+  );
+  it.each(cases)("%o", (key) => {
+    expect(isLiveKey(key)).toBe(isPerKeyDailiesEligibleKey(key));
   });
 });

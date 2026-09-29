@@ -10487,12 +10487,15 @@ class DepartedHistoryDecision:
 
 
 def _is_live_key(row: Mapping[str, Any]) -> bool:
-    """The allocator's eligible-key predicate. A key that is not live is departed."""
-    return (
-        row.get("is_active", True) is True
-        and row.get("sync_status") != "revoked"
-        and row.get("disconnected_at") is None
-    )
+    """The allocator's eligible-key predicate. A key that is not live is departed.
+
+    ``eligible_key_predicate`` itself (IN-02), with one difference: a MISSING
+    ``is_active`` reads as active, as the shared fixture's inputs say. The job
+    always selects the column. Imported here, as the derive imports it, to keep
+    pandas off this module's import path."""
+    from services.allocator_equity_derive import eligible_key_predicate
+
+    return eligible_key_predicate({**row, "is_active": row.get("is_active", True)})
 
 
 def _utc_day(value: object) -> str | None:
@@ -10512,9 +10515,6 @@ def _utc_day(value: object) -> str | None:
     return parsed.astimezone(timezone.utc).date().isoformat()
 
 
-_SHARED_ACCOUNT_MARKER_KINDS = frozenset({"duplicate", "composite_member"})
-
-
 def account_identity_tokens(
     keys: Sequence[Mapping[str, Any]],
 ) -> dict[str, str | None]:
@@ -10529,7 +10529,11 @@ def account_identity_tokens(
     which is exactly why its own ``venue_account_id`` stays NULL. Reading the
     NULL alone would call it an unknown account and let an owner's 'include'
     count one account twice. A key with neither a venue id nor a marker link is
-    unknown (``None``). Pure."""
+    unknown (``None``). The marker kinds are ``SHARED_ACCOUNT_KINDS``, the set
+    ``account_groups`` reads (IN-03), never a copy. Pure."""
+    import services.allocator_equity_derive as allocator_equity_derive
+
+    marker_kinds = allocator_equity_derive.SHARED_ACCOUNT_KINDS
     ids = [str(row["id"]) for row in keys]
     parent = {key_id: key_id for key_id in ids}
 
@@ -10562,7 +10566,7 @@ def account_identity_tokens(
         key_id = str(row["id"])
         holder = row.get("account_shared_with_api_key_id")
         if (
-            row.get("account_share_kind") in _SHARED_ACCOUNT_MARKER_KINDS
+            row.get("account_share_kind") in marker_kinds
             and holder is not None
             and str(holder) != key_id
             and str(holder) in parent

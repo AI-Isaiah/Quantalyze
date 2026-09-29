@@ -17,6 +17,8 @@
  * Pure: no I/O.
  */
 
+import type { ApiKeyAccountShareKind } from "@/lib/types";
+
 /** The fields of a key the rule reads. `is_active` defaults to true when absent. */
 export interface DepartedHistoryKey {
   id: string;
@@ -51,7 +53,21 @@ export interface DepartedHistoryDecision {
   reason: DepartedHistoryReason;
 }
 
-const SHARED_ACCOUNT_MARKER_KINDS = new Set(["duplicate", "composite_member"]);
+/**
+ * Which `account_share_kind` values join two keys into one account (IN-03).
+ * Keyed by the closed union, so a kind added to `ApiKeyAccountShareKind` fails
+ * to compile here until someone decides it; the Python twin reads the derive's
+ * `SHARED_ACCOUNT_KINDS` itself, never a copy.
+ */
+const MARKER_KIND_IS_SHARED: Record<ApiKeyAccountShareKind, boolean> = {
+  duplicate: true,
+  composite_member: true,
+};
+const SHARED_ACCOUNT_MARKER_KINDS: ReadonlySet<string> = new Set(
+  Object.entries(MARKER_KIND_IS_SHARED)
+    .filter(([, shared]) => shared)
+    .map(([kind]) => kind),
+);
 
 /** Sorts before every real ISO day. */
 const BEFORE_EVERY_DAY = "0000-00-00";

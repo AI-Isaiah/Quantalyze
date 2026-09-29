@@ -498,3 +498,47 @@ async def test_the_job_passes_the_rules_end_days_to_the_compose(case: dict[str, 
     assert captured.get("departed_end_by_key", {}) == expected_end
     departed = set(case["expected"])
     assert captured["returns_keys"] & departed == set(expected_end)
+
+
+# ── IN-02 / IN-03: one eligibility rule and one marker-kind set ───────────────
+
+
+@pytest.mark.parametrize("is_active", [True, False])
+@pytest.mark.parametrize("sync_status", [None, "complete", "error", "sign_in_failed", "revoked"])
+@pytest.mark.parametrize("disconnected_at", [None, "2026-06-10T00:00:00+00:00"])
+def test_the_rules_live_key_is_the_derives_eligible_key(
+    is_active: bool, sync_status: str | None, disconnected_at: str | None
+) -> None:
+    """A key the D-09 rule calls live must be exactly a key the derive counts as
+    eligible. If the two drift, the rule bounds a departed key by a key the book
+    does not count (days lost), or treats a counted key as departed (days
+    counted twice). The fixture adapter's only difference: a MISSING is_active
+    means active there, and the job always selects the column."""
+    from services.allocator_equity_derive import eligible_key_predicate
+    from services.job_worker import _is_live_key
+
+    row = {"is_active": is_active, "sync_status": sync_status, "disconnected_at": disconnected_at}
+    assert _is_live_key(row) is eligible_key_predicate(row)
+
+
+def test_account_identity_reads_the_derives_marker_kinds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The identity token and account_groups must agree on what a marker is. A
+    private copy of the kinds meant a new kind would join keys in one and not
+    the other (IN-03, the root of WR-03's divergence)."""
+    import services.allocator_equity_derive as derive
+    from services.job_worker import account_identity_tokens
+
+    monkeypatch.setattr(
+        derive, "SHARED_ACCOUNT_KINDS", derive.SHARED_ACCOUNT_KINDS | {"future_kind"}
+    )
+    tokens = account_identity_tokens([
+        {"id": "k-holder", "exchange": "okx", "venue_account_id": "acct-1"},
+        {
+            "id": "k-marked",
+            "exchange": "okx",
+            "venue_account_id": None,
+            "account_share_kind": "future_kind",
+            "account_shared_with_api_key_id": "k-holder",
+        },
+    ])
+    assert tokens["k-marked"] == tokens["k-holder"] is not None
