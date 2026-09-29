@@ -3827,6 +3827,8 @@ Plans:
 
 **D-09 case (2) amended 2026-09-29 (PR C4 review rounds 1 and 2, SFH-C4-07 and WR-R2-02; recorded in 167.1.2-CONTEXT.md):** a departed key whose last countable day falls before that of a key ordered ahead of it on the same known account is covered (zero days, reason `same_account_as_earlier_key`), so every day of the account is counted exactly once; and a departed key with no usable saved balance neither covers nor bounds any other key, so a dropped key never leaves a gap another key would have filled.
 
+**D-16 amended 2026-09-29 (PR C4 review rounds 1 and 2, SFH-C4-01, SFH-C4-02, SFH-R2-01; recorded in 167.1.2-CONTEXT.md):** Open Positions groups keys that read one exchange account and shows only the account's newest reading, and hides a key's rows once a newer clean poll has read it; the scenario-commit fingerprint (migration 20260929120000) applies the same row set.
+
 **Goal:** An allocator's book counts each exchange ACCOUNT exactly once, and "My Allocation" never shows an equity curve, return or ratio that the data does not support. A second key on an account that is already connected is refused. The equity history is rebuilt as one series per account from per-key returns and flows, and hidden until that series exists.
 **Requirements**: TBD. Source: founder browser UAT 2026-09-24 on the founder's own allocator book ("completely wrong, obviously"), with a read-only root-cause trace at `96b5db4c`.
 **Depends on:** Phase 167.1
