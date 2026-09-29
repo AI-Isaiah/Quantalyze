@@ -3129,8 +3129,10 @@ def _log_marker_not_confirmed(
 # finds a rebuilt day absent. Those days are sent as an explicit date list, and
 # supabase-py puts a delete's filters in the URL query string. A span can be
 # thousands of days wide, so an unbounded list could build a request line past
-# the gateway's limit (commonly 8 to 16 KB). 200 ISO dates is about 2.4 KB, and a
-# ten-year span refused whole is 19 statements.
+# the gateway's limit (commonly 8 to 16 KB). Measured with postgrest-py's own
+# request builder: a 200-date delete with its scope and span filters is a
+# 2,770-byte URL (each date costs 13 bytes once the comma is percent-encoded),
+# and a ten-year span refused whole is 19 statements.
 _RECONCILE_DELETE_IN_BATCH: Final[int] = 200
 
 
