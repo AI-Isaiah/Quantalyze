@@ -258,6 +258,12 @@ AuditAction = Literal[
     "allocator.equity.refresh_failed",
     "allocator.equity.sibling_lookup_failed",
     "allocator.equity.perp_upnl_missing",
+    # --- Phase 167.1.2 plan 12 / review SFH-R2-01: the daily refresh held a
+    # zero-snapshot book's FIRST row while a reconstruct of one of its keys was
+    # in flight (Python-only call site: services.equity_reconstruction).
+    # Metadata carries counts only. Kept in the TS union too
+    # (test_action_literal_matches_ts_union).
+    "allocator.equity.refresh_held_for_reconstruct",
     # --- Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint ----------
     "debug_key_flow.invoke",
     # --- audit-2026-05-07 P700: break-glass ADMIN_EMAIL fallback grant ------

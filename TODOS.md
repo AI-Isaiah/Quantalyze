@@ -8149,6 +8149,12 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       **Closed when:** each item's verdict is written into `167-UAT.md` (verdict and counts only —
       no key id, account number or server name).
 
+## Phase 167.1.2 (ACCOUNTTRUTH) — PR C2 informational items (logged 2026-09-29)
+
+- [ ] **`[167.1.2-C2-R3-IN-05]` A corrupt `key_inputs` row on an older key fails the stitched book permanently (Info, C2 round-3 review IN-05, founder: "It is an informational. Just put it into todos").**
+      - **What happens.** When the derive stitches a failing older key's history onto the working key (C2 round-2 fix SFH-R2-03), one corrupt `key_inputs` row on the older key marks the whole book `shared_account_history_truncated`, so the book stays hidden, while the rebuilding line says the history is recomputed once a day.
+      - **Source.** `.planning/phases/167.1.2-accounttruth-one-exchange-account-is-counted-once-and-the-al/167.1.2-C2-REVIEW-R3.md`, IN-05.
+
 ## Phase 167.1.2 (ACCOUNTTRUTH) — PR B review round 4, routed items (logged 2026-09-26)
 
 - [ ] **`[167.1.2-REUSED-RETRY-ENDS-FAILED-FINAL]` A toggle can report success while the recompose

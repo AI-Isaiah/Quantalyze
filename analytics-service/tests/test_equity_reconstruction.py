@@ -80,6 +80,9 @@ class _FakeTable:
         self._select_neq_filters: list[tuple[str, Any]] = []
         self._select_is_null_cols: list[str] = []
         self._select_ranges: list[tuple[str, str, str]] = []  # (col, op, val)
+        # PostgREST `.in_(col, values)`: col IN (values). Added for the daily
+        # refresh's reconstruct-hold probe (Phase 167.1.2 plan 12, SFH-R2-01).
+        self._select_in_filters: list[tuple[str, frozenset]] = []
         self._select_count_mode: str | None = None
         # Pending write
         self._pending_op: str | None = None  # 'upsert' | 'update' | 'insert' | 'delete'
@@ -147,6 +150,10 @@ class _FakeTable:
             self._select_is_null_cols.append(col)
         else:
             self._select_filters.append((col, val))
+        return self
+
+    def in_(self, col: str, values):
+        self._select_in_filters.append((col, frozenset(values)))
         return self
 
     def gte(self, col: str, val):
@@ -248,6 +255,8 @@ class _FakeTable:
                 if any(row.get(c) == v for c, v in self._select_neq_filters):
                     continue
                 if any(row.get(c) is not None for c in self._select_is_null_cols):
+                    continue
+                if not all(row.get(c) in vals for c, vals in self._select_in_filters):
                     continue
                 # range filters
                 ok = True
@@ -419,6 +428,29 @@ def _install_fake_preflight(monkeypatch, venue: str, fake_supabase: FakeSupabase
     from services import db as db_module
     monkeypatch.setattr(db_module, "get_supabase", lambda: fake_supabase)
     monkeypatch.setattr(er, "get_supabase", lambda: fake_supabase, raising=False)
+
+
+def _seed_eligible_keys_for_holdings(fake_supabase: FakeSupabaseClient) -> None:
+    """Phase 167.1.2 plan 10 (D-07): the daily refresh sums the holdings of the
+    allocator's ELIGIBLE keys only (``eligible_key_predicate``), so every key
+    that owns a seeded ``allocator_holdings`` row needs an eligible ``api_keys``
+    row. Before plan 10 the refresh read every row at ``asof = today`` without
+    looking at the keys. A key row a test seeded itself is left alone."""
+    key_ids = {
+        row.get("api_key_id")
+        for row in fake_supabase.rows_for("allocator_holdings")
+        if row.get("api_key_id")
+    }
+    for key_id in sorted(key_ids):
+        fake_supabase.store.setdefault(("api_keys", (key_id,)), {
+            "id": key_id,
+            "user_id": ALLOCATOR_ID,
+            "is_active": True,
+            "sync_status": "ok",
+            "disconnected_at": None,
+            "account_share_kind": None,
+            "account_shared_with_api_key_id": None,
+        })
 
 
 def _install_fake_audit(monkeypatch):
@@ -924,6 +956,7 @@ async def test_refresh_daily_appends_one_row(monkeypatch):
     }
     assert "allocator_id" not in job, "refresh_allocator_equity_daily must be KEY-SCOPED (f1)"
 
+    _seed_eligible_keys_for_holdings(fake_supabase)
     result = await run_refresh_allocator_equity_daily_job(job)
 
     from services.job_worker import DispatchOutcome
@@ -1099,6 +1132,7 @@ async def test_refresh_daily_aggregates_across_keys(monkeypatch):
     job1 = {"id": "refresh-1", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_1}
     job2 = {"id": "refresh-2", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_2}
 
+    _seed_eligible_keys_for_holdings(fake_supabase)
     result1 = await run_refresh_allocator_equity_daily_job(job1)
     result2 = await run_refresh_allocator_equity_daily_job(job2)
 
@@ -2827,6 +2861,7 @@ async def test_refresh_daily_uses_unrealized_pnl_for_perp_not_notional(monkeypat
 
     monkeypatch.setattr(er, "datetime", _FakeDatetime)
 
+    _seed_eligible_keys_for_holdings(fake_supabase)
     result = await run_refresh_allocator_equity_daily_job(
         {"id": "refresh-1", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_1}
     )
@@ -2930,6 +2965,7 @@ async def test_refresh_daily_excludes_deribit_derivatives(monkeypatch):
 
     monkeypatch.setattr(er, "datetime", _FakeDatetime)
 
+    _seed_eligible_keys_for_holdings(fake_supabase)
     result = await run_refresh_allocator_equity_daily_job(
         {"id": "refresh-drb", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_1}
     )
@@ -3834,6 +3870,7 @@ async def test_h1161_refresh_logs_audit_when_perp_upnl_is_none(monkeypatch):
 
     monkeypatch.setattr(er, "datetime", _FakeDatetime)
 
+    _seed_eligible_keys_for_holdings(fake_supabase)
     result = await run_refresh_allocator_equity_daily_job(
         {"id": "refresh-null-upnl", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_1}
     )
@@ -3883,6 +3920,7 @@ async def test_h1161_refresh_keeps_perp_breakdown_entry_when_upnl_is_zero(monkey
 
     monkeypatch.setattr(er, "datetime", _FakeDatetime)
 
+    _seed_eligible_keys_for_holdings(fake_supabase)
     result = await run_refresh_allocator_equity_daily_job(
         {"id": "refresh-zero-upnl", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_1}
     )
@@ -5040,13 +5078,15 @@ async def test_pta7_refresh_skips_non_numeric_upnl(monkeypatch):
     fake_supabase.store[
         ("allocator_holdings", (ALLOCATOR_ID, today_iso, "USDT"))
     ] = {
-        "allocator_id": ALLOCATOR_ID, "asof": today_iso, "symbol": "USDT",
+        "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+        "asof": today_iso, "symbol": "USDT",
         "holding_type": "spot", "value_usd": 100.0,
     }
     fake_supabase.store[
         ("allocator_holdings", (ALLOCATOR_ID, today_iso, "BTCUSDT"))
     ] = {
-        "allocator_id": ALLOCATOR_ID, "asof": today_iso, "symbol": "BTCUSDT",
+        "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+        "asof": today_iso, "symbol": "BTCUSDT",
         "holding_type": "derivative", "value_usd": 1000.0,
         "unrealized_pnl_usd": "not_a_number",
     }
@@ -5185,14 +5225,16 @@ async def test_spec_sfh4_refresh_perp_upnl_missing_is_aggregated(monkeypatch):
         fake_supabase.store[
             ("allocator_holdings", (ALLOCATOR_ID, today_iso, sym))
         ] = {
-            "allocator_id": ALLOCATOR_ID, "asof": today_iso, "symbol": sym,
+            "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+            "asof": today_iso, "symbol": sym,
             "holding_type": "derivative", "value_usd": 1000.0,
             "unrealized_pnl_usd": None,
         }
     fake_supabase.store[
         ("allocator_holdings", (ALLOCATOR_ID, today_iso, "USDT"))
     ] = {
-        "allocator_id": ALLOCATOR_ID, "asof": today_iso, "symbol": "USDT",
+        "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+        "asof": today_iso, "symbol": "USDT",
         "holding_type": "spot", "value_usd": 50.0,
     }
 

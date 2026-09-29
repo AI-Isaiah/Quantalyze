@@ -1,0 +1,1244 @@
+{
+  "notes": "Phase 167.1.2 C2 round 2, R2-WR-01. ONE table both runtimes assert against, so the Python writers and the TS reader cannot drift apart silently. Book: key O (its own account, working, stamped), holder H (stamped with the shared account id) and key M marked `kind` against H with a NULL venue_account_id (the production shape). All three hold returns on the same three days, so no stitch applies. `states` are the key-row overrides each side applies. derive: `refuse` = the curve is deleted (account_duplicate); `compose` = the keys counted (by anchor) and whether the payload is trustworthy. reader: equityHistoryReadiness given the series the derive leaves (present when compose+trustworthy, else null with the reason the producer passes). The invariant this pins: the reader says duplicate_account exactly when the derive refuses, and it says ready only where the derive counts the shared account at most once on a trustworthy curve. Hand-written from D-18 (working = active, connected, not revoked/sign_in_failed/error; eligible = active, connected, not revoked), D-01/D-04 (a duplicate behind a WORKING holder is refused; a composite member never is) and the round-2 rule that a pair with no working key is untrustworthy (SFH-R2-04).",
+  "consumers": [
+    "analytics-service/tests/test_holder_matrix_parity.py",
+    "src/lib/__tests__/holder-matrix-parity.test.ts"
+  ],
+  "exchange": "binance",
+  "anchors": {
+    "O": 10000.0,
+    "H": 100000.0,
+    "M": 60000.0
+  },
+  "states": {
+    "working": {
+      "is_active": true,
+      "sync_status": "complete",
+      "disconnected_at": null
+    },
+    "error": {
+      "is_active": true,
+      "sync_status": "error",
+      "disconnected_at": null
+    },
+    "sign_in_failed": {
+      "is_active": true,
+      "sync_status": "sign_in_failed",
+      "disconnected_at": null
+    },
+    "inactive": {
+      "is_active": false,
+      "sync_status": "complete",
+      "disconnected_at": null
+    },
+    "revoked": {
+      "is_active": true,
+      "sync_status": "revoked",
+      "disconnected_at": null
+    },
+    "disconnected": {
+      "is_active": true,
+      "sync_status": "complete",
+      "disconnected_at": "2026-06-02T00:00:00Z"
+    }
+  },
+  "cells": [
+    {
+      "kind": "duplicate",
+      "holder": "working",
+      "marked": "working",
+      "derive": {
+        "outcome": "refuse",
+        "counted": [],
+        "trustworthy": null
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "duplicate_account"
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "working",
+      "marked": "error",
+      "derive": {
+        "outcome": "refuse",
+        "counted": [],
+        "trustworthy": null
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "duplicate_account"
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "working",
+      "marked": "sign_in_failed",
+      "derive": {
+        "outcome": "refuse",
+        "counted": [],
+        "trustworthy": null
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "duplicate_account"
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "working",
+      "marked": "inactive",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "working",
+      "marked": "revoked",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "working",
+      "marked": "disconnected",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "error",
+      "marked": "working",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "error",
+      "marked": "error",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": false
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "derivation_rejected"
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "error",
+      "marked": "sign_in_failed",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": false
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "derivation_rejected"
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "error",
+      "marked": "inactive",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "error",
+      "marked": "revoked",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "error",
+      "marked": "disconnected",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "sign_in_failed",
+      "marked": "working",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "sign_in_failed",
+      "marked": "error",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": false
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "derivation_rejected"
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "sign_in_failed",
+      "marked": "sign_in_failed",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": false
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "derivation_rejected"
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "sign_in_failed",
+      "marked": "inactive",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "sign_in_failed",
+      "marked": "revoked",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "sign_in_failed",
+      "marked": "disconnected",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "inactive",
+      "marked": "working",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "inactive",
+      "marked": "error",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "inactive",
+      "marked": "sign_in_failed",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "inactive",
+      "marked": "inactive",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "inactive",
+      "marked": "revoked",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "inactive",
+      "marked": "disconnected",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "revoked",
+      "marked": "working",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "revoked",
+      "marked": "error",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "revoked",
+      "marked": "sign_in_failed",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "revoked",
+      "marked": "inactive",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "revoked",
+      "marked": "revoked",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "revoked",
+      "marked": "disconnected",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "disconnected",
+      "marked": "working",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "disconnected",
+      "marked": "error",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "disconnected",
+      "marked": "sign_in_failed",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "disconnected",
+      "marked": "inactive",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "disconnected",
+      "marked": "revoked",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "duplicate",
+      "holder": "disconnected",
+      "marked": "disconnected",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "working",
+      "marked": "working",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "working",
+      "marked": "error",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "working",
+      "marked": "sign_in_failed",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "working",
+      "marked": "inactive",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "working",
+      "marked": "revoked",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "working",
+      "marked": "disconnected",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "error",
+      "marked": "working",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "error",
+      "marked": "error",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": false
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "derivation_rejected"
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "error",
+      "marked": "sign_in_failed",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": false
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "derivation_rejected"
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "error",
+      "marked": "inactive",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "error",
+      "marked": "revoked",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "error",
+      "marked": "disconnected",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "sign_in_failed",
+      "marked": "working",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "sign_in_failed",
+      "marked": "error",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": false
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "derivation_rejected"
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "sign_in_failed",
+      "marked": "sign_in_failed",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": false
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "derivation_rejected"
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "sign_in_failed",
+      "marked": "inactive",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "sign_in_failed",
+      "marked": "revoked",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "sign_in_failed",
+      "marked": "disconnected",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "H",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "inactive",
+      "marked": "working",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "inactive",
+      "marked": "error",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "inactive",
+      "marked": "sign_in_failed",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "inactive",
+      "marked": "inactive",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "inactive",
+      "marked": "revoked",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "inactive",
+      "marked": "disconnected",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "revoked",
+      "marked": "working",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "revoked",
+      "marked": "error",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "revoked",
+      "marked": "sign_in_failed",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "revoked",
+      "marked": "inactive",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "revoked",
+      "marked": "revoked",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "revoked",
+      "marked": "disconnected",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "disconnected",
+      "marked": "working",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "disconnected",
+      "marked": "error",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "disconnected",
+      "marked": "sign_in_failed",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "M",
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "disconnected",
+      "marked": "inactive",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "disconnected",
+      "marked": "revoked",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "kind": "composite_member",
+      "holder": "disconnected",
+      "marked": "disconnected",
+      "derive": {
+        "outcome": "compose",
+        "counted": [
+          "O"
+        ],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    }
+  ]
+}

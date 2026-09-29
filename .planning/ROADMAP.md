@@ -3813,6 +3813,10 @@ Plans:
 
 After 167.1.2 PR C ships, Open Positions (per key, latest asof) and the exposure panel will disagree about a quiet key until these three move. Success: each reads per key, with a test that fails on the allocator-wide read. Each symbol was verified at `origin/main` `c052ab4d` on 2026-09-27.
 
+⭐ **ROUTED IN 2026-09-29 (from 167.1.2 PR C2, D-13; user-facing): `/compare` per-holding metrics stay withheld until a flow-neutral per-holding source exists.**
+- `/compare`'s per-holding return, Sharpe, max drawdown and vol are computed as day-over-day ratios of dollar values (`src/app/(dashboard)/compare/lib/holding-compare-adapter.ts`), so buying more of an asset reads as a gain. Plan 11 kept them at "rebuilding" (D-13 decided, evidence in `167.1.2-11-SUMMARY.md`); plan 10 fixes new rows only and changes neither the stored rows nor that calculation.
+- Success: each per-holding metric reads a source that removes purchases, sales and transfers, with a test that fails on the dollar-ratio read; only then does `/compare` flip back to "ready".
+
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1.1 to break down)
@@ -3898,6 +3902,17 @@ Plans:
 5. **`failed_retry` is counted:** `request_allocator_holdings_sync`'s status list includes `failed_retry`, as the cron's does. A test fails on the old list.
 6. **Migration review before merge.** Any migration this phase writes is reviewed by migration-reviewer, rls-policy-auditor and silent-failure-hunter, because a merge of `supabase/migrations/**` auto-applies to PROD.
 7. **The fast-fail race (added 2026-09-27):** when a zero-snapshot book's reconstruct reaches `failed_final` before the daily refresh (`run_refresh_allocator_equity_daily_job`) is claimed, the key is still recorded as owing its reconstruct, the refresh's first row does not strand its history, and the history is rebuilt. A test written first reproduces the race (reconstruct failed, refresh claimed after) and fails on the old behaviour.
+
+⭐ **ROUTED IN 2026-09-29 (from 167.1.2 PR C2 review rounds 1-3; data integrity): writer-side residuals of the history rebuild.** Sources: `167.1.2-C2-REVIEW-SFH*.md`, `167.1.2-C2-REVIEW-R*.md`, `167.1.2-C2-REVIEW-FIX*.md`.
+- **SFH-05 (writer half):** the derive deletes the curve on a refusal instead of persisting why, so the reader can only name the generic reason.
+- **One failing key with a known account id** is carried flat inside a book that reads "ready", diluting its returns (two failing keys on one account now hide the history; the single-key case is not reconciled).
+- **SFH-R3-02:** the stitch drops a deposit that only the newer key lists on a day the older key owns; the curve stays trusted.
+- **SFH-R3-07 (pre-existing):** the derive reads per-key daily returns in one unordered call against the 1000-row read cap, and the stitch now chooses keys from that read.
+- **SFH-08:** a key that has never polled adds $0 to the day's persisted total; only a counter records it.
+- **SFH-09:** a carried balance has no age limit (a WARNING above 3 days only). The limit is a founder call.
+- **R2-CR-02 residual:** two WORKING keys on one account that are both still unstamped are counted twice while that lasts.
+- **R3-WR-02 (landing constraint, recorded here for the next writer change):** a deploy between the 04:00 poll and the 05:00 refresh writes one stale row per emptied account.
+- Success: each item is fixed with a test that fails on the old behaviour, or closed by a recorded founder decision.
 
 Plans:
 

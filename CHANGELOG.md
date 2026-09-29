@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.111.0.0] - 2026-09-29 — ACCOUNTTRUTH C2: the allocator history is rebuilt one account at a time, from flow-neutral returns, and shown only when it is right
+
+⭐ **What changed for whoever reads this next.** This is the second topic PR of Phase 167.1.2 PR C (D-21). It covers plans 10, 05, 12, 06, 07 and 11. Plans 06 and 07 moved in from C3 by founder decision (2026-09-29, "Pull 06+07 into C2"), because plan 11 depends on them and edits the same files. Plan 13 already shipped alone as v0.110.0.2 (#899). C3 is now plan 14; C4 (plans 09, 15) and plan 08 follow.
+- The daily equity refresh counts each exchange account once and carries a quiet account at its latest holdings instead of $0.
+- A book with zero equity snapshots is now bootstrapped by the daily fan-out.
+- The derived book series is persisted as version 2 with flow-neutral daily returns, so a deposit is no longer read as a gain.
+- My Allocation turns "ready" only when that series exists and every account is counted once; otherwise it says, in one line, what it is waiting for.
+
+⚠️ **A minor bump: new behaviour in the daily refresh, the derive and the Overview, plus a migration.** `20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql` **auto-applies to TEST and then PROD on merge, with no human gate**. migration-reviewer, rls-policy-auditor and silent-failure-hunter reviewed it over three rounds; round 3 found no CRITICAL or HIGH.
+
+⚠️ **Landing window.** Merge so the Railway deploy lands outside roughly 03:30–05:00 UTC (between the 04:00 poll and the 05:00 refresh). A deploy in that window writes one stale row per emptied account (C2 round-3 R3-WR-02).
+
+### Added
+- **The daily refresh counts one exchange account once and carries a quiet account (plan 10, D-18).**
+  - Holdings are read per account group (a holder plus every key marked as sharing its account), at the group's latest day, and summed once. A duplicate pair counts through a working key under D-18; a non-working holder is not counted beside it.
+  - An account that did not poll today is carried at its latest holdings instead of counted as $0.
+  - An account counts as emptied, and contributes $0, only when a clean poll found zero rows after its latest holdings day AND the key's own live equity read, taken after that poll, shows no material capital. Deribit never supplies that proof. A book whose every account is proven empty writes an explicit $0 row (`book_emptied`, sent to Sentry).
+  - A key that is not working and has no account id is not carried forward (only its same-day rows count), so an unstamped rotation is not summed twice.
+  - New counters: `never_polled_keys`, `identity_unknown_not_carried`, `emptied_accounts`, and the age of the oldest carry (WARNING above 3 days).
+- **The daily fan-out bootstraps a book with zero equity snapshots (plan 12, SC-7, D-17).** Migration `20260928140000` re-bases `enqueue_refresh_allocator_equity_for_all` on migration 075. For a book with no snapshots it enqueues a capped (25 per run) whole-book reconstruct and then the refresh, and the refresh holds the book's first row while its reconstruct is in flight. Refused credentials spend no cap slot, a book whose enqueue fails is skipped alone, and each skip or failure leaves a `cron_runs` row. The rollback restores migration 075's body, COMMENT and grants.
+- **The derived book series is persisted at payload version 2 with flow-neutral returns (plan 05, D-06).**
+  - `compose_allocator_equity` writes `version: 2` and `returns` computed from each key's returns and cash flows.
+  - The derive refuses to compose when a working-holder duplicate or an account-identity collision would count one account twice; the refusal deletes the curve and is sent to Sentry with no ids.
+  - A shared account whose working key starts later has the older key's returns and flows stitched in before that day. Where that cannot be done honestly (a gap, missing inputs, cut flows), the book is marked untrustworthy (`shared_account_history_truncated`). A shared account with no working key is untrustworthy too (`shared_account_no_working_key`).
+- **My Allocation reads the version-2 series and names the wait (plan 11, D-02, D-06).**
+  - "Ready" requires a version-2 trustworthy series with well-formed returns, no working-holder duplicate and no ccxt key still waiting for its account id. The legacy snapshot-curve fallback is gone.
+  - Each rebuild reason has one authored line: `duplicate_account`, `account_identity_pending`, `key_not_syncing` (names the key when there is exactly one), `awaiting_derivation`, `history_read_failed`, `derivation_rejected`, plus lines for no working key and a truncated history.
+  - The factsheet panels and the Scenario "vs your book" delta read the persisted returns, never a dollar curve.
+  - The 44px EquityChart tap-rect gate at 320px is restored; the e2e seed writes a version-2 row and an account id.
+
+### Changed
+- **The Scenario composer is honest about empty and excluded weight (plan 06, SC-4).** Zero weight mass returns the honest empty shape and shows no result, not a flat +0.00% curve. Every toggled-on dollar is in the total or in a named excluded part; dollars from disconnected or inactive keys are named "keys that are not connected".
+- **Small fixes (plan 07, SC-5).** A key's label, never its api key id, names each Scenario unit. The short-history warning reads the payload's own annualisation basis. A tab switch on /allocations updates the URL through the History API, with no server render.
+- **`/compare` per-holding return, Sharpe, max drawdown and vol stay withheld (D-13).** They are still day-over-day ratios of dollar values; routed to Phase 167.1.1.
+- **Deploy day.** Every existing derived row is pre-version-2, so books read `awaiting_derivation` ("recomputed once a day") until the 05:30 UTC derive rewrites them; this is not sent to Sentry. A rejected version-2 row is reported at most once per allocator and reason per 6 hours per server instance.
+
+### Fixed
+- **Review round 1** (gsd-code-reviewer 4 critical / 5 warning / 2 info; silent-failure-hunter 1 critical / 4 high / 4 medium / 2 low), fixed test-first by two topic fixers (Python writers, TS reader):
+  - Both Python writers used the pre-D-18 holder rule, so an inactive or failing holder dropped an account from the saved refresh total (CR-01, SFH-01/02/03). One shared `working_holder_predicate` and `account_groups` now sit beside `eligible_key_predicate`.
+  - The per-key read carried a duplicate pair at stale rows, because holdings rows belong to whichever key polled last (CR-03); an emptied account's last balance was carried forever (CR-04).
+  - A working key behind a live but not-working holder was held in `account_identity_pending` forever (CR-02, SFH-04, WR-05); a failing never-stamped key promised a sync that never comes (WR-02).
+  - A rejected row or a failed read showed as a daily wait (SFH-05/06); disconnected dollars were called connected (WR-03); a non-finite return was filtered silently (SFH-10/11).
+  - Plan 12's census pins, never carried to this branch, were re-measured (WR-04).
+- **Review round 2** found three CRITICAL and one HIGH, fixed the same way: the emptiness proof judged the key's current status instead of the proving poll (R2-CR-01); an unstamped rotation was summed twice in the saved snapshots (R2-CR-02); pre-version-2 rows showed "did not pass its checks" and alerted on every load (R2-CR-03); a failing older key's history was dropped under a benign flag (SFH-R2-03). Riding along: a poll landing between the refresh's two reads (SFH-R2-01), a fully emptied book (SFH-R2-02), a no-working-key book shown ready (SFH-R2-04), Sentry captures scheduled with `after()` (SFH-R2-05), the venue compared case-blind (IN-02), the derive refusal reaching Sentry (SFH-07), and one shared holder-state table (R2-WR-01).
+- **Review round 3** found one HIGH: a single clean empty poll could zero a funded account (SFH-R3-01), now also requiring the live equity read. Also fixed: a poll crossing UTC midnight blocked the emptiness proof (R3-WR-01), the two new blocking states had no way forward in their copy (R3-WR-03), and the Sentry flood on every 30-second refresh (R3-WR-04). By founder decision, round 3 fixed criticals and highs only, and its confirmation round was waived; the orchestrator confirmed both Python fixes red-before, green-after.
+
+### Tests
+- `analytics-service/tests/fixtures/shared_account_resolution.json`: a 72-cell holder-state × marker-kind × marked-key-state table, asserted by `test_holder_matrix_parity.py` against the real derive and by `holder-matrix-parity.test.ts` against the real reader.
+- `.gitleaks.toml` gains one narrow allowlist block (one rule, one file, one literal) for plan 07's synthetic `api_key_id` UUID in `scenario-adapter.test.ts`, a `generic-api-key` false positive. Calibrated both ways: the two fixture hits clear while a planted high-entropy key in the same file is still caught.
+- The SQL gate `test_refresh_fanout_zero_snapshot_bootstrap.sql` (32 arms, all biting on the pg lane). The mutation census moved by measurement: `FILES_FLOOR` 53 → 54, `ARMS_FLOOR` 513 → 545; `WAIVED_CEILING` stays 0.
+
+### Notes
+- **D-22 (founder, 2026-09-29, "Accept until C4"):** until C4 (plan 09) lands, a ready curve leaves out the history of departed (revoked or disconnected) keys.
+- **Expected red:** `baseline-content-drift` reports one DRIFT on `enqueue_refresh_allocator_equity_for_all`. This is the stale-baseline class, and the post-apply re-dump clears it.
+- **Routed, not fixed:** D-13 (`/compare` per-holding metrics) to Phase 167.1.1; eight writer residuals (the writer persisting its refusal reason, a single failing key diluting a ready book, a stitch dropping a newer-key-only deposit, the 1000-row returns read, never-polled keys, carry age limit, two working unstamped keys, the landing window) to Phase 167.1.2.1. `[167.1.2-C2-R3-IN-05]` is booked in `TODOS.md`. SFH-R3-03 and SFH-R3-06 stay recorded in the round-3 review.
+- **Known, not C2's:** `src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts` times out under full-suite load on a busy machine and passes alone.
+- **Ledger housekeeping:** C1's phase-level review files are renamed `167.1.2-C1-REVIEW*.md` so C2's reports do not overwrite them; plan 10/12/13 ledger files are carried onto this branch; plan 12's migration header records the D-20 routing.
+- **Verification** (`167.1.2-C2-VERIFY.md`): human_needed, 40/40 C2 must-haves verified; open items are founder copy checks, 390px / desktop 200% browser checks and post-deploy observation of the first 05:00 refresh and 05:30 derive. **Security** (`167.1.2-SECURITY.md`): 22 C2 threats, 0 open; merge condition VAC-04 green on the PR.
+
 ## [0.110.0.2] - 2026-09-28 — ACCOUNTTRUTH: an empty sole-key reconstruct no longer wipes equity history
 
 ### Fixed

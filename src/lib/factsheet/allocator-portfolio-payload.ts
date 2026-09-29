@@ -16,6 +16,12 @@ export interface AllocatorPortfolioMetadata {
   markets?: string[];
   startDate?: string | null;
   aum?: number | null;
+  /**
+   * Phase 167.1.2 / D-06. Persisted flow-neutral returns (`{ date, value }`).
+   * When present, these ARE the factsheet's return series. Absent (other
+   * callers) still derives ratios from the $-curve.
+   */
+  dailyReturns?: DailyPoint[];
 }
 
 /**
@@ -34,7 +40,12 @@ export function buildAllocatorPortfolioFactsheetPayload(
   equityDailyPoints: DailyPoint[],
   meta: AllocatorPortfolioMetadata,
 ): FactsheetPayload | null {
-  const dailyReturns = equityCurveToDailyReturns(equityDailyPoints);
+  // D-06: a supplied series is used as-is, including when it is too short to
+  // build a payload. Do not fall through to $-level ratios in that case.
+  const dailyReturns =
+    meta.dailyReturns !== undefined
+      ? meta.dailyReturns
+      : equityCurveToDailyReturns(equityDailyPoints);
   if (dailyReturns.length < 2) return null;
 
   // Use a stable synthetic strategyId so the FactsheetProvider's

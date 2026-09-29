@@ -212,6 +212,11 @@ export function computeMetricsForDraft(
       buildPerKeyStrategyForBuilderSet(
         eligibleOnly,
         liveInputs.equityByApiKeyId ?? {},
+        // Phase 167.1.2 plan 07 (SC-5): an EMPTY label map, so every per-key
+        // unit is named "Connected key", never its api_key_id. The compare
+        // inputs carry no key list, and this path returns ComputedMetrics
+        // only; no unit name leaves it.
+        new Map(),
       ),
       draft.addedStrategies,
       liveInputs.addedStrategyReturnsLookup as Record<
