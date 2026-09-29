@@ -51,7 +51,10 @@ import {
 // would dispatch a key event the source deliberately does not listen for and
 // would pass against a component with no keyboard support at all.
 import userEvent from "@testing-library/user-event";
-import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import type {
+  EquityHistoryRebuildReason,
+  MyAllocationDashboardPayload,
+} from "@/lib/queries";
 import { isoDayFromDate } from "@/lib/dateday";
 
 // --- next/navigation mock -------------------------------------------------
@@ -357,6 +360,7 @@ vi.mock("./WeightOptimizerSection", () => ({
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer } from "./ScenarioComposer";
+import { EquityHistoryRebuilding } from "./EquityHistoryRebuilding";
 // Real (un-mocked) — used to build a valid current-schema draft so the
 // onRegisterOpen handler decodes "ok" in the WR-02 regression test below.
 import {
@@ -17000,77 +17004,356 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(live.max_drawdown).toBe(payload.liveBaselineMetrics.maxDd);
   });
 
-  // Review round 1 (SFH-05): the disclosure explains an absence D-02 caused.
-  // A book with no snapshot yet (a first connect) has no own-book history to
-  // withhold, so the sentence would be false there. `snapshotCount` survives
-  // the withholding, so the composer can tell the two apart.
-  it("rebuilding + a live book with NO snapshot yet: no disclosure (nothing was withheld); with snapshots it renders", () => {
-    render(
-      <ScenarioComposer
-        payload={makePayload({ equityHistoryState: "rebuilding", snapshotCount: 0 })}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    // Book mode is live (the default fixture has holdings), so only the
-    // snapshot condition decides the absence.
-    expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
-    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  // Phase 167.1.2 D-15 (2026-09-27) supersedes IN-01 (2026-09-25): under
+  // 'rebuilding' the copy is chosen by state, never by count, because the
+  // warm-up line promises a timer the D-02 hold never honours.
+  // The two arms below replaced review round 1 SFH-05 (no disclosure for a
+  // book with no legacy snapshot) and review round 2 WR-02 (a derived curve
+  // alone turned it on, "neither source" kept it off). The Overview shows its
+  // rebuilding panel for every non-"ready" book, so the Scenario says the same
+  // thing about the same book: the disclosure follows the state alone. Do NOT
+  // restore a snapshot-count or curve-source condition on it.
+  const expectLiveBookKpis = (payload: MyAllocationDashboardPayload) => {
+    // D-03: the live-book KPIs come from the per-key blend, not the withheld
+    // curve, so they reach the KPI strip in every arm.
+    const live = vi.mocked(KpiStrip).mock.calls.at(-1)![0].liveMetrics as unknown as {
+      twr?: number | null;
+      sharpe?: number | null;
+    };
+    expect(live.twr).toBe(payload.liveBaselineMetrics.ytdTwr);
+    expect(live.sharpe).toBe(payload.liveBaselineMetrics.sharpe);
+  };
 
-    cleanup();
-    render(
-      <ScenarioComposer
-        payload={makePayload({ equityHistoryState: "rebuilding", snapshotCount: 3 })}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
-  });
+  // Review C3 IN-03: the D-15 arms use the producer's own shape for a
+  // non-ready book (`derivePhase07Fields` in src/lib/queries.ts): no curve,
+  // no returns, no raw snapshots, and a named reason. `makePayload`'s default
+  // 2-point curve is a shape the producer never sends under "rebuilding", and
+  // with it a gate that also required a curve would pass every arm while
+  // hiding the disclosure for every real book.
+  const producerRebuildingPayload = (
+    overrides: Partial<MyAllocationDashboardPayload> = {},
+  ) =>
+    makePayload({
+      equityHistoryState: "rebuilding",
+      equityHistoryRebuildReason: "awaiting_derivation",
+      equityDailyPoints: [],
+      equityDailyReturns: [],
+      equitySnapshots: [],
+      derivedCurveComputedAt: null,
+      ...overrides,
+    });
 
-  // Review round 2 (WR-02): the own-book series has TWO sources, the
-  // trustworthy derived curve and the legacy snapshots. `snapshotCount` counts
-  // only the legacy rows, so a book whose history is ALL derived (every legacy
-  // row terminus-flagged, or no legacy row at all) reports 0 snapshots while
-  // D-02 still withholds a real curve. Gating on the legacy count alone
-  // silenced the disclosure for exactly that book.
-  it("rebuilding + NO legacy snapshot but a trustworthy DERIVED curve: the disclosure renders (something was withheld)", () => {
-    render(
-      <ScenarioComposer
-        payload={makePayload({
-          equityHistoryState: "rebuilding",
-          snapshotCount: 0,
-          equityCurveSource: "derived",
-        })}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
-    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
+  it.each([
+    ["0 snapshots on the legacy source (SFH-05's book)", 0, "legacy"],
+    ["3 snapshots on the legacy source", 3, "legacy"],
+  ] as const)(
+    "rebuilding + %s: the disclosure renders exactly once, and the live-book KPIs stay (D-15)",
+    (_label, snapshotCount, equityCurveSource) => {
+      const payload = producerRebuildingPayload({
+        snapshotCount,
+        equityCurveSource,
+      });
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      // Book mode is live (the default fixture has holdings), so blank mode
+      // is not what decides the disclosure here.
+      expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+      const notes = screen.getAllByTestId("scenario-ownbook-rebuilding");
+      expect(notes).toHaveLength(1);
+      expect(notes[0].textContent).toBe(OWN_BOOK_REBUILDING_COPY);
+      expect(lastChart().scenarioOwnBookDelta).toBeUndefined();
+      expectLiveBookKpis(payload);
+    },
+  );
 
-    // Control: the same zero-snapshot book on the legacy source has nothing to
-    // withhold, so the case above is decided by the derived source alone.
-    cleanup();
-    render(
-      <ScenarioComposer
-        payload={makePayload({
-          equityHistoryState: "rebuilding",
-          snapshotCount: 0,
-          equityCurveSource: "legacy",
-        })}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
-  });
+  // Phase 167.1.2 D-15 (2026-09-27) supersedes IN-01 (2026-09-25): under
+  // 'rebuilding' the copy is chosen by state, never by count, because the
+  // warm-up line promises a timer the D-02 hold never honours.
+  // Review round 2 WR-02's two books, 0 legacy snapshots with and without a
+  // derived curve, now read the same: the disclosure renders for both. The
+  // "neither source" book used to be the control that kept it off.
+  // Producer-shaped (IN-03). The derived book is the one the producer stamps
+  // "derived" under "rebuilding": a trustworthy v2 curve exists but is held
+  // back (a key's account is still pending), so the payload carries the
+  // source and its compute time and still no curve points. The "neither
+  // source" book carries no curve at all.
+  it.each([
+    [
+      "a derived curve held back and 0 legacy snapshots",
+      "derived",
+      "2026-09-20T05:30:00Z",
+      "account_identity_pending",
+    ],
+    [
+      "neither source (0 legacy snapshots, no derived curve)",
+      "legacy",
+      null,
+      "awaiting_derivation",
+    ],
+  ] as const)(
+    "rebuilding + %s: the disclosure renders (D-15, state-driven)",
+    (_label, equityCurveSource, derivedCurveComputedAt, reason) => {
+      const payload = producerRebuildingPayload({
+        snapshotCount: 0,
+        equityCurveSource,
+        derivedCurveComputedAt,
+        equityHistoryRebuildReason: reason,
+      });
+      expect(payload.equityDailyPoints).toEqual([]);
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      expect(screen.getAllByTestId("scenario-ownbook-rebuilding")).toHaveLength(1);
+      expectLiveBookKpis(payload);
+    },
+  );
+
+  // D-15: blank mode has no own book to compare with, so the disclosure never
+  // renders there, whatever the state and whatever the history shape.
+  it.each([
+    ["rebuilding", "rebuilding", 0, "legacy"],
+    ["rebuilding", "rebuilding", 3, "derived"],
+    ["null", null, 0, "legacy"],
+    ["an unrecognised state", "partial", 3, "legacy"],
+    ["ready", "ready", 3, "derived"],
+  ] as const)(
+    // Review C3 SFH-C3-05 / IN-04: one placeholder per column, in row order
+    // (label, state, snapshotCount, source), so a red run names its case.
+    "blank mode + %s (equityHistoryState %s, %s snapshots, %s source): no disclosure",
+    (_label, state, snapshotCount, equityCurveSource) => {
+      // Review C3 IN-03: producer-shaped. Only "ready" carries a curve and its
+      // returns; every other state carries none, as `derivePhase07Fields`
+      // sends it.
+      const payload =
+        state === "ready"
+          ? makePayload({
+              equityHistoryState: "ready",
+              equityHistoryRebuildReason: null,
+              equityDailyPoints: THREE_POINT_CURVE,
+              equityDailyReturns: THREE_POINT_RETURNS,
+              snapshotCount,
+              equityCurveSource,
+            })
+          : producerRebuildingPayload({
+              equityHistoryState: state as never,
+              snapshotCount,
+              equityCurveSource,
+            });
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      fireEvent.click(screen.getByRole("radio", { name: /blank slate/i }));
+      expect(screen.getByRole("radio", { name: /blank slate/i })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+      expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+    },
+  );
+
+  // Review C3 SFH-C3-01: the Scenario sentence says WHY the comparison is
+  // withheld, and it must give the same kind of answer the Overview gives for
+  // the same payload. A failed read said "being rebuilt" here while the
+  // Overview said to reload, so the allocator waited on a rebuild that was not
+  // running. Four classes: a wait ("being rebuilt"), a read that failed
+  // (reload), a key the owner must fix (the Exchanges page), and a hold that
+  // no wait heals (review C3 round 2 WR-02 / SFH-C3R2-03).
+  //
+  // The class per reason is written out here, NOT read from the component's
+  // classifier, so a reason moved to the wrong class fails this arm instead of
+  // moving both surfaces together. The type check below forces a reason added
+  // to `EquityHistoryRebuildReason` into this table.
+  //
+  // Review C3 round 2 WR-02: a reason is a wait ("rebuilding") only when the
+  // Overview's own line for it names the daily run that retries it
+  // (account_identity_pending: "Each daily sync checks it again";
+  // awaiting_derivation: "recomputed ... once a day"). derivation_rejected
+  // ("did not pass its checks, so it is not shown") and
+  // shared_account_history_truncated ("we cannot join its history ... yet, so
+  // your history is not shown") name no such run, so they are "held_back".
+  const REASON_CLASSES = [
+    ["duplicate_account", "needs_action"],
+    ["key_not_syncing", "needs_action"],
+    ["shared_account_no_working_key", "needs_action"],
+    ["history_read_failed", "read_failed"],
+    ["awaiting_derivation", "rebuilding"],
+    ["account_identity_pending", "rebuilding"],
+    ["derivation_rejected", "held_back"],
+    ["shared_account_history_truncated", "held_back"],
+  ] as const satisfies ReadonlyArray<
+    readonly [
+      EquityHistoryRebuildReason,
+      "needs_action" | "read_failed" | "rebuilding" | "held_back",
+    ]
+  >;
+  type UnlistedReason = Exclude<
+    EquityHistoryRebuildReason,
+    (typeof REASON_CLASSES)[number][0]
+  >;
+  // Compile-time only: `true` is not assignable when a reason is unlisted.
+  const everyReasonListed: [UnlistedReason] extends [never] ? true : false = true;
+  void everyReasonListed;
+
+  const SCENARIO_LINE_BY_CLASS = {
+    rebuilding: OWN_BOOK_REBUILDING_COPY,
+    read_failed:
+      "We could not load your book's history just now, so the comparison with your current book is not shown; reload the page to try again.",
+    needs_action:
+      "Your book's own history is on hold until you update your keys on the Exchanges page, so the comparison with your current book is not shown.",
+    held_back:
+      "We are holding back your book's own history, so the comparison with your current book is not shown.",
+  } as const;
+  // Review C3 round 3 WR-01: the Overview heading per class, written out
+  // literally for the same reason as the class table above.
+  const OVERVIEW_HEADING_BY_CLASS = {
+    rebuilding: "Your equity history is being rebuilt",
+    read_failed: "Your equity history is being rebuilt",
+    needs_action: "Your equity history is being rebuilt",
+    held_back: "We are holding back your equity history",
+  } as const;
+  const EXCHANGES_HREF = "/profile?tab=exchanges";
+
+  it.each(REASON_CLASSES)(
+    "rebuilding reason %s: the Scenario gives the %s line, the same class the Overview panel gives (SFH-C3-01)",
+    (reason, reasonClass) => {
+      // The producer's shape for a non-ready book: no curve, no returns.
+      const payload = makePayload({
+        equityHistoryState: "rebuilding",
+        equityHistoryRebuildReason: reason,
+        equityDailyPoints: [],
+        equityDailyReturns: [],
+      });
+      render(
+        <>
+          <ScenarioComposer
+            payload={payload}
+            allocatorId={ALLOCATOR_A}
+            allocatorMandate={null}
+          />
+          <EquityHistoryRebuilding reason={payload.equityHistoryRebuildReason} />
+        </>,
+      );
+      const scenario = screen.getByTestId("scenario-ownbook-rebuilding");
+      const overview = screen.getByTestId("overview-equity-rebuilding");
+      expect(scenario.textContent).toBe(SCENARIO_LINE_BY_CLASS[reasonClass]);
+      // Neither surface promises "appear once" (D-15).
+      expect(scenario.textContent).not.toMatch(/appear once/);
+
+      const exchangesLink = (el: HTMLElement) =>
+        within(el)
+          .queryAllByRole("link")
+          .filter((a) => a.getAttribute("href") === EXCHANGES_HREF);
+      const saysReload = (el: HTMLElement) => /reload the page/i.test(el.textContent ?? "");
+
+      // The same class on both surfaces: a fix names the Exchanges page on
+      // both, a failed read says reload on both, a wait does neither on either.
+      const needsAction = reasonClass === "needs_action";
+      const readFailed = reasonClass === "read_failed";
+      expect(exchangesLink(scenario).length > 0).toBe(needsAction);
+      expect(exchangesLink(overview).length > 0).toBe(needsAction);
+      expect(saysReload(scenario)).toBe(readFailed);
+      expect(saysReload(overview)).toBe(readFailed);
+
+      // Review C3 round 2 WR-02: the Scenario says "being rebuilt" exactly
+      // when the Overview's own reason line names the daily run that retries
+      // it. The panel's body is the same for every reason, and no heading
+      // names a daily run, so the match comes from the reason line alone.
+      const rebuilding = reasonClass === "rebuilding";
+      expect(/being rebuilt/.test(scenario.textContent ?? "")).toBe(rebuilding);
+      expect(/\bdaily\b|once a day/i.test(overview.textContent ?? "")).toBe(rebuilding);
+
+      // Review C3 round 3 WR-01: the Overview heading follows the same class.
+      // For a held_back reason the heading and the Scenario both say the
+      // history is held back, and neither says "being rebuilt"; every other
+      // class keeps the "being rebuilt" heading.
+      const heading = within(overview).getByRole("heading", { level: 2 });
+      expect(heading.textContent).toBe(OVERVIEW_HEADING_BY_CLASS[reasonClass]);
+      const heldBack = reasonClass === "held_back";
+      expect(/holding back/.test(heading.textContent ?? "")).toBe(heldBack);
+      expect(/holding back/.test(scenario.textContent ?? "")).toBe(heldBack);
+      expect(/being rebuilt/.test(heading.textContent ?? "")).toBe(!heldBack);
+    },
+  );
+
+  // Fail-closed: no reason, or a reason this build does not know (a stale
+  // client, a reason added later, a prototype key), keeps the generic wait
+  // line rather than claiming a failed read or a key to fix.
+  it.each([
+    ["null", null],
+    ["missing", undefined],
+    ["a reason this build does not know", "some_later_reason"],
+    ["a prototype key", "constructor"],
+  ] as const)(
+    "rebuilding with reason %s: the Scenario keeps the generic rebuilding line (SFH-C3-01, fail-closed)",
+    (_label, reason) => {
+      const payload = makePayload({
+        equityHistoryState: "rebuilding",
+        equityHistoryRebuildReason: reason as never,
+        equityDailyPoints: [],
+        equityDailyReturns: [],
+      });
+      if (reason === undefined) {
+        delete (payload as Partial<MyAllocationDashboardPayload>).equityHistoryRebuildReason;
+        expect("equityHistoryRebuildReason" in payload).toBe(false);
+      }
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      expect(screen.getByTestId("scenario-ownbook-rebuilding").textContent).toBe(
+        OWN_BOOK_REBUILDING_COPY,
+      );
+    },
+  );
+
+  // Review C3 round 2 IN-01: the Overview panel fails closed through the same
+  // guard. An unknown reason or a prototype key used to reach
+  // `REASON_LINE[reason]` unguarded: an unknown string drew an empty line, and
+  // "constructor" handed React a function. It must render exactly what a book
+  // with no reason renders (the generic heading and body, no reason line).
+  it.each([
+    ["a reason this build does not know", "some_later_reason"],
+    ["a prototype key", "constructor"],
+  ] as const)(
+    "the Overview panel with reason %s renders the no-reason panel (IN-01, fail-closed)",
+    (_label, reason) => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { unmount } = render(<EquityHistoryRebuilding reason={null} />);
+        const generic = screen.getByTestId("overview-equity-rebuilding");
+        const genericText = generic.textContent;
+        const genericLines = generic.querySelectorAll("p").length;
+        unmount();
+
+        render(<EquityHistoryRebuilding reason={reason as never} />);
+        const panel = screen.getByTestId("overview-equity-rebuilding");
+        expect(panel.textContent).toBe(genericText);
+        expect(panel.querySelectorAll("p").length).toBe(genericLines);
+        expect(errorSpy).not.toHaveBeenCalled();
+      } finally {
+        errorSpy.mockRestore();
+      }
+    },
+  );
 
   // Review round 1 (WR-02): the `bookReturns.length < 2` guard in
   // `scenarioOwnBookDelta`. A 2-point book yields ONE return, and a Sharpe or

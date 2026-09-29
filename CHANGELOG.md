@@ -36,6 +36,25 @@
 - **Full-suite timing.** Under full-suite load on a busy machine, `lint-sql-gates.test.ts` and `ci-anti-skip-gate.contract.test.ts` time out at 5 s; this branch touches nothing either file tests. Both pass when run alone.
 - **Planning.** The phase was planned, split into one-topic phases (169.1 to 169.4, then 169.4.1 OGSHARPE and 169.5 BENCHCOMPARE), replanned against current main and plan-checked; decisions D-44 to D-62 are recorded in `169-CONTEXT.md`, and each plan carries a SUMMARY. `TODOS.md` books `[169-PORTFOLIO-ANALYTICS-COLUMNS]`.
 
+## [0.111.1.0] - 2026-09-29 — ACCOUNTTRUTH C3: My Allocation says why its history is held, and every daily-returns read is complete
+
+### Changed
+- **The Overview and the Scenario choose their rebuilding copy by the history's state, never by a snapshot count (plan 14, D-15).** A brand-new book with no snapshot and no derived curve now gets the rebuilding panel with its named reason. The Scenario's own-book note follows the same state, so the two screens agree.
+- **The warm-up note tells the truth about its threshold.** "Ready" needs one return, N curve days give N-1 returns, and the factsheet builder needs two, so the note now says panels appear "once at least three days of blended equity history are available". Its count line counts the days of the curve shown above it, not legacy snapshot rows. Its test runs the real builder. D-15 is amended in CONTEXT and the ROADMAP.
+- **One reason classifier decides the wording on both screens.** `equityHistoryRebuildClass()` in `EquityHistoryRebuilding.tsx` sorts every reason into rebuilding, read_failed, needs_action or held_back. The Scenario sentence and the Overview heading both read it: a failed history read says to reload, a key problem says to update your keys on the Exchanges page, and a history that waiting cannot heal (derivation_rejected, shared_account_history_truncated) says "We are holding back". An unknown reason falls back to the generic line through one guard, never a blank one.
+
+### Fixed
+- **Daily-returns reads no longer stop at 1000 rows.** PostgREST caps every response at 1000 rows and says nothing. Measured on PROD 2026-09-29: one allocator holds 2804 `csv_daily_returns` rows (2348 inside the dashboard's 730-day window).
+  - The My Allocation dashboard's per-key read now drains every row through the new `src/lib/drain-by-id.ts` (id keyset, empty-page stop, fails loud on a repeated or missing id or at its page ceiling). Before, it read the oldest 1000 and lost the newest days. The wizard's composite preview uses the same helper.
+  - The allocator derive (`job_worker.py` `_load_allocator_daily_returns`) reads every key's returns by keyset on date, so a sibling key's concurrent write cannot skip or double a day. Past its page cap it deletes the stale curve and fails permanent instead of composing from part of the rows.
+  - The CSV analytics series read (`analytics_runner.py`) pages by keyset on date too.
+- **The daily-returns writers never expose a hole.** The dailies derive and the composite stitch now upsert the new rows first and then delete only the days the new payload lacks, in bounded batches that keep their exact old scope. Before, they deleted the span first, so a reader landing between the two statements saw days missing and read them as zero.
+
+### Notes
+- The `equityCurveSource` contract comments in `src/lib/queries.ts` now name the real reader (the chart's provenance stamp, mounted only when the history is ready). A test pins that a one-point trustworthy row reads as `derivation_rejected`, which the writer cannot produce.
+- Reviews: round 1 (0 critical, 0 high), then the founder's "fix all issues, and run confirmation". Round 2 found a pre-existing CRITICAL (the dashboard read cap above) and was fixed; round 3 found 0 critical. Fix topics A to I. Verification `167.1.2-C3-VERIFY.md`: human_needed, 8/8. Security: 9 threats, 0 open (T-167.1.2-65 to -70 added for the new reads and deletes).
+- Known limits, recorded: the Overview heading still says "being rebuilt" for the read_failed and needs_action classes (a copy call); no fix-H write has yet run against a real database; allocators past 1000 rows recompose from a complete read on their next key refresh after deploy. The public composite factsheet's own read cap is fixed in Phase 169, which lands next.
+
 ## [0.111.0.1] - 2026-09-29 — BASELINE: automated re-dump after the PROD apply of 6ca90e73
 
 ### Changed
