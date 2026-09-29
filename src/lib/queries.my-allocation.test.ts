@@ -49,6 +49,9 @@ const state = vi.hoisted(() => ({
     // Prod selects this for isPerKeyDailiesEligibleKey; optional so fixtures that
     // don't set it (→ eligible on the disconnect axis) keep compiling.
     disconnected_at?: string | null;
+    // Review C4 SFH-C4-01: the account identity the per-key holdings read
+    // groups on. Optional for the same reason.
+    venue_account_id?: string | null;
   }>,
   alerts: [] as Array<{
     id: string;
@@ -4726,9 +4729,42 @@ describe("getMyAllocationDashboard — Open Positions reads each key's own lates
       expect(read.eqs).toContainEqual({ column: "allocator_id", value: "user-1" });
       expect(read.eqs).toContainEqual({ column: "api_key_id", value: "key-a" });
     }
+    // Review C4 SFH-C4-01: the key read carries the account identity columns.
     const idRead = chainAudit.entries.find(
-      (e) => e.table === "api_keys" && e.select === "id",
+      (e) =>
+        e.table === "api_keys" &&
+        e.select ===
+          "id, exchange, venue_account_id, account_share_kind, account_shared_with_api_key_id",
     );
     expect(idRead?.eqs).toContainEqual({ column: "user_id", value: "user-1" });
+    // Review C4 SFH-C4-02: the poll-outcome read is owner- and key-scoped.
+    const pollReads = chainAudit.entries.filter((e) => e.table === "audit_log");
+    expect(pollReads).toHaveLength(1);
+    expect(pollReads[0].eqs).toContainEqual({ column: "user_id", value: "user-1" });
+    expect(pollReads[0].eqs).toContainEqual({ column: "entity_id", value: "key-a" });
+  });
+
+  it("SFH-C4-01: after a key rotation on one account, the departed key's older rows leave holdingsSummary", async () => {
+    // Old key D read the account until 2026-08-31 and held BTC-PERP. New key N
+    // reads the SAME account (same venue account id) and no longer holds it.
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [
+      {
+        ...key("key-old", "binance"),
+        disconnected_at: "2026-09-01T00:00:00Z",
+        venue_account_id: "acct-1",
+      },
+      { ...key("key-new", "binance"), venue_account_id: "acct-1" },
+    ];
+    state.allocatorHoldings = [
+      holding("key-old", "binance", "2026-08-31", "BTC-PERP", 900),
+      holding("key-new", "binance", "2026-09-29", "ETH", 120),
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(
+      result.holdingsSummary.map((h) => `${h.api_key_id}:${h.symbol}`),
+    ).toEqual(["key-new:ETH"]);
   });
 });

@@ -2862,6 +2862,13 @@ export interface MyAllocationDashboardPayload {
     side: "long" | "short" | "flat" | null;
     entry_price: number | null;
     unrealized_pnl_usd: number | null;
+    /**
+     * Review C4 SFH-C4-08: the day this row's key read it (`allocator_holdings.asof`,
+     * the key's own latest read under D-16). Open Positions dates a key's rows
+     * when that day is older than the newest read. Optional so legacy fixtures
+     * compile; the dashboard read always sets it.
+     */
+    asof?: string;
   }>;
   /** Row count of TRUSTWORTHY snapshots (flagged zero-baseline rows excluded) — drives the warm-up gate (snapshotCount < 30 → KPIs render `—`). */
   snapshotCount: number;
@@ -2949,6 +2956,16 @@ export interface MyAllocationDashboardPayload {
    * fixture) renders the unnamed line rather than a wrong name.
    */
   equityHistoryNotSyncingKeyIds?: string[];
+  /**
+   * Review C4 SFH-C4-04. True when the history on screen (state "ready") left
+   * out at least one departed account the history rule includes, because the
+   * balance its history is measured from is gone. The derive raises the
+   * benign `departed_history_unavailable` flag in the payload's `flags` and
+   * still marks the curve trustworthy (job_worker.py); the Overview says so in
+   * one line. The flag carries no count. False whenever the curve is not shown.
+   * Optional so legacy fixtures compile; the producer always sets it.
+   */
+  departedHistoryUnavailable?: boolean;
   /**
    * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
    * allocator's snapshots, or null when every snapshot's column is
@@ -3632,6 +3649,14 @@ export function buildPerKeyReturnsByApiKeyId(
 const DERIVED_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * Review C4 SFH-C4-04. The benign flag the derive raises when it leaves a
+ * departed key's history out for want of an anchor (`departed_history_unavailable`
+ * in `derive_allocator_equity`'s `benign_flag_tokens`, job_worker.py). The name
+ * is the writer's; do not rename it here.
+ */
+const DEPARTED_HISTORY_UNAVAILABLE_FLAG = "departed_history_unavailable";
+
+/**
  * The pre-167.1.2 curve check: trustworthy + a non-empty well-formed curve.
  * Does NOT require version 2. `extractTrustworthyDerivedSeries` builds on it
  * and adds the version-2 returns check. The producer also stamps
@@ -4071,6 +4096,7 @@ export function derivePhase07Fields(
   | "equityHistoryState"
   | "equityHistoryRebuildReason"
   | "equityHistoryNotSyncingKeyIds"
+  | "departedHistoryUnavailable"
   | "minHistoryDepthMonths"
   | "activeVenues"
   | "hasConnectedKeys"
@@ -4123,6 +4149,16 @@ export function derivePhase07Fields(
     equityHistoryRebuildReason === "key_not_syncing"
       ? notSyncingIdentityPendingKeyIds(apiKeys)
       : [];
+  // Review C4 SFH-C4-04: the writer's token, read defensively (the JSONB is
+  // worker-written and untrusted), and only for the curve on screen.
+  const payloadFlags =
+    derivedPayload !== null && typeof derivedPayload === "object"
+      ? (derivedPayload as Record<string, unknown>).flags
+      : undefined;
+  const departedHistoryUnavailable =
+    equityHistoryState === "ready" &&
+    Array.isArray(payloadFlags) &&
+    payloadFlags.includes(DEPARTED_HISTORY_UNAVAILABLE_FLAG);
   const equityDailyPoints: DailyPoint[] =
     equityHistoryState === "ready" && series ? series.curve : [];
   const equityDailyReturns: DailyPoint[] =
@@ -4178,7 +4214,11 @@ export function derivePhase07Fields(
   //
   // Phase 167.1.2 D-16: the collapse runs only over each key's rows at that
   // key's own latest asof (latestHoldingsPerKey), so a position a key closed
-  // before its latest poll no longer survives from an older row.
+  // before its latest poll no longer survives from an older row. Review C4
+  // SFH-C4-01 / SFH-C4-02: the read already dropped a key whose account a
+  // newer reading superseded (another key on the same exchange account, or
+  // the key's own later clean poll), so this collapse never picks a departed
+  // key's row for a symbol the account has closed since.
   const holdingsMap = new Map<string, (typeof holdingsRows)[number]>();
   for (const r of latestHoldingsPerKey(holdingsRows)) {
     // B8: same canonical triple key as the scope_ref sites above
@@ -4199,6 +4239,7 @@ export function derivePhase07Fields(
     side: r.side,
     entry_price: r.entry_price,
     unrealized_pnl_usd: r.unrealized_pnl_usd,
+    asof: r.asof,
   }));
 
   return {
@@ -4221,6 +4262,7 @@ export function derivePhase07Fields(
     equityHistoryState,
     equityHistoryRebuildReason,
     equityHistoryNotSyncingKeyIds,
+    departedHistoryUnavailable,
     minHistoryDepthMonths,
     activeVenues,
     hasConnectedKeys,
