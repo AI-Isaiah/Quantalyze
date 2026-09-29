@@ -236,7 +236,7 @@ describe("fetchLatestHoldingsPerKey (D-16, bounded read)", () => {
 
   it("no keys at all is an empty book, not an error", async () => {
     const res = await fetchLatestHoldingsPerKey(fakeClient([], []), "user-1", COLS);
-    expect(res).toEqual({ data: [], error: null });
+    expect(res).toEqual({ data: [], error: null, partialReads: [] });
   });
 
   it("another user's keys and rows are never read", async () => {
@@ -266,7 +266,7 @@ describe("fetchLatestHoldingsPerKey (D-16, bounded read)", () => {
       { table, select, message: "rls denied" },
     );
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
-    expect(res).toEqual({ data: null, error: { message: "rls denied" } });
+    expect(res).toEqual({ data: null, error: { message: "rls denied" }, partialReads: [] });
   });
 
   it("a per-key rows read that reaches the row cap returns a named error, never a partial list", async () => {
@@ -300,6 +300,7 @@ describe("fetchLatestHoldingsPerKey (D-16, bounded read)", () => {
     expect(res).toEqual({
       data: null,
       error: { message: "api_keys id read reached the row cap" },
+      partialReads: [],
     });
   });
 });
@@ -327,7 +328,7 @@ describe("fetchLatestHoldingsPerKey: a later clean poll supersedes older rows (S
       }),
     ]);
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
-    expect(res).toEqual({ data: [], error: null });
+    expect(res).toEqual({ data: [], error: null, partialReads: [] });
   });
 
   it("the newest clean poll decides: an empty poll before a later poll with rows does not hide them", async () => {
@@ -398,7 +399,7 @@ describe("fetchLatestHoldingsPerKey: a later clean poll supersedes older rows (S
       ],
     );
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
-    expect(res).toEqual({ data: [], error: null });
+    expect(res).toEqual({ data: [], error: null, partialReads: [] });
   });
 
   it("another user's poll events are never read", async () => {
@@ -461,7 +462,7 @@ describe("fetchLatestHoldingsPerKey: one exchange account, one reading (SFH-C4-0
       ],
     );
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
-    expect(res).toEqual({ data: [], error: null });
+    expect(res).toEqual({ data: [], error: null, partialReads: [] });
   });
 
   it("a live key that never wrote a row but polled clean and empty supersedes them too", async () => {
@@ -478,7 +479,7 @@ describe("fetchLatestHoldingsPerKey: one exchange account, one reading (SFH-C4-0
       ],
     );
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
-    expect(res).toEqual({ data: [], error: null });
+    expect(res).toEqual({ data: [], error: null, partialReads: [] });
   });
 
   it("a marker link joins the account when the marked key has no venue id of its own", async () => {
@@ -539,5 +540,131 @@ describe("fetchLatestHoldingsPerKey: one exchange account, one reading (SFH-C4-0
       "key-a:2026-08-31:BTC-PERP",
       "key-b:2026-09-29:ETH-PERP",
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review C4 round 2 WR-R2-03 / SFH-R2-02. A key whose rows came from a poll
+// that could not read its open positions (`complete_with_warnings` on the
+// rows' own day) is named in `partialReads`, with the rows' day. The flag follows the poll
+// that WROTE the rows the read returns, never the key's current status: a
+// failed poll records `sync_failed` and writes nothing, so the rows and their
+// poll's record both stay, and so must the flag.
+// ---------------------------------------------------------------------------
+describe("fetchLatestHoldingsPerKey: the poll that wrote the rows could not read positions (WR-R2-03)", () => {
+  const binance = [{ id: "key-b", user_id: "user-1", exchange: "binance" }];
+  const spotOnly = [h("key-b", "2026-09-05", "USDT"), h("key-b", "2026-09-05", "BTC")];
+  const partial = poll("key-b", "2026-09-05T04:00:05+00:00", {
+    final_status: "complete_with_warnings",
+    row_count: 2,
+    asof: "2026-09-05",
+  });
+  const failed = (createdAt: string): AuditDb => ({
+    ...poll("key-b", createdAt, { error_kind: "rate_limit", sanitized_message: "429" }),
+    action: "allocator.holdings.sync_failed",
+  });
+
+  it("a partial poll names the key", async () => {
+    const client = fakeClient(binance, spotOnly, undefined, [partial]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.error).toBeNull();
+    expect(res.partialReads).toEqual([{ api_key_id: "key-b", asof: "2026-09-05" }]);
+  });
+
+  it("a partial poll, then a failed poll: the rows stay and so does the flag", async () => {
+    const client = fakeClient(binance, spotOnly, undefined, [
+      partial,
+      failed("2026-09-06T04:00:05+00:00"),
+    ]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[]).sort()).toEqual([
+      "key-b:2026-09-05:BTC",
+      "key-b:2026-09-05:USDT",
+    ]);
+    expect(res.partialReads).toEqual([{ api_key_id: "key-b", asof: "2026-09-05" }]);
+  });
+
+  it("a later clean poll on the same day read the positions: no flag", async () => {
+    const client = fakeClient(binance, [...spotOnly, h("key-b", "2026-09-05", "BTC-PERP")], undefined, [
+      partial,
+      poll("key-b", "2026-09-05T11:00:00+00:00", {
+        final_status: "complete",
+        row_count: 3,
+        asof: "2026-09-05",
+      }),
+    ]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.partialReads).toEqual([]);
+  });
+
+  it("a later clean poll on a later day: no flag", async () => {
+    const client = fakeClient(binance, [...spotOnly, h("key-b", "2026-09-06", "BTC-PERP")], undefined, [
+      partial,
+      poll("key-b", "2026-09-06T04:00:05+00:00", {
+        final_status: "complete",
+        row_count: 1,
+        asof: "2026-09-06",
+      }),
+    ]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[])).toEqual(["key-b:2026-09-06:BTC-PERP"]);
+    expect(res.partialReads).toEqual([]);
+  });
+
+  it("a partial poll on a day other than the rows' day did not write them: no flag", async () => {
+    // A partial poll that read no spot row either writes nothing, so the key's
+    // rows are still an older, complete poll's.
+    const client = fakeClient(binance, spotOnly, undefined, [
+      poll("key-b", "2026-09-06T04:00:05+00:00", {
+        final_status: "complete_with_warnings",
+        row_count: 0,
+        asof: "2026-09-06",
+      }),
+    ]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.data).toHaveLength(2);
+    expect(res.partialReads).toEqual([]);
+  });
+
+  it("a partial event with no recorded day is no evidence: no flag", async () => {
+    const client = fakeClient(binance, spotOnly, undefined, [
+      poll("key-b", "2026-09-05T04:00:05+00:00", {
+        final_status: "complete_with_warnings",
+        row_count: 2,
+      }),
+    ]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.partialReads).toEqual([]);
+  });
+
+  it("a partial key whose account a newer reading superseded contributes no rows and no flag", async () => {
+    const client = fakeClient(
+      [
+        { id: "key-b", user_id: "user-1", exchange: "binance", venue_account_id: "acct-1" },
+        { id: "key-n", user_id: "user-1", exchange: "binance", venue_account_id: "acct-1" },
+      ],
+      [...spotOnly, h("key-n", "2026-09-07", "ETH-PERP")],
+      undefined,
+      [partial],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[])).toEqual(["key-n:2026-09-07:ETH-PERP"]);
+    expect(res.partialReads).toEqual([]);
+  });
+
+  it("another user's partial event is never read", async () => {
+    const client = fakeClient(binance, spotOnly, undefined, [{ ...partial, user_id: "user-2" }]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.partialReads).toEqual([]);
+  });
+
+  it("an error returns no flags", async () => {
+    const client = fakeClient(binance, spotOnly, {
+      table: "allocator_holdings",
+      select: COLS,
+      message: "rls denied",
+    }, [partial]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res).toEqual({ data: null, error: { message: "rls denied" }, partialReads: [] });
   });
 });

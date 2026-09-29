@@ -175,6 +175,10 @@ const state = vi.hoisted(() => ({
   // the client asked for, and still answers `error: null`. Opt-in (null = no
   // cap) so the legacy fixtures are unaffected.
   maxRows: null as number | null,
+  // Review C4 round 2 WR-R2-03 — the poll events the holdings read consults.
+  // Rows carry a flattened `metadata->>final_status` so the `.eq()` on that
+  // JSON path filters like PostgREST does.
+  auditLog: [] as Array<Record<string, unknown>>,
 }));
 
 function resetState() {
@@ -194,6 +198,7 @@ function resetState() {
   state.strategyKeys = [];
   state.tableErrors = {};
   state.maxRows = null;
+  state.auditLog = [];
   chainAudit.entries.length = 0;
 }
 
@@ -332,6 +337,8 @@ function buildChain(table: string) {
         return applyFilters(
           state.strategyKeys as Array<Record<string, unknown>>,
         );
+      case "audit_log":
+        return applyFilters(state.auditLog);
       default:
         return [];
     }
@@ -4738,10 +4745,45 @@ describe("getMyAllocationDashboard — Open Positions reads each key's own lates
     );
     expect(idRead?.eqs).toContainEqual({ column: "user_id", value: "user-1" });
     // Review C4 SFH-C4-02: the poll-outcome read is owner- and key-scoped.
+    // Round 2 WR-R2-03 adds the newest poll of any outcome: two reads, both
+    // owner- and key-scoped.
     const pollReads = chainAudit.entries.filter((e) => e.table === "audit_log");
-    expect(pollReads).toHaveLength(1);
-    expect(pollReads[0].eqs).toContainEqual({ column: "user_id", value: "user-1" });
-    expect(pollReads[0].eqs).toContainEqual({ column: "entity_id", value: "key-a" });
+    expect(pollReads).toHaveLength(2);
+    for (const read of pollReads) {
+      expect(read.eqs).toContainEqual({ column: "user_id", value: "user-1" });
+      expect(read.eqs).toContainEqual({ column: "entity_id", value: "key-a" });
+    }
+  });
+
+  it("WR-R2-03: a key whose rows' poll could not read positions reaches the payload, and a later failed poll does not clear it", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [{ ...key("key-a", "binance"), sync_status: "rate_limited" }];
+    state.allocatorHoldings = [holding("key-a", "binance", "2026-09-05", "USDT", 500)];
+    const event = (createdAt: string, action: string, metadata: Record<string, unknown>) => ({
+      user_id: "user-1",
+      action,
+      entity_type: "api_key",
+      entity_id: "key-a",
+      created_at: createdAt,
+      metadata,
+      "metadata->>final_status": metadata.final_status ?? null,
+    });
+    state.auditLog = [
+      event("2026-09-05T04:00:05+00:00", "allocator.holdings.sync_completed", {
+        final_status: "complete_with_warnings",
+        row_count: 1,
+        asof: "2026-09-05",
+      }),
+      event("2026-09-06T04:00:05+00:00", "allocator.holdings.sync_failed", {
+        error_kind: "rate_limit",
+      }),
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.partialPositionReads).toEqual([
+      { api_key_id: "key-a", asof: "2026-09-05" },
+    ]);
   });
 
   it("SFH-C4-01: after a key rotation on one account, the departed key's older rows leave holdingsSummary", async () => {

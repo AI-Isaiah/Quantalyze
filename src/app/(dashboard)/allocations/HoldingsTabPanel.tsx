@@ -84,14 +84,29 @@ function keyPhrase(
     : `the ${venueName(apiKey.exchange)} key`;
 }
 
+/** The UTC day before `today` (`YYYY-MM-DD`), or "" when `today` is not a day. */
+function dayBefore(today: string): string {
+  const ms = Date.parse(`${today}T00:00:00Z`);
+  if (Number.isNaN(ms)) return "";
+  return new Date(ms - 86_400_000).toISOString().slice(0, 10);
+}
+
 /**
- * Review C4 SFH-C4-08. One sentence per key whose open positions were read on
- * a day older than the newest read in the book. D-16 keeps each key's own
- * latest read on purpose ("never flat"), so a key that stopped reading (it
- * failed, or disconnected) keeps showing its last read; this says how old it
- * is. Rows without a read day (legacy payloads) say nothing. The sentence sits
- * beside the Open Positions table and names the positions it dates, since the
- * table itself carries no date column.
+ * Review C4 SFH-C4-08, made absolute by round 2 SFH-R2-03. One sentence per
+ * key whose open positions were read on a day older than either the newest
+ * read in the book, or yesterday (UTC). D-16 keeps each key's own latest read
+ * on purpose ("never flat"), so a key that stopped reading (it failed, or
+ * disconnected) keeps showing its last read; this says how old it is.
+ *
+ * Comparing only to the newest read in the book never dated a one-key book, or
+ * a book whose keys are all equally stale, so a single key failing for weeks
+ * showed undated positions. `today` is the reference that closes that. The
+ * tolerance is one day because the daily poll runs at 04:00 UTC: between
+ * midnight and the poll, a healthy key's latest read is yesterday's. So a key
+ * whose last read is yesterday is not dated; one that has missed a whole day's
+ * poll is. Rows without a read day (legacy payloads) say nothing. The sentence
+ * sits beside the Open Positions table and names the positions it dates, since
+ * the table itself carries no date column.
  */
 export function openPositionReadDayNotes(
   derivativeRows: ReadonlyArray<{
@@ -102,15 +117,20 @@ export function openPositionReadDayNotes(
   }>,
   allRows: ReadonlyArray<{ asof?: string }>,
   apiKeys: ReadonlyArray<{ id: string; exchange: string; label: string | null }>,
+  today: string,
 ): string[] {
   let newest = "";
   for (const r of allRows) {
     if (typeof r.asof === "string" && r.asof > newest) newest = r.asof;
   }
-  if (newest === "") return [];
+  // SFH-R2-03: a row is dated when it is older than the newest read in the
+  // book, or older than yesterday, whichever is later.
+  const yesterday = dayBefore(today);
+  const datedBefore = yesterday > newest ? yesterday : newest;
+  if (datedBefore === "") return [];
   const byKey = new Map<string, { asof: string; venue: string; symbols: string[] }>();
   for (const r of derivativeRows) {
-    if (typeof r.asof !== "string" || r.asof >= newest) continue;
+    if (typeof r.asof !== "string" || r.asof >= datedBefore) continue;
     const entry = byKey.get(r.api_key_id);
     if (entry) entry.symbols.push(r.symbol);
     else byKey.set(r.api_key_id, { asof: r.asof, venue: r.venue, symbols: [r.symbol] });
@@ -138,36 +158,47 @@ const CCXT_POSITION_VENUES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Review C4 WR-01. One sentence per connected key whose last sync could not
- * read its open positions. That sync saved the spot rows at a newer day, so
- * under D-16 (each key's rows at its own latest read) every open position of
- * the key leaves the table until a sync reads them again. Chosen over holding
- * the key's latest read back to an older complete day: that would also show a
- * stale spot book, and under repeated failures an arbitrarily old one. Reads
- * the key's CURRENT `sync_status`, which moves on with the next sync, so the
- * line clears when a sync reads the positions again. Departed keys are not
- * polled, so they get no line.
+ * Review C4 WR-01, bound to the rows by round 2 WR-R2-03. One sentence per key
+ * whose rows on screen were written by a poll that could not read its open
+ * positions (`partialPositionReads`, from `fetchLatestHoldingsPerKey`). That
+ * poll saved the spot rows at a newer day, so under D-16 (each key's rows at
+ * its own latest read) every open position of the key is missing from the
+ * table. Chosen over holding the key's latest read back to an older complete
+ * day: that would also show a stale spot book, and under repeated failures an
+ * arbitrarily old one.
+ *
+ * The line follows the poll that wrote the rows, never the key's current
+ * `sync_status`. A later poll that fails (a 429, a venue error) or is still
+ * running writes no rows, so the partial rows stay and so does the line. It
+ * clears only when a poll writes the key's rows again. A key that is no longer
+ * connected is not polled, so its sentence does not promise a sync.
  */
 export function partialPositionReadNotes(
+  partialReads: ReadonlyArray<{ api_key_id: string; asof: string }>,
   apiKeys: ReadonlyArray<{
+    id: string;
     exchange: string;
     label: string | null;
     is_active: boolean;
     sync_status: string | null;
     disconnected_at: string | null;
   }>,
+  rows: ReadonlyArray<{ api_key_id: string; venue: string }>,
 ): string[] {
-  return apiKeys
-    .filter(
-      (k) =>
-        isLiveKey(k) &&
-        k.sync_status === "complete_with_warnings" &&
-        CCXT_POSITION_VENUES.has(k.exchange.trim().toLowerCase()),
-    )
-    .map(
-      (k) =>
-        `Open positions from ${keyPhrase(k, k.exchange)} could not be read on its last sync. Any it holds are missing below until a sync reads them.`,
+  const keysById = new Map(apiKeys.map((k) => [k.id, k]));
+  const notes: string[] = [];
+  for (const { api_key_id, asof } of partialReads) {
+    const key = keysById.get(api_key_id);
+    const venue = key?.exchange ?? rows.find((r) => r.api_key_id === api_key_id)?.venue;
+    if (venue === undefined || !CCXT_POSITION_VENUES.has(venue.trim().toLowerCase())) continue;
+    const lead = `Open positions from ${keyPhrase(key, venue)} could not be read on its sync of ${asof}.`;
+    notes.push(
+      key !== undefined && isLiveKey(key)
+        ? `${lead} Any it holds are missing below until a sync reads them.`
+        : `${lead} Any it held then are missing below.`,
     );
+  }
+  return notes;
 }
 
 const EMPTY_OPTIMIZER: OptimizerPrefetch = {
@@ -366,12 +397,23 @@ export function HoldingsTabPanel(
     [derivativeHoldings, keyStatusById],
   );
 
+  // SFH-R2-03: the UTC day the tab was opened, the absolute reference the
+  // read-day note dates rows against. UTC so it matches `asof`, which the poll
+  // stamps in UTC.
+  const [today] = useState(() => new Date().toISOString().slice(0, 10));
   const readDayNotes = useMemo(
-    () => openPositionReadDayNotes(derivativeHoldings, holdingsSummary, apiKeys),
-    [derivativeHoldings, holdingsSummary, apiKeys],
+    () => openPositionReadDayNotes(derivativeHoldings, holdingsSummary, apiKeys, today),
+    [derivativeHoldings, holdingsSummary, apiKeys, today],
   );
 
-  const partialReadNotes = useMemo(() => partialPositionReadNotes(apiKeys), [apiKeys]);
+  const partialPositionReads = useMemo(
+    () => props.partialPositionReads ?? [],
+    [props.partialPositionReads],
+  );
+  const partialReadNotes = useMemo(
+    () => partialPositionReadNotes(partialPositionReads, apiKeys, holdingsSummary),
+    [partialPositionReads, apiKeys, holdingsSummary],
+  );
 
   const allocatorPreferences = props.mandate
     ? { max_weight: props.mandate.max_weight }
