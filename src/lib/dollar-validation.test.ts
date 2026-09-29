@@ -91,6 +91,24 @@ describe("formatUsd — the ONE money formatter for the allocations surface", ()
   it("renders the em-dash for a null amount — never $0 (no-invented-data)", () => {
     expect(formatUsd(null)).toBe("—");
   });
+
+  // 2026-09-29, Phase 169 review round 1 (IN-04 + SFH L-3). The private copy in
+  // HoldingDetail.tsx guarded non-finite input and this module did not, so
+  // routing it here must not turn a NaN allocation into "$NaN". And an amount
+  // that rounds to zero dollars reads "$0", never "-$0": the sign is the one of
+  // the ROUNDED value, the rule formatUsdSigned/signAtCents already follow.
+  it("renders the em-dash for a non-finite amount — never $NaN or $∞", () => {
+    expect(formatUsd(Number.NaN)).toBe("—");
+    expect(formatUsd(Number.POSITIVE_INFINITY)).toBe("—");
+    expect(formatUsd(Number.NEGATIVE_INFINITY)).toBe("—");
+  });
+
+  it("an amount that rounds to zero dollars carries no sign — never -$0", () => {
+    expect(formatUsd(-0)).toBe("$0");
+    expect(formatUsd(-0.4)).toBe("$0");
+    // Half away from zero, as toLocaleString rounds: -0.5 is a real -$1.
+    expect(formatUsd(-0.5)).toBe("-$1");
+  });
 });
 
 /**
@@ -119,6 +137,13 @@ describe("[169 D-50] formatUsdPrice — a price keeps its real precision", () =>
 
   it("a zero price has no significant digits to show and reads $0.00", () => {
     expect(formatUsdPrice(0)).toBe("$0.00");
+  });
+
+  // 2026-09-29, Phase 169 review round 1 SFH L-3 (measured by the reviewer): a
+  // mark derived as 0 / -qty is -0, which took the 2-decimal branch and
+  // printed "-$0.00". No signed zero, as with formatUsdSigned.
+  it("a negative-zero price reads $0.00, never -$0.00", () => {
+    expect(formatUsdPrice(-0)).toBe("$0.00");
   });
 
   it("null and non-finite render the em-dash", () => {
