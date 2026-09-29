@@ -1979,8 +1979,21 @@ async def _fetch_latest_holdings_per_eligible_key(
         if latest < today_iso and await _polled_empty_since(
             supabase, eligible, latest
         ):
-            emptied += 1
-            continue
+            # C2 silent-failure round 2, SFH-R2-01: the asof read and the proof
+            # read are two round trips. A poll that persisted rows between them
+            # is invisible to the first, and its own audit event lands after its
+            # rows, so it cannot veto an older clean-and-empty proof yet. Re-read
+            # the latest asof before zeroing: if it moved, count what the poll
+            # wrote instead. One extra read, on the emptied path only.
+            recheck = [
+                str(r["asof"])
+                for r in (getattr(await db_execute(_sel_latest_asof), "data", None) or [])
+                if r.get("asof")
+            ]
+            if not recheck or max(recheck) <= latest:
+                emptied += 1
+                continue
+            latest = max(recheck)
 
         def _sel_rows(group_ids: list[str] = group_ids, latest: str = latest) -> Any:
             return (

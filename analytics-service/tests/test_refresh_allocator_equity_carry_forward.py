@@ -662,6 +662,42 @@ async def test_proven_empty_account_stays_zero_whatever_the_keys_current_status(
 
 
 @pytest.mark.asyncio
+async def test_a_poll_landing_between_the_two_reads_is_counted_not_zeroed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C2 silent-failure round 2, SFH-R2-01. The refresh reads the account's
+    latest asof, then asks for a proof of emptiness, in two round trips. A poll
+    that persists today's rows between them is invisible to the first read,
+    and an OLDER clean, empty poll outcome makes the second read say "empty"
+    (this poll's own audit event lands after its rows, so it cannot veto yet).
+    Round 1 zeroed the account and persisted that first-writer-wins (measured:
+    1000 where 1510 is right). After a positive proof the refresh re-reads the
+    latest asof, and counts the rows it finds there."""
+    from services import equity_reconstruction as er
+
+    fake = FakeSupabaseClient()
+    _seed_emptied_candidate(fake)
+    _seed_poll_outcome(fake, API_KEY_ID_2, _at(TODAY - timedelta(days=1)))
+    real_proof = er._polled_empty_since
+
+    async def _poll_lands_mid_refresh(*args: Any, **kwargs: Any) -> bool:
+        _seed_holding(fake, API_KEY_ID_2, "bybit", "BTC", TODAY, 510.0)
+        return await real_proof(*args, **kwargs)
+
+    monkeypatch.setattr(er, "_polled_empty_since", _poll_lands_mid_refresh)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    row = _today_row(fake)
+    assert row["value_usd"] == pytest.approx(HOLDER_USD + 510.0), (
+        f"rows persisted between the two reads were zeroed: {row['value_usd']}"
+    )
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["emptied_accounts"] == 0
+    assert metadata["carried_keys"] == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "case",
     [
