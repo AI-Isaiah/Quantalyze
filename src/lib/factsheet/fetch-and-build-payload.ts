@@ -251,6 +251,40 @@ function compositeUnbuildable(
 }
 
 /**
+ * Phase 169 (D-41) and review round 1 (WR-05 / SFH M-3) — a persisted series
+ * read FAILED: the composite's `csv_daily_returns`, or a gated MTM or smoothed
+ * series read on either arm. It is an outage, never a fact about the row, so it
+ * is `read_error` with its code, exactly as the strategies read above, never
+ * `composite_unbuildable` and never a payload built without the series. The
+ * public cached callback throws on `read_error`, so the outage is never stored
+ * for the analytics run. Captured for a BUILD only (WR-01); a probe returns the
+ * code. `read` names the series in the log line and the event.
+ */
+function seriesReadError(id: string, caller: ResolveCaller, err: CompositeSeriesReadError): NotBuildable {
+  const { code, read } = err;
+  console.error(`[factsheet] resolve(${caller}) — ${read} read failed`, {
+    id,
+    caller,
+    errorMessage: typeof err.cause === "string" ? err.cause : undefined,
+    errorCode: code,
+    read,
+  });
+  if (caller === "build") {
+    captureToSentry(new Error(`factsheet resolve: ${read} read failed (${code})`), {
+      tags: {
+        stage: "factsheet-resolve",
+        caller,
+        reason: "read_error",
+        code,
+        strategy_id: id,
+        read,
+      },
+    });
+  }
+  return notBuildable("read_error", { code });
+}
+
+/**
  * Phase 167.2.1 (D-04) — THE RESOLVE STAGE, gates G0 to G4, shared by
  * `fetchAndBuildPayload` and `probeFactsheetBuildable`. It holds EVERY null exit
  * of the builder: the admin read under the injected visibility predicate (G0),
@@ -409,33 +443,11 @@ async function resolveFactsheetInputs(
       });
     } catch (err) {
       // Phase 169 (D-41 / R3, routed from 167.2.1 D-07): a FAILED
-      // `csv_daily_returns` read is an outage, not a fact about the row, so it
-      // is `read_error` with its code, exactly as the strategies read above,
-      // never `composite_unbuildable`. The public cached callback throws on
-      // `read_error`, so the outage is never stored for the analytics run.
-      // Captured for a BUILD only (WR-01); a probe returns the code. Any other
+      // `csv_daily_returns` read (or, since review round 1, a failed MTM or
+      // smoothed series read) is `read_error`; see `seriesReadError`. Any other
       // throw is not this stage's to answer.
       if (!(err instanceof CompositeSeriesReadError)) throw err;
-      const code = err.code;
-      console.error(`[factsheet] resolve(${caller}) — composite csv_daily_returns read failed`, {
-        id,
-        caller,
-        errorMessage: typeof err.cause === "string" ? err.cause : undefined,
-        errorCode: code,
-      });
-      if (caller === "build") {
-        captureToSentry(new Error(`factsheet resolve: composite csv_daily_returns read failed (${code})`), {
-          tags: {
-            stage: "factsheet-resolve",
-            caller,
-            reason: "read_error",
-            code,
-            strategy_id: id,
-            read: "csv_daily_returns",
-          },
-        });
-      }
-      return notBuildable("read_error", { code });
+      return seriesReadError(id, caller, err);
     }
     if (!composite) return compositeUnbuildable(id, caller, "headline");
     dailyReturns = composite.dailyReturns;
@@ -484,6 +496,59 @@ async function resolveFactsheetInputs(
       : singleKeyUnbuildable(id, caller, "short_series", dailyRaw, analytics?.returns_series, dailyReturns.length);
   }
 
+  // Phase 169 review round 1 (WR-05 / SFH M-3): the single-key basis assembly
+  // runs HERE, in the resolve stage, because its gated MTM and smoothed series
+  // reads can fail, and a failed read must be `read_error` like the composite's
+  // (whose reader already reads its basis series inside this stage). Past this
+  // stage the build has no null exit (167.2.1-REVIEW WR-04), so an outage there
+  // could only have been a throw that no lane answers, or the old degrade the
+  // public cache stored for the run. A row with no by-basis object reads nothing
+  // (the shared cheap predicates), so the hot non-options path, the probe
+  // included, stays roundtrip-free.
+  //
+  // MTM-01 (Phase 102): a single-key OPTIONS strategy also persists its MTM
+  // basis (`metrics_json_by_basis.mark_to_market`) + an honest degrade reason.
+  // The F-4 `computation_status`-DONE gate was documented as riding a
+  // computed_at-bearing cache key; until 167.2.1-REVIEW WR-02 it did not (the
+  // effective key was id-only). It does now: `computed_at` is a keyParts
+  // member (see the header comment of `fetchAndBuildPayload`). The status bridge
+  // stamps a fresh computed_at on every job transition it resolves, at job
+  // start and at its end (167.2.1-REVIEW-R2 IN-01), so a status change always
+  // moves the key; nothing waits on the TTL. Status is public-safe on a
+  // published row (unchanged RLS boundary — the outer request-scoped signature
+  // probe stays the auth gate).
+  //
+  // Phase 169 (SC4, D-10): the analytics row is passed too, and the embed above
+  // projects its seven persisted headline scalars. The owner overlays them as
+  // the cash headline for a rankable row, so this page reads the stored CAGR and
+  // Sharpe that discovery, recommendations and my-strategies show.
+  //
+  // MTM-04 (Phase 103) + SMTM-01 (Phase 133, review WR-01): the persisted
+  // `mtm_daily_returns` / `smoothed_mtm_daily_returns` series reads (so charts
+  // follow the toggle) and the gate/scalar/series threading are assembled by
+  // the ONE shared owner `readSingleKeyBasisOpts` — the SAME assembly the
+  // discovery detail page calls, so the two surfaces cannot diverge (WR-01 was
+  // exactly a per-page inline copy drifting). The reads ride the SAME
+  // service-role admin `supabase` handle (deny-all RLS on
+  // strategy_analytics_series — no visibility widening, same gate as the
+  // scalar objects).
+  let singleKeyOpts: Awaited<ReturnType<typeof readSingleKeyBasisOpts>> | undefined;
+  if (!isComposite) {
+    try {
+      singleKeyOpts = await readSingleKeyBasisOpts(
+        () => supabase,
+        id,
+        dqf,
+        analytics?.metrics_json_by_basis,
+        analytics?.computation_status,
+        analytics,
+      );
+    } catch (err) {
+      if (!(err instanceof CompositeSeriesReadError)) throw err;
+      return seriesReadError(id, caller, err);
+    }
+  }
+
   return {
     ok: true as const,
     strategy,
@@ -493,6 +558,7 @@ async function resolveFactsheetInputs(
     dailyRaw,
     dailyReturns,
     compositeBuildOpts,
+    singleKeyOpts,
   };
 }
 
@@ -607,7 +673,7 @@ async function buildFromResolved(
   id: string,
   resolved: ResolvedFactsheetInputs,
 ): Promise<FactsheetPayload> {
-  const { strategy, analytics, dqf, isComposite, dailyRaw, dailyReturns } = resolved;
+  const { strategy, analytics, dqf, isComposite, dailyRaw, dailyReturns, singleKeyOpts } = resolved;
 
   // Ingest source classifies daily_returns (CSV path) vs returns_series-only
   // (live API path). The empty-array-is-csv invariant (FINDING-1) + the
@@ -626,49 +692,14 @@ async function buildFromResolved(
     // (`singleKeyDataQuality`) so this route and the discovery detail page can't
     // diverge on the DQ opt (the composite "one path" lesson).
     //
-    // MTM-01 (Phase 102): a single-key OPTIONS strategy also persists its MTM
-    // basis (`metrics_json_by_basis.mark_to_market`) + an honest degrade reason.
-    // The F-4 `computation_status`-DONE gate was documented as riding a
-    // computed_at-bearing cache key; until 167.2.1-REVIEW WR-02 it did not (the
-    // effective key was id-only). It does now: `computed_at` is a keyParts
-    // member (see the header comment above). The status bridge stamps a fresh
-    // computed_at on every job transition it resolves, at job start and at
-    // its end (167.2.1-REVIEW-R2 IN-01), so a status change always moves
-    // the key; nothing waits on the TTL. Status is public-safe on a published row
-    // (unchanged RLS boundary — the outer
-    // request-scoped signature probe stays the auth gate).
-    //
-    // Phase 169 (SC4, D-10): the analytics row is passed too, and the embed above
-    // projects its seven persisted headline scalars. The owner overlays them as
-    // the cash headline for a rankable row, so this page reads the stored CAGR and
-    // Sharpe that discovery, recommendations and my-strategies show. The
-    // non-options single-key payload is therefore no longer the TypeScript-only
-    // headline; the resolve stage's G1 gate above already refused a row that is
-    // not rankable, so here the overlay always applies to a row that carries the
-    // scalars.
-    //
-    // MTM-04 (Phase 103) + SMTM-01 (Phase 133, review WR-01): the persisted
-    // `mtm_daily_returns` / `smoothed_mtm_daily_returns` series reads (so charts
-    // follow the toggle) and the gate/scalar/series threading are assembled by
-    // the ONE shared owner `readSingleKeyBasisOpts` — the SAME assembly the
-    // discovery detail page calls, so the two surfaces cannot diverge (WR-01 was
-    // exactly a per-page inline copy drifting). The reads ride the SAME
-    // service-role admin `supabase` handle (deny-all RLS on
-    // strategy_analytics_series — no visibility widening, same gate as the
-    // scalar objects), gated by the shared cheap predicates so the hot
-    // non-options path stays roundtrip-free. A failed/malformed row degrades to
-    // no-bundle (charts stay cash).
+    // The basis story (MTM / smoothed gates, scalars and series, and since
+    // Phase 169 the persisted cash headline) was assembled by
+    // `readSingleKeyBasisOpts` in the resolve stage (review round 1, WR-05),
+    // where its series reads can answer `read_error`; see the comment there.
     buildOpts = {
       ...(buildOpts ?? {}),
       dataQuality: singleKeyDataQuality(dqf),
-      ...(await readSingleKeyBasisOpts(
-        () => supabase,
-        id,
-        dqf,
-        analytics?.metrics_json_by_basis,
-        analytics?.computation_status,
-        analytics,
-      )),
+      ...singleKeyOpts,
     };
   }
 
@@ -760,13 +791,18 @@ export class FactsheetProbeTimeoutError extends Error {
  * Phase 167.2.1 (D-04, D-09) — can this strategy's factsheet build, answered by
  * the builder's own code without building it. It creates the same service-role
  * client and runs the SAME resolve stage `fetchAndBuildPayload` runs, and
- * nothing else: no basis reads, no compute.
+ * nothing else: no build, no compute. Since review round 1 (WR-05) the resolve
+ * stage holds the gated MTM and smoothed series reads of a single-key row, as
+ * it already held a composite's, so the probe reads them too for a row that
+ * carries a by-basis object, and answers a failed one `read_error` exactly as
+ * the build does. A row with no by-basis object reads no series.
  *
  * INVARIANT: every null exit of `fetchAndBuildPayload` lives in that shared
  * resolve stage, so `probe.buildable === (fetchAndBuildPayload(id, v) !== null)`
  * for the same id, predicate and rows. DOMAIN: this holds for a builder that
- * does not throw. A throw in the basis reads or the build is not a null exit,
- * and the probe cannot see it; the page's own error handling owns that case.
+ * does not throw. A throw in the build is not a null exit, and the probe
+ * cannot see it; the page's own error handling owns that case. A FAILED series
+ * read is no longer such a throw: it is `read_error` on both sides.
  * So "buildable" means "no null exit", not "renders" (167.2.1-REVIEW IN-03): a
  * share note chosen from this answer is silent about a builder throw at the
  * recipient's request, which is outside the note's domain.
@@ -786,8 +822,8 @@ export class FactsheetProbeTimeoutError extends Error {
  * deadline rejects with `FactsheetProbeTimeoutError` (SFH-R2 N-3). The
  * deadline aborts the strategies read. It cannot abort a composite's
  * `csv_daily_returns` read, which `readCompositeFactsheet` issues without a
- * signal, so that read may finish in the background after the probe has
- * answered.
+ * signal, nor a gated MTM or smoothed series read, so those may finish in the
+ * background after the probe has answered.
  *
  * ⛔ Never route this probe through the cached wrapper
  * `buildFactsheetPayloadCached` (D-11): its key carries no viewer, so it would

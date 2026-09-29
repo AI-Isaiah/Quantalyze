@@ -381,7 +381,10 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
       }
       // The invariant the probe's doc comment states.
       expect(probe.buildable).toBe(payload !== null);
-      // The probe is the resolve stage and nothing else: no build, no basis reads.
+      // The probe is the resolve stage and nothing else: no build. No PARITY
+      // fixture carries a by-basis object, so none reads a basis series (the
+      // gated MTM / smoothed reads live in the resolve stage since review round
+      // 1, WR-05, and run only for a row that carries one).
       expect(vi.mocked(buildFactsheetPayload).mock.calls.length).toBe(buildsBefore);
       expect(fake.tablesSeen).not.toContain("strategy_analytics_series");
       // The visibility predicate is REQUIRED and reached the probe's query.

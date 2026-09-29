@@ -134,7 +134,10 @@ type CsvAnswer = { rows: typeof CSV_ROWS } | { error: { message: string; code?: 
  * benchmark read a later plan adds) is an empty SUCCESSFUL read, so it can
  * never be what turns a case red.
  */
-function mockAdmin(csv: CsvAnswer): SupabaseClient {
+function mockAdmin(
+  csv: CsvAnswer,
+  opts: { row?: unknown; series?: { payload: unknown } | { error: { message: string; code?: string } } } = {},
+): SupabaseClient {
   const from = (table: string) => {
     if (table === "strategies") {
       const chain = {
@@ -142,8 +145,20 @@ function mockAdmin(csv: CsvAnswer): SupabaseClient {
         eq: () => chain,
         maybeSingle: () => {
           strategyReads += 1;
-          return Promise.resolve({ data: COMPOSITE_ROW, error: null });
+          return Promise.resolve({ data: opts.row ?? COMPOSITE_ROW, error: null });
         },
+      };
+      return chain;
+    }
+    if (table === "strategy_analytics_series" && opts.series) {
+      // A persisted per-basis series row (review round 1, WR-05 / M-3): a
+      // payload, or a failed read.
+      const series = opts.series;
+      const chain = {
+        select: () => chain,
+        eq: () => chain,
+        maybeSingle: () =>
+          Promise.resolve("error" in series ? { data: null, error: series.error } : { data: series, error: null }),
       };
       return chain;
     }
@@ -215,9 +230,9 @@ function findPayload(node: unknown): FactsheetPayload | null {
 }
 
 /** One public request on the same analytics run, with the csv read answering `csv`. */
-async function request(csv: CsvAnswer) {
+async function request(csv: CsvAnswer, opts: Parameters<typeof mockAdmin>[1] = {}) {
   vi.mocked(createClient).mockResolvedValue(mockRequestClient() as never);
-  vi.mocked(createAdminClient).mockReturnValue(mockAdmin(csv));
+  vi.mocked(createAdminClient).mockReturnValue(mockAdmin(csv, opts));
   return FactsheetV2Page({ params: Promise.resolve({ id: STRATEGY_ID }) });
 }
 
@@ -272,6 +287,67 @@ describe("169 D-41 — a composite's csv_daily_returns read outage is not cached
       const again = await request({ rows: CSV_ROWS });
       expect(findPayload(again), "the cached fact is served for the run").toBeNull();
       expect(strategyReads).toBe(1);
+    } finally {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+/**
+ * Phase 169 review round 1, WR-05 / SFH M-3 — the rest of D-41's class. The
+ * persisted MTM and smoothed series reads turned a failed read into `null`
+ * ("charts stay cash"), so the build succeeded without the basis bundle and
+ * `buildFactsheetPayloadCached` stored that degraded payload for the whole
+ * analytics run: for up to the TTL the MTM toggle drew the cash series under
+ * the mark-to-market label. The readers now throw `CompositeSeriesReadError`
+ * naming the series, the resolve stage answers `read_error`, and the public
+ * cache stores nothing, exactly as for the composite's `csv_daily_returns`.
+ */
+describe("169 WR-05 — a single-key MTM series read outage is not cached for its analytics run", () => {
+  /** A published single-key options book: a cash series plus a persisted MTM basis. */
+  const OPTIONS_ROW = {
+    ...COMPOSITE_ROW,
+    name: "Synthetic Options Book",
+    strategy_analytics: {
+      computed_at: T0,
+      computation_status: "complete",
+      daily_returns: CSV_ROWS.map((r) => ({ date: r.date, value: r.daily_return })),
+      returns_series: null,
+      data_quality_flags: {},
+      metrics_json_by_basis: { mark_to_market: FULL_CASH },
+      ...FULL_CASH,
+    },
+  };
+  const MTM_SERIES = {
+    payload: {
+      schema: 2,
+      basis: "mark_to_market",
+      rows: CSV_ROWS.map((r) => ({ date: r.date, return: r.daily_return })),
+      gap_spans: [],
+    },
+  };
+
+  it("MTM-READ-ERROR-NOT-CACHED: request 1 renders the placeholder and stores nothing; request 2 on the same computed_at builds the MTM bundle", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const failed = await request(
+        { rows: [] },
+        { row: OPTIONS_ROW, series: { error: { message: "synthetic statement timeout", code: "57014" } } },
+      );
+      expect(findPayload(failed), "the MTM outage was built into a payload without its bundle").toBeNull();
+      expect(cacheStore.size, "the MTM outage was stored as the run's answer").toBe(0);
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toMatchObject({
+        tags: { stage: "factsheet-resolve", reason: "read_error", code: "57014", read: "mtm_daily_returns" },
+      });
+
+      const recovered = await request({ rows: [] }, { row: OPTIONS_ROW, series: MTM_SERIES });
+      const payload = findPayload(recovered);
+      expect(payload, "the MTM outage was cached for the run").not.toBeNull();
+      expect(payload!.seriesByBasis?.mark_to_market, "the recovered build lacks its MTM bundle").toBeDefined();
+      expect(strategyReads, "both requests reached the resolve stage").toBe(2);
     } finally {
       errSpy.mockRestore();
       warnSpy.mockRestore();

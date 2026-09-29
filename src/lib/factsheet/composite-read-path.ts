@@ -89,8 +89,17 @@ export function parseMtmSeriesPayload(raw: unknown): ParsedMtmSeries | null {
  * is deny-all RLS (migration 20260428120919), so ONLY the admin handle reads it —
  * the SAME visibility gate the scalar MTM object already rides (no widening; the
  * caller owns the upstream published/owner gate, exactly as the `csv_daily_returns`
- * read above). A read error or a missing/malformed row degrades to `null` (charts
- * stay cash, V5) — NEVER a throw.
+ * read above). A missing or malformed row is a fact about the row and degrades to
+ * `null` (charts stay cash, V5).
+ *
+ * Phase 169 review round 1 (WR-05 / SFH M-3): a FAILED read THROWS
+ * {@link CompositeSeriesReadError} with `read: "mtm_daily_returns"`. It used to
+ * degrade to `null` too, so the build succeeded without the MTM bundle and the
+ * public factsheet cache stored that payload for the whole analytics run: the
+ * D-41 class, on a sibling read. The resolve stage answers the throw `read_error`
+ * and captures it once for a build; the old "Log at ERROR (→ Sentry)" comment was
+ * false (no `console.*` reaches Sentry here: `instrumentation.ts` has no console
+ * integration).
  */
 export async function readMtmSeries(
   admin: SupabaseClient,
@@ -102,15 +111,7 @@ export async function readMtmSeries(
     .eq("strategy_id", strategyId)
     .eq("kind", MTM_DAILY_RETURNS_SERIES_KIND)
     .maybeSingle();
-  if (error) {
-    // Degrade (never throw): a failed series read must yield "charts stay cash",
-    // not hide the whole published factsheet. Log at ERROR (→ Sentry).
-    console.error("[factsheet] readMtmSeries — mtm_daily_returns read failed", {
-      strategyId,
-      errorMessage: error.message,
-    });
-    return null;
-  }
+  if (error) throw new CompositeSeriesReadError(error.code || "none", error.message, "mtm_daily_returns");
   return parseMtmSeriesPayload((data as { payload?: unknown } | null)?.payload);
 }
 
@@ -140,8 +141,11 @@ export function parseSmoothedSeriesPayload(raw: unknown): ParsedMtmSeries | null
 /**
  * Phase 133 (SMTM-01) — the smoothed sibling of {@link readMtmSeries}: read the
  * persisted `smoothed_mtm_daily_returns` series row. SAME service-role handle +
- * deny-all RLS posture + degrade-to-null-never-throw discipline; parses through
- * {@link parseSmoothedSeriesPayload} (wrong-basis defensive).
+ * deny-all RLS posture; a missing or malformed row degrades to `null`, and a
+ * FAILED read throws {@link CompositeSeriesReadError} with
+ * `read: "smoothed_mtm_daily_returns"` (Phase 169 review round 1, WR-05 / SFH
+ * M-3, as for MTM); parses through {@link parseSmoothedSeriesPayload}
+ * (wrong-basis defensive).
  */
 export async function readSmoothedSeries(
   admin: SupabaseClient,
@@ -154,11 +158,7 @@ export async function readSmoothedSeries(
     .eq("kind", SMOOTHED_MTM_DAILY_RETURNS_SERIES_KIND)
     .maybeSingle();
   if (error) {
-    console.error("[factsheet] readSmoothedSeries — smoothed_mtm_daily_returns read failed", {
-      strategyId,
-      errorMessage: error.message,
-    });
-    return null;
+    throw new CompositeSeriesReadError(error.code || "none", error.message, "smoothed_mtm_daily_returns");
   }
   return parseSmoothedSeriesPayload((data as { payload?: unknown } | null)?.payload);
 }
@@ -174,13 +174,22 @@ export async function readSmoothedSeries(
  * error) or `row_ceiling` (more than {@link CSV_READ_MAX_ROWS} rows). The
  * message names the table, never the strategy; the PostgREST message rides as
  * `cause` for the catcher's log line.
+ *
+ * Phase 169 review round 1 (WR-05 / SFH M-3): the persisted MTM and smoothed
+ * series reads throw it too, on a composite AND on a single-key strategy, and
+ * `read` names which series failed. The class keeps the name of its first case,
+ * because the discovery detail page and the resolve stage catch it by class.
  */
+export type FactsheetSeriesRead = "csv_daily_returns" | "mtm_daily_returns" | "smoothed_mtm_daily_returns";
+
 export class CompositeSeriesReadError extends Error {
   readonly code: string;
-  constructor(code: string, postgrestMessage?: string) {
-    super(`composite series read failed: csv_daily_returns (${code})`, { cause: postgrestMessage });
+  readonly read: FactsheetSeriesRead;
+  constructor(code: string, postgrestMessage?: string, read: FactsheetSeriesRead = "csv_daily_returns") {
+    super(`factsheet series read failed: ${read} (${code})`, { cause: postgrestMessage });
     this.name = "CompositeSeriesReadError";
     this.code = code;
+    this.read = read;
   }
 }
 
@@ -295,7 +304,8 @@ async function readCsvDailyReturns(admin: SupabaseClient, strategyId: string): P
  *          defect (missing/untrusted cash headline) → caller renders placeholder.
  * @throws {CompositeSeriesReadError} when the `csv_daily_returns` read FAILS
  *          (an outage, never a fact about the row), so no caller can take it
- *          for an empty composite (Phase 169, D-41).
+ *          for an empty composite (Phase 169, D-41), and, since review round 1
+ *          (WR-05), when a gated MTM or smoothed series read fails.
  */
 export async function readCompositeFactsheet(
   admin: SupabaseClient,
@@ -399,7 +409,9 @@ export async function readCompositeFactsheet(
   // MTM basis is available (skip the extra roundtrip for every non-MTM composite);
   // thread it so buildFactsheetPayload emits the per-basis bundle. Gated exactly
   // like the scalar MTM object — the series rides the SAME published/owner + F2/M-1
-  // gate, no visibility widening. A failed/malformed row degrades to no-bundle.
+  // gate, no visibility widening. A malformed row degrades to no-bundle; a FAILED
+  // read throws CompositeSeriesReadError (Phase 169 review round 1, WR-05), which
+  // propagates out of this reader like the csv read's.
   // Phase 133 (SMTM-01): read the persisted smoothed series ONLY when the scalar
   // smoothed gate is available (skip the roundtrip otherwise) — same gating as MTM.
   // The two reads are independent; fire them concurrently (each still gated so a
@@ -625,7 +637,8 @@ export async function readSingleKeyBasisOpts(
   let admin: SupabaseClient | undefined;
   const resolveAdmin = () => (admin ??= getAdmin());
   // MTM-04 (Phase 103): read the persisted MTM series only when the SHARED cheap
-  // predicate holds — a failed/malformed row degrades to no-bundle (charts stay cash).
+  // predicate holds — a malformed row degrades to no-bundle (charts stay cash); a
+  // FAILED read throws CompositeSeriesReadError (Phase 169 review round 1, WR-05).
   // Phase 133 (SMTM-01): the smoothed sibling read, identically gated. The two reads
   // are independent; fire them concurrently (each still gated so a skipped read stays
   // skipped — resolves to null without a roundtrip). resolveAdmin memoizes

@@ -877,7 +877,7 @@ describe("MTM-04 readMtmSeries — service-role direct read + degrade", () => {
   };
 
   function mockSeriesAdmin(
-    result: { data: { payload: unknown } | null; error: { message?: string } | null },
+    result: { data: { payload: unknown } | null; error: { message?: string; code?: string } | null },
   ): SupabaseClient {
     const chain = {
       select: () => chain,
@@ -895,12 +895,23 @@ describe("MTM-04 readMtmSeries — service-role direct read + degrade", () => {
     ]);
   });
 
-  it("read error → null + console.error (degrade, never throw)", async () => {
-    const err = vi.spyOn(console, "error").mockImplementation(() => {});
-    const out = await readMtmSeries(mockSeriesAdmin({ data: null, error: { message: "boom" } }), "s1");
-    expect(out).toBeNull();
-    expect(err).toHaveBeenCalledOnce();
-    err.mockRestore();
+  // 169 review round 1, WR-05 / SFH M-3: a failed read is an OUTAGE, not "no
+  // series". Degrading it to null let the public cache store a payload without
+  // its MTM bundle for the whole analytics run, so it now throws, as the
+  // composite's csv_daily_returns read does (D-41).
+  it("read error → throws CompositeSeriesReadError naming the series and its code", async () => {
+    const err = await readMtmSeries(
+      mockSeriesAdmin({ data: null, error: { message: "boom", code: "57014" } }),
+      "s1",
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err, "the outage was degraded to 'no series'").toBeInstanceOf(CompositeSeriesReadError);
+    expect((err as CompositeSeriesReadError).read).toBe("mtm_daily_returns");
+    expect((err as CompositeSeriesReadError).code).toBe("57014");
+    expect((err as Error).message).toContain("mtm_daily_returns");
+    expect((err as Error).message).not.toContain("s1");
   });
 
   it("missing row (maybeSingle null) → null", async () => {
@@ -1000,18 +1011,24 @@ describe("MTM-04 readCompositeFactsheet — gated MTM series threading (one owne
     expect(mtmReads()).toBe(0);
   });
 
-  it("mtmAvailable but the MTM series read errors → degrade to no mtmSeries (composite still renders)", async () => {
-    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  // 169 review round 1, WR-05 / SFH M-3: an MTM series outage on a composite is
+  // the same class as its csv outage (D-41) and is thrown, never folded into a
+  // composite that builds without its MTM bundle and is then cached for the run.
+  it("mtmAvailable but the MTM series read errors → throws CompositeSeriesReadError (read mtm_daily_returns)", async () => {
     const { admin } = mockAdminMulti({ mtmError: { message: "boom" } });
-    const out = await readCompositeFactsheet(admin, {
+    const err = await readCompositeFactsheet(admin, {
       strategyId: "s1",
       dqf: DQF,
       metricsJsonByBasis: { cash_settlement: FULL_CASH, mark_to_market: MTM_HEADLINE },
       returnsDenominatorConfig: null,
-    });
-    expect(out).not.toBeNull();
-    expect("mtmSeries" in out!.buildOpts).toBe(false);
-    err.mockRestore();
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err, "the MTM outage was folded into a composite without its bundle").toBeInstanceOf(
+      CompositeSeriesReadError,
+    );
+    expect((err as CompositeSeriesReadError).read).toBe("mtm_daily_returns");
   });
 });
 
@@ -1166,7 +1183,7 @@ describe("SMTM-01 readSmoothedSeries — service-role direct read + degrade", ()
   };
 
   function mockSeriesAdmin(
-    result: { data: { payload: unknown } | null; error: { message?: string } | null },
+    result: { data: { payload: unknown } | null; error: { message?: string; code?: string } | null },
   ): { admin: SupabaseClient; kind: () => string | undefined } {
     let seenKind: string | undefined;
     const chain = {
@@ -1190,13 +1207,16 @@ describe("SMTM-01 readSmoothedSeries — service-role direct read + degrade", ()
     expect(kind()).toBe("smoothed_mtm_daily_returns");
   });
 
-  it("read error → null + console.error (degrade, never throw)", async () => {
-    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  // 169 review round 1, WR-05 / SFH M-3: the smoothed sibling of the MTM case.
+  it("read error → throws CompositeSeriesReadError naming the smoothed series", async () => {
     const { admin } = mockSeriesAdmin({ data: null, error: { message: "boom" } });
-    const out = await readSmoothedSeries(admin, "s1");
-    expect(out).toBeNull();
-    expect(err).toHaveBeenCalledOnce();
-    err.mockRestore();
+    const err = await readSmoothedSeries(admin, "s1").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err, "the outage was degraded to 'no series'").toBeInstanceOf(CompositeSeriesReadError);
+    expect((err as CompositeSeriesReadError).read).toBe("smoothed_mtm_daily_returns");
+    expect((err as CompositeSeriesReadError).code).toBe("none");
   });
 
   it("wrong-basis row (mark_to_market payload) → null (defensive, no mislabel)", async () => {
