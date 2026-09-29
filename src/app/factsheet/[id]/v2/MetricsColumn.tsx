@@ -31,10 +31,16 @@ import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentManda
  *     from that basis's series, not from the stored cash headline.
  * With a date it names the date; with `null` it says the same without one. It
  * never invents a date.
+ *
+ * Round 2, IN-R2-02: `subject` names the figures by the labels the calling
+ * surface shows (the Cumulative Return Metrics panel calls the stored
+ * cumulative return "Since Inception" and shows no Calmar; the KPI strip says
+ * "Cum. Return"), so a reader never has to infer that two names are one number.
  */
 export function headlineCoverageCaveat(
   dataQuality: FactsheetPayload["dataQuality"],
   basis: Basis,
+  subject: string,
 ): string | null {
   if (basis !== "cash_settlement") return null;
   if (dataQuality?.twrChainBroken !== true) return null;
@@ -42,8 +48,8 @@ export function headlineCoverageCaveat(
   if (from === undefined) return null;
   const date = from === null ? null : isoToMonthDay(from);
   return date === null || date === "—"
-    ? "Cumulative return, CAGR and Calmar cover only the record after its last break in the return chain. The chart shows the whole record."
-    : `Cumulative return, CAGR and Calmar cover the record from ${date}, after its last break in the return chain. The chart shows the whole record.`;
+    ? `${subject} cover only the record after its last break in the return chain. The chart shows the whole record.`
+    : `${subject} cover the record from ${date}, after its last break in the return chain. The chart shows the whole record.`;
 }
 
 /**
@@ -104,7 +110,11 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // calendar years compute() reports, at Years Observed and in the warning below.
   // Dividing the observation count by the basis read a sparse record short.
   const recordLength = formatRecordLength({ n: m.n, years: m.years });
-  const coverageCaveat = headlineCoverageCaveat(payload.dataQuality, useBasisOrCash());
+  const coverageCaveat = headlineCoverageCaveat(
+    payload.dataQuality,
+    useBasisOrCash(),
+    "Cumulative Return, CAGR and Calmar",
+  );
 
   return (
     <aside className="flex flex-col gap-12">
@@ -471,7 +481,7 @@ function CumulativeReturnsPanel() {
   const m = view.strategyMetrics;
   // Phase 169 review round 1 (SFH H-1): Since Inception and CAGR are the stored
   // headline on a chain-broken row, so the panel says which span they cover.
-  const coverageCaveat = headlineCoverageCaveat(payload.dataQuality, useBasisOrCash());
+  const coverageCaveat = headlineCoverageCaveat(payload.dataQuality, useBasisOrCash(), "Since Inception and CAGR");
   // Inception return = cum_ret (no need to recompute).
   return (
     <Panel title="Cumulative Return Metrics">

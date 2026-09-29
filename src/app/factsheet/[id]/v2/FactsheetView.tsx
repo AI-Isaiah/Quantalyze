@@ -1437,7 +1437,10 @@ function KpiStrip() {
   // headline covers only the record after its last break. Said beside it, only
   // while the stored figures are the ones shown (cash basis, no what-if; a
   // chain-broken row has no what-if anyway, `leverageEligibleFor`).
-  const coverageCaveat = leverageApplied ? null : headlineCoverageCaveat(payload.dataQuality, basis);
+  // Round 2, IN-R2-02: named by the strip's own labels.
+  const coverageCaveat = leverageApplied
+    ? null
+    : headlineCoverageCaveat(payload.dataQuality, basis, "Cum. Return, CAGR and Calmar");
   const j = view.comparators[cmpKey].joint;
   const cn = cmp.shortName;
 

@@ -58,12 +58,21 @@ beforeEach(() => {
   });
 });
 
-/** Hand-typed: the dated branch, for a span starting 2024-06-15. */
-const DATED =
-  "⚠ Cumulative return, CAGR and Calmar cover the record from Jun 15, 2024, after its last break in the return chain. The chart shows the whole record.";
-/** Hand-typed: the undatable branch. */
-const UNDATED =
-  "⚠ Cumulative return, CAGR and Calmar cover only the record after its last break in the return chain. The chart shows the whole record.";
+/**
+ * Round 2, IN-R2-02: each caveat names the figures by the label THAT surface
+ * shows, so a reader never has to infer that two names are one number. The
+ * Cumulative Return Metrics panel labels the stored cumulative return "Since
+ * Inception" and shows no Calmar; Main Metrics says "Cumulative Return"; the KPI
+ * strip says "Cum. Return". Each string is hand-typed from the rendered labels.
+ */
+const dated = (subject: string) =>
+  `⚠ ${subject} cover the record from Jun 15, 2024, after its last break in the return chain. The chart shows the whole record.`;
+const undated = (subject: string) =>
+  `⚠ ${subject} cover only the record after its last break in the return chain. The chart shows the whole record.`;
+const MAIN = "Cumulative Return, CAGR and Calmar";
+const CUMULATIVE_PANEL = "Since Inception and CAGR";
+const STRIP = "Cum. Return, CAGR and Calmar";
+const ALL = [MAIN, CUMULATIVE_PANEL, STRIP].flatMap((s) => [dated(s), undated(s)]);
 
 const DAY = 86_400_000;
 const START = Date.UTC(2024, 0, 1);
@@ -100,7 +109,7 @@ const CLEAN = { composite: false, insufficientWindow: false };
 function caveats(container: HTMLElement): string[] {
   return [...container.querySelectorAll("p")]
     .map((p) => (p.textContent ?? "").trim())
-    .filter((t) => t === DATED || t === UNDATED);
+    .filter((t) => ALL.includes(t));
 }
 
 function renderColumn(payload: FactsheetPayload) {
@@ -120,17 +129,26 @@ function panelOf(container: HTMLElement, text: string): string | null {
 describe("the chain-break caveat in MetricsColumn (169 SFH H-1)", () => {
   it("with a date: Main Metrics and Cumulative Return Metrics each name the date the headline covers from", () => {
     const { container } = renderColumn(payloadWith(CHAIN_BROKEN_DATED));
-    expect(caveats(container)).toEqual([DATED, DATED]);
-    const panels = [...container.querySelectorAll("p")]
-      .filter((el) => (el.textContent ?? "").trim() === DATED)
-      .map((el) => el.closest("section")?.querySelector("h3")?.textContent);
-    expect(panels).toEqual(["Main Metrics", "Cumulative Return Metrics"]);
+    expect(caveats(container)).toEqual([dated(MAIN), dated(CUMULATIVE_PANEL)]);
+    expect(panelOf(container, dated(MAIN))).toBe("Main Metrics");
+    expect(panelOf(container, dated(CUMULATIVE_PANEL))).toBe("Cumulative Return Metrics");
   });
 
   it("with no date the stored data can name: the same sentence without a date, never an invented one", () => {
     const { container } = renderColumn(payloadWith(CHAIN_BROKEN_UNDATED));
-    expect(caveats(container)).toEqual([UNDATED, UNDATED]);
-    expect(panelOf(container, UNDATED)).toBe("Main Metrics");
+    expect(caveats(container)).toEqual([undated(MAIN), undated(CUMULATIVE_PANEL)]);
+    expect(panelOf(container, undated(MAIN))).toBe("Main Metrics");
+    expect(panelOf(container, undated(CUMULATIVE_PANEL))).toBe("Cumulative Return Metrics");
+  });
+
+  it("IN-R2-02: each panel's caveat names only labels that panel shows", () => {
+    const { container } = renderColumn(payloadWith(CHAIN_BROKEN_DATED));
+    const labelsIn = (title: string) =>
+      [...(([...container.querySelectorAll("h3")].find((h) => h.textContent === title)?.closest("section")
+        ?.querySelectorAll("tr td:first-child")) ?? [])].map((td) => td.textContent);
+    expect(labelsIn("Cumulative Return Metrics")).toEqual(expect.arrayContaining(["Since Inception", "CAGR"]));
+    expect(labelsIn("Cumulative Return Metrics")).not.toContain("Calmar");
+    expect(labelsIn("Main Metrics")).toEqual(expect.arrayContaining(["Cumulative Return", "CAGR", "Calmar"]));
   });
 
   it("CONTROL: a clean row shows no caveat", () => {
@@ -201,17 +219,26 @@ describe("the chain-break caveat beside the headline, the KPI strip (169 SFH H-1
     return [...container.querySelectorAll("section")]
       .filter((s) => [...s.querySelectorAll("p")].some((p) => (p.textContent ?? "").trim() === "Cum. Return"))
       .flatMap((s) => [...s.querySelectorAll(":scope > p")].map((p) => (p.textContent ?? "").trim()))
-      .filter((t) => t === DATED || t === UNDATED);
+      .filter((t) => ALL.includes(t));
   }
 
   it("with a date", () => {
     const { container } = renderBody(payloadWith(CHAIN_BROKEN_DATED));
-    expect(stripCaveats(container)).toEqual([DATED]);
+    expect(stripCaveats(container)).toEqual([dated(STRIP)]);
   });
 
   it("with no date", () => {
     const { container } = renderBody(payloadWith(CHAIN_BROKEN_UNDATED));
-    expect(stripCaveats(container)).toEqual([UNDATED]);
+    expect(stripCaveats(container)).toEqual([undated(STRIP)]);
+  });
+
+  it("IN-R2-02: the strip's caveat names the strip's own labels", () => {
+    const { container } = renderBody(payloadWith(CHAIN_BROKEN_DATED));
+    const strip = [...container.querySelectorAll("section")].find((s) =>
+      [...s.querySelectorAll("p")].some((p) => (p.textContent ?? "").trim() === "Cum. Return"),
+    );
+    const texts = [...(strip?.querySelectorAll("p") ?? [])].map((p) => (p.textContent ?? "").trim());
+    for (const label of ["Cum. Return", "CAGR", "Calmar"]) expect(texts).toContain(label);
   });
 
   it("CONTROL: a clean row shows no caveat anywhere on the page", () => {
