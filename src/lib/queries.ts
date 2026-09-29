@@ -2862,6 +2862,13 @@ export interface MyAllocationDashboardPayload {
     side: "long" | "short" | "flat" | null;
     entry_price: number | null;
     unrealized_pnl_usd: number | null;
+    /**
+     * Review C4 SFH-C4-08: the day this row's key read it (`allocator_holdings.asof`,
+     * the key's own latest read under D-16). Open Positions dates a key's rows
+     * when that day is older than the newest read. Optional so legacy fixtures
+     * compile; the dashboard read always sets it.
+     */
+    asof?: string;
   }>;
   /** Row count of TRUSTWORTHY snapshots (flagged zero-baseline rows excluded) — drives the warm-up gate (snapshotCount < 30 → KPIs render `—`). */
   snapshotCount: number;
@@ -4203,6 +4210,7 @@ export function derivePhase07Fields(
     side: r.side,
     entry_price: r.entry_price,
     unrealized_pnl_usd: r.unrealized_pnl_usd,
+    asof: r.asof,
   }));
 
   return {

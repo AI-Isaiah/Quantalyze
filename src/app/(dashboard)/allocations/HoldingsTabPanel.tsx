@@ -57,6 +57,68 @@ import { DashboardNoteCard } from "./components/DashboardNoteCard";
 import type { FavoriteRow, OptimizerPrefetch } from "./lib/watchlist-read";
 
 /** Honest-empty optimizer state when the prop is absent (test harnesses). */
+/** A venue's display name. The exchange ids that need more than a capital. */
+const VENUE_NAMES: Readonly<Record<string, string>> = {
+  okx: "OKX",
+  mt5: "MT5",
+  sfox: "sFOX",
+};
+
+function venueName(exchange: string): string {
+  const id = exchange.trim().toLowerCase();
+  return VENUE_NAMES[id] ?? (id ? id.charAt(0).toUpperCase() + id.slice(1) : exchange);
+}
+
+/** "the Binance key Main", or "a Binance key" when the key is not in the list. */
+function keyPhrase(
+  apiKey: { exchange: string; label: string | null } | undefined,
+  venue: string,
+): string {
+  if (apiKey === undefined) return `a ${venueName(venue)} key`;
+  const label = (apiKey.label ?? "").trim();
+  return label
+    ? `the ${venueName(apiKey.exchange)} key ${label}`
+    : `the ${venueName(apiKey.exchange)} key`;
+}
+
+/**
+ * Review C4 SFH-C4-08. One sentence per key whose open positions were read on
+ * a day older than the newest read in the book. D-16 keeps each key's own
+ * latest read on purpose ("never flat"), so a key that stopped reading (it
+ * failed, or disconnected) keeps showing its last read; this says how old it
+ * is. Rows without a read day (legacy payloads) say nothing. The sentence sits
+ * beside the Open Positions table and names the positions it dates, since the
+ * table itself carries no date column.
+ */
+export function openPositionReadDayNotes(
+  derivativeRows: ReadonlyArray<{
+    api_key_id: string;
+    symbol: string;
+    venue: string;
+    asof?: string;
+  }>,
+  allRows: ReadonlyArray<{ asof?: string }>,
+  apiKeys: ReadonlyArray<{ id: string; exchange: string; label: string | null }>,
+): string[] {
+  let newest = "";
+  for (const r of allRows) {
+    if (typeof r.asof === "string" && r.asof > newest) newest = r.asof;
+  }
+  if (newest === "") return [];
+  const byKey = new Map<string, { asof: string; venue: string; symbols: string[] }>();
+  for (const r of derivativeRows) {
+    if (typeof r.asof !== "string" || r.asof >= newest) continue;
+    const entry = byKey.get(r.api_key_id);
+    if (entry) entry.symbols.push(r.symbol);
+    else byKey.set(r.api_key_id, { asof: r.asof, venue: r.venue, symbols: [r.symbol] });
+  }
+  const keysById = new Map(apiKeys.map((k) => [k.id, k]));
+  return Array.from(byKey.entries()).map(([keyId, { asof, venue, symbols }]) => {
+    const phrase = keyPhrase(keysById.get(keyId), venue);
+    return `Positions from ${phrase} are as last read on ${asof}: ${symbols.join(", ")}.`;
+  });
+}
+
 const EMPTY_OPTIMIZER: OptimizerPrefetch = {
   portfolios: [],
   defaultPortfolioId: null,
@@ -253,6 +315,11 @@ export function HoldingsTabPanel(
     [derivativeHoldings, keyStatusById],
   );
 
+  const readDayNotes = useMemo(
+    () => openPositionReadDayNotes(derivativeHoldings, holdingsSummary, apiKeys),
+    [derivativeHoldings, holdingsSummary, apiKeys],
+  );
+
   const allocatorPreferences = props.mandate
     ? { max_weight: props.mandate.max_weight }
     : null;
@@ -351,6 +418,15 @@ export function HoldingsTabPanel(
           onShowRevokedChange={setShowRevoked}
         />
         <OpenPositionsTable rows={openPositionRows} />
+        {readDayNotes.map((note) => (
+          <p
+            key={note}
+            data-testid="open-positions-read-day-note"
+            className="text-xs text-text-muted"
+          >
+            {note}
+          </p>
+        ))}
       </section>
     </div>
   );
