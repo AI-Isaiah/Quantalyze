@@ -581,15 +581,20 @@ def _seed_poll_outcome(
     final_status: str | None = "complete",
     row_count: int = 0,
     action: str = "allocator.holdings.sync_completed",
+    asof: date | None = None,
 ) -> None:
     """The audit row a holdings poll of ``key_id`` wrote at ``at``.
-    ``final_status=None`` is the shape a poll wrote before this round."""
+    ``final_status=None`` is the shape a poll wrote before round 2;
+    ``asof`` (the day the poll stamps its rows, round 3) is left out unless
+    given, which is the shape a poll wrote before round 3."""
     metadata: dict[str, Any] = {
         "row_count": row_count,
         "holding_type_counts": {"spot": row_count, "derivative": 0},
     }
     if final_status is not None:
         metadata["final_status"] = final_status
+    if asof is not None:
+        metadata["asof"] = asof.isoformat()
     event_id = f"audit-{key_id}-{at.isoformat()}-{action}"
     fake.store[("audit_log", (event_id,))] = {
         "id": event_id,
@@ -1086,3 +1091,88 @@ async def test_a_second_key_on_the_account_that_finds_capital_vetoes_the_proof(
         assert _today_row(fake)["value_usd"] == 0.0
         assert metadata["reason"] == "book_emptied"
         assert metadata["emptied_accounts"] == 1
+
+
+# ---------------------------------------------------------------------------
+# C2 review round 3, R3-WR-01: the proof binds a poll to the day its rows
+# carry, not to the time its audit event was created.
+#
+# A poll stamps its rows with the UTC day it STARTED (job_worker's today_str,
+# taken before the fetch) and emits sync_completed after the fetch, the
+# persist and _update_ok. A poll that starts before 00:00 UTC and emits after
+# it writes rows dated D and an event created on D+1. When D stays the
+# account's latest asof, that event sits inside the proof window
+# (created_at >= D+1) with row_count > 0 and vetoed every later clean, empty
+# poll until 200 newer events pushed it out: ~200 days of a stale carry,
+# first-writer-wins. The event now records the poll's own asof, and the proof
+# compares that day with the latest asof.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_poll_that_ran_across_utc_midnight_does_not_veto_a_later_empty_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reviewer's reproduction. Key 2's last rows are at TODAY-3, written
+    by a poll that emitted its row_count=1 event at 00:00:04 on TODAY-2. Clean,
+    empty polls follow on TODAY-2 and TODAY-1, and the key's live equity read
+    after them finds no capital. Round 2 measured 1500 (the stale 500 carried);
+    the account is empty, so 1000 is right."""
+    fake = FakeSupabaseClient()
+    _seed_emptied_candidate(fake)
+    rows_day = TODAY - timedelta(days=3)
+    straddle_emit = datetime(
+        (rows_day + timedelta(days=1)).year,
+        (rows_day + timedelta(days=1)).month,
+        (rows_day + timedelta(days=1)).day,
+        0, 0, 4, tzinfo=timezone.utc,
+    )
+    _seed_poll_outcome(fake, API_KEY_ID_2, straddle_emit, row_count=1, asof=rows_day)
+    for days_ago in (2, 1):
+        day = TODAY - timedelta(days=days_ago)
+        _seed_poll_outcome(fake, API_KEY_ID_2, _at(day), asof=day)
+    _seed_key_inputs(fake, API_KEY_ID_2, _at(TODAY - timedelta(days=1)) + timedelta(minutes=30))
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    row = _today_row(fake)
+    assert row["value_usd"] == pytest.approx(HOLDER_USD), (
+        f"a midnight-straddling poll vetoed the emptiness proof: {row['value_usd']}"
+    )
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["emptied_accounts"] == 1
+    assert metadata["carried_keys"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param("legacy_rows_event", id="pre-deploy-event-without-asof-still-vetoes"),
+        pytest.param("later_rows_event", id="a-poll-that-wrote-rows-after-the-latest-day-vetoes"),
+    ],
+)
+async def test_events_without_asof_keep_the_created_at_rule(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """An event written before round 3 has no asof, so its rows' day is
+    unknown: it keeps round 2's created_at rule, and a row_count > 0 event
+    created after the latest day still vetoes (no proof, the account is
+    carried). An event WITH an asof after the latest day vetoes as before."""
+    fake = FakeSupabaseClient()
+    _seed_emptied_candidate(fake)
+    rows_event_at = _at(TODAY - timedelta(days=2), hour=0)
+    if case == "legacy_rows_event":
+        _seed_poll_outcome(fake, API_KEY_ID_2, rows_event_at, row_count=1)
+    else:
+        _seed_poll_outcome(
+            fake, API_KEY_ID_2, rows_event_at, row_count=1, asof=TODAY - timedelta(days=2)
+        )
+    day = TODAY - timedelta(days=1)
+    _seed_poll_outcome(fake, API_KEY_ID_2, _at(day), asof=day)
+    _seed_key_inputs(fake, API_KEY_ID_2, _at(day) + timedelta(minutes=30))
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD + 500.0)
+    assert _refresh_complete_metadata(audit)["emptied_accounts"] == 0

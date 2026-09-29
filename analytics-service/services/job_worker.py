@@ -9363,6 +9363,13 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
                 # sync_status moves on after the poll (a later 429, a manual
                 # sync) and cannot stand in for it.
                 "final_status": final_status,
+                # Round 3 (R3-WR-01): the day this poll stamped its rows with,
+                # fixed at handler start. The event is created after the
+                # fetch and persist, so for a poll that runs across 00:00 UTC
+                # created_at lands on the NEXT day; the refresh binds the event
+                # to this day instead, or rows dated D would read as a poll
+                # after D and veto every later emptiness proof.
+                "asof": today_str,
             },
         )
 

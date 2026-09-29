@@ -797,7 +797,10 @@ async def test_run_poll_allocator_positions_job_emits_sync_completed_audit_on_do
     async def _fake_fetch(venue, exchange, api_key_id=None):
         return ([spot_row, deriv_row], None)
 
+    persisted_asof: list[str] = []
+
     async def _fake_persist(supa, rows, allocator_id, api_key_id, asof):
+        persisted_asof.append(asof)
         return len(rows)
 
     # Patch module-local lookups in the handler. The handler does a local
@@ -844,10 +847,16 @@ async def test_run_poll_allocator_positions_job_emits_sync_completed_audit_on_do
     # 167.1.2 C2 round 2 (R2-CR-01): the poll records its own outcome. The
     # daily refresh reads final_status + row_count from this event as the proof
     # that an account is empty, never the key's current sync_status.
+    # Round 3 (R3-WR-01): the event also records the day this poll stamped its
+    # rows with (fixed at handler start), so the refresh binds the event to
+    # that day and not to created_at, which lands on the next UTC day for a
+    # poll that runs across midnight.
+    assert persisted_asof and len(persisted_asof) == 1
     assert kwargs["metadata"] == {
         "row_count": 2,
         "holding_type_counts": {"spot": 1, "derivative": 1},
         "final_status": "complete",
+        "asof": persisted_asof[0],
     }
 
 
