@@ -21,9 +21,10 @@ export type ParsedMtmSeries = {
  * {@link ParsedMtmSeries}, or `null` when the shape can't yield an MTM bundle.
  *
  * Mirrors the strict-coercion discipline of {@link singleKeyBasisOpts} /
- * {@link parseDegradedMembers} / `deriveSegmentMarkers`: a malformed/failed
+ * {@link parseDegradedMembers} / `deriveSegmentMarkers`: a malformed
  * series row degrades to "no MTM bundle → charts stay cash" (V5), NEVER a crash
- * or fabricated data. Returns null for:
+ * or fabricated data. (A FAILED read is not a malformed row: since Phase 169
+ * review round 1, M-3 / WR-05, it throws {@link CompositeSeriesReadError}.) Returns null for:
  *   - a non-object / null / array payload,
  *   - a missing / non-array `rows`,
  *   - fewer than 2 VALID rows (mirrors the build-payload dedup<2 null guard —
@@ -716,8 +717,8 @@ export function singleKeyBasisOpts(
  * The method is resolved with the composite's own rule
  * ({@link attributionBasisFromConfig}: arithmetic only for `simple`), and returned as
  * `cumulativeMethod` only when it is arithmetic, so a geometric strategy's opts are
- * unchanged. Omitting the config keeps the geometric default; the discovery detail
- * page does not pass it yet (reported to its owner, until 169.1-01).
+ * unchanged. Omitting the config keeps the geometric default. Both production
+ * callers (the factsheet resolve stage and the discovery detail page) pass it.
  *
  * `options.captureDefects` (default true) decides whether the persisted-headline
  * defects below reach Sentry (review round 1, WR-01 / SFH M-1 / SFH H-1). They are
@@ -726,7 +727,10 @@ export function singleKeyBasisOpts(
  * event storm 167.2.1-REVIEW-R2 WR-01 removed. A build captures once.
  *
  * @throws {CompositeSeriesReadError} when a gated MTM or smoothed series read FAILS
- *          (review round 1, WR-05); the factsheet resolve stage answers it `read_error`.
+ *          (review round 1, WR-05), or when the chain-broken row's `cash_settlement`
+ *          series read FAILS (review round 1, SFH H-1; `read: "cash_settlement"`). The
+ *          factsheet resolve stage answers it `read_error`; the discovery page shows its
+ *          read-failure sentence.
  */
 export async function readSingleKeyBasisOpts(
   getAdmin: () => SupabaseClient,
