@@ -328,8 +328,11 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     // so it is genuinely leverage-VARIANT — its boundary change under leverage is honest,
     // and pinning it to the unlevered persisted value would HIDE a real effect (see the
     // Phase 107 review-fix note; the reviewer's suggested calmar pin was declined for
-    // this reason). Only MTM carries a persisted per-basis overlay; cash's `basisM`
-    // already equals the client recompute, so there is no cash jump to reconcile.
+    // this reason). Phase 169 (D-25, SC4): cash carries a persisted overlay too now.
+    // A rankable single-key payload's L=1 cash headline is the stored value from
+    // `metricsByBasis.cash_settlement` (composite-read-path `readSingleKeyBasisOpts`),
+    // so without this re-pin the cash Sharpe/Sortino would jump to the client
+    // recompute purely by engaging leverage, exactly as MTM's did.
     //
     // B-1 (Phase 107 Fable red team): the invariance holds ONLY for L > 0. At L=0
     // (a reachable, intended state — input min="0", sanitizeLeverage keeps 0 valid)
@@ -340,15 +343,19 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     // "Cum 0.0% / Ann. Vol 0.0%" and flat charts — a fresh dishonesty. So apply the
     // pin only when L > 0; at L=0 let the honest derived zeros stand.
     const strategyMetrics = ((): typeof lb.strategyMetrics => {
-      // Phase 133 (SMTM-01): the re-pin applies under BOTH persisted-overlay bases
-      // (mark_to_market and smoothed_mtm) — each pins Sharpe/Sortino to its OWN
-      // persisted scalar cache so the L=1↔L≠1 boundary is continuous for the two
-      // invariant metrics. Cash carries no persisted per-basis overlay, so it is
-      // excluded (its L=1 KPIs already equal the client recompute).
-      if (basis === "cash_settlement" || L <= 0) return lb.strategyMetrics;
-      const persisted = (basis === "mark_to_market"
-        ? payload.metricsByBasis?.mark_to_market
-        : payload.metricsByBasis?.smoothed_mtm) as
+      // Phase 133 (SMTM-01) + Phase 169 (D-25): the re-pin applies under EVERY
+      // persisted-overlay basis — mark_to_market, smoothed_mtm, and cash_settlement
+      // when the payload carries a persisted cash headline — each pinning
+      // Sharpe/Sortino to its OWN persisted scalar cache so the L=1↔L≠1 boundary is
+      // continuous for the two invariant metrics. A cash payload with no persisted
+      // cash object (a row the owner declined to overlay, or a payload cached
+      // before Phase 169) keeps the client recompute below.
+      if (L <= 0) return lb.strategyMetrics;
+      const persisted = (basis === "cash_settlement"
+        ? payload.metricsByBasis?.cash_settlement
+        : basis === "mark_to_market"
+          ? payload.metricsByBasis?.mark_to_market
+          : payload.metricsByBasis?.smoothed_mtm) as
         | Record<string, unknown>
         | undefined
         | null;

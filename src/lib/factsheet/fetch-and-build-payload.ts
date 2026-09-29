@@ -270,7 +270,8 @@ async function resolveFactsheetInputs(
        description, subtypes, supported_exchanges, leverage_range, aum,
        max_capacity, avg_daily_turnover, start_date, benchmark, asset_class,
        returns_denominator_config,
-       strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis, computation_status )`,
+       strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis, computation_status,
+         cumulative_return, volatility, max_drawdown, cagr, sharpe, sortino, calmar )`,
     )
     .eq("id", id);
   const { data: strategy, error } = await visibility(
@@ -596,8 +597,16 @@ async function buildFromResolved(
     // its end (167.2.1-REVIEW-R2 IN-01), so a status change always moves
     // the key; nothing waits on the TTL. Status is public-safe on a published row
     // (unchanged RLS boundary — the outer
-    // request-scoped signature probe stays the auth gate). The assembly returns
-    // `{}` for every non-options single-key strategy → byte-identical.
+    // request-scoped signature probe stays the auth gate).
+    //
+    // Phase 169 (SC4, D-10): the analytics row is passed too, and the embed above
+    // projects its seven persisted headline scalars. The owner overlays them as
+    // the cash headline for a rankable row, so this page reads the stored CAGR and
+    // Sharpe that discovery, recommendations and my-strategies show. The
+    // non-options single-key payload is therefore no longer the TypeScript-only
+    // headline; the resolve stage's G1 gate above already refused a row that is
+    // not rankable, so here the overlay always applies to a row that carries the
+    // scalars.
     //
     // MTM-04 (Phase 103) + SMTM-01 (Phase 133, review WR-01): the persisted
     // `mtm_daily_returns` / `smoothed_mtm_daily_returns` series reads (so charts
@@ -619,6 +628,7 @@ async function buildFromResolved(
         dqf,
         analytics?.metrics_json_by_basis,
         analytics?.computation_status,
+        analytics,
       )),
     };
   }

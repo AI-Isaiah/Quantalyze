@@ -131,9 +131,17 @@ export default async function StrategyDetailPage({
     // column precisely so it still arrives on the row — it used to arrive via a
     // wildcard analytics embed, which no longer exists. Narrowing that constant
     // without this read in mind is the way to break this line silently.
-    // `{}` for every non-options single-key strategy keeps
-    // the payload byte-identical. The series rows live behind deny-all RLS, so
-    // the assembly takes the service-role factory as a thunk — the handle is
+    //
+    // Phase 169 (SC4, D-10): the row itself is passed too, so the owner can
+    // overlay its seven persisted headline scalars (the same projection carries
+    // them: `PUBLIC_ANALYTICS_COLUMNS` in queries.ts). A rankable single-key row
+    // therefore renders the stored CAGR and Sharpe that discovery,
+    // recommendations and my-strategies show, and the payload is no longer the
+    // TypeScript-only headline. A row that is not rankable keeps the computed
+    // headline; that arm is reachable from this page only (the factsheet route's
+    // resolve stage refuses such a row), until Phase 169.1 plan 169.1-01 moves
+    // this page onto the shared build. The series rows live behind deny-all RLS,
+    // so the assembly takes the service-role factory as a thunk — the handle is
     // constructed only when a cheap gate holds (hot path stays roundtrip-free).
     buildOpts = {
       ...(buildOpts ?? {}),
@@ -144,6 +152,7 @@ export default async function StrategyDetailPage({
         dqf,
         analyticsRow?.metrics_json_by_basis,
         analyticsRow?.computation_status,
+        analyticsRow,
       )),
     };
   }
