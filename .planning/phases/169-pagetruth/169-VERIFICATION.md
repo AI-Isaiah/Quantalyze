@@ -1,9 +1,10 @@
 ---
 phase: 169-pagetruth
 verified: 2026-09-29T22:40:00Z
-status: gaps_found
-score: 12/13 must-haves verified
-verified_at_sha: 48ee02a13972619c0b2b1a548ecede908cadebf2
+status: human_needed
+score: 13/13 must-haves verified
+verified_at_sha: efaaf92afb38a4438b0c9f32670a36ef6ce36ea9
+# re-verified 2026-09-29: the one gap (release entry) closed by 1db0b5d3c; first verdict gaps_found at 48ee02a13972619c0b2b1a548ecede908cadebf2
 drift_subjects:
   - src/lib/factsheet/composite-read-path.ts
   - src/lib/factsheet/fetch-and-build-payload.ts
@@ -70,6 +71,17 @@ human_verification:
 **Re-verification:** No, initial verification
 
 The product code achieves the goal. Every code-level truth holds at HEAD, two of them confirmed by a neuter run by the verifier. The one gap is the release artifact: the CHANGELOG entry predates both review rounds.
+
+## Re-verification 2026-09-29 (orchestrator)
+
+The one gap, the stale release entry, is closed. `1db0b5d3c` rewrote the `[0.112.0.0]` entry over all
+112 commits on `origin/main..HEAD`, each mapped to a bullet by sha in `169-06-SUMMARY.md` (mechanical
+diff against `git log` empty both ways). The discovery-page outage bullet now states the read-failure
+sentence and the Sentry capture. The D-22 live reproduction the report listed as a human item was run
+on the local lane by plan 06 Task 1 (7/7 SC1 cases, 408 lane tests, ledger match 7/7), which also
+closes `169-SECURITY.md` T-169-06-A. No source file changed after `439e9e259`. Status moves to
+`human_needed` for the items below (plan 06 Task 3 and the fixer-flagged rules); the first verdict is
+kept as lineage in the frontmatter comment.
 
 ## Goal Achievement
 
