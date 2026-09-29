@@ -42,7 +42,7 @@ scope: "plans 169-01, 04, 05, 06, 07, 09, 10 and the surface added by review fix
 | T-169-23 | Integrity | 3Y / 5Y rows | high | mitigate | rows render only when `p3y`/`p5y` non-null (`MetricsColumn.tsx:499-500`); index-clamped fallback deleted (`8cd75cc79`) | closed |
 | T-169-23b | Integrity | 6M / 1Y rows, factsheet and scenario | high | mitigate | both panels omit a null row (`MetricsColumn.tsx:168-169`, `:496,498`); scenario mount tested | closed |
 | T-169-24 | Tampering (cross-phase) | MetricsColumn.tsx and C3's test | medium | mitigate | amended at audit: `217af15f6` changed the two length literals (`0.79y` -> `0.54y`, lines 120 and 150) of C3's test, no threshold assertion; recorded in `169-05-SUMMARY.md:41` | closed |
-| T-169-06-A | Integrity (integration drift) | merged phase branch | medium | mitigate | plan 06 Task 1 (integration run, D-22 parity table, SC1 live reproduction on the local lane) must run on the merged branch after the last merge. Not yet recorded at `48ee02a13`: no 169-06 SUMMARY, and the live-DB suite that exercises the CSV-READ-CAP keyset paging was not run. Re-run owned by plan 06 before ship | open — below high threshold (non-blocking) |
+| T-169-06-A | Integrity (integration drift) | merged phase branch | medium | mitigate | plan 06 Task 1 ran on the merged branch at `439e9e259`, after the last merge of origin/main (`ab12aff26`, bringing 167.1.2 C3; `git merge-base --is-ancestor origin/main HEAD` exit 0): tsc 0 errors; lint exit 0; full suite 17524 passed, 1 failed (`ci-anti-skip-gate.contract.test.ts`, 5 s timeout under load; 33/33 alone); compute-once + critical-regressions 203 passed; D-22 parity table `fetch-and-build-payload.test.ts` 38 passed; SC1 live reproduction on the private local lane 7 passed, 0 skipped (`REPRO-SINGLE-ONE-POINT`, `CONTROL-BUILDABLE` present); `test:live-db:ledger` exit 0, "the failing set is EXACTLY the ledger (7/7)", 408 executed across 50 files. The keyset reader ran against a real PostgREST in the two composite SC1 cases (one data page, then the empty page that ends the read); the past-1000-rows case is unit-tested only (the 1112-row fake). No integration fix was needed. Evidence in `169-06-SUMMARY.md`. *Lineage (2026-09-29, at `48ee02a13`):* "Not yet recorded at `48ee02a13`: no 169-06 SUMMARY, and the live-DB suite that exercises the CSV-READ-CAP keyset paging was not run. Re-run owned by plan 06 before ship" | closed (2026-09-29, plan 06 Task 1 re-run; was open, medium, non-blocking) |
 | T-169-06-B | Repudiation | post-deploy check | medium | mitigate | pre-deploy half in place (v8 key at `v2/page.tsx:191`); post-deploy browser check bound to the deployed SHA is plan 06 Task 3, pending | closed (post-deploy half pending) |
 | T-169-06-C | Information disclosure | CHANGELOG / SUMMARY | medium | mitigate | no identifiers, credential-shaped literals or skip tokens in the CHANGELOG diff or the 109 branch commit messages; planning hygiene OK | closed |
 | T-169-06-D | Integrity (shared DB) | SC1 live reproduction | high | mitigate | local lane only (`scripts/local-stack/run.sh`); `vitest.livedb.globalsetup.ts:136-139` refuses any non-localhost API URL | closed |
@@ -78,6 +78,7 @@ scope: "plans 169-01, 04, 05, 06, 07, 09, 10 and the surface added by review fix
 | Audit Date | Threats Total | Closed | Open | Run By |
 |------------|---------------|--------|------|--------|
 | 2026-09-29 | 28 (27 planned + T-169-25 from the fix rounds) | 27 | 1 (T-169-06-A, medium, non-blocking) | gsd-security-auditor (ASVS L1, block_on high) at `48ee02a13` |
+| 2026-09-29 | 28 | 28 | 0 | gsd-executor, plan 169-06 Task 1 re-run at `439e9e259` (after merge `ab12aff26`): T-169-06-A closed with the integration, D-22 parity and SC1 live-lane evidence; no other row changed |
 
 ---
 
@@ -88,4 +89,4 @@ scope: "plans 169-01, 04, 05, 06, 07, 09, 10 and the surface added by review fix
 - [x] `threats_open: 0` confirmed
 - [x] `status: verified` set in frontmatter
 
-**Approval:** verified 2026-09-29 (T-169-06-A open below the block threshold; closed by plan 06 Task 1's re-run before ship)
+**Approval:** verified 2026-09-29; T-169-06-A closed 2026-09-29 by plan 06 Task 1's re-run at `439e9e259`. *Lineage:* "verified 2026-09-29 (T-169-06-A open below the block threshold; closed by plan 06 Task 1's re-run before ship)"
