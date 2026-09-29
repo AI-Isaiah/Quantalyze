@@ -553,3 +553,98 @@ describe("FreshnessChip — the date line belongs to the subject (169 D-16)", ()
     expect(computedLineText(container)).toBe(`Computed ${usDate(computedAt)}`);
   });
 });
+
+/**
+ * 169 review WR-04 (2026-09-29): the chip's colour and its printed age are ONE
+ * number, the whole UTC days since the series end.
+ *
+ * WHY: the tone was bucketed on the fractional age while the date line printed
+ * it floored, so from mid-morning on the boundary days the chip read
+ * "Track record · old (7d)" in red and "stale (3d)" in amber, against its own
+ * documented ladder (green ≤ 3d, amber 3-7d, red > 7d). The chip exists to make
+ * the track record's age honest; a verdict that contradicts the age printed
+ * beside it is the dishonesty D-16 set out to remove.
+ *
+ * The clock is frozen mid-afternoon UTC (Date only), so a series ending N
+ * calendar days earlier is N.6 days old: the fractional part the old code
+ * bucketed on. Labels are typed literals; the expected age is the calendar-day
+ * difference, computed here, never read from the component.
+ */
+describe("FreshnessChip — the verdict and the printed age are one number (169 WR-04)", () => {
+  const NOW = "2026-09-29T14:24:00Z"; // 0.6 of a UTC day
+
+  function atNow<T>(fn: () => T): T {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(NOW));
+    try {
+      return fn();
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it("WR04-1: a series 7 calendar days old reads 'stale (7d)' in amber, never 'old (7d)'", () => {
+    atNow(() => {
+      const { container } = renderFactsheet(payloadWith(7, isoHoursAgo(1)));
+      const chip = readChip(container);
+      expect(chip.label).toBe("Track record · stale");
+      expect(chip.tone).toBe(WARNING);
+      expect(chip.dateLine).toBe(`${usDate(ymdDaysAgo(7))}(7d)`);
+    });
+  });
+
+  it("WR04-2: a series 3 calendar days old is within the green band, so a fresh job keeps the verdict", () => {
+    atNow(() => {
+      const { container } = renderFactsheet(payloadWith(3, isoHoursAgo(1)));
+      const chip = readChip(container);
+      expect(chip.label).toBe("Computed · fresh");
+      expect(chip.tone).toBe(POSITIVE);
+    });
+  });
+
+  it("WR04-3 (control): a series 8 calendar days old reads 'old (8d)' in red", () => {
+    atNow(() => {
+      const { container } = renderFactsheet(payloadWith(8, isoHoursAgo(1)));
+      const chip = readChip(container);
+      expect(chip.label).toBe("Track record · old");
+      expect(chip.tone).toBe(NEGATIVE);
+      expect(chip.dateLine).toBe(`${usDate(ymdDaysAgo(8))}(8d)`);
+    });
+  });
+
+  it("WR04-4: early, midday and late on the boundary days, the printed age alone predicts the verdict", () => {
+    // Independent oracle over the printed whole-day age N: N ≤ 3 → the fresh job
+    // keeps "Computed · fresh"; 4..7 → "stale"; ≥ 8 → "old".
+    const expected = (n: number) =>
+      n <= 3 ? "Computed · fresh" : n <= 7 ? "Track record · stale" : "Track record · old";
+    for (const days of [3, 4, 7, 8]) {
+      for (const hour of [0, 12, 23]) {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(new Date(Date.UTC(2026, 8, 29, hour, 30)));
+        try {
+          const { container, unmount } = renderFactsheet(payloadWith(days, isoHoursAgo(1)));
+          const chip = readChip(container);
+          expect(chip.label, `${days}d at ${hour}:30Z`).toBe(expected(days));
+          if (chip.label.startsWith("Track record")) {
+            expect(chip.dateLine, `${days}d at ${hour}:30Z`).toMatch(new RegExp(`\\(${days}d\\)$`));
+          }
+          unmount();
+        } finally {
+          vi.useRealTimers();
+        }
+      }
+    }
+    // Twelve full factsheet renders: well under a second on an idle box, but the
+    // default 5 s budget is not enough on a loaded CI runner.
+  }, 30_000);
+
+  it("WR04-5: the future allowance is unchanged — a bar dated tomorrow (UTC) is fresh, two days ahead is 'future'", () => {
+    atNow(() => {
+      const tomorrow = renderFactsheet(payloadWith(-1, isoHoursAgo(1)));
+      expect(readChip(tomorrow.container).label).toBe("Computed · fresh");
+      tomorrow.unmount();
+      const ahead = renderFactsheet(payloadWith(-2, isoHoursAgo(1)));
+      expect(readChip(ahead.container).label).toBe("Track record · future — check data");
+    });
+  });
+});
