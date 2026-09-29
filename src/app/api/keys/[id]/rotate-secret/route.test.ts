@@ -460,6 +460,10 @@ describe("PATCH /api/keys/[id]/rotate-secret — the happy path end-to-end", () 
       // CR-01: the third field `reconnect_allocator_api_key` clears — restores
       // fan-out eligibility, not just visibility.
       sync_status: "idle",
+      // Phase 167.1.2 plan 09: a revoked key comes back to live through this
+      // update, so the departed-history choice made while it was revoked is
+      // reset to the default rule here, as reconnect_allocator_api_key does.
+      history_inclusion: null,
       // WR-03: disconnected_at is NEVER touched — every writer of it at HEAD
       // is the user-initiated Disconnect button, so clearing it here would
       // silently reconnect a deliberately parked key.
@@ -807,6 +811,17 @@ describe("PATCH /api/keys/[id]/rotate-secret — D-05 / CR-01: clear the failure
     // be silently reconnected by a password fix.
     expect(ADMIN_STATE.updates[0].payload).not.toHaveProperty("disconnected_at");
   });
+
+  it("resets history_inclusion to NULL, so a choice made while the key was revoked never carries over to its next departure (167.1.2 plan 09)", async () => {
+    // COMMENT ON COLUMN api_keys.history_inclusion binds EVERY path that returns
+    // a departed key to live. A revoked key returns here (sync_status 'idle'),
+    // not through reconnect_allocator_api_key, so without the reset an
+    // 'include' chosen for one revocation silently applied to the next.
+    await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(ADMIN_STATE.updates).toHaveLength(1);
+    expect(ADMIN_STATE.updates[0].payload).toHaveProperty("history_inclusion", null);
+    expect(ADMIN_STATE.updates[0].payload).toMatchObject({ sync_status: "idle" });
+  });
 });
 
 describe("PATCH /api/keys/[id]/rotate-secret — the venue-identity 23505 backstop (Pitfall 1 / WR-02)", () => {
@@ -858,6 +873,7 @@ describe("PATCH /api/keys/[id]/rotate-secret — the venue-identity 23505 backst
       api_key_encrypted: SEAM_SUCCESS_BODY.api_key_encrypted,
       sync_error: null,
       sync_status: "idle",
+      history_inclusion: null,
     });
   });
 
