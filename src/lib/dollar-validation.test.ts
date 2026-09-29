@@ -13,7 +13,13 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { isValidDollar, formatUsd } from "./dollar-validation";
+import {
+  isValidDollar,
+  formatUsd,
+  formatUsdPrice,
+  formatUsdSigned,
+  signAtCents,
+} from "./dollar-validation";
 
 // The AUM / capacity bound, typed in as a literal ORACLE — deliberately NOT
 // `MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD`. Asserting a constant against itself
@@ -84,5 +90,82 @@ describe("formatUsd — the ONE money formatter for the allocations surface", ()
 
   it("renders the em-dash for a null amount — never $0 (no-invented-data)", () => {
     expect(formatUsd(null)).toBe("—");
+  });
+});
+
+/**
+ * Phase 169 D-50 (founder UAT 2026-09-27) — /allocations Open Positions showed a
+ * $0.42 entry or mark price as "$0", a +$0.37 P&L as "+$0", and a tiny negative
+ * as a red "−$0". The whole-dollar `formatUsd` above is RIGHT for amounts (AUM,
+ * notional, allocations) and stays pinned unchanged; prices and P&L get their
+ * own formatters here. Every expectation is a typed literal.
+ */
+describe("[169 D-50] formatUsdPrice — a price keeps its real precision", () => {
+  it("a price under $1 shows 4 significant digits, never $0", () => {
+    expect(formatUsdPrice(0.4213)).toBe("$0.4213");
+    expect(formatUsdPrice(0.00009876)).toBe("$0.00009876");
+  });
+
+  it("a price of $1 or more shows 2 decimals", () => {
+    expect(formatUsdPrice(60000)).toBe("$60,000.00");
+    expect(formatUsdPrice(1)).toBe("$1.00");
+  });
+
+  it("a sub-dollar price that rounds to $1 at 4 significant digits reads as a $1-or-more price", () => {
+    // 0.99999 at 4 significant digits is "1.000"; the reader sees a $1 price,
+    // so it takes the $1-or-more form rather than a 3-decimal hybrid.
+    expect(formatUsdPrice(0.99999)).toBe("$1.00");
+  });
+
+  it("a zero price has no significant digits to show and reads $0.00", () => {
+    expect(formatUsdPrice(0)).toBe("$0.00");
+  });
+
+  it("null and non-finite render the em-dash", () => {
+    expect(formatUsdPrice(null)).toBe("—");
+    expect(formatUsdPrice(Number.NaN)).toBe("—");
+    expect(formatUsdPrice(Number.POSITIVE_INFINITY)).toBe("—");
+  });
+});
+
+describe("[169 D-50] formatUsdSigned — P&L at 2 decimals, sign from the ROUNDED value", () => {
+  it("a sub-dollar gain or loss keeps its cents and its sign (U+2212 minus)", () => {
+    expect(formatUsdSigned(0.37)).toBe("+$0.37");
+    expect(formatUsdSigned(-0.21)).toBe("−$0.21");
+  });
+
+  it("a tiny negative that rounds to zero carries no sign — never a red −$0", () => {
+    expect(formatUsdSigned(-0.0001)).toBe("$0.00");
+  });
+
+  it("a tiny positive, or zero, that rounds to zero carries no sign — never +$0", () => {
+    expect(formatUsdSigned(0.004)).toBe("$0.00");
+    expect(formatUsdSigned(0)).toBe("$0.00");
+  });
+
+  it("a whole-dollar amount gains cents and thousands separators", () => {
+    expect(formatUsdSigned(1300)).toBe("+$1,300.00");
+    expect(formatUsdSigned(-1234.6)).toBe("−$1,234.60");
+  });
+
+  it("null and non-finite render the em-dash", () => {
+    expect(formatUsdSigned(null)).toBe("—");
+    expect(formatUsdSigned(Number.NaN)).toBe("—");
+  });
+});
+
+describe("[169 D-50] signAtCents — the one rounding decision the text sign and the P&L colour read", () => {
+  it("reads the sign of the value rounded to cents", () => {
+    expect(signAtCents(0.37)).toBe("positive");
+    expect(signAtCents(-0.21)).toBe("negative");
+    expect(signAtCents(0.005)).toBe("positive");
+    expect(signAtCents(-0.0001)).toBe("zero");
+    expect(signAtCents(0.004)).toBe("zero");
+    expect(signAtCents(0)).toBe("zero");
+  });
+
+  it("has no sign for a missing value", () => {
+    expect(signAtCents(null)).toBeNull();
+    expect(signAtCents(Number.NaN)).toBeNull();
   });
 });

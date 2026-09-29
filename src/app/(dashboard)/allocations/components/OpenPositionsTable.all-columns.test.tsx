@@ -84,3 +84,78 @@ describe("OpenPositionsTable all-columns guard (7 material columns)", () => {
     }
   });
 });
+
+/**
+ * Phase 169 D-50 (founder UAT 2026-09-27) — a $0.42 entry / mark price read "$0",
+ * a +$0.37 P&L read "+$0", and a tiny negative read as a red "−$0". Prices keep
+ * their real precision, P&L shows cents, and a P&L that rounds to zero carries
+ * neither a sign nor a colour. Notional is an amount and stays whole dollars.
+ * Every expected string is a typed literal.
+ */
+describe("[169 D-50] OpenPositionsTable money cells", () => {
+  // Column order pinned by NAMED_HEADERS above.
+  const ENTRY = 3;
+  const MARK = 4;
+  const NOTIONAL = 5;
+  const PNL = 6;
+
+  function rowCells(container: HTMLElement): HTMLTableCellElement[] {
+    return Array.from(
+      container.querySelector("tbody")!.querySelectorAll("tr")[0].querySelectorAll("td"),
+    );
+  }
+
+  it("a sub-dollar entry and mark price render at 4 significant digits; notional stays whole-dollar", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[makeRow({ entry_price: 0.4213, mark_price: 0.4213, notional_usd: 1_234.56 })]}
+      />,
+    );
+    const cells = rowCells(container);
+    expect(cells[ENTRY].textContent).toBe("$0.4213");
+    expect(cells[MARK].textContent).toBe("$0.4213");
+    expect(cells[NOTIONAL].textContent).toBe("$1,235");
+  });
+
+  it("a price of $1 or more renders at 2 decimals", () => {
+    const { container } = render(<OpenPositionsTable rows={[makeRow()]} />);
+    const cells = rowCells(container);
+    expect(cells[ENTRY].textContent).toBe("$60,000.00");
+    expect(cells[MARK].textContent).toBe("$72,000.00");
+  });
+
+  it("a sub-dollar P&L keeps its cents, its sign and the positive colour", () => {
+    const { container } = render(
+      <OpenPositionsTable rows={[makeRow({ unrealized_pnl_usd: 0.37 })]} />,
+    );
+    const cell = rowCells(container)[PNL];
+    expect(cell.textContent).toBe("+$0.37");
+    expect(cell.getAttribute("style") ?? "").toContain("var(--color-positive)");
+  });
+
+  it("a P&L that rounds to zero reads $0.00 with no sign and no colour — never a red −$0", () => {
+    const { container } = render(
+      <OpenPositionsTable rows={[makeRow({ unrealized_pnl_usd: -0.0001 })]} />,
+    );
+    const cell = rowCells(container)[PNL];
+    expect(cell.textContent).toBe("$0.00");
+    expect(cell.getAttribute("style") ?? "").not.toContain("color");
+    // The footer total of the same one row reads the same, uncoloured.
+    const footerCells = container.querySelector("tfoot")!.querySelectorAll("tr")[0].querySelectorAll("td");
+    const footer = footerCells[footerCells.length - 1];
+    expect(footer.textContent).toBe("$0.00");
+    expect(footer.getAttribute("style") ?? "").not.toContain("color");
+  });
+
+  it("a null price and a null P&L stay the em-dash", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[makeRow({ entry_price: null, mark_price: null, unrealized_pnl_usd: null })]}
+      />,
+    );
+    const cells = rowCells(container);
+    expect(cells[ENTRY].textContent).toBe("—");
+    expect(cells[MARK].textContent).toBe("—");
+    expect(cells[PNL].textContent).toBe("—");
+  });
+});
