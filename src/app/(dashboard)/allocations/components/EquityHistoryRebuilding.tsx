@@ -10,8 +10,10 @@ import type { EquityHistoryRebuildReason } from "@/lib/queries";
  * count one exchange account twice or read a day with no sync as zero; a wrong
  * number the allocator can act on is worse than an honest absence.
  *
- * Static copy only: no number, no date and no promise of when the history
- * returns. Every sentence must be true for EVERY allocator who sees it (review
+ * Static copy only: no number, no date and no id. The body promises nothing
+ * about when the history returns; plan 11's reason line names only the daily
+ * cadence the sync and the recompute run on. Every sentence must be true for
+ * EVERY allocator who sees it (review
  * round 1 WR-03 / SFH-05): a single-key book, a first connect that never saw a
  * chart, and a stale book under the StalenessBanner. So the cause is worded as
  * a property of the history ("could", "when more than one key reads it"), no
