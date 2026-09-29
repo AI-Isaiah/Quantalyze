@@ -80,6 +80,7 @@ status: partial
 - **All reported:** no note. A real reported zero still reads "$0.00".
 - The note has its own `<tr>` and testid (`open-positions-pnl-unavailable-note`). It uses the key-trust note's tone (muted, `text-xs`, colSpan 7). The key-trust note and its roughly dozen literal pins are untouched.
 - The note counts every row with no P&L, so for an untrusted row it overlaps the key-trust part's "(P&L unavailable for k …)". Both statements are true at their own scope, and they use the same noun phrase.
+- **An overlap that was already there, seen and left alone.** When every row is untrusted and has no P&L, the total now reads "—", but the key-trust note below it still reads "Includes $0.00 from keys needing attention (P&L unavailable for 1 position)". That "$0.00" comes from `buildKeyTrustClause` in `live-holdings-summary.ts`. That builder is shared with the composer (167.1.2's), and an existing test pins its output. This fix does not change it.
 - The open-positions total is computed inside `OpenPositionsTable.tsx`. `live-holdings-summary.ts` (the composer's AUM total, 167.1.2's) was read and not modified.
 
 **Proof:**
