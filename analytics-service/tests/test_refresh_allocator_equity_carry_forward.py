@@ -544,3 +544,51 @@ async def test_eligible_key_that_never_polled_is_counted_not_silent(
     metadata = _refresh_complete_metadata(audit)
     assert metadata["never_polled_keys"] == 1
     assert metadata["carried_keys"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("stale_days", "warns"), [(2, False), (3, False), (5, True)])
+async def test_carry_age_is_recorded_and_an_old_carry_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    stale_days: int,
+    warns: bool,
+) -> None:
+    """C2 silent-failure SFH-09: a carried account contributes its value_usd
+    from its last poll, priced at THAT day's marks, and D-07 sets no horizon.
+    The only trace was the aggregate carried_keys count. The oldest carry's age
+    in days is now in the audit, and a carry older than
+    CARRY_AGE_WARN_DAYS logs a WARNING (no id, no USD)."""
+    import logging
+
+    from services.equity_reconstruction import CARRY_AGE_WARN_DAYS
+
+    assert CARRY_AGE_WARN_DAYS == 3
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.equity_reconstruction")
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_key(fake, API_KEY_ID_2)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    _seed_holding(fake, API_KEY_ID_2, "bybit", "BTC", TODAY - timedelta(days=stale_days), 500.0)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    assert _refresh_complete_metadata(audit)["max_carry_age_days"] == stale_days
+    carry_warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "carried" in r.getMessage()
+    ]
+    assert bool(carry_warnings) is warns, caplog.text
+    assert API_KEY_ID_2 not in caplog.text
+    assert "500" not in " ".join(r.getMessage() for r in carry_warnings)
+
+
+@pytest.mark.asyncio
+async def test_no_carry_records_a_zero_carry_age(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    assert _refresh_complete_metadata(audit)["max_carry_age_days"] == 0

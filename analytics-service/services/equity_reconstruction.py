@@ -1808,6 +1808,13 @@ _REFRESH_HOLDINGS_COLUMNS = (
     "unrealized_pnl_usd, venue, holding_type, api_key_id"
 )
 
+# C2 silent-failure SFH-09: a carried account contributes its value_usd from its
+# last poll, priced at THAT day's marks, and D-07 sets no horizon. A carry older
+# than this many days logs a WARNING. It is a LOG threshold only: capping or
+# dropping an old carry changes the persisted number and is a founder call, not
+# a default for the code to pick.
+CARRY_AGE_WARN_DAYS = 3
+
 
 @dataclass(frozen=True)
 class _LatestHoldings:
@@ -1826,6 +1833,7 @@ class _LatestHoldings:
     no_working_accounts: int
     emptied_accounts: int
     never_polled_keys: int
+    max_carry_age_days: int
 
 
 async def _fetch_latest_holdings_per_eligible_key(
@@ -1911,6 +1919,7 @@ async def _fetch_latest_holdings_per_eligible_key(
     no_working = 0
     emptied = 0
     never_polled = 0
+    max_carry_age = 0
     for group in account_groups(key_rows):
         eligible = [r for r in group if eligible_key_predicate(r)]
         if not eligible:
@@ -1962,6 +1971,10 @@ async def _fetch_latest_holdings_per_eligible_key(
         rows.extend(getattr(await db_execute(_sel_rows), "data", None) or [])
         if latest < today_iso:
             carried += 1
+            max_carry_age = max(
+                max_carry_age,
+                (date.fromisoformat(today_iso) - date.fromisoformat(latest)).days,
+            )
         if not any(working_holder_predicate(r) for r in eligible):
             no_working += 1
 
@@ -1973,6 +1986,7 @@ async def _fetch_latest_holdings_per_eligible_key(
         no_working_accounts=no_working,
         emptied_accounts=emptied,
         never_polled_keys=never_polled,
+        max_carry_age_days=max_carry_age,
     )
 
 
@@ -3401,6 +3415,15 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
             ctx.supabase, allocator_id, today_iso
         )
         holdings = latest.rows
+        if latest.max_carry_age_days > CARRY_AGE_WARN_DAYS:
+            # SFH-09: counts and days only — no key id, no USD (T-167.1.2-32).
+            logger.warning(
+                "refresh_allocator_equity_daily: allocator=%s has %d account(s) "
+                "carried at an earlier day's holdings; the oldest carry is %d "
+                "day(s) old (warn above %d), valued at that day's marks",
+                allocator_id, latest.carried_keys, latest.max_carry_age_days,
+                CARRY_AGE_WARN_DAYS,
+            )
 
         # Compute single-day equity from holdings' value_usd fan-in.
         #
@@ -3530,6 +3553,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                     "no_working_accounts": latest.no_working_accounts,
                     "emptied_accounts": latest.emptied_accounts,
                     "never_polled_keys": latest.never_polled_keys,
+                    "max_carry_age_days": latest.max_carry_age_days,
                 },
             )
             return DispatchResult(outcome=DispatchOutcome.DONE)
@@ -3573,11 +3597,13 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
             "value_usd": round(total, 2),
             "breakdown": capped_bd,
             "source": "exchange_primary",
-            # NEW-C01-11 (CL9): the daily refresh marks TODAY's live holdings
-            # against current prices — this is the true, fully-known equity, so
-            # it is never terminus-clamped. Explicit false keeps the column
+            # NEW-C01-11 (CL9): the daily refresh reads live holdings, so it
+            # is never terminus-clamped. Explicit false keeps the column
             # concrete and lets trustworthy live rows render normally even when
-            # the older reconstructed window was suppressed.
+            # the older reconstructed window was suppressed. NOT "today's
+            # prices": since D-07 a carried account contributes its last
+            # poll's value_usd, priced at that day's marks (SFH-09; the carry
+            # age is max_carry_age_days in the refresh_complete audit).
             "pre_terminus_balance_unknown": False,
         }
         depth_months = history_depth_months_for_venue(venue)
@@ -3598,6 +3624,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 "no_working_accounts": latest.no_working_accounts,
                 "emptied_accounts": latest.emptied_accounts,
                 "never_polled_keys": latest.never_polled_keys,
+                "max_carry_age_days": latest.max_carry_age_days,
             },
         )
         logger.info(
