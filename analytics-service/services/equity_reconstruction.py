@@ -30,6 +30,7 @@ import logging
 import math
 import os
 from bisect import bisect_right
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -1968,7 +1969,7 @@ async def _fetch_latest_holdings_per_eligible_key(
 
 
 async def _polled_empty_since(
-    supabase: Any, eligible: list[dict[str, Any]], latest_asof: str
+    supabase: Any, eligible: Sequence[Mapping[str, Any]], latest_asof: str
 ) -> bool:
     """True when a successful holdings poll of one of ``eligible`` was claimed on
     a day after ``latest_asof`` (see the CR-04 paragraph of
