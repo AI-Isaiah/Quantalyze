@@ -129,7 +129,8 @@ export default async function StrategyDetailPage({
     // stage captures it for a build (`console.error` alone never reaches Sentry:
     // `src/instrumentation.ts` registers no console integration), and the page
     // says the load failed rather than KCS-10's "not available yet". The
-    // reader's own error is sent, so its PostgREST message rides as `cause`.
+    // reader's own error is sent, so its PostgREST message rides as `cause`,
+    // which `captureToSentry` folds, scrubbed, into the event message.
     let composite: Awaited<ReturnType<typeof readCompositeFactsheet>>;
     try {
       composite = await readCompositeFactsheet(admin, {
