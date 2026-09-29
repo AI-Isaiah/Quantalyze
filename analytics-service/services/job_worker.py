@@ -10316,15 +10316,45 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # D-01 / D-04 / D-18: one exchange account is ONE counted key. Keys that read
     # one account form a group (account_groups: a holder plus every key marked
     # against it). Of a group's ELIGIBLE members exactly one is counted: a
-    # WORKING one (D-18) when any works, the holder first. A failing holder is
+    # WORKING one (D-18) when any works, ordered as below. A failing holder is
     # still eligible, so it must LEAVE the sum when a working marked key counts
     # the account (the holder-drop half): the marked key's venue_account_id is
     # NULL while the holder keeps the index slot, so the collision gate below
     # cannot see the pair and would let one account be summed twice. When no
-    # member works, the account is still counted once (through the holder, so
-    # its history is kept) and the job says so at WARNING with a payload flag.
+    # member works, the account is still counted once (through the key whose
+    # history starts first, the holder on a tie) and the job says so at WARNING
+    # with a payload flag.
     # A key left out here keeps its key_inputs row (it is still eligible; only
     # the compose skips it), so it is never cleaned up as an orphan.
+    #
+    # C2 review WR-01 (C1 WR-03): among the members that qualify, the one whose
+    # returns START FIRST is counted, then the holder, then the id. The marker's
+    # direction follows stamp order, not seniority, so during the backfill
+    # window the holder is often the NEWER key; keeping it by default dropped the
+    # older key's earlier returns under a benign flag. The returns are loaded
+    # here for that ordering only: loading is not composing, and the identity
+    # gate below still refuses before anything is composed.
+    def _load_returns() -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            supabase.table("csv_daily_returns")
+            .select("api_key_id,date,daily_return")
+            .eq("allocator_id", allocator_id)
+            .execute()
+            .data
+            or [],
+        )
+
+    csv_rows = await db_execute(_load_returns)
+    first_return_day: dict[str, str] = {}
+    for r in csv_rows:
+        day = r.get("date")
+        k = r.get("api_key_id")
+        if k is None or day is None:
+            continue  # the strict per-row parse below disposes a corrupt row
+        if k not in first_return_day or str(day) < first_return_day[k]:
+            first_return_day[k] = str(day)
+
     excluded_shared: set[str] = set()
     composite_counted_once = False
     duplicate_counted_once = False
@@ -10348,7 +10378,15 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 and str(holder_id) in group_ids
             )
 
-        kept = min(pool, key=lambda row: (_is_marked_in_group(row), str(row["id"])))
+        kept = min(
+            pool,
+            key=lambda row: (
+                # A key with no returns yet sorts after every key that has some.
+                first_return_day.get(row["id"], "9999-12-31"),
+                _is_marked_in_group(row),
+                str(row["id"]),
+            ),
+        )
         excluded_shared.update(row["id"] for row in members if row is not kept)
         kinds = {row.get("account_share_kind") for row in group}
         composite_counted_once = composite_counted_once or "composite_member" in kinds
@@ -10362,7 +10400,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # status. A holder that is not working leaves the marked key ordinary (the
     # group resolution above counts the account once), and a same-id overlap
     # with another counted key is then a collision, not a duplicate. Checked
-    # BEFORE loading returns so a double-counted book never composes.
+    # BEFORE anything is composed, so a double-counted book never composes.
     duplicate_keys = [
         row
         for row in key_rows
@@ -10405,12 +10443,12 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
 
     if no_working_groups:
         # D-18: an account none of whose keys works is still counted once,
-        # through the holder, so its history stays; its series stops on the day
-        # the keys started failing and carries flat after it. Counts only (no
-        # key id, no venue id, no USD — T-167.1.2-22).
+        # through the key whose history starts first, so its history stays; its
+        # series stops on the day the keys started failing and carries flat
+        # after it. Counts only (no key id, no venue id, no USD — T-167.1.2-22).
         logger.warning(
             "derive_allocator_equity: %d shared account(s) for allocator %s have "
-            "no working key — each is counted once, through its holder, whose "
+            "no working key — each is counted once, through a failing key whose "
             "series may have stopped (flag shared_account_no_working_key)",
             no_working_groups,
             allocator_id,
@@ -10420,17 +10458,6 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     #      'date' column (carry-in #3). NEVER pd.to_datetime / DatetimeIndex:
     #      the core hard-asserts a 'YYYY-MM-DD' index and a DatetimeIndex would
     #      stringify to 'YYYY-MM-DD 00:00:00' and silently misalign flows. ──
-    def _load_returns() -> list[dict[str, Any]]:
-        return cast(
-            list[dict[str, Any]],
-            supabase.table("csv_daily_returns")
-            .select("api_key_id,date,daily_return")
-            .eq("allocator_id", allocator_id)
-            .execute()
-            .data
-            or [],
-        )
-
     async def _permanent_corrupt_input(exc: Exception) -> DispatchResult:
         # M3: a corrupt PERSISTED value (a NULL daily_return → float(None)
         # TypeError, a non-numeric usd_signed, a non-finite flow rejected by
@@ -10459,7 +10486,6 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             error_kind="permanent",
         )
 
-    csv_rows = await db_execute(_load_returns)
     _grouped: dict[str, list[dict[str, Any]]] = {}
     for r in csv_rows:
         k = r.get("api_key_id")

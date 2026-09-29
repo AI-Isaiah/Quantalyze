@@ -1882,6 +1882,42 @@ async def test_shared_account_with_no_working_key_is_counted_once_and_loudly(
 
 
 @pytest.mark.asyncio
+async def test_composite_pair_keeps_the_key_whose_history_starts_first() -> None:
+    """C2 review WR-01 (C1 WR-03): the marker's direction follows stamp order,
+    not seniority, so during the backfill window the HOLDER is often the newer
+    key. Keeping the holder dropped the older member's earlier returns while the
+    benign composite flag kept the shortened curve trustworthy. Of two working
+    members the one whose returns start first is counted."""
+    alloc = "alloc-comp-older-member"
+    early = ["2026-05-29", "2026-05-30", "2026-05-31", "2026-06-01", "2026-06-02", "2026-06-03"]
+    csv_h, ki_h = _series_rows(alloc, "key-H", HOLDER_ANCHOR)
+    _, ki_m = _series_rows(alloc, "key-M", MARKED_ANCHOR)
+    csv_m = [
+        {"api_key_id": "key-M", "allocator_id": alloc, "date": day, "daily_return": 0.0}
+        for day in early
+    ]
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key("key-H", alloc, venue_account_id="venue-shared"),
+            _gate_key(
+                "key-M", alloc,
+                account_share_kind="composite_member",
+                account_shared_with_api_key_id="key-H",
+            ),
+        ],
+        "csv_daily_returns": csv_h + csv_m,
+        DERIVED_TABLE: [ki_h, ki_m],
+        LEGACY_TABLE: [],
+    })
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 1
+    assert payload["curve"][0]["date"] <= "2026-05-30", payload["curve"][0]
+    assert payload["curve"][-1]["equity_usd"] == pytest.approx(MARKED_ANCHOR, rel=1e-6)
+    assert "composite_shared_account_counted_once" in payload["flags"]
+
+
+@pytest.mark.asyncio
 async def test_duplicate_whose_marked_key_fails_behind_a_working_holder_still_refuses() -> None:
     """Reader parity (queries.ts countsAsDuplicate): an ELIGIBLE duplicate-marked
     key whose holder is working is a duplicate, whatever the marked key's own
