@@ -11,7 +11,8 @@
     "sync_status": "a 'revoked' key that was never disconnected ends on its last returns day",
     "history_inclusion": "'include' | 'exclude' | null (the default rule)",
     "first_returns_day": "the key's first csv_daily_returns day, or null",
-    "last_returns_day": "the key's last csv_daily_returns day, or null"
+    "last_returns_day": "the key's last csv_daily_returns day, or null",
+    "anchored": "optional, default true. false when the key's key_inputs row is missing or carries a null anchor_usd: the derive cannot level its history, so the book never counts it"
   },
   "rule": [
     "A key is LIVE when it is active, not revoked and not disconnected. Every other key is DEPARTED.",
@@ -22,6 +23,7 @@
     "Known account: every LIVE key on it bounds the departed key to the day before that live key's first_returns_day (a live key with no returns yet bounds it to nothing). The COUNTED departed keys on it (not excluded, with returns) are ordered by (first_returns_day, last_returns_day, id). A key whose last countable day (min(end day, last_returns_day)) is BEFORE the last countable day of a key ordered ahead of it is COVERED: that earlier key reads the account over every one of its days, so it counts zero days and bounds nothing (a later key that ends first must never cut the earlier key's tail, which would count those days nowhere). Every other counted departed key is bounded to the day before the next uncovered key's first_returns_day. 'include' never lifts these bounds.",
     "Reason for a known account: a live key on it with no returns yet -> same_account_as_connected_key_pending (it is decided again once that key has returns); else a live key on it -> same_account_as_connected_key; else COVERED by an earlier key -> same_account_as_earlier_key; else a later uncovered departed key -> same_account_as_later_key; else another counted departed key before it -> latest_key_on_account; else distinct_account.",
     "A departed key whose bound falls before its own first_returns_day counts for zero days: included false, until null, with the reason of its bound.",
+    "A departed key with anchored false (no saved balance to level it from) neither covers nor bounds any other key: it is left out of every other key's ordering, exactly as an excluded key is, so the account's chain re-forms around the keys the book can count. Its OWN decision is taken against the keys that can be levelled, with itself added, so included true / until on it name the days it would carry that no levelled key carries: the derive leaves it out under departed_history_unavailable and its card says its balance is not available (WR-R2-02).",
     "Neither implementation reads created_at."
   ],
   "cases": [
@@ -207,6 +209,44 @@
         {"id": "k-dep", "exchange": "binance", "venue_account_id": "acct-2", "disconnected_at": "not-a-timestamp", "sync_status": "complete", "history_inclusion": null, "first_returns_day": "2026-06-01", "last_returns_day": "2026-06-07"}
       ],
       "expected": {"k-dep": {"included": true, "until": "2026-06-07", "reason": "distinct_account"}}
+    },
+    {
+      "name": "21_an_unanchored_earlier_key_does_not_cover_the_later_key_it_would_have_carried",
+      "keys": [
+        {"id": "k-live", "exchange": "okx", "venue_account_id": "acct-other", "disconnected_at": null, "sync_status": "complete", "history_inclusion": null, "first_returns_day": "2026-01-01", "last_returns_day": "2026-04-30"},
+        {"id": "k-a", "exchange": "okx", "venue_account_id": "acct-9", "disconnected_at": "2026-03-01T12:00:00+00:00", "sync_status": "complete", "history_inclusion": null, "first_returns_day": "2026-01-01", "last_returns_day": "2026-03-01", "anchored": false},
+        {"id": "k-b", "exchange": "okx", "venue_account_id": "acct-9", "disconnected_at": "2026-02-15T12:00:00+00:00", "sync_status": "complete", "history_inclusion": null, "first_returns_day": "2026-02-01", "last_returns_day": "2026-02-15"}
+      ],
+      "expected": {
+        "k-a": {"included": true, "until": "2026-03-01", "reason": "distinct_account"},
+        "k-b": {"included": true, "until": "2026-02-15", "reason": "distinct_account"}
+      }
+    },
+    {
+      "name": "22_an_unanchored_later_key_does_not_cut_the_earlier_keys_tail",
+      "keys": [
+        {"id": "k-live", "exchange": "okx", "venue_account_id": "acct-other", "disconnected_at": null, "sync_status": "complete", "history_inclusion": null, "first_returns_day": "2026-01-01", "last_returns_day": "2026-04-30"},
+        {"id": "k-a", "exchange": "okx", "venue_account_id": "acct-9", "disconnected_at": "2026-03-01T12:00:00+00:00", "sync_status": "complete", "history_inclusion": null, "first_returns_day": "2026-01-01", "last_returns_day": "2026-03-01"},
+        {"id": "k-b", "exchange": "okx", "venue_account_id": "acct-9", "disconnected_at": "2026-04-01T12:00:00+00:00", "sync_status": "complete", "history_inclusion": null, "first_returns_day": "2026-02-01", "last_returns_day": "2026-04-01", "anchored": false}
+      ],
+      "expected": {
+        "k-a": {"included": true, "until": "2026-03-01", "reason": "distinct_account"},
+        "k-b": {"included": true, "until": "2026-04-01", "reason": "latest_key_on_account"}
+      }
+    },
+    {
+      "name": "23_the_chain_re_forms_around_an_unanchored_middle_key",
+      "keys": [
+        {"id": "k-live", "exchange": "okx", "venue_account_id": "acct-other", "disconnected_at": null, "sync_status": "complete", "history_inclusion": null, "first_returns_day": "2026-01-01", "last_returns_day": "2026-04-30"},
+        {"id": "k-a", "exchange": "okx", "venue_account_id": "acct-9", "disconnected_at": "2026-01-31T12:00:00+00:00", "sync_status": "complete", "history_inclusion": null, "first_returns_day": "2026-01-01", "last_returns_day": "2026-01-31"},
+        {"id": "k-b", "exchange": "okx", "venue_account_id": "acct-9", "disconnected_at": "2026-03-01T12:00:00+00:00", "sync_status": "complete", "history_inclusion": null, "first_returns_day": "2026-01-20", "last_returns_day": "2026-03-01", "anchored": false},
+        {"id": "k-c", "exchange": "okx", "venue_account_id": "acct-9", "disconnected_at": "2026-04-01T12:00:00+00:00", "sync_status": "complete", "history_inclusion": null, "first_returns_day": "2026-02-10", "last_returns_day": "2026-04-01"}
+      ],
+      "expected": {
+        "k-a": {"included": true, "until": "2026-01-31", "reason": "same_account_as_later_key"},
+        "k-b": {"included": true, "until": "2026-02-09", "reason": "same_account_as_later_key"},
+        "k-c": {"included": true, "until": "2026-04-01", "reason": "latest_key_on_account"}
+      }
     }
   ]
 }
