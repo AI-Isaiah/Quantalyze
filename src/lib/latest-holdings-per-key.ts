@@ -97,7 +97,7 @@ const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
  * The day a clean poll read the key on, or null when `metadata` is not one.
- * Clean means `final_status === "complete"`: a poll with warnings had a read
+ * Clean means `final_status` is exactly `complete`: a poll with warnings had a read
  * fail, so what it did not write proves nothing. An event without `asof`
  * predates the poll recording its day (C2 round 3, R3-WR-01), so nothing binds
  * it to a day and it is no evidence. `row_count` must be a whole number; it is
