@@ -2126,7 +2126,8 @@ async def _polled_empty_since(
         skipped: the poll ran across 00:00 UTC, so its event was created the
         day after the rows it wrote. Before round 3 it vetoed every later
         proof for up to ``_POLL_OUTCOME_READ_LIMIT`` polls. An event without
-        ``asof`` predates round 3 and keeps the ``created_at`` rule;
+        ``asof`` predates round 3: it keeps the ``created_at`` rule for the
+        veto below, and is never a candidate;
       * any with ``row_count > 0`` VETOES: rows were persisted after the latest
         ``asof`` this refresh read, so the account is not empty (the caller's
         re-read then counts them, SFH-R2-01);
@@ -2203,10 +2204,15 @@ async def _polled_empty_since(
             # the latest asof already covers. It ran across 00:00 UTC, so its
             # created_at passed the window prefilter; it neither vetoes nor
             # proves. An event without asof predates round 3 and keeps the
-            # created_at rule.
+            # created_at rule for the veto only (below).
             continue
         if row_count > 0:
             return False
+        if not isinstance(poll_asof, str):
+            # R3-WR-01: written before the poll recorded its rows' day, so
+            # nothing binds its emptiness to a day after latest_asof. It may
+            # veto (above), never prove.
+            continue
         if metadata.get("final_status") != "complete":
             continue
         created_at = _parse_utc_instant(event.get("created_at"))

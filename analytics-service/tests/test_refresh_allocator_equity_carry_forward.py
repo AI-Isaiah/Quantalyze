@@ -582,19 +582,21 @@ def _seed_poll_outcome(
     row_count: int = 0,
     action: str = "allocator.holdings.sync_completed",
     asof: date | None = None,
+    without_asof: bool = False,
 ) -> None:
     """The audit row a holdings poll of ``key_id`` wrote at ``at``.
-    ``final_status=None`` is the shape a poll wrote before round 2;
-    ``asof`` (the day the poll stamps its rows, round 3) is left out unless
-    given, which is the shape a poll wrote before round 3."""
+    ``final_status=None`` is the shape a poll wrote before round 2. ``asof``
+    (the day the poll stamped its rows, recorded since round 3) defaults to
+    ``at``'s UTC day, the production shape; ``without_asof=True`` is the shape
+    a poll wrote before round 3."""
     metadata: dict[str, Any] = {
         "row_count": row_count,
         "holding_type_counts": {"spot": row_count, "derivative": 0},
     }
     if final_status is not None:
         metadata["final_status"] = final_status
-    if asof is not None:
-        metadata["asof"] = asof.isoformat()
+    if not without_asof:
+        metadata["asof"] = (asof or at.astimezone(timezone.utc).date()).isoformat()
     event_id = f"audit-{key_id}-{at.isoformat()}-{action}"
     fake.store[("audit_log", (event_id,))] = {
         "id": event_id,
@@ -754,6 +756,7 @@ async def test_a_poll_landing_between_the_two_reads_is_counted_not_zeroed(
         pytest.param("poll_failed", id="the-poll-failed"),
         pytest.param("poll_wrote_rows", id="the-poll-wrote-rows"),
         pytest.param("pre_round_event", id="event-without-final-status"),
+        pytest.param("clean_event_without_asof", id="clean-empty-event-without-asof"),
         pytest.param("non_ccxt", id="mt5-writes-its-own-empty-marker"),
         pytest.param("no_live_read", id="clean-empty-poll-without-a-live-equity-read"),
         pytest.param("live_read_failed", id="live-equity-read-failed"),
@@ -783,7 +786,9 @@ async def test_account_without_proof_of_emptiness_is_carried(
     (a present anchor, or flow_drop, which is stamped only above the dust
     floor), and a read older than the poll all keep the carry. A Deribit poll
     never proves emptiness: it skips spot before any network call, so zero
-    rows means no open positions, not no collateral."""
+    rows means no open positions, not no collateral. A clean, empty event
+    without asof (written before round 3, R3-WR-01) never proves either:
+    nothing binds its emptiness to a day after the latest rows."""
     fake = FakeSupabaseClient()
     key: dict[str, Any] = {}
     if case == "non_ccxt":
@@ -822,7 +827,11 @@ async def test_account_without_proof_of_emptiness_is_carried(
     elif case == "poll_wrote_rows":
         _seed_poll_outcome(fake, API_KEY_ID_2, today_poll, row_count=3)
     elif case == "pre_round_event":
-        _seed_poll_outcome(fake, API_KEY_ID_2, today_poll, final_status=None)
+        _seed_poll_outcome(
+            fake, API_KEY_ID_2, today_poll, final_status=None, without_asof=True
+        )
+    elif case == "clean_event_without_asof":
+        _seed_poll_outcome(fake, API_KEY_ID_2, today_poll, without_asof=True)
     elif case != "no_poll_outcome":
         _seed_poll_outcome(fake, API_KEY_ID_2, today_poll)
     if not case.startswith(("live_read_", "no_live_read", "deribit")):
@@ -1158,12 +1167,14 @@ async def test_events_without_asof_keep_the_created_at_rule(
     """An event written before round 3 has no asof, so its rows' day is
     unknown: it keeps round 2's created_at rule, and a row_count > 0 event
     created after the latest day still vetoes (no proof, the account is
-    carried). An event WITH an asof after the latest day vetoes as before."""
+    carried). An event WITH an asof after the latest day vetoes as before.
+    Such an event never PROVES either: see the clean-empty-event-without-asof
+    arm of test_account_without_proof_of_emptiness_is_carried."""
     fake = FakeSupabaseClient()
     _seed_emptied_candidate(fake)
     rows_event_at = _at(TODAY - timedelta(days=2), hour=0)
     if case == "legacy_rows_event":
-        _seed_poll_outcome(fake, API_KEY_ID_2, rows_event_at, row_count=1)
+        _seed_poll_outcome(fake, API_KEY_ID_2, rows_event_at, row_count=1, without_asof=True)
     else:
         _seed_poll_outcome(
             fake, API_KEY_ID_2, rows_event_at, row_count=1, asof=TODAY - timedelta(days=2)
