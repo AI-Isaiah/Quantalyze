@@ -17216,6 +17216,14 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     held_back:
       "We are holding back your book's own history, so the comparison with your current book is not shown.",
   } as const;
+  // Review C3 round 3 WR-01: the Overview heading per class, written out
+  // literally for the same reason as the class table above.
+  const OVERVIEW_HEADING_BY_CLASS = {
+    rebuilding: "Your equity history is being rebuilt",
+    read_failed: "Your equity history is being rebuilt",
+    needs_action: "Your equity history is being rebuilt",
+    held_back: "We are holding back your equity history",
+  } as const;
   const EXCHANGES_HREF = "/profile?tab=exchanges";
 
   it.each(REASON_CLASSES)(
@@ -17261,11 +17269,22 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
 
       // Review C3 round 2 WR-02: the Scenario says "being rebuilt" exactly
       // when the Overview's own reason line names the daily run that retries
-      // it. The panel's heading and body are the same for every reason and
-      // name no daily run, so the match comes from the reason line alone.
+      // it. The panel's body is the same for every reason, and no heading
+      // names a daily run, so the match comes from the reason line alone.
       const rebuilding = reasonClass === "rebuilding";
       expect(/being rebuilt/.test(scenario.textContent ?? "")).toBe(rebuilding);
       expect(/\bdaily\b|once a day/i.test(overview.textContent ?? "")).toBe(rebuilding);
+
+      // Review C3 round 3 WR-01: the Overview heading follows the same class.
+      // For a held_back reason the heading and the Scenario both say the
+      // history is held back, and neither says "being rebuilt"; every other
+      // class keeps the "being rebuilt" heading.
+      const heading = within(overview).getByRole("heading", { level: 2 });
+      expect(heading.textContent).toBe(OVERVIEW_HEADING_BY_CLASS[reasonClass]);
+      const heldBack = reasonClass === "held_back";
+      expect(/holding back/.test(heading.textContent ?? "")).toBe(heldBack);
+      expect(/holding back/.test(scenario.textContent ?? "")).toBe(heldBack);
+      expect(/being rebuilt/.test(heading.textContent ?? "")).toBe(!heldBack);
     },
   );
 

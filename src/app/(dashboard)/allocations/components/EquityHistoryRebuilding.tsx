@@ -69,6 +69,10 @@ const HEADING_ID = "overview-equity-rebuilding-heading";
  *   so your history is not shown"). Nothing here is a wait (C2 SFH-05 /
  *   SFH-06 and R3-WR-03, see the lines' own comments), so the Scenario says
  *   the history is held back, never that it is being rebuilt.
+ *
+ * The Overview heading follows the same class (review C3 round 3 WR-01,
+ * `HEADING_BY_CLASS` below), so for a `held_back` reason the heading says the
+ * history is held back, as the Scenario does, and never "being rebuilt".
  */
 const REBUILD_REASON_CLASS = {
   duplicate_account: "needs_action",
@@ -117,6 +121,20 @@ export function equityHistoryRebuildClass(
   }
   return REBUILD_REASON_CLASS[reason];
 }
+
+/**
+ * Review C3 round 3 WR-01. The Overview heading, by class. Only `held_back`
+ * differs: its reason lines name no run that retries it, so the heading
+ * mirrors the Scenario's "We are holding back your book's own history" and
+ * promises no wait. Every other class keeps the "being rebuilt" heading. Keyed
+ * by every class, so a class added to the table above fails to compile here.
+ */
+const HEADING_BY_CLASS: Record<EquityHistoryRebuildClass, string> = {
+  needs_action: "Your equity history is being rebuilt",
+  read_failed: "Your equity history is being rebuilt",
+  rebuilding: "Your equity history is being rebuilt",
+  held_back: "We are holding back your equity history",
+};
 
 function isNeedsActionReason(
   reason: EquityHistoryRebuildReason,
@@ -272,7 +290,7 @@ export function EquityHistoryRebuilding({
         id={HEADING_ID}
         className="mt-3 text-h3 font-semibold text-text-primary"
       >
-        Your equity history is being rebuilt
+        {HEADING_BY_CLASS[equityHistoryRebuildClass(knownReason)]}
       </h2>
       <p className="mt-2 max-w-prose text-sm text-text-secondary">
         The equity chart and the ratios built from it are hidden for now. The
