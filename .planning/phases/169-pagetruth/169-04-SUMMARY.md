@@ -26,10 +26,13 @@ key-files:
     - src/lib/factsheet/__snapshots__/build-payload.test.ts.snap
     - src/app/factsheet/[id]/v2/FactsheetView.tsx
     - src/app/factsheet/[id]/v2/FactsheetView.chip-honesty.test.tsx
-decisions:
+key-decisions:
   - "The chip prints the series end's age as whole elapsed UTC days (Math.floor), not Math.round: the series end is a UTC date, and rounding would call a bar dated 120 days ago 121d every afternoon UTC"
   - "An UNKNOWN series end under the Track record subject prints the em dash on the date line (never the compute date); the compute date keeps its labelled Computed line"
   - "chip-honesty C-12 pinned the pre-D-16 contract and was rewritten to D-16 (the plan file owns that test)"
+patterns-established:
+  - "a return window is shown only when the record covers it; multi-year windows are calendar days, never an observation count"
+requirements-completed: [SC5, SC6, SC9]
 metrics:
   duration: "~14 min"
   completed: 2026-09-29
@@ -50,6 +53,12 @@ plan_head_after: be5af7d09ba6bf10425eb18a5239d160367620d6
 **Task 1 (tracer), commit `d2b01a494`.** In `compute()` a single internal helper `windowReturn(cutoff)` returns null when the first observation date is after `cutoff` plus one UTC day, and otherwise the existing `compoundFrom(cutoff)` value. `mtd`, `ytd`, `p3m`, `p6m` and `p1y` all route through it, and `p3y` / `p5y` are added with cutoffs `offsetDays(3 * 365)` / `offsetDays(5 * 365)`. The comment states the rule once and cites D-11. `years` is untouched. In `types.ts` the five windows are `number | null`, and `p3y?` / `p5y?` are optional so the 167.1.2 hand-built summary (`emptyComputeSummary`, named `zeroedComputeSummary` in the plan) compiles unedited (D-21). The `ComparatorBlock.summary` Pick is unchanged. `tsc` flagged no reader. `pct()` in MetricsColumn already renders null as "—".
 
 **Task 2, commit `be5af7d09`.** In `FreshnessChip`, on the series-binding arm the date line is `seriesEnd?.formatted ?? "—"` followed by the series age in whole days. The age reuses the `seriesAgeDays` value the tone was bucketed from, hoisted into a variable. A `<p>` line reading "Computed <compute date>" follows it (`mt-0.5 text-caption font-mono tabular-nums text-text-muted`, which is DESIGN.md's muted timestamp tier in the mono data voice). The line is rendered second, so the existing `querySelector("p")` readers still find the date line first. The job-binding arm renders byte-identically to before. The docblock now says the date line always belongs to the subject. No threshold, tone or formatter was added.
+
+## Task Commits
+
+1. **Task 1 (tracer): one calendar coverage rule plus p3y / p5y.** Commit `d2b01a494` (fix). The tests, implementation and snapshot are in one commit. The tracer gate re-ran the task's verify end-to-end after that commit and it was green.
+2. **Task 2: the chip's date line states its subject's fact.** Commit `be5af7d09` (fix). The tests and implementation are in one commit; see deviation 4.
+3. **SUMMARY:** `c9dd1a099` (docs), plus the follow-up docs commit that adds this section.
 
 ## Verification (exact output, run by the executor)
 
@@ -120,10 +129,27 @@ One note on the composite export: its `strategyMetrics.cum_ret` is the persisted
 - **Fix:** The series age uses `Math.floor` (whole elapsed UTC days). The compute arm keeps `Math.round` unchanged.
 - **Commit:** `be5af7d09`
 
+**4. [Process] Task 2 (`tdd="true"`): the RED tests and the GREEN implementation share one commit**
+- **Found during:** post-execution check against `references/tdd.md`. The reference's task-level cycle asks for a separate `test(...)` RED commit, and its gate rule 3 says to flag a missing one in the SUMMARY.
+- **What happened:** the failing tests were written first and run on the pre-change code, and the RED result is recorded under "SC9 neuter evidence" above (5 failed, including the rewritten C-12 and D16-1). They were then committed together with the fix in `be5af7d09`. History was not rewritten to split them.
+- **Why it is acceptable here:** this plan is `type: execute`, not `type: tdd`, so the plan-level RED-commit gate does not apply. The RED evidence and a separate neuter RED are both on record. Task 1 followed the same shape.
+
 ### Anchor drift, not a deviation
 - The plan names the 167.1.2 hand-built summary `zeroedComputeSummary`. At HEAD it is `emptyComputeSummary` in `scenario-factsheet-payload.ts`. It compiles unedited, which is D-21's point.
 - The worktree's `node_modules` symlink was pre-created by the orchestrator. It points at a sibling worktree's `node_modules`, not the main checkout's. `require.resolve('vitest')` resolved, so it was kept. It was removed before each commit and re-created afterwards, and never staged.
 - The generic executor's `agent-*` branch allow-list was not applied, because the orchestrator assigned `feat/169-w1-04`. The protected-branch check was applied before both commits.
+
+## Issues Encountered
+
+- A full-suite flake in `src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts` is recorded under Verification. `deferred-items.md` was deliberately not created, because the sibling wave-1 plans write to the same phase directory concurrently and a shared new file would conflict at merge. This SUMMARY entry is the record.
+
+## User Setup Required
+
+None.
+
+## Next Phase Readiness
+
+Plan 169-05 can now read `p6m`, `p1y`, `p3y` and `p5y` as null for a short record and omit those rows (D-17, D-57). It should hide on `== null` so that an ABSENT `p3y` / `p5y` in a hand-built summary is also hidden.
 
 ## Known Stubs
 
