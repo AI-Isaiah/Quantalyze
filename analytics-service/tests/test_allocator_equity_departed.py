@@ -322,3 +322,125 @@ async def test_a_departed_key_whose_inputs_are_gone_is_left_out_and_the_book_sta
     curve = _curve(payload)
     for day in DAYS:
         assert curve[day] == pytest.approx(_live_level(day), rel=1e-12), day
+
+
+# ── Task 2: the D-09 rule, ONE spec for Python and TypeScript ─────────────────
+
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "departed_history_inclusion.json"
+FIXTURE = json.loads(FIXTURE_PATH.read_text())
+CASES = FIXTURE["cases"]
+
+
+def test_the_fixture_carries_the_plan_rows() -> None:
+    """At least the nine rows of the plan, including two DEPARTED keys that share
+    a known account (B4)."""
+    assert len(CASES) >= 9
+    names = {case["name"] for case in CASES}
+    assert "03_two_departed_keys_on_one_account_never_count_on_the_same_day" in names
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
+def test_python_rule_matches_every_fixture_row(case: dict[str, Any]) -> None:
+    from services.job_worker import departed_history_inclusion
+
+    decisions = departed_history_inclusion(case["keys"])
+    actual = {
+        key_id: {"included": d.included, "until": d.until, "reason": d.reason}
+        for key_id, d in decisions.items()
+    }
+    assert actual == case["expected"]
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
+def test_no_two_counted_keys_share_a_known_account_on_any_day(case: dict[str, Any]) -> None:
+    """B4 over the history set the rule builds: every live key from its first
+    returns day, every included departed key over the days it counts."""
+    from services.job_worker import (
+        account_identity_collisions,
+        account_identity_tokens,
+        departed_history_inclusion,
+    )
+
+    keys = case["keys"]
+    tokens = account_identity_tokens(keys)
+    decisions = departed_history_inclusion(keys)
+    counted = [
+        {
+            "id": key["id"],
+            "exchange": "account",
+            "venue_account_id": tokens[key["id"]],
+            "first_counted_day": key["first_returns_day"],
+            "last_counted_day": None,
+        }
+        for key in keys
+        if key["id"] not in decisions
+    ] + [
+        {
+            "id": key_id,
+            "exchange": "account",
+            "venue_account_id": tokens[key_id],
+            "first_counted_day": next(k for k in keys if k["id"] == key_id)["first_returns_day"],
+            "last_counted_day": d.until,
+        }
+        for key_id, d in decisions.items()
+        if d.included
+    ]
+    assert account_identity_collisions(counted) == []
+
+
+def _fixture_supabase(case: dict[str, Any]) -> _FakeSupabase:
+    """Every key of the case as an api_keys row, dense daily returns from its first
+    to its last returns day, and a key_inputs row with an anchor, so the job has
+    everything it needs to compose."""
+    api_keys = []
+    csv: list[dict[str, Any]] = []
+    derived = []
+    for key in case["keys"]:
+        row = _gate_key(key["id"], ALLOC)
+        row.update({k: v for k, v in key.items() if not k.endswith("_returns_day")})
+        api_keys.append(row)
+        first, last = key["first_returns_day"], key["last_returns_day"]
+        if first and last:
+            days = [
+                d.date().isoformat()
+                for d in pd.date_range(first, last, freq="D")
+            ]
+            csv += _csv(key["id"], days, 0.001)
+        derived.append(_key_inputs(key["id"], 1_000.0, last or "2026-06-30"))
+    return _FakeSupabase({
+        "api_keys": api_keys,
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: derived,
+        LEGACY_TABLE: [],
+    })
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
+async def test_the_job_passes_the_rules_end_days_to_the_compose(case: dict[str, Any]) -> None:
+    """The job's history set and each departed key's clip day are the fixture's."""
+    import services.allocator_equity_compose as compose_module
+
+    captured: dict[str, Any] = {}
+    real = compose_module.compose_allocator_equity
+
+    def _spy(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        captured["departed_end_by_key"] = dict(kwargs.get("departed_end_by_key") or {})
+        captured["returns_keys"] = set(args[0])
+        return real(*args, **kwargs)
+
+    fake = _fixture_supabase(case)
+    with patch.object(compose_module, "compose_allocator_equity", _spy):
+        result = await _run(fake)
+    assert result.outcome.name == "DONE"
+    expected_end = {
+        key_id: row["until"]
+        for key_id, row in case["expected"].items()
+        if row["included"]
+    }
+    assert captured.get("departed_end_by_key", {}) == expected_end
+    departed = set(case["expected"])
+    assert captured["returns_keys"] & departed == set(expected_end)
