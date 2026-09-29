@@ -303,7 +303,9 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
               </tr>
             ) : null}
             {/* Renders on the untrusted COUNT, not the amount (D-07): an
-                untrusted row with a null P&L is summed as 0 and still says so.
+                untrusted row with a null P&L still opens it,
+                and a part with no P&L reported names its count, never
+                "$0.00" (169 review round 2, IN-R2-05).
                 Muted, sentence case, no role (D-09). Its own row, so the
                 uppercase label cell above is not overridden. Review round 2
                 WR-05: an unknown-status row opens it too, as its own part. */}

@@ -124,6 +124,11 @@ asserts that the same start on an every-calendar-day record is `null` at 252.
 **Known limits.**
 - A 24/7 venue whose CSV omits every weekend is treated as a weekday venue. The record really has no
   weekend observations, so no traded day in it is missed.
+- A weekday FX/CFD strategy whose MT5 broker prints a Sunday (or Saturday) bar has a weekend date,
+  so it loses the WR-02 tolerance. For that population the original WR-02 symptom comes back: a
+  launch on 2 January reads YTD as "—" all year. The SFH named this (R2-7). It fails safe (the
+  em-dash, never a wrong number), and the brief accepted it: "a series with any weekend date gets
+  the strict rule even at 252". The size of the population is UNMEASURED.
 - Every other limit from T2 still holds: any other holiday gives the em-dash.
 
 **Population query not run.** The review suggested measuring the published non-crypto strategies

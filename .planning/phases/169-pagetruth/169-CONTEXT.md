@@ -187,6 +187,9 @@ call the research left to the plan.
   proves the venue trades weekends; a record too short to span a weekend proves nothing. Both get the
   strict "C plus one day" rule whatever the basis, so a weekday-only record on the 365 basis now
   shows the same window as on 252, and a weekend-bearing record on 252 no longer gets the tolerance.
+  Accepted trade-off: a weekday FX/CFD strategy whose MT5 broker prints a Sunday or Saturday bar
+  loses the tolerance and reads the em-dash (for example YTD for a 2 January launch). It fails safe,
+  and the size of that population is unmeasured.
   Implemented in `compute.ts`; the tests and neuters are in `169-REVIEW-FIX-T6.md` WR-R2-01.
 - **Reversibility:** reversible.
 
