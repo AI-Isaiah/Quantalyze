@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import type { JointMetrics } from "@/lib/factsheet/types";
+import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { usePayload, useActiveComparator } from "./factsheet-context";
 import { useBasisSeriesView } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel } from "./AnalyticalPanels";
@@ -63,6 +64,10 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
     payload.periodsPerYear > 0
       ? payload.periodsPerYear
       : undefined;
+  // Phase 169 D-12 / D-25 (SC5): the record length is stated one way, from the
+  // calendar years compute() reports, at Years Observed and in the warning below.
+  // Dividing the observation count by the basis read a sparse record short.
+  const recordLength = formatRecordLength({ n: m.n, years: m.years });
 
   return (
     <aside className="flex flex-col gap-12">
@@ -72,17 +77,19 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
           <Kpm>
             <Row label="Start Date" value={isoToMonthDay(m.start)} bench="" />
             <Row label="End Date" value={isoToMonthDay(m.end)} bench="" />
-            <Row label="Years Observed" value={m.years.toFixed(2)} bench="" />
+            <Row label="Years Observed" value={recordLength.years} bench="" />
           </Kpm>
         </Panel>
         <Panel title="Main Metrics" benchHeader={bn}>
           {/* Phase 167.1.2 plan 07 (SC-5b): one year is the payload's own
               annualisation basis (365 crypto / the book's blend basis), not a
               fixed trading-day count. A payload with no basis shows no warning:
-              assuming one is the defect this replaced. */}
+              assuming one is the defect this replaced. The basis sets only the
+              threshold; the stated length is calendar years (Phase 169 D-12,
+              D-51). */}
           {obsPerYear != null && m.n < obsPerYear && (
             <p className="mb-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
-              ⚠ Only {m.n} observations ({(m.n / obsPerYear).toFixed(2)}y) — Sharpe / Sortino / Calmar below
+              ⚠ Only {m.n} observations ({recordLength.years}y) — Sharpe / Sortino / Calmar below
               have wide statistical confidence intervals. Conventional reliability threshold is
               ≥ {obsPerYear} observations (1 year).
             </p>
