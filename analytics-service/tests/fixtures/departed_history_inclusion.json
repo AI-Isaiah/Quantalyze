@@ -20,7 +20,7 @@
     "Account identity: the same non-blank (exchange, venue_account_id), or a marker link, is one account. Neither means the account is unknown.",
     "Unknown account: excluded by default (account_unknown, founder-confirmed 2026-09-25); 'include' counts it to its end day (owner_included).",
     "Known account: every LIVE key on it bounds the departed key to the day before that live key's first_returns_day (a live key with no returns yet bounds it to nothing). The COUNTED departed keys on it (not excluded, with returns) are ordered by (first_returns_day, last_returns_day, id). A key whose last countable day (min(end day, last_returns_day)) is BEFORE the last countable day of a key ordered ahead of it is COVERED: that earlier key reads the account over every one of its days, so it counts zero days and bounds nothing (a later key that ends first must never cut the earlier key's tail, which would count those days nowhere). Every other counted departed key is bounded to the day before the next uncovered key's first_returns_day. 'include' never lifts these bounds.",
-    "Reason for a known account: a live key on it -> same_account_as_connected_key; else COVERED by an earlier key -> same_account_as_earlier_key; else a later uncovered departed key -> same_account_as_later_key; else another counted departed key before it -> latest_key_on_account; else distinct_account.",
+    "Reason for a known account: a live key on it with no returns yet -> same_account_as_connected_key_pending (it is decided again once that key has returns); else a live key on it -> same_account_as_connected_key; else COVERED by an earlier key -> same_account_as_earlier_key; else a later uncovered departed key -> same_account_as_later_key; else another counted departed key before it -> latest_key_on_account; else distinct_account.",
     "A departed key whose bound falls before its own first_returns_day counts for zero days: included false, until null, with the reason of its bound.",
     "Neither implementation reads created_at."
   ],
@@ -140,7 +140,7 @@
         {"id": "k-live", "exchange": "okx", "venue_account_id": "acct-1", "disconnected_at": null, "sync_status": null, "history_inclusion": null, "first_returns_day": null, "last_returns_day": null},
         {"id": "k-dep", "exchange": "okx", "venue_account_id": "acct-1", "disconnected_at": "2026-06-10T00:00:00+00:00", "sync_status": "complete", "history_inclusion": null, "first_returns_day": "2026-06-01", "last_returns_day": "2026-06-10"}
       ],
-      "expected": {"k-dep": {"included": false, "until": null, "reason": "same_account_as_connected_key"}}
+      "expected": {"k-dep": {"included": false, "until": null, "reason": "same_account_as_connected_key_pending"}}
     },
     {
       "name": "14_a_revoked_key_ends_on_its_last_returns_day",

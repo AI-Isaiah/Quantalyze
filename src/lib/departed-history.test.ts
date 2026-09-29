@@ -15,6 +15,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   departedHistoryInclusion,
+  departedHistorySentence,
   isDepartedKey,
   type DepartedHistoryKey,
   type DepartedHistoryDecision,
@@ -68,6 +69,33 @@ describe("departedHistoryInclusion — the shared D-09 spec", () => {
     const dep = withCreated.find((k) => k.id === "k-dep")!;
     expect(departedHistoryInclusion(dep, withCreated)).toEqual(
       base.expected["k-dep"],
+    );
+  });
+});
+
+describe("departedHistorySentence — the card never states a false reason", () => {
+  function decisionFor(caseName: string, keyId: string): DepartedHistoryDecision {
+    const c = spec.cases.find((row) => row.name.startsWith(caseName))!;
+    return departedHistoryInclusion(c.keys.find((k) => k.id === keyId)!, c.keys);
+  }
+
+  it("WR-04: a connected key with no history yet is not said to read these days", () => {
+    // Rotation: the new key on the same account has no daily returns yet, so it
+    // reads none of the departed key's days. Saying it does tells the owner a
+    // falsehood about why their history vanished.
+    const line = departedHistorySentence(
+      decisionFor("13_", "k-dep"),
+      true,
+    );
+    expect(line).not.toContain("over these days");
+    expect(line).toBe(
+      "History not included yet: a key you still have connected reads the same exchange account and has no history yet. Once it has, this key counts for the days before that key's history starts.",
+    );
+  });
+
+  it("SFH-C4-07: a covered key names the earlier key that counts its days", () => {
+    expect(departedHistorySentence(decisionFor("18_", "k-b"), true)).toBe(
+      "History not included: an earlier key read the same exchange account over all of these days.",
     );
   });
 });

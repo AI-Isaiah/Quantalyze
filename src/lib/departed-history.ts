@@ -35,6 +35,7 @@ export interface DepartedHistoryKey {
 export type DepartedHistoryReason =
   | "distinct_account"
   | "same_account_as_connected_key"
+  | "same_account_as_connected_key_pending"
   | "same_account_as_later_key"
   | "same_account_as_earlier_key"
   | "latest_key_on_account"
@@ -236,8 +237,11 @@ export function departedHistoryInclusion(
   if (successor !== null) bounds.push(dayBefore(successor[0]));
   const countedUntil = bounds.reduce((a, b) => (b < a ? b : a));
 
-  const reason: DepartedHistoryReason =
-    liveFirsts.length > 0
+  // WR-04: a live key on this account with no returns yet reads none of these
+  // days today; the decision is made again once it has returns.
+  const reason: DepartedHistoryReason = liveFirsts.includes(BEFORE_EVERY_DAY)
+    ? "same_account_as_connected_key_pending"
+    : liveFirsts.length > 0
       ? "same_account_as_connected_key"
       : isCovered
         ? "same_account_as_earlier_key"
@@ -282,6 +286,8 @@ export function departedHistorySentence(
       return "History not included: you excluded it.";
     case "same_account_as_connected_key":
       return "History not included: a key you still have connected reads the same exchange account over these days.";
+    case "same_account_as_connected_key_pending":
+      return "History not included yet: a key you still have connected reads the same exchange account and has no history yet. Once it has, this key counts for the days before that key's history starts.";
     case "same_account_as_later_key":
       return "History not included: a later key read the same exchange account over these days.";
     case "same_account_as_earlier_key":

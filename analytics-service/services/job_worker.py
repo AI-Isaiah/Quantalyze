@@ -10599,7 +10599,8 @@ def departed_history_inclusion(
     * Unknown account (``account_identity_tokens`` None): excluded by default
       (founder-confirmed 2026-09-25); 'include' counts it to its end day.
     * Known account: a LIVE key on it bounds the departed key to the day before
-      the live key's first returns day. The COUNTED departed keys on it (not
+      the live key's first returns day. A live key with no returns yet bounds it to
+      no day at all, under its own reason (WR-04), until that key has returns. The COUNTED departed keys on it (not
       excluded, with returns) are ordered by (first, last, id). A key whose last
       countable day is before that of a key ordered ahead of it is COVERED (that
       key reads the account over all its days): it counts zero days and bounds
@@ -10705,7 +10706,12 @@ def departed_history_inclusion(
             successor = None
         if successor is not None:
             bounds.append(_day_before(successor[0]))
-        if live_firsts:
+        if _BEFORE_EVERY_DAY in live_firsts:
+            # WR-04: the live key on this account has no returns yet (a
+            # rotation still building its history), so it reads none of these
+            # days today; the decision is made again once it has returns.
+            reason = "same_account_as_connected_key_pending"
+        elif live_firsts:
             reason = "same_account_as_connected_key"
         elif key_id in covered:
             reason = "same_account_as_earlier_key"
