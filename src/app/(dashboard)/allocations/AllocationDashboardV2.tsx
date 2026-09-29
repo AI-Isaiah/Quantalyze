@@ -234,10 +234,24 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
 
 /**
  * The Overview's warm-up note, shown when there is too little history to build
- * factsheet panels from. It renders in ONE place, the "ready" branch before two
- * days have accrued: there the curve is shown and short, and more days do build
- * the panels, so its timer is true. Phase 167.1.2 / D-15: it never renders while
- * the history is rebuilding, where no number of days changes the state.
+ * factsheet panels from. It renders in ONE place, the "ready" branch, when the
+ * factsheet builder refuses the book's returns. Phase 167.1.2 / D-15: it never
+ * renders while the history is rebuilding, where no number of days changes the
+ * state.
+ *
+ * Review C3 WR-01: the day count in the copy is derived, not chosen. The
+ * builder needs two returns (`dailyReturns.length < 2` returns null in
+ * `buildAllocatorPortfolioFactsheetPayload`, src/lib/factsheet/
+ * allocator-portfolio-payload.ts; the threshold is an inline literal there,
+ * not an export). The writer emits one return per curve day after the first
+ * (`allocator_equity_compose.py::portfolio_returns`, `range(1, len(union))`),
+ * and "ready" needs at least one return. So in practice the note shows beside
+ * a two-day curve with one return, and the panels need three curve days.
+ * Known limit: a day the writer skips (no weight, or a non-finite value) adds
+ * no return, so the panels can need more than three days. "At least" stays
+ * true then; the promise is a floor, never an early date.
+ * `AllocationDashboardV2.warmup.test.tsx` measures the count against the real
+ * builder, so a change to its threshold fails there.
  */
 function FactsheetWarmupNote({ snapshotCount }: { snapshotCount: number }) {
   return (
@@ -250,7 +264,7 @@ function FactsheetWarmupNote({ snapshotCount }: { snapshotCount: number }) {
         Portfolio factsheet
       </p>
       <p className="mt-3 text-sm text-text-secondary">
-        Aggregated factsheet panels appear once at least two days of
+        Aggregated factsheet panels appear once at least three days of
         blended equity history are available. The data flows from
         the API keys you connect on the My Allocation page.
       </p>
