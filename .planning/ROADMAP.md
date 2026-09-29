@@ -3825,6 +3825,8 @@ Plans:
 
 **D-15 amended 2026-09-29 (PR C3 review fix A; recorded in 167.1.2-CONTEXT.md):** the ready-branch warm-up note now promises panels after three days of blended history, not two (the factsheet builder needs 2 returns, and N days give N-1), and counts the days of the curve on screen. The Scenario sentence and the Overview heading follow one four-class reason classifier (C3 fixes B, G, I).
 
+**D-09 case (2) amended 2026-09-29 (PR C4 review rounds 1 and 2, SFH-C4-07 and WR-R2-02; recorded in 167.1.2-CONTEXT.md):** a departed key whose last countable day falls before that of a key ordered ahead of it on the same known account is covered (zero days, reason `same_account_as_earlier_key`), so every day of the account is counted exactly once; and a departed key with no usable saved balance neither covers nor bounds any other key, so a dropped key never leaves a gap another key would have filled.
+
 **Goal:** An allocator's book counts each exchange ACCOUNT exactly once, and "My Allocation" never shows an equity curve, return or ratio that the data does not support. A second key on an account that is already connected is refused. The equity history is rebuilt as one series per account from per-key returns and flows, and hidden until that series exists.
 **Requirements**: TBD. Source: founder browser UAT 2026-09-24 on the founder's own allocator book ("completely wrong, obviously"), with a read-only root-cause trace at `96b5db4c`.
 **Depends on:** Phase 167.1
