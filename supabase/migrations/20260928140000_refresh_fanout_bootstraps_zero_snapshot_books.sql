@@ -133,11 +133,13 @@
 -- retries it on the next run.
 -- ⚠️ RESIDUALS, recorded and not fixed here (one class with plan 12's R-12-1
 -- and plan 13's R-13-1, "no durable per-key history-reconstructed marker",
--- UNROUTED, founder decision):
+-- routed to Phase 167.1.2.1 RECONMARKER by founder decision D-20):
 --   * the hold sees only a reconstruct IN FLIGHT. If the same-run reconstruct
 --     reaches failed_final BEFORE the refresh is claimed (a permanent failure
---     early in the job, with both jobs claimed at once), the refresh sees no
---     in-flight row and writes the first row, and the key is stranded;
+--     early in the job; claim order within one fan-out burst is by random
+--     uuid, 5 per batch, so the window is up to the burst's drain time), the
+--     refresh sees no in-flight row, writes the first row, and the key is
+--     stranded;
 --   * on a book with TWO qualifying keys, one key's reconstruct can end done
 --     and write rows while the other's ends failed_final. The book then has
 --     snapshots and the failed key is never bootstrapped again.
