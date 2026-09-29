@@ -862,6 +862,9 @@ function pruneLeverageToDraftRefs(
 // ScenarioComposer
 // ---------------------------------------------------------------------------
 
+/** A stable empty own-book return series (a fresh `[]` would defeat the memo). */
+const NO_OWN_BOOK_RETURNS: MyAllocationDashboardPayload["equityDailyReturns"] = [];
+
 export function ScenarioComposer({
   payload,
   allocatorId,
@@ -890,6 +893,10 @@ export function ScenarioComposer({
     activeVenues,
     // Phase 167.1.2 / D-02: read below as fail-closed, matching the Overview.
     equityHistoryState,
+    // Phase 167.1.2 plan 11 (D-06): the book's persisted flow-neutral returns,
+    // the ONE source of the own-book delta below. A payload without the field
+    // reads as no returns.
+    equityDailyReturns = NO_OWN_BOOK_RETURNS,
   } = payload as MyAllocationDashboardPayload & {
     existingOutcomesByHoldingRef?: Record<string, unknown>;
   };
@@ -989,9 +996,10 @@ export function ScenarioComposer({
   // baseline, so blank mode just reproduces that already-handled state.
   //
   // Phase 167.1.2 / D-02 ("Hide it until correct"): the same switch withholds
-  // the own-book series while the equity history is rebuilt, which also leaves
-  // `scenarioOwnBookDelta` undefined (it needs >= 2 levels). The live-book KPIs
-  // (`liveBaselineMetrics`) are a separate field and stay (D-03).
+  // the own-book series and its returns while the equity history is rebuilt,
+  // which also leaves `scenarioOwnBookDelta` undefined (it needs >= 2 returns).
+  // The live-book KPIs (`liveBaselineMetrics`) are a separate field and stay
+  // (D-03).
   const isBlankMode = entryMode === "blank";
   // Fail-closed: ONLY an explicit "ready" may show the own-book series. A
   // missing field, null, "" or any later state all read as rebuilding.
@@ -1000,6 +1008,11 @@ export function ScenarioComposer({
     () => (isBlankMode || isOwnBookRebuilding ? [] : equityDailyPoints),
     [isBlankMode, isOwnBookRebuilding, equityDailyPoints],
   ) as typeof equityDailyPoints;
+  // The same switch gates the returns the own-book delta reads (plan 11).
+  const baselineEquityDailyReturns = useMemo(
+    () => (isBlankMode || isOwnBookRebuilding ? [] : equityDailyReturns),
+    [isBlankMode, isOwnBookRebuilding, equityDailyReturns],
+  );
 
   const scenario = useScenarioState({
     holdingsSummary: holdingsSummary as { symbol: string; venue: string; holding_type: string; value_usd: number }[],
@@ -3866,27 +3879,24 @@ export function ScenarioComposer({
   // PEER-05 (Phase 42) — the blend-vs-live-book signed delta on the sample basis
   // at the blend's periodsPerYear (like-for-like legs; #597 BLEND-01). The
   // own-book leg recomputes the live book's Sharpe/Sortino/maxDD via
-  // `sampleBasisRatios` on the OWN-BOOK DAILY RETURNS — derived here from
-  // `baselineEquityDailyPoints` (absolute-USD equity LEVELS: value[i]/value[i-1]
-  // − 1), NOT `liveBaselineMetrics` (a different/population basis). BLEND-01: the
-  // book leg is annualized at the SAME `blendBasis` the engine used for the blend
+  // `sampleBasisRatios` on the OWN-BOOK DAILY RETURNS — the payload's persisted
+  // flow-neutral returns (`baselineEquityDailyReturns`, Phase 167.1.2 plan 11,
+  // D-06). They used to be level ratios of the $-curve (value[i]/value[i-1] − 1),
+  // which read a deposit or a withdrawal as a return. NOT `liveBaselineMetrics`
+  // (a different/population basis). BLEND-01: the book leg is annualized at the
+  // SAME `blendBasis` the engine used for the blend
   // leg (`scenarioMetrics`), so the delta stays like-for-like in BASIS at 365 as
   // well as 252 — a crypto book's blend and own-book legs both ride √365. Each
   // delta = blend − book; null when a leg is null. `null` (→ undefined) when
   // there is no live book series (blank mode or a no-book allocator) so the panel
   // is silently absent. Keyed on the engine output + the own-book series + basis.
   const scenarioOwnBookDelta = useMemo<OwnBookDeltaPayload | undefined>(() => {
-    const levels = baselineEquityDailyPoints;
-    // Need ≥ 2 dated levels to derive at least one daily return. No book → absent.
-    if (!levels || levels.length < 2) return undefined;
-    const bookReturns: number[] = [];
-    for (let i = 1; i < levels.length; i++) {
-      const prev = levels[i - 1].value;
-      const cur = levels[i].value;
-      if (prev > 0 && Number.isFinite(prev) && Number.isFinite(cur)) {
-        bookReturns.push(cur / prev - 1);
-      }
-    }
+    // The producer only emits finite returns (extractTrustworthyDerivedSeries);
+    // the filter keeps this leg honest if that ever changes. No book → absent.
+    const bookReturns = baselineEquityDailyReturns
+      .map((point) => point.value)
+      .filter((r) => Number.isFinite(r));
+    // One observation is not a Sharpe or Sortino worth showing.
     if (bookReturns.length < 2) return undefined;
     const book = sampleBasisRatios(bookReturns, blendBasis);
     // Blend ratios are the engine's already-rounded sample-basis output at the
@@ -3913,7 +3923,7 @@ export function ScenarioComposer({
       book_n: bookReturns.length,
     };
   }, [
-    baselineEquityDailyPoints,
+    baselineEquityDailyReturns,
     scenarioMetrics.n,
     scenarioMetrics.sharpe,
     scenarioMetrics.sortino,
