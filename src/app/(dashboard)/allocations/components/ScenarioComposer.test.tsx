@@ -17168,13 +17168,22 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
   // withheld, and it must give the same kind of answer the Overview gives for
   // the same payload. A failed read said "being rebuilt" here while the
   // Overview said to reload, so the allocator waited on a rebuild that was not
-  // running. Three classes: a wait ("being rebuilt"), a read that failed
-  // (reload), and a key the owner must fix (the Exchanges page).
+  // running. Four classes: a wait ("being rebuilt"), a read that failed
+  // (reload), a key the owner must fix (the Exchanges page), and a hold that
+  // no wait heals (review C3 round 2 WR-02 / SFH-C3R2-03).
   //
   // The class per reason is written out here, NOT read from the component's
   // classifier, so a reason moved to the wrong class fails this arm instead of
   // moving both surfaces together. The type check below forces a reason added
   // to `EquityHistoryRebuildReason` into this table.
+  //
+  // Review C3 round 2 WR-02: a reason is a wait ("rebuilding") only when the
+  // Overview's own line for it names the daily run that retries it
+  // (account_identity_pending: "Each daily sync checks it again";
+  // awaiting_derivation: "recomputed ... once a day"). derivation_rejected
+  // ("did not pass its checks, so it is not shown") and
+  // shared_account_history_truncated ("we cannot join its history ... yet, so
+  // your history is not shown") name no such run, so they are "held_back".
   const REASON_CLASSES = [
     ["duplicate_account", "needs_action"],
     ["key_not_syncing", "needs_action"],
@@ -17182,10 +17191,13 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     ["history_read_failed", "read_failed"],
     ["awaiting_derivation", "rebuilding"],
     ["account_identity_pending", "rebuilding"],
-    ["derivation_rejected", "rebuilding"],
-    ["shared_account_history_truncated", "rebuilding"],
+    ["derivation_rejected", "held_back"],
+    ["shared_account_history_truncated", "held_back"],
   ] as const satisfies ReadonlyArray<
-    readonly [EquityHistoryRebuildReason, "needs_action" | "read_failed" | "rebuilding"]
+    readonly [
+      EquityHistoryRebuildReason,
+      "needs_action" | "read_failed" | "rebuilding" | "held_back",
+    ]
   >;
   type UnlistedReason = Exclude<
     EquityHistoryRebuildReason,
@@ -17201,6 +17213,8 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
       "We could not load your book's history just now, so the comparison with your current book is not shown; reload the page to try again.",
     needs_action:
       "Your book's own history is on hold until you update your keys on the Exchanges page, so the comparison with your current book is not shown.",
+    held_back:
+      "We are holding back your book's own history, so the comparison with your current book is not shown.",
   } as const;
   const EXCHANGES_HREF = "/profile?tab=exchanges";
 
@@ -17244,6 +17258,14 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
       expect(exchangesLink(overview).length > 0).toBe(needsAction);
       expect(saysReload(scenario)).toBe(readFailed);
       expect(saysReload(overview)).toBe(readFailed);
+
+      // Review C3 round 2 WR-02: the Scenario says "being rebuilt" exactly
+      // when the Overview's own reason line names the daily run that retries
+      // it. The panel's heading and body are the same for every reason and
+      // name no daily run, so the match comes from the reason line alone.
+      const rebuilding = reasonClass === "rebuilding";
+      expect(/being rebuilt/.test(scenario.textContent ?? "")).toBe(rebuilding);
+      expect(/\bdaily\b|once a day/i.test(overview.textContent ?? "")).toBe(rebuilding);
     },
   );
 

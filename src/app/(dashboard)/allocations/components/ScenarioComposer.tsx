@@ -885,8 +885,10 @@ function pruneLeverageToDraftRefs(
  * comparison, keyed by the class the Overview's `equityHistoryRebuildClass`
  * gives the same reason. A failed read says to reload, a key the owner must
  * fix names the Exchanges page, and only a real wait says "being rebuilt".
- * The Overview panel carries the per-reason detail. No sentence promises a
- * date or a day count.
+ * Review C3 round 2 WR-02: a hold that no wait heals (`held_back`) says the
+ * history is held back, the meaning of the Overview's "so it is not shown"
+ * lines, and names no wait. The Overview panel carries the per-reason detail.
+ * No sentence promises a date or a day count.
  */
 const OWN_BOOK_REBUILDING_LINE: Record<EquityHistoryRebuildClass, ReactNode> = {
   rebuilding: (
@@ -908,6 +910,12 @@ const OWN_BOOK_REBUILDING_LINE: Record<EquityHistoryRebuildClass, ReactNode> = {
       Your book&apos;s own history is on hold until you update your keys on
       the <ExchangesPageLink />, so the comparison with your current book is
       not shown.
+    </>
+  ),
+  held_back: (
+    <>
+      We are holding back your book&apos;s own history, so the comparison with
+      your current book is not shown.
     </>
   ),
 };

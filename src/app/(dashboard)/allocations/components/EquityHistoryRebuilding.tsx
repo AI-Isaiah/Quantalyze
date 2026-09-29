@@ -50,7 +50,7 @@ import { dataSourceLabel } from "@/lib/api-key-label";
 const HEADING_ID = "overview-equity-rebuilding-heading";
 
 /**
- * Review C3 SFH-C3-01. What each rebuild reason asks of the owner, in three
+ * Review C3 SFH-C3-01. What each rebuild reason asks of the owner, in four
  * classes. This table is the ONE place a reason is classed: the Overview line
  * below picks its per-reason copy inside the class, and the Scenario's
  * own-book sentence (`ScenarioComposer.tsx`) picks its copy by class alone, so
@@ -59,8 +59,16 @@ const HEADING_ID = "overview-equity-rebuilding-heading";
  * - `needs_action`: nothing rebuilds until the owner fixes a key on the
  *   Exchanges page.
  * - `read_failed`: our read of the history failed; a reload tries again.
- * - `rebuilding`: a wait on a running job, or a hold no owner action heals in
- *   this release. The generic "being rebuilt" copy is true for these.
+ * - `rebuilding`: a wait on a daily run. The reason's own line below names
+ *   that run ("Each daily sync checks it again", "recomputed ... once a
+ *   day"), so the Scenario's "being rebuilt" is true for these.
+ * - `held_back` (review C3 round 2 WR-02 / SFH-C3R2-03): the history is not
+ *   shown and the reason's line names no run that retries it
+ *   (`derivation_rejected`: "did not pass its checks, so it is not shown";
+ *   `shared_account_history_truncated`: "we cannot join its history ... yet,
+ *   so your history is not shown"). Nothing here is a wait (C2 SFH-05 /
+ *   SFH-06 and R3-WR-03, see the lines' own comments), so the Scenario says
+ *   the history is held back, never that it is being rebuilt.
  */
 const REBUILD_REASON_CLASS = {
   duplicate_account: "needs_action",
@@ -69,11 +77,11 @@ const REBUILD_REASON_CLASS = {
   history_read_failed: "read_failed",
   account_identity_pending: "rebuilding",
   awaiting_derivation: "rebuilding",
-  derivation_rejected: "rebuilding",
-  shared_account_history_truncated: "rebuilding",
+  derivation_rejected: "held_back",
+  shared_account_history_truncated: "held_back",
 } as const satisfies Record<
   EquityHistoryRebuildReason,
-  "needs_action" | "read_failed" | "rebuilding"
+  "needs_action" | "read_failed" | "rebuilding" | "held_back"
 >;
 
 export type EquityHistoryRebuildClass =
@@ -88,8 +96,9 @@ type NeedsActionReason = {
 /**
  * The class of a rebuild reason. Fail-closed: null, a missing reason, or a
  * string this build does not know (a stale client, a reason added later)
- * reads as `rebuilding`, the generic wait, never as a failed read or a key to
- * fix. `Object.hasOwn` keeps a prototype key such as "constructor" out.
+ * reads as `rebuilding`, the generic wait, never as a failed read, a key to
+ * fix or a hold. `Object.hasOwn` keeps a prototype key such as "constructor"
+ * out.
  */
 export function equityHistoryRebuildClass(
   reason: EquityHistoryRebuildReason | null | undefined,
