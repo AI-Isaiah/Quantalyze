@@ -50,18 +50,112 @@ import { dataSourceLabel } from "@/lib/api-key-label";
 const HEADING_ID = "overview-equity-rebuilding-heading";
 
 /**
+ * Review C3 SFH-C3-01. What each rebuild reason asks of the owner, in four
+ * classes. This table is the ONE place a reason is classed: the Overview line
+ * below picks its per-reason copy inside the class, and the Scenario's
+ * own-book sentence (`ScenarioComposer.tsx`) picks its copy by class alone, so
+ * the two surfaces cannot disagree on why the history is withheld.
+ *
+ * - `needs_action`: nothing rebuilds until the owner fixes a key on the
+ *   Exchanges page.
+ * - `read_failed`: our read of the history failed; a reload tries again.
+ * - `rebuilding`: a wait on a daily run. The reason's own line below names
+ *   that run ("Each daily sync checks it again", "recomputed ... once a
+ *   day"), so the Scenario's "being rebuilt" is true for these.
+ * - `held_back` (review C3 round 2 WR-02 / SFH-C3R2-03): the history is not
+ *   shown and the reason's line names no run that retries it
+ *   (`derivation_rejected`: "did not pass its checks, so it is not shown";
+ *   `shared_account_history_truncated`: "we cannot join its history ... yet,
+ *   so your history is not shown"). Nothing here is a wait (C2 SFH-05 /
+ *   SFH-06 and R3-WR-03, see the lines' own comments), so the Scenario says
+ *   the history is held back, never that it is being rebuilt.
+ *
+ * The Overview heading follows the same class (review C3 round 3 WR-01,
+ * `HEADING_BY_CLASS` below), so for a `held_back` reason the heading says the
+ * history is held back, as the Scenario does, and never "being rebuilt".
+ */
+const REBUILD_REASON_CLASS = {
+  duplicate_account: "needs_action",
+  key_not_syncing: "needs_action",
+  shared_account_no_working_key: "needs_action",
+  history_read_failed: "read_failed",
+  account_identity_pending: "rebuilding",
+  awaiting_derivation: "rebuilding",
+  derivation_rejected: "held_back",
+  shared_account_history_truncated: "held_back",
+} as const satisfies Record<
+  EquityHistoryRebuildReason,
+  "needs_action" | "read_failed" | "rebuilding" | "held_back"
+>;
+
+export type EquityHistoryRebuildClass =
+  (typeof REBUILD_REASON_CLASS)[EquityHistoryRebuildReason];
+
+type NeedsActionReason = {
+  [R in EquityHistoryRebuildReason]: (typeof REBUILD_REASON_CLASS)[R] extends "needs_action"
+    ? R
+    : never;
+}[EquityHistoryRebuildReason];
+
+/**
+ * The one guard both surfaces read a reason through. A reason this build does
+ * not know (a stale client, a reason added later) or a prototype key such as
+ * "constructor" is not a reason: `Object.hasOwn` keeps both out.
+ */
+function isKnownRebuildReason(
+  reason: EquityHistoryRebuildReason | null | undefined,
+): reason is EquityHistoryRebuildReason {
+  return reason != null && Object.hasOwn(REBUILD_REASON_CLASS, reason);
+}
+
+/**
+ * The class of a rebuild reason. Fail-closed: null, a missing reason, or one
+ * `isKnownRebuildReason` refuses reads as `rebuilding`, the generic wait,
+ * never as a failed read, a key to fix or a hold.
+ */
+export function equityHistoryRebuildClass(
+  reason: EquityHistoryRebuildReason | null | undefined,
+): EquityHistoryRebuildClass {
+  if (!isKnownRebuildReason(reason)) {
+    return "rebuilding";
+  }
+  return REBUILD_REASON_CLASS[reason];
+}
+
+/**
+ * Review C3 round 3 WR-01. The Overview heading, by class. Only `held_back`
+ * differs: its reason lines name no run that retries it, so the heading
+ * mirrors the Scenario's "We are holding back your book's own history" and
+ * promises no wait. Every other class keeps the "being rebuilt" heading. Keyed
+ * by every class, so a class added to the table above fails to compile here.
+ */
+const HEADING_BY_CLASS: Record<EquityHistoryRebuildClass, string> = {
+  needs_action: "Your equity history is being rebuilt",
+  read_failed: "Your equity history is being rebuilt",
+  rebuilding: "Your equity history is being rebuilt",
+  held_back: "We are holding back your equity history",
+};
+
+function isNeedsActionReason(
+  reason: EquityHistoryRebuildReason,
+): reason is NeedsActionReason {
+  return equityHistoryRebuildClass(reason) === "needs_action";
+}
+
+/**
  * Review C2 WR-02: every line states only what a running job does. The
  * pending line used to say the account is confirmed "on the next daily sync".
  * The stamper runs after every successful poll, but it can come back with no
  * id, and it never runs for a key that is failing to sync. So the pending line
  * says each sync checks again, and a failing key gets its own line, which
  * names the one place the owner can fix it.
+ *
+ * Review C3 SFH-C3-01: keyed by every reason OUTSIDE the `needs_action` class,
+ * so moving a reason between classes fails to compile here until its line
+ * moves too.
  */
 const REASON_LINE: Record<
-  Exclude<
-    EquityHistoryRebuildReason,
-    "duplicate_account" | "key_not_syncing" | "shared_account_no_working_key"
-  >,
+  Exclude<EquityHistoryRebuildReason, NeedsActionReason>,
   string
 > = {
   account_identity_pending:
@@ -119,7 +213,48 @@ function NotSyncingLine({ keys }: { keys: readonly NotSyncingKey[] | null }) {
   );
 }
 
-function ExchangesPageLink() {
+/**
+ * The line for a `needs_action` reason: each names the one place the owner
+ * can fix it. The switch is exhaustive over the class, so a reason added to
+ * `needs_action` without a line fails to compile.
+ */
+function NeedsActionLine({
+  reason,
+  notSyncingKeys,
+}: {
+  reason: NeedsActionReason;
+  notSyncingKeys: readonly NotSyncingKey[] | null;
+}) {
+  switch (reason) {
+    case "duplicate_account":
+      return (
+        <>
+          Two of your keys read the same exchange account. Disconnect one of
+          them on the <ExchangesPageLink /> and the history rebuilds.
+        </>
+      );
+    case "key_not_syncing":
+      return <NotSyncingLine keys={notSyncingKeys} />;
+    case "shared_account_no_working_key":
+      // Review C2 round 3 R3-WR-03: the payload does not say which account,
+      // so the line names none (T-167.1.2-22a) and points at the one place
+      // the owner can fix a key.
+      return (
+        <>
+          The keys that read one of your exchange accounts are all failing to
+          sync, so that account&apos;s history stops. Fix or reconnect one of
+          them on the <ExchangesPageLink />.
+        </>
+      );
+    default: {
+      const unhandled: never = reason;
+      return unhandled;
+    }
+  }
+}
+
+/** Exported for the Scenario's own-book sentence (review C3 SFH-C3-01), so both surfaces link the same page. */
+export function ExchangesPageLink() {
   return (
     <Link
       href="/profile?tab=exchanges"
@@ -138,6 +273,10 @@ export function EquityHistoryRebuilding({
   /** Review C2 round 2 IN-04: the keys a key_not_syncing reason is about, or null when unknown. */
   notSyncingKeys?: readonly NotSyncingKey[] | null;
 }) {
+  // Review C3 round 2 IN-01: the per-reason line reads the reason through the
+  // same guard as the classifier. An unknown reason or a prototype key renders
+  // the no-reason panel, never an empty line or a non-string child.
+  const knownReason = isKnownRebuildReason(reason) ? reason : null;
   return (
     <section
       aria-labelledby={HEADING_ID}
@@ -151,7 +290,7 @@ export function EquityHistoryRebuilding({
         id={HEADING_ID}
         className="mt-3 text-h3 font-semibold text-text-primary"
       >
-        Your equity history is being rebuilt
+        {HEADING_BY_CLASS[equityHistoryRebuildClass(knownReason)]}
       </h2>
       <p className="mt-2 max-w-prose text-sm text-text-secondary">
         The equity chart and the ratios built from it are hidden for now. The
@@ -159,27 +298,16 @@ export function EquityHistoryRebuilding({
         than one key reads it, or read a day with no sync as zero. Holdings and
         AUM on this page do not use that history.
       </p>
-      {reason === "duplicate_account" ? (
+      {knownReason && isNeedsActionReason(knownReason) ? (
         <p className="mt-2 max-w-prose text-sm text-text-secondary">
-          Two of your keys read the same exchange account. Disconnect one of
-          them on the <ExchangesPageLink /> and the history rebuilds.
+          <NeedsActionLine
+            reason={knownReason}
+            notSyncingKeys={notSyncingKeys}
+          />
         </p>
-      ) : reason === "key_not_syncing" ? (
+      ) : knownReason ? (
         <p className="mt-2 max-w-prose text-sm text-text-secondary">
-          <NotSyncingLine keys={notSyncingKeys} />
-        </p>
-      ) : reason === "shared_account_no_working_key" ? (
-        // Review C2 round 3 R3-WR-03: the payload does not say which account,
-        // so the line names none (T-167.1.2-22a) and points at the one place
-        // the owner can fix a key.
-        <p className="mt-2 max-w-prose text-sm text-text-secondary">
-          The keys that read one of your exchange accounts are all failing to
-          sync, so that account&apos;s history stops. Fix or reconnect one of
-          them on the <ExchangesPageLink />.
-        </p>
-      ) : reason ? (
-        <p className="mt-2 max-w-prose text-sm text-text-secondary">
-          {REASON_LINE[reason]}
+          {REASON_LINE[knownReason]}
         </p>
       ) : null}
     </section>

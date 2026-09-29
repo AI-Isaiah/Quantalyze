@@ -60,6 +60,10 @@ class _FakeTable:
         self._store = store
         self._filters: list[tuple[str, Any]] = []
         self._like: list[tuple[str, str]] = []
+        self._order: list[tuple[str, bool]] = []
+        self._range: tuple[int, int] | None = None
+        self._gt: list[tuple[str, Any]] = []
+        self._limit: int | None = None
         self._is_delete = False
 
     # --- write ops: refuse the legacy store, record on the derived surface ------
@@ -112,11 +116,33 @@ class _FakeTable:
         self._like.append((col, pattern))
         return self
 
+    def order(self, col: str, desc: bool = False) -> "_FakeTable":
+        self._order.append((col, desc))
+        self._store.orders.append((self._name, col, desc))
+        return self
+
+    def gt(self, col: str, val: Any) -> "_FakeTable":
+        # A keyset cursor. ISO dates compare correctly as strings.
+        self._gt.append((col, val))
+        return self
+
+    def limit(self, n: int) -> "_FakeTable":
+        self._limit = n
+        return self
+
+    def range(self, start: int, end: int) -> "_FakeTable":
+        # PostgREST's range is INCLUSIVE of `end`. A new range replaces the last
+        # one, as paginated_select re-ranges the same ordered builder per page.
+        self._range = (start, end)
+        return self
+
     def _rows(self) -> list[dict]:
         rows = self._store.rows.get(self._name, [])
         out = []
         for r in rows:
-            if all(r.get(c) == v for c, v in self._filters):
+            if all(r.get(c) == v for c, v in self._filters) and all(
+                r.get(c) is not None and str(r.get(c)) > str(v) for c, v in self._gt
+            ):
                 ok = True
                 for c, pat in self._like:
                     prefix = pat.rstrip("%")
@@ -124,6 +150,10 @@ class _FakeTable:
                         ok = False
                 if ok:
                     out.append(r)
+        # Apply ORDER BY right-to-left over a stable sort, so the first column
+        # is the primary key. str() keeps a row that lacks a column sortable.
+        for col, desc in reversed(self._order):
+            out = sorted(out, key=lambda r, c=col: str(r.get(c)), reverse=desc)
         return out
 
     def execute(self) -> Any:
@@ -142,12 +172,36 @@ class _FakeTable:
             ]
             self._store.rows[self._name] = remaining
             return _R(matched)
-        return _R(self._rows())
+        out = self._rows()
+        if self._range is not None:
+            start, end = self._range
+            out = out[start:end + 1]
+        if self._limit is not None:
+            out = out[: self._limit]
+        if self._store.max_rows is not None:
+            # PostgREST's per-response cap (supabase/config.toml max_rows = 1000):
+            # a bare read returns the first max_rows rows and no error.
+            out = out[: self._store.max_rows]
+        # Copy the rows, as a response is a fresh JSON decode: a later write to
+        # the store must not reach back into a page already read.
+        out = [dict(r) for r in out]
+        if self._store.on_read is not None:
+            # The response is already built, so a write the hook makes lands
+            # BETWEEN this read and the next one, as a concurrent writer's would.
+            self._store.on_read(self._name)
+        return _R(out)
 
 
 class _FakeSupabase:
-    def __init__(self, rows: dict[str, list[dict]]) -> None:
+    def __init__(
+        self, rows: dict[str, list[dict]], max_rows: int | None = None
+    ) -> None:
         self.rows = rows
+        # None = no response cap, the default every older test in this file uses.
+        self.max_rows = max_rows
+        # Fired after each read's response is built (C3 round 2 race tests).
+        self.on_read: Any = None
+        self.orders: list[tuple[str, str, bool]] = []
         self.upserts: list[tuple[str, Any, Any]] = []
         self.deletes: list[tuple[str, dict, int]] = []
         self.selects: list[tuple[str, Any]] = []
@@ -2320,3 +2374,359 @@ def _extract_payload(payload: Any) -> dict:
             inner = r.get("payload")
             return inner if isinstance(inner, dict) else {}
     return {}
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2 C3 topic D (SFH-R3-07) — the returns read drains every page.
+# ---------------------------------------------------------------------------
+
+_LONG_ALLOC = "alloc-long"
+_LONG_DAYS = 1500  # > PostgREST's 1000-row response cap (supabase/config.toml)
+
+
+def _seed_long_history() -> tuple[dict[str, list[dict]], str, str]:
+    """One working key with 1500 consecutive days of returns, stored NEWEST
+    FIRST, so a capped bare read (the first 1000 rows) provably loses the
+    earliest 500 days rather than the latest ones."""
+    import datetime as _dt
+
+    start = _dt.date(2022, 1, 1)
+    days = [(start + _dt.timedelta(days=i)).isoformat() for i in range(_LONG_DAYS)]
+    csv = [
+        {
+            "id": _LONG_DAYS - i,
+            "api_key_id": "key-L",
+            "allocator_id": _LONG_ALLOC,
+            "date": day,
+            "daily_return": 0.001,
+        }
+        for i, day in enumerate(reversed(days))
+    ]
+    rows: dict[str, list[dict]] = {
+        "api_keys": [
+            {
+                "id": "key-L", "user_id": _LONG_ALLOC, "is_active": True,
+                "sync_status": "connected", "disconnected_at": None,
+            },
+        ],
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: [
+            {
+                "allocator_id": _LONG_ALLOC,
+                "kind": "key_inputs:key-L",
+                "payload": {
+                    "flows": [], "anchor_usd": 100_000.0,
+                    "anchor_asof": days[-1], "venue": "binance",
+                },
+            },
+        ],
+        LEGACY_TABLE: [],
+    }
+    return rows, days[0], days[-1]
+
+
+@pytest.mark.asyncio
+async def test_sfh_r3_07_returns_read_drains_past_the_response_cap() -> None:
+    """SFH-R3-07: PostgREST caps one response at 1000 rows, and PROD holds an
+    allocator with 2804 csv_daily_returns rows (measured 2026-09-29). A bare
+    `.select().eq().execute()` hands the derive an arbitrary 1000 of them, so
+    the curve starts late (and the stitch picks keys from a partial read) while
+    still being marked trustworthy. The read must drain every page under a
+    total order, so the curve starts on the key's FIRST stored day."""
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    rows, first_day, last_day = _seed_long_history()
+    fake = _FakeSupabase(rows, max_rows=1000)
+    job = {"id": "j-long", "kind": "derive_allocator_equity", "allocator_id": _LONG_ALLOC}
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "DONE", result
+    curve_upserts = [
+        u for u in fake.upserts
+        if u[0] == DERIVED_TABLE and _is_equity_curve_upsert(u[1])
+    ]
+    assert len(curve_upserts) == 1, fake.upserts
+    payload = _extract_payload(curve_upserts[0][1])
+    curve_days = [p["date"] for p in payload["curve"]]
+    assert curve_days[0] <= first_day, (
+        f"the curve starts at {curve_days[0]}, after the key's first stored day "
+        f"{first_day}: the returns read lost the earliest rows to the response cap"
+    )
+    assert curve_days[-1] == last_day, curve_days[-1]
+    assert first_day in curve_days and len(set(curve_days)) >= _LONG_DAYS, (
+        f"the curve holds {len(set(curve_days))} days; {_LONG_DAYS} were stored"
+    )
+    # C3 round 2: the read is keyset per key, so every csv_daily_returns page
+    # is ordered by date alone (the key is fixed by an eq filter). Two or more
+    # pages were read, so the drain crossed the response cap.
+    csv_orders = [(c, d) for t, c, d in fake.orders if t == "csv_daily_returns"]
+    assert len(csv_orders) >= 2 and set(csv_orders) == {("date", False)}, (
+        csv_orders
+    )
+
+
+@pytest.mark.asyncio
+async def test_sfh_r3_07_returns_read_truncation_is_permanent_and_deletes_curve() -> None:
+    """A returns read past the read's hard cap raises
+    PaginatedSelectTruncated. Retrying re-reads the same rows, so the job must
+    end permanent FAILED (not the classifier's retrying `unknown`), delete the
+    stale equity_curve row, and never compose from partial data. The message
+    carries no allocator id (the hint is a log-only triage string)."""
+    from unittest.mock import patch
+
+    from services.db import PaginatedSelectTruncated
+    from services.job_worker import run_derive_allocator_equity_job
+
+    rows, _first, _last = _seed_long_history()
+    rows[DERIVED_TABLE].append(
+        {"allocator_id": _LONG_ALLOC, "kind": "equity_curve", "payload": {"curve": []}}
+    )
+    fake = _FakeSupabase(rows)
+    job = {"id": "j-trunc", "kind": "derive_allocator_equity", "allocator_id": _LONG_ALLOC}
+
+    def _boom(*_a: Any, **_kw: Any) -> list[dict]:
+        raise PaginatedSelectTruncated(page_count=1000, page_size=1000, hint="probe")
+
+    with patch("services.job_worker.get_supabase", return_value=fake), \
+         patch("services.job_worker._load_allocator_daily_returns", side_effect=_boom):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "FAILED", result
+    assert result.error_kind == "permanent", result.error_kind
+    assert _LONG_ALLOC not in (result.error_message or ""), result.error_message
+    curve_deletes = [
+        d for d in fake.deletes
+        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
+        and d[1].get("allocator_id") == _LONG_ALLOC
+    ]
+    assert len(curve_deletes) == 1, fake.deletes
+    assert not [u for u in fake.upserts if _is_equity_curve_upsert(u[1])], fake.upserts
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2 C3 round 2 (WR-01 / SFH-C3R2-01) — the paged read is consistent
+# under a concurrent per-key dailies write.
+# ---------------------------------------------------------------------------
+
+_RACE_ALLOC = "alloc-race"
+_RACE_KEYS = ("key-1", "key-2", "key-3")  # sorted: key-1 is read first
+_RACE_DAYS = 6
+_RACE_PAGE = 4  # 6 days per key over 4-row pages: offset pages cross keys
+
+
+def _race_day(i: int) -> str:
+    return f"2026-04-{i:02d}"
+
+
+def _seed_race() -> dict[str, list[dict]]:
+    """Three working, unshared keys with 6 days each and key_inputs rows. Offset
+    pages of 4 rows over the (api_key_id, date) order end INSIDE key-2, so a
+    write to key-1 between pages shifts every later row."""
+    csv = []
+    next_id = 1
+    for k in _RACE_KEYS:
+        for i in range(1, _RACE_DAYS + 1):
+            csv.append({
+                "id": next_id, "api_key_id": k, "allocator_id": _RACE_ALLOC,
+                "date": _race_day(i), "daily_return": 0.001,
+            })
+            next_id += 1
+    return {
+        "api_keys": [
+            {
+                "id": k, "user_id": _RACE_ALLOC, "is_active": True,
+                "sync_status": "connected", "disconnected_at": None,
+            }
+            for k in _RACE_KEYS
+        ],
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: [
+            {
+                "allocator_id": _RACE_ALLOC,
+                "kind": f"key_inputs:{k}",
+                "payload": {
+                    "flows": [], "anchor_usd": 10_000.0,
+                    "anchor_asof": _race_day(_RACE_DAYS), "venue": "binance",
+                },
+            }
+            for k in _RACE_KEYS
+        ],
+        LEGACY_TABLE: [],
+    }
+
+
+def _rewrite_key_1(fake: _FakeSupabase, shape: str) -> None:
+    """A concurrent rewrite of key-1's span, applied between two page reads:
+    delete key-1's span and re-insert it with NEW ids (the key-mode
+    derive_broker_dailies writer's shape before C3 topic H reordered it to
+    upsert-then-delete; the read must survive either shape). `day_added`
+    appends today's new day; `day_removed` leaves a day the derive refused
+    honestly absent."""
+    rows = fake.rows["csv_daily_returns"]
+    kept = [r for r in rows if r["api_key_id"] != "key-1"]
+    days = list(range(1, _RACE_DAYS + 1))
+    if shape == "day_added":
+        days.append(_RACE_DAYS + 1)
+    elif shape == "day_removed":
+        days.remove(3)
+    else:  # pragma: no cover - a typo in a parametrize id
+        raise AssertionError(shape)
+    new_id = 1000
+    for i in days:
+        kept.append({
+            "id": new_id, "api_key_id": "key-1", "allocator_id": _RACE_ALLOC,
+            "date": _race_day(i), "daily_return": 0.001,
+        })
+        new_id += 1
+    fake.rows["csv_daily_returns"] = kept
+
+
+def _arm_race(fake: _FakeSupabase, shape: str, after_read: int = 2) -> dict[str, Any]:
+    """Fire the key-1 rewrite once, right after the `after_read`-th
+    csv_daily_returns read. Returns the pairs present before the write, filled
+    in when it fires."""
+    state: dict[str, Any] = {"reads": 0, "before": None}
+
+    def _hook(table: str) -> None:
+        if table != "csv_daily_returns":
+            return
+        state["reads"] += 1
+        if state["reads"] == after_read:
+            state["before"] = {
+                (r["api_key_id"], r["date"]) for r in fake.rows["csv_daily_returns"]
+            }
+            _rewrite_key_1(fake, shape)
+
+    fake.on_read = _hook
+    return state
+
+
+def _present_throughout(fake: _FakeSupabase, state: dict[str, Any]) -> set[tuple[str, str]]:
+    after = {(r["api_key_id"], r["date"]) for r in fake.rows["csv_daily_returns"]}
+    assert state["before"] is not None, "the concurrent write never fired"
+    return set(state["before"]) & after
+
+
+@pytest.mark.parametrize("shape", ["day_added", "day_removed"])
+def test_c3r2_wr01_keyset_read_neither_skips_nor_duplicates_under_a_concurrent_write(
+    shape: str,
+) -> None:
+    """WR-01 / SFH-C3R2-01. A sibling key's dailies write lands between two
+    page reads. The read must return no (api_key_id, date) pair twice, and
+    every pair present for the whole read. Offset pages fail this: key-1's
+    row count changes before the next page's offset, so `day_added` reads a
+    key-2 day twice and `day_removed` never reads one."""
+    from services.job_worker import _load_allocator_daily_returns
+
+    fake = _FakeSupabase(_seed_race())
+    state = _arm_race(fake, shape)
+
+    got = _load_allocator_daily_returns(
+        fake, _RACE_ALLOC, list(_RACE_KEYS), page_size=_RACE_PAGE
+    )
+
+    pairs = [(r["api_key_id"], r["date"]) for r in got]
+    dupes = sorted({p for p in pairs if pairs.count(p) > 1})
+    assert not dupes, f"{shape}: the paged read returned {dupes} twice"
+    missing = sorted(_present_throughout(fake, state) - set(pairs))
+    assert not missing, (
+        f"{shape}: the paged read never returned {missing}, present for the whole read"
+    )
+    assert state["reads"] > len(_RACE_KEYS), (
+        f"only {state['reads']} reads: the read never crossed a page boundary"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["day_added", "day_removed"])
+async def test_c3r2_wr01_derive_composes_every_day_once_under_a_concurrent_write(
+    shape: str,
+) -> None:
+    """The same race, through the derive. The series each counted key hands the
+    compose holds every day present for the whole read, once. A doubled day
+    would be composed twice; a skipped day would be carried at r = 0 in a curve
+    still marked trustworthy."""
+    from unittest.mock import patch
+
+    import services.allocator_equity_compose as compose_mod
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(_seed_race())
+    state = _arm_race(fake, shape)
+    seen: dict[str, list[str]] = {}
+    real_compose = compose_mod.compose_allocator_equity
+
+    def _capture(returns_by_key: Any, *a: Any, **kw: Any) -> Any:
+        for k, series in returns_by_key.items():
+            seen[str(k)] = [str(d) for d in series.index]
+        return real_compose(returns_by_key, *a, **kw)
+
+    job = {"id": "j-race", "kind": "derive_allocator_equity", "allocator_id": _RACE_ALLOC}
+    with patch("services.job_worker.get_supabase", return_value=fake), \
+         patch("services.job_worker._DAILY_RETURNS_PAGE_SIZE", _RACE_PAGE), \
+         patch.object(compose_mod, "compose_allocator_equity", side_effect=_capture):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "DONE", result
+    assert sorted(seen) == list(_RACE_KEYS), seen
+    for k, days in seen.items():
+        dupes = sorted({d for d in days if days.count(d) > 1})
+        assert not dupes, f"{shape}: {k} handed the compose {dupes} twice"
+    for k, day in sorted(_present_throughout(fake, state)):
+        assert day in seen[k], (
+            f"{shape}: {k} {day} was present for the whole read and never "
+            "reached the compose"
+        )
+
+
+@pytest.mark.parametrize(("stored", "raises"), [(4, False), (5, True)])
+def test_c3r2_keyset_read_hard_cap_refuses_only_real_overflow(
+    stored: int, raises: bool
+) -> None:
+    """The keyset read keeps topic D's contract: past its hard cap of non-empty
+    pages it raises PaginatedSelectTruncated (the caller ends the job
+    permanent), and a count landing exactly on the cap is read whole."""
+    from services.db import PaginatedSelectTruncated
+    from services.job_worker import _load_allocator_daily_returns
+
+    rows = {
+        "csv_daily_returns": [
+            {
+                "id": i, "api_key_id": "key-1", "allocator_id": _RACE_ALLOC,
+                "date": _race_day(i), "daily_return": 0.001,
+            }
+            for i in range(1, stored + 1)
+        ]
+    }
+    fake = _FakeSupabase(rows)
+    if raises:
+        with pytest.raises(PaginatedSelectTruncated):
+            _load_allocator_daily_returns(
+                fake, _RACE_ALLOC, ["key-1"], page_size=2, hard_cap_pages=2
+            )
+    else:
+        got = _load_allocator_daily_returns(
+            fake, _RACE_ALLOC, ["key-1"], page_size=2, hard_cap_pages=2
+        )
+        assert [r["date"] for r in got] == [_race_day(i) for i in range(1, stored + 1)]
+
+
+def test_c3r2_keyset_read_survives_a_server_cap_below_its_page_size() -> None:
+    """The read stops on an EMPTY page, not a short one. PostgREST clamps a
+    response to max_rows, so if that cap ever sits below the page size a
+    short-page stop would end each key after its first clamped page, silently:
+    the SFH-R3-07 truncation again, by a different route."""
+    from services.job_worker import _load_allocator_daily_returns
+
+    fake = _FakeSupabase(_seed_race(), max_rows=_RACE_PAGE - 1)
+    got = _load_allocator_daily_returns(
+        fake, _RACE_ALLOC, list(_RACE_KEYS), page_size=_RACE_PAGE
+    )
+    pairs = sorted((r["api_key_id"], r["date"]) for r in got)
+    assert pairs == sorted(
+        (k, _race_day(i)) for k in _RACE_KEYS for i in range(1, _RACE_DAYS + 1)
+    ), pairs
