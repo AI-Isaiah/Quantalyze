@@ -57,7 +57,7 @@ import { SMOOTHED_MTM_UI_ENABLED } from "@/lib/closed-sets";
 import { ComparatorPicker } from "./ComparatorPicker";
 import { TimeSeriesChart } from "./TimeSeriesChart";
 import { HistogramChart } from "./HistogramChart";
-import { MetricsColumn } from "./MetricsColumn";
+import { MetricsColumn, headlineCoverageCaveat } from "./MetricsColumn";
 import { AllocatorSection } from "./BatchDPanels";
 import { StreakDistributionPanel } from "./AnalyticalPanels";
 import { EndOfYearBarsPanel, QuantileBoxPlotPanel, CorrelationStripPanel, CorrelationsMatrixPanel } from "./DistributionPanels";
@@ -1188,9 +1188,16 @@ const TONE_RANK: Record<Exclude<FreshnessTone, "neutral">, number> = {
  * fact is driving the verdict: `Computed · …` while the job is the stalest
  * thing here (unchanged — every previously-shipped render still reads exactly
  * this), and `Track record · …` on the one new arm, where a recent job sits over
- * a dead track. The date line beneath is untouched and still stamps the compute
- * date: dropping it would have cost the surface its provenance, and the series'
- * own date is already spelled out by `SeriesRecencyLine` directly below.
+ * a dead track.
+ *
+ * THE DATE LINE ALWAYS BELONGS TO THE SUBJECT (Phase 169 D-16, SC5). Until 169
+ * the date line kept stamping the compute date even under "Track record", so
+ * the chip said "track record: old" over a date from this morning. On the
+ * "Track record" arm the date line now shows the series end and its age, and
+ * the compute date moves to its own line labelled "Computed", so provenance is
+ * kept and every date on the chip names what it is a date of. On the
+ * "Computed" arm the render is exactly what it was. No threshold, tone or
+ * formatter was added: the ladder is the 3d / 7d one above.
  */
 function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; seriesDates: string[] }) {
   // Hooks must run unconditionally and in the same order every render, so this
@@ -1224,9 +1231,19 @@ function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; series
   // renders, so the chip and the sentence below it can never disagree about
   // where the track record ends.
   const seriesEnd = resolveSeriesEnd(seriesDates);
+  // 169 review WR-04: the series end is a UTC DATE, so its age is whole elapsed
+  // days (floor), and the tone is bucketed on the SAME number the date line
+  // prints. Bucketing the fractional age while printing the floored one read
+  // "old (7d)" and "stale (3d)" for most of each boundary day, against the
+  // ladder above. The future allowance holds: a bar dated tomorrow west of UTC
+  // is floor(-0.4) = -1, within SERIES_END_FUTURE_ALLOWANCE_DAYS; two days
+  // ahead is -2, still `future`.
+  const seriesAgeDays = seriesEnd
+    ? Math.floor((nowMs - new Date(seriesEnd.iso).getTime()) / 86_400_000)
+    : NaN;
   const seriesAgeTone: FreshnessTone = seriesEnd
     ? bucketByAge(
-        (nowMs - new Date(seriesEnd.iso).getTime()) / 86_400_000,
+        seriesAgeDays,
         // WR-06-UTC — the SERIES arm, and the only one whose discriminant
         // unlocks `SERIES_END_FUTURE_ALLOWANCE_DAYS`. The badge's
         // `bucketSeriesAge` reads the same constant from the same file, so
@@ -1259,6 +1276,15 @@ function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; series
     : tone === "old" ? "old"
     : tone === "future" ? "future — check data"
     : "—";
+  // Phase 169 D-16 (SC5): the date line belongs to the SUBJECT. Under
+  // "Track record" it is the series end and its age, read from the same
+  // `seriesEnd` the tone used (one derivation, so it matches SeriesRecencyLine
+  // byte for byte); an unknown end prints "—", never the compute date. The
+  // series age is already whole elapsed days (floor, above), the same value the
+  // tone was bucketed on: Math.round would call a bar dated 120 days ago "121d"
+  // every afternoon UTC.
+  const dateText = seriesIsBinding ? (seriesEnd?.formatted ?? "—") : formatIsoDate(computedAt);
+  const ageDays = seriesIsBinding ? seriesAgeDays : Math.round(days);
   return (
     <div>
       <div className="flex items-center justify-end gap-1.5 text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
@@ -1266,9 +1292,14 @@ function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; series
         {subject} · {label}
       </div>
       <p className="mt-1 text-small font-mono tabular-nums text-text-secondary">
-        {formatIsoDate(computedAt)}
-        {Number.isFinite(days) && days >= 0 && <span className="ml-1 text-text-muted">({Math.round(days)}d)</span>}
+        {dateText}
+        {Number.isFinite(ageDays) && ageDays >= 0 && <span className="ml-1 text-text-muted">({ageDays}d)</span>}
       </p>
+      {seriesIsBinding && (
+        <p className="mt-0.5 text-caption font-mono tabular-nums text-text-muted">
+          Computed {formatIsoDate(computedAt)}
+        </p>
+      )}
     </div>
   );
 }
@@ -1402,6 +1433,14 @@ function KpiStrip() {
   const appliedLeverage = useAppliedLeverage();
   const leverageApplied = leverageApplies(payload, basis, appliedLeverage);
   const m = leverageApplied ? view.strategyMetrics : basisM;
+  // Phase 169 review round 1 (SFH H-1): on a chain-broken row the stored cash
+  // headline covers only the record after its last break. Said beside it, only
+  // while the stored figures are the ones shown (cash basis, no what-if; a
+  // chain-broken row has no what-if anyway, `leverageEligibleFor`).
+  // Round 2, IN-R2-02: named by the strip's own labels.
+  const coverageCaveat = leverageApplied
+    ? null
+    : headlineCoverageCaveat(payload.dataQuality, basis, "Cum. Return, CAGR and Calmar");
   const j = view.comparators[cmpKey].joint;
   const cn = cmp.shortName;
 
@@ -1591,6 +1630,17 @@ function KpiStrip() {
           }}
         >
           ⚠ Track record under 90 days — annualized metrics are flagged as computed on an insufficient window.
+        </p>
+      )}
+      {coverageCaveat && (
+        <p
+          className="px-3 sm:px-4 py-2 text-micro font-mono"
+          style={{
+            borderTop: "1px solid var(--color-border)",
+            color: "var(--color-warning, #B45309)",
+          }}
+        >
+          ⚠ {coverageCaveat}
         </p>
       )}
       {/* HARD-05 (Phase 93): server-truth degraded-member flag from

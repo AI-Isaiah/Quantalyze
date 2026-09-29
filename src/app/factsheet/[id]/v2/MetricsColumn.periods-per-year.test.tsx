@@ -117,7 +117,8 @@ describe("MetricsColumn observation warning follows payload.periodsPerYear (SC-5
     const { container } = renderColumn(payloadWith(200, 252));
     const w = warningText(container);
     expect(w).not.toBeNull();
-    expect(w).toContain("Only 200 observations (0.79y)");
+    // 2026-09-27, Phase 169 D-12 / D-51: record length is stated in calendar years; the threshold assertion below is 167.1.2's and unchanged.
+    expect(w).toContain("Only 200 observations (0.54y)");
     expect(w).toContain("Conventional reliability threshold is ≥ 252 observations (1 year).");
   });
 
@@ -146,7 +147,7 @@ describe("the Scenario surface's payload carries its basis to MetricsColumn (W2)
     const { container } = renderColumn(payload);
     const w = warningText(container);
     expect(w).not.toBeNull();
-    expect(w).toContain("Only 200 observations (0.79y)");
+    expect(w).toContain("Only 200 observations (0.54y)"); // Phase 169 D-12 / D-51: calendar years, as above
     expect(w).toContain("≥ 252 observations (1 year).");
   });
 

@@ -1485,6 +1485,22 @@ true for 146 and half of 142–145, and **false for 141**.
       `FactsheetBody` under a sub-range and asserts figures (not the em-dash) that equal
       `compute()` of the slice; and 167.1.2 records whether the leverage control should appear on
       the Scenario tab.
+
+- [ ] **`[169-PORTFOLIO-ANALYTICS-COLUMNS]` The portfolio analytics compute behind `/portfolios/[id]`
+      may never refresh (booked 2026-09-27, Phase 169 D-53; inferred from source, NOT measured).**
+      `_compute_portfolio_analytics` (`analytics-service/routers/portfolio.py`) selects
+      `strategy_analytics` columns that `supabase/schema/baseline.sql` does not carry, and reads
+      `returns_series` as daily returns while `metrics.py` writes that field as a cumulative series.
+      If so, every portfolio analytics compute fails and the risk decomposition on `/portfolios/[id]`
+      is stale or absent, and `standalone_vol`'s period cannot be confirmed end to end.
+      **Why not fixed in 169:** a Python compute path, not a page-number surface; found by the
+      169 replan research (`169-RESEARCH.md` Open Question 1).
+      **Owner:** THE FOUNDER, to route to a phase (data-integrity). *(Routed 2026-09-27: Phase 166.4.1
+      PORTFOLIOANALYTICS, inserted on main by PR #889.)* **Trigger:** one read of the
+      analytics logs for "Portfolio analytics computation failed" confirms or clears it.
+      **Closed when:** the compute selects only real columns, derives daily returns from the stored
+      series, and a test that fails on today's select pins both.
+
 - [ ] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
       queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
       **Measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).** `python` took

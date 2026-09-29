@@ -40,12 +40,22 @@ export type ComputeResult = {
   longest_dd: number;
   skew: number;
   kurt: number;
-  // Period returns relative to the series' end date
-  mtd: number;
-  ytd: number;
-  p3m: number;
-  p6m: number;
-  p1y: number;
+  // Period returns relative to the series' end date. Phase 169 D-11 (SC6): a
+  // window is null when the record does not cover it (the first observation is
+  // after the window's cutoff plus one day), never the whole-record return
+  // under the window's label.
+  mtd: number | null;
+  ytd: number | null;
+  p3m: number | null;
+  p6m: number | null;
+  p1y: number | null;
+  /** 3 x 365 calendar days back from the series end (D-11). OPTIONAL only so a
+   *  hand-built zeroed summary compiles unedited (D-21); `compute()` always
+   *  sets it. A reader treats ABSENT like null (`== null`, D-17). */
+  p3y?: number | null;
+  /** 5 x 365 calendar days back from the series end (D-11). Optional for the
+   *  same reason as `p3y`; `compute()` always sets it. */
+  p5y?: number | null;
   // Single-day extremes (compounded for non-day periods)
   best_day: number;
   worst_day: number;
@@ -548,10 +558,13 @@ export type FactsheetCommon = {
   quantiles: QuantilePayload;
 
   // ---- Phase 90 (FS-01/FS-02/FS-03) composite marker + basis fields ----
-  // All OPTIONAL + absent-by-default so single-key payloads stay byte-identical
-  // (the object-spread over the discriminated union at page.tsx preserves the
-  // `ingestSource` discriminant). Populated ONLY on the composite (csv-arm)
-  // branch of the read path (page.tsx `fetchAndBuildPayload`).
+  // All OPTIONAL + absent-by-default (the object-spread over the discriminated
+  // union preserves the `ingestSource` discriminant). The segment markers are
+  // composite-only; the basis fields (`metricsByBasis`, the gates, `dataQuality`)
+  // are also set on the single-key arm (Phases 102/103/133 and 169), by
+  // `composite-read-path.ts` `readSingleKeyBasisOpts` / `singleKeyDataQuality`.
+  // On the factsheet route both arms are assembled by `fetch-and-build-payload.ts`
+  // `fetchAndBuildPayload`; the discovery detail page still builds its own (169.1-01).
   /**
    * FS-01 — per-key handoff seams on the stitched equity track. One entry per
    * `data_quality_flags.per_key[]` with `seq > 1` (seq 1 = inception, NOT a
@@ -566,17 +579,26 @@ export type FactsheetCommon = {
    */
   missingSegments?: { start: string; end: string; kind: "gap"; days: number }[];
   /**
-   * FS-03 — persisted `metrics_json_by_basis`. `cash_settlement` is present on a
-   * COMPOSITE payload (drives the D3 cash-scalar overlay onto `strategyMetrics` at
-   * build-payload.ts:243) but ABSENT on a single-key options payload, which carries
-   * ONLY `mark_to_market` (Phase 101/102 decision — the SC-4 keystone: with no
-   * cash key the cash overlay is a no-op, so the cash headline stays byte-identical).
-   * `mark_to_market` is OMITTED (never JSON null) when the venue/book can't produce
-   * an MTM basis. Drives the KpiStrip/MetricsColumn basis relabel (D5).
+   * FS-03 — persisted per-basis headline scalars. `cash_settlement` drives the D3
+   * cash-scalar overlay onto `strategyMetrics` (build-payload.ts). It is present on
+   * a COMPOSITE payload (the stitch's persisted `metrics_json_by_basis` object) and,
+   * since Phase 169 (D-10, SC4), on a RANKABLE single-key payload, where
+   * `readSingleKeyBasisOpts` builds it from the row's persisted top-level
+   * `strategy_analytics` scalars so the page reads the value the lists show. A
+   * single-key row's RAW `metrics_json_by_basis.cash_settlement` is still never
+   * threaded (the Phase 101/102 SC-4 keystone). Absent on a row that is not
+   * rankable. `mark_to_market` is OMITTED (never JSON null) when the venue/book
+   * can't produce an MTM basis. Drives the KpiStrip/MetricsColumn basis relabel (D5).
    */
   metricsByBasis?: {
-    cash_settlement?: Record<string, number>;
-    mark_to_market?: Record<string, number>;
+    // Review round 1 (IN-02): each basis is `number | null`. Python's
+    // `_safe_float` persists JSON null for a scalar that does not exist (a
+    // Sortino with no losing day, a Calmar with no drawdown), and the single-key
+    // cash headline carries the stored null through. Every reader checks
+    // `typeof v === "number" && Number.isFinite(v)` (the strict overlay renders
+    // anything else "—"); never do arithmetic on a value without that check.
+    cash_settlement?: Record<string, number | null>;
+    mark_to_market?: Record<string, number | null>;
     /**
      * Phase 132/133 (SMTM-01) — the smoothed daily-mark basis. SAME omission
      * contract as `mark_to_market`: present ONLY when the Phase-132 worker's
@@ -584,7 +606,7 @@ export type FactsheetCommon = {
      * null, otherwise). Drives the third SegmentedControl segment + KpiStrip
      * overlay.
      */
-    smoothed_mtm?: Record<string, number>;
+    smoothed_mtm?: Record<string, number | null>;
   };
   /**
    * FS-03 — server-truth MTM gate (D1). `available` = the `mark_to_market` key
@@ -623,6 +645,32 @@ export type FactsheetCommon = {
     composite: boolean;
     insufficientWindow?: boolean;
     degradedMembers?: Array<{ seq: number; venue: string }>;
+    /**
+     * Phase 169 review round 1 (SFH H-1) — single-key only, present only when
+     * true: `data_quality_flags.twr_chain_broken`, an INTERIOR chain break. The
+     * stored `cumulative_return` and CAGR then compound only the stretch after
+     * the last break, while the chart, the return windows and Years Observed
+     * cover the whole series. The headline stays the stored value (D-25, SC4);
+     * the page must say which span it covers.
+     */
+    twrChainBroken?: boolean;
+    /**
+     * Phase 169 review round 1 (SFH H-1) — present only on a chain-broken row
+     * whose persisted cash headline is overlaid: the first day (ISO date) of the
+     * span that headline covers, read from the stored `cash_settlement` series
+     * row (`deriveHeadlineCoversFrom`). `null` when the stored data cannot name
+     * it: a reader must then say the headline covers part of the record without
+     * a date, never invent one.
+     */
+    headlineCoversFrom?: string | null;
+    /**
+     * Phase 169 review round 1 (SFH M-2) — single-key only, present only when
+     * true: the stored headline was computed under a `returns_denominator_config`
+     * TypeScript does not reproduce (`cumulative_method: "simple"`, or
+     * `metrics_basis: "active_day"`). The client leverage re-derive cannot
+     * continue it from L=1, so `leverageEligibleFor` withholds the what-if.
+     */
+    returnsConventionOverride?: boolean;
   };
   /** Phase 90.5 (LEV-01/D2): #597 annualization basis (365 crypto / 252 traditional) — enables the client leverage recompute. Optional: absent (stale v4 cache drain) => leverage control hidden, fail-closed. */
   periodsPerYear?: number;

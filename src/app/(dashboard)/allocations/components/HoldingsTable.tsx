@@ -45,7 +45,12 @@ import { formatNumber, formatPercent } from "@/lib/utils";
 // Phase 150: `formatUsd` was module-private here; it is now the ONE money
 // formatter for this surface (shared with the Phase-150 mark/allocate
 // dialogs). Body unchanged — a second money formatter here is forbidden.
-import { formatUsd } from "@/lib/dollar-validation";
+// Phase 169 D-50: entry price and P&L use the module's price and signed formatters.
+import {
+  formatUsd,
+  formatUsdPrice,
+  formatUsdSigned,
+} from "@/lib/dollar-validation";
 // Phase 167 CREDTRUST / D-16 — the ONE definition of "this key's data is not
 // to be trusted as current". This file used to answer that question with SIX
 // hand-kept equalities against the literal `revoked`, with no closed set over
@@ -87,17 +92,6 @@ function formatQuantity(n: number): string {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   });
-}
-
-function formatPnl(n: number | null): string {
-  if (n == null) return "—";
-  const sign = n >= 0 ? "+" : "−";
-  return `${sign}${Math.abs(n).toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  })}`;
 }
 
 function formatDays(n: number | null): string {
@@ -662,10 +656,10 @@ function LegacyHoldingsTable({
                       {h.holding_type === "spot" ? "Spot" : "Derivative"}
                     </td>
                     <td className={numericCell}>{formatQuantity(h.quantity)}</td>
-                    <td className={numericCell}>{formatUsd(h.entry_price)}</td>
+                    <td className={numericCell}>{formatUsdPrice(h.entry_price)}</td>
                     <td className={numericCell}>{formatUsd(h.value_usd)}</td>
                     <td className={numericCell}>
-                      {formatPnl(h.unrealized_pnl_usd)}
+                      {formatUsdSigned(h.unrealized_pnl_usd)}
                     </td>
                     <td className="px-2 py-2">
                       <HoldingNoteIconButton
