@@ -106,12 +106,15 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
           </Kpm>
         </Panel>
         <Panel title="Returns" benchHeader={bn}>
+          {/* Phase 169 D-57: 6 Month / 1 Year are omitted when the STRATEGY's
+              window is null (the record is shorter), exactly as in Cumulative
+              Return Metrics; a null bench value alone keeps the row. */}
           <Kpm>
             <Row label="Month-to-date" value={pct(m.mtd, true)} bench={pct(b?.mtd, true)} />
             <Row label="Year-to-date" value={pct(m.ytd, true)} bench={pct(b?.ytd, true)} />
             <Row label="3 Month" value={pct(m.p3m, true)} bench={pct(b?.p3m, true)} />
-            <Row label="6 Month" value={pct(m.p6m, true)} bench={pct(b?.p6m, true)} />
-            <Row label="1 Year" value={pct(m.p1y, true)} bench={pct(b?.p1y, true)} />
+            {m.p6m != null && <Row label="6 Month" value={pct(m.p6m, true)} bench={pct(b?.p6m, true)} />}
+            {m.p1y != null && <Row label="1 Year" value={pct(m.p1y, true)} bench={pct(b?.p1y, true)} />}
             <Row label="Win Rate (days)" value={pct(m.win_rate)} bench={pct(b?.win_rate)} />
             <Row label="Profit Factor" value={num(m.profit_factor)} bench={num(b?.profit_factor)} />
           </Kpm>
@@ -420,6 +423,7 @@ function CumulativeReturnsPanel() {
   // mark_to_market; `payload` by reference under cash), and a multi-year row
   // exists only when the record covers its window (compute() reports it null).
   // Phase 169 D-17, 2026-09-25: 3 Year / 5 Year rows are omitted, not em-dashed, when the window is absent or null; SC6 read literally.
+  // Phase 169 D-57, 2026-09-27: 6 Month / 1 Year rows are omitted like 3 Year / 5 Year when the record is shorter, in this panel and in Returns, on every mount including the scenario payload; YTD is a calendar window and keeps the em-dash (D-11).
   const view = useBasisSeriesView(usePayload());
   const m = view.strategyMetrics;
   // Inception return = cum_ret (no need to recompute).
@@ -428,9 +432,9 @@ function CumulativeReturnsPanel() {
       <Kpm>
         <Row label="Month-to-date" value={pct(m.mtd, true)} bench="" />
         <Row label="3 Month" value={pct(m.p3m, true)} bench="" />
-        <Row label="6 Month" value={pct(m.p6m, true)} bench="" />
+        {m.p6m != null && <Row label="6 Month" value={pct(m.p6m, true)} bench="" />}
         <Row label="Year-to-date" value={pct(m.ytd, true)} bench="" />
-        <Row label="1 Year" value={pct(m.p1y, true)} bench="" />
+        {m.p1y != null && <Row label="1 Year" value={pct(m.p1y, true)} bench="" />}
         {m.p3y != null && <Row label="3 Year" value={pct(m.p3y, true)} bench="" />}
         {m.p5y != null && <Row label="5 Year" value={pct(m.p5y, true)} bench="" />}
         <Row label="Since Inception" value={pct(m.cum_ret, true)} bench="" accent />
