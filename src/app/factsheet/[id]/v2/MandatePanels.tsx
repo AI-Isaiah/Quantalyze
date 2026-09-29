@@ -78,8 +78,15 @@ export function TermsPanel() {
   // Inception / live-date separator: if the strategy declares a start_date
   // BEFORE the observation window starts, the gap is implicitly backtest —
   // flag it so allocators know which portion is paper vs live.
+  // 169 review round 2, SFH R2-1: the comparison and the start it names are the
+  // CASH record's (`payload.strategyMetrics`), the record the declared live date
+  // describes. They are a fact about the strategy, not about the basis on screen:
+  // read from the selected basis, an MTM series that starts later made a live
+  // record read "backtest" under the MTM toggle. The length Terms below stay on
+  // the selected basis (WR-03).
+  const recordStart = payload.strategyMetrics.start;
   const declaredStart = payload.startDate ? new Date(payload.startDate) : null;
-  const obsStart = new Date(m.start);
+  const obsStart = new Date(recordStart);
   const hasBacktestGap =
     declaredStart && !Number.isNaN(declaredStart.getTime())
       ? declaredStart.getTime() < obsStart.getTime() - 86_400_000
@@ -99,7 +106,7 @@ export function TermsPanel() {
             {iso(payload.startDate)}
             {hasBacktestGap && (
               <span className="ml-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
-                — observation window starts {start}; portion before live date is backtest
+                — observation window starts {iso(recordStart)}; portion before live date is backtest
               </span>
             )}
           </Term>

@@ -347,4 +347,52 @@ describe("the record length follows the selected basis at every site (WR-03)", (
     expect(thesisText).toContain(`(${cashLength.text})`);
     expect(termValue(container, "Sample size")).toBe(cashLength.text);
   });
+
+  /**
+   * 169 review round 2, SFH R2-1 (2026-09-29): "portion before live date is
+   * backtest" is a claim about the strategy's RECORD (the cash series the
+   * declared live date describes), not about which basis is on screen.
+   *
+   * Why this matters: WR-03 moved every Terms read onto the selected basis,
+   * including this comparison. An MTM series that starts later than cash (marks
+   * began later) then made a strategy live since 2024-01-01 read "portion before
+   * live date is backtest" the moment the user toggled to MTM. A display toggle
+   * turned series availability into a false live-versus-backtest claim.
+   */
+  function liveSinceText(container: HTMLElement): string {
+    return (termValue(container, "Live since") ?? "").replace(/\s+/g, " ");
+  }
+
+  it("R2-1: a strategy live since its cash start makes no backtest claim under mark_to_market", () => {
+    const { payload, mtm } = mtmPayload();
+    const live = { ...payload, startDate: "2024-01-01" } as FactsheetPayload;
+    // Guard the fixture: cash starts on the live date, MTM starts later.
+    expect(live.strategyMetrics.start).toBe("2024-01-01");
+    expect(mtm.strategyMetrics.start).toBe("2024-08-08");
+
+    const { container } = renderOn(live, "mark_to_market");
+    expect(liveSinceText(container)).toBe("2024-01-01");
+    expect(liveSinceText(container)).not.toContain("backtest");
+    // The length fields still describe the selected (MTM) record.
+    expect(termValue(container, "Observation start")).toBe("2024-08-08");
+  });
+
+  it("R2-1: the same strategy makes no backtest claim under cash (control, unchanged)", () => {
+    const { payload } = mtmPayload();
+    const live = { ...payload, startDate: "2024-01-01" } as FactsheetPayload;
+    const { container } = renderOn(live, "cash_settlement");
+    expect(liveSinceText(container)).toBe("2024-01-01");
+  });
+
+  it("R2-1: a live date before the cash record flags the backtest on both bases, naming the cash start", () => {
+    const { payload } = mtmPayload();
+    const early = { ...payload, startDate: "2023-06-01" } as FactsheetPayload;
+    for (const basis of ["cash_settlement", "mark_to_market"] as const) {
+      const { container, unmount } = renderOn(early, basis);
+      expect(liveSinceText(container), basis).toContain(
+        "observation window starts 2024-01-01; portion before live date is backtest",
+      );
+      unmount();
+    }
+  });
 });
