@@ -212,9 +212,9 @@ this file.
 | `npx vitest run src/lib/factsheet src/app/factsheet "…/allocations/components/scenario" "…/components/Scenario" "…/components/KpiStrip.scenario" "…/allocations/widgets/performance"` | 105 files, 1814 tests passed |
 | Dependent tests outside those folders (factsheet-share, the OG route page-agreement test, `/strategies` share and key-pill, AllocationDashboardV2 ×3, SyncBadge staler-of-two, phase-147/148 guards, `leverage.test.ts`, `src/lib/freshness*` including `two-surfaces`) | 18 files, 278 tests passed. Run before the revert, while the chip change was live, which is how the two-surfaces risk surfaced. |
 
-- **Baseline** on `8d9155b7a`, before any edit: the four lower-case gate folders ran 104 files and
-  1788 tests, all passing. The `components/Scenario` and `KpiStrip.scenario` filters were added after
-  that run, because the brief's `scenario*` glob is lower-case and the files are named `Scenario…`.
+- **Baseline** on `8d9155b7a`, before any edit: the four gate folders ran 104 files and 1788 tests,
+  all passing. The filter was then widened with `components/Scenario` and `KpiStrip.scenario`, which
+  added one file (105).
 - **Load note:** the load average was about 43 while three fixers ran in parallel. The first run of the
   now-reverted WR04-4 sweep hit the default 5 s timeout. It was trimmed and given an explicit 30 s
   budget before the revert, and `5cadefab7` carries that version.
