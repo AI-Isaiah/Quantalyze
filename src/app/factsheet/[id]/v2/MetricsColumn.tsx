@@ -2,13 +2,49 @@
 
 import type { ReactNode } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
-import type { JointMetrics } from "@/lib/factsheet/types";
+import type { FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
 import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { usePayload, useActiveComparator } from "./factsheet-context";
-import { useBasisSeriesView } from "./basis-context";
+import { useBasisOrCash, useBasisSeriesView, type Basis } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel } from "./AnalyticalPanels";
 import { StyleDriftPanel, PeerPercentilePanel, OwnBookDeltaPanel } from "./BatchDPanels";
 import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentMandatePanel } from "./MandatePanels";
+
+/**
+ * Phase 169 review round 1 (SFH H-1) — the caveat for a chain-broken single-key
+ * row, authored once and rendered beside the headline (the KPI strip in
+ * FactsheetView.tsx) and in the two panels here that state those figures.
+ *
+ * Python compounds the stored `cumulative_return` and annualizes CAGR over the
+ * record after its last interior break (`nav_twr._last_interior_break_suffix`),
+ * and Calmar is that CAGR over the max drawdown. The page shows those stored
+ * values (D-25, SC4), while the chart, the return windows and Years Observed
+ * cover the whole series, so the page says which span the three cover.
+ *
+ * Returns null (no caveat) unless the STORED headline is the one shown:
+ *   - `twrChainBroken` is true;
+ *   - `headlineCoversFrom` is present. The resolve stage sets it, to a date or
+ *     `null`, exactly when it overlaid the persisted cash headline on a
+ *     chain-broken row. Absent means the headline was computed in TypeScript
+ *     over the whole series, and a caveat would be false;
+ *   - the basis is cash. Under mark_to_market or smoothed the figures come
+ *     from that basis's series, not from the stored cash headline.
+ * With a date it names the date; with `null` it says the same without one. It
+ * never invents a date.
+ */
+export function headlineCoverageCaveat(
+  dataQuality: FactsheetPayload["dataQuality"],
+  basis: Basis,
+): string | null {
+  if (basis !== "cash_settlement") return null;
+  if (dataQuality?.twrChainBroken !== true) return null;
+  const from = dataQuality.headlineCoversFrom;
+  if (from === undefined) return null;
+  const date = from === null ? null : isoToMonthDay(from);
+  return date === null || date === "—"
+    ? "Cumulative return, CAGR and Calmar cover only the record after its last break in the return chain. The chart shows the whole record."
+    : `Cumulative return, CAGR and Calmar cover the record from ${date}, after its last break in the return chain. The chart shows the whole record.`;
+}
 
 /**
  * Editorial right-column metrics. Four named sections — Performance, Risk,
@@ -68,6 +104,7 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // calendar years compute() reports, at Years Observed and in the warning below.
   // Dividing the observation count by the basis read a sparse record short.
   const recordLength = formatRecordLength({ n: m.n, years: m.years });
+  const coverageCaveat = headlineCoverageCaveat(payload.dataQuality, useBasisOrCash());
 
   return (
     <aside className="flex flex-col gap-12">
@@ -92,6 +129,11 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
               ⚠ Only {m.n} observations ({recordLength.years}y) — Sharpe / Sortino / Calmar below
               have wide statistical confidence intervals. Conventional reliability threshold is
               ≥ {obsPerYear} observations (1 year).
+            </p>
+          )}
+          {coverageCaveat && (
+            <p className="mb-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
+              ⚠ {coverageCaveat}
             </p>
           )}
           <Kpm>
@@ -424,11 +466,20 @@ function CumulativeReturnsPanel() {
   // exists only when the record covers its window (compute() reports it null).
   // Phase 169 D-17, 2026-09-25: 3 Year / 5 Year rows are omitted, not em-dashed, when the window is absent or null; SC6 read literally.
   // Phase 169 D-57, 2026-09-27: 6 Month / 1 Year rows are omitted like 3 Year / 5 Year when the record is shorter, in this panel and in Returns, on every mount including the scenario payload; YTD is a calendar window and keeps the em-dash (D-11).
-  const view = useBasisSeriesView(usePayload());
+  const payload = usePayload();
+  const view = useBasisSeriesView(payload);
   const m = view.strategyMetrics;
+  // Phase 169 review round 1 (SFH H-1): Since Inception and CAGR are the stored
+  // headline on a chain-broken row, so the panel says which span they cover.
+  const coverageCaveat = headlineCoverageCaveat(payload.dataQuality, useBasisOrCash());
   // Inception return = cum_ret (no need to recompute).
   return (
     <Panel title="Cumulative Return Metrics">
+      {coverageCaveat && (
+        <p className="mb-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
+          ⚠ {coverageCaveat}
+        </p>
+      )}
       <Kpm>
         <Row label="Month-to-date" value={pct(m.mtd, true)} bench="" />
         <Row label="3 Month" value={pct(m.p3m, true)} bench="" />
