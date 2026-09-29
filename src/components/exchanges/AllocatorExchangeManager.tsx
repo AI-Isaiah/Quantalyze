@@ -406,8 +406,10 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
 
   const supabase = createClient();
 
-  // The D-09 rule's inputs, one per key. The returns days are the only inputs
-  // not on the key row; until they load, a card says so rather than guessing.
+  // The D-09 rule's inputs, one per key. The returns days and the departed
+  // keys' anchors are the only inputs not on the key row; until they load, a
+  // card says so rather than guessing. WR-R2-02: a departed key with no usable
+  // anchor neither covers nor bounds another key, as in the derive.
   const historyKeys: DepartedHistoryKey[] = keys.map((k) => ({
     id: k.id,
     exchange: k.exchange,
@@ -420,6 +422,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
     history_inclusion: k.history_inclusion,
     first_returns_day: returnsDays[k.id]?.first ?? null,
     last_returns_day: returnsDays[k.id]?.last ?? null,
+    anchored: anchorById[k.id] === undefined || anchorById[k.id].state === "anchored",
   }));
   const historyKeysById = new Map(historyKeys.map((k) => [k.id, k]));
   const departedIds = new Set(historyKeys.filter(isDepartedKey).map((k) => k.id));
@@ -562,7 +565,11 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
     if (!input || !isDepartedKey(input)) return null;
     const ids = historyInputIds(keyId);
     const failed = ids.some((id) => historyLoadFailed[id]);
-    const loaded = ids.every((id) => id in returnsDays) && keyId in anchorById;
+    // Every departed key on the account must have its anchor state, or a key
+    // with none would still read as able to cover this one (WR-R2-02).
+    const loaded =
+      ids.every((id) => id in returnsDays) &&
+      ids.filter((id) => departedIds.has(id)).every((id) => id in anchorById);
     // The switch is ON only when the book holds the history, and live only
     // where flipping it changes what the book holds (SFH-C4-05): see
     // departedHistoryCard.

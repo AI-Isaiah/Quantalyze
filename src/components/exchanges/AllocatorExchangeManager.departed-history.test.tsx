@@ -352,6 +352,31 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
     expect(csvReads.some((r) => r.keyId === "key-live" && r.ascending)).toBe(true);
   });
 
+  it("WR-R2-02: a key whose saved balance is gone does not zero the key it would have covered", async () => {
+    // key-a reads acct-9 from June 1 to 15 but has no saved balance, so the
+    // derive cannot count it; key-b reads the same account June 5 to 10 and
+    // has one. The derive counts key-b's days, so its card must say so, not
+    // that an earlier key read them.
+    RETURNS_DAYS = { "key-a": ["2026-06-01", "2026-06-15"], "key-b": ["2026-06-05", "2026-06-10"] };
+    ANCHORED = new Set(["key-b"]);
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          LIVE,
+          departed({ id: "key-a", venue_account_id: "acct-9", disconnected_at: "2026-06-15T12:00:00Z" }),
+          departed({ id: "key-b", venue_account_id: "acct-9", disconnected_at: "2026-06-10T12:00:00Z" }),
+        ]}
+      />,
+    );
+    await waitFor(() =>
+      expect(historyBlock("key-b").textContent).toContain("History included until 2026-06-10."),
+    );
+    expect(historyBlock("key-b").textContent).not.toContain("an earlier key");
+    expect(historySwitch("key-b").getAttribute("aria-checked")).toBe("true");
+    expect(historyBlock("key-a").textContent).toContain("History not available:");
+  });
+
   it("an included key whose saved balance is gone says its history is not available", async () => {
     RETURNS_DAYS = { "key-dep": ["2026-06-01", "2026-06-10"] };
     render(

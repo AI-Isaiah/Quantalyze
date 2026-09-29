@@ -10599,7 +10599,9 @@ def departed_history_inclusion(
     ``exchange``, ``venue_account_id``, ``account_shared_with_api_key_id``,
     ``account_share_kind``, ``is_active`` (optional, default true),
     ``disconnected_at``, ``sync_status``, ``history_inclusion``,
-    ``first_returns_day`` and ``last_returns_day``. The spec is the shared
+    ``first_returns_day``, ``last_returns_day`` and ``anchored`` (optional,
+    default true: false when the key has no saved balance to level its history
+    from). The spec is the shared
     fixture ``tests/fixtures/departed_history_inclusion.json`` (its ``rule``
     list); src/lib/departed-history.ts is the twin and is tested against the
     same rows. Pure; never reads created_at.
@@ -10619,6 +10621,13 @@ def departed_history_inclusion(
       (SFH-C4-07). Every other one is bounded to the day before the next
       uncovered key's first day (B4: on no day do two counted keys share a
       known account). 'include' never lifts a bound.
+    * WR-R2-02: a departed key with ``anchored`` false cannot be counted by the
+      book, so it neither covers nor bounds another key: it is left out of every
+      other key's ordering, as an excluded key is, and the chain re-forms around
+      the keys that can be levelled. Its own decision is taken against those
+      keys with itself added, so ``included``/``until`` on it name the days it
+      would carry that no levelled key carries; the derive leaves it out and
+      flags ``departed_history_unavailable``.
     """
     identity = account_identity_tokens(keys)
     live_ids = {str(row["id"]) for row in keys if _is_live_key(row)}
@@ -10675,6 +10684,9 @@ def departed_history_inclusion(
         ]
         # The departed keys that count on this account, this key among them,
         # in D-09 order: first returns day, then last returns day, then id.
+        # WR-R2-02: a key with no saved balance is never counted by the book,
+        # so it covers and bounds no other key; it is ordered only when it is
+        # the key being decided.
         counted_departed = sorted(
             (
                 str(rows_by_id[other_id]["first_returns_day"]),
@@ -10685,6 +10697,7 @@ def departed_history_inclusion(
             if other_id not in live_ids
             and rows_by_id[other_id].get("history_inclusion") != "exclude"
             and windows[other_id] is not None
+            and (other_id == key_id or rows_by_id[other_id].get("anchored", True) is not False)
         )
         position = next(
             index for index, entry in enumerate(counted_departed) if entry[2] == key_id
@@ -10961,23 +10974,81 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     counted_ids = eligible_ids - excluded_shared
     counted_rows = [row for row in key_rows if row["id"] in counted_ids]
 
+    def _load_key_inputs() -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            supabase.table("allocator_equity_derived")
+            .select("kind,payload")
+            .eq("allocator_id", allocator_id)
+            .like("kind", "key_inputs:%")
+            .execute()
+            .data
+            or []
+        )
+
+    ki_rows = await db_execute(_load_key_inputs)
+
+    # WR-R2-02: which departed keys can be levelled is decided BEFORE the D-09
+    # rule, from the same key_inputs rows the compose reads. A departed key
+    # whose row is missing (the orphan cleanup deleted every departed key's row
+    # before plan 09) or carries a null anchor (its last balance read failed)
+    # is never counted by the book, and it is never re-derived. Deciding this
+    # after the rule let such a key cover or bound a key that CAN be levelled,
+    # and that key's days then counted nowhere on a curve shown as ready.
+    departed_anchored: set[str] = set()
+    # Departed keys whose key_inputs row exists but carries no anchor → the
+    # stamped anchor_null_reason (SFH-C4-06).
+    departed_null_anchor_reasons: dict[str, str] = {}
+    for row in ki_rows:
+        kind = str(row.get("kind", ""))
+        api_key_id = kind.split(":", 1)[1] if ":" in kind else ""
+        if api_key_id not in rows_by_id or api_key_id in eligible_ids:
+            continue
+        departed_payload = row.get("payload")
+        if not isinstance(departed_payload, Mapping):
+            departed_payload = {}
+        if departed_payload.get("anchor_usd") is not None:
+            departed_anchored.add(api_key_id)
+            continue
+        _departed_reason = departed_payload.get("anchor_null_reason")
+        departed_null_anchor_reasons[api_key_id] = (
+            _departed_reason
+            if isinstance(_departed_reason, str) and _departed_reason
+            else "unstamped"
+        )
+
     # D-05 / D-09 (plan 09): a departed key's history stays in the book up to its
     # end day. The rule reads first/last returns days and disconnected_at only,
-    # the same inputs the overview (src/lib/departed-history.ts) reads.
+    # the same inputs the overview (src/lib/departed-history.ts) reads, plus
+    # whether the key can be levelled (the overview reads the same key_inputs
+    # rows for that).
     departed_decisions = departed_history_inclusion(
         [
             {
                 **row,
                 "first_returns_day": first_return_day.get(row["id"]),
                 "last_returns_day": last_return_day.get(row["id"]),
+                "anchored": row["id"] in eligible_ids or row["id"] in departed_anchored,
             }
             for row in key_rows
         ]
     )
+    # A departed key the rule includes but that cannot be levelled is left out
+    # under a benign flag: composing it would drop it as DROPPED_KEY and hold the
+    # whole book untrustworthy forever. The book stays what it was before plan 09
+    # for that key (D-22), no worse, and the rule has already let the keys that
+    # CAN be levelled carry every day they read.
+    departed_unavailable = sorted(
+        key_id
+        for key_id, decision in departed_decisions.items()
+        if decision.included and key_id not in departed_anchored
+    )
     departed_end_by_key: dict[str, str] = {
         key_id: decision.until
         for key_id, decision in departed_decisions.items()
-        if decision.included and decision.until is not None
+        if decision.included
+        and decision.until is not None
+        and key_id in departed_anchored
     }
 
     # Identity gate. A 'duplicate' is a duplicate while its holder is WORKING
@@ -11142,19 +11213,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         return await _permanent_corrupt_input(exc)
 
     # ── 3. key_inputs rows → flows_by_key + anchors_by_key; orphan cleanup. ──
-    def _load_key_inputs() -> list[dict[str, Any]]:
-        return cast(
-            list[dict[str, Any]],
-            supabase.table("allocator_equity_derived")
-            .select("kind,payload")
-            .eq("allocator_id", allocator_id)
-            .like("kind", "key_inputs:%")
-            .execute()
-            .data
-            or []
-        )
-
-    ki_rows = await db_execute(_load_key_inputs)
+    # (ki_rows was read before the D-09 rule; see WR-R2-02 there.)
     flows_by_key: dict[str, list[ExternalFlow]] = {}
     anchors_by_key: dict[str, float | None] = {}
     # F1a×F3/M2 seam: WHY the epilogue nulled an anchor ('dust' vs a real-capital
@@ -11162,9 +11221,6 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # returns axis is gated dust-omit vs real-failure-degrade (never silently
     # omitted → a trustworthy partial curve).
     null_anchor_reasons: dict[str, str] = {}
-    # Departed keys whose key_inputs row exists but carries no anchor → the
-    # stamped anchor_null_reason (SFH-C4-06).
-    departed_null_anchor_reasons: dict[str, str] = {}
     key_inputs_ids: set[str] = set()
     # SFH-R2-03: a stitch source's flows, when its key_inputs row is usable.
     source_flows: dict[str, list[ExternalFlow]] = {}
@@ -11188,28 +11244,19 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 continue
             if api_key_id not in eligible_ids:
                 if api_key_id in departed_end_by_key:
+                    # Anchored by construction (WR-R2-02: only a key with a
+                    # saved anchor reaches departed_end_by_key).
                     departed_payload = row.get("payload") or {}
-                    departed_anchor = departed_payload.get("anchor_usd")
-                    if departed_anchor is None:
-                        # SFH-C4-06: the row exists; its last balance read gave
-                        # no anchor. Kept apart from a missing row below.
-                        _departed_reason = departed_payload.get("anchor_null_reason")
-                        departed_null_anchor_reasons[api_key_id] = (
-                            _departed_reason
-                            if isinstance(_departed_reason, str) and _departed_reason
-                            else "unstamped"
-                        )
-                    else:
-                        flows_by_key[api_key_id] = [
-                            validate_flow_shape(
-                                ExternalFlow(
-                                    utc_day_iso=str(_f["utc_day_iso"]),
-                                    usd_signed=float(_f["usd_signed"]),
-                                )
+                    flows_by_key[api_key_id] = [
+                        validate_flow_shape(
+                            ExternalFlow(
+                                utc_day_iso=str(_f["utc_day_iso"]),
+                                usd_signed=float(_f["usd_signed"]),
                             )
-                            for _f in (departed_payload.get("flows") or [])
-                        ]
-                        anchors_by_key[api_key_id] = float(departed_anchor)
+                        )
+                        for _f in (departed_payload.get("flows") or [])
+                    ]
+                    anchors_by_key[api_key_id] = float(departed_payload["anchor_usd"])
                 continue
             if api_key_id not in counted_ids:
                 # A shared-account key left out by the group resolution: still
@@ -11285,20 +11332,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED.value,
         )
 
-    # A departed key the rule includes but whose inputs are gone (no key_inputs
-    # row: the orphan cleanup deleted every departed key's row before plan 09,
-    # or its last anchor read was null) cannot be leveled, and it is never
-    # re-derived. Composing it would drop it as DROPPED_KEY and hold the whole
-    # book untrustworthy forever, so it is left out under a benign flag: the
-    # book stays what it was before plan 09 for that key (D-22), no worse.
-    departed_unavailable = sorted(
-        k for k in departed_end_by_key if anchors_by_key.get(k) is None
-    )
-    for k in departed_unavailable:
-        del departed_end_by_key[k]
-        returns_by_key.pop(k, None)
-        flows_by_key.pop(k, None)
-        anchors_by_key.pop(k, None)
+    # A departed key the rule includes but whose inputs are gone was left out of
+    # departed_end_by_key before the rule's end days were used (WR-R2-02), so it
+    # never reached the returns, the flows or the collision gate.
     if departed_unavailable:
         # Counts only (no key id, no venue id, no USD — T-167.1.2-22). A key
         # whose row was deleted and a key whose last balance read failed are

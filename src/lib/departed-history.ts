@@ -32,6 +32,12 @@ export interface DepartedHistoryKey {
   history_inclusion: string | null;
   first_returns_day: string | null;
   last_returns_day: string | null;
+  /**
+   * False when the key has no saved balance to level its history from (its
+   * key_inputs row is missing or carries a null anchor). Default true.
+   * WR-R2-02: such a key neither covers nor bounds another key.
+   */
+  anchored?: boolean;
 }
 
 export type DepartedHistoryReason =
@@ -208,12 +214,16 @@ export function departedHistoryInclusion(
     .map((k) => k.first_returns_day ?? BEFORE_EVERY_DAY);
   // The departed keys that count on this account, this key among them, in
   // D-09 order: first returns day, then last returns day, then id.
+  // WR-R2-02: a key with no saved balance is never counted by the book, so it
+  // covers and bounds no other key; it is ordered only when it is the key
+  // being decided.
   const countedDeparted = [...sameAccount, key]
     .filter(
       (k) =>
         !isLiveKey(k) &&
         k.history_inclusion !== "exclude" &&
-        ownWindow(k) !== null,
+        ownWindow(k) !== null &&
+        (k.id === key.id || k.anchored !== false),
     )
     .map((k) => [k.first_returns_day!, k.last_returns_day!, k.id] as const)
     .sort((a, b) =>

@@ -364,6 +364,71 @@ async def test_a_departed_key_whose_last_balance_read_failed_is_counted_apart(
     assert "1 whose last balance read gave no anchor (balance_error=1)" in lines[0]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gone", ["no_row", "null_anchor"])
+async def test_an_unanchored_departed_key_does_not_zero_the_key_it_would_have_covered(
+    gone: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """WR-R2-02. Two departed keys read one exchange account: A from June 1 to
+    June 15, B from June 5 to June 10. A would cover B (it reads the account over
+    all of B's days), but A has no saved balance, so the derive cannot count it.
+    B's days must then count through B. Before the fix the rule chose A as the
+    account's carrier first and the job dropped A afterwards: B counted zero days,
+    the account was out of a book shown as ready, and B's card said an earlier
+    key read those days."""
+    import logging
+
+    key_a = _gate_key(
+        "key-A", ALLOC,
+        venue_account_id="acct-9",
+        disconnected_at="2026-06-15T12:00:00+00:00",
+    )
+    key_b = _gate_key(
+        "key-B", ALLOC,
+        venue_account_id="acct-9",
+        disconnected_at="2026-06-10T12:00:00+00:00",
+    )
+    derived = [_key_inputs("key-L", LIVE_ANCHOR, DAYS[-1]), _key_inputs("key-B", DEP_ANCHOR, DAYS[9])]
+    if gone == "null_anchor":
+        row = _key_inputs("key-A", DEP_ANCHOR, DAYS[14])
+        row["payload"] = {**row["payload"], "anchor_usd": None, "anchor_null_reason": "balance_error"}
+        derived.append(row)
+    fake = _FakeSupabase({
+        "api_keys": [_gate_key("key-L", ALLOC, venue_account_id="acct-live"), key_a, key_b],
+        "csv_daily_returns": (
+            _csv("key-L", DAYS, LIVE_R)
+            + _csv("key-A", DAYS[:15], DEP_R)
+            + _csv("key-B", DAYS[4:10], DEP_R)
+        ),
+        DERIVED_TABLE: derived,
+        LEGACY_TABLE: [],
+    })
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
+        result = await _run(fake)
+    assert result.outcome.name == "DONE"
+    payload = _book(fake)
+    assert payload["is_trustworthy"] is True
+    # B is in the book over its own days, and the unlevellable A is disclosed.
+    assert "departed_history_included" in payload["flags"]
+    assert "departed_history_unavailable" in payload["flags"]
+    curve = _curve(payload)
+    for day in DAYS[4:10]:
+        expected = _live_level(day) + _level(DEP_ANCHOR, DEP_R, 9 - DAYS.index(day))
+        assert curve[day] == pytest.approx(expected, rel=1e-12), day
+    for day in DAYS[10:]:
+        assert curve[day] == pytest.approx(_live_level(day), rel=1e-12), day
+    lines = [
+        r.getMessage() for r in caplog.records
+        if "departed_history_unavailable" in r.getMessage()
+    ]
+    assert len(lines) == 1, lines
+    assert lines[0].startswith("derive_allocator_equity: 1 departed key(s)"), lines[0]
+    if gone == "null_anchor":
+        assert "1 whose last balance read gave no anchor (balance_error=1)" in lines[0]
+    else:
+        assert "1 with no saved inputs row" in lines[0]
+
+
 # ── Task 2: the D-09 rule, ONE spec for Python and TypeScript ─────────────────
 
 import json  # noqa: E402
@@ -426,9 +491,15 @@ def test_no_two_counted_keys_share_a_known_account_on_any_day(case: dict[str, An
             "last_counted_day": d.until,
         }
         for key_id, d in decisions.items()
-        if d.included
+        if d.included and _anchored(next(k for k in keys if k["id"] == key_id))
     ]
     assert account_identity_collisions(counted) == []
+
+
+def _anchored(key: dict[str, Any]) -> bool:
+    """WR-R2-02: a key with no saved balance is left out by the derive, whatever
+    the rule decides for it. Only an anchored key is ever in the book."""
+    return key.get("anchored", True) is not False
 
 
 def _own_days(key: dict[str, Any]) -> list[str]:
@@ -451,7 +522,14 @@ def test_no_day_of_a_known_account_is_dropped(case: dict[str, Any]) -> None:
     account takes over) is counted by exactly one key. Without it, a later key
     that ends first cut the earlier key's tail and those days counted nowhere,
     with no flag. A live key with no returns yet is skipped: the book rebuilds
-    until it has them (WR-04)."""
+    until it has them (WR-04).
+
+    WR-R2-02: the derive drops an included key that has no saved balance, so
+    such a key counts nothing here. Every day an ANCHORED key read must still be
+    counted, by exactly one anchored key: a dropped key never leaves a gap that
+    another key the book can count would have filled. Before the fix an
+    unanchored key covered or bounded an anchored one and those days counted
+    nowhere, on a curve shown as ready."""
     from services.job_worker import (
         _is_live_key,
         account_identity_tokens,
@@ -470,14 +548,16 @@ def test_no_day_of_a_known_account_is_dropped(case: dict[str, Any]) -> None:
         needed = {
             day
             for k in on_account
-            if not _is_live_key(k) and k.get("history_inclusion") != "exclude"
+            if not _is_live_key(k)
+            and k.get("history_inclusion") != "exclude"
+            and _anchored(k)
             for day in _own_days(k)
             if live_start is None or day < live_start
         }
         counted: dict[str, int] = {}
         for k in on_account:
             decision = decisions.get(k["id"])
-            if decision is None or not decision.included:
+            if decision is None or not decision.included or not _anchored(k):
                 continue
             for day in _own_days({**k, "last_returns_day": decision.until}):
                 counted[day] = counted.get(day, 0) + 1
@@ -488,13 +568,18 @@ def test_no_day_of_a_known_account_is_dropped(case: dict[str, Any]) -> None:
 def _fixture_supabase(case: dict[str, Any]) -> _FakeSupabase:
     """Every key of the case as an api_keys row, dense daily returns from its first
     to its last returns day, and a key_inputs row with an anchor, so the job has
-    everything it needs to compose."""
+    everything it needs to compose. A key marked ``anchored: false`` gets no
+    key_inputs row (WR-R2-02): its saved balance is gone."""
     api_keys = []
     csv: list[dict[str, Any]] = []
     derived = []
     for key in case["keys"]:
         row = _gate_key(key["id"], ALLOC)
-        row.update({k: v for k, v in key.items() if not k.endswith("_returns_day")})
+        row.update({
+            k: v
+            for k, v in key.items()
+            if not k.endswith("_returns_day") and k != "anchored"
+        })
         api_keys.append(row)
         first, last = key["first_returns_day"], key["last_returns_day"]
         if first and last:
@@ -503,7 +588,8 @@ def _fixture_supabase(case: dict[str, Any]) -> _FakeSupabase:
                 for d in pd.date_range(first, last, freq="D")
             ]
             csv += _csv(key["id"], days, 0.001)
-        derived.append(_key_inputs(key["id"], 1_000.0, last or "2026-06-30"))
+        if _anchored(key):
+            derived.append(_key_inputs(key["id"], 1_000.0, last or "2026-06-30"))
     return _FakeSupabase({
         "api_keys": api_keys,
         "csv_daily_returns": csv,
@@ -530,10 +616,11 @@ async def test_the_job_passes_the_rules_end_days_to_the_compose(case: dict[str, 
     with patch.object(compose_module, "compose_allocator_equity", _spy):
         result = await _run(fake)
     assert result.outcome.name == "DONE"
+    anchored = {key["id"] for key in case["keys"] if _anchored(key)}
     expected_end = {
         key_id: row["until"]
         for key_id, row in case["expected"].items()
-        if row["included"]
+        if row["included"] and key_id in anchored
     }
     assert captured.get("departed_end_by_key", {}) == expected_end
     departed = set(case["expected"])
