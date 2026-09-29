@@ -200,6 +200,13 @@
         "k-b": {"included": false, "until": null, "reason": "same_account_as_earlier_key"},
         "k-c": {"included": true, "until": "2026-04-01", "reason": "latest_key_on_account"}
       }
+    },
+    {
+      "name": "20_an_unreadable_disconnected_at_ends_on_the_last_returns_day_in_both_languages",
+      "keys": [
+        {"id": "k-dep", "exchange": "binance", "venue_account_id": "acct-2", "disconnected_at": "not-a-timestamp", "sync_status": "complete", "history_inclusion": null, "first_returns_day": "2026-06-01", "last_returns_day": "2026-06-07"}
+      ],
+      "expected": {"k-dep": {"included": true, "until": "2026-06-07", "reason": "distinct_account"}}
     }
   ]
 }

@@ -10496,10 +10496,17 @@ def _is_live_key(row: Mapping[str, Any]) -> bool:
 
 
 def _utc_day(value: object) -> str | None:
-    """The UTC calendar day of a timestamptz string, or None."""
+    """The UTC calendar day of a timestamptz string, or None.
+
+    An unreadable value is None, as in the TS twin (``utcDay``), so the key ends
+    on its last returns day. Raising here sat outside the job's corrupt-input
+    disposal and would have retried the job forever (IN-05 / SFH-C4-11)."""
     if not isinstance(value, str) or not value.strip():
         return None
-    parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).date().isoformat()
