@@ -86,11 +86,12 @@ export function useBasisOrCash(): Basis {
  * server-side D3 overlay — payload-as-arg avoids coupling to the frozen
  * FactsheetProvider).
  *
- *   - `cash_settlement` → `payload.strategyMetrics` UNTOUCHED. For composites,
- *     build-payload already overlaid the persisted cash scalars onto it (geometric
- *     or arithmetic per `returns_denominator_config` — Round-2 C-1; arithmetic
- *     only for the "simple"/allocated-capital override), so this is coherent with
- *     the persisted headline and byte-identical to today for single-key.
+ *   - `cash_settlement` → `payload.strategyMetrics` UNTOUCHED. build-payload
+ *     already overlaid the persisted cash scalars onto it (geometric or arithmetic
+ *     per `returns_denominator_config` — Round-2 C-1; arithmetic only for the
+ *     "simple"/allocated-capital override): for a composite from the stitch's
+ *     object, and since Phase 169 (D-10) for a rankable single-key row from its
+ *     persisted top-level scalars. So this is the persisted headline the lists show.
  *   - `mark_to_market` → a shallow copy overlaying ONLY the seven mapped
  *     {@link overlayBasisScalars} scalars from the PERSISTED
  *     `metrics_json_by_basis.mark_to_market`. α/IR and every unmapped key keep
@@ -355,8 +356,8 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
       // when the payload carries a persisted cash headline — each pinning
       // Sharpe/Sortino to its OWN persisted scalar cache so the L=1↔L≠1 boundary is
       // continuous for the two invariant metrics. A cash payload with no persisted
-      // cash object (a row the owner declined to overlay, or a payload cached
-      // before Phase 169) keeps the client recompute below.
+      // cash object (a row the owner declined to overlay) keeps the client
+      // recompute below.
       if (L <= 0) return lb.strategyMetrics;
       const persisted = (basis === "cash_settlement"
         ? payload.metricsByBasis?.cash_settlement

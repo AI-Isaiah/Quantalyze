@@ -576,13 +576,16 @@ export type FactsheetCommon = {
    */
   missingSegments?: { start: string; end: string; kind: "gap"; days: number }[];
   /**
-   * FS-03 — persisted `metrics_json_by_basis`. `cash_settlement` is present on a
-   * COMPOSITE payload (drives the D3 cash-scalar overlay onto `strategyMetrics` at
-   * build-payload.ts:243) but ABSENT on a single-key options payload, which carries
-   * ONLY `mark_to_market` (Phase 101/102 decision — the SC-4 keystone: with no
-   * cash key the cash overlay is a no-op, so the cash headline stays byte-identical).
-   * `mark_to_market` is OMITTED (never JSON null) when the venue/book can't produce
-   * an MTM basis. Drives the KpiStrip/MetricsColumn basis relabel (D5).
+   * FS-03 — persisted per-basis headline scalars. `cash_settlement` drives the D3
+   * cash-scalar overlay onto `strategyMetrics` (build-payload.ts). It is present on
+   * a COMPOSITE payload (the stitch's persisted `metrics_json_by_basis` object) and,
+   * since Phase 169 (D-10, SC4), on a RANKABLE single-key payload, where
+   * `readSingleKeyBasisOpts` builds it from the row's persisted top-level
+   * `strategy_analytics` scalars so the page reads the value the lists show. A
+   * single-key row's RAW `metrics_json_by_basis.cash_settlement` is still never
+   * threaded (the Phase 101/102 SC-4 keystone). Absent on a row that is not
+   * rankable. `mark_to_market` is OMITTED (never JSON null) when the venue/book
+   * can't produce an MTM basis. Drives the KpiStrip/MetricsColumn basis relabel (D5).
    */
   metricsByBasis?: {
     // Review round 1 (IN-02): each basis is `number | null`. Python's
