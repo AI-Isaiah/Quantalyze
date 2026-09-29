@@ -17021,14 +17021,32 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(live.sharpe).toBe(payload.liveBaselineMetrics.sharpe);
   };
 
+  // Review C3 IN-03: the D-15 arms use the producer's own shape for a
+  // non-ready book (`derivePhase07Fields` in src/lib/queries.ts): no curve,
+  // no returns, no raw snapshots, and a named reason. `makePayload`'s default
+  // 2-point curve is a shape the producer never sends under "rebuilding", and
+  // with it a gate that also required a curve would pass every arm while
+  // hiding the disclosure for every real book.
+  const producerRebuildingPayload = (
+    overrides: Partial<MyAllocationDashboardPayload> = {},
+  ) =>
+    makePayload({
+      equityHistoryState: "rebuilding",
+      equityHistoryRebuildReason: "awaiting_derivation",
+      equityDailyPoints: [],
+      equityDailyReturns: [],
+      equitySnapshots: [],
+      derivedCurveComputedAt: null,
+      ...overrides,
+    });
+
   it.each([
     ["0 snapshots on the legacy source (SFH-05's book)", 0, "legacy"],
     ["3 snapshots on the legacy source", 3, "legacy"],
   ] as const)(
     "rebuilding + %s: the disclosure renders exactly once, and the live-book KPIs stay (D-15)",
     (_label, snapshotCount, equityCurveSource) => {
-      const payload = makePayload({
-        equityHistoryState: "rebuilding",
+      const payload = producerRebuildingPayload({
         snapshotCount,
         equityCurveSource,
       });
@@ -17059,17 +17077,34 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
   // Review round 2 WR-02's two books, 0 legacy snapshots with and without a
   // derived curve, now read the same: the disclosure renders for both. The
   // "neither source" book used to be the control that kept it off.
+  // Producer-shaped (IN-03). The derived book is the one the producer stamps
+  // "derived" under "rebuilding": a trustworthy v2 curve exists but is held
+  // back (a key's account is still pending), so the payload carries the
+  // source and its compute time and still no curve points. The "neither
+  // source" book carries no curve at all.
   it.each([
-    ["a derived curve and 0 legacy snapshots", "derived"],
-    ["neither source (0 legacy snapshots, no derived curve)", "legacy"],
+    [
+      "a derived curve held back and 0 legacy snapshots",
+      "derived",
+      "2026-09-20T05:30:00Z",
+      "account_identity_pending",
+    ],
+    [
+      "neither source (0 legacy snapshots, no derived curve)",
+      "legacy",
+      null,
+      "awaiting_derivation",
+    ],
   ] as const)(
     "rebuilding + %s: the disclosure renders (D-15, state-driven)",
-    (_label, equityCurveSource) => {
-      const payload = makePayload({
-        equityHistoryState: "rebuilding",
+    (_label, equityCurveSource, derivedCurveComputedAt, reason) => {
+      const payload = producerRebuildingPayload({
         snapshotCount: 0,
         equityCurveSource,
+        derivedCurveComputedAt,
+        equityHistoryRebuildReason: reason,
       });
+      expect(payload.equityDailyPoints).toEqual([]);
       render(
         <ScenarioComposer
           payload={payload}
@@ -17095,11 +17130,24 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     // (label, state, snapshotCount, source), so a red run names its case.
     "blank mode + %s (equityHistoryState %s, %s snapshots, %s source): no disclosure",
     (_label, state, snapshotCount, equityCurveSource) => {
-      const payload = makePayload({
-        equityHistoryState: state as never,
-        snapshotCount,
-        equityCurveSource,
-      });
+      // Review C3 IN-03: producer-shaped. Only "ready" carries a curve and its
+      // returns; every other state carries none, as `derivePhase07Fields`
+      // sends it.
+      const payload =
+        state === "ready"
+          ? makePayload({
+              equityHistoryState: "ready",
+              equityHistoryRebuildReason: null,
+              equityDailyPoints: THREE_POINT_CURVE,
+              equityDailyReturns: THREE_POINT_RETURNS,
+              snapshotCount,
+              equityCurveSource,
+            })
+          : producerRebuildingPayload({
+              equityHistoryState: state as never,
+              snapshotCount,
+              equityCurveSource,
+            });
       render(
         <ScenarioComposer
           payload={payload}
