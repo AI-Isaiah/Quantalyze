@@ -1184,6 +1184,78 @@ def _is_trade_mix_approximate(positions: list[dict[str, Any]]) -> bool:
     )
 
 
+# C3 topic H: page size and hard cap of the keyset series read below. Same
+# values paginated_select used, so the truncation arm's row-cap sentence is
+# unchanged (1000 x 1000 = 1,000,000 rows).
+_SERIES_PAGE_SIZE: int = 1000
+_SERIES_HARD_CAP_PAGES: int = 1000
+
+
+def _load_strategy_daily_returns(
+    supabase: Any,
+    strategy_id: str,
+    *,
+    page_size: int = _SERIES_PAGE_SIZE,
+    hard_cap_pages: int = _SERIES_HARD_CAP_PAGES,
+) -> list[dict[str, Any]]:
+    """Read one strategy's ``csv_daily_returns`` series with KEYSET pagination.
+
+    C3 topic H. This read used ``paginated_select``, which pages by OFFSET: each
+    page is a separate request with its own snapshot, and the writers that
+    rewrite this strategy's series (the dailies derive, the composite stitch)
+    can land between two pages. A write that adds or removes a day sorting
+    before the next page's offset shifts every later row by one, so a day is
+    read twice or never read, and the metrics run over that torn series.
+
+    Keyset on ``date`` removes the shift. ``(strategy_id, date)`` is UNIQUE
+    (``csv_daily_returns_strategy_date_key``), so with the strategy fixed by
+    ``eq`` a ``date > cursor`` cursor is a total order: no date is read twice,
+    and every row present for the whole read is read, because no page's start
+    depends on how many rows sort before it. It mirrors C3 fix E's
+    ``job_worker._load_allocator_daily_returns``.
+
+    The read stops on the first EMPTY page, not a short one: PostgREST clamps
+    ``limit`` to its ``max_rows``, and a short-page stop would silently end the
+    read after the first page if that cap ever sat below ``page_size``.
+
+    Past ``hard_cap_pages`` non-empty pages it raises ``PaginatedSelectTruncated``
+    with the same hint string ``paginated_select`` carried, so the runner's
+    typed truncation arm is unchanged. A count landing exactly on the cap is
+    read whole, as ``paginated_select``'s boundary peek did.
+    """
+    out: list[dict[str, Any]] = []
+    pages = 0
+    cursor: str | None = None
+    while True:
+        query = (
+            supabase.table("csv_daily_returns")
+            .select("date, daily_return")
+            .eq("strategy_id", strategy_id)
+        )
+        if cursor is not None:
+            query = query.gt("date", cursor)
+        result = query.order("date", desc=False).limit(page_size).execute()
+        chunk: list[dict[str, Any]] = list(result.data or [])
+        if not chunk:
+            return out
+        if pages >= hard_cap_pages:
+            logger.error(
+                "_load_strategy_daily_returns: hit hard cap of %d pages x %d rows "
+                "— raising PaginatedSelectTruncated (strategy %s)",
+                hard_cap_pages,
+                page_size,
+                strategy_id,
+            )
+            raise PaginatedSelectTruncated(
+                page_count=hard_cap_pages,
+                page_size=page_size,
+                hint=f"csv_daily_returns strategy_id={strategy_id}",
+            )
+        pages += 1
+        out.extend(chunk)
+        cursor = str(chunk[-1]["date"])
+
+
 async def run_csv_strategy_analytics(
     strategy_id: str,
     *,
@@ -1623,24 +1695,18 @@ async def run_csv_strategy_analytics(
         try:
             # Load persisted series.
             #
-            # WR-02 (19.1-REVIEW): use paginated_select. A bare
+            # WR-02 (19.1-REVIEW): drain every page. A bare
             # .select(...).eq(...).order(...).execute() caps at PostgREST's
             # default 1000-row response on hosted Supabase, but the CSV finalize
             # fold accepts up to 5000 rows (finalize_csv_strategy_with_returns,
             # migration 20260819120000). A 1001–5000-row CSV persists fine but
             # would silently truncate to the first 1000 rows here, feeding
-            # compute_all_metrics a partial series. Composite order_by
-            # (date asc) matches the (strategy_id, date) UNIQUE index from
-            # the same migration so paginated rows cannot duplicate or
-            # skip at page boundaries.
+            # compute_all_metrics a partial series. C3 topic H: the pages are
+            # KEYSET on date, not OFFSET, so a concurrent rewrite of this
+            # series between two pages cannot make a day be read twice or
+            # skipped (see _load_strategy_daily_returns).
             def _load_series() -> list[dict[str, Any]]:
-                return paginated_select(
-                    supabase.table("csv_daily_returns")
-                    .select("date, daily_return")
-                    .eq("strategy_id", strategy_id),
-                    order_by=(("date", False),),
-                    truncation_hint=f"csv_daily_returns strategy_id={strategy_id}",
-                )
+                return _load_strategy_daily_returns(supabase, strategy_id)
             data = await db_execute(_load_series)
 
             if len(data) < 2:
