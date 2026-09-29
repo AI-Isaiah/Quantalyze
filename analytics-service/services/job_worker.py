@@ -10282,8 +10282,10 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     supabase = get_supabase()
 
     async def _delete_equity_curve_row() -> None:
-        # Degrade to the clean no-row legacy fallback (the SAFETY pin's no-row
-        # case). Shared by the empty-compose (B2), incomplete-compose (F1b), and
+        # Leave NO row, so the reader renders its rebuilding panel (Phase
+        # 167.1.2 plan 11 removed the legacy-curve fallback: a missing row is no
+        # longer drawn from allocator_equity_snapshots). Shared by the identity
+        # refusal, the empty-compose (B2), incomplete-compose (F1b), and
         # permanent-failure (F2) paths so a structurally-failed / partial / empty
         # recompute can never leave a STALE trustworthy row rendering as "derived".
         def _del() -> None:
@@ -10426,13 +10428,20 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     if duplicate_keys or collisions:
         await _delete_equity_curve_row()
         # Reason token + counts only. No key id, no venue id, no USD (T-167.1.2-22).
+        # C2 silent-failure SFH-07: WARNING, not INFO. The refusal deletes the
+        # curve and ends DONE, so this line is the only trace of why the book
+        # renders "rebuilding". An audit action for it needs a member in BOTH
+        # services/audit.py and src/lib/audit.ts (test_action_literal_matches_ts_union),
+        # and this derive has no api_key to anchor it on; recorded in the
+        # 167.1.2 REVIEW-FIX report rather than half-added here.
         reason = (
             "account_duplicate" if duplicate_keys else "account_identity_collision"
         )
-        logger.info(
+        logger.warning(
             "derive_allocator_equity: %s for allocator %s "
             "(counted_keys=%d duplicate_keys=%d colliding_groups=%d) — "
-            "deleted any stale equity_curve row",
+            "deleted any stale equity_curve row; the book shows the rebuilding "
+            "panel until the keys are resolved",
             reason,
             allocator_id,
             len(counted_rows),
@@ -10466,7 +10475,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # permanent scrubbed FAILED so the admin sees a terminal state, not an
         # infinite poison-retry. Scrubbed for defence in depth (no raw value leak).
         # F2: DELETE the stale equity_curve row first so a structurally-failed
-        # recompute degrades to legacy instead of leaving a stale trustworthy row.
+        # recompute leaves no row (the book shows "rebuilding") instead of a
+        # stale trustworthy row.
         await _delete_equity_curve_row()
         import re
 
@@ -10588,10 +10598,10 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # key_inputs row. During the founder-gated backfill the FIRST key's compose
     # runs while sibling keys still have zero rows (all 517 prod keys start empty),
     # so composing now would emit a TRUSTWORTHY curve over a SUBSET of the
-    # allocator's capital (a transient 1-of-N-capital curve labeled "Derived",
-    # suppressing a legacy curve that included every key). If ANY eligible key is
+    # allocator's capital (a transient 1-of-N-capital curve rendered as ready).
+    # If ANY eligible key is
     # absent from BOTH maps the compose is INCOMPLETE → refuse: delete the
-    # equity_curve row (degrade to legacy) rather than compose a silently-partial
+    # equity_curve row (the book shows "rebuilding") rather than compose a silently-partial
     # trustworthy curve. A key WITH a key_inputs row but no returns is NOT missing
     # here — it is visible to the compose core, which classifies it
     # anchored-without-returns → DROPPED_KEY → untrustworthy (B3). This gate is for
@@ -10604,8 +10614,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             "derive_allocator_equity: INCOMPLETE compose for allocator %s "
             "(eligible_keys=%d returns_keys=%d key_inputs_keys=%d missing=%d) — "
             "an eligible key has neither returns nor key_inputs (backfill window); "
-            "deleted any stale equity_curve row, degrading to legacy until every "
-            "sibling derives (Option B, self-healing)",
+            "deleted any stale equity_curve row; the book shows the rebuilding "
+            "panel until every sibling derives (self-healing)",
             allocator_id, len(eligible_ids), len(returns_by_key),
             len(key_inputs_ids), len(missing_ids),
         )
@@ -10637,7 +10647,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # errors carry counts/day-indices only, still scrubbed for defence in
         # depth). F2: DELETE the stale equity_curve row first — otherwise a
         # post-liquidation poison input would leave the frozen pre-liquidation curve
-        # rendering as trustworthy FOREVER; degrade to legacy instead.
+        # rendering as trustworthy FOREVER; leave no row (the book shows
+        # "rebuilding") instead.
         await _delete_equity_curve_row()
         scrubbed = str(scrub_freeform_string(str(exc)))
         return DispatchResult(
@@ -10654,18 +10665,18 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     #      today) returns curve=[] — is_trustworthy may be True (benign honest-empty
     #      tokens: NO_ANCHORED_KEYS/ZERO_WEIGHT_MASS) OR False (all keys DROPPED_KEY
     #      post-B3); this branch keys on EMPTINESS, not on the trust flag, so both
-    #      empty shapes degrade the same. Upserting it would blank the dashboard
-    #      while suppressing the legacy render (which has real data), and a later
+    #      empty shapes degrade the same. Upserting it would render a blank
+    #      chart as the book's history, and a later
     #      structurally-empty recompute would leave a STALE trustworthy row (L1).
-    #      Instead DELETE any existing equity_curve row → degrade to the clean
-    #      no-row legacy fallback (the SAFETY pin's no-row case). The frontend
+    #      Instead DELETE any existing equity_curve row → no row, which the
+    #      reader renders as the rebuilding panel (plan 11). The frontend
     #      extractTrustworthyDerivedCurve is the paired last-line defense (B2a). ──
     if not (payload.get("curve") or []):
         await _delete_equity_curve_row()
         logger.info(
             "derive_allocator_equity: empty compose for allocator %s "
             "(eligible_keys=%d returns_keys=%d orphans_cleaned=%d) — deleted any "
-            "stale equity_curve row, degrading to the legacy fallback (Option B)",
+            "stale equity_curve row; the book shows the rebuilding panel",
             allocator_id, len(eligible_ids), len(returns_by_key), len(orphan_kinds),
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)

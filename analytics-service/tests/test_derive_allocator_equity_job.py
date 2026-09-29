@@ -1882,6 +1882,57 @@ async def test_shared_account_with_no_working_key_is_counted_once_and_loudly(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("keys", "token"),
+    [
+        pytest.param(
+            [
+                _gate_key(
+                    "key-D", "alloc-refuse",
+                    account_share_kind="duplicate",
+                    account_shared_with_api_key_id="key-H",
+                ),
+                _gate_key("key-H", "alloc-refuse", venue_account_id="venue-holder"),
+            ],
+            "account_duplicate",
+            id="duplicate",
+        ),
+        pytest.param(
+            [
+                _gate_key("key-A", "alloc-refuse", venue_account_id="venue-shared"),
+                _gate_key("key-B", "alloc-refuse", venue_account_id="venue-shared"),
+            ],
+            "account_identity_collision",
+            id="collision",
+        ),
+    ],
+)
+async def test_identity_refusal_is_a_warning_not_info(
+    caplog: pytest.LogCaptureFixture, keys: list[dict[str, Any]], token: str
+) -> None:
+    """C2 silent-failure SFH-07: the identity refusal deletes the allocator's
+    curve and ends the job DONE. At INFO nobody can find out from the logs why
+    the curve keeps disappearing. It logs at WARNING: token and counts only."""
+    import logging
+
+    alloc = "alloc-refuse"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    fake = _FakeSupabase({
+        "api_keys": keys,
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [_stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    assert len(_curve_deletes(fake, alloc)) == 1
+    refusals = [r for r in caplog.records if token in r.getMessage()]
+    assert refusals, caplog.text
+    assert all(r.levelno == logging.WARNING for r in refusals), [
+        logging.getLevelName(r.levelno) for r in refusals
+    ]
+
+
+@pytest.mark.asyncio
 async def test_composite_pair_keeps_the_key_whose_history_starts_first() -> None:
     """C2 review WR-01 (C1 WR-03): the marker's direction follows stamp order,
     not seniority, so during the backfill window the HOLDER is often the newer
