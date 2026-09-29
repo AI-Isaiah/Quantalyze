@@ -93,11 +93,32 @@ describe("latestHoldingsPerKey (D-16)", () => {
 // ---------------------------------------------------------------------------
 type HoldingDb = { allocator_id: string; api_key_id: string; asof: string; symbol: string };
 type Fail = { table: string; select: string; message: string };
+type KeyDb = {
+  id: string;
+  user_id: string;
+  exchange?: string;
+  venue_account_id?: string | null;
+  account_share_kind?: string | null;
+  account_shared_with_api_key_id?: string | null;
+};
+/** One `allocator.holdings.sync_completed` audit row, as the poll writes it. */
+type AuditDb = {
+  user_id: string;
+  action: string;
+  entity_type: string;
+  entity_id: string;
+  created_at: string;
+  metadata: Record<string, unknown> | null;
+  // The fake has no JSON operators: the `metadata->>final_status` filter
+  // reads this flattened copy, which `poll()` keeps equal to the metadata's.
+  "metadata->>final_status": unknown;
+};
 
 function fakeClient(
-  keys: Array<{ id: string; user_id: string }>,
+  keys: KeyDb[],
   holdings: HoldingDb[],
   fail?: Fail,
+  audit: AuditDb[] = [],
 ) {
   return {
     from(table: string) {
@@ -127,9 +148,9 @@ function fakeClient(
             resolve({ data: null, error: { message: fail.message } });
             return;
           }
-          const source = (table === "api_keys" ? keys : holdings) as Array<
-            Record<string, unknown>
-          >;
+          const source = (
+            table === "api_keys" ? keys : table === "audit_log" ? audit : holdings
+          ) as Array<Record<string, unknown>>;
           let rows = source.filter((r) => eqs.every(([c, v]) => r[c] === v));
           if (order) {
             const { column, ascending } = order;
@@ -148,6 +169,26 @@ function fakeClient(
   } as unknown as Parameters<typeof fetchLatestHoldingsPerKey>[0];
 }
 
+/** A poll's success event for `keyId` (user-1), as `_emit_audit` records it. */
+function poll(
+  keyId: string,
+  createdAt: string,
+  metadata: Record<string, unknown> | null,
+): AuditDb {
+  return {
+    user_id: "user-1",
+    action: "allocator.holdings.sync_completed",
+    entity_type: "api_key",
+    entity_id: keyId,
+    created_at: createdAt,
+    metadata,
+    "metadata->>final_status":
+      metadata && typeof metadata.final_status === "string"
+        ? metadata.final_status
+        : null,
+  };
+}
+
 const h = (api_key_id: string, asof: string, symbol: string): HoldingDb => ({
   allocator_id: "user-1",
   api_key_id,
@@ -155,6 +196,7 @@ const h = (api_key_id: string, asof: string, symbol: string): HoldingDb => ({
   symbol,
 });
 const COLS = "api_key_id, asof, symbol";
+const KEY_SELECT = "id";
 
 describe("fetchLatestHoldingsPerKey (D-16, bounded read)", () => {
   it("returns each key's rows at its own latest asof, from an ascending table", async () => {
@@ -212,7 +254,8 @@ describe("fetchLatestHoldingsPerKey (D-16, bounded read)", () => {
   });
 
   it.each([
-    ["the key id read", "api_keys", "id"],
+    ["the key id read", "api_keys", KEY_SELECT],
+    ["a poll-outcome read", "audit_log", "metadata"],
     ["a latest-asof read", "allocator_holdings", "asof"],
     ["a rows read", "allocator_holdings", COLS],
   ])("an error in %s is returned as error, with no partial data", async (_label, table, select) => {
@@ -259,3 +302,116 @@ describe("fetchLatestHoldingsPerKey (D-16, bounded read)", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review C4 SFH-C4-02 (and the WR-02 not-worse arm). A clean poll that read
+// NOTHING writes no holdings row, so the key's latest asof stays on the day
+// before its last position closed. The poll's own record of that outcome is
+// its `allocator.holdings.sync_completed` audit event (final_status, row_count,
+// asof), the same evidence the daily refresh reads (`_polled_empty_since`).
+// ---------------------------------------------------------------------------
+describe("fetchLatestHoldingsPerKey: a later clean poll supersedes older rows (SFH-C4-02)", () => {
+  const deribit = [{ id: "key-d", user_id: "user-1", exchange: "deribit" }];
+  const expired = [
+    h("key-d", "2026-09-26", "BTC-26SEP26-60000-C"),
+    h("key-d", "2026-09-26", "ETH-26SEP26-3000-P"),
+  ];
+
+  it("a clean, empty poll after the key's latest rows leaves the key with no current rows", async () => {
+    const client = fakeClient(deribit, expired, undefined, [
+      poll("key-d", "2026-09-27T04:00:05+00:00", {
+        final_status: "complete",
+        row_count: 0,
+        asof: "2026-09-27",
+      }),
+    ]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res).toEqual({ data: [], error: null });
+  });
+
+  it("the newest clean poll decides: an empty poll before a later poll with rows does not hide them", async () => {
+    const client = fakeClient(
+      deribit,
+      [...expired, h("key-d", "2026-09-28", "BTC-PERPETUAL")],
+      undefined,
+      [
+        poll("key-d", "2026-09-27T04:00:05+00:00", {
+          final_status: "complete",
+          row_count: 0,
+          asof: "2026-09-27",
+        }),
+        poll("key-d", "2026-09-28T04:00:05+00:00", {
+          final_status: "complete",
+          row_count: 1,
+          asof: "2026-09-28",
+        }),
+      ],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[])).toEqual(["key-d:2026-09-28:BTC-PERPETUAL"]);
+  });
+
+  it.each([
+    [
+      "a poll with warnings (a read failed, so empty proves nothing)",
+      { final_status: "complete_with_warnings", row_count: 0, asof: "2026-09-27" },
+    ],
+    [
+      "an event written before the poll recorded its day (no asof)",
+      { final_status: "complete", row_count: 0 },
+    ],
+    [
+      "a poll on the rows' own day",
+      { final_status: "complete", row_count: 0, asof: "2026-09-26" },
+    ],
+    [
+      "a malformed row_count",
+      { final_status: "complete", row_count: "0", asof: "2026-09-27" },
+    ],
+    ["no metadata at all", null],
+  ])("%s keeps the key's latest rows", async (_label, metadata) => {
+    const client = fakeClient(deribit, expired, undefined, [
+      poll("key-d", "2026-09-27T04:00:05+00:00", metadata),
+    ]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[]).sort()).toEqual([
+      "key-d:2026-09-26:BTC-26SEP26-60000-C",
+      "key-d:2026-09-26:ETH-26SEP26-3000-P",
+    ]);
+  });
+
+  it("WR-02 not-worse: a clean poll that wrote rows the key no longer owns does not bring back its older rows", async () => {
+    // The unique index has no api_key_id, so another key's upsert on the same
+    // (venue, symbol, asof) relabels this key's only row of the day. The key's
+    // latest asof falls back a day; its poll record says it read on the later day.
+    const client = fakeClient(
+      [{ id: "key-a", user_id: "user-1", exchange: "binance" }],
+      [h("key-a", "2026-09-26", "BTC"), h("key-a", "2026-09-26", "SOL")],
+      undefined,
+      [
+        poll("key-a", "2026-09-27T04:00:05+00:00", {
+          final_status: "complete",
+          row_count: 1,
+          asof: "2026-09-27",
+        }),
+      ],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res).toEqual({ data: [], error: null });
+  });
+
+  it("another user's poll events are never read", async () => {
+    const foreign = {
+      ...poll("key-d", "2026-09-27T04:00:05+00:00", {
+        final_status: "complete",
+        row_count: 0,
+        asof: "2026-09-27",
+      }),
+      user_id: "user-2",
+    };
+    const client = fakeClient(deribit, expired, undefined, [foreign]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.data).toHaveLength(2);
+  });
+});
+

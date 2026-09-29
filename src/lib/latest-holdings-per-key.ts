@@ -61,6 +61,39 @@ export const HOLDINGS_ROW_CAP = 1000;
 type ReadError = { message: string };
 
 /**
+ * Review C4 SFH-C4-02. The action a holdings poll records on success
+ * (`_emit_audit` in `run_poll_allocator_positions_job`, job_worker.py), with
+ * metadata `{ final_status, row_count, asof }`. It is the poll's own record of
+ * what it read, and the one record a poll that read NOTHING leaves:
+ * `persist_allocator_holdings` writes no row for an empty list. The daily
+ * refresh reads the same event (`_POLL_COMPLETED_ACTION` /
+ * `_polled_empty_since`, equity_reconstruction.py).
+ */
+export const POLL_COMPLETED_ACTION = "allocator.holdings.sync_completed";
+
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * The day a clean poll read the key on, or null when `metadata` is not one.
+ * Clean means `final_status === "complete"`: a poll with warnings had a read
+ * fail, so what it did not write proves nothing. An event without `asof`
+ * predates the poll recording its day (C2 round 3, R3-WR-01), so nothing binds
+ * it to a day and it is no evidence. `row_count` must be a whole number; it is
+ * read only to reject a malformed event.
+ */
+export function cleanPollDay(metadata: unknown): string | null {
+  if (metadata === null || typeof metadata !== "object") return null;
+  const m = metadata as Record<string, unknown>;
+  if (m.final_status !== "complete") return null;
+  const rowCount = m.row_count;
+  if (typeof rowCount !== "number" || !Number.isInteger(rowCount) || rowCount < 0) {
+    return null;
+  }
+  const asof = m.asof;
+  return typeof asof === "string" && ISO_DAY.test(asof) ? asof : null;
+}
+
+/**
  * The bounded read behind Open Positions. Three steps, in the shape of
  * `getLatestExposureSnapshot` (read the latest `asof` first, then the rows at
  * it) but at the per-key grain (D-16):
@@ -75,14 +108,37 @@ type ReadError = { message: string };
  * 3. per key, that key's rows at that `asof`.
  *
  * Steps 2 and 3 run in parallel across keys. There is no date window: a key
- * that has been quiet for a long time still shows its last poll, never flat.
+ * that has not polled for a long time still shows its last poll, never flat.
  * Every read runs on the caller's user-scoped client under owner RLS and also
  * filters explicitly by `user_id` / `allocator_id`.
+ *
+ * Review C4 SFH-C4-02: a key that POLLED but read nothing is not "quiet". A
+ * clean poll with zero rows writes no row, so its latest `asof` stayed on the
+ * day before its last position closed and an expired Deribit option showed
+ * forever. Step 2 therefore also reads the key's newest clean poll event
+ * (`POLL_COMPLETED_ACTION`, `audit_log_owner_read`). When that poll read the
+ * key on a day AFTER its latest rows, the rows are not what the key holds now,
+ * and the key contributes nothing. That covers both ways it happens: the poll
+ * read nothing (an emptied account, every option expired), or the poll wrote
+ * rows the key no longer owns because another key's upsert took them (the
+ * holdings unique index has no `api_key_id`, review C4 WR-02). A poll with
+ * warnings, an event with no recorded day and a missing event are no evidence,
+ * and the key keeps its latest rows. Known limit: this reads what the poll
+ * read. A poll that read an account as empty when it was not (the Bybit UTA
+ * parse the daily refresh cross-checks against the key's live equity read)
+ * shows that key flat until its next poll; the refresh, whose $0 would be
+ * permanent, keeps its stricter proof.
  *
  * Never throws. Returns `{ data, error }` so the caller's `assertOk` treats it
  * like any other Supabase result. Any step's error is returned as `error`. A
  * read that reaches `HOLDINGS_ROW_CAP` returns a named error instead of a
  * partial list. A key with no holdings contributes nothing.
+ *
+ * Why a cap and not the id keyset drain the per-key dailies read uses (review
+ * C4 IN-04): each read here is ONE key on ONE day, and a thousand positions on
+ * one key on one day is not an account this product serves, so a cap that
+ * fails loud is enough. The cost is that such a key fails the whole My
+ * Allocation read rather than only its holdings panel.
  */
 export async function fetchLatestHoldingsPerKey(
   supabase: SupabaseClient<Database>,
@@ -108,16 +164,34 @@ export async function fetchLatestHoldingsPerKey(
       async (
         keyId,
       ): Promise<{ rows: unknown[]; error: ReadError | null }> => {
-        const latestRes = await supabase
-          .from("allocator_holdings")
-          .select("asof")
-          .eq("allocator_id", userId)
-          .eq("api_key_id", keyId)
-          .order("asof", { ascending: false })
-          .limit(1);
+        const [latestRes, pollRes] = await Promise.all([
+          supabase
+            .from("allocator_holdings")
+            .select("asof")
+            .eq("allocator_id", userId)
+            .eq("api_key_id", keyId)
+            .order("asof", { ascending: false })
+            .limit(1),
+          supabase
+            .from("audit_log")
+            .select("metadata")
+            .eq("user_id", userId)
+            .eq("action", POLL_COMPLETED_ACTION)
+            .eq("entity_type", "api_key")
+            .eq("entity_id", keyId)
+            .eq("metadata->>final_status", "complete")
+            .order("created_at", { ascending: false })
+            .limit(1),
+        ]);
         if (latestRes.error) return { rows: [], error: latestRes.error };
+        if (pollRes.error) return { rows: [], error: pollRes.error };
         const latestAsof = latestRes.data?.[0]?.asof;
         if (!latestAsof) return { rows: [], error: null };
+        const cleanPollAsof = cleanPollDay(pollRes.data?.[0]?.metadata ?? null);
+        if (cleanPollAsof !== null && cleanPollAsof > latestAsof) {
+          // SFH-C4-02: the key's newest clean poll read it after these rows.
+          return { rows: [], error: null };
+        }
 
         const rowsRes = await supabase
           .from("allocator_holdings")
