@@ -35,7 +35,7 @@ import logging
 import math
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 import pandas as pd
 
@@ -59,6 +59,25 @@ logger = logging.getLogger(__name__)
 # Benign (does not flip is_trustworthy). A day whose prior-capital denominator is
 # not positive has no return — emitting one would invent a number from no capital.
 _SKIPPED_NONPOSITIVE_DENOMINATOR = "skipped_nonpositive_denominator"
+# Reported, not blocking (167.1.2 C2 SFH-10): a key-day inside the key's own
+# coverage with no return row AND no flow (a gap in its csv_daily_returns). The
+# key's level is carried with r = 0, as before; the flag says it happened.
+_MISSING_RETURN_INSIDE_COVERAGE = "missing_return_inside_coverage"
+
+
+class PortfolioReturns(NamedTuple):
+    """``portfolio_returns``' result. Counts carry no USD figure.
+
+    ``skipped_nonpositive_days``: days omitted because the prior-capital
+    denominator was not positive (benign). ``nonfinite_days``: days omitted
+    because a level, a return or the sum was non-finite (blocking; SFH-10).
+    ``missing_return_days``: key-days inside a key's coverage with no level
+    (no return row and no flow), read as r = 0 on the carried level (SFH-10)."""
+
+    rows: list[dict[str, Any]]
+    skipped_nonpositive_days: int
+    nonfinite_days: int
+    missing_return_days: int
 
 
 def _bool_flag_tokens(flags: Mapping[str, Any]) -> set[str]:
@@ -90,7 +109,7 @@ def _current_equity_weights(
 def portfolio_returns(
     per_key_equity: Mapping[str, KeyEquity],
     per_key_returns: Mapping[str, pd.Series],
-) -> tuple[list[dict[str, Any]], int]:
+) -> PortfolioReturns:
     """D-06 book returns: ``r_t = Σ_k E_{k,t−1}·r_{k,t} / Σ_k E_{k,t−1}``.
 
     Sums only keys that have a level on both the previous union day and ``t``.
@@ -99,8 +118,14 @@ def portfolio_returns(
     ``r = 0`` (stale-mark carry — never a drop to $0, and never a return). A
     rotated-out key (disjoint coverage seam, the same classification the $-curve
     uses) stops: no level after its last day, so a departure is not a return.
-    A day whose denominator is not positive is omitted; the returned count is
-    that omission (the caller logs it and raises a benign flag). Pure: no I/O.
+    A day whose denominator is not positive is omitted and counted (the caller
+    logs it and raises a benign flag). A day with a non-finite level, return or
+    sum is omitted and counted apart (the caller makes it a blocking degrade
+    reason). A key's level days are its return days plus its flow days (the
+    replay unions them), so a day inside the key's coverage with NO level has
+    neither a return row nor a flow: a gap. The key's level is carried with
+    r = 0 there, as for a flow-only day, and the key-day is counted so the
+    caller can report it. Pure: no I/O.
     """
     level_by_key: dict[str, dict[str, float]] = {}
     equity_by_key: dict[str, pd.Series] = {}
@@ -119,7 +144,7 @@ def portfolio_returns(
         first_day[key] = ordered[0]
         last_day[key] = ordered[-1]
     if not level_by_key:
-        return [], 0
+        return PortfolioReturns([], 0, 0, 0)
 
     return_by_key: dict[str, dict[str, float]] = {
         key: {str(day): float(value) for day, value in series.items()}
@@ -160,6 +185,8 @@ def portfolio_returns(
     union = sorted({day for day_map in level_by_key.values() for day in day_map})
     rows: list[dict[str, Any]] = []
     skipped = 0
+    nonfinite = 0
+    missing = 0
     for index in range(1, len(union)):
         prev, day = union[index - 1], union[index]
         numer = 0.0
@@ -170,6 +197,8 @@ def portfolio_returns(
             equity_day = _level_on(key, day)
             if equity_prev is None or equity_day is None:
                 continue
+            if first_day[key] < day < last_day[key] and day not in level_by_key[key]:
+                missing += 1
             ret = _return_on(key, day)
             if (
                 not math.isfinite(equity_prev)
@@ -180,20 +209,18 @@ def portfolio_returns(
                 break
             numer += equity_prev * ret
             denom += equity_prev
-        if (
-            poison
-            or not math.isfinite(denom)
-            or not math.isfinite(numer)
-            or not (denom > 0.0)
-        ):
+        if poison or not math.isfinite(denom) or not math.isfinite(numer):
+            nonfinite += 1
+            continue
+        if not (denom > 0.0):
             skipped += 1
             continue
         value = numer / denom
         if not math.isfinite(value):
-            skipped += 1
+            nonfinite += 1
             continue
         rows.append({"date": day, "r": value})
-    return rows, skipped
+    return PortfolioReturns(rows, skipped, nonfinite, missing)
 
 
 def compose_allocator_equity(
@@ -355,7 +382,25 @@ def compose_allocator_equity(
     # D-06: the book curve's own returns. Not _current_equity_weights (static D1
     # shares weight history by today's mix). ``version`` 2 is the contract the
     # reader accepts; a payload without it is still the pre-D-06 $-curve.
-    returns_rows, skipped_days = portfolio_returns(per_key_equity, anchored_returns)
+    book_returns = portfolio_returns(per_key_equity, anchored_returns)
+    returns_rows = book_returns.rows
+    skipped_days = book_returns.skipped_nonpositive_days
+    if book_returns.nonfinite_days:
+        # SFH-10: a non-finite input is not benign. Blocking, counts only.
+        reasons.add(DegradeReason.NONFINITE_RETURN)
+        logger.warning(
+            "compose: portfolio returns omitted %d day(s) with a non-finite "
+            "level, return or sum — the book is untrustworthy",
+            book_returns.nonfinite_days,
+        )
+    if book_returns.missing_return_days:
+        flag_tokens.add(_MISSING_RETURN_INSIDE_COVERAGE)
+        logger.warning(
+            "compose: %d key-day(s) inside a key's coverage had no return row and "
+            "no flow; each was read as r = 0 on the carried level (flag %s)",
+            book_returns.missing_return_days,
+            _MISSING_RETURN_INSIDE_COVERAGE,
+        )
     if skipped_days:
         flag_tokens.add(_SKIPPED_NONPOSITIVE_DENOMINATOR)
         logger.info(

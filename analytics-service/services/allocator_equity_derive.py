@@ -116,6 +116,10 @@ class DegradeReason(str, Enum):
     EXCLUSIVE_FILL = "exclusive_fill"
     OUT_OF_WINDOW_FLOW = "out_of_window_flow"
     DROPPED_KEY = "dropped_key"
+    # 167.1.2 C2 silent-failure SFH-10: a book-return day whose level, return or
+    # sum was non-finite. It was reported under the benign
+    # skipped_nonpositive_denominator flag; a non-finite input is not benign.
+    NONFINITE_RETURN = "nonfinite_return"
 
 
 # The BLOCKING subset: any of these present -> ``is_trustworthy`` is False.
@@ -125,6 +129,7 @@ _BLOCKING_REASONS: frozenset[DegradeReason] = frozenset(
         DegradeReason.EXCLUSIVE_FILL,
         DegradeReason.OUT_OF_WINDOW_FLOW,
         DegradeReason.DROPPED_KEY,
+        DegradeReason.NONFINITE_RETURN,
     }
 )
 

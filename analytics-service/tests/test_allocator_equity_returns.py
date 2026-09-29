@@ -204,3 +204,88 @@ def test_nonpositive_denominator_is_a_benign_skip() -> None:
     assert "skipped_nonpositive_denominator" not in payload["degrade_reasons"]
     assert payload["is_trustworthy"] is True
     assert math.isfinite(payload["curve"][-1]["equity_usd"])
+
+
+# ---------------------------------------------------------------------------
+# C2 silent-failure SFH-10: a non-finite day is not a benign skip, and a missing
+# return inside a key's coverage is not a silent flat day.
+# ---------------------------------------------------------------------------
+
+
+def test_nonfinite_day_is_counted_apart_from_the_benign_skip() -> None:
+    """A non-finite level or return used to raise the benign
+    skipped_nonpositive_denominator flag under the wrong name. It is counted on
+    its own. (Upstream refuses non-finite returns, so this is driven through the
+    pure helper.)"""
+    from services.allocator_equity_compose import portfolio_returns
+    from services.allocator_equity_derive import KeyEquity
+
+    days = ["2026-08-01", "2026-08-02", "2026-08-03"]
+    equity = {"key-A": KeyEquity(_series(days, [100.0, 101.0, 102.0]))}
+    returns = {"key-A": _series(days, [0.0, float("nan"), 0.01])}
+
+    result = portfolio_returns(equity, returns)
+
+    assert result.nonfinite_days == 1
+    assert result.skipped_nonpositive_days == 0
+    assert [row["date"] for row in result.rows] == ["2026-08-03"]
+
+
+def test_nonfinite_day_makes_the_book_untrustworthy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The compose maps a non-finite day to a BLOCKING degrade reason, never to
+    the benign flag."""
+    from services import allocator_equity_compose as compose_mod
+
+    real = compose_mod.portfolio_returns
+
+    def _poisoned(*args, **kwargs):  # type: ignore[no-untyped-def]
+        result = real(*args, **kwargs)
+        return result._replace(nonfinite_days=1)
+
+    monkeypatch.setattr(compose_mod, "portfolio_returns", _poisoned)
+    payload = compose_allocator_equity(
+        {"key-A": _series(["2026-08-01", "2026-08-02"], [0.0, 0.01])},
+        {"key-A": []},
+        {"key-A": 100.0},
+    )
+    assert "nonfinite_return" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "skipped_nonpositive_denominator" not in payload["flags"]
+
+
+def test_missing_return_inside_coverage_is_counted_and_flagged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """key-A has returns on 08-01, 08-02 and 08-04 but no row (and no flow) on
+    08-03, while key-B covers 08-03. key-A's return that day is unknown; the
+    compose used to read it as r = 0 exactly like a flow-only day and say
+    nothing. It still carries key-A's level (the arithmetic is unchanged), but
+    the day is counted, flagged and logged at WARNING."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="services.allocator_equity_compose")
+    payload = compose_allocator_equity(
+        {
+            "key-A": _series(["2026-08-01", "2026-08-02", "2026-08-04"], [0.0, 0.01, 0.01]),
+            "key-B": _series(
+                ["2026-08-01", "2026-08-02", "2026-08-03", "2026-08-04"], [0.0, 0.0, 0.0, 0.0]
+            ),
+        },
+        {"key-A": [], "key-B": []},
+        {"key-A": 1000.0, "key-B": 1000.0},
+    )
+    assert "missing_return_inside_coverage" in payload["flags"]
+    assert any(
+        r.levelno == logging.WARNING and "missing" in r.getMessage() for r in caplog.records
+    ), caplog.text
+
+
+def test_flow_only_day_is_not_a_missing_return() -> None:
+    """A flow on a no-return day is unioned into the key's levels by the replay:
+    r = 0 on that day is correct (D-06) and is not reported as a gap."""
+    payload = compose_allocator_equity(
+        {"key-A": _series(["2026-08-01", "2026-08-02", "2026-08-04"], [0.0, 0.01, 0.01])},
+        {"key-A": [ExternalFlow(utc_day_iso="2026-08-03", usd_signed=50.0)]},
+        {"key-A": 1000.0},
+    )
+    assert "missing_return_inside_coverage" not in payload["flags"]
