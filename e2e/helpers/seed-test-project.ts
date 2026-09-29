@@ -713,6 +713,8 @@ export async function seedAllocatorBook(opts: {
   const days = opts.days ?? 120;
 
   // 1. Active api_key (placeholder ciphertext — no DB-level validation trigger).
+  // venue_account_id is set so plan 11's readiness does not hold the book in
+  // account_identity_pending. The scrub trigger keeps a service-role value.
   const { data: key, error: kErr } = await admin
     .from("api_keys")
     .insert({
@@ -721,6 +723,7 @@ export async function seedAllocatorBook(opts: {
       label: `e2e-equitychart-book-${uniqueSuffix(6)}`,
       api_key_encrypted: "e2e-placeholder-ciphertext",
       is_active: true,
+      venue_account_id: `e2e-${uniqueSuffix(8)}`,
     })
     .select("id")
     .single();
@@ -760,6 +763,40 @@ export async function seedAllocatorBook(opts: {
     .upsert(snapshots, { onConflict: "allocator_id,asof" });
   if (sErr) {
     throw new Error(`seedAllocatorBook (equity snapshots) failed: ${sErr.message}`);
+  }
+
+  // 4. The display series is the version-2 derived row (plan 11). Snapshots
+  // alone leave the Overview rebuilding, so the EquityChart would not mount.
+  const curve = snapshots.map((s, i) => ({
+    date: s.asof,
+    equity_usd: 100_000 * (1 + Math.sin(i / 30) * 0.02),
+  }));
+  const returns = curve.slice(1).map((point, i) => ({
+    date: point.date,
+    r:
+      curve[i].equity_usd > 0
+        ? point.equity_usd / curve[i].equity_usd - 1
+        : 0,
+  }));
+  const { error: dErr } = await admin.from("allocator_equity_derived").upsert(
+    {
+      allocator_id: opts.allocatorUserId,
+      kind: "equity_curve",
+      payload: {
+        version: 2,
+        is_trustworthy: true,
+        curve,
+        returns,
+        flags: [],
+        degrade_reasons: [],
+      },
+    },
+    { onConflict: "allocator_id,kind" },
+  );
+  if (dErr) {
+    throw new Error(
+      `seedAllocatorBook (derived equity) failed: ${dErr.message}`,
+    );
   }
 
   return { apiKeyId: key.id };

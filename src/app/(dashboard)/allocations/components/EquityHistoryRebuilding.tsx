@@ -1,3 +1,6 @@
+import Link from "next/link";
+import type { EquityHistoryRebuildReason } from "@/lib/queries";
+
 /**
  * Phase 167.1.2 / D-02 ("Hide it until correct").
  *
@@ -15,6 +18,11 @@
  * sentence refers to an "earlier chart", and the holdings sentence says those
  * figures do not use this history rather than calling them current.
  *
+ * Phase 167.1.2 plan 11 adds ONE authored line under the body, chosen by the
+ * producer's `equityHistoryRebuildReason` (the first failing condition of
+ * `equityHistoryReadiness`). No reason, no line. The line names a condition,
+ * never an id or a number (T-167.1.2-22a).
+ *
  * Tokens follow DESIGN.md (mono eyebrow at the 0.18em tracking step, DM Sans
  * on the fluid `text-h3` tier, secondary body text) and the layout is
  * left-aligned (the AI-Slop ban on centered-everything layouts).
@@ -29,7 +37,21 @@
  */
 const HEADING_ID = "overview-equity-rebuilding-heading";
 
-export function EquityHistoryRebuilding() {
+const REASON_LINE: Record<
+  Exclude<EquityHistoryRebuildReason, "duplicate_account">,
+  string
+> = {
+  account_identity_pending:
+    "We are confirming which exchange account each key reads. This happens on the next daily sync.",
+  awaiting_derivation:
+    "Your history is recomputed from each account's returns and cash flows once a day.",
+};
+
+export function EquityHistoryRebuilding({
+  reason = null,
+}: {
+  reason?: EquityHistoryRebuildReason | null;
+}) {
   return (
     <section
       aria-labelledby={HEADING_ID}
@@ -51,6 +73,23 @@ export function EquityHistoryRebuilding() {
         than one key reads it, or read a day with no sync as zero. Holdings and
         AUM on this page do not use that history.
       </p>
+      {reason === "duplicate_account" ? (
+        <p className="mt-2 max-w-prose text-sm text-text-secondary">
+          Two of your keys read the same exchange account. Disconnect one of
+          them on the{" "}
+          <Link
+            href="/profile?tab=exchanges"
+            className="text-accent underline underline-offset-4"
+          >
+            Exchanges page
+          </Link>{" "}
+          and the history rebuilds.
+        </p>
+      ) : reason ? (
+        <p className="mt-2 max-w-prose text-sm text-text-secondary">
+          {REASON_LINE[reason]}
+        </p>
+      ) : null}
     </section>
   );
 }

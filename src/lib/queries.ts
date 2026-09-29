@@ -12,6 +12,7 @@ import {
   PERCENTILE_GATE_COLUMN,
   type SeriesState,
 } from "./closed-sets";
+import { isWorkingHolder } from "@/lib/account-share-note";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
 import {
@@ -2917,9 +2918,16 @@ export interface MyAllocationDashboardPayload {
    * an honest "being rebuilt" state instead and are fail-closed: every value
    * other than an explicit `"ready"` (a missing field, `null`, `""`, a state
    * added later) reads as `"rebuilding"`. `"ready"` requires a version-2
-   * trustworthy series whose `returns` are well-formed (Phase 167.1.2 plan 11).
+   * trustworthy series, no eligible key counted through a working holder, and
+   * a known account on every eligible ccxt key (sFOX and MT5 exempt). See
+   * `equityHistoryReadiness`.
    */
   equityHistoryState: "rebuilding" | "ready";
+  /**
+   * Why `equityHistoryState` is not `"ready"`. Null when it is. One of
+   * `duplicate_account`, `account_identity_pending`, `awaiting_derivation`.
+   */
+  equityHistoryRebuildReason: EquityHistoryRebuildReason | null;
   /**
    * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
    * allocator's snapshots, or null when every snapshot's column is
@@ -3669,6 +3677,88 @@ export function extractTrustworthyDerivedSeries(
 }
 
 /**
+ * Venues whose account id can be read. sFOX has no stable id (D-10) and MT5
+ * is not in this set, so both are exempt rather than "pending".
+ */
+const ACCOUNT_IDENTITY_EXCHANGES: ReadonlySet<string> = new Set([
+  "binance",
+  "okx",
+  "bybit",
+  "deribit",
+]);
+
+export type EquityHistoryRebuildReason =
+  | "duplicate_account"
+  | "account_identity_pending"
+  | "awaiting_derivation";
+
+export type EquityHistoryKey = {
+  id: string;
+  exchange: string;
+  is_active: boolean;
+  sync_status: string | null;
+  disconnected_at: string | null;
+  venue_account_id: string | null;
+  account_share_kind: string | null;
+  account_shared_with_api_key_id: string | null;
+};
+
+function knownVenueAccountId(id: string | null | undefined): boolean {
+  return typeof id === "string" && id.trim() !== "";
+}
+
+/**
+ * A duplicate blocks "ready" only while its holder is working. "Working" is
+ * D-18's rule (`isWorkingHolder`, the column comment on account_share_kind
+ * from migration 20260927180000), the same rule the Exchanges page note uses,
+ * so the reason line and the note agree. A holder that is inactive,
+ * disconnected, failing or absent from the key list leaves the marked key
+ * ordinary. The marked key itself is judged by eligibility, as the derive job
+ * judges it.
+ */
+function countsAsDuplicate(
+  key: EquityHistoryKey,
+  byId: ReadonlyMap<string, EquityHistoryKey>,
+): boolean {
+  if (!isPerKeyDailiesEligibleKey(key)) return false;
+  if (key.account_share_kind !== "duplicate") return false;
+  const holderId = key.account_shared_with_api_key_id;
+  if (!holderId) return false;
+  const holder = byId.get(holderId);
+  if (!holder) return false;
+  return isWorkingHolder(holder);
+}
+
+function identityStillPending(key: EquityHistoryKey): boolean {
+  if (!isPerKeyDailiesEligibleKey(key)) return false;
+  if (!ACCOUNT_IDENTITY_EXCHANGES.has(key.exchange.toLowerCase())) return false;
+  if (key.account_share_kind === "composite_member") return false;
+  return !knownVenueAccountId(key.venue_account_id);
+}
+
+/**
+ * Phase 167.1.2 plan 11. Ready iff the version-2 series is present, no
+ * eligible key is a duplicate of a working holder, and every eligible key on
+ * okx/bybit/binance/deribit has a venue account id or is a composite member.
+ * The reason names the first failing condition, in that order.
+ */
+export function equityHistoryReadiness(
+  apiKeys: readonly EquityHistoryKey[],
+  series: { curve: DailyPoint[]; returns: DailyPoint[] } | null,
+): { state: "ready" | "rebuilding"; reason: EquityHistoryRebuildReason | null } {
+  const byId = new Map<string, EquityHistoryKey>();
+  for (const key of apiKeys) byId.set(key.id, key);
+  if (apiKeys.some((key) => countsAsDuplicate(key, byId))) {
+    return { state: "rebuilding", reason: "duplicate_account" };
+  }
+  if (apiKeys.some((key) => identityStillPending(key))) {
+    return { state: "rebuilding", reason: "account_identity_pending" };
+  }
+  if (!series) return { state: "rebuilding", reason: "awaiting_derivation" };
+  return { state: "ready", reason: null };
+}
+
+/**
  * Phase 07 / 07-03: compute the Phase 07 payload derivations shared by
  * both branches (portfolio-exists and !portfolio). The dashboard function
  * is the only production caller.
@@ -3681,6 +3771,7 @@ export function extractTrustworthyDerivedSeries(
  */
 export function derivePhase07Fields(
   apiKeys: Array<{
+    id: string;
     is_active: boolean;
     exchange: string;
     sync_status: string | null;
@@ -3688,6 +3779,13 @@ export function derivePhase07Fields(
     // DOGFOOD-1 (Phase 110.1): required by isPerKeyDailiesEligibleKey to
     // distinguish a genuinely connected key from a soft-disconnected one.
     disconnected_at: string | null;
+    // Phase 167.1.2 plan 11: read by equityHistoryReadiness. Required, not
+    // optional: a key list that omits them would read every duplicate as
+    // absent and a double-counted book as ready. getUserApiKeys projects all
+    // of them (API_KEY_USER_COLUMNS).
+    venue_account_id: string | null;
+    account_share_kind: string | null;
+    account_shared_with_api_key_id: string | null;
   }>,
   equitySnapshots: MyAllocationDashboardPayload["equitySnapshots"],
   snapshotCount: number,
@@ -3731,6 +3829,7 @@ export function derivePhase07Fields(
   | "equityCurveSource"
   | "derivedCurveComputedAt"
   | "equityHistoryState"
+  | "equityHistoryRebuildReason"
   | "minHistoryDepthMonths"
   | "activeVenues"
   | "hasConnectedKeys"
@@ -3754,22 +3853,29 @@ export function derivePhase07Fields(
   const lastSyncAt = freshness.lastSyncAt;
   const hasSyncing = freshness.syncing;
 
-  // Phase 167.1.2 plan 11 — the ONE producer of the display series. A version-2
-  // trustworthy row with well-formed returns is "ready" and its curve and
-  // returns are shown. Anything else is "rebuilding" and both arrays are empty.
-  // Identity conditions are applied on top of this in the same plan. Snapshots
-  // are not a display fallback (the pre-115.1 branch is gone).
+  // Phase 167.1.2 plan 11 — the ONE producer of the display series. Ready only
+  // when equityHistoryReadiness says so (v2 series, no working-holder
+  // duplicate, ccxt identity known). Otherwise both arrays are empty.
+  // Snapshots are not a display fallback.
   const derivedPayload = derivedEquityRow?.payload ?? null;
   const series = extractTrustworthyDerivedSeries(derivedPayload);
-  // Source stamp: the pre-167.1.2 curve gate, not the version-2 series. While
-  // rebuilding the chart does not read it; the warm-up gate and the composer
-  // disclosure do, so a v1 trustworthy curve still reads as "derived".
+  const readiness = equityHistoryReadiness(apiKeys, series);
+  const equityHistoryState = readiness.state;
+  const equityHistoryRebuildReason = readiness.reason;
+  const equityDailyPoints: DailyPoint[] =
+    equityHistoryState === "ready" && series ? series.curve : [];
+  const equityDailyReturns: DailyPoint[] =
+    equityHistoryState === "ready" && series ? series.returns : [];
+  // While rebuilding the chart does not read equityCurveSource. The Overview
+  // warm-up gate and the Scenario disclosure still do, so keep the pre-167.1.2
+  // curve gate in that state. Ready always stamps "derived".
   const curveForSource = trustworthyDerivedCurve(derivedPayload);
-  const equityHistoryState: "rebuilding" | "ready" = series ? "ready" : "rebuilding";
-  const equityDailyPoints: DailyPoint[] = series ? series.curve : [];
-  const equityDailyReturns: DailyPoint[] = series ? series.returns : [];
   const equityCurveSource: "derived" | "legacy" =
-    curveForSource !== null ? "derived" : "legacy";
+    equityHistoryState === "ready"
+      ? "derived"
+      : curveForSource !== null
+        ? "derived"
+        : "legacy";
   const derivedCurveComputedAt =
     curveForSource !== null ? (derivedEquityRow?.computed_at ?? null) : null;
 
@@ -3845,6 +3951,7 @@ export function derivePhase07Fields(
     equityCurveSource,
     derivedCurveComputedAt,
     equityHistoryState,
+    equityHistoryRebuildReason,
     minHistoryDepthMonths,
     activeVenues,
     hasConnectedKeys,

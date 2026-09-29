@@ -76,6 +76,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     equityCurveSource,
     // D-06: the factsheet's return series. Empty while rebuilding.
     equityDailyReturns = [],
+    equityHistoryRebuildReason = null,
   } = props;
   // Fail-closed: ONLY an explicit "ready" may show the curve. A missing field,
   // null, "" or any state added later (a destructuring default fires on
@@ -203,7 +204,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         hasNoHistoryYet ? (
           <FactsheetWarmupNote snapshotCount={snapshotCount} />
         ) : (
-          <EquityHistoryRebuilding />
+          <EquityHistoryRebuilding reason={equityHistoryRebuildReason} />
         )
       ) : factsheetPayload ? (
         <FactsheetProvider payload={factsheetPayload}>
