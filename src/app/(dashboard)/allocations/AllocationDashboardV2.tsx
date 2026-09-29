@@ -43,7 +43,6 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     flaggedHoldings = [],
     equityDailyPoints,
     activeVenues = [],
-    snapshotCount,
     // NEW-C09-04 (B14, audit-2026-05-07): the payload already carries the
     // sync-freshness signal — `allKeysStale` is true when every active
     // api_key's `last_sync_at` is older than 24h, and `lastSyncAt` is the
@@ -225,7 +224,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       ) : (
         <>
           {equitySlot}
-          <FactsheetWarmupNote snapshotCount={snapshotCount} />
+          <FactsheetWarmupNote curveDays={equityDailyPoints.length} />
         </>
       )}
     </div>
@@ -234,12 +233,31 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
 
 /**
  * The Overview's warm-up note, shown when there is too little history to build
- * factsheet panels from. It renders in ONE place, the "ready" branch before two
- * days have accrued: there the curve is shown and short, and more days do build
- * the panels, so its timer is true. Phase 167.1.2 / D-15: it never renders while
- * the history is rebuilding, where no number of days changes the state.
+ * factsheet panels from. It renders in ONE place, the "ready" branch, when the
+ * factsheet builder refuses the book's returns. Phase 167.1.2 / D-15: it never
+ * renders while the history is rebuilding, where no number of days changes the
+ * state.
+ *
+ * Review C3 WR-01: the day count in the copy is derived, not chosen. The
+ * builder needs two returns (`dailyReturns.length < 2` returns null in
+ * `buildAllocatorPortfolioFactsheetPayload`, src/lib/factsheet/
+ * allocator-portfolio-payload.ts; the threshold is an inline literal there,
+ * not an export). The writer emits one return per curve day after the first
+ * (`allocator_equity_compose.py::portfolio_returns`, `range(1, len(union))`),
+ * and "ready" needs at least one return. So in practice the note shows beside
+ * a two-day curve with one return, and the panels need three curve days.
+ * Known limit: a day the writer skips (no weight, or a non-finite value) adds
+ * no return, so the panels can need more than three days. "At least" stays
+ * true then; the promise is a floor, never an early date.
+ * `AllocationDashboardV2.warmup.test.tsx` measures the count against the real
+ * builder, so a change to its threshold fails there.
+ *
+ * Review C3 IN-01: the count line counts the days of the curve drawn above
+ * the note, in the same unit as the threshold. It used to count legacy
+ * `allocator_equity_snapshots` rows, which since plan 11 have no relation to
+ * the derived curve on screen.
  */
-function FactsheetWarmupNote({ snapshotCount }: { snapshotCount: number }) {
+function FactsheetWarmupNote({ curveDays }: { curveDays: number }) {
   return (
     <div
       role="status"
@@ -250,13 +268,14 @@ function FactsheetWarmupNote({ snapshotCount }: { snapshotCount: number }) {
         Portfolio factsheet
       </p>
       <p className="mt-3 text-sm text-text-secondary">
-        Aggregated factsheet panels appear once at least two days of
+        Aggregated factsheet panels appear once at least three days of
         blended equity history are available. The data flows from
         the API keys you connect on the My Allocation page.
       </p>
-      {snapshotCount > 0 && snapshotCount < 2 && (
+      {curveDays > 0 && (
         <p className="mt-2 text-fixed-11 text-text-muted">
-          {snapshotCount} snapshot recorded so far.
+          {curveDays} {curveDays === 1 ? "day" : "days"} of blended equity
+          history so far.
         </p>
       )}
     </div>

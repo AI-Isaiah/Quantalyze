@@ -13,12 +13,14 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
 // +100% jump, a -50% "crash" and Sharpe 1.44 beside -42.8% cumulative. While
 // `equityHistoryState === "rebuilding"` the Overview must show NONE of it: no
 // curve, no factsheet KPI built from the curve, and not the warm-up copy (which
-// would promise panels "once two days of history are available" — a wrong
+// would promise panels once enough days of history are available — a wrong
 // reason, since the history is withheld, not short). Holdings-backed chrome
 // (InsightStrip) stays. Phase 167.1.2 D-15 (2026-09-27) supersedes IN-01
 // (2026-09-25): the copy is chosen by state, never by a snapshot count, so a
 // brand-new book under "rebuilding" gets the panel and its reason too. The
-// warm-up note renders only in the "ready" branch, where its timer is true.
+// warm-up note renders only in the "ready" branch, where more days do build
+// the panels (review C3 WR-01: its count is measured against the real builder
+// in `AllocationDashboardV2.warmup.test.tsx`).
 //
 // The factsheet body mock renders a "Sharpe" label and the payload builder
 // returns a non-null stub, so a regression that let the factsheet mount would
@@ -385,29 +387,10 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
   );
 
   // D-15: the warm-up note keeps exactly one home, the "ready" branch, where
-  // the curve IS shown and is too short for factsheet panels. There its timer
-  // is true: more days of history do build the panels. The builder returns
-  // null for fewer than two returns, which the mock stands in for here.
-  it("ready + a curve too short for a factsheet: the curve and the warm-up note render, and the rebuilding panel does not", () => {
-    buildPayloadSpy.mockReturnValueOnce(null as never);
-    render(
-      <AllocationDashboardV2
-        {...baseProps}
-        equityHistoryState="ready"
-        equityDailyPoints={baseProps.equityDailyPoints.slice(0, 2)}
-        snapshotCount={1}
-      />,
-    );
-    expect(buildPayloadSpy).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId("overview-equity-curve")).toBeInTheDocument();
-    const note = screen.getByTestId("overview-factsheet-warmup");
-    expect(note.textContent).toContain(
-      "Aggregated factsheet panels appear once at least two days of blended equity history are available.",
-    );
-    expect(note.textContent).toContain("1 snapshot recorded so far.");
-    expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
-    expect(screen.queryByTestId("mock-factsheet-body")).toBeNull();
-  });
+  // the curve IS shown and is too short for factsheet panels. Review C3 WR-01
+  // moved that arm to `AllocationDashboardV2.warmup.test.tsx`: it mocked the
+  // builder and pinned a two-day threshold the real builder does not have. The
+  // arm there runs the real builder on a producer-shaped ready payload.
 
   // Positive control (moved behaviour, D-02): with the state explicitly "ready"
   // the same fixture DOES render the curve and the factsheet, so the absences
