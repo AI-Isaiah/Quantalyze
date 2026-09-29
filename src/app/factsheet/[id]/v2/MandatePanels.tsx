@@ -2,6 +2,7 @@
 
 import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { usePayload } from "./factsheet-context";
+import { useBasisSeriesView } from "./basis-context";
 
 /**
  * Mandate-section editorial panels.
@@ -24,13 +25,19 @@ import { usePayload } from "./factsheet-context";
 
 export function StrategyThesisPanel() {
   const payload = usePayload();
+  // 169 review WR-03 (SC5 / D-12): the record this panel describes is the
+  // SELECTED basis's, the same summary "Years Observed" and the observation
+  // warning read (MetricsColumn). Reading `payload.strategyMetrics` here stated
+  // the cash length beside the MTM one when the MTM series is shorter. Under cash
+  // the view is `payload` by reference, so the cash page is unchanged.
+  const m = useBasisSeriesView(payload).strategyMetrics;
   const types = payload.strategyTypes.length > 0 ? payload.strategyTypes.join(" · ") : null;
   const markets = payload.markets.length > 0 ? payload.markets.join(" · ") : null;
-  const startYr = payload.strategyMetrics.start.slice(0, 4);
-  const endYr = payload.strategyMetrics.end.slice(0, 4);
+  const startYr = m.start.slice(0, 4);
+  const endYr = m.end.slice(0, 4);
   const observation = startYr === endYr ? startYr : `${startYr}–${endYr}`;
   // Phase 169 D-12: the record length is stated one way on the whole factsheet.
-  const recordLength = formatRecordLength({ n: payload.strategyMetrics.n, years: payload.strategyMetrics.years });
+  const recordLength = formatRecordLength({ n: m.n, years: m.years });
 
   return (
     <section>
@@ -55,6 +62,9 @@ export function StrategyThesisPanel() {
 
 export function TermsPanel() {
   const payload = usePayload();
+  // 169 review WR-03: the observation window and Sample size describe the
+  // selected basis's record, as the thesis above and "Years Observed" do.
+  const m = useBasisSeriesView(payload).strategyMetrics;
   const tier = payload.trustTier;
   const tierLabel =
     tier === "api_verified" ? "API-verified" :
@@ -62,14 +72,14 @@ export function TermsPanel() {
     tier === "self_reported" ? "Self-reported" :
     "—";
   const computed = iso(payload.computedAt);
-  const start = iso(payload.strategyMetrics.start);
-  const end = iso(payload.strategyMetrics.end);
+  const start = iso(m.start);
+  const end = iso(m.end);
 
   // Inception / live-date separator: if the strategy declares a start_date
   // BEFORE the observation window starts, the gap is implicitly backtest —
   // flag it so allocators know which portion is paper vs live.
   const declaredStart = payload.startDate ? new Date(payload.startDate) : null;
-  const obsStart = new Date(payload.strategyMetrics.start);
+  const obsStart = new Date(m.start);
   const hasBacktestGap =
     declaredStart && !Number.isNaN(declaredStart.getTime())
       ? declaredStart.getTime() < obsStart.getTime() - 86_400_000
@@ -97,7 +107,7 @@ export function TermsPanel() {
         <Term label="Observation start">{start}</Term>
         <Term label="Observation end">{end}</Term>
         {/* Phase 169 D-12: the same record-length statement as the thesis above. */}
-        <Term label="Sample size">{formatRecordLength({ n: payload.strategyMetrics.n, years: payload.strategyMetrics.years }).text}</Term>
+        <Term label="Sample size">{formatRecordLength({ n: m.n, years: m.years }).text}</Term>
         <Term label="Risk-free rate">0% (factsheet convention)</Term>
         <Term label="Bench frequency">Daily close, forward-filled to strategy calendar</Term>
         <Term label="Factsheet computed">{computed}</Term>

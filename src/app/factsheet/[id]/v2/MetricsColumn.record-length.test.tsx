@@ -11,13 +11,15 @@
  * allocator reading the page could not tell which was the record's length.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { useEffect } from "react";
 import { render } from "@testing-library/react";
-import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
+import { buildFactsheetPayload, deriveSeriesBundle } from "@/lib/factsheet/build-payload";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 
 import { formatRecordLength } from "@/lib/factsheet/record-length";
 
 import { FactsheetProvider } from "./factsheet-context";
+import { BasisProvider, useBasis, type Basis } from "./basis-context";
 import { MetricsColumn } from "./MetricsColumn";
 import { StrategyThesisPanel, TermsPanel } from "./MandatePanels";
 
@@ -247,5 +249,102 @@ describe("MandatePanels state the record length through formatRecordLength (D-12
     const sample = dts.find((dt) => dt.textContent === "Sample size");
     if (!sample) throw new Error("no Sample size Term");
     expect(sample.nextElementSibling?.textContent).toBe(expected.text);
+  });
+});
+
+/**
+ * 169 review WR-03 (2026-09-29, SC5 / D-12): under the MTM (or smoothed) basis the
+ * page states ONE record length, the selected basis's.
+ *
+ * Why this matters: "Years Observed" and the observation warning read the active
+ * basis's summary, while the Strategy Thesis sentence and the Terms "Sample size"
+ * read the cash summary. An MTM series that starts later than cash (marks began
+ * later) put two lengths on one page: "1.09 years, 400 daily observations" in the
+ * thesis beside "Only 180 observations (0.49y)" in the rail. One formatter does
+ * not make one record; every site must read the same summary.
+ */
+describe("the record length follows the selected basis at every site (WR-03)", () => {
+  function SetBasis({ basis }: { basis: Basis }) {
+    const { setBasis } = useBasis();
+    useEffect(() => {
+      setBasis(basis);
+    }, [basis, setBasis]);
+    return null;
+  }
+
+  /** Cash: 400 days from 2024-01-01. MTM: the last 180 of them (marks began later). */
+  function mtmPayload(): { payload: FactsheetPayload; mtm: ReturnType<typeof deriveSeriesBundle> } {
+    const cash = payloadOf(dense(400), 365);
+    const mtm = deriveSeriesBundle(series(Array.from({ length: 180 }, (_, i) => 220 + i)), {
+      periodsPerYear: 365,
+      isArithmetic: false,
+      markets: [],
+      strategyName: "Record Length Test",
+    });
+    const payload = {
+      ...cash,
+      seriesByBasis: { mark_to_market: mtm },
+      metricsByBasis: {
+        mark_to_market: {
+          cumulative_return: 0.05,
+          cagr: 0.1,
+          volatility: 0.2,
+          sharpe: 0.5,
+          sortino: 0.7,
+          max_drawdown: -0.1,
+          calmar: 1,
+        },
+      },
+      mtmGate: { available: true },
+    } as unknown as FactsheetPayload;
+    return { payload, mtm };
+  }
+
+  function renderOn(payload: FactsheetPayload, basis: Basis) {
+    return render(
+      <FactsheetProvider payload={payload} persist={false}>
+        <BasisProvider>
+          <SetBasis basis={basis} />
+          <MetricsColumn />
+        </BasisProvider>
+      </FactsheetProvider>,
+    );
+  }
+
+  function termValue(container: HTMLElement, label: string): string {
+    const dt = [...container.querySelectorAll("dt")].find((el) => el.textContent === label);
+    if (!dt) throw new Error(`no Term "${label}"`);
+    return dt.nextElementSibling?.textContent ?? "";
+  }
+
+  it("under mark_to_market the thesis, Sample size, Years Observed and the warning all state the MTM record", () => {
+    const { payload, mtm } = mtmPayload();
+    const cashLength = formatRecordLength({ n: payload.strategyMetrics.n, years: payload.strategyMetrics.years });
+    const mtmLength = formatRecordLength({ n: mtm.strategyMetrics.n, years: mtm.strategyMetrics.years });
+    // Guard the fixture: the two records really differ in count AND in years.
+    expect(cashLength.text).toBe("1.09 years, 400 daily observations");
+    expect(mtmLength.text).toBe("0.49 years, 180 daily observations");
+
+    const { container } = renderOn(payload, "mark_to_market");
+    expect(rowValue(section(container, "Compound Performance"), "Years Observed")).toBe(mtmLength.years);
+    expect(warningText(container)).toContain(`Only 180 observations (${mtmLength.years}y)`);
+
+    const thesisText = (section(container, "Strategy Thesis").textContent ?? "").replace(/\s+/g, " ");
+    expect(thesisText).toContain(`(${mtmLength.text})`);
+    expect(thesisText).not.toContain(cashLength.text);
+    expect(termValue(container, "Sample size")).toBe(mtmLength.text);
+    // The Terms window beside Sample size describes the same record.
+    expect(termValue(container, "Observation start")).toBe(mtm.strategyMetrics.start);
+    expect(termValue(container, "Observation end")).toBe(mtm.strategyMetrics.end);
+  });
+
+  it("under cash the same payload states the cash record at every site (control)", () => {
+    const { payload } = mtmPayload();
+    const cashLength = formatRecordLength({ n: payload.strategyMetrics.n, years: payload.strategyMetrics.years });
+    const { container } = renderOn(payload, "cash_settlement");
+    expect(rowValue(section(container, "Compound Performance"), "Years Observed")).toBe(cashLength.years);
+    const thesisText = (section(container, "Strategy Thesis").textContent ?? "").replace(/\s+/g, " ");
+    expect(thesisText).toContain(`(${cashLength.text})`);
+    expect(termValue(container, "Sample size")).toBe(cashLength.text);
   });
 });
