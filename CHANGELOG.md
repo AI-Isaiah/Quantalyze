@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.111.0.1] - 2026-09-29 — BASELINE: automated re-dump after the PROD apply of 6ca90e73
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `36590346974`, after the PROD apply of merge `6ca90e73`: sha256 `af1760aa…` → `92b7d216…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-09-29` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.111.0.0 → 0.111.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=282 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `36590346974` succeeded, and this entry was composed by the `redump-pr` job. Run `36590346974` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.111.0.0] - 2026-09-29 — ACCOUNTTRUTH C2: the allocator history is rebuilt one account at a time, from flow-neutral returns, and shown only when it is right
 
 ⭐ **What changed for whoever reads this next.** This is the second topic PR of Phase 167.1.2 PR C (D-21). It covers plans 10, 05, 12, 06, 07 and 11. Plans 06 and 07 moved in from C3 by founder decision (2026-09-29, "Pull 06+07 into C2"), because plan 11 depends on them and edits the same files. Plan 13 already shipped alone as v0.110.0.2 (#899). C3 is now plan 14; C4 (plans 09, 15) and plan 08 follow.
