@@ -5,6 +5,7 @@ import { MTM_DAILY_RETURNS_SERIES_KIND, SMOOTHED_MTM_DAILY_RETURNS_SERIES_KIND }
 import { deriveSegmentMarkers } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { BASIS_KPI_MAP, hasBasisHeadline } from "./basis-metrics";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { attributionBasisFromConfig } from "@/lib/composite/compositeAttribution";
 import { isComputedAnalytics, isRankableAnalyticsRow } from "@/lib/closed-sets";
 
@@ -89,8 +90,17 @@ export function parseMtmSeriesPayload(raw: unknown): ParsedMtmSeries | null {
  * is deny-all RLS (migration 20260428120919), so ONLY the admin handle reads it —
  * the SAME visibility gate the scalar MTM object already rides (no widening; the
  * caller owns the upstream published/owner gate, exactly as the `csv_daily_returns`
- * read above). A read error or a missing/malformed row degrades to `null` (charts
- * stay cash, V5) — NEVER a throw.
+ * read above). A missing or malformed row is a fact about the row and degrades to
+ * `null` (charts stay cash, V5).
+ *
+ * Phase 169 review round 1 (WR-05 / SFH M-3): a FAILED read THROWS
+ * {@link CompositeSeriesReadError} with `read: "mtm_daily_returns"`. It used to
+ * degrade to `null` too, so the build succeeded without the MTM bundle and the
+ * public factsheet cache stored that payload for the whole analytics run: the
+ * D-41 class, on a sibling read. The resolve stage answers the throw `read_error`
+ * and captures it once for a build; the old "Log at ERROR (→ Sentry)" comment was
+ * false (no `console.*` reaches Sentry here: `instrumentation.ts` has no console
+ * integration).
  */
 export async function readMtmSeries(
   admin: SupabaseClient,
@@ -102,15 +112,7 @@ export async function readMtmSeries(
     .eq("strategy_id", strategyId)
     .eq("kind", MTM_DAILY_RETURNS_SERIES_KIND)
     .maybeSingle();
-  if (error) {
-    // Degrade (never throw): a failed series read must yield "charts stay cash",
-    // not hide the whole published factsheet. Log at ERROR (→ Sentry).
-    console.error("[factsheet] readMtmSeries — mtm_daily_returns read failed", {
-      strategyId,
-      errorMessage: error.message,
-    });
-    return null;
-  }
+  if (error) throw new CompositeSeriesReadError(error.code || "none", error.message, "mtm_daily_returns");
   return parseMtmSeriesPayload((data as { payload?: unknown } | null)?.payload);
 }
 
@@ -140,8 +142,11 @@ export function parseSmoothedSeriesPayload(raw: unknown): ParsedMtmSeries | null
 /**
  * Phase 133 (SMTM-01) — the smoothed sibling of {@link readMtmSeries}: read the
  * persisted `smoothed_mtm_daily_returns` series row. SAME service-role handle +
- * deny-all RLS posture + degrade-to-null-never-throw discipline; parses through
- * {@link parseSmoothedSeriesPayload} (wrong-basis defensive).
+ * deny-all RLS posture; a missing or malformed row degrades to `null`, and a
+ * FAILED read throws {@link CompositeSeriesReadError} with
+ * `read: "smoothed_mtm_daily_returns"` (Phase 169 review round 1, WR-05 / SFH
+ * M-3, as for MTM); parses through {@link parseSmoothedSeriesPayload}
+ * (wrong-basis defensive).
  */
 export async function readSmoothedSeries(
   admin: SupabaseClient,
@@ -154,11 +159,7 @@ export async function readSmoothedSeries(
     .eq("kind", SMOOTHED_MTM_DAILY_RETURNS_SERIES_KIND)
     .maybeSingle();
   if (error) {
-    console.error("[factsheet] readSmoothedSeries — smoothed_mtm_daily_returns read failed", {
-      strategyId,
-      errorMessage: error.message,
-    });
-    return null;
+    throw new CompositeSeriesReadError(error.code || "none", error.message, "smoothed_mtm_daily_returns");
   }
   return parseSmoothedSeriesPayload((data as { payload?: unknown } | null)?.payload);
 }
@@ -168,15 +169,109 @@ export async function readSmoothedSeries(
  * `csv_daily_returns` read FAILED. Thrown by {@link readCompositeFactsheet} so
  * an outage stays distinguishable from a genuinely empty composite (a fact
  * about the row). `code` is the PostgREST / SQLSTATE code, `"none"` when the
- * error carried none. The message names the table, never the strategy; the
- * PostgREST message rides as `cause` for the catcher's log line.
+ * error carried none. Since review round 1 (CSV-READ-CAP) the paged read also
+ * throws it with its own code when it cannot finish: `page_order` (a date that
+ * did not follow the cursor), `no_data` (a page with neither rows nor an
+ * error) or `row_ceiling` (more than {@link CSV_READ_MAX_ROWS} rows). The
+ * message names the table, never the strategy; the PostgREST message rides as
+ * `cause` for the catcher's log line.
+ *
+ * Phase 169 review round 1 (WR-05 / SFH M-3): the persisted MTM and smoothed
+ * series reads throw it too, on a composite AND on a single-key strategy, and
+ * `read` names which series failed. The class keeps the name of its first case,
+ * because the discovery detail page and the resolve stage catch it by class.
  */
+export type FactsheetSeriesRead =
+  | "csv_daily_returns"
+  | "mtm_daily_returns"
+  | "smoothed_mtm_daily_returns"
+  | typeof CASH_SETTLEMENT_SERIES_KIND;
+
+/**
+ * The `strategy_analytics_series.kind` of the persisted cash series row
+ * (`basis_series.KIND_CASH_SETTLEMENT` in the analytics service). Read only on a
+ * chain-broken single-key row, to name the span its stored headline covers
+ * (Phase 169 review round 1, SFH H-1).
+ */
+const CASH_SETTLEMENT_SERIES_KIND = "cash_settlement" as const;
+
 export class CompositeSeriesReadError extends Error {
   readonly code: string;
-  constructor(code: string, postgrestMessage?: string) {
-    super(`composite series read failed: csv_daily_returns (${code})`, { cause: postgrestMessage });
+  readonly read: FactsheetSeriesRead;
+  constructor(code: string, postgrestMessage?: string, read: FactsheetSeriesRead = "csv_daily_returns") {
+    super(`factsheet series read failed: ${read} (${code})`, { cause: postgrestMessage });
     this.name = "CompositeSeriesReadError";
     this.code = code;
+    this.read = read;
+  }
+}
+
+/**
+ * Phase 169 review round 1 (orchestrator-added CSV-READ-CAP) — rows per
+ * `csv_daily_returns` page. PostgREST answers every read with at most its
+ * `max_rows` (1000 on hosted Supabase) and says nothing when it cuts: HTTP 200,
+ * `error: null`, a partial body.
+ */
+export const CSV_READ_PAGE_SIZE = 1000;
+
+/**
+ * The most `csv_daily_returns` rows one composite read accepts (the flat
+ * T-36-03-03 ceiling the single `.limit(20000)` call used to carry). A series
+ * longer than this is refused as a read error, never cut to its first rows.
+ */
+export const CSV_READ_MAX_ROWS = 20_000;
+
+/**
+ * Phase 169 review round 1 (orchestrator-added CSV-READ-CAP) — EVERY stored
+ * `csv_daily_returns` row of one strategy, ascending by date.
+ *
+ * The defect this replaces. The read was one `.order("date").limit(20000)` call.
+ * PostgREST capped it at 1000 rows, so a composite with more than 1000 days
+ * lost its NEWEST days (ascending order keeps the oldest), and the factsheet
+ * ended early with nothing on the page saying so. MEASURED on PROD 2026-09-29:
+ * one strategy holds 1112 rows.
+ *
+ * The read here:
+ *   - DATE KEYSET pages of {@link CSV_READ_PAGE_SIZE}: each page after the
+ *     first asks for `date > <the newest date already read>`. `(strategy_id,
+ *     date)` is UNIQUE (migration 20260819120000), so `date` is a total order
+ *     under the strategy filter. A keyset is anchored to a date, so a row
+ *     written between two pages cannot shift a page boundary and repeat a day,
+ *     as an offset (`.range()`) page can (the `benchmark-source.ts` reasoning,
+ *     169.2 review WR-03);
+ *   - it stops only on an EMPTY page. Stopping on a short page would stop
+ *     after the first page against any server whose cap is below the page
+ *     size, which is the truncation this function exists to remove;
+ *   - a date that does not strictly increase (a server that ignored the
+ *     cursor), a page with neither data nor an error, and a series longer
+ *     than {@link CSV_READ_MAX_ROWS} each THROW {@link CompositeSeriesReadError}.
+ *     Returning what was read so far would hand the builder a partial series
+ *     as if it were whole. The resolve stage answers every one of them
+ *     `read_error`, which the public factsheet cache never stores (D-41).
+ */
+async function readCsvDailyReturns(admin: SupabaseClient, strategyId: string): Promise<DailyReturn[]> {
+  const rows: DailyReturn[] = [];
+  let cursor: string | null = null;
+  for (;;) {
+    let query = admin.from("csv_daily_returns").select("date, daily_return").eq("strategy_id", strategyId);
+    if (cursor !== null) query = query.gt("date", cursor);
+    const { data, error } = await query.order("date", { ascending: true }).limit(CSV_READ_PAGE_SIZE);
+    if (error) throw new CompositeSeriesReadError(error.code || "none", error.message);
+    if (!Array.isArray(data)) {
+      throw new CompositeSeriesReadError("no_data", "a page answered neither rows nor an error");
+    }
+    if (data.length === 0) return rows;
+    for (const r of data as Array<{ date: unknown; daily_return: unknown }>) {
+      const date = r.date as string;
+      if (cursor !== null && !(date > cursor)) {
+        throw new CompositeSeriesReadError("page_order", `date ${String(date)} did not follow ${cursor}`);
+      }
+      rows.push({ date, value: r.daily_return as number });
+      cursor = date;
+    }
+    if (rows.length > CSV_READ_MAX_ROWS) {
+      throw new CompositeSeriesReadError("row_ceiling", `more than ${CSV_READ_MAX_ROWS} rows`);
+    }
   }
 }
 
@@ -193,7 +288,8 @@ export class CompositeSeriesReadError extends Error {
  *
  * Responsibilities (identical to the factsheet route's former inline block):
  *   - Read the honest SPARSE cash series from `csv_daily_returns` (gap days
- *     ABSENT, never zero-filled). A read failure THROWS
+ *     ABSENT, never zero-filled), every row, in date-keyset pages
+ *     ({@link readCsvDailyReturns}). A read failure THROWS
  *     {@link CompositeSeriesReadError} with its PostgREST / SQLSTATE code
  *     (Phase 169, D-41), so no caller can take an outage for an empty
  *     composite: the factsheet resolve stage answers it `read_error`, which the
@@ -221,7 +317,8 @@ export class CompositeSeriesReadError extends Error {
  *          defect (missing/untrusted cash headline) → caller renders placeholder.
  * @throws {CompositeSeriesReadError} when the `csv_daily_returns` read FAILS
  *          (an outage, never a fact about the row), so no caller can take it
- *          for an empty composite (Phase 169, D-41).
+ *          for an empty composite (Phase 169, D-41), and, since review round 1
+ *          (WR-05), when a gated MTM or smoothed series read fails.
  */
 export async function readCompositeFactsheet(
   admin: SupabaseClient,
@@ -245,26 +342,15 @@ export async function readCompositeFactsheet(
 ): Promise<{ dailyReturns: DailyReturn[]; buildOpts: BuildFactsheetOpts } | null> {
   const { strategyId, dqf, metricsJsonByBasis, returnsDenominatorConfig } = input;
 
-  const { data: sparseRows, error: sparseErr } = await admin
-    .from("csv_daily_returns")
-    .select("date, daily_return")
-    .eq("strategy_id", strategyId)
-    .order("date", { ascending: true })
-    .limit(20000); // Flat safety ceiling, T-36-03-03 precedent.
-  if (sparseErr) {
-    // F3 / Phase 169 (D-41, routed from 167.2.1 D-07): a composite depends
-    // ENTIRELY on this sparse read, and a failed read is an OUTAGE, not a fact
-    // about the row. It used to be logged here and mapped to an empty series,
-    // which the resolve stage answered `composite_unbuildable` and the public
-    // factsheet cache stored for the whole analytics run. It now throws, so no
-    // caller can take it for an empty composite; each catcher logs it (the
-    // resolve stage in `fetch-and-build-payload.ts` answers `read_error` with
-    // the code and captures a build once). Still never the api arm.
-    throw new CompositeSeriesReadError(sparseErr.code || "none", sparseErr.message);
-  }
-  const dailyReturns: DailyReturn[] = (sparseRows ?? []).map(
-    (r): DailyReturn => ({ date: r.date as string, value: r.daily_return as number }),
-  );
+  // F3 / Phase 169 (D-41, routed from 167.2.1 D-07): a composite depends
+  // ENTIRELY on this sparse read, and a failed read is an OUTAGE, not a fact
+  // about the row. It used to be logged here and mapped to an empty series,
+  // which the resolve stage answered `composite_unbuildable` and the public
+  // factsheet cache stored for the whole analytics run. It now throws, so no
+  // caller can take it for an empty composite; each catcher logs it (the
+  // resolve stage in `fetch-and-build-payload.ts` answers `read_error` with
+  // the code and captures a build once). Still never the api arm.
+  const dailyReturns = await readCsvDailyReturns(admin, strategyId);
 
   const metricsByBasis = (metricsJsonByBasis ?? undefined) as
     | BuildFactsheetOpts["metricsByBasis"]
@@ -336,7 +422,9 @@ export async function readCompositeFactsheet(
   // MTM basis is available (skip the extra roundtrip for every non-MTM composite);
   // thread it so buildFactsheetPayload emits the per-basis bundle. Gated exactly
   // like the scalar MTM object — the series rides the SAME published/owner + F2/M-1
-  // gate, no visibility widening. A failed/malformed row degrades to no-bundle.
+  // gate, no visibility widening. A malformed row degrades to no-bundle; a FAILED
+  // read throws CompositeSeriesReadError (Phase 169 review round 1, WR-05), which
+  // propagates out of this reader like the csv read's.
   // Phase 133 (SMTM-01): read the persisted smoothed series ONLY when the scalar
   // smoothed gate is available (skip the roundtrip otherwise) — same gating as MTM.
   // The two reads are independent; fire them concurrently (each still gated so a
@@ -406,9 +494,74 @@ export async function readCompositeFactsheet(
  * composite path so a malformed dqf value can never render the caveat (T-92-05).
  */
 export function singleKeyDataQuality(
-  dqf: { insufficient_window?: unknown } | null | undefined,
+  dqf: { insufficient_window?: unknown; twr_chain_broken?: unknown } | null | undefined,
 ): NonNullable<BuildFactsheetOpts["dataQuality"]> {
-  return { composite: false, insufficientWindow: dqf?.insufficient_window === true };
+  return {
+    composite: false,
+    insufficientWindow: dqf?.insufficient_window === true,
+    // Phase 169 review round 1 (SFH H-1): present only when true, with the same
+    // strict `=== true` coercion, so a clean row's opt is unchanged.
+    ...(dqf?.twr_chain_broken === true ? { twrChainBroken: true } : {}),
+  };
+}
+
+/**
+ * Phase 169 review round 1 (SFH H-1) — the first day of the span a chain-broken
+ * single-key headline covers, read from the stored `cash_settlement` series row
+ * payload, or `null` when the stored data cannot name it.
+ *
+ * Python compounds the stored `cumulative_return` and annualizes the CAGR over
+ * `nav_twr._last_interior_break_suffix`: the maximal run of valid days that ends
+ * at the last one, i.e. everything after the LAST interior break. On the broker
+ * path the runner reindexes the series to a dense daily calendar, so a refused
+ * (guard) day is NaN, and `basis_series.derive_basis_series` persists the finite
+ * days as `rows` and every absent in-span day as `gap_spans`, echoing
+ * `conventions.densify = "broker_nan"`. Under that echo an absent day can only be
+ * a refused one, so the covered span starts at the first stored day after the
+ * last gap span: the same day, from the stored data, not a recomputation.
+ *
+ * Any other echo cannot name it, and the answer is `null`, never a guess: a
+ * `"sparse"` (user CSV) series is absent on weekends and holidays too, and a row
+ * written before Phase 105 echoes nothing. No gap, or no stored day after the
+ * last gap, is `null` as well.
+ */
+export function deriveHeadlineCoversFrom(raw: unknown): string | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const payload = raw as { rows?: unknown; gap_spans?: unknown; conventions?: unknown };
+  const conventions = payload.conventions as { densify?: unknown } | null | undefined;
+  if (conventions === null || typeof conventions !== "object" || conventions.densify !== "broker_nan") return null;
+  if (!Array.isArray(payload.gap_spans) || !Array.isArray(payload.rows)) return null;
+  let lastGapEnd: string | null = null;
+  for (const span of payload.gap_spans) {
+    const end = (span as { end?: unknown } | null)?.end;
+    if (typeof end === "string" && (lastGapEnd === null || end > lastGapEnd)) lastGapEnd = end;
+  }
+  if (lastGapEnd === null) return null;
+  let start: string | null = null;
+  for (const row of payload.rows) {
+    const date = (row as { date?: unknown } | null)?.date;
+    if (typeof date === "string" && date > lastGapEnd && (start === null || date < start)) start = date;
+  }
+  return start;
+}
+
+/**
+ * Phase 169 review round 1 (SFH H-1) — read the stored `cash_settlement` series
+ * row of a single-key strategy and name the span its headline covers. Same
+ * service-role handle and deny-all RLS posture as {@link readMtmSeries}. A missing
+ * row is a fact (`null`); a FAILED read throws {@link CompositeSeriesReadError}
+ * (`read: "cash_settlement"`), so an outage is never rendered as "the span cannot
+ * be named".
+ */
+async function readHeadlineCoversFrom(admin: SupabaseClient, strategyId: string): Promise<string | null> {
+  const { data, error } = await admin
+    .from("strategy_analytics_series")
+    .select("payload")
+    .eq("strategy_id", strategyId)
+    .eq("kind", CASH_SETTLEMENT_SERIES_KIND)
+    .maybeSingle();
+  if (error) throw new CompositeSeriesReadError(error.code || "none", error.message, CASH_SETTLEMENT_SERIES_KIND);
+  return deriveHeadlineCoversFrom((data as { payload?: unknown } | null)?.payload);
 }
 
 /**
@@ -452,7 +605,7 @@ export function singleKeyBasisOpts(
   smoothedSeries?: ParsedMtmSeries | null,
 ): Pick<BuildFactsheetOpts, "metricsByBasis" | "mtmGate" | "mtmSeries" | "smoothedGate" | "smoothedSeries"> {
   // Extract a non-null non-array by-basis object under `key` from the untrusted jsonb.
-  const extractBasisObject = (key: string): Record<string, number> | undefined => {
+  const extractBasisObject = (key: string): Record<string, number | null> | undefined => {
     if (
       metricsJsonByBasis !== null &&
       typeof metricsJsonByBasis === "object" &&
@@ -460,7 +613,7 @@ export function singleKeyBasisOpts(
     ) {
       const cand = (metricsJsonByBasis as Record<string, unknown>)[key];
       if (cand !== null && typeof cand === "object" && !Array.isArray(cand)) {
-        return cand as Record<string, number>;
+        return cand as Record<string, number | null>;
       }
     }
     return undefined;
@@ -548,21 +701,61 @@ export function singleKeyBasisOpts(
  * a failed run leaves the previous run's scalars behind and they must not render.
  * The factsheet resolve stage's G1 gate already refuses a non-computed row, so the
  * not-rankable arm is reached from the discovery detail page only, until Phase 169.1
- * plan 169.1-01 moves that page onto the shared build. It adds no read, so the admin
- * thunk posture above is unchanged. Omitting `persistedRow` keeps the pre-169 result.
+ * plan 169.1-01 moves that page onto the shared build. It adds no read for a clean
+ * row, so the admin thunk posture above is unchanged there; a chain-broken row
+ * (review round 1, SFH H-1) reads its stored `cash_settlement` series once, to name
+ * the span its headline covers, and returns `dataQuality` with that start date.
+ * Omitting `persistedRow` keeps the pre-169 result.
+ *
+ * Review round 1 (SFH H-2): `returnsDenominatorConfig` is the strategy's
+ * `returns_denominator_config`. The Python single-key runner computes the stored
+ * headline under it (a `simple` config stores the SUM of the returns, with an
+ * arithmetic CAGR and drawdown), so the curve must be drawn on the same method or
+ * the stored "Since Inception" and the equity curve drift apart with every period.
+ * The method is resolved with the composite's own rule
+ * ({@link attributionBasisFromConfig}: arithmetic only for `simple`), and returned as
+ * `cumulativeMethod` only when it is arithmetic, so a geometric strategy's opts are
+ * unchanged. Omitting the config keeps the geometric default; the discovery detail
+ * page does not pass it yet (reported to its owner, until 169.1-01).
+ *
+ * `options.captureDefects` (default true) decides whether the persisted-headline
+ * defects below reach Sentry (review round 1, WR-01 / SFH M-1 / SFH H-1). They are
+ * always logged. The factsheet resolve stage passes `false` for a probe: /strategies
+ * probes every computed row on every load, and a per-row capture there is the
+ * event storm 167.2.1-REVIEW-R2 WR-01 removed. A build captures once.
+ *
+ * @throws {CompositeSeriesReadError} when a gated MTM or smoothed series read FAILS
+ *          (review round 1, WR-05); the factsheet resolve stage answers it `read_error`.
  */
 export async function readSingleKeyBasisOpts(
   getAdmin: () => SupabaseClient,
   strategyId: string,
-  dqf: { mtm_gated_reason?: unknown } | null | undefined,
+  dqf:
+    | { mtm_gated_reason?: unknown; insufficient_window?: unknown; twr_chain_broken?: unknown }
+    | null
+    | undefined,
   metricsJsonByBasis: unknown,
   computationStatus: unknown,
   persistedRow?: Record<string, unknown> | null,
-): Promise<Pick<BuildFactsheetOpts, "metricsByBasis" | "mtmGate" | "mtmSeries" | "smoothedGate" | "smoothedSeries">> {
+  returnsDenominatorConfig?: unknown,
+  options: { captureDefects?: boolean } = {},
+): Promise<
+  Pick<
+    BuildFactsheetOpts,
+    | "metricsByBasis"
+    | "mtmGate"
+    | "mtmSeries"
+    | "smoothedGate"
+    | "smoothedSeries"
+    | "cumulativeMethod"
+    | "dataQuality"
+  >
+> {
   let admin: SupabaseClient | undefined;
   const resolveAdmin = () => (admin ??= getAdmin());
   // MTM-04 (Phase 103): read the persisted MTM series only when the SHARED cheap
-  // predicate holds — a failed/malformed row degrades to no-bundle (charts stay cash).
+  // predicate holds — a malformed row degrades to no-bundle (charts stay cash); a
+  // FAILED read throws CompositeSeriesReadError (Phase 169 review round 1, WR-05).
   // Phase 133 (SMTM-01): the smoothed sibling read, identically gated. The two reads
   // are independent; fire them concurrently (each still gated so a skipped read stays
   // skipped — resolves to null without a roundtrip). resolveAdmin memoizes
@@ -575,10 +768,65 @@ export async function readSingleKeyBasisOpts(
       ? readSmoothedSeries(resolveAdmin(), strategyId)
       : Promise.resolve(null),
   ]);
-  const opts = singleKeyBasisOpts(dqf, metricsJsonByBasis, computationStatus, mtmSeries, smoothedSeries);
-  const cashHeadline = persistedCashHeadline(strategyId, persistedRow, metricsJsonByBasis, computationStatus);
-  if (!cashHeadline) return opts;
-  return { ...opts, metricsByBasis: { ...(opts.metricsByBasis ?? {}), cash_settlement: cashHeadline } };
+  const basisOpts = singleKeyBasisOpts(dqf, metricsJsonByBasis, computationStatus, mtmSeries, smoothedSeries);
+  const arithmetic = attributionBasisFromConfig(returnsDenominatorConfig) === "arithmetic";
+  const opts = arithmetic ? { ...basisOpts, cumulativeMethod: "arithmetic" as const } : basisOpts;
+  // `dataQuality` is returned ONLY when this owner has something to add to it: it is
+  // the single-key opt both callers already set from `singleKeyDataQuality(dqf)` and
+  // spread this result over, so a clean row's opts stay unchanged.
+  const addedQuality: Partial<NonNullable<BuildFactsheetOpts["dataQuality"]>> = {};
+  // Review round 1 (SFH M-2): the stored headline was computed under a returns
+  // convention TypeScript does not reproduce (a `simple` sum, or an active-day
+  // Sharpe and volatility; `compute()` has no active-day basis). The client
+  // leverage re-derive could not continue it from L=1, so the payload says so and
+  // `leverageEligibleFor` withholds the what-if, as it does for a composite.
+  if (arithmetic || activeDayMetricsBasis(returnsDenominatorConfig)) addedQuality.returnsConventionOverride = true;
+  const captureDefects = options.captureDefects ?? true;
+  const cashHeadline = persistedCashHeadline(
+    strategyId,
+    persistedRow,
+    metricsJsonByBasis,
+    computationStatus,
+    captureDefects,
+  );
+  const withHeadline = cashHeadline
+    ? { ...opts, metricsByBasis: { ...(opts.metricsByBasis ?? {}), cash_settlement: cashHeadline } }
+    : opts;
+  // Review round 1 (SFH H-1): on a chain-broken row the stored headline covers only
+  // the stretch after the last break, and it is still the value shown (D-25, SC4).
+  // Name the start of that span from the stored cash series, so the page can say it.
+  if (cashHeadline && dqf?.twr_chain_broken === true) {
+    const headlineCoversFrom = await readHeadlineCoversFrom(resolveAdmin(), strategyId);
+    if (headlineCoversFrom === null) {
+      console.warn(
+        "[factsheet] readSingleKeyBasisOpts — a chain-broken headline's covered span cannot be named from the stored cash series",
+        { strategyId },
+      );
+      if (captureDefects) {
+        captureToSentry(new Error("factsheet: chain-broken headline span cannot be named"), {
+          level: "warning",
+          tags: { stage: "factsheet-persisted-headline", reason: "covered_span_unnamed", strategy_id: strategyId },
+        });
+      }
+    }
+    addedQuality.headlineCoversFrom = headlineCoversFrom;
+  }
+  if (Object.keys(addedQuality).length === 0) return withHeadline;
+  return { ...withHeadline, dataQuality: { ...singleKeyDataQuality(dqf), ...addedQuality } };
+}
+
+/**
+ * Review round 1 (SFH M-2) — the `returns_denominator_config` asks for active-day
+ * risk metrics (`metrics_basis: "active_day"`, the analytics service's
+ * `metrics_day_basis` → `active`): volatility, Sharpe and Sortino over non-zero
+ * days only. Strict literal match, as {@link attributionBasisFromConfig} is.
+ */
+function activeDayMetricsBasis(raw: unknown): boolean {
+  return (
+    raw !== null &&
+    typeof raw === "object" &&
+    (raw as { metrics_basis?: unknown }).metrics_basis === "active_day"
+  );
 }
 
 /**
@@ -591,39 +839,89 @@ export async function readSingleKeyBasisOpts(
  *   - the raw `metrics_json_by_basis` already carries a `cash_settlement` object: a
  *     lingering composite→single key (SC-4 in {@link singleKeyBasisOpts}). D-10 applies
  *     the persisted headline only where that key is absent, and the raw object itself
- *     is never threaded;
- *   - the row does not carry the headline structurally ({@link hasBasisHeadline}: all
- *     seven keys present and a finite `cumulative_return`). A caller whose select did
- *     not project the scalars would otherwise overlay seven em-dashes; it is logged.
- * A per-scalar null on a row that passes (`sortino` with no losing day) is kept, and
- * the strict overlay renders it "—", as the lists do.
+ *     is never threaded. It is warned with the strategy id (SFH M-1);
+ *   - the row does not carry the seven {@link BASIS_KPI_MAP} keys: a caller whose select
+ *     stopped projecting them would otherwise overlay seven em-dashes. That is a code
+ *     defect, so it is logged with `reason: "missing_keys"` and the missing keys, and
+ *     captured to Sentry (`console.*` does not reach Sentry in this repo).
+ *
+ * Review round 1 (WR-01 / SFH M-1): the gate is STRUCTURAL only. It used to be
+ * {@link hasBasisHeadline}, which also needs a finite `cumulative_return`, so a
+ * rankable row storing a null one (Python `_safe_float` persists null for a
+ * non-finite value) fell back to the whole TypeScript headline, CAGR and Sharpe
+ * included, while the lists show the stored values: the SC4 split D-25 removes. It
+ * logged that refusal with `missing: []`, naming nothing. Now a stored null renders
+ * "—" under the strict overlay, as the lists do; a rankable row storing no finite
+ * `cumulative_return` is a data defect and is warned and captured at `warning` with
+ * the non-finite keys. A lone null `sortino` / `calmar` (no losing day, no drawdown)
+ * is legitimate and is neither warned nor captured. The discovery detail page runs
+ * this per request (it is not cached), so a defective row captures on each of its
+ * views there until Phase 169.1 plan 169.1-01 moves that page onto the shared build.
  */
 function persistedCashHeadline(
   strategyId: string,
   persistedRow: Record<string, unknown> | null | undefined,
   metricsJsonByBasis: unknown,
   computationStatus: unknown,
-): Record<string, number> | undefined {
+  captureDefects: boolean,
+): Record<string, number | null> | undefined {
   if (persistedRow == null) return undefined;
   if (!isRankableAnalyticsRow({ computation_status: computationStatus as string | null | undefined })) {
     return undefined;
   }
   if (metricsJsonByBasis !== null && typeof metricsJsonByBasis === "object" && !Array.isArray(metricsJsonByBasis)) {
     const rawCash = (metricsJsonByBasis as Record<string, unknown>).cash_settlement;
-    if (rawCash !== null && typeof rawCash === "object" && !Array.isArray(rawCash)) return undefined;
+    if (rawCash !== null && typeof rawCash === "object" && !Array.isArray(rawCash)) {
+      console.warn(
+        "[factsheet] readSingleKeyBasisOpts — a single-key row carries a raw metrics_json_by_basis.cash_settlement object; keeping the computed headline",
+        { strategyId },
+      );
+      return undefined;
+    }
   }
-  if (!hasBasisHeadline(persistedRow)) {
-    console.warn(
-      "[factsheet] readSingleKeyBasisOpts — rankable row carries no persisted headline; keeping the computed one",
-      { strategyId, missing: BASIS_KPI_MAP.filter(({ serverKey }) => !(serverKey in persistedRow)).map((k) => k.serverKey) },
+  const missing = BASIS_KPI_MAP.filter(({ serverKey }) => !(serverKey in persistedRow)).map((k) => k.serverKey);
+  if (missing.length > 0) {
+    console.error(
+      "[factsheet] readSingleKeyBasisOpts — the analytics select did not project the persisted headline; keeping the computed one",
+      { strategyId, reason: "missing_keys", missing },
     );
+    if (captureDefects) {
+      captureToSentry(new Error("factsheet: persisted headline not projected (missing_keys)"), {
+        tags: { stage: "factsheet-persisted-headline", reason: "missing_keys", strategy_id: strategyId },
+        extra: { missing },
+      });
+    }
     return undefined;
   }
-  const headline: Record<string, unknown> = {};
-  for (const { serverKey } of BASIS_KPI_MAP) headline[serverKey] = persistedRow[serverKey];
-  // `metricsByBasis` types each basis as `Record<string, number>`; a persisted null
-  // stays null here on purpose (the strict overlay turns it into "—").
-  return headline as Record<string, number>;
+  const cumulativeReturn = persistedRow.cumulative_return;
+  if (typeof cumulativeReturn !== "number" || !Number.isFinite(cumulativeReturn)) {
+    const nonFinite = BASIS_KPI_MAP.filter(({ serverKey }) => {
+      const v = persistedRow[serverKey];
+      return typeof v !== "number" || !Number.isFinite(v);
+    }).map((k) => k.serverKey);
+    console.warn(
+      "[factsheet] readSingleKeyBasisOpts — a rankable row stores no finite cumulative_return; its headline renders the em-dash there",
+      { strategyId, reason: "non_finite_cumulative_return", computationStatus, nonFinite },
+    );
+    if (captureDefects) {
+      captureToSentry(new Error("factsheet: rankable row stores a non-finite cumulative_return"), {
+        level: "warning",
+        tags: { stage: "factsheet-persisted-headline", reason: "non_finite_cumulative_return", strategy_id: strategyId },
+        extra: { computationStatus, nonFinite },
+      });
+    }
+  }
+  // Review round 1 (IN-02): typed as it is, `number | null`, with no cast. A
+  // persisted null (a stored Sortino with no losing day) stays null on purpose,
+  // and the strict overlay renders it "—", as the lists do. A value PostgREST
+  // did not answer as a number is carried as null, which the overlay renders
+  // the same way.
+  const headline: Record<string, number | null> = {};
+  for (const { serverKey } of BASIS_KPI_MAP) {
+    const v = persistedRow[serverKey];
+    headline[serverKey] = typeof v === "number" ? v : null;
+  }
+  return headline;
 }
 
 /**

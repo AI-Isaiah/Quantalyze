@@ -182,6 +182,12 @@ function buildFactsheetPayloadCached(
     // figure. `revalidate` and the admin route's tag bust are both
     // stale-while-revalidate, so only a key move stops a pre-deploy entry being
     // served after the deploy. Phase 169.5 moves the key again (169.5-01).
+    // Review round 1 (2026-09-29) changed the payload again before any v8 entry
+    // existed (v8 was not on origin/main): optional `dataQuality` fields
+    // (`twrChainBroken`, `headlineCoversFrom`, `returnsConventionOverride`), an
+    // arithmetic curve for a single-key `simple` config, and an MTM / smoothed /
+    // cash-series read outage that now throws instead of building a degraded
+    // payload. They ride this one v8 bump; no second move was needed.
     ["factsheet-v2-payload-v8", id, computedAt],
     {
       revalidate: 3600,

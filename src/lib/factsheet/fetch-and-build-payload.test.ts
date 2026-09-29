@@ -69,9 +69,23 @@ vi.mock("@/lib/supabase/admin", () => {
       return { data: null, error: null };
     };
     if (table === "csv_daily_returns") {
-      // The composite read awaits the builder itself after `.limit(...)`.
+      // The composite read awaits the builder itself after `.limit(...)`, one
+      // date-keyset page at a time (review round 1, CSV-READ-CAP): a page after
+      // the first carries `.gt("date", cursor)`, and the read stops on an empty page.
+      let after: string | null = null;
+      b.gt = (_column: string, value: string) => {
+        after = value;
+        return b;
+      };
       b.then = (resolve: (v: unknown) => unknown) =>
-        resolve(fake.csvError ? { data: null, error: fake.csvError } : { data: fake.csvRows, error: null });
+        resolve(
+          fake.csvError
+            ? { data: null, error: fake.csvError }
+            : {
+                data: fake.csvRows.filter((r) => after === null || r.date > after),
+                error: null,
+              },
+        );
     }
     return b;
   }
@@ -367,7 +381,10 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
       }
       // The invariant the probe's doc comment states.
       expect(probe.buildable).toBe(payload !== null);
-      // The probe is the resolve stage and nothing else: no build, no basis reads.
+      // The probe is the resolve stage and nothing else: no build. No PARITY
+      // fixture carries a by-basis object, so none reads a basis series (the
+      // gated MTM / smoothed reads live in the resolve stage since review round
+      // 1, WR-05, and run only for a row that carries one).
       expect(vi.mocked(buildFactsheetPayload).mock.calls.length).toBe(buildsBefore);
       expect(fake.tablesSeen).not.toContain("strategy_analytics_series");
       // The visibility predicate is REQUIRED and reached the probe's query.
@@ -496,6 +513,8 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
         strategy_id: STRATEGY_ID,
         read: "csv_daily_returns",
       },
+      // SFH L-2 (review round 1): the PostgREST message rides in `extra`.
+      extra: { errorMessage: "synthetic csv outage" },
     });
     seed(outage.row, outage.csv ?? [], null, outage.csvError);
     vi.mocked(captureToSentry).mockClear();
@@ -690,5 +709,38 @@ describe("167.2.1 WR-04 — NO-NULL-AFTER-RESOLVE holds by construction", () => 
     // The overload that makes a BuildableSeries build non-null is still there.
     expect(src).toMatch(/dailyReturns: BuildableSeries,\s*opts\?: BuildFactsheetOpts,\s*\): FactsheetPayload;/);
     expect(src).toMatch(/export function hasBuildableSeries\(rows: DailyReturn\[\]\): rows is BuildableSeries/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1 (WR-05 moved the single-key basis assembly into the resolve
+// stage; WR-01 made its persisted-headline defects reach Sentry). The probe
+// runs once per computed row on every /strategies load, so it must never
+// capture (167.2.1-REVIEW-R2 WR-01): a build captures a defect once, a probe
+// captures nothing.
+// ---------------------------------------------------------------------------
+describe("review round 1 — a persisted-headline defect is captured by a build, never by a probe", () => {
+  const SEVEN = {
+    cumulative_return: 0.05,
+    volatility: 0.12,
+    max_drawdown: -0.04,
+    cagr: 0.31,
+    sharpe: 1.4,
+    sortino: 2.1,
+    calmar: 3.0,
+  };
+
+  it.each([
+    ["the select did not project the seven scalars (missing_keys)", {}],
+    ["a rankable row stores a null cumulative_return", { ...SEVEN, cumulative_return: null }],
+  ])("%s: the build captures once, the probe captures nothing", async (_label, scalars) => {
+    seed(single({ daily_returns: points(30), ...scalars }));
+    expect(await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility)).not.toBeNull();
+    expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+
+    vi.mocked(captureToSentry).mockClear();
+    seed(single({ daily_returns: points(30), ...scalars }));
+    expect(await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility)).toEqual({ buildable: true });
+    expect(vi.mocked(captureToSentry), "the probe sent a per-row event").not.toHaveBeenCalled();
   });
 });

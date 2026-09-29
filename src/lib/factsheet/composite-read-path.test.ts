@@ -19,6 +19,7 @@ import {
   shouldReadSingleKeyMtmSeries,
   shouldReadSingleKeySmoothedSeries,
   shouldReadCashSettlementSeries,
+  deriveHeadlineCoversFrom,
 } from "./composite-read-path";
 import type { ParsedMtmSeries } from "./composite-read-path";
 import { buildFactsheetPayload, deriveIngestSource } from "./build-payload";
@@ -55,17 +56,65 @@ const FULL_CASH = {
   calmar: 3.0,
 };
 
-function mockAdmin(
-  rows: { date: string; daily_return: number }[] | null,
+/**
+ * Hosted Supabase's PostgREST `max_rows`: every response carries at most this
+ * many rows, whatever `.limit()` asked for, with HTTP 200 and `error: null`.
+ * MEASURED on PROD 2026-09-29: one strategy holds 1112 `csv_daily_returns` rows.
+ */
+const POSTGREST_MAX_ROWS = 1000;
+
+type CsvRow = { date: string; daily_return: number };
+
+/**
+ * A `csv_daily_returns` query builder that answers as PostgREST does: rows in
+ * date order, `.gt("date", cursor)` honoured, and every response silently
+ * capped at {@link POSTGREST_MAX_ROWS}. `ignoreCursor` models a server that
+ * drops the keyset filter, so every page starts from the first row again.
+ */
+function csvChain(
+  rows: CsvRow[] | null,
   error: { message?: string; code?: string } | null = null,
-): SupabaseClient {
+  opts: { ignoreCursor?: boolean } = {},
+) {
+  let after: string | null = null;
   const chain = {
     select: () => chain,
     eq: () => chain,
+    gt: (_column: string, value: string) => {
+      if (!opts.ignoreCursor) after = value;
+      return chain;
+    },
     order: () => chain,
-    limit: () => Promise.resolve({ data: rows, error }),
+    limit: (n: number) =>
+      Promise.resolve(
+        error || rows === null
+          ? { data: null, error }
+          : {
+              data: rows
+                .filter((r) => after === null || r.date > after)
+                .slice(0, Math.min(n, POSTGREST_MAX_ROWS)),
+              error: null,
+            },
+      ),
   };
-  return { from: () => chain } as unknown as SupabaseClient;
+  return chain;
+}
+
+function mockAdmin(
+  rows: CsvRow[] | null,
+  error: { message?: string; code?: string } | null = null,
+  opts: { ignoreCursor?: boolean } = {},
+): SupabaseClient {
+  return { from: () => csvChain(rows, error, opts) } as unknown as SupabaseClient;
+}
+
+/** N consecutive calendar days of synthetic returns from 2022-01-01. */
+function csvDays(n: number): CsvRow[] {
+  const start = Date.parse("2022-01-01T00:00:00Z");
+  return Array.from({ length: n }, (_, i) => ({
+    date: new Date(start + i * 86_400_000).toISOString().slice(0, 10),
+    daily_return: ((i % 5) - 2) / 1000,
+  }));
 }
 
 const DQF = {
@@ -305,6 +354,60 @@ describe("169 D-41 readCompositeFactsheet — a failed csv_daily_returns read is
     } finally {
       err.mockRestore();
     }
+  });
+});
+
+/**
+ * Phase 169 review round 1, orchestrator-added CSV-READ-CAP. PostgREST answers
+ * every read with at most `max_rows` rows (1000 on hosted Supabase), silently:
+ * HTTP 200, `error: null`, a partial body. The composite read asked for
+ * `.limit(20000)` in one call and ordered ascending, so a composite longer than
+ * 1000 days lost its NEWEST days and the factsheet ended early with nothing
+ * saying so (measured on PROD 2026-09-29: one strategy has 1112 rows). The read
+ * now pages by a date keyset until a page comes back empty, and a read it
+ * cannot finish is a `CompositeSeriesReadError`, never a partial series.
+ */
+describe("169 CSV-READ-CAP readCompositeFactsheet — the whole csv_daily_returns series, never the first 1000 rows", () => {
+  const input = {
+    strategyId: "s1",
+    dqf: DQF,
+    metricsJsonByBasis: { cash_settlement: FULL_CASH },
+    returnsDenominatorConfig: null,
+  };
+
+  it("a composite longer than one PostgREST response reads every row, the newest day included", async () => {
+    const rows = csvDays(1112);
+    const out = await readCompositeFactsheet(mockAdmin(rows), input);
+    expect(out!.dailyReturns).toHaveLength(1112);
+    expect(out!.dailyReturns.at(-1)!.date).toBe(rows.at(-1)!.date);
+    expect(out!.dailyReturns.map((d) => d.date)).toEqual(rows.map((r) => r.date));
+  });
+
+  it("a server that ignores the cursor is a read error, never a series with a repeated day", async () => {
+    const err = await readCompositeFactsheet(mockAdmin(csvDays(1112), null, { ignoreCursor: true }), input).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CompositeSeriesReadError);
+    expect((err as CompositeSeriesReadError).code).toBe("page_order");
+  });
+
+  it("a series past the row ceiling is a read error, never a truncated one", async () => {
+    const err = await readCompositeFactsheet(mockAdmin(csvDays(20_001)), input).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CompositeSeriesReadError);
+    expect((err as CompositeSeriesReadError).code).toBe("row_ceiling");
+  });
+
+  it("a page answering neither data nor an error is a read error, not the end of the series", async () => {
+    const err = await readCompositeFactsheet(mockAdmin(null), input).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CompositeSeriesReadError);
+    expect((err as CompositeSeriesReadError).code).toBe("no_data");
   });
 });
 
@@ -775,7 +878,7 @@ describe("MTM-04 readMtmSeries — service-role direct read + degrade", () => {
   };
 
   function mockSeriesAdmin(
-    result: { data: { payload: unknown } | null; error: { message?: string } | null },
+    result: { data: { payload: unknown } | null; error: { message?: string; code?: string } | null },
   ): SupabaseClient {
     const chain = {
       select: () => chain,
@@ -793,12 +896,23 @@ describe("MTM-04 readMtmSeries — service-role direct read + degrade", () => {
     ]);
   });
 
-  it("read error → null + console.error (degrade, never throw)", async () => {
-    const err = vi.spyOn(console, "error").mockImplementation(() => {});
-    const out = await readMtmSeries(mockSeriesAdmin({ data: null, error: { message: "boom" } }), "s1");
-    expect(out).toBeNull();
-    expect(err).toHaveBeenCalledOnce();
-    err.mockRestore();
+  // 169 review round 1, WR-05 / SFH M-3: a failed read is an OUTAGE, not "no
+  // series". Degrading it to null let the public cache store a payload without
+  // its MTM bundle for the whole analytics run, so it now throws, as the
+  // composite's csv_daily_returns read does (D-41).
+  it("read error → throws CompositeSeriesReadError naming the series and its code", async () => {
+    const err = await readMtmSeries(
+      mockSeriesAdmin({ data: null, error: { message: "boom", code: "57014" } }),
+      "s1",
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err, "the outage was degraded to 'no series'").toBeInstanceOf(CompositeSeriesReadError);
+    expect((err as CompositeSeriesReadError).read).toBe("mtm_daily_returns");
+    expect((err as CompositeSeriesReadError).code).toBe("57014");
+    expect((err as Error).message).toContain("mtm_daily_returns");
+    expect((err as Error).message).not.toContain("s1");
   });
 
   it("missing row (maybeSingle null) → null", async () => {
@@ -861,13 +975,7 @@ describe("MTM-04 readCompositeFactsheet — gated MTM series threading (one owne
         };
         return chain;
       }
-      const chain = {
-        select: () => chain,
-        eq: () => chain,
-        order: () => chain,
-        limit: () => Promise.resolve({ data: opts.sparseRows ?? SPARSE_ROWS, error: null }),
-      };
-      return chain;
+      return csvChain(opts.sparseRows ?? SPARSE_ROWS);
     };
     return { admin: { from } as unknown as SupabaseClient, mtmReads: () => mtmReadCount };
   }
@@ -904,18 +1012,24 @@ describe("MTM-04 readCompositeFactsheet — gated MTM series threading (one owne
     expect(mtmReads()).toBe(0);
   });
 
-  it("mtmAvailable but the MTM series read errors → degrade to no mtmSeries (composite still renders)", async () => {
-    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  // 169 review round 1, WR-05 / SFH M-3: an MTM series outage on a composite is
+  // the same class as its csv outage (D-41) and is thrown, never folded into a
+  // composite that builds without its MTM bundle and is then cached for the run.
+  it("mtmAvailable but the MTM series read errors → throws CompositeSeriesReadError (read mtm_daily_returns)", async () => {
     const { admin } = mockAdminMulti({ mtmError: { message: "boom" } });
-    const out = await readCompositeFactsheet(admin, {
+    const err = await readCompositeFactsheet(admin, {
       strategyId: "s1",
       dqf: DQF,
       metricsJsonByBasis: { cash_settlement: FULL_CASH, mark_to_market: MTM_HEADLINE },
       returnsDenominatorConfig: null,
-    });
-    expect(out).not.toBeNull();
-    expect("mtmSeries" in out!.buildOpts).toBe(false);
-    err.mockRestore();
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err, "the MTM outage was folded into a composite without its bundle").toBeInstanceOf(
+      CompositeSeriesReadError,
+    );
+    expect((err as CompositeSeriesReadError).read).toBe("mtm_daily_returns");
   });
 });
 
@@ -1070,7 +1184,7 @@ describe("SMTM-01 readSmoothedSeries — service-role direct read + degrade", ()
   };
 
   function mockSeriesAdmin(
-    result: { data: { payload: unknown } | null; error: { message?: string } | null },
+    result: { data: { payload: unknown } | null; error: { message?: string; code?: string } | null },
   ): { admin: SupabaseClient; kind: () => string | undefined } {
     let seenKind: string | undefined;
     const chain = {
@@ -1094,13 +1208,16 @@ describe("SMTM-01 readSmoothedSeries — service-role direct read + degrade", ()
     expect(kind()).toBe("smoothed_mtm_daily_returns");
   });
 
-  it("read error → null + console.error (degrade, never throw)", async () => {
-    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  // 169 review round 1, WR-05 / SFH M-3: the smoothed sibling of the MTM case.
+  it("read error → throws CompositeSeriesReadError naming the smoothed series", async () => {
     const { admin } = mockSeriesAdmin({ data: null, error: { message: "boom" } });
-    const out = await readSmoothedSeries(admin, "s1");
-    expect(out).toBeNull();
-    expect(err).toHaveBeenCalledOnce();
-    err.mockRestore();
+    const err = await readSmoothedSeries(admin, "s1").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err, "the outage was degraded to 'no series'").toBeInstanceOf(CompositeSeriesReadError);
+    expect((err as CompositeSeriesReadError).read).toBe("smoothed_mtm_daily_returns");
+    expect((err as CompositeSeriesReadError).code).toBe("none");
   });
 
   it("wrong-basis row (mark_to_market payload) → null (defensive, no mislabel)", async () => {
@@ -1405,13 +1522,7 @@ describe("SMTM-01 readCompositeFactsheet — smoothed gate + gated series read",
         };
         return chain;
       }
-      const chain = {
-        select: () => chain,
-        eq: () => chain,
-        order: () => chain,
-        limit: () => Promise.resolve({ data: SPARSE_ROWS, error: null }),
-      };
-      return chain;
+      return csvChain(SPARSE_ROWS);
     };
     return { admin: { from } as unknown as SupabaseClient, smoothedReads: () => smoothedReadCount };
   }
@@ -1563,5 +1674,144 @@ describe("169 D-10 readSingleKeyBasisOpts — the persisted single-key cash head
     const out = await readSingleKeyBasisOpts(noAdmin(), "s-1", {}, raw, "complete", row({ metrics_json_by_basis: raw }));
     expect(out).toEqual(await readSingleKeyBasisOpts(noAdmin(), "s-1", {}, raw, "complete"));
     expect(out.metricsByBasis?.cash_settlement).toBeUndefined();
+  });
+});
+
+/**
+ * Review round 1, SFH H-1. On a single-key row with an INTERIOR chain break
+ * (`data_quality_flags.twr_chain_broken`), Python's stored
+ * `cumulative_return` and CAGR compound only the stretch AFTER the last break
+ * (`nav_twr._last_interior_break_suffix`, `metrics._cagr_index`), while the
+ * chart, the windows and Years Observed cover the whole series. D-25 keeps the
+ * stored value (the lists show it), so the page must SAY which span the
+ * headline covers. These pin the data half: the flag reaches the payload, and
+ * the start of the covered span is read from the stored cash series row, never
+ * guessed.
+ *
+ * WHY the stored row names it. On the broker path the runner reindexes the
+ * series to a dense daily calendar, so a refused (guard) day becomes NaN; the
+ * persisted `cash_settlement` series row (`basis_series.derive_basis_series`)
+ * drops NaN from `rows` and records every absent in-span day in `gap_spans`,
+ * and echoes `conventions.densify = "broker_nan"`. Under that echo an absent
+ * day can only be a refused day, so the covered span starts at the first row
+ * after the LAST gap span: exactly the suffix `_last_interior_break_suffix`
+ * compounds. Under any other echo (a user CSV is "sparse": weekends are absent
+ * too) the rows cannot name it, and the answer is null.
+ */
+describe("169 SFH H-1 — the span a chain-broken headline covers, read from the stored series", () => {
+  const BROKER_SERIES = {
+    schema: 2,
+    basis: "cash_settlement",
+    rows: [
+      { date: "2024-01-01", return: 0.01 },
+      { date: "2024-01-02", return: 0.01 },
+      { date: "2024-01-04", return: 0.01 },
+      { date: "2024-01-05", return: 0.01 },
+      { date: "2024-01-09", return: 0.01 },
+      { date: "2024-01-10", return: 0.01 },
+    ],
+    gap_spans: [
+      { start: "2024-01-03", end: "2024-01-03" },
+      { start: "2024-01-06", end: "2024-01-08" },
+    ],
+    conventions: { periods_per_year: 365, cumulative_method: "geometric", day_basis: "calendar", densify: "broker_nan" },
+  };
+
+  it("broker_nan series with interior gaps → the first stored day after the last gap", () => {
+    expect(deriveHeadlineCoversFrom(BROKER_SERIES)).toBe("2024-01-09");
+  });
+
+  it.each([
+    ["a sparse (user CSV) series, where an absent day may be a weekend", { ...BROKER_SERIES, conventions: { ...BROKER_SERIES.conventions, densify: "sparse" } }],
+    ["a series with no densify echo (written before Phase 105)", { ...BROKER_SERIES, conventions: { periods_per_year: 365 } }],
+    ["a series with no gap", { ...BROKER_SERIES, gap_spans: [] }],
+    ["a malformed payload", { rows: "x" }],
+    ["no payload", null],
+  ])("%s → null (the stored data cannot name the span; never a guess)", (_label, payload) => {
+    expect(deriveHeadlineCoversFrom(payload)).toBeNull();
+  });
+
+  it("singleKeyDataQuality carries the flag strictly (=== true), and is unchanged without it", () => {
+    expect(singleKeyDataQuality({ twr_chain_broken: true }).twrChainBroken).toBe(true);
+    expect("twrChainBroken" in singleKeyDataQuality({ twr_chain_broken: "true" })).toBe(false);
+    expect(singleKeyDataQuality({})).toEqual({ composite: false, insufficientWindow: false });
+  });
+
+  const PERSISTED = {
+    cumulative_return: 0.18,
+    volatility: 0.3,
+    max_drawdown: -0.2,
+    cagr: 0.1,
+    sharpe: 1.1,
+    sortino: 1.6,
+    calmar: 0.5,
+  };
+  const row = { ...PERSISTED, computation_status: "complete", metrics_json_by_basis: null };
+
+  function seriesAdmin(answer: { data: unknown; error: { message: string; code?: string } | null }) {
+    const kinds: string[] = [];
+    const getAdmin = vi.fn(
+      () =>
+        ({
+          from: () => {
+            const chain = {
+              select: () => chain,
+              eq: (column: string, value: string) => {
+                if (column === "kind") kinds.push(value);
+                return chain;
+              },
+              maybeSingle: () => Promise.resolve(answer),
+            };
+            return chain;
+          },
+        }) as unknown as SupabaseClient,
+    );
+    return { getAdmin, kinds };
+  }
+
+  it("a rankable chain-broken row threads the flag and the covered span's start from the stored cash series", async () => {
+    const { getAdmin, kinds } = seriesAdmin({ data: { payload: BROKER_SERIES }, error: null });
+    const out = await readSingleKeyBasisOpts(getAdmin, "s-1", { twr_chain_broken: true }, null, "complete", row);
+    expect(out.dataQuality).toEqual({
+      composite: false,
+      insufficientWindow: false,
+      twrChainBroken: true,
+      headlineCoversFrom: "2024-01-09",
+    });
+    expect(kinds).toEqual(["cash_settlement"]);
+    // D-25 / SC4: the headline stays the stored value the lists show.
+    expect(out.metricsByBasis?.cash_settlement).toEqual(PERSISTED);
+  });
+
+  it("a chain-broken row whose stored series cannot name the span → headlineCoversFrom null, warned", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { getAdmin } = seriesAdmin({ data: null, error: null });
+      const out = await readSingleKeyBasisOpts(getAdmin, "s-1", { twr_chain_broken: true }, null, "complete", row);
+      expect(out.dataQuality?.twrChainBroken).toBe(true);
+      expect(out.dataQuality?.headlineCoversFrom).toBeNull();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("covered span"), expect.objectContaining({ strategyId: "s-1" }));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a failed stored-series read is a read error, never a guessed or missing span", async () => {
+    const { getAdmin } = seriesAdmin({ data: null, error: { message: "boom", code: "57014" } });
+    const err = await readSingleKeyBasisOpts(getAdmin, "s-1", { twr_chain_broken: true }, null, "complete", row).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CompositeSeriesReadError);
+    expect((err as CompositeSeriesReadError).read).toBe("cash_settlement");
+  });
+
+  it("a row without the flag reads nothing and adds no dataQuality (byte-identical)", async () => {
+    const getAdmin = vi.fn((): SupabaseClient => {
+      throw new Error("a clean row must not construct the service-role handle");
+    });
+    const out = await readSingleKeyBasisOpts(getAdmin, "s-1", {}, null, "complete", row);
+    expect("dataQuality" in out).toBe(false);
+    expect(getAdmin).not.toHaveBeenCalled();
   });
 });

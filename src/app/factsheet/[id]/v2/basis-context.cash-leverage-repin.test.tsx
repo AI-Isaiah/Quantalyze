@@ -3,7 +3,7 @@ import { renderHook, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
-import { BasisProvider, useBasis, useBasisSeriesView } from "./basis-context";
+import { BasisProvider, leverageEligibleFor, useBasis, useBasisSeriesView } from "./basis-context";
 import { LeverageProvider, useLeverage } from "./leverage-context";
 
 /**
@@ -138,5 +138,50 @@ describe("169 D-25 useBasisSeriesView — the cash basis re-pins the persisted S
     const v = result.current.view;
     expect(v.strategyMetrics.sharpe).toBeCloseTo(LEVERED_CLIENT.sharpe, 10);
     expect(v.strategyMetrics.sortino).toBeCloseTo(LEVERED_CLIENT.sortino, 10);
+  });
+});
+
+/**
+ * Review round 1, SFH M-2. At L=1 the cash headline is the STORED value; at
+ * L != 1 the leverage-variant scalars (Since Inception, CAGR, volatility,
+ * drawdown) are the TypeScript re-derive over the displayed series. D-25 (i)
+ * accepts that seam on a clean series, where the two agree. On two kinds of
+ * row they do not agree by construction, so moving the input from 1.00 to
+ * 1.01 changed "Since Inception" by far more than 1% and presented the gap as
+ * the effect of leverage:
+ *   - H-1, a chain-broken row: the stored figure covers only the stretch after
+ *     the last break, the re-derive covers the whole series;
+ *   - H-2, a row whose stored headline was computed under a returns convention
+ *     TypeScript cannot reproduce (a `simple` sum, or an active-day Sharpe and
+ *     volatility): the re-derive compounds calendar days.
+ * The leveraged view cannot be derived on the L=1 headline's basis for those
+ * rows, so the what-if is withheld for them, as it already is for a composite:
+ * the view stays the L=1 view by reference, and the eligibility predicate the
+ * ControlBar and the KpiStrip read says no.
+ */
+describe("169 SFH M-2 — no leverage what-if on a row whose stored headline the re-derive cannot continue", () => {
+  function flagged(dataQuality: Record<string, unknown>): FactsheetPayload {
+    const p = makeCashPayload() as unknown as Record<string, unknown>;
+    p.dataQuality = { composite: false, insufficientWindow: false, ...dataQuality };
+    return p as unknown as FactsheetPayload;
+  }
+
+  it.each([
+    ["chain-broken (H-1)", { twrChainBroken: true, headlineCoversFrom: "2024-01-20" }],
+    ["stored under a returns convention the re-derive cannot reproduce (H-2)", { returnsConventionOverride: true }],
+  ])("%s: not leverage-eligible, and L=2 keeps the L=1 view by reference", (_label, dq) => {
+    const payload = flagged(dq);
+    expect(leverageEligibleFor(payload, "cash_settlement")).toBe(false);
+    const { result } = renderHook(() => useViewProbe(payload), { wrapper: bothWrapper });
+    act(() => result.current.lev.setLeverage(2));
+    expect(result.current.view, "the levered arm ran on a row it cannot continue").toBe(payload);
+  });
+
+  it("CONTROL: a clean single-key payload with the same dataQuality shape still levers", () => {
+    const payload = flagged({});
+    expect(leverageEligibleFor(payload, "cash_settlement")).toBe(true);
+    const { result } = renderHook(() => useViewProbe(payload), { wrapper: bothWrapper });
+    act(() => result.current.lev.setLeverage(2));
+    expect(result.current.view).not.toBe(payload);
   });
 });

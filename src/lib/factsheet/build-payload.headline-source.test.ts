@@ -31,6 +31,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getStrategyDetail } from "@/lib/queries";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * Phase 169 (SC4, D-10, D-25) — where the factsheet's headline CAGR and Sharpe
@@ -178,6 +179,75 @@ describe("169 D-10 / SC4 — the single-key factsheet headline reads the persist
     expect(p.strategyMetrics.sharpe).toBe(CLIENT.strategyMetrics.sharpe);
   });
 
+  /**
+   * Review round 1, WR-01 / SFH M-1. The second gate needed a FINITE stored
+   * `cumulative_return`, so a rankable row whose stored value is null (Python
+   * `_safe_float` persists null for a non-finite value) fell back to the WHOLE
+   * TypeScript headline, CAGR and Sharpe included, while the lists show the
+   * stored ones: the SC4 split D-25 removes. The gate is now structural (the
+   * seven keys present); a null stored value renders "—" under the strict
+   * overlay, as the lists do, and the defect reaches Sentry.
+   */
+  it("WR-01: a rankable row with a null stored cumulative return still renders the stored CAGR and Sharpe", async () => {
+    vi.mocked(captureToSentry).mockClear();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const p = await headlineFor(analyticsRow({ cumulative_return: null }));
+      expect(p.strategyMetrics.sharpe, "fell back to the TypeScript Sharpe").toBe(1.5);
+      expect(p.strategyMetrics.cagr, "fell back to the TypeScript CAGR").toBe(0.12);
+      // NaN before the cache, null after it: the em-dash, never the TypeScript value.
+      expect(p.strategyMetrics.cum_ret).toBeNull();
+      // A rankable row storing no cumulative return is a data defect: captured once, at warning.
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toMatchObject({
+        level: "warning",
+        tags: { reason: "non_finite_cumulative_return", strategy_id: STRATEGY.id },
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("WR-01: a lone stored null Sortino is legitimate (no losing day) and captures nothing", async () => {
+    vi.mocked(captureToSentry).mockClear();
+    const p = await headlineFor(analyticsRow({ sortino: null }));
+    expect(p.strategyMetrics.sortino).toBeNull();
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+  });
+
+  it("WR-01: an unprojected headline is refused with its real cause, and the refusal reaches Sentry", async () => {
+    vi.mocked(captureToSentry).mockClear();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const row = analyticsRow();
+      delete row.sharpe;
+      delete row.calmar;
+      const p = await headlineFor(row);
+      expect(p.strategyMetrics.sharpe).toBe(CLIENT.strategyMetrics.sharpe);
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toMatchObject({
+        tags: { reason: "missing_keys", strategy_id: STRATEGY.id },
+        extra: { missing: ["sharpe", "calmar"] },
+      });
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("SFH M-1: a lingering raw cash_settlement object is declined with a warning naming the strategy", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const p = await headlineFor(analyticsRow({ metrics_json_by_basis: { cash_settlement: { sharpe: 9 } } }));
+      expect(p.strategyMetrics.sharpe).toBe(CLIENT.strategyMetrics.sharpe);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("cash_settlement"),
+        expect.objectContaining({ strategyId: STRATEGY.id }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("RESEARCH Pitfall 1: on a clean series the persisted cumulative return equals the chart endpoint", async () => {
     const p = await headlineFor(analyticsRow());
     const chartEnd = p.strategyEquity[p.strategyEquity.length - 1] - 1;
@@ -288,5 +358,126 @@ describe("169 D-10 — both factsheet surfaces render the persisted CAGR and Sha
     expect(route!.strategyMetrics.sharpe).toBe(1.5);
     expect(discovery!.strategyMetrics.cagr).toBe(route!.strategyMetrics.cagr);
     expect(discovery!.strategyMetrics.sharpe).toBe(route!.strategyMetrics.sharpe);
+  });
+});
+
+/**
+ * Review round 1, SFH H-2. A single-key strategy with a
+ * `returns_denominator_config` (the allocated-capital override, `simple` +
+ * `active`) is computed by the Python runner under that config: a `simple`
+ * stored `cumulative_return` is the SUM of the daily returns and its CAGR /
+ * Calmar / max drawdown are arithmetic. The single-key arm never resolved
+ * `cumulativeMethod` (only the composite reader did), so the page overlaid
+ * that arithmetic headline on a geometric equity curve and the two drifted
+ * apart with every period. The single-key owner now resolves the method with
+ * the composite's own rule, so the chart the page draws agrees with its
+ * stored "Since Inception".
+ */
+describe("169 SFH H-2 — a single-key allocated-capital strategy draws the curve its stored headline was computed on", () => {
+  const STRATEGY_ID = "66666666-6666-4666-8666-666666666666";
+  const SIMPLE_CONFIG = {
+    denominator: "allocated_capital",
+    pnl_basis: "cash_settlement",
+    metrics_basis: "active_day",
+    cumulative_method: "simple",
+    capital_schedule: [{ effective_from: "2024-01-01", capital_usd: 1_000_000 }],
+  };
+  /** Python's `simple` cumulative return: the plain sum of the daily returns. */
+  const SUM = SERIES.reduce((acc, d) => acc + d.value, 0);
+
+  function mockAdmin(config: unknown): SupabaseClient {
+    const from = (table: string) => {
+      const chain = {
+        select: () => chain,
+        eq: () => chain,
+        abortSignal: () => chain,
+        maybeSingle: () =>
+          Promise.resolve(
+            table === "strategies"
+              ? {
+                  data: {
+                    id: STRATEGY_ID,
+                    name: "Allocated Capital Test",
+                    codename: null,
+                    disclosure_tier: "exploratory",
+                    status: "published",
+                    markets: ["BTC"],
+                    strategy_types: ["test"],
+                    description: null,
+                    subtypes: [],
+                    supported_exchanges: ["binance"],
+                    leverage_range: null,
+                    aum: null,
+                    max_capacity: null,
+                    avg_daily_turnover: null,
+                    start_date: null,
+                    benchmark: null,
+                    asset_class: "crypto",
+                    returns_denominator_config: config,
+                    strategy_analytics: {
+                      ...analyticsRow({ cumulative_return: SUM }),
+                      daily_returns: SERIES,
+                      returns_series: null,
+                      computed_at: "2026-09-29T00:00:00.000Z",
+                    },
+                  },
+                  error: null,
+                }
+              : { data: null, error: null },
+          ),
+      };
+      return chain;
+    };
+    return { from } as unknown as SupabaseClient;
+  }
+
+  it("fixture guard: the sum and the compounded product differ, so agreement cannot be an accident", () => {
+    const product = SERIES.reduce((acc, d) => acc * (1 + d.value), 1) - 1;
+    expect(Math.abs(product - SUM)).toBeGreaterThan(0.001);
+  });
+
+  it("the payload's equity curve ends at the stored simple cumulative return", async () => {
+    vi.mocked(createAdminClient).mockReturnValue(mockAdmin(SIMPLE_CONFIG) as never);
+    const p = await fetchAndBuildPayload(STRATEGY_ID, (q) => q);
+    expect(p, "payload").not.toBeNull();
+    expect(p!.strategyMetrics.cum_ret).toBe(SUM);
+    const chartEnd = p!.strategyEquity[p!.strategyEquity.length - 1] - 1;
+    expect(chartEnd, "the curve compounds while the stored headline sums").toBeCloseTo(SUM, 12);
+  });
+
+  it("CONTROL: with no config the curve stays geometric", async () => {
+    vi.mocked(createAdminClient).mockReturnValue(mockAdmin(null) as never);
+    const p = await fetchAndBuildPayload(STRATEGY_ID, (q) => q);
+    const product = SERIES.reduce((acc, d) => acc * (1 + d.value), 1) - 1;
+    const chartEnd = p!.strategyEquity[p!.strategyEquity.length - 1] - 1;
+    expect(chartEnd).toBeCloseTo(product, 12);
+  });
+
+  it("SFH M-2: a config the re-derive cannot reproduce marks the payload, so the leverage what-if is withheld", async () => {
+    const row = analyticsRow();
+    const simple = await readSingleKeyBasisOpts(neverAdmin, "s", {}, null, "complete", row, SIMPLE_CONFIG);
+    expect(simple.dataQuality).toEqual({ composite: false, insufficientWindow: false, returnsConventionOverride: true });
+    // An active-day Sharpe on a geometric sum is a convention TypeScript does not compute either.
+    const active = await readSingleKeyBasisOpts(neverAdmin, "s", {}, null, "complete", row, {
+      ...SIMPLE_CONFIG,
+      cumulative_method: "geometric",
+    });
+    expect(active.dataQuality?.returnsConventionOverride).toBe(true);
+    expect("cumulativeMethod" in active).toBe(false);
+    // Geometric + calendar-day is the TypeScript convention: nothing to mark.
+    const calendar = await readSingleKeyBasisOpts(neverAdmin, "s", {}, null, "complete", row, {
+      ...SIMPLE_CONFIG,
+      cumulative_method: "geometric",
+      metrics_basis: "calendar_day",
+    });
+    expect("dataQuality" in calendar).toBe(false);
+  });
+
+  it("the single-key owner resolves the method with the composite's rule", async () => {
+    const row = analyticsRow();
+    const simple = await readSingleKeyBasisOpts(neverAdmin, "s", {}, null, "complete", row, SIMPLE_CONFIG);
+    expect(simple.cumulativeMethod).toBe("arithmetic");
+    const none = await readSingleKeyBasisOpts(neverAdmin, "s", {}, null, "complete", row, null);
+    expect("cumulativeMethod" in none).toBe(false);
   });
 });
