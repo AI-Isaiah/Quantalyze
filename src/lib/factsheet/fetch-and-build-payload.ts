@@ -507,9 +507,10 @@ async function resolveFactsheetInputs(
   // (whose reader already reads its basis series inside this stage). Past this
   // stage the build has no null exit (167.2.1-REVIEW WR-04), so an outage there
   // could only have been a throw that no lane answers, or the old degrade the
-  // public cache stored for the run. A row with no by-basis object reads nothing
-  // (the shared cheap predicates), so the hot non-options path, the probe
-  // included, stays roundtrip-free.
+  // public cache stored for the run. A clean row with no by-basis object reads
+  // nothing (the shared cheap predicates), so the hot non-options path, the
+  // probe included, stays roundtrip-free; a chain-broken row reads its stored
+  // cash series once (SFH H-1).
   //
   // MTM-01 (Phase 102): a single-key OPTIONS strategy also persists its MTM
   // basis (`metrics_json_by_basis.mark_to_market`) + an honest degrade reason.

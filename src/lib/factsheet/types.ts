@@ -558,10 +558,11 @@ export type FactsheetCommon = {
   quantiles: QuantilePayload;
 
   // ---- Phase 90 (FS-01/FS-02/FS-03) composite marker + basis fields ----
-  // All OPTIONAL + absent-by-default so single-key payloads stay byte-identical
-  // (the object-spread over the discriminated union at page.tsx preserves the
-  // `ingestSource` discriminant). Populated ONLY on the composite (csv-arm)
-  // branch of the read path (page.tsx `fetchAndBuildPayload`).
+  // All OPTIONAL + absent-by-default (the object-spread over the discriminated
+  // union preserves the `ingestSource` discriminant). The segment markers are
+  // composite-only; the basis fields (`metricsByBasis`, the gates, `dataQuality`)
+  // are also set on the single-key arm (Phases 102/103/133 and 169), by
+  // `composite-read-path.ts` `readSingleKeyBasisOpts` / `singleKeyDataQuality`.
   /**
    * FS-01 — per-key handoff seams on the stitched equity track. One entry per
    * `data_quality_flags.per_key[]` with `seq > 1` (seq 1 = inception, NOT a
