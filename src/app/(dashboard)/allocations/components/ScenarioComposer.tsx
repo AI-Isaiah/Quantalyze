@@ -715,6 +715,11 @@ type AddedMetricsState = "pending" | "settled" | "unavailable";
  * Phase 167.1.2 SC-4: it also passes `excludedTrusted`, dropped dollars from a
  * trusted key with no return series yet, which until then landed in no part
  * at all ("excludes $X from connected keys with no return history yet").
+ *
+ * Review C2 WR-03: and `excludedNotConnected`, dropped dollars from a key that
+ * is not in the payload's eligible set (disconnected or inactive), which
+ * until then were called connected keys ("excludes $X from keys that are not
+ * connected").
  */
 function buildUntrustedAumClause(summary: LiveHoldingsSummary): string {
   return buildKeyTrustClause(
@@ -728,6 +733,7 @@ function buildUntrustedAumClause(summary: LiveHoldingsSummary): string {
     summary.excludedUntrusted,
     summary.excludedUnknownStatus,
     summary.excludedTrusted,
+    summary.excludedNotConnected,
   );
 }
 
@@ -4194,6 +4200,9 @@ export function ScenarioComposer({
         contributingApiKeyIds: payload.contributingApiKeyIds ?? [],
         managerSideApiKeyIds,
         statusByKeyId,
+        // Review C2 WR-03: the server-built eligible set, read raw (no
+        // `?? []`): an absent one means "cannot tell", not "none eligible".
+        eligibleApiKeyIds: payload.eligibleApiKeyIds,
       }),
     [
       scenario.draft.toggleByScopeRef,
@@ -4201,6 +4210,7 @@ export function ScenarioComposer({
       payload.contributingApiKeyIds,
       managerSideApiKeyIds,
       statusByKeyId,
+      payload.eligibleApiKeyIds,
     ],
   );
   const liveHoldingsSum = liveHoldingsSummary.total;
@@ -4744,7 +4754,8 @@ export function ScenarioComposer({
       liveHoldingsSummary.unknownStatus.count > 0 ||
       liveHoldingsSummary.excludedUntrusted.count > 0 ||
       liveHoldingsSummary.excludedUnknownStatus.count > 0 ||
-      liveHoldingsSummary.excludedTrusted.count > 0) &&
+      liveHoldingsSummary.excludedTrusted.count > 0 ||
+      liveHoldingsSummary.excludedNotConnected.count > 0) &&
     (fieldShowsLive || overrideNoteShowsLive || fieldBlankHintShows);
   // Review WR-02 — the note that qualifies the field's value is its accessible
   // description, so a screen-reader user who tabs to PORTFOLIO AUM hears the

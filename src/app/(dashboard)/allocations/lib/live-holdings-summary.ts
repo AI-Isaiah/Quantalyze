@@ -156,6 +156,16 @@ export interface LiveHoldingsSummary {
    *  $X from connected keys with no return history yet". Never added to, or
    *  subtracted from, `total` (D-03). */
   excludedTrusted: LiveHoldingsPart;
+  /** Review C2 WR-03. Holdings the narrowing dropped whose key is in the
+   *  status map with a status that is not untrusted, but is NOT in the
+   *  payload's `eligibleApiKeyIds`: a soft-disconnected or inactive key whose
+   *  last holdings still arrive (`holdingsSummary` is not filtered by key
+   *  eligibility). Until this part they landed in `excludedTrusted` and were
+   *  called "connected keys with no return history yet", both halves false.
+   *  The composer names them "keys that are not connected". Empty when the
+   *  caller passes no eligible set, because then the two cannot be told apart.
+   *  Never added to, or subtracted from, `total` (D-03). */
+  excludedNotConnected: LiveHoldingsPart;
   /** Phase 167.1.2 SC-4. Holdings the narrowing dropped whose key the payload
    *  names as manager-side (D-20: not the allocator's book), whatever its
    *  status. Kept OUT of every disclosure, per D-20's reasoning, but counted,
@@ -208,8 +218,15 @@ export function summarizeLiveHoldings(args: {
    *  as a manager. Read only to narrow `excludedUntrusted` to D-20's `$Y`. */
   managerSideApiKeyIds: readonly string[];
   statusByKeyId: ReadonlyMap<string, string | null>;
+  /** The payload's `eligibleApiKeyIds` (server-built by
+   *  `isPerKeyDailiesEligibleKey`; never re-derived here). Read only to split
+   *  `excludedNotConnected` out of `excludedTrusted` (review C2 WR-03).
+   *  Undefined means unknown, and nothing is called not-connected. */
+  eligibleApiKeyIds?: readonly string[];
 }): LiveHoldingsSummary {
   const contributing = new Set(args.contributingApiKeyIds);
+  const eligible =
+    args.eligibleApiKeyIds === undefined ? null : new Set(args.eligibleApiKeyIds);
   const managerSide = new Set(args.managerSideApiKeyIds);
   // ⚠️ The narrowing applies only when there IS a modelled set to narrow TO.
   // An EMPTY contributing set means no per-key row exists, so there is nothing
@@ -242,6 +259,7 @@ export function summarizeLiveHoldings(args: {
     excludedUntrusted: { amount: 0, count: 0, unavailable: 0 },
     excludedUnknownStatus: { amount: 0, count: 0, unavailable: 0 },
     excludedTrusted: { amount: 0, count: 0, unavailable: 0 },
+    excludedNotConnected: { amount: 0, count: 0, unavailable: 0 },
     excludedManagerSide: { amount: 0, count: 0, unavailable: 0 },
   };
   const addTo = (part: LiveHoldingsPart, h: DashboardHolding, equity: number) => {
@@ -275,6 +293,11 @@ export function summarizeLiveHoldings(args: {
         // Review round 3 WR-01: an ABSENT status is unknown, not trusted,
         // on the excludes side too (the WR-05 `.has` rule).
         addTo(out.excludedUnknownStatus, h, equity);
+      } else if (eligible !== null && !eligible.has(h.api_key_id)) {
+        // Review C2 WR-03: in the key list, status not untrusted, but not
+        // eligible: the key is disconnected or inactive, not "connected with
+        // no return history yet".
+        addTo(out.excludedNotConnected, h, equity);
       } else {
         // Trusted, not contributing, not manager-side: a key with no return
         // series yet. Before 167.1.2 this fell through to `continue` unnamed.
@@ -310,6 +333,10 @@ export interface KeyTrustClauseRender {
  *  plan fixed ("excludes $X from connected keys with no return history yet").
  *  Local to this module: only this clause renders it. */
 const NO_RETURN_HISTORY_KEY_SET_NOUN = "connected keys with no return history yet";
+
+/** Review C2 WR-03 — the noun for `excludedNotConnected`. Local to this module
+ *  for the same reason as the noun above. */
+const NOT_CONNECTED_KEY_SET_NOUN = "keys that are not connected";
 
 /**
  * Phase 167.1 AUMTRUST — the ONE lower-case clause that names the parts of a
@@ -350,6 +377,9 @@ const NO_RETURN_HISTORY_KEY_SET_NOUN = "connected keys with no return history ye
  *   same count and unavailable rules. Its presence rules out the shared-noun
  *   form, which would otherwise return before naming it. Open Positions
  *   passes it no more than the other excluded parts.
+ * - Review C2 WR-03: an optional `excludedNotConnected` part (dropped dollars
+ *   from a key that is not connected) is named before it, as `excludes $X
+ *   from keys that are not connected`, with the same rules.
  */
 export function buildKeyTrustClause(
   untrusted: LiveHoldingsPart,
@@ -358,6 +388,7 @@ export function buildKeyTrustClause(
   excludedUntrusted?: LiveHoldingsPart,
   excludedUnknownStatus?: LiveHoldingsPart,
   excludedTrusted?: LiveHoldingsPart,
+  excludedNotConnected?: LiveHoldingsPart,
 ): string {
   const phrase = (part: LiveHoldingsPart, noun: string): string => {
     const base = `${render.amount(part.amount)} from ${noun}`;
@@ -382,12 +413,19 @@ export function buildKeyTrustClause(
     excludedTrusted !== undefined && excludedTrusted.count > 0
       ? excludedTrusted
       : null;
+  const excludedGone =
+    excludedNotConnected !== undefined && excludedNotConnected.count > 0
+      ? excludedNotConnected
+      : null;
   const excludedParts: string[] = [];
   if (excluded !== null) {
     excludedParts.push(phrase(excluded, UNTRUSTED_KEY_SET_NOUN));
   }
   if (excludedUnknown !== null) {
     excludedParts.push(phrase(excludedUnknown, UNKNOWN_KEY_STATUS_SET_NOUN));
+  }
+  if (excludedGone !== null) {
+    excludedParts.push(phrase(excludedGone, NOT_CONNECTED_KEY_SET_NOUN));
   }
   if (excludedNoHistory !== null) {
     excludedParts.push(phrase(excludedNoHistory, NO_RETURN_HISTORY_KEY_SET_NOUN));
@@ -400,6 +438,7 @@ export function buildKeyTrustClause(
     excluded !== null &&
     excludedUnknown === null &&
     excludedNoHistory === null &&
+    excludedGone === null &&
     unknownStatus.count === 0 &&
     untrusted.unavailable === 0 &&
     excluded.unavailable === 0;

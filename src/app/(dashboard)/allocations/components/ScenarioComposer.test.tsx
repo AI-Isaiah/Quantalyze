@@ -16786,6 +16786,44 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     );
   });
 
+  // Review C2 WR-03: a key that is not connected (not in the payload's
+  // eligible set) but whose status is not untrusted used to be named as one of
+  // the "connected keys with no return history yet". Its dollars get their own
+  // noun, and the field is unchanged.
+  it("review C2 WR-03: a key that is not connected is named 'Excludes $3,300 from keys that are not connected.', never as a connected key", () => {
+    const AT_KEY_GONE = "aumtrust-key-gone";
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_GONE,
+        status: "complete",
+        venue: "okx",
+        symbol: "AUMTRUST-GONE",
+        spotUsd: 3_300,
+        eligible: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    // Fixture self-proof: the key is in the key list with a trusted status,
+    // and in no eligible set.
+    expect(payload.apiKeys.map((k) => k.id)).toContain(AT_KEY_GONE);
+    expect(payload.eligibleApiKeyIds).not.toContain(AT_KEY_GONE);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_TRUSTED_USD));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $3,300 from keys that are not connected.",
+    );
+  });
+
   it("167.1.2 SC-4: beside includes and excluded untrusted parts, the trusted exclusion is still named, never swallowed by the shared-noun form", () => {
     const payload = atBook([
       {
