@@ -5,10 +5,10 @@ import { render, screen } from "@testing-library/react";
  * Review C4 SFH-C4-08 and WR-01. Open Positions keeps each key's rows at that
  * key's own latest read (D-16), so a key that has not read its account for
  * weeks, or has disconnected, still shows its last read. Those rows must say
- * how old they are. And a live key whose last sync could not read its open
- * positions (a derivative-side failure keeps only the spot rows at the key's
- * newest day) must say its positions may be missing, beside the table the
- * owner reads them from.
+ * how old they are. And a key whose rows on screen came from a poll that could
+ * not read its open positions (a derivative-side failure keeps only the spot
+ * rows at the key's newest day) must say its positions are missing, beside the
+ * table the owner reads them from, for as long as those rows are shown.
  */
 
 vi.mock("./components/HoldingsTable", () => ({
@@ -57,6 +57,7 @@ const apiKey = (
 function renderPanel(
   holdingsSummary: unknown[],
   apiKeys: unknown[],
+  partialPositionReads: unknown[] = [],
 ) {
   const props = {
     portfolio: null,
@@ -77,6 +78,7 @@ function renderPanel(
     matchDecisionsByHoldingRef: {},
     strategies: [],
     exposure: EMPTY_EXPOSURE,
+    partialPositionReads,
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return render(<HoldingsTabPanel {...(props as any)} />);
@@ -118,39 +120,54 @@ describe("HoldingsTabPanel: open positions say how old an older key's read is (S
   });
 });
 
-describe("HoldingsTabPanel: a live key whose last sync could not read its positions says so (WR-01)", () => {
-  it("names a connected exchange key whose last sync finished with warnings", () => {
+describe("HoldingsTabPanel: a key whose rows' poll could not read its positions says so (WR-01, WR-R2-03)", () => {
+  // The line is bound to the poll that wrote the rows on screen
+  // (`partialPositionReads`, from the reader), never to the key's current
+  // `sync_status`: a later failed poll writes no rows, so the partial rows and
+  // the line both stay.
+  const partial = [{ api_key_id: "key-a", asof: "2026-09-05" }];
+  const spot = { ...perp("key-a", "USDT", "2026-09-05"), holding_type: "spot" as const };
+
+  it("names the key and its sync day", () => {
+    renderPanel([spot], [apiKey("key-a", "Main", { sync_status: "complete_with_warnings" })], partial);
+    expect(
+      screen.getByTestId("open-positions-partial-read-note").textContent,
+    ).toBe(
+      "Open positions from the Binance key Main could not be read on its sync of 2026-09-05. Any it holds are missing below until a sync reads them.",
+    );
+  });
+
+  it.each([["rate_limited"], ["error"], ["syncing"], ["complete"]])(
+    "stays when the key's current status moved on to %s",
+    (status) => {
+      renderPanel([spot], [apiKey("key-a", "Main", { sync_status: status })], partial);
+      expect(screen.getAllByTestId("open-positions-partial-read-note")).toHaveLength(1);
+    },
+  );
+
+  it("says nothing when the rows' poll read the positions, whatever the key's status says", () => {
+    renderPanel([spot], [apiKey("key-a", "Main", { sync_status: "complete_with_warnings" })], []);
+    expect(screen.queryByTestId("open-positions-partial-read-note")).toBeNull();
+  });
+
+  it("a departed key's rows say so without promising a sync", () => {
     renderPanel(
-      [perp("key-a", "ETH-PERP", "2026-09-29")],
-      [apiKey("key-a", "Main", { sync_status: "complete_with_warnings" })],
+      [spot],
+      [apiKey("key-a", "Old", { disconnected_at: "2026-09-10T00:00:00Z" })],
+      partial,
     );
     expect(
       screen.getByTestId("open-positions-partial-read-note").textContent,
     ).toBe(
-      "Open positions from the Binance key Main could not be read on its last sync. Any it holds are missing below until a sync reads them.",
+      "Open positions from the Binance key Old could not be read on its sync of 2026-09-05. Any it held then are missing below.",
     );
   });
 
   it.each([
-    ["an MT5 account (its warnings are not a positions read)", { exchange: "mt5" }],
-    ["an sFOX account (its warnings are not a positions read)", { exchange: "sfox" }],
-    ["a disconnected key", { disconnected_at: "2026-09-01T00:00:00Z" }],
-    ["an inactive key", { is_active: false }],
-  ])("says nothing for %s", (_label, overrides) => {
-    renderPanel(
-      [perp("key-a", "ETH-PERP", "2026-09-29")],
-      [
-        apiKey("key-a", "Main", {
-          sync_status: "complete_with_warnings",
-          ...overrides,
-        }),
-      ],
-    );
-    expect(screen.queryByTestId("open-positions-partial-read-note")).toBeNull();
-  });
-
-  it("says nothing for a clean sync", () => {
-    renderPanel([perp("key-a", "ETH-PERP", "2026-09-29")], [apiKey("key-a", "Main")]);
+    ["an MT5 account (its warnings are not a positions read)", "mt5"],
+    ["an sFOX account (its warnings are not a positions read)", "sfox"],
+  ])("says nothing for %s", (_label, exchange) => {
+    renderPanel([{ ...spot, venue: exchange }], [apiKey("key-a", "Main", { exchange })], partial);
     expect(screen.queryByTestId("open-positions-partial-read-note")).toBeNull();
   });
 });

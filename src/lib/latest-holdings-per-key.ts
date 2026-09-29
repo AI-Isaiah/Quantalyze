@@ -90,6 +90,12 @@ type KeyIdentityRow = {
   account_shared_with_api_key_id: string | null;
 };
 
+/**
+ * Review C4 round 2 WR-R2-03: a key whose returned rows were written, on
+ * `asof`, by a poll that could not read its open positions.
+ */
+export type PartialRead = { api_key_id: string; asof: string };
+
 /** A key's newest reading: the day, and whether it wrote rows on that day. */
 type KeyReading = { day: string; hasRows: boolean };
 
@@ -111,6 +117,21 @@ export function cleanPollDay(metadata: unknown): string | null {
   if (typeof rowCount !== "number" || !Number.isInteger(rowCount) || rowCount < 0) {
     return null;
   }
+  const asof = m.asof;
+  return typeof asof === "string" && ISO_DAY.test(asof) ? asof : null;
+}
+
+/**
+ * Review C4 round 2 WR-R2-03. The day a poll that could NOT read the key's open
+ * positions stamped its rows with, or null when `metadata` is not such a poll.
+ * On a ccxt venue `complete_with_warnings` has one cause: the derivative-side
+ * read failed and only the spot rows were saved (`fetch_allocator_holdings`,
+ * allocator_positions.py). An event without a recorded day binds to no rows.
+ */
+export function partialPollDay(metadata: unknown): string | null {
+  if (metadata === null || typeof metadata !== "object") return null;
+  const m = metadata as Record<string, unknown>;
+  if (m.final_status !== "complete_with_warnings") return null;
   const asof = m.asof;
   return typeof asof === "string" && ISO_DAY.test(asof) ? asof : null;
 }
@@ -165,8 +186,17 @@ export function cleanPollDay(metadata: unknown): string | null {
  * shows that key flat until its next poll; the refresh, whose $0 would be
  * permanent, keeps its stricter proof.
  *
- * Never throws. Returns `{ data, error }` so the caller's `assertOk` treats it
- * like any other Supabase result. Any step's error is returned as `error`. A
+ * Review C4 round 2 WR-R2-03: step 2 also reads the key's newest poll event
+ * of ANY outcome. When that poll finished with warnings on the very day of the
+ * rows this read returns, it is the poll that wrote them, and it could not read
+ * the key's open positions; the key and that day are named in `partialReads`. This is
+ * bound to the rows, not to the key's current `sync_status`: a failed poll
+ * records `sync_failed` and writes nothing, so the rows and their poll's
+ * record both stay, and so does the flag. It clears only when a later poll
+ * writes the key's rows again. A key that contributes no rows is never named.
+ *
+ * Never throws. Returns `{ data, error, partialReads }` so the caller's
+ * `assertOk` treats it like any other Supabase result. Any step's error is returned as `error`. A
  * read that reaches `HOLDINGS_ROW_CAP` returns a named error instead of a
  * partial list. A key with no holdings contributes nothing.
  *
@@ -180,26 +210,37 @@ export async function fetchLatestHoldingsPerKey(
   supabase: SupabaseClient<Database>,
   userId: string,
   columns: string,
-): Promise<{ data: unknown[] | null; error: ReadError | null }> {
+): Promise<{
+  data: unknown[] | null;
+  error: ReadError | null;
+  partialReads: PartialRead[];
+}> {
   const keysRes = await supabase
     .from("api_keys")
     .select(KEY_IDENTITY_COLUMNS)
     .eq("user_id", userId)
     .limit(HOLDINGS_ROW_CAP);
-  if (keysRes.error) return { data: null, error: keysRes.error };
+  if (keysRes.error) return { data: null, error: keysRes.error, partialReads: [] };
   const keys = (keysRes.data ?? []) as KeyIdentityRow[];
   if (keys.length >= HOLDINGS_ROW_CAP) {
     return {
       data: null,
       error: { message: "api_keys id read reached the row cap" },
+      partialReads: [],
     };
   }
 
   // Step 2: each key's newest reading, rows or a clean empty poll.
   const readings = await Promise.all(
     keys.map(
-      async (key): Promise<{ reading: KeyReading | null; error: ReadError | null }> => {
-        const [latestRes, pollRes] = await Promise.all([
+      async (
+        key,
+      ): Promise<{
+        reading: KeyReading | null;
+        partialDay: string | null;
+        error: ReadError | null;
+      }> => {
+        const [latestRes, pollRes, newestPollRes] = await Promise.all([
           supabase
             .from("allocator_holdings")
             .select("asof")
@@ -217,24 +258,46 @@ export async function fetchLatestHoldingsPerKey(
             .eq("metadata->>final_status", "complete")
             .order("created_at", { ascending: false })
             .limit(1),
+          // WR-R2-03: the newest poll of any outcome, to tell whether it
+          // wrote the rows below with the positions unread.
+          supabase
+            .from("audit_log")
+            .select("metadata")
+            .eq("user_id", userId)
+            .eq("action", POLL_COMPLETED_ACTION)
+            .eq("entity_type", "api_key")
+            .eq("entity_id", key.id)
+            .order("created_at", { ascending: false })
+            .limit(1),
         ]);
-        if (latestRes.error) return { reading: null, error: latestRes.error };
-        if (pollRes.error) return { reading: null, error: pollRes.error };
+        if (latestRes.error) return { reading: null, partialDay: null, error: latestRes.error };
+        if (pollRes.error) return { reading: null, partialDay: null, error: pollRes.error };
+        if (newestPollRes.error) {
+          return { reading: null, partialDay: null, error: newestPollRes.error };
+        }
+        const partialDay = partialPollDay(newestPollRes.data?.[0]?.metadata ?? null);
         const latestAsof = latestRes.data?.[0]?.asof ?? null;
         const cleanPollAsof = cleanPollDay(pollRes.data?.[0]?.metadata ?? null);
         if (cleanPollAsof !== null && (latestAsof === null || cleanPollAsof > latestAsof)) {
           // SFH-C4-02: the key's newest clean poll read it after these rows.
-          return { reading: { day: cleanPollAsof, hasRows: false }, error: null };
+          return {
+            reading: { day: cleanPollAsof, hasRows: false },
+            partialDay: null,
+            error: null,
+          };
         }
         return {
           reading: latestAsof ? { day: latestAsof, hasRows: true } : null,
+          partialDay,
           error: null,
         };
       },
     ),
   );
   const failedReading = readings.find((r) => r.error !== null);
-  if (failedReading) return { data: null, error: failedReading.error };
+  if (failedReading) {
+    return { data: null, error: failedReading.error, partialReads: [] };
+  }
 
   // SFH-C4-01: one exchange account, one reading. Keys that read the same
   // account (the D-09 identity) are grouped; only the keys holding the
@@ -266,6 +329,7 @@ export async function fetchLatestHoldingsPerKey(
     }
   });
   const toRead: Array<{ keyId: string; asof: string }> = [];
+  const partialReads: PartialRead[] = [];
   keys.forEach((key, i) => {
     const reading = readings[i].reading;
     if (
@@ -274,6 +338,11 @@ export async function fetchLatestHoldingsPerKey(
       reading.day === newestByAccount.get(accountOf(key.id))
     ) {
       toRead.push({ keyId: key.id, asof: reading.day });
+      // WR-R2-03: the rows at this day were written by a poll that could
+      // not read the key's open positions.
+      if (readings[i].partialDay === reading.day) {
+        partialReads.push({ api_key_id: key.id, asof: reading.day });
+      }
     }
   });
 
@@ -304,6 +373,6 @@ export async function fetchLatestHoldingsPerKey(
   );
 
   const failed = perKey.find((k) => k.error !== null);
-  if (failed) return { data: null, error: failed.error };
-  return { data: perKey.flatMap((k) => k.rows), error: null };
+  if (failed) return { data: null, error: failed.error, partialReads: [] };
+  return { data: perKey.flatMap((k) => k.rows), error: null, partialReads };
 }

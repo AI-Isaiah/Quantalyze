@@ -138,36 +138,47 @@ const CCXT_POSITION_VENUES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Review C4 WR-01. One sentence per connected key whose last sync could not
- * read its open positions. That sync saved the spot rows at a newer day, so
- * under D-16 (each key's rows at its own latest read) every open position of
- * the key leaves the table until a sync reads them again. Chosen over holding
- * the key's latest read back to an older complete day: that would also show a
- * stale spot book, and under repeated failures an arbitrarily old one. Reads
- * the key's CURRENT `sync_status`, which moves on with the next sync, so the
- * line clears when a sync reads the positions again. Departed keys are not
- * polled, so they get no line.
+ * Review C4 WR-01, bound to the rows by round 2 WR-R2-03. One sentence per key
+ * whose rows on screen were written by a poll that could not read its open
+ * positions (`partialPositionReads`, from `fetchLatestHoldingsPerKey`). That
+ * poll saved the spot rows at a newer day, so under D-16 (each key's rows at
+ * its own latest read) every open position of the key is missing from the
+ * table. Chosen over holding the key's latest read back to an older complete
+ * day: that would also show a stale spot book, and under repeated failures an
+ * arbitrarily old one.
+ *
+ * The line follows the poll that wrote the rows, never the key's current
+ * `sync_status`. A later poll that fails (a 429, a venue error) or is still
+ * running writes no rows, so the partial rows stay and so does the line. It
+ * clears only when a poll writes the key's rows again. A key that is no longer
+ * connected is not polled, so its sentence does not promise a sync.
  */
 export function partialPositionReadNotes(
+  partialReads: ReadonlyArray<{ api_key_id: string; asof: string }>,
   apiKeys: ReadonlyArray<{
+    id: string;
     exchange: string;
     label: string | null;
     is_active: boolean;
     sync_status: string | null;
     disconnected_at: string | null;
   }>,
+  rows: ReadonlyArray<{ api_key_id: string; venue: string }>,
 ): string[] {
-  return apiKeys
-    .filter(
-      (k) =>
-        isLiveKey(k) &&
-        k.sync_status === "complete_with_warnings" &&
-        CCXT_POSITION_VENUES.has(k.exchange.trim().toLowerCase()),
-    )
-    .map(
-      (k) =>
-        `Open positions from ${keyPhrase(k, k.exchange)} could not be read on its last sync. Any it holds are missing below until a sync reads them.`,
+  const keysById = new Map(apiKeys.map((k) => [k.id, k]));
+  const notes: string[] = [];
+  for (const { api_key_id, asof } of partialReads) {
+    const key = keysById.get(api_key_id);
+    const venue = key?.exchange ?? rows.find((r) => r.api_key_id === api_key_id)?.venue;
+    if (venue === undefined || !CCXT_POSITION_VENUES.has(venue.trim().toLowerCase())) continue;
+    const lead = `Open positions from ${keyPhrase(key, venue)} could not be read on its sync of ${asof}.`;
+    notes.push(
+      key !== undefined && isLiveKey(key)
+        ? `${lead} Any it holds are missing below until a sync reads them.`
+        : `${lead} Any it held then are missing below.`,
     );
+  }
+  return notes;
 }
 
 const EMPTY_OPTIMIZER: OptimizerPrefetch = {
@@ -371,7 +382,14 @@ export function HoldingsTabPanel(
     [derivativeHoldings, holdingsSummary, apiKeys],
   );
 
-  const partialReadNotes = useMemo(() => partialPositionReadNotes(apiKeys), [apiKeys]);
+  const partialPositionReads = useMemo(
+    () => props.partialPositionReads ?? [],
+    [props.partialPositionReads],
+  );
+  const partialReadNotes = useMemo(
+    () => partialPositionReadNotes(partialPositionReads, apiKeys, holdingsSummary),
+    [partialPositionReads, apiKeys, holdingsSummary],
+  );
 
   const allocatorPreferences = props.mandate
     ? { max_weight: props.mandate.max_weight }

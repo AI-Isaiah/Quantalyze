@@ -2967,6 +2967,15 @@ export interface MyAllocationDashboardPayload {
    */
   departedHistoryUnavailable?: boolean;
   /**
+   * Review C4 round 2 WR-R2-03. The keys whose rows in `holdingsSummary` were
+   * written, on `asof`, by a poll that could not read their open positions
+   * (`fetchLatestHoldingsPerKey`'s `partialReads`). Bound to the poll that
+   * wrote the rows, not to the key's current `sync_status`, so a later failed
+   * poll does not clear it. Optional so legacy fixtures compile; the dashboard
+   * read always sets it.
+   */
+  partialPositionReads?: Array<{ api_key_id: string; asof: string }>;
+  /**
    * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
    * allocator's snapshots, or null when every snapshot's column is
    * NULL (e.g., pure CoinGecko-fallback data). Drives the venue-
@@ -4081,6 +4090,9 @@ export function derivePhase07Fields(
   // rebuilding. Review C2 SFH-06: or DERIVED_ROW_READ_FAILED when the read
   // itself failed, which the producer names as `history_read_failed`.
   derivedEquityRow: DerivedEquityRowRead,
+  // Review C4 round 2 WR-R2-03: the read's `partialReads`. Defaulted so
+  // callers that pass no holdings read (fixtures) name no key.
+  partialReads: ReadonlyArray<{ api_key_id: string; asof: string }> = [],
 ): Pick<
   MyAllocationDashboardPayload,
   | "equitySnapshots"
@@ -4097,6 +4109,7 @@ export function derivePhase07Fields(
   | "equityHistoryRebuildReason"
   | "equityHistoryNotSyncingKeyIds"
   | "departedHistoryUnavailable"
+  | "partialPositionReads"
   | "minHistoryDepthMonths"
   | "activeVenues"
   | "hasConnectedKeys"
@@ -4263,6 +4276,7 @@ export function derivePhase07Fields(
     equityHistoryRebuildReason,
     equityHistoryNotSyncingKeyIds,
     departedHistoryUnavailable,
+    partialPositionReads: partialReads.map((p) => ({ ...p })),
     minHistoryDepthMonths,
     activeVenues,
     hasConnectedKeys,
@@ -4821,6 +4835,8 @@ export const getMyAllocationDashboard = cache(
       // Phase 115.1 / BACKBONE-02 (RD-1) — the derived $-equity row (or null)
       // threaded into the ONE producer site so the repoint gates there.
       phase115DerivedRow,
+      // Review C4 round 2 WR-R2-03: keys whose rows' poll left positions unread.
+      phase07HoldingsRes.partialReads,
     );
 
     // Phase 09 / D-07 + D-08 + D-11 + finding f5
