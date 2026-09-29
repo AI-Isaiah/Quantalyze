@@ -53,6 +53,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { deriveSyncFreshness } from "@/lib/sync-freshness/types";
 import { safeFraction } from "./units";
+import { drainById } from "./drain-by-id";
 import { withPublishedOnly } from "./visibility";
 import {
   PERCENTILE_METRICS,
@@ -4419,31 +4420,54 @@ export const getMyAllocationDashboard = cache(
         .order("created_at", { ascending: false })
         .limit(200),
       // Phase 36 / 36-03 (D1, UNIFY-01/02) — per-key dailies for the Overview
-      // repoint. Bound by a DATE-WINDOW filter (`.gte("date", ...)`), NOT a
-      // bare ascending `.limit()`: the snapshot path caps at 730 rows because
-      // it is a single per-allocator series, but the per-key series spans K
-      // keys — a bare ascending `.limit(730)` over K keys would silently DROP
-      // the NEWEST rows (truncating the most recent ~730/K days), corrupting
-      // the curve. Filter by date instead so every key keeps its full 730-day
-      // window. `.limit(20000)` is a flat SAFETY CEILING (≈27 keys × 730d) so
-      // the payload cannot grow unbounded as csv_daily_returns accumulates
-      // (T-36-03-03), without truncating recent data for any realistic key
-      // count. User client + owner RLS gates the read (T-36-03-01).
-      supabase
-        .from("csv_daily_returns")
-        // allocator_id is NOT selected: RLS + the .eq below already scope the
-        // read to this allocator, and buildPerKeyReturnsByApiKeyId only consumes
-        // api_key_id / date / daily_return (trims wire bytes per review).
-        .select("api_key_id, date, daily_return")
-        .eq("allocator_id", userId)
-        .gte(
-          "date",
-          new Date(Date.now() - 730 * 24 * 60 * 60 * 1000)
-            .toISOString()
-            .slice(0, 10),
-        )
-        .order("date", { ascending: true })
-        .limit(20000),
+      // repoint. Bound by a DATE-WINDOW filter (`.gte("date", ...)`): every
+      // key keeps its full 730-day window, and the window is what bounds the
+      // payload as csv_daily_returns accumulates (T-36-03-03). User client +
+      // owner RLS gates the read (T-36-03-01).
+      //
+      // 167.1.2 C3 fix F (SFH-C3R2-X1): this used to be ONE request,
+      // `.order("date", asc).limit(20000)`, under a comment calling the
+      // limit a "flat SAFETY CEILING" that truncated nothing. That was false:
+      // PostgREST caps every response at max_rows (1000 on PROD) whatever the
+      // limit, answers 200 with a partial body, and the ascending order made
+      // the dropped rows the NEWEST. PROD 2026-09-29: an allocator with 2348
+      // rows in the window read only its oldest 1000. The read now drains
+      // every row through `drainById` (id keyset, stops on an empty page,
+      // fails loud at its page ceiling or on a non-monotone cursor). A drain
+      // failure resolves `{ data: null, error }`, so `assertOk` below logs
+      // and throws on it exactly as on a PostgREST error; never a silent
+      // partial series. Rows come back sorted by (api_key_id, date), which is
+      // the per-key date order buildPerKeyReturnsByApiKeyId relies on.
+      // A NULL api_key_id row (a strategy-scoped row) is excluded at the
+      // query: buildPerKeyReturnsByApiKeyId drops it anyway, and without the
+      // filter those rows would share natural keys across strategies.
+      (async () => {
+        const windowStart = new Date(Date.now() - 730 * 24 * 60 * 60 * 1000)
+          .toISOString()
+          .slice(0, 10);
+        return drainById<{
+          id: number;
+          api_key_id: string;
+          date: string;
+          daily_return: number;
+        }>({
+          label: "csv_daily_returns",
+          naturalKey: (r) => `${r.api_key_id}|${r.date}`,
+          fetchPage: (afterId, pageSize) => {
+            // allocator_id is NOT selected: RLS + the .eq below already scope
+            // the read to this allocator. `id` is selected because it is the
+            // keyset cursor.
+            let page = supabase
+              .from("csv_daily_returns")
+              .select("id, api_key_id, date, daily_return")
+              .eq("allocator_id", userId)
+              .not("api_key_id", "is", null)
+              .gte("date", windowStart);
+            if (afterId !== null) page = page.gt("id", afterId);
+            return page.order("id", { ascending: true }).limit(pageSize);
+          },
+        });
+      })(),
       // Phase 115.1 / BACKBONE-02 (RD-1) — one JSONB row per
       // (allocator_id, kind); the display row is kind='equity_curve'. USER
       // client + owner RLS + explicit `.eq("allocator_id", userId)` (the
