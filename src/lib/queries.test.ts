@@ -2130,3 +2130,94 @@ describe("deriveStrategyLinkedKeyIds — the shared manager-role discriminator (
     expect(result.map((k) => k.id)).toEqual(["k-bybit", "k-okx"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 plan 15 (item 8, D-16): Open Positions keeps each key's rows at
+// that key's own latest asof before the unchanged holdingScopeKey collapse.
+// ---------------------------------------------------------------------------
+/**
+ * Why this matters: the collapse keeps the newest row per venue:symbol:type
+ * across EVERY date, so a position a key closed before its latest poll
+ * survived from its last row and Open Positions showed it as still open (five
+ * symbols on 2026-09-27). The fix is per KEY, not allocator-wide: a key that
+ * did not poll on the latest day keeps its own latest rows, or a quiet key
+ * would read as flat.
+ */
+describe("derivePhase07Fields: holdingsSummary is each key's own latest asof (D-16)", () => {
+  type HoldingRow = Parameters<typeof derivePhase07Fields>[3][number];
+  const row = (
+    api_key_id: string,
+    asof: string,
+    symbol: string,
+    over: Partial<HoldingRow> = {},
+  ): HoldingRow => ({
+    symbol,
+    quantity: 1,
+    mark_price: 100,
+    value_usd: 100,
+    venue: "binance",
+    holding_type: "spot",
+    asof,
+    api_key_id,
+    side: null,
+    entry_price: null,
+    unrealized_pnl_usd: null,
+    ...over,
+  });
+  const summarize = (rows: HoldingRow[]) =>
+    derivePhase07Fields([], [], 0, rows, false, null).holdingsSummary;
+  const symbolsOf = (rows: HoldingRow[]) =>
+    summarize(rows)
+      .map((h) => `${h.api_key_id}:${h.symbol}`)
+      .sort();
+
+  it("a position the key closed before its latest poll is gone (BTC at D-1 only, ETH at D)", () => {
+    // Key A held BTC and ETH on D-1 and only ETH on D: BTC was closed. Today's
+    // collapse keeps BTC from its D-1 row because no D row replaces it.
+    const rows = [
+      row("key-a", "2026-09-26", "BTC"),
+      row("key-a", "2026-09-26", "ETH", { value_usd: 90 }),
+      row("key-a", "2026-09-27", "ETH", { value_usd: 110 }),
+    ];
+    expect(symbolsOf(rows)).toEqual(["key-a:ETH"]);
+    // The surviving ETH row is D's, not D-1's.
+    expect(summarize(rows)[0].value_usd).toBe(110);
+  });
+
+  it("a key that did not poll on the latest day keeps its own latest rows (never read as flat)", () => {
+    // Key B last polled on D-2; key A polled on D. An allocator-wide latest
+    // asof would drop B's SOL entirely.
+    const rows = [
+      row("key-a", "2026-09-27", "ETH"),
+      row("key-b", "2026-09-25", "SOL", { venue: "okx" }),
+    ];
+    expect(symbolsOf(rows)).toEqual(["key-a:ETH", "key-b:SOL"]);
+  });
+
+  it("input order is irrelevant: ascending and descending asof give the same holdingsSummary", () => {
+    const rows = [
+      row("key-a", "2026-09-25", "BTC"),
+      row("key-a", "2026-09-26", "ETH"),
+      row("key-a", "2026-09-27", "ETH"),
+      row("key-b", "2026-09-24", "SOL", { venue: "okx" }),
+    ];
+    const asc = symbolsOf(rows);
+    const desc = symbolsOf([...rows].reverse());
+    expect(asc).toEqual(["key-a:ETH", "key-b:SOL"]);
+    expect(desc).toEqual(asc);
+  });
+
+  it("the unchanged collapse still keeps the newer of two keys' rows on one venue:symbol:type", () => {
+    // Two keys on the same venue:symbol:type at their own latest asofs. The
+    // per-key filter keeps both; the D-08 collapse (holdingScopeKey, max asof)
+    // then keeps key A's newer row. The collapse is not touched by D-16.
+    const rows = [
+      row("key-a", "2026-09-27", "BTC", { value_usd: 200 }),
+      row("key-b", "2026-09-25", "BTC", { value_usd: 50 }),
+    ];
+    const summary = summarize(rows);
+    expect(summary).toHaveLength(1);
+    expect(summary[0].api_key_id).toBe("key-a");
+    expect(summary[0].value_usd).toBe(200);
+  });
+});

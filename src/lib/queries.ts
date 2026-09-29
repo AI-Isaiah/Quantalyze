@@ -48,6 +48,7 @@ import type {
 } from "./types";
 import { SUPPORTED_EXCHANGES, type SupportedExchange } from "./utils";
 import { holdingScopeKey } from "./keys";
+import { latestHoldingsPerKey } from "./latest-holdings-per-key";
 import { getOwnPreferences, type AllocatorOwnPreferences } from "./preferences";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -4173,8 +4174,12 @@ export function derivePhase07Fields(
   // surviving venue could flip between page loads. The scope_ref keyspace
   // used everywhere else in the pipeline already uses this triple-key
   // format (see buildHoldingRef).
+  //
+  // Phase 167.1.2 D-16: the collapse runs only over each key's rows at that
+  // key's own latest asof (latestHoldingsPerKey), so a position a key closed
+  // before its latest poll no longer survives from an older row.
   const holdingsMap = new Map<string, (typeof holdingsRows)[number]>();
-  for (const r of holdingsRows) {
+  for (const r of latestHoldingsPerKey(holdingsRows)) {
     // B8: same canonical triple key as the scope_ref sites above
     // (holdingScopeKey) so the dedup keyspace cannot drift from the rest of
     // the pipeline. The "holding:" prefix is immaterial to a local dedup map.
