@@ -2927,7 +2927,9 @@ export interface MyAllocationDashboardPayload {
   /**
    * Why `equityHistoryState` is not `"ready"`. Null when it is. One of
    * `duplicate_account`, `key_not_syncing`, `account_identity_pending`,
-   * `awaiting_derivation`, `derivation_rejected`, `history_read_failed`.
+   * `awaiting_derivation`, `derivation_rejected`,
+   * `shared_account_no_working_key`, `shared_account_history_truncated`
+   * (review C2 round 3 R3-WR-03), `history_read_failed`.
    */
   equityHistoryRebuildReason: EquityHistoryRebuildReason | null;
   /**
@@ -3711,6 +3713,39 @@ function scheduleDerivedRowCapture(capture: Promise<void>): void {
   }
 }
 
+/**
+ * Review C2 round 3 R3-WR-04. How long one (allocator, rejection) pair stays
+ * reported. `router.refresh()` re-runs the dashboard read every 30 s while the
+ * Overview is open (AllocationsTabs' PERFORMANCE_POLL_INTERVAL_MS), and an
+ * untrustworthy row can last for days. Capturing on every load was ~120 events
+ * an hour per open tab, which kept the Sentry issue permanently active.
+ */
+export const DERIVED_ROW_CAPTURE_WINDOW_MS = 6 * 60 * 60 * 1000;
+
+// ponytail: per-instance and in memory. It resets on a cold start, and each
+// warm instance keeps its own window, so the real ceiling is one event per
+// (allocator, rejection) per 6 h per instance, not per deployment. Entries are
+// never evicted; the map holds at most one per allocator per rejection token.
+const derivedRowCaptureLastAt = new Map<string, number>();
+
+/** Whether this (allocator, rejection) may be reported now; records it if so. */
+function shouldCaptureDerivedRowRejection(
+  allocatorId: string,
+  rejection: DerivedPayloadRejection,
+): boolean {
+  const key = `${allocatorId}:${rejection}`;
+  const now = Date.now();
+  const last = derivedRowCaptureLastAt.get(key);
+  if (last !== undefined && now - last < DERIVED_ROW_CAPTURE_WINDOW_MS) return false;
+  derivedRowCaptureLastAt.set(key, now);
+  return true;
+}
+
+/** @internal Test-only reset of the R3-WR-04 capture window. */
+export function __resetDerivedRowCaptureThrottleForTests(): void {
+  derivedRowCaptureLastAt.clear();
+}
+
 /** Why the reader refused a PRESENT derived row. A token, never a value. */
 export type DerivedPayloadRejection = "not_version_2" | "untrustworthy" | "malformed";
 
@@ -3764,6 +3799,8 @@ export type EquityHistoryRebuildReason =
   | "account_identity_pending"
   | "awaiting_derivation"
   | "derivation_rejected"
+  | "shared_account_no_working_key"
+  | "shared_account_history_truncated"
   | "history_read_failed";
 
 /**
@@ -3773,12 +3810,51 @@ export type EquityHistoryRebuildReason =
  * pre-v2, and `derive-allocator-key-dailies` (05:30 UTC) re-composes each book
  * as v2, so "recomputed once a day" is true for it. Review C2 SFH-05 / SFH-06:
  * a v2 row the reader rejected, or a read that failed, must not be shown as a
- * wait.
+ * wait. Review C2 round 3 R3-WR-03: a v2 row the writer marked untrustworthy
+ * for a shared account names that cause (`untrustworthyRebuildReason`).
  */
 export type MissingSeriesReason = Extract<
   EquityHistoryRebuildReason,
-  "awaiting_derivation" | "derivation_rejected" | "history_read_failed"
+  | "awaiting_derivation"
+  | "derivation_rejected"
+  | "shared_account_no_working_key"
+  | "shared_account_history_truncated"
+  | "history_read_failed"
 >;
+
+/**
+ * Review C2 round 3 R3-WR-03 / SFH-R3-04. The reason for a v2 row the writer
+ * marked untrustworthy. Two of the writer's blocking tokens (job_worker's
+ * compose call puts them in `degrade_reasons`, never in `flags`) have a cause
+ * the owner can be told, so they get their own line instead of "did not pass
+ * its checks". When both are present, `shared_account_no_working_key` wins
+ * because it is the one the owner can fix; the writer sorts the tokens, so
+ * array order must not decide. Every other token, and a payload with no
+ * readable tokens, keeps `derivation_rejected`.
+ *
+ * Residual (recorded): alongside another blocker (for example `dropped_key`)
+ * the named line is still true, but fixing the key alone may not unlock the
+ * history. The TS side does not mirror the writer's blocking set.
+ */
+function untrustworthyRebuildReason(
+  payload: unknown,
+): Extract<
+  MissingSeriesReason,
+  "derivation_rejected" | "shared_account_no_working_key" | "shared_account_history_truncated"
+> {
+  const tokens =
+    payload !== null && typeof payload === "object"
+      ? (payload as Record<string, unknown>).degrade_reasons
+      : undefined;
+  if (!Array.isArray(tokens)) return "derivation_rejected";
+  if (tokens.includes("shared_account_no_working_key")) {
+    return "shared_account_no_working_key";
+  }
+  if (tokens.includes("shared_account_history_truncated")) {
+    return "shared_account_history_truncated";
+  }
+  return "derivation_rejected";
+}
 
 export type EquityHistoryKey = {
   id: string;
@@ -4026,7 +4102,9 @@ export function derivePhase07Fields(
     ? "history_read_failed"
     : rejection === null || rejection === "not_version_2"
       ? "awaiting_derivation"
-      : "derivation_rejected";
+      : rejection === "untrustworthy"
+        ? untrustworthyRebuildReason(derivedPayload)
+        : "derivation_rejected";
   const readiness = equityHistoryReadiness(apiKeys, series, missingSeriesReason);
   const equityHistoryState = readiness.state;
   const equityHistoryRebuildReason = readiness.reason;
@@ -4408,23 +4486,27 @@ export const getMyAllocationDashboard = cache(
             );
           } else if (rejection !== null) {
             console.error(
-              `[queries.getMyAllocationDashboard] allocator_equity_derived row rejected (${rejection}); rendering the history as rebuilding, reason derivation_rejected`,
+              `[queries.getMyAllocationDashboard] allocator_equity_derived row rejected (${rejection}); rendering the history as rebuilding`,
             );
-            scheduleDerivedRowCapture(
-              captureToSentry(
-                new Error(`allocator_equity_derived row rejected: ${rejection}`),
-                {
-                  tags: {
-                    op: "getMyAllocationDashboard",
-                    reason: "derived_row_rejected",
-                    rejection,
+            // Review C2 round 3 R3-WR-04: the log line above runs on every
+            // load; the capture runs once per (allocator, rejection) window.
+            if (shouldCaptureDerivedRowRejection(userId, rejection)) {
+              scheduleDerivedRowCapture(
+                captureToSentry(
+                  new Error(`allocator_equity_derived row rejected: ${rejection}`),
+                  {
+                    tags: {
+                      op: "getMyAllocationDashboard",
+                      reason: "derived_row_rejected",
+                      rejection,
+                    },
+                    // A writer's own untrustworthy verdict is a data state; a
+                    // malformed row is a writer bug.
+                    level: rejection === "malformed" ? "error" : "warning",
                   },
-                  // A writer's own untrustworthy verdict is a data state; a
-                  // malformed row is a writer bug.
-                  level: rejection === "malformed" ? "error" : "warning",
-                },
-              ),
-            );
+                ),
+              );
+            }
           }
         }
         return row;

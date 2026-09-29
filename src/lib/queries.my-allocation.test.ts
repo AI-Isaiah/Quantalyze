@@ -3008,7 +3008,13 @@ function derivedRow(isTrustworthy: boolean) {
 // identity is resolved), so it is the fixture here, alongside legacy snapshots.
 // ---------------------------------------------------------------------------
 describe("167.1.2 D-02 — the allocator equity curve is withheld while it is rebuilt", () => {
-  beforeEach(resetState);
+  // Review C2 round 3 R3-WR-04: the derived_row_rejected capture is throttled
+  // per (allocator, rejection) in module state, and every test here reads as
+  // user-1, so each test starts with an empty window.
+  beforeEach(async () => {
+    resetState();
+    (await import("./queries")).__resetDerivedRowCaptureThrottleForTests();
+  });
 
   it("a trustworthy derived row AND legacy snapshots both present → equityDailyPoints is [] and equityHistoryState is 'rebuilding'", async () => {
     state.portfolios = [P1151_PORTFOLIO];
@@ -3201,15 +3207,14 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
   });
 
   // Review C2 SFH-05 (reader half), kept for rows that ARE version 2. A v2 row
-  // its writer marked untrustworthy (for example the shared account with no
-  // working key, which fixer A makes a non-benign outcome) already had its
-  // recompute, so it is `derivation_rejected` and reported with its token only.
+  // its writer marked untrustworthy already had its recompute, so it is
+  // `derivation_rejected` and reported with its token only.
   it("SFH-05: a v2 row the writer marked untrustworthy is derivation_rejected and reported with its rejection token", async () => {
     state.portfolios = [P1151_PORTFOLIO];
     state.apiKeys = [identifiedKey()];
     const row = v2Row();
     row.payload.is_trustworthy = false;
-    row.payload.flags = ["shared_account_no_working_key"];
+    row.payload.degrade_reasons = ["dropped_key"];
     state.allocatorEquityDerived = [row];
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const sentry = await import("./sentry-capture");
@@ -3236,6 +3241,42 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
     const logged = JSON.stringify(errSpy.mock.calls);
     expect(logged).toContain("untrustworthy");
     expect(logged).not.toContain("100500");
+    errSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  // Review C2 round 3 R3-WR-03. The shared account with no working key is the
+  // writer's untrustworthy verdict too, so it is still captured with the same
+  // rejection token, but the owner sees its own reason, read from the
+  // persisted `degrade_reasons`, and not "did not pass its checks".
+  it("R3-WR-03: a v2 row untrustworthy for shared_account_no_working_key names that reason", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    const row = v2Row();
+    row.payload.is_trustworthy = false;
+    row.payload.degrade_reasons = ["shared_account_no_working_key"];
+    state.allocatorEquityDerived = [row];
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("shared_account_no_working_key");
+    expect(result.equityDailyPoints).toEqual([]);
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: expect.objectContaining({
+          reason: "derived_row_rejected",
+          rejection: "untrustworthy",
+        }),
+      }),
+    );
     errSpy.mockRestore();
     captureSpy.mockRestore();
   });
@@ -3299,6 +3340,71 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
     expect(settled).toBe(true);
     errSpy.mockRestore();
     captureSpy.mockRestore();
+  });
+
+  // Review C2 round 3 R3-WR-04. `router.refresh()` re-runs this read every
+  // 30 s while the Overview is open (AllocationsTabs'
+  // PERFORMANCE_POLL_INTERVAL_MS), and an untrustworthy row can last for days
+  // (no working key, a history gap). One capture per load was ~120 Sentry
+  // events an hour per open tab and kept the issue permanently active, which
+  // defeats the alert. A given (allocator, rejection) now reports at most once
+  // per window per server instance; the console line stays on every load.
+  it("R3-WR-04: the rejected-row capture reports once per (allocator, rejection) per window; the log line stays on every load", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    const untrusted = v2Row();
+    untrusted.payload.is_trustworthy = false;
+    state.allocatorEquityDerived = [untrusted];
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+    const rejectedCaptures = (rejection: string) =>
+      captureSpy.mock.calls.filter(
+        ([, ctx]) =>
+          (ctx as { tags?: Record<string, string> } | undefined)?.tags?.reason ===
+            "derived_row_rejected" &&
+          (ctx as { tags?: Record<string, string> }).tags?.rejection === rejection,
+      ).length;
+    const rejectedLogs = () =>
+      errSpy.mock.calls.filter((c) =>
+        String(c[0]).includes("allocator_equity_derived row rejected"),
+      ).length;
+
+    const { getMyAllocationDashboard, DERIVED_ROW_CAPTURE_WINDOW_MS } = await import(
+      "./queries"
+    );
+    const t0 = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(t0);
+
+    try {
+      // Three polls inside the window: one capture, three log lines.
+      await getMyAllocationDashboard("user-1");
+      await getMyAllocationDashboard("user-1");
+      nowSpy.mockReturnValue(t0 + DERIVED_ROW_CAPTURE_WINDOW_MS - 1);
+      await getMyAllocationDashboard("user-1");
+      expect(rejectedCaptures("untrustworthy")).toBe(1);
+      expect(rejectedLogs()).toBe(3);
+
+      // A different rejection for the same allocator has its own window.
+      const malformed = v2Row();
+      malformed.payload.returns = [];
+      state.allocatorEquityDerived = [malformed];
+      await getMyAllocationDashboard("user-1");
+      expect(rejectedCaptures("malformed")).toBe(1);
+
+      // Once the window has passed, the state that is still there reports again.
+      state.allocatorEquityDerived = [untrusted];
+      nowSpy.mockReturnValue(t0 + DERIVED_ROW_CAPTURE_WINDOW_MS);
+      await getMyAllocationDashboard("user-1");
+      expect(rejectedCaptures("untrustworthy")).toBe(2);
+      expect(rejectedLogs()).toBe(5);
+    } finally {
+      nowSpy.mockRestore();
+      errSpy.mockRestore();
+      captureSpy.mockRestore();
+    }
   });
 
   it("SFH-05 positive control: an accepted v2 row reports nothing", async () => {
