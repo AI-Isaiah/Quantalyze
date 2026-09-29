@@ -168,8 +168,12 @@ export async function readSmoothedSeries(
  * `csv_daily_returns` read FAILED. Thrown by {@link readCompositeFactsheet} so
  * an outage stays distinguishable from a genuinely empty composite (a fact
  * about the row). `code` is the PostgREST / SQLSTATE code, `"none"` when the
- * error carried none. The message names the table, never the strategy; the
- * PostgREST message rides as `cause` for the catcher's log line.
+ * error carried none. Since review round 1 (CSV-READ-CAP) the paged read also
+ * throws it with its own code when it cannot finish: `page_order` (a date that
+ * did not follow the cursor), `no_data` (a page with neither rows nor an
+ * error) or `row_ceiling` (more than {@link CSV_READ_MAX_ROWS} rows). The
+ * message names the table, never the strategy; the PostgREST message rides as
+ * `cause` for the catcher's log line.
  */
 export class CompositeSeriesReadError extends Error {
   readonly code: string;
@@ -177,6 +181,75 @@ export class CompositeSeriesReadError extends Error {
     super(`composite series read failed: csv_daily_returns (${code})`, { cause: postgrestMessage });
     this.name = "CompositeSeriesReadError";
     this.code = code;
+  }
+}
+
+/**
+ * Phase 169 review round 1 (orchestrator-added CSV-READ-CAP) — rows per
+ * `csv_daily_returns` page. PostgREST answers every read with at most its
+ * `max_rows` (1000 on hosted Supabase) and says nothing when it cuts: HTTP 200,
+ * `error: null`, a partial body.
+ */
+export const CSV_READ_PAGE_SIZE = 1000;
+
+/**
+ * The most `csv_daily_returns` rows one composite read accepts (the flat
+ * T-36-03-03 ceiling the single `.limit(20000)` call used to carry). A series
+ * longer than this is refused as a read error, never cut to its first rows.
+ */
+export const CSV_READ_MAX_ROWS = 20_000;
+
+/**
+ * Phase 169 review round 1 (orchestrator-added CSV-READ-CAP) — EVERY stored
+ * `csv_daily_returns` row of one strategy, ascending by date.
+ *
+ * The defect this replaces. The read was one `.order("date").limit(20000)` call.
+ * PostgREST capped it at 1000 rows, so a composite with more than 1000 days
+ * lost its NEWEST days (ascending order keeps the oldest), and the factsheet
+ * ended early with nothing on the page saying so. MEASURED on PROD 2026-09-29:
+ * one strategy holds 1112 rows.
+ *
+ * The read here:
+ *   - DATE KEYSET pages of {@link CSV_READ_PAGE_SIZE}: each page after the
+ *     first asks for `date > <the newest date already read>`. `(strategy_id,
+ *     date)` is UNIQUE (migration 20260819120000), so `date` is a total order
+ *     under the strategy filter. A keyset is anchored to a date, so a row
+ *     written between two pages cannot shift a page boundary and repeat a day,
+ *     as an offset (`.range()`) page can (the `benchmark-source.ts` reasoning,
+ *     169.2 review WR-03);
+ *   - it stops only on an EMPTY page. Stopping on a short page would stop
+ *     after the first page against any server whose cap is below the page
+ *     size, which is the truncation this function exists to remove;
+ *   - a date that does not strictly increase (a server that ignored the
+ *     cursor), a page with neither data nor an error, and a series longer
+ *     than {@link CSV_READ_MAX_ROWS} each THROW {@link CompositeSeriesReadError}.
+ *     Returning what was read so far would hand the builder a partial series
+ *     as if it were whole. The resolve stage answers every one of them
+ *     `read_error`, which the public factsheet cache never stores (D-41).
+ */
+async function readCsvDailyReturns(admin: SupabaseClient, strategyId: string): Promise<DailyReturn[]> {
+  const rows: DailyReturn[] = [];
+  let cursor: string | null = null;
+  for (;;) {
+    let query = admin.from("csv_daily_returns").select("date, daily_return").eq("strategy_id", strategyId);
+    if (cursor !== null) query = query.gt("date", cursor);
+    const { data, error } = await query.order("date", { ascending: true }).limit(CSV_READ_PAGE_SIZE);
+    if (error) throw new CompositeSeriesReadError(error.code || "none", error.message);
+    if (!Array.isArray(data)) {
+      throw new CompositeSeriesReadError("no_data", "a page answered neither rows nor an error");
+    }
+    if (data.length === 0) return rows;
+    for (const r of data as Array<{ date: unknown; daily_return: unknown }>) {
+      const date = r.date as string;
+      if (cursor !== null && !(date > cursor)) {
+        throw new CompositeSeriesReadError("page_order", `date ${String(date)} did not follow ${cursor}`);
+      }
+      rows.push({ date, value: r.daily_return as number });
+      cursor = date;
+    }
+    if (rows.length > CSV_READ_MAX_ROWS) {
+      throw new CompositeSeriesReadError("row_ceiling", `more than ${CSV_READ_MAX_ROWS} rows`);
+    }
   }
 }
 
@@ -193,7 +266,8 @@ export class CompositeSeriesReadError extends Error {
  *
  * Responsibilities (identical to the factsheet route's former inline block):
  *   - Read the honest SPARSE cash series from `csv_daily_returns` (gap days
- *     ABSENT, never zero-filled). A read failure THROWS
+ *     ABSENT, never zero-filled), every row, in date-keyset pages
+ *     ({@link readCsvDailyReturns}). A read failure THROWS
  *     {@link CompositeSeriesReadError} with its PostgREST / SQLSTATE code
  *     (Phase 169, D-41), so no caller can take an outage for an empty
  *     composite: the factsheet resolve stage answers it `read_error`, which the
@@ -245,26 +319,15 @@ export async function readCompositeFactsheet(
 ): Promise<{ dailyReturns: DailyReturn[]; buildOpts: BuildFactsheetOpts } | null> {
   const { strategyId, dqf, metricsJsonByBasis, returnsDenominatorConfig } = input;
 
-  const { data: sparseRows, error: sparseErr } = await admin
-    .from("csv_daily_returns")
-    .select("date, daily_return")
-    .eq("strategy_id", strategyId)
-    .order("date", { ascending: true })
-    .limit(20000); // Flat safety ceiling, T-36-03-03 precedent.
-  if (sparseErr) {
-    // F3 / Phase 169 (D-41, routed from 167.2.1 D-07): a composite depends
-    // ENTIRELY on this sparse read, and a failed read is an OUTAGE, not a fact
-    // about the row. It used to be logged here and mapped to an empty series,
-    // which the resolve stage answered `composite_unbuildable` and the public
-    // factsheet cache stored for the whole analytics run. It now throws, so no
-    // caller can take it for an empty composite; each catcher logs it (the
-    // resolve stage in `fetch-and-build-payload.ts` answers `read_error` with
-    // the code and captures a build once). Still never the api arm.
-    throw new CompositeSeriesReadError(sparseErr.code || "none", sparseErr.message);
-  }
-  const dailyReturns: DailyReturn[] = (sparseRows ?? []).map(
-    (r): DailyReturn => ({ date: r.date as string, value: r.daily_return as number }),
-  );
+  // F3 / Phase 169 (D-41, routed from 167.2.1 D-07): a composite depends
+  // ENTIRELY on this sparse read, and a failed read is an OUTAGE, not a fact
+  // about the row. It used to be logged here and mapped to an empty series,
+  // which the resolve stage answered `composite_unbuildable` and the public
+  // factsheet cache stored for the whole analytics run. It now throws, so no
+  // caller can take it for an empty composite; each catcher logs it (the
+  // resolve stage in `fetch-and-build-payload.ts` answers `read_error` with
+  // the code and captures a build once). Still never the api arm.
+  const dailyReturns = await readCsvDailyReturns(admin, strategyId);
 
   const metricsByBasis = (metricsJsonByBasis ?? undefined) as
     | BuildFactsheetOpts["metricsByBasis"]

@@ -55,17 +55,65 @@ const FULL_CASH = {
   calmar: 3.0,
 };
 
-function mockAdmin(
-  rows: { date: string; daily_return: number }[] | null,
+/**
+ * Hosted Supabase's PostgREST `max_rows`: every response carries at most this
+ * many rows, whatever `.limit()` asked for, with HTTP 200 and `error: null`.
+ * MEASURED on PROD 2026-09-29: one strategy holds 1112 `csv_daily_returns` rows.
+ */
+const POSTGREST_MAX_ROWS = 1000;
+
+type CsvRow = { date: string; daily_return: number };
+
+/**
+ * A `csv_daily_returns` query builder that answers as PostgREST does: rows in
+ * date order, `.gt("date", cursor)` honoured, and every response silently
+ * capped at {@link POSTGREST_MAX_ROWS}. `ignoreCursor` models a server that
+ * drops the keyset filter, so every page starts from the first row again.
+ */
+function csvChain(
+  rows: CsvRow[] | null,
   error: { message?: string; code?: string } | null = null,
-): SupabaseClient {
+  opts: { ignoreCursor?: boolean } = {},
+) {
+  let after: string | null = null;
   const chain = {
     select: () => chain,
     eq: () => chain,
+    gt: (_column: string, value: string) => {
+      if (!opts.ignoreCursor) after = value;
+      return chain;
+    },
     order: () => chain,
-    limit: () => Promise.resolve({ data: rows, error }),
+    limit: (n: number) =>
+      Promise.resolve(
+        error || rows === null
+          ? { data: null, error }
+          : {
+              data: rows
+                .filter((r) => after === null || r.date > after)
+                .slice(0, Math.min(n, POSTGREST_MAX_ROWS)),
+              error: null,
+            },
+      ),
   };
-  return { from: () => chain } as unknown as SupabaseClient;
+  return chain;
+}
+
+function mockAdmin(
+  rows: CsvRow[] | null,
+  error: { message?: string; code?: string } | null = null,
+  opts: { ignoreCursor?: boolean } = {},
+): SupabaseClient {
+  return { from: () => csvChain(rows, error, opts) } as unknown as SupabaseClient;
+}
+
+/** N consecutive calendar days of synthetic returns from 2022-01-01. */
+function csvDays(n: number): CsvRow[] {
+  const start = Date.parse("2022-01-01T00:00:00Z");
+  return Array.from({ length: n }, (_, i) => ({
+    date: new Date(start + i * 86_400_000).toISOString().slice(0, 10),
+    daily_return: ((i % 5) - 2) / 1000,
+  }));
 }
 
 const DQF = {
@@ -305,6 +353,60 @@ describe("169 D-41 readCompositeFactsheet — a failed csv_daily_returns read is
     } finally {
       err.mockRestore();
     }
+  });
+});
+
+/**
+ * Phase 169 review round 1, orchestrator-added CSV-READ-CAP. PostgREST answers
+ * every read with at most `max_rows` rows (1000 on hosted Supabase), silently:
+ * HTTP 200, `error: null`, a partial body. The composite read asked for
+ * `.limit(20000)` in one call and ordered ascending, so a composite longer than
+ * 1000 days lost its NEWEST days and the factsheet ended early with nothing
+ * saying so (measured on PROD 2026-09-29: one strategy has 1112 rows). The read
+ * now pages by a date keyset until a page comes back empty, and a read it
+ * cannot finish is a `CompositeSeriesReadError`, never a partial series.
+ */
+describe("169 CSV-READ-CAP readCompositeFactsheet — the whole csv_daily_returns series, never the first 1000 rows", () => {
+  const input = {
+    strategyId: "s1",
+    dqf: DQF,
+    metricsJsonByBasis: { cash_settlement: FULL_CASH },
+    returnsDenominatorConfig: null,
+  };
+
+  it("a composite longer than one PostgREST response reads every row, the newest day included", async () => {
+    const rows = csvDays(1112);
+    const out = await readCompositeFactsheet(mockAdmin(rows), input);
+    expect(out!.dailyReturns).toHaveLength(1112);
+    expect(out!.dailyReturns.at(-1)!.date).toBe(rows.at(-1)!.date);
+    expect(out!.dailyReturns.map((d) => d.date)).toEqual(rows.map((r) => r.date));
+  });
+
+  it("a server that ignores the cursor is a read error, never a series with a repeated day", async () => {
+    const err = await readCompositeFactsheet(mockAdmin(csvDays(1112), null, { ignoreCursor: true }), input).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CompositeSeriesReadError);
+    expect((err as CompositeSeriesReadError).code).toBe("page_order");
+  });
+
+  it("a series past the row ceiling is a read error, never a truncated one", async () => {
+    const err = await readCompositeFactsheet(mockAdmin(csvDays(20_001)), input).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CompositeSeriesReadError);
+    expect((err as CompositeSeriesReadError).code).toBe("row_ceiling");
+  });
+
+  it("a page answering neither data nor an error is a read error, not the end of the series", async () => {
+    const err = await readCompositeFactsheet(mockAdmin(null), input).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CompositeSeriesReadError);
+    expect((err as CompositeSeriesReadError).code).toBe("no_data");
   });
 });
 
@@ -861,13 +963,7 @@ describe("MTM-04 readCompositeFactsheet — gated MTM series threading (one owne
         };
         return chain;
       }
-      const chain = {
-        select: () => chain,
-        eq: () => chain,
-        order: () => chain,
-        limit: () => Promise.resolve({ data: opts.sparseRows ?? SPARSE_ROWS, error: null }),
-      };
-      return chain;
+      return csvChain(opts.sparseRows ?? SPARSE_ROWS);
     };
     return { admin: { from } as unknown as SupabaseClient, mtmReads: () => mtmReadCount };
   }
@@ -1405,13 +1501,7 @@ describe("SMTM-01 readCompositeFactsheet — smoothed gate + gated series read",
         };
         return chain;
       }
-      const chain = {
-        select: () => chain,
-        eq: () => chain,
-        order: () => chain,
-        limit: () => Promise.resolve({ data: SPARSE_ROWS, error: null }),
-      };
-      return chain;
+      return csvChain(SPARSE_ROWS);
     };
     return { admin: { from } as unknown as SupabaseClient, smoothedReads: () => smoothedReadCount };
   }

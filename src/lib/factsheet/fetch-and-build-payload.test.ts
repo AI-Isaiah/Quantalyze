@@ -69,9 +69,23 @@ vi.mock("@/lib/supabase/admin", () => {
       return { data: null, error: null };
     };
     if (table === "csv_daily_returns") {
-      // The composite read awaits the builder itself after `.limit(...)`.
+      // The composite read awaits the builder itself after `.limit(...)`, one
+      // date-keyset page at a time (review round 1, CSV-READ-CAP): a page after
+      // the first carries `.gt("date", cursor)`, and the read stops on an empty page.
+      let after: string | null = null;
+      b.gt = (_column: string, value: string) => {
+        after = value;
+        return b;
+      };
       b.then = (resolve: (v: unknown) => unknown) =>
-        resolve(fake.csvError ? { data: null, error: fake.csvError } : { data: fake.csvRows, error: null });
+        resolve(
+          fake.csvError
+            ? { data: null, error: fake.csvError }
+            : {
+                data: fake.csvRows.filter((r) => after === null || r.date > after),
+                error: null,
+              },
+        );
     }
     return b;
   }

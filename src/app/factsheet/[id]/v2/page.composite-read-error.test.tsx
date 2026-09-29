@@ -130,7 +130,7 @@ type CsvAnswer = { rows: typeof CSV_ROWS } | { error: { message: string; code?: 
 /**
  * The service-role client, dispatching by table. `strategies` answers the
  * resolve stage's read; `csv_daily_returns` answers the composite reader
- * (awaited directly after `.limit(...)`); any other table (a series row, a
+ * (awaited directly after `.limit(...)`, one date-keyset page at a time); any other table (a series row, a
  * benchmark read a later plan adds) is an empty SUCCESSFUL read, so it can
  * never be what turns a case red.
  */
@@ -148,12 +148,24 @@ function mockAdmin(csv: CsvAnswer): SupabaseClient {
       return chain;
     }
     if (table === "csv_daily_returns") {
+      // The reader pages by a date keyset (review round 1, CSV-READ-CAP): a
+      // page after the first carries `.gt("date", cursor)`, and it stops on an
+      // empty page, so the cursor is honoured here.
+      let after: string | null = null;
       const chain = {
         select: () => chain,
         eq: () => chain,
+        gt: (_column: string, value: string) => {
+          after = value;
+          return chain;
+        },
         order: () => chain,
         limit: () =>
-          Promise.resolve("error" in csv ? { data: null, error: csv.error } : { data: csv.rows, error: null }),
+          Promise.resolve(
+            "error" in csv
+              ? { data: null, error: csv.error }
+              : { data: csv.rows.filter((r) => after === null || r.date > after), error: null },
+          ),
       };
       return chain;
     }
