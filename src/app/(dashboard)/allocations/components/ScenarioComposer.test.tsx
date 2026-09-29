@@ -16786,6 +16786,44 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     );
   });
 
+  // Review C2 WR-03: a key that is not connected (not in the payload's
+  // eligible set) but whose status is not untrusted used to be named as one of
+  // the "connected keys with no return history yet". Its dollars get their own
+  // noun, and the field is unchanged.
+  it("review C2 WR-03: a key that is not connected is named 'Excludes $3,300 from keys that are not connected.', never as a connected key", () => {
+    const AT_KEY_GONE = "aumtrust-key-gone";
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_GONE,
+        status: "complete",
+        venue: "okx",
+        symbol: "AUMTRUST-GONE",
+        spotUsd: 3_300,
+        eligible: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    // Fixture self-proof: the key is in the key list with a trusted status,
+    // and in no eligible set.
+    expect(payload.apiKeys.map((k) => k.id)).toContain(AT_KEY_GONE);
+    expect(payload.eligibleApiKeyIds).not.toContain(AT_KEY_GONE);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_TRUSTED_USD));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $3,300 from keys that are not connected.",
+    );
+  });
+
   it("167.1.2 SC-4: beside includes and excluded untrusted parts, the trusted exclusion is still named, never swallowed by the shared-noun form", () => {
     const payload = atBook([
       {
@@ -17054,6 +17092,34 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(props.equityDailyPoints).toEqual(TWO_POINT_CURVE);
     expect(props.scenarioOwnBookDelta).toBeUndefined();
     expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  });
+
+  // Review C2 SFH-11 (b). The producer emits only finite returns, so this is a
+  // guard on a broken contract. Before, a non-finite return was filtered out
+  // silently and the Sharpe and Sortino deltas were computed on fewer
+  // observations with nothing said. Now the own-book leg is absent (as for a
+  // book with no series) and the broken contract is logged.
+  it("ready + a non-finite persisted return: no own-book delta is built, and the broken contract is logged", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          equityDailyPoints: THREE_POINT_CURVE,
+          equityDailyReturns: [
+            { date: "2026-01-02", value: 0.01 },
+            { date: "2026-01-03", value: Number.NaN },
+            { date: "2026-01-04", value: -0.0148 },
+          ],
+          equityHistoryState: "ready",
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(lastChart().scenarioOwnBookDelta).toBeUndefined();
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain("non-finite own-book return");
+    errSpy.mockRestore();
   });
 
   it("ready (regression guard): the own-book series and delta flow as before and no disclosure renders", () => {

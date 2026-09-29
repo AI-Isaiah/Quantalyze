@@ -39,15 +39,40 @@ import type { EquityHistoryRebuildReason } from "@/lib/queries";
  */
 const HEADING_ID = "overview-equity-rebuilding-heading";
 
+/**
+ * Review C2 WR-02: every line states only what a running job does. The
+ * pending line used to say the account is confirmed "on the next daily sync".
+ * The stamper runs after every successful poll, but it can come back with no
+ * id, and it never runs for a key that is failing to sync. So the pending line
+ * says each sync checks again, and a failing key gets its own line, which
+ * names the one place the owner can fix it.
+ */
 const REASON_LINE: Record<
-  Exclude<EquityHistoryRebuildReason, "duplicate_account">,
+  Exclude<EquityHistoryRebuildReason, "duplicate_account" | "key_not_syncing">,
   string
 > = {
   account_identity_pending:
-    "We are confirming which exchange account each key reads. This happens on the next daily sync.",
+    "We are confirming which exchange account each key reads. Each daily sync checks it again.",
   awaiting_derivation:
     "Your history is recomputed from each account's returns and cash flows once a day.",
+  // Review C2 SFH-05 / SFH-06: a row the reader refused, or a read that
+  // failed, is not a wait on the daily recompute, so neither line names one.
+  derivation_rejected:
+    "The latest rebuild of your history did not pass its checks, so it is not shown.",
+  history_read_failed:
+    "Your history could not be loaded just now. Reload the page to try again.",
 };
+
+function ExchangesPageLink() {
+  return (
+    <Link
+      href="/profile?tab=exchanges"
+      className="text-accent underline underline-offset-4"
+    >
+      Exchanges page
+    </Link>
+  );
+}
 
 export function EquityHistoryRebuilding({
   reason = null,
@@ -78,14 +103,12 @@ export function EquityHistoryRebuilding({
       {reason === "duplicate_account" ? (
         <p className="mt-2 max-w-prose text-sm text-text-secondary">
           Two of your keys read the same exchange account. Disconnect one of
-          them on the{" "}
-          <Link
-            href="/profile?tab=exchanges"
-            className="text-accent underline underline-offset-4"
-          >
-            Exchanges page
-          </Link>{" "}
-          and the history rebuilds.
+          them on the <ExchangesPageLink /> and the history rebuilds.
+        </p>
+      ) : reason === "key_not_syncing" ? (
+        <p className="mt-2 max-w-prose text-sm text-text-secondary">
+          One of your keys is not syncing, so we cannot confirm which exchange
+          account it reads. Check it on the <ExchangesPageLink />.
         </p>
       ) : reason ? (
         <p className="mt-2 max-w-prose text-sm text-text-secondary">

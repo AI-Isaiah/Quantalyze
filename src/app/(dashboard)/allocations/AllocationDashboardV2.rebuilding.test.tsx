@@ -350,12 +350,27 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       "Two of your keys read the same exchange account. Disconnect one of them on the Exchanges page and the history rebuilds.",
     ],
     [
+      // Review C2 WR-02: the line no longer promises the NEXT sync succeeds.
+      // The stamper runs after every successful poll, and that is all the
+      // line claims.
       "account_identity_pending",
-      "We are confirming which exchange account each key reads. This happens on the next daily sync.",
+      "We are confirming which exchange account each key reads. Each daily sync checks it again.",
+    ],
+    [
+      "key_not_syncing",
+      "One of your keys is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
     ],
     [
       "awaiting_derivation",
       "Your history is recomputed from each account's returns and cash flows once a day.",
+    ],
+    [
+      "derivation_rejected",
+      "The latest rebuild of your history did not pass its checks, so it is not shown.",
+    ],
+    [
+      "history_read_failed",
+      "Your history could not be loaded just now. Reload the page to try again.",
     ],
   ] as const)("rebuilding reason %s renders its one line", (reason, line) => {
     render(
@@ -367,7 +382,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     );
     const panel = screen.getByTestId("overview-equity-rebuilding");
     expect(panel.textContent).toContain(line);
-    if (reason === "duplicate_account") {
+    if (reason === "duplicate_account" || reason === "key_not_syncing") {
       expect(screen.getByRole("link", { name: "Exchanges page" })).toHaveAttribute(
         "href",
         "/profile?tab=exchanges",

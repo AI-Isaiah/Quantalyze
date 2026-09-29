@@ -726,6 +726,63 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] excludedTrusted and excludedM
   });
 });
 
+// ---------------------------------------------------------------------------
+// Review C2 WR-03 — a dropped holding from a key that is not connected is not
+// "from connected keys with no return history yet"
+// ---------------------------------------------------------------------------
+//
+// WHY: `holdingsSummary` is not filtered by key eligibility, so a
+// soft-disconnected or inactive key's last holdings still arrive. Its status
+// can be `complete`, `error` or null, so it is not untrusted, and it is not
+// contributing or manager-side. It landed in `excludedTrusted`, whose copy
+// says the dollars come from CONNECTED keys with no history YET: both halves
+// false for a disconnected key that has history. The payload's own
+// `eligibleApiKeyIds` (built by isPerKeyDailiesEligibleKey on the server)
+// tells the two apart, so no predicate is re-derived here.
+describe("summarizeLiveHoldings — [review C2 WR-03] excludedNotConnected", () => {
+  const KEY_GONE = "wr03-key-disconnected";
+  const H_GONE = buildHolding({
+    venue: "venue-wr03",
+    symbol: "WR03-SPOT",
+    value_usd: 3_300,
+    api_key_id: KEY_GONE,
+  });
+  const statusWithGone = new Map<string, string | null>([
+    ...STATUS_BY_KEY_ID,
+    [KEY_GONE, "complete"],
+  ]);
+  const run = (eligible: readonly string[] | undefined) =>
+    summarizeLiveHoldings({
+      toggleByScopeRef: allOn([H_TRUSTED, H_GONE, H_REVOKED]),
+      holdingByRef: buildHoldingByRef([H_TRUSTED, H_GONE, H_REVOKED]),
+      contributingApiKeyIds: [KEY_TRUSTED],
+      managerSideApiKeyIds: [],
+      statusByKeyId: statusWithGone,
+      eligibleApiKeyIds: eligible,
+    });
+
+  it("a trusted-status key outside the payload's eligible set lands in excludedNotConnected, not excludedTrusted", () => {
+    const s = run([KEY_TRUSTED]);
+    expect(s.total).toBe(480_000);
+    expect(s.excludedNotConnected).toEqual({ amount: 3_300, count: 1, unavailable: 0 });
+    expect(s.excludedTrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
+    // A revoked key is ineligible too, but it stays with the untrusted part.
+    expect(s.excludedUntrusted.count).toBe(1);
+  });
+
+  it("an eligible, non-contributing key is still excludedTrusted (the case the SC-4 noun is true for)", () => {
+    const s = run([KEY_TRUSTED, KEY_GONE]);
+    expect(s.excludedTrusted).toEqual({ amount: 3_300, count: 1, unavailable: 0 });
+    expect(s.excludedNotConnected).toEqual({ amount: 0, count: 0, unavailable: 0 });
+  });
+
+  it("an absent eligible set cannot tell the two apart, so nothing is called not-connected", () => {
+    const s = run(undefined);
+    expect(s.excludedNotConnected).toEqual({ amount: 0, count: 0, unavailable: 0 });
+    expect(s.excludedTrusted.count).toBe(1);
+  });
+});
+
 describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated books", () => {
   // A seeded LCG, so a failure names a reproducible case. 256 cases mixing
   // every status the fixture knows (trusted, untrusted, absent from the status
@@ -747,13 +804,21 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
     KEY_ERROR,
     KEY_MISSING_FROM_API_KEYS,
     "conservation-key-x",
+    // Review C2 WR-03: a key the status map carries but the payload's
+    // eligible set does not (soft-disconnected or inactive).
+    "conservation-key-disconnected",
   ];
+  const GEN_STATUS = new Map<string, string | null>([
+    ...STATUS_BY_KEY_ID,
+    ["conservation-key-disconnected", "complete"],
+  ]);
   const partAmount = (p: { amount: number } | undefined) => p?.amount ?? 0;
 
   it("for every generated book: Σ toggled-on equity = total + excludedUntrusted + excludedUnknownStatus + excludedTrusted + excludedManagerSide", () => {
     const rand = lcg(1672);
     const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(rand() * xs.length)];
     let casesWithTrustedExclusion = 0;
+    let casesWithNotConnectedExclusion = 0;
     for (let c = 0; c < 256; c += 1) {
       const nHoldings = 1 + Math.floor(rand() * 8);
       const holdings: DashboardHolding[] = [];
@@ -786,13 +851,22 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
       const managerSide = KEYS.filter(
         (k) => !contributing.includes(k) && rand() < 0.25,
       );
+      // The payload's eligible set: every key but the disconnected one and
+      // the one the key list does not carry (contributing and manager-side
+      // keys are eligible by construction on the server).
+      const eligible = KEYS.filter(
+        (k) =>
+          k !== "conservation-key-disconnected" && k !== KEY_MISSING_FROM_API_KEYS,
+      );
       const s = summarizeLiveHoldings({
         toggleByScopeRef: toggles,
         holdingByRef: buildHoldingByRef(holdings),
         contributingApiKeyIds: contributing,
         managerSideApiKeyIds: managerSide,
-        statusByKeyId: STATUS_BY_KEY_ID,
+        statusByKeyId: GEN_STATUS,
+        eligibleApiKeyIds: eligible,
       });
+      if (s.excludedNotConnected.count > 0) casesWithNotConnectedExclusion += 1;
       // The oracle is the plain sum of the equity of every toggled-on holding,
       // with the equity definition the total itself uses.
       let expected = 0;
@@ -804,6 +878,7 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
         partAmount(s.excludedUntrusted) +
         partAmount(s.excludedUnknownStatus) +
         partAmount((s as { excludedTrusted?: { amount: number } }).excludedTrusted) +
+        partAmount(s.excludedNotConnected) +
         partAmount(
           (s as { excludedManagerSide?: { amount: number } }).excludedManagerSide,
         );
@@ -827,6 +902,8 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
     }
     // Non-vacuity: the generator really produced the case this plan closes.
     expect(casesWithTrustedExclusion).toBeGreaterThan(20);
+    // ...and the not-connected case review C2 WR-03 closes.
+    expect(casesWithNotConnectedExclusion).toBeGreaterThan(20);
   });
 });
 
@@ -869,6 +946,32 @@ describe("buildKeyTrustClause — [167.1.2 SC-4] the excludedTrusted part", () =
       buildKeyTrustClause(NONE, NONE, RENDER, NONE, part(4_444, 1), part(0, 2, 2)),
     ).toBe(
       "excludes $4444 from keys with an unknown sync status and $0 from connected keys with no return history yet (value unavailable for 2 holdings)",
+    );
+  });
+
+  // Review C2 WR-03: the not-connected part has its own noun, never the
+  // "connected keys" one, and it cannot be folded into the shared-noun form.
+  it("excludedNotConnected is named 'from keys that are not connected', before the no-history part", () => {
+    expect(
+      buildKeyTrustClause(NONE, NONE, RENDER, NONE, NONE, NONE, part(3_300, 1)),
+    ).toBe("excludes $3300 from keys that are not connected");
+    expect(
+      buildKeyTrustClause(
+        part(12_345, 1),
+        NONE,
+        RENDER,
+        part(8_000, 1),
+        NONE,
+        part(5_000, 1),
+        part(3_300, 1),
+      ),
+    ).toBe(
+      "includes $12345 from keys needing attention, and excludes $8000 from keys needing attention and $3300 from keys that are not connected and $5000 from connected keys with no return history yet",
+    );
+    expect(
+      buildKeyTrustClause(part(12_345, 1), NONE, RENDER, part(8_000, 1), NONE, NONE, part(3_300, 1)),
+    ).toBe(
+      "includes $12345 from keys needing attention, and excludes $8000 from keys needing attention and $3300 from keys that are not connected",
     );
   });
 

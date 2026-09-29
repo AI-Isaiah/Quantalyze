@@ -12,7 +12,7 @@ import {
   PERCENTILE_GATE_COLUMN,
   type SeriesState,
 } from "./closed-sets";
-import { isWorkingHolder } from "@/lib/account-share-note";
+import { isWorkingHolder, NOT_WORKING_SYNC_STATUSES } from "@/lib/account-share-note";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
 import {
@@ -2925,7 +2925,8 @@ export interface MyAllocationDashboardPayload {
   equityHistoryState: "rebuilding" | "ready";
   /**
    * Why `equityHistoryState` is not `"ready"`. Null when it is. One of
-   * `duplicate_account`, `account_identity_pending`, `awaiting_derivation`.
+   * `duplicate_account`, `key_not_syncing`, `account_identity_pending`,
+   * `awaiting_derivation`, `derivation_rejected`, `history_read_failed`.
    */
   equityHistoryRebuildReason: EquityHistoryRebuildReason | null;
   /**
@@ -3676,6 +3677,40 @@ export function extractTrustworthyDerivedSeries(
   return { curve, returns: points };
 }
 
+/** Why the reader refused a PRESENT derived row. A token, never a value. */
+export type DerivedPayloadRejection = "not_version_2" | "untrustworthy" | "malformed";
+
+/**
+ * Review C2 SFH-05 (reader half). `null` when `extractTrustworthyDerivedSeries`
+ * accepts the payload, else the first thing it refuses: a pre-v2 row, a row the
+ * writer marked untrustworthy, or any other shape defect. The reader uses it
+ * to report a present-but-rejected row (token only) and to tell that outcome
+ * apart from "no row yet", which is the only one a daily recompute answers.
+ */
+export function derivedPayloadRejection(
+  payload: unknown,
+): DerivedPayloadRejection | null {
+  if (extractTrustworthyDerivedSeries(payload) !== null) return null;
+  if (payload === null || typeof payload !== "object") return "malformed";
+  const p = payload as Record<string, unknown>;
+  if (p.version !== 2) return "not_version_2";
+  if (p.is_trustworthy !== true) return "untrustworthy";
+  return "malformed";
+}
+
+/**
+ * Review C2 SFH-06. The derived-row read's outcome when the read itself
+ * failed, as distinct from "no row" (`null`). The producer turns it into
+ * `history_read_failed`, never into a promise of a daily recompute.
+ */
+export const DERIVED_ROW_READ_FAILED = "read_failed" as const;
+
+/** What the `allocator_equity_derived` read hands the producer. */
+export type DerivedEquityRowRead =
+  | { payload: unknown; computed_at: string | null }
+  | null
+  | typeof DERIVED_ROW_READ_FAILED;
+
 /**
  * Venues whose account id can be read. sFOX has no stable id (D-10) and MT5
  * is not in this set, so both are exempt rather than "pending".
@@ -3689,8 +3724,22 @@ const ACCOUNT_IDENTITY_EXCHANGES: ReadonlySet<string> = new Set([
 
 export type EquityHistoryRebuildReason =
   | "duplicate_account"
+  | "key_not_syncing"
   | "account_identity_pending"
-  | "awaiting_derivation";
+  | "awaiting_derivation"
+  | "derivation_rejected"
+  | "history_read_failed";
+
+/**
+ * Why there is no display series, once the key list is clear. Only
+ * `awaiting_derivation` (no row yet) is answered by the daily recompute.
+ * Review C2 SFH-05 / SFH-06: a row the reader rejected, or a read that failed,
+ * must not be shown as a wait.
+ */
+export type MissingSeriesReason = Extract<
+  EquityHistoryRebuildReason,
+  "awaiting_derivation" | "derivation_rejected" | "history_read_failed"
+>;
 
 export type EquityHistoryKey = {
   id: string;
@@ -3729,32 +3778,80 @@ function countsAsDuplicate(
   return isWorkingHolder(holder);
 }
 
-function identityStillPending(key: EquityHistoryKey): boolean {
+/**
+ * Whether an eligible ccxt key's account is still unknown.
+ *
+ * Review C2 CR-02 / SFH-04: a key marked `duplicate` keeps a NULL
+ * `venue_account_id` for as long as its holder is live, because the holder
+ * keeps the partial unique index slot (`disconnected_at IS NULL`) whatever its
+ * status, and the stamper leaves the marked key's id NULL until the holder has
+ * left. Its account is still KNOWN: it is the holder's. So a marked duplicate
+ * whose holder is in the key list with a known id is identity-known. Reading
+ * it as unknown held the book in `account_identity_pending` for as long as a
+ * dead holder stayed connected, and no sync could ever clear that. Whether the
+ * pair then blocks "ready" is `countsAsDuplicate`'s question (a working
+ * holder), not this one.
+ */
+function identityStillPending(
+  key: EquityHistoryKey,
+  byId: ReadonlyMap<string, EquityHistoryKey>,
+): boolean {
   if (!isPerKeyDailiesEligibleKey(key)) return false;
   if (!ACCOUNT_IDENTITY_EXCHANGES.has(key.exchange.toLowerCase())) return false;
   if (key.account_share_kind === "composite_member") return false;
-  return !knownVenueAccountId(key.venue_account_id);
+  if (knownVenueAccountId(key.venue_account_id)) return false;
+  const holder = key.account_shared_with_api_key_id
+    ? byId.get(key.account_shared_with_api_key_id)
+    : undefined;
+  return !(
+    key.account_share_kind === "duplicate" &&
+    holder !== undefined &&
+    knownVenueAccountId(holder.venue_account_id)
+  );
 }
 
 /**
  * Phase 167.1.2 plan 11. Ready iff the version-2 series is present, no
  * eligible key is a duplicate of a working holder, and every eligible key on
- * okx/bybit/binance/deribit has a venue account id or is a composite member.
- * The reason names the first failing condition, in that order.
+ * okx/bybit/binance/deribit has a venue account id, is a composite member, or
+ * is a duplicate whose holder in the key list carries the shared id.
+ * The reason names the first failing condition, in that order. An unknown
+ * account on a key that is failing to sync is `key_not_syncing` (review C2
+ * WR-02); on any other key it is `account_identity_pending`.
+ *
+ * ⚠️ Review C2 fix coupling: a marked duplicate behind a NOT-working holder
+ * reads as identity-known and ordinary here, so "ready" relies on the writers
+ * counting that account once, through its working member (review CR-01's
+ * holder-drop half, in the Python writers). Ship the two together.
  */
 export function equityHistoryReadiness(
   apiKeys: readonly EquityHistoryKey[],
   series: { curve: DailyPoint[]; returns: DailyPoint[] } | null,
+  missingSeriesReason: MissingSeriesReason = "awaiting_derivation",
 ): { state: "ready" | "rebuilding"; reason: EquityHistoryRebuildReason | null } {
   const byId = new Map<string, EquityHistoryKey>();
   for (const key of apiKeys) byId.set(key.id, key);
   if (apiKeys.some((key) => countsAsDuplicate(key, byId))) {
     return { state: "rebuilding", reason: "duplicate_account" };
   }
-  if (apiKeys.some((key) => identityStillPending(key))) {
+  const pending = apiKeys.filter((key) => identityStillPending(key, byId));
+  // Review C2 WR-02: the stamper runs only after a SUCCESSFUL poll, so a key
+  // failing to sync (`error` / `sign_in_failed`; eligibility already excludes
+  // `revoked`) is never stamped while it fails. The hold stays, because its
+  // account really is unknown and the derive still counts it, but the reason
+  // names the failing key rather than promising a sync that cannot stamp it.
+  if (
+    pending.some(
+      (key) =>
+        key.sync_status !== null && NOT_WORKING_SYNC_STATUSES.has(key.sync_status),
+    )
+  ) {
+    return { state: "rebuilding", reason: "key_not_syncing" };
+  }
+  if (pending.length > 0) {
     return { state: "rebuilding", reason: "account_identity_pending" };
   }
-  if (!series) return { state: "rebuilding", reason: "awaiting_derivation" };
+  if (!series) return { state: "rebuilding", reason: missingSeriesReason };
   return { state: "ready", reason: null };
 }
 
@@ -3810,12 +3907,12 @@ export function derivePhase07Fields(
   equityBaselineUnknown: boolean,
   // Phase 115.1 / BACKBONE-02 (RD-1). The row read from the NEW keyed
   // `allocator_equity_derived` surface (kind='equity_curve'), or null when
-  // absent / the table is missing pre-migration. Threaded in so the ONE
-  // producer site below can gate the $-equity series onto the derived curve
-  // when trustworthy, else fall back to the legacy snapshot render. Null is
-  // the SAFETY default (legacy render) — every prod allocator hits this until
-  // the founder-gated backfill runs.
-  derivedEquityRow: { payload: unknown; computed_at: string | null } | null,
+  // there is no row. Threaded in so the ONE producer site below can gate the
+  // $-equity series onto the derived curve. Since plan 11 there is no legacy
+  // snapshot render to fall back to: without an accepted row the history is
+  // rebuilding. Review C2 SFH-06: or DERIVED_ROW_READ_FAILED when the read
+  // itself failed, which the producer names as `history_read_failed`.
+  derivedEquityRow: DerivedEquityRowRead,
 ): Pick<
   MyAllocationDashboardPayload,
   | "equitySnapshots"
@@ -3857,9 +3954,19 @@ export function derivePhase07Fields(
   // when equityHistoryReadiness says so (v2 series, no working-holder
   // duplicate, ccxt identity known). Otherwise both arrays are empty.
   // Snapshots are not a display fallback.
-  const derivedPayload = derivedEquityRow?.payload ?? null;
+  const derivedReadFailed = derivedEquityRow === DERIVED_ROW_READ_FAILED;
+  const derivedRow = derivedReadFailed ? null : derivedEquityRow;
+  const derivedPayload = derivedRow?.payload ?? null;
   const series = extractTrustworthyDerivedSeries(derivedPayload);
-  const readiness = equityHistoryReadiness(apiKeys, series);
+  // Review C2 SFH-05 / SFH-06: only a missing row waits on the daily recompute.
+  // A present row the reader rejects already had its recompute, and a failed
+  // read says nothing about the history at all.
+  const missingSeriesReason: MissingSeriesReason = derivedReadFailed
+    ? "history_read_failed"
+    : derivedRow !== null && series === null
+      ? "derivation_rejected"
+      : "awaiting_derivation";
+  const readiness = equityHistoryReadiness(apiKeys, series, missingSeriesReason);
   const equityHistoryState = readiness.state;
   const equityHistoryRebuildReason = readiness.reason;
   const equityDailyPoints: DailyPoint[] =
@@ -3877,7 +3984,7 @@ export function derivePhase07Fields(
         ? "derived"
         : "legacy";
   const derivedCurveComputedAt =
-    curveForSource !== null ? (derivedEquityRow?.computed_at ?? null) : null;
+    curveForSource !== null ? (derivedRow?.computed_at ?? null) : null;
 
   // f9: min non-null history_depth_months across snapshots. Null when
   // every snapshot's column is NULL (e.g. pure CoinGecko-fallback).
@@ -4083,11 +4190,11 @@ export const getMyAllocationDashboard = cache(
       phase36PerKeyDailiesRes,
       // Phase 115.1 / BACKBONE-02 (RD-1) — the derived $-equity curve row from
       // the NEW keyed `allocator_equity_derived` surface. Resolves to
-      // `{ payload, computed_at }` or null. NON-FATAL by design (never
-      // assertOk'd below): the derived curve is an ADDITIVE enhancement over the
-      // legacy snapshot render, so any read failure degrades to the legacy
-      // fallback (the prod-cutover SAFETY invariant) rather than blanking a
-      // working dashboard.
+      // `{ payload, computed_at }`, null (no row), or DERIVED_ROW_READ_FAILED.
+      // NON-FATAL by design (never assertOk'd below): a failed read must not
+      // blank the rest of the dashboard. Since plan 11 there is no legacy
+      // curve to fall back to; a failed read renders the history as
+      // rebuilding with reason `history_read_failed` (review C2 SFH-06).
       phase115DerivedRow,
       // Phase 151 / 151-02 (AUM-04) — the owner's OWN strategies and the
       // composite `strategy_keys` links, the two halves of the manager-role
@@ -4186,16 +4293,14 @@ export const getMyAllocationDashboard = cache(
       // (allocator_id, kind); the display row is kind='equity_curve'. USER
       // client + owner RLS + explicit `.eq("allocator_id", userId)` (the
       // phase36 T-36-03-01 pattern: RLS is the tenant boundary, the .eq is
-      // defence-in-depth; the admin client would bypass RLS). PGRST205 (table
-      // missing from the PostgREST schema cache on a pre-migration env) is
-      // swallowed to null so the SAFETY fallback renders the legacy curve —
-      // exactly the cutover-safe semantics. Any OTHER read failure also
-      // degrades to legacy (non-fatal enhancement) but logs a breadcrumb so a
-      // real fault stays observable.
-      (async (): Promise<{
-        payload: unknown;
-        computed_at: string | null;
-      } | null> => {
+      // defence-in-depth; the admin client would bypass RLS).
+      // Review C2 SFH-06: every read failure, PGRST205 included (the table
+      // exists on every environment now, so a schema-cache miss is a real
+      // fault), is logged, reported to Sentry, and returned as
+      // DERIVED_ROW_READ_FAILED. There is no legacy curve to fall back to.
+      // Review C2 SFH-05 (reader half): a PRESENT row the reader rejects is
+      // reported with its rejection token only, never a value.
+      (async (): Promise<DerivedEquityRowRead> => {
         const res = await supabase
           .from("allocator_equity_derived")
           .select("payload, computed_at")
@@ -4203,19 +4308,45 @@ export const getMyAllocationDashboard = cache(
           .eq("kind", "equity_curve")
           .maybeSingle();
         if (res.error) {
-          const code = (res.error as { code?: string }).code;
-          if (code !== "PGRST205") {
-            console.error(
-              "[queries.getMyAllocationDashboard] allocator_equity_derived read failed (falling back to legacy curve):",
-              res.error,
-            );
-          }
-          return null;
+          console.error(
+            "[queries.getMyAllocationDashboard] allocator_equity_derived read failed (rendering the history as rebuilding, reason history_read_failed):",
+            res.error,
+          );
+          captureToSentry(res.error, {
+            tags: {
+              op: "getMyAllocationDashboard",
+              reason: "derived_row_read_failed",
+            },
+            level: "error",
+          });
+          return DERIVED_ROW_READ_FAILED;
         }
-        return (res.data ?? null) as {
+        const row = (res.data ?? null) as {
           payload: unknown;
           computed_at: string | null;
         } | null;
+        if (row !== null) {
+          const rejection = derivedPayloadRejection(row.payload);
+          if (rejection !== null) {
+            console.error(
+              `[queries.getMyAllocationDashboard] allocator_equity_derived row rejected (${rejection}); rendering the history as rebuilding, reason derivation_rejected`,
+            );
+            captureToSentry(
+              new Error(`allocator_equity_derived row rejected: ${rejection}`),
+              {
+                tags: {
+                  op: "getMyAllocationDashboard",
+                  reason: "derived_row_rejected",
+                  rejection,
+                },
+                // A pre-v2 row or a writer's own untrustworthy verdict is a
+                // data state; a malformed row is a writer bug.
+                level: rejection === "malformed" ? "error" : "warning",
+              },
+            );
+          }
+        }
+        return row;
       })(),
       // Phase 151 / AUM-04 — the owner's own strategies. `.eq("user_id",
       // userId)` (NOT allocator_id): on this table the owner column is

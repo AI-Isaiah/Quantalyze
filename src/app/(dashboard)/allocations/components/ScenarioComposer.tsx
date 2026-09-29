@@ -715,6 +715,11 @@ type AddedMetricsState = "pending" | "settled" | "unavailable";
  * Phase 167.1.2 SC-4: it also passes `excludedTrusted`, dropped dollars from a
  * trusted key with no return series yet, which until then landed in no part
  * at all ("excludes $X from connected keys with no return history yet").
+ *
+ * Review C2 WR-03: and `excludedNotConnected`, dropped dollars from a key that
+ * is not in the payload's eligible set (disconnected or inactive), which
+ * until then were called connected keys ("excludes $X from keys that are not
+ * connected").
  */
 function buildUntrustedAumClause(summary: LiveHoldingsSummary): string {
   return buildKeyTrustClause(
@@ -728,6 +733,7 @@ function buildUntrustedAumClause(summary: LiveHoldingsSummary): string {
     summary.excludedUntrusted,
     summary.excludedUnknownStatus,
     summary.excludedTrusted,
+    summary.excludedNotConnected,
   );
 }
 
@@ -3891,11 +3897,18 @@ export function ScenarioComposer({
   // there is no live book series (blank mode or a no-book allocator) so the panel
   // is silently absent. Keyed on the engine output + the own-book series + basis.
   const scenarioOwnBookDelta = useMemo<OwnBookDeltaPayload | undefined>(() => {
-    // The producer only emits finite returns (extractTrustworthyDerivedSeries);
-    // the filter keeps this leg honest if that ever changes. No book → absent.
-    const bookReturns = baselineEquityDailyReturns
-      .map((point) => point.value)
-      .filter((r) => Number.isFinite(r));
+    // The producer only emits finite returns (extractTrustworthyDerivedSeries).
+    // Review C2 SFH-11 (b): if that contract ever breaks, the book leg is
+    // absent and the break is logged. Filtering the bad value out silently
+    // would compute the Sharpe and Sortino on fewer observations with nothing
+    // said. No book → absent.
+    const bookReturns = baselineEquityDailyReturns.map((point) => point.value);
+    if (!bookReturns.every((r) => Number.isFinite(r))) {
+      console.error(
+        "[ScenarioComposer] non-finite own-book return in equityDailyReturns; the own-book comparison is omitted",
+      );
+      return undefined;
+    }
     // One observation is not a Sharpe or Sortino worth showing.
     if (bookReturns.length < 2) return undefined;
     const book = sampleBasisRatios(bookReturns, blendBasis);
@@ -4194,6 +4207,9 @@ export function ScenarioComposer({
         contributingApiKeyIds: payload.contributingApiKeyIds ?? [],
         managerSideApiKeyIds,
         statusByKeyId,
+        // Review C2 WR-03: the server-built eligible set, read raw (no
+        // `?? []`): an absent one means "cannot tell", not "none eligible".
+        eligibleApiKeyIds: payload.eligibleApiKeyIds,
       }),
     [
       scenario.draft.toggleByScopeRef,
@@ -4201,6 +4217,7 @@ export function ScenarioComposer({
       payload.contributingApiKeyIds,
       managerSideApiKeyIds,
       statusByKeyId,
+      payload.eligibleApiKeyIds,
     ],
   );
   const liveHoldingsSum = liveHoldingsSummary.total;
@@ -4744,7 +4761,8 @@ export function ScenarioComposer({
       liveHoldingsSummary.unknownStatus.count > 0 ||
       liveHoldingsSummary.excludedUntrusted.count > 0 ||
       liveHoldingsSummary.excludedUnknownStatus.count > 0 ||
-      liveHoldingsSummary.excludedTrusted.count > 0) &&
+      liveHoldingsSummary.excludedTrusted.count > 0 ||
+      liveHoldingsSummary.excludedNotConnected.count > 0) &&
     (fieldShowsLive || overrideNoteShowsLive || fieldBlankHintShows);
   // Review WR-02 — the note that qualifies the field's value is its accessible
   // description, so a screen-reader user who tabs to PORTFOLIO AUM hears the

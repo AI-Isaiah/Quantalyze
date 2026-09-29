@@ -359,6 +359,10 @@ function buildChain(table: string) {
       return chain;
     },
     maybeSingle: async () => {
+      // Review C2 SFH-06: honour an injected read failure here too, the same
+      // shape `then` resolves, so a `.maybeSingle()` read can be failed.
+      const injected = state.tableErrors[table];
+      if (injected) return { data: null, error: injected };
       const rows = rowsFor();
       const row = limitN !== null ? rows.slice(0, limitN)[0] : rows[0];
       return { data: row ?? null, error: null };
@@ -3104,6 +3108,100 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
     expect(result.equityHistoryRebuildReason).toBe("duplicate_account");
     expect(result.equityDailyPoints).toEqual([]);
     expect(result.equityDailyReturns).toEqual([]);
+  });
+
+  // Review C2 SFH-06. A failed read of the derived row used to become
+  // "awaiting derivation" (a promise of a daily recompute) under a log line
+  // that claimed a legacy fallback plan 11 removed, and PGRST205 was not
+  // logged at all. The read now reports to Sentry, logs what really happens,
+  // and gives the producer a distinct outcome.
+  it.each([
+    ["a transport error", { message: "connection reset (test)" }],
+    ["PGRST205 (table missing from the schema cache)", { message: "schema cache miss (test)", code: "PGRST205" }],
+  ])("SFH-06: %s on the derived-row read is history_read_failed, logged and reported", async (_label, error) => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    state.allocatorEquityDerived = [v2Row()];
+    state.tableErrors["allocator_equity_derived"] = error as { message: string };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("history_read_failed");
+    expect(captureSpy).toHaveBeenCalledWith(
+      error,
+      expect.objectContaining({
+        tags: expect.objectContaining({ reason: "derived_row_read_failed" }),
+      }),
+    );
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain("allocator_equity_derived read failed");
+    expect(logged).not.toContain("legacy");
+    errSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  // Review C2 SFH-05 (reader half). A PRESENT row the reader rejects used to be
+  // shown as "recomputed once a day" with nothing logged. It is now its own
+  // reason, and the rejection is reported with its token only (no values).
+  it("SFH-05: a present row the reader rejects is derivation_rejected and reported with its rejection token", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    state.allocatorEquityDerived = [derivedRow(true)]; // no version: pre-v2
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("derivation_rejected");
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: expect.objectContaining({
+          reason: "derived_row_rejected",
+          rejection: "not_version_2",
+        }),
+      }),
+    );
+    // Token only: the curve's dollar values never reach the log.
+    const logged = JSON.stringify(errSpy.mock.calls);
+    expect(logged).toContain("not_version_2");
+    expect(logged).not.toContain("100500");
+    errSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  it("SFH-05 positive control: an accepted v2 row reports nothing", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    state.allocatorEquityDerived = [v2Row()];
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("ready");
+    expect(captureSpy).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tags: expect.objectContaining({ reason: "derived_row_rejected" }),
+      }),
+    );
+    captureSpy.mockRestore();
   });
 });
 
