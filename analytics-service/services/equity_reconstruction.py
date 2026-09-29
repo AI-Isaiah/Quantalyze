@@ -30,7 +30,6 @@ import logging
 import math
 import os
 from bisect import bisect_right
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -39,7 +38,11 @@ import ccxt.async_support as ccxt
 import httpx
 import pandas as pd
 
-from services.allocator_equity_derive import eligible_key_predicate
+from services.allocator_equity_derive import (
+    account_groups,
+    eligible_key_predicate,
+    working_holder_predicate,
+)
 from services.ccxt_flow_fetch import _rate_limit_sleep, fetch_ccxt_transfers
 from services.closed_sets import (
     # A-03 — the MT5 go-dark gate. Added HERE, in the block this module already
@@ -1807,69 +1810,55 @@ _REFRESH_HOLDINGS_COLUMNS = (
 @dataclass(frozen=True)
 class _LatestHoldings:
     """What ``_fetch_latest_holdings_per_eligible_key`` read. Counts only: no
-    USD figure and no key id leaves this object except inside ``rows``."""
+    USD figure and no key id leaves this object except inside ``rows``.
+
+    The unit is the exchange ACCOUNT (an ``account_groups`` group): one account
+    is counted once, through whichever of its keys, so ``carried_keys`` and
+    ``no_working_accounts`` count accounts. For an account behind one key that
+    is the key. ``eligible_keys`` and ``excluded_shared_keys`` count keys."""
 
     rows: list[dict[str, Any]]
     eligible_keys: int
     carried_keys: int
     excluded_shared_keys: int
-
-
-def _counted_through_holder(
-    key_row: Mapping[str, Any], key_rows_by_id: Mapping[Any, Mapping[str, Any]]
-) -> bool:
-    """True when ``key_row`` reads an exchange account that its HOLDER already
-    brings into this sum, so summing ``key_row`` too would count the account
-    twice (Phase 167.1.2 D-01, D-04, D-11).
-
-    * ``'duplicate'``: excluded only while the holder is WORKING, i.e.
-      ``disconnected_at IS NULL AND sync_status <> 'revoked'``. That is the
-      reader contract in COMMENT ON COLUMN api_keys.account_share_kind
-      (migration 20260925120000). The marker is not cleared when the holder
-      departs, and a departed holder contributes nothing here, so dropping
-      every 'duplicate' unconditionally would count the account through nobody.
-    * ``'composite_member'``: excluded only while the holder passes
-      ``eligible_key_predicate`` (D-04, the rotation inside a composite).
-    * A holder that is not among the allocator's own keys, or any other value,
-      leaves the key counted as if unmarked: an unresolvable marker never
-      removes dollars.
-    """
-    kind = key_row.get("account_share_kind")
-    holder = key_rows_by_id.get(key_row.get("account_shared_with_api_key_id"))
-    if kind is None or holder is None:
-        return False
-    if kind == "duplicate":
-        return holder.get("disconnected_at") is None and holder.get("sync_status") != "revoked"
-    if kind == "composite_member":
-        return eligible_key_predicate(holder)
-    return False
+    no_working_accounts: int
 
 
 async def _fetch_latest_holdings_per_eligible_key(
     supabase: Any, allocator_id: str, today_iso: str
 ) -> _LatestHoldings:
-    """Phase 167.1.2 D-07: every ELIGIBLE key's holdings at THAT key's own
-    latest ``asof`` on or before ``today_iso``.
+    """Phase 167.1.2 D-07: every counted exchange account at its latest
+    ``asof`` on or before ``today_iso``.
 
     Replaces the former ``_fetch_today_holdings``, which read only
     ``asof = today``: a key that had not polled yet today contributed $0, so
     the legacy snapshot showed the book losing that key's whole balance, and
     first-writer-wins on (allocator_id, asof) then kept whichever patchwork of
-    keys the first job saw. There is no staleness horizon: a key is carried
-    for as long as ``eligible_key_predicate`` admits it, and drops out the day
-    it is revoked or disconnected.
+    keys the first job saw. There is no staleness horizon: an account is
+    carried for as long as one of its keys passes ``eligible_key_predicate``,
+    and drops out the day its last eligible key is revoked or disconnected.
 
-    A key that reads an account its holder already brings in is left out
-    (``_counted_through_holder``), so one exchange account is counted once.
+    Grain: per ACCOUNT, not per key (C2 review CR-03). Keys that read one
+    exchange account form a group (``account_groups``: a holder plus every key
+    marked 'duplicate' or 'composite_member' against it). ``allocator_holdings``
+    is last-writer on (allocator_id, venue, symbol, asof) with no api_key_id in
+    the key, so an account's rows on a day carry whichever of its keys polled it
+    LAST. Reading one key's own-named rows would carry the account at the last
+    day that key happened to win the race, which can be months old. So a group
+    with at least one eligible member is read once: its latest ``asof`` over
+    EVERY member's rows (a departed member's rows are still that account's),
+    then that day's rows, summed once. Which member is working (D-18) does not
+    change the sum; a working member is simply the one that keeps the latest
+    day fresh. A group none of whose eligible members is working is still
+    carried once, and counted in ``no_working_accounts`` so it is not silent.
 
-    Grain: per key, two reads. First the key's latest ``asof`` (the reduction
-    is ``max()`` in Python, so correctness never rests on the order a read
-    returns), then that key's rows at exactly that ``asof``.
+    The latest ``asof`` is reduced with ``max()`` in Python, so correctness
+    never rests on the order a read returns.
 
-    A failed read RAISES. Swallowing it per key would persist a total missing
-    that key, and first-writer-wins would keep the short total for the day:
-    the $0 defect again. The job's own ``except`` turns the raise into a
-    FAILED job and a ``refresh_failed`` audit, and no row is written.
+    A failed read RAISES. Swallowing it per account would persist a total
+    missing that account, and first-writer-wins would keep the short total for
+    the day: the $0 defect again. The job's own ``except`` turns the raise into
+    a FAILED job and a ``refresh_failed`` audit, and no row is written.
     """
 
     def _sel_keys() -> Any:
@@ -1886,24 +1875,26 @@ async def _fetch_latest_holdings_per_eligible_key(
     key_rows: list[dict[str, Any]] = list(
         getattr(await db_execute(_sel_keys), "data", None) or []
     )
-    key_rows_by_id = {r.get("id"): r for r in key_rows}
-    eligible = sorted(
-        (r for r in key_rows if eligible_key_predicate(r)),
-        key=lambda r: str(r.get("id")),
-    )
-    counted = [r for r in eligible if not _counted_through_holder(r, key_rows_by_id)]
+    eligible_keys = sum(1 for r in key_rows if eligible_key_predicate(r))
 
     rows: list[dict[str, Any]] = []
+    counted_accounts = 0
     carried = 0
-    for key_row in counted:
-        key_id = key_row["id"]
+    no_working = 0
+    for group in account_groups(key_rows):
+        eligible = [r for r in group if eligible_key_predicate(r)]
+        if not eligible:
+            # Every key of this account is revoked or disconnected.
+            continue
+        counted_accounts += 1
+        group_ids = sorted(str(r.get("id")) for r in group)
 
-        def _sel_latest_asof(key_id: Any = key_id) -> Any:
+        def _sel_latest_asof(group_ids: list[str] = group_ids) -> Any:
             return (
                 supabase.table("allocator_holdings")
                 .select("asof")
                 .eq("allocator_id", allocator_id)
-                .eq("api_key_id", key_id)
+                .in_("api_key_id", group_ids)
                 .lte("asof", today_iso)
                 .order("asof", desc=True)
                 .limit(1)
@@ -1917,12 +1908,12 @@ async def _fetch_latest_holdings_per_eligible_key(
             continue
         latest = max(asofs)
 
-        def _sel_rows(key_id: Any = key_id, latest: str = latest) -> Any:
+        def _sel_rows(group_ids: list[str] = group_ids, latest: str = latest) -> Any:
             return (
                 supabase.table("allocator_holdings")
                 .select(_REFRESH_HOLDINGS_COLUMNS)
                 .eq("allocator_id", allocator_id)
-                .eq("api_key_id", key_id)
+                .in_("api_key_id", group_ids)
                 .eq("asof", latest)
                 .execute()
             )
@@ -1930,12 +1921,15 @@ async def _fetch_latest_holdings_per_eligible_key(
         rows.extend(getattr(await db_execute(_sel_rows), "data", None) or [])
         if latest < today_iso:
             carried += 1
+        if not any(working_holder_predicate(r) for r in eligible):
+            no_working += 1
 
     return _LatestHoldings(
         rows=rows,
-        eligible_keys=len(eligible),
+        eligible_keys=eligible_keys,
         carried_keys=carried,
-        excluded_shared_keys=len(eligible) - len(counted),
+        excluded_shared_keys=eligible_keys - counted_accounts,
+        no_working_accounts=no_working,
     )
 
 
@@ -3454,6 +3448,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                     "eligible_keys": latest.eligible_keys,
                     "carried_keys": latest.carried_keys,
                     "excluded_shared_keys": latest.excluded_shared_keys,
+                    "no_working_accounts": latest.no_working_accounts,
                 },
             )
             return DispatchResult(outcome=DispatchOutcome.DONE)
@@ -3519,14 +3514,16 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 "eligible_keys": latest.eligible_keys,
                 "carried_keys": latest.carried_keys,
                 "excluded_shared_keys": latest.excluded_shared_keys,
+                "no_working_accounts": latest.no_working_accounts,
             },
         )
         logger.info(
             "refresh_allocator_equity_daily: upserted %d row for allocator=%s "
             "(key=%s, venue=%s, eligible_keys=%d, carried_keys=%d, "
-            "excluded_shared_keys=%d)",
+            "excluded_shared_keys=%d, no_working_accounts=%d)",
             count, allocator_id, api_key_id, venue,
             latest.eligible_keys, latest.carried_keys, latest.excluded_shared_keys,
+            latest.no_working_accounts,
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
     except ccxt.RateLimitExceeded as exc:

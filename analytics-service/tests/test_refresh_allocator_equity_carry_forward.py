@@ -166,99 +166,154 @@ async def test_quiet_key_counts_at_its_latest_holdings_not_zero(monkeypatch: pyt
 # Task 2: one account counted once, write order irrelevant, departed keys out
 # ---------------------------------------------------------------------------
 
-# A holder's USDT and a marked key's BTC. Different symbols on purpose: the
-# assertions must tell WHICH key's dollars reached the total, which a shared
-# symbol would hide.
+# One exchange account behind two keys. The holdings table is last-writer on
+# (allocator_id, venue, symbol, asof) with no api_key_id in the key, so the
+# account's rows on a day carry whichever key polled it LAST; a pair's two keys
+# never write different symbols for one account. The fixtures below are that
+# production shape: one venue, one symbol set, and the api_key_id stamp is the
+# only thing that varies. TODAY_USD and STALE_USD differ so the total names the
+# day the account was read on.
 HOLDER_USD = 1000.0
-MARKED_USD = 700.0
+TODAY_USD = 1000.0
+STALE_USD = 800.0
 
 
-def _seed_holder_and_marked(fake: FakeSupabaseClient, kind: str, **holder: Any) -> None:
-    _seed_key(fake, API_KEY_ID_1, **holder)
+def _seed_account_day(
+    fake: FakeSupabaseClient, owner_key: str, asof: date, value_usd: float
+) -> None:
+    """The shared okx account's rows on ``asof``, stamped with the key that
+    polled it last that day."""
+    _seed_holding(fake, owner_key, "okx", "USDT", asof, value_usd * 0.6)
+    _seed_holding(fake, owner_key, "okx", "BTC", asof, value_usd * 0.4)
+
+
+def _seed_pair(
+    fake: FakeSupabaseClient,
+    kind: str,
+    *,
+    holder: dict[str, Any] | None = None,
+    marked: dict[str, Any] | None = None,
+) -> None:
+    """Holder H (API_KEY_ID_1) and a key M (API_KEY_ID_2) marked ``kind`` of H.
+    The marked key's venue id is NULL in production; the refresh reads none."""
+    _seed_key(fake, API_KEY_ID_1, **(holder or {}))
     _seed_key(
         fake, API_KEY_ID_2,
         account_share_kind=kind,
         account_shared_with_api_key_id=API_KEY_ID_1,
+        **(marked or {}),
     )
-    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
-    _seed_holding(fake, API_KEY_ID_2, "bybit", "BTC", TODAY, MARKED_USD)
 
 
 @pytest.mark.asyncio
-async def test_duplicate_key_is_counted_once_through_its_working_holder(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("kind", ["duplicate", "composite_member"])
+async def test_shared_account_is_read_by_group_not_by_the_holders_own_rows(
+    monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
-    """D-01: a key marked 'duplicate' reads an account its live holder already
-    reads. Summing both counts one exchange account twice."""
+    """C2 review CR-03. Both keys poll the one account; M polled last today, so
+    TODAY's rows carry M's id, and H's own-named rows are three days old. Plan
+    10 excluded M and read H's own rows at H's latest day, persisting the
+    three-day-old total as today's snapshot. The account is read as a GROUP:
+    the group's latest day over every member's rows, summed once."""
     fake = FakeSupabaseClient()
-    _seed_holder_and_marked(fake, "duplicate")
+    _seed_pair(fake, kind)
+    _seed_account_day(fake, API_KEY_ID_1, TODAY - timedelta(days=3), STALE_USD)
+    _seed_account_day(fake, API_KEY_ID_2, TODAY, TODAY_USD)
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
     row = _today_row(fake)
-    assert row["value_usd"] == pytest.approx(HOLDER_USD), (
-        f"the duplicate's dollars were summed on top of its holder's: {row['value_usd']}"
+    assert row["value_usd"] == pytest.approx(TODAY_USD), (
+        f"the account was read at the holder's stale own rows: {row['value_usd']}"
     )
-    assert "BTC" not in row["breakdown"]
-    assert _refresh_complete_metadata(audit)["excluded_shared_keys"] == 1
+    assert row["breakdown"] == {"USDT": 600.0, "BTC": 400.0}
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["excluded_shared_keys"] == 1
+    assert metadata["carried_keys"] == 0
 
 
 @pytest.mark.asyncio
-async def test_composite_member_is_counted_once_through_its_eligible_holder(
+async def test_shared_account_rows_split_across_both_keys_are_summed_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """D-04: two members of one composite on one account (a key rotation inside
-    the composite). The account counts once, through the holder."""
+    """Both keys polled today and each won the race for one symbol. The account's
+    day is the union of the group's rows, one row per symbol, never a key's half."""
     fake = FakeSupabaseClient()
-    _seed_holder_and_marked(fake, "composite_member")
+    _seed_pair(fake, "duplicate")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, 600.0)
+    _seed_holding(fake, API_KEY_ID_2, "okx", "BTC", TODAY, 400.0)
 
     await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
 
     row = _today_row(fake)
-    assert row["value_usd"] == pytest.approx(HOLDER_USD)
-    assert "BTC" not in row["breakdown"]
+    assert row["value_usd"] == pytest.approx(1000.0)
+    assert row["breakdown"] == {"USDT": 600.0, "BTC": 400.0}
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["duplicate", "composite_member"])
 @pytest.mark.parametrize(
     "holder",
     [
+        pytest.param({"is_active": False}, id="holder-inactive"),
+        pytest.param({"sync_status": "error"}, id="holder-error"),
+        pytest.param({"sync_status": "sign_in_failed"}, id="holder-sign-in-failed"),
         pytest.param({"sync_status": "revoked"}, id="holder-revoked"),
         pytest.param({"disconnected_at": "2026-09-10T00:00:00Z"}, id="holder-disconnected"),
     ],
 )
-async def test_duplicate_of_a_departed_holder_counts_on_its_own(
-    monkeypatch: pytest.MonkeyPatch, holder: dict[str, Any]
+async def test_account_behind_a_non_working_holder_is_counted_once_by_the_healthy_key(
+    monkeypatch: pytest.MonkeyPatch, kind: str, holder: dict[str, Any]
 ) -> None:
-    """Reader rule in COMMENT ON COLUMN api_keys.account_share_kind: the marker
-    is NOT cleared when the holder departs. A departed holder contributes
-    nothing here, so a reader that dropped every 'duplicate' unconditionally
-    would count this account through nobody."""
+    """C2 review CR-01 / SFH-01 / SFH-03 (D-18). The holder stopped polling (an
+    inactive key is never polled; a failing one polls and fails), so its own
+    rows are old, and the healthy marked key has polled the account today.
+
+    Before this fix an inactive holder took the healthy key out with it and the
+    account was counted by NOBODY; an error / sign_in_failed holder stayed
+    counted at its frozen rows while the healthy key's fresh ones were thrown
+    away every day, persisted first-writer-wins. The account is counted once, at
+    today's rows — never twice (the naive predicate swap would have summed the
+    failing holder's carried rows beside the healthy key's)."""
     fake = FakeSupabaseClient()
-    _seed_holder_and_marked(fake, "duplicate", **holder)
-
-    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
-
-    row = _today_row(fake)
-    assert row["value_usd"] == pytest.approx(MARKED_USD), (
-        "the departed holder must contribute nothing and the marked key must "
-        f"count on its own; got {row['value_usd']}"
-    )
-    assert _refresh_complete_metadata(audit)["excluded_shared_keys"] == 0
-
-
-@pytest.mark.asyncio
-async def test_composite_member_of_an_ineligible_holder_counts_on_its_own(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """D-04 excludes a composite member only while its holder is eligible, i.e.
-    while the holder's own holdings are in this sum."""
-    fake = FakeSupabaseClient()
-    _seed_holder_and_marked(fake, "composite_member", is_active=False)
+    _seed_pair(fake, kind, holder=holder)
+    _seed_account_day(fake, API_KEY_ID_1, TODAY - timedelta(days=5), STALE_USD)
+    _seed_account_day(fake, API_KEY_ID_2, TODAY, TODAY_USD)
 
     await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
 
-    assert _today_row(fake)["value_usd"] == pytest.approx(MARKED_USD)
+    row = _today_row(fake)
+    assert row["value_usd"] == pytest.approx(TODAY_USD), (
+        f"expected the account once at today's rows (1000); got {row['value_usd']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_shared_account_with_no_working_key_is_carried_once_and_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-18, neither key works (both eligible, both failing). The account is
+    carried ONCE at its last rows — never $0 and never twice — and the refresh
+    says so: no_working_accounts in the audit, beside carried_keys."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_3)
+    _seed_holding(fake, API_KEY_ID_3, "bybit", "ETH", TODAY, 300.0)
+    _seed_pair(
+        fake, "duplicate",
+        holder={"sync_status": "error"},
+        marked={"sync_status": "sign_in_failed"},
+    )
+    _seed_account_day(fake, API_KEY_ID_1, TODAY - timedelta(days=4), STALE_USD)
+    _seed_account_day(fake, API_KEY_ID_2, TODAY - timedelta(days=2), TODAY_USD)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_3)
+
+    row = _today_row(fake)
+    assert row["value_usd"] == pytest.approx(300.0 + TODAY_USD)
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["no_working_accounts"] == 1
+    assert metadata["carried_keys"] == 1
+    assert metadata["excluded_shared_keys"] == 1
 
 
 @pytest.mark.asyncio
@@ -287,7 +342,9 @@ async def test_departed_key_contributes_nothing_even_with_holdings_today(
 
 
 def _seed_book(fake: FakeSupabaseClient) -> None:
-    """A fresh key, a quiet key two days stale, and a duplicate of the fresh key."""
+    """A fresh key, a quiet key two days stale, and a duplicate of the fresh key
+    that polled the shared account after it today (so today's row carries the
+    duplicate's id: the same store key, overwritten, as in production)."""
     _seed_key(fake, API_KEY_ID_1)
     _seed_key(fake, API_KEY_ID_2)
     _seed_key(
@@ -297,7 +354,7 @@ def _seed_book(fake: FakeSupabaseClient) -> None:
     )
     _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
     _seed_holding(fake, API_KEY_ID_2, "bybit", "BTC", TODAY - timedelta(days=2), 500.0)
-    _seed_holding(fake, API_KEY_ID_3, "binance", "ETH", TODAY, MARKED_USD)
+    _seed_holding(fake, API_KEY_ID_3, "okx", "USDT", TODAY, HOLDER_USD)
 
 
 @pytest.mark.asyncio
