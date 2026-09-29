@@ -1,5 +1,5 @@
 {
-  "notes": "Phase 167.1.2 C2 round 2, R2-WR-01. ONE table both runtimes assert against, so the Python writers and the TS reader cannot drift apart silently. Book: key O (its own account, working, stamped), holder H (stamped with the shared account id) and key M marked `kind` against H with a NULL venue_account_id (the production shape). All three hold returns on the same three days, so no stitch applies. `states` are the key-row overrides each side applies. derive: `refuse` = the curve is deleted (account_duplicate); `compose` = the keys counted (by anchor) and whether the payload is trustworthy. reader: equityHistoryReadiness given the series the derive leaves (present when compose+trustworthy, else null with the reason the producer passes). The invariant this pins: the reader says duplicate_account exactly when the derive refuses, and it says ready only where the derive counts the shared account at most once on a trustworthy curve. Hand-written from D-18 (working = active, connected, not revoked/sign_in_failed/error; eligible = active, connected, not revoked), D-01/D-04 (a duplicate behind a WORKING holder is refused; a composite member never is) and the round-2 rule that a pair with no working key is untrustworthy (SFH-R2-04). Phase 167.1.2 plan 09 (D-05, D-09, ending D-22's accepted omission): when BOTH H and M are departed, the account's history is kept. H and M read one account (the marker), share first and last returns days, and the D-09 order (first, last, id) puts H first, so H counts for zero days and M counts to its end day. `terminal` (default: `counted`) names the keys still in the book on the last day: a disconnected M ends on 2026-06-02 and leaves the book on 2026-06-03 as an exit, never a carried level.",
+  "notes": "Phase 167.1.2 C2 round 2, R2-WR-01. ONE table both runtimes assert against, so the Python writers and the TS reader cannot drift apart silently. Book: key O (its own account, working, stamped), holder H (stamped with the shared account id) and key M marked `kind` against H with a NULL venue_account_id (the production shape). All three hold returns on the same three days, so no stitch applies. `states` are the key-row overrides each side applies. derive: `refuse` = the curve is deleted (account_duplicate); `compose` = the keys counted (by anchor) and whether the payload is trustworthy. reader: equityHistoryReadiness given the series the derive leaves (present when compose+trustworthy, else null with the reason the producer passes). The invariant this pins: the reader says duplicate_account exactly when the derive refuses, and it says ready only where the derive counts the shared account at most once on a trustworthy curve. Hand-written from D-18 (working = active, connected, not revoked/sign_in_failed/error; eligible = active, connected, not revoked), D-01/D-04 (a duplicate behind a WORKING holder is refused; a composite member never is) and the round-2 rule that a pair with no working key is untrustworthy (SFH-R2-04). Phase 167.1.2 plan 09 (D-05, D-09, ending D-22's accepted omission): when BOTH H and M are departed, the account's history is kept. H and M read one account (the marker), share first and last returns days, and the D-09 order (first, last, id) puts H first, so H counts for zero days and M counts to its end day. `terminal` (default: `counted`) names the keys still in the book on the last day: a disconnected M ends on 2026-06-02 and leaves the book on 2026-06-03 as an exit, never a carried level. C4 review SFH-C4-07: when H is revoked or inactive (never disconnected) it ends on its last returns day, 2026-06-03, AFTER M's 2026-06-02. M is then COVERED by H, which reads the account over every one of M's days, so H counts the account through 2026-06-03 and M counts zero days. Before that fix H counted zero days and M's end dropped the account's 2026-06-03 from the book with no flag.",
   "consumers": [
     "analytics-service/tests/test_holder_matrix_parity.py",
     "src/lib/__tests__/holder-matrix-parity.test.ts"
@@ -433,11 +433,12 @@
         "outcome": "compose",
         "counted": [
           "O",
-          "M"
+          "H"
         ],
         "trustworthy": true,
         "terminal": [
-          "O"
+          "O",
+          "H"
         ]
       },
       "reader": {
@@ -538,11 +539,12 @@
         "outcome": "compose",
         "counted": [
           "O",
-          "M"
+          "H"
         ],
         "trustworthy": true,
         "terminal": [
-          "O"
+          "O",
+          "H"
         ]
       },
       "reader": {
@@ -1054,11 +1056,12 @@
         "outcome": "compose",
         "counted": [
           "O",
-          "M"
+          "H"
         ],
         "trustworthy": true,
         "terminal": [
-          "O"
+          "O",
+          "H"
         ]
       },
       "reader": {
@@ -1159,11 +1162,12 @@
         "outcome": "compose",
         "counted": [
           "O",
-          "M"
+          "H"
         ],
         "trustworthy": true,
         "terminal": [
-          "O"
+          "O",
+          "H"
         ]
       },
       "reader": {
