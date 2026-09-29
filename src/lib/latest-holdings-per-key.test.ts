@@ -196,7 +196,8 @@ const h = (api_key_id: string, asof: string, symbol: string): HoldingDb => ({
   symbol,
 });
 const COLS = "api_key_id, asof, symbol";
-const KEY_SELECT = "id";
+const KEY_SELECT =
+  "id, exchange, venue_account_id, account_share_kind, account_shared_with_api_key_id";
 
 describe("fetchLatestHoldingsPerKey (D-16, bounded read)", () => {
   it("returns each key's rows at its own latest asof, from an ascending table", async () => {
@@ -415,3 +416,128 @@ describe("fetchLatestHoldingsPerKey: a later clean poll supersedes older rows (S
   });
 });
 
+
+// ---------------------------------------------------------------------------
+// Review C4 SFH-C4-01. Keys that read ONE exchange account (the D-09 account
+// identity, `accountIdentityTokens`) are one reading of that account. Only the
+// keys holding the account's newest reading contribute rows, so a departed
+// key's last poll cannot stand in for a position a live key on the same
+// account has since closed.
+// ---------------------------------------------------------------------------
+describe("fetchLatestHoldingsPerKey: one exchange account, one reading (SFH-C4-01)", () => {
+  const departed = {
+    id: "key-old",
+    user_id: "user-1",
+    exchange: "binance",
+    venue_account_id: "acct-1",
+  };
+  const live = {
+    id: "key-new",
+    user_id: "user-1",
+    exchange: "Binance",
+    venue_account_id: "acct-1",
+  };
+
+  it("a live key's newer reading supersedes a departed key's older rows on the same account", async () => {
+    const client = fakeClient(
+      [departed, live],
+      [h("key-old", "2026-08-31", "BTC-PERP"), h("key-new", "2026-09-29", "ETH-PERP")],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[])).toEqual(["key-new:2026-09-29:ETH-PERP"]);
+  });
+
+  it("a live key whose newest clean poll read nothing supersedes them too", async () => {
+    const client = fakeClient(
+      [departed, live],
+      [h("key-old", "2026-08-31", "BTC-PERP"), h("key-new", "2026-09-20", "ETH-PERP")],
+      undefined,
+      [
+        poll("key-new", "2026-09-29T04:00:05+00:00", {
+          final_status: "complete",
+          row_count: 0,
+          asof: "2026-09-29",
+        }),
+      ],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res).toEqual({ data: [], error: null });
+  });
+
+  it("a live key that never wrote a row but polled clean and empty supersedes them too", async () => {
+    const client = fakeClient(
+      [departed, live],
+      [h("key-old", "2026-08-31", "BTC-PERP")],
+      undefined,
+      [
+        poll("key-new", "2026-09-29T04:00:05+00:00", {
+          final_status: "complete",
+          row_count: 0,
+          asof: "2026-09-29",
+        }),
+      ],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res).toEqual({ data: [], error: null });
+  });
+
+  it("a marker link joins the account when the marked key has no venue id of its own", async () => {
+    const marked = {
+      id: "key-new",
+      user_id: "user-1",
+      exchange: "binance",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "key-old",
+    };
+    const client = fakeClient(
+      [departed, marked],
+      [h("key-old", "2026-08-31", "BTC-PERP"), h("key-new", "2026-09-29", "ETH-PERP")],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[])).toEqual(["key-new:2026-09-29:ETH-PERP"]);
+  });
+
+  it("a live key that never polled leaves the departed key's rows standing", async () => {
+    const client = fakeClient([departed, live], [h("key-old", "2026-08-31", "BTC-PERP")]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[])).toEqual(["key-old:2026-08-31:BTC-PERP"]);
+  });
+
+  it("a key whose last reading is OLDER than the departed key's does not supersede it", async () => {
+    const client = fakeClient(
+      [departed, live],
+      [h("key-old", "2026-08-31", "BTC-PERP"), h("key-new", "2026-08-15", "ETH-PERP")],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[])).toEqual(["key-old:2026-08-31:BTC-PERP"]);
+  });
+
+  it("keys on DIFFERENT accounts each keep their own latest rows", async () => {
+    const other = { ...live, venue_account_id: "acct-2" };
+    const client = fakeClient(
+      [departed, other],
+      [h("key-old", "2026-08-31", "BTC-PERP"), h("key-new", "2026-09-29", "ETH-PERP")],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[]).sort()).toEqual([
+      "key-new:2026-09-29:ETH-PERP",
+      "key-old:2026-08-31:BTC-PERP",
+    ]);
+  });
+
+  it("keys with no known account identity are each their own account", async () => {
+    const client = fakeClient(
+      [
+        { id: "key-a", user_id: "user-1", exchange: "binance", venue_account_id: null },
+        { id: "key-b", user_id: "user-1", exchange: "binance", venue_account_id: null },
+      ],
+      [h("key-a", "2026-08-31", "BTC-PERP"), h("key-b", "2026-09-29", "ETH-PERP")],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[]).sort()).toEqual([
+      "key-a:2026-08-31:BTC-PERP",
+      "key-b:2026-09-29:ETH-PERP",
+    ]);
+  });
+});

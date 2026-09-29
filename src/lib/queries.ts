@@ -4178,7 +4178,11 @@ export function derivePhase07Fields(
   //
   // Phase 167.1.2 D-16: the collapse runs only over each key's rows at that
   // key's own latest asof (latestHoldingsPerKey), so a position a key closed
-  // before its latest poll no longer survives from an older row.
+  // before its latest poll no longer survives from an older row. Review C4
+  // SFH-C4-01 / SFH-C4-02: the read already dropped a key whose account a
+  // newer reading superseded (another key on the same exchange account, or
+  // the key's own later clean poll), so this collapse never picks a departed
+  // key's row for a symbol the account has closed since.
   const holdingsMap = new Map<string, (typeof holdingsRows)[number]>();
   for (const r of latestHoldingsPerKey(holdingsRows)) {
     // B8: same canonical triple key as the scope_ref sites above

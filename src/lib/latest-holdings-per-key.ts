@@ -27,6 +27,10 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/database.types";
+// Review C4 SFH-C4-01: the D-09 account identity, read-only. The same rule
+// decides which departed key's history counts, so Open Positions and the book
+// agree on which keys read one exchange account.
+import { accountIdentityTokens } from "@/lib/departed-history";
 
 /**
  * Keep, for each `api_key_id`, only the rows whose `asof` equals that key's
@@ -71,6 +75,24 @@ type ReadError = { message: string };
  */
 export const POLL_COMPLETED_ACTION = "allocator.holdings.sync_completed";
 
+/**
+ * The key columns the account identity reads (`accountIdentityTokens`). Every
+ * one is in `API_KEY_USER_COLUMNS`, so the user-scoped client may select it.
+ */
+const KEY_IDENTITY_COLUMNS =
+  "id, exchange, venue_account_id, account_share_kind, account_shared_with_api_key_id";
+
+type KeyIdentityRow = {
+  id: string;
+  exchange: string | null;
+  venue_account_id: string | null;
+  account_share_kind: string | null;
+  account_shared_with_api_key_id: string | null;
+};
+
+/** A key's newest reading: the day, and whether it wrote rows on that day. */
+type KeyReading = { day: string; hasRows: boolean };
+
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
@@ -98,16 +120,30 @@ export function cleanPollDay(metadata: unknown): string | null {
  * `getLatestExposureSnapshot` (read the latest `asof` first, then the rows at
  * it) but at the per-key grain (D-16):
  *
- * 1. the owner's key ids (`api_keys.select("id")`, allowed by SEC-005). This
- *    is the whole key set the old read covered: every `allocator_holdings`
- *    row names one of the owner's `api_keys` rows (the FK, which refuses a
- *    key delete while holdings exist, and the
+ * 1. the owner's keys with their account identity columns (allowed by
+ *    SEC-005). This is the whole key set the old read covered: every
+ *    `allocator_holdings` row names one of the owner's `api_keys` rows (the
+ *    FK, which refuses a key delete while holdings exist, and the
  *    `enforce_allocator_holdings_owner_coherence` trigger), and a departed
  *    key is soft-disconnected, so its row stays;
- * 2. per key, that key's latest `asof` (`order(asof desc).limit(1)`);
- * 3. per key, that key's rows at that `asof`.
+ * 2. per key, that key's latest `asof` (`order(asof desc).limit(1)`) and its
+ *    newest clean poll (below);
+ * 3. per contributing key, that key's rows at that `asof`.
  *
- * Steps 2 and 3 run in parallel across keys. There is no date window: a key
+ * Review C4 SFH-C4-01: between steps 2 and 3, keys that read ONE exchange
+ * account (`accountIdentityTokens`, the D-09 identity: a shared non-blank
+ * venue account id, or a duplicate / composite_member marker) are one reading
+ * of that account. Only the keys whose reading is the account's newest, and
+ * wrote rows on that day, contribute. Before this, after a key rotation the
+ * old key's last poll still showed a position the account had closed since,
+ * because the collapse is by venue:symbol:type and the live key no longer
+ * held that symbol. A departed key's rows still stand when no key on its
+ * account has read it since (the new key has not polled, or is failing and
+ * its last reading is older), and a key whose account is unknown is its own
+ * account. Dropping superseded rows moves no dollars out of a disclosure: the
+ * newer reading is the account's current value.
+ *
+ * Steps 2 and 3 each run in parallel across keys. There is no date window: a key
  * that has not polled for a long time still shows its last poll, never flat.
  * Every read runs on the caller's user-scoped client under owner RLS and also
  * filters explicitly by `user_id` / `allocator_id`.
@@ -147,29 +183,28 @@ export async function fetchLatestHoldingsPerKey(
 ): Promise<{ data: unknown[] | null; error: ReadError | null }> {
   const keysRes = await supabase
     .from("api_keys")
-    .select("id")
+    .select(KEY_IDENTITY_COLUMNS)
     .eq("user_id", userId)
     .limit(HOLDINGS_ROW_CAP);
   if (keysRes.error) return { data: null, error: keysRes.error };
-  const keyIds = (keysRes.data ?? []).map((k) => k.id);
-  if (keyIds.length >= HOLDINGS_ROW_CAP) {
+  const keys = (keysRes.data ?? []) as KeyIdentityRow[];
+  if (keys.length >= HOLDINGS_ROW_CAP) {
     return {
       data: null,
       error: { message: "api_keys id read reached the row cap" },
     };
   }
 
-  const perKey = await Promise.all(
-    keyIds.map(
-      async (
-        keyId,
-      ): Promise<{ rows: unknown[]; error: ReadError | null }> => {
+  // Step 2: each key's newest reading, rows or a clean empty poll.
+  const readings = await Promise.all(
+    keys.map(
+      async (key): Promise<{ reading: KeyReading | null; error: ReadError | null }> => {
         const [latestRes, pollRes] = await Promise.all([
           supabase
             .from("allocator_holdings")
             .select("asof")
             .eq("allocator_id", userId)
-            .eq("api_key_id", keyId)
+            .eq("api_key_id", key.id)
             .order("asof", { ascending: false })
             .limit(1),
           supabase
@@ -178,27 +213,80 @@ export async function fetchLatestHoldingsPerKey(
             .eq("user_id", userId)
             .eq("action", POLL_COMPLETED_ACTION)
             .eq("entity_type", "api_key")
-            .eq("entity_id", keyId)
+            .eq("entity_id", key.id)
             .eq("metadata->>final_status", "complete")
             .order("created_at", { ascending: false })
             .limit(1),
         ]);
-        if (latestRes.error) return { rows: [], error: latestRes.error };
-        if (pollRes.error) return { rows: [], error: pollRes.error };
-        const latestAsof = latestRes.data?.[0]?.asof;
-        if (!latestAsof) return { rows: [], error: null };
+        if (latestRes.error) return { reading: null, error: latestRes.error };
+        if (pollRes.error) return { reading: null, error: pollRes.error };
+        const latestAsof = latestRes.data?.[0]?.asof ?? null;
         const cleanPollAsof = cleanPollDay(pollRes.data?.[0]?.metadata ?? null);
-        if (cleanPollAsof !== null && cleanPollAsof > latestAsof) {
+        if (cleanPollAsof !== null && (latestAsof === null || cleanPollAsof > latestAsof)) {
           // SFH-C4-02: the key's newest clean poll read it after these rows.
-          return { rows: [], error: null };
+          return { reading: { day: cleanPollAsof, hasRows: false }, error: null };
         }
+        return {
+          reading: latestAsof ? { day: latestAsof, hasRows: true } : null,
+          error: null,
+        };
+      },
+    ),
+  );
+  const failedReading = readings.find((r) => r.error !== null);
+  if (failedReading) return { data: null, error: failedReading.error };
 
+  // SFH-C4-01: one exchange account, one reading. Keys that read the same
+  // account (the D-09 identity) are grouped; only the keys holding the
+  // group's newest reading day, with rows on it, contribute.
+  const identity = accountIdentityTokens(
+    keys.map((k) => ({
+      id: k.id,
+      exchange: typeof k.exchange === "string" ? k.exchange : "",
+      venue_account_id: k.venue_account_id ?? null,
+      account_share_kind: k.account_share_kind ?? null,
+      account_shared_with_api_key_id: k.account_shared_with_api_key_id ?? null,
+      disconnected_at: null,
+      sync_status: null,
+      history_inclusion: null,
+      first_returns_day: null,
+      last_returns_day: null,
+    })),
+  );
+  const accountOf = (keyId: string): string =>
+    identity.get(keyId) ?? `key:${keyId}`;
+  const newestByAccount = new Map<string, string>();
+  keys.forEach((key, i) => {
+    const reading = readings[i].reading;
+    if (reading === null) return;
+    const account = accountOf(key.id);
+    const current = newestByAccount.get(account);
+    if (current === undefined || reading.day > current) {
+      newestByAccount.set(account, reading.day);
+    }
+  });
+  const toRead: Array<{ keyId: string; asof: string }> = [];
+  keys.forEach((key, i) => {
+    const reading = readings[i].reading;
+    if (
+      reading !== null &&
+      reading.hasRows &&
+      reading.day === newestByAccount.get(accountOf(key.id))
+    ) {
+      toRead.push({ keyId: key.id, asof: reading.day });
+    }
+  });
+
+  // Step 3: the contributing keys' rows at their reading day.
+  const perKey = await Promise.all(
+    toRead.map(
+      async ({ keyId, asof }): Promise<{ rows: unknown[]; error: ReadError | null }> => {
         const rowsRes = await supabase
           .from("allocator_holdings")
           .select(columns)
           .eq("allocator_id", userId)
           .eq("api_key_id", keyId)
-          .eq("asof", latestAsof)
+          .eq("asof", asof)
           .limit(HOLDINGS_ROW_CAP);
         if (rowsRes.error) return { rows: [], error: rowsRes.error };
         const rows = (rowsRes.data ?? []) as unknown[];
