@@ -371,8 +371,9 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       "The latest rebuild of your history did not pass its checks, so it is not shown.",
     ],
     [
+      // Review C2 round 2 IN-05: active voice (DESIGN.md Voice).
       "history_read_failed",
-      "Your history could not be loaded just now. Reload the page to try again.",
+      "We could not load your history just now. Reload the page to try again.",
     ],
   ] as const)("rebuilding reason %s renders its one line", (reason, line) => {
     render(
