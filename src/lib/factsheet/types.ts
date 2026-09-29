@@ -40,12 +40,22 @@ export type ComputeResult = {
   longest_dd: number;
   skew: number;
   kurt: number;
-  // Period returns relative to the series' end date
-  mtd: number;
-  ytd: number;
-  p3m: number;
-  p6m: number;
-  p1y: number;
+  // Period returns relative to the series' end date. Phase 169 D-11 (SC6): a
+  // window is null when the record does not cover it (the first observation is
+  // after the window's cutoff plus one day), never the whole-record return
+  // under the window's label.
+  mtd: number | null;
+  ytd: number | null;
+  p3m: number | null;
+  p6m: number | null;
+  p1y: number | null;
+  /** 3 x 365 calendar days back from the series end (D-11). OPTIONAL only so a
+   *  hand-built zeroed summary compiles unedited (D-21); `compute()` always
+   *  sets it. A reader treats ABSENT like null (`== null`, D-17). */
+  p3y?: number | null;
+  /** 5 x 365 calendar days back from the series end (D-11). Optional for the
+   *  same reason as `p3y`; `compute()` always sets it. */
+  p5y?: number | null;
   // Single-day extremes (compounded for non-day periods)
   best_day: number;
   worst_day: number;

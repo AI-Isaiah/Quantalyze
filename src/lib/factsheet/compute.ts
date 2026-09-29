@@ -182,6 +182,19 @@ export function compute(
     d.setUTCDate(d.getUTCDate() - days);
     return d;
   };
+  // Phase 169 D-11 (SC6): ONE coverage rule for every return window. A window
+  // is shown only when the record covers it, i.e. the first observation date is
+  // on or before the window's cutoff plus one UTC day; otherwise it is null.
+  // Without this, a record shorter than the window compounded its WHOLE history
+  // under the window's label (a 5-month record printed a "1 Year" return).
+  // Multi-year windows are calendar days (3 x 365, 5 x 365), never an
+  // observation count: 756 observations is three years on a weekday venue and
+  // about two on a 24/7 one.
+  const windowReturn = (cutoff: Date): number | null => {
+    const lastCoveredStart = new Date(cutoff);
+    lastCoveredStart.setUTCDate(lastCoveredStart.getUTCDate() + 1);
+    return startDate > lastCoveredStart ? null : compoundFrom(cutoff);
+  };
 
   const yearlyObj: Record<string, number> = {};
   yearly.forEach((v, k) => {
@@ -205,11 +218,13 @@ export function compute(
     longest_dd: longestDd,
     skew,
     kurt,
-    mtd: compoundFrom(mtdCutoff),
-    ytd: compoundFrom(ytdCutoff),
-    p3m: compoundFrom(offsetDays(90)),
-    p6m: compoundFrom(offsetDays(182)),
-    p1y: compoundFrom(offsetDays(365)),
+    mtd: windowReturn(mtdCutoff),
+    ytd: windowReturn(ytdCutoff),
+    p3m: windowReturn(offsetDays(90)),
+    p6m: windowReturn(offsetDays(182)),
+    p1y: windowReturn(offsetDays(365)),
+    p3y: windowReturn(offsetDays(3 * 365)),
+    p5y: windowReturn(offsetDays(5 * 365)),
     best_day: bestDay === -Infinity ? 0 : bestDay,
     worst_day: worstDay === Infinity ? 0 : worstDay,
     best_week: weeklyVals.length > 0 ? Math.max(...weeklyVals) : 0,
