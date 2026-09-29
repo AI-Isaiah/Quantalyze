@@ -11162,6 +11162,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # returns axis is gated dust-omit vs real-failure-degrade (never silently
     # omitted → a trustworthy partial curve).
     null_anchor_reasons: dict[str, str] = {}
+    # Departed keys whose key_inputs row exists but carries no anchor → the
+    # stamped anchor_null_reason (SFH-C4-06).
+    departed_null_anchor_reasons: dict[str, str] = {}
     key_inputs_ids: set[str] = set()
     # SFH-R2-03: a stitch source's flows, when its key_inputs row is usable.
     source_flows: dict[str, list[ExternalFlow]] = {}
@@ -11187,7 +11190,16 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 if api_key_id in departed_end_by_key:
                     departed_payload = row.get("payload") or {}
                     departed_anchor = departed_payload.get("anchor_usd")
-                    if departed_anchor is not None:
+                    if departed_anchor is None:
+                        # SFH-C4-06: the row exists; its last balance read gave
+                        # no anchor. Kept apart from a missing row below.
+                        _departed_reason = departed_payload.get("anchor_null_reason")
+                        departed_null_anchor_reasons[api_key_id] = (
+                            _departed_reason
+                            if isinstance(_departed_reason, str) and _departed_reason
+                            else "unstamped"
+                        )
+                    else:
                         flows_by_key[api_key_id] = [
                             validate_flow_shape(
                                 ExternalFlow(
@@ -11288,13 +11300,28 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         flows_by_key.pop(k, None)
         anchors_by_key.pop(k, None)
     if departed_unavailable:
-        # Counts only (no key id, no venue id, no USD — T-167.1.2-22).
+        # Counts only (no key id, no venue id, no USD — T-167.1.2-22). A key
+        # whose row was deleted and a key whose last balance read failed are
+        # counted apart, with the stamped reasons (SFH-C4-06).
+        null_anchor_counts: dict[str, int] = {}
+        for k in departed_unavailable:
+            if k in departed_null_anchor_reasons:
+                reason_token = departed_null_anchor_reasons[k]
+                null_anchor_counts[reason_token] = null_anchor_counts.get(reason_token, 0) + 1
+        null_anchor_total = sum(null_anchor_counts.values())
         logger.warning(
             "derive_allocator_equity: %d departed key(s) for allocator %s are "
-            "included by the history rule but have no usable anchor; their "
-            "history is left out of the book (%s)",
+            "included by the history rule but have no usable anchor: %d with no "
+            "saved inputs row, %d whose last balance read gave no anchor (%s); "
+            "their history is left out of the book (%s)",
             len(departed_unavailable),
             allocator_id,
+            len(departed_unavailable) - null_anchor_total,
+            null_anchor_total,
+            ", ".join(
+                f"{token}={count}" for token, count in sorted(null_anchor_counts.items())
+            )
+            or "none",
             "departed_history_unavailable",
         )
 

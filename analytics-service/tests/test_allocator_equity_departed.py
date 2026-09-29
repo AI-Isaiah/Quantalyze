@@ -324,6 +324,46 @@ async def test_a_departed_key_whose_inputs_are_gone_is_left_out_and_the_book_sta
         assert curve[day] == pytest.approx(_live_level(day), rel=1e-12), day
 
 
+@pytest.mark.asyncio
+async def test_a_departed_key_whose_last_balance_read_failed_is_counted_apart(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """SFH-C4-06: a departed key whose key_inputs row EXISTS with a null anchor
+    (its last balance read failed) is not a key whose row was deleted. The
+    WARNING counts the two apart and names the stamped reason, so an operator
+    reading it is not sent looking for a cleanup that never ran. The book still
+    stays ready (the key cannot be leveled either way)."""
+    import logging
+
+    departed = _gate_key(
+        "key-D", ALLOC,
+        venue_account_id="acct-departed",
+        disconnected_at="2026-06-10T15:30:00+00:00",
+    )
+    null_anchor = _key_inputs("key-D", DEP_ANCHOR, DAYS[9])
+    null_anchor["payload"] = {
+        **null_anchor["payload"],
+        "anchor_usd": None,
+        "anchor_null_reason": "balance_error",
+    }
+    fake = _FakeSupabase({
+        "api_keys": [_gate_key("key-L", ALLOC, venue_account_id="acct-live"), departed],
+        "csv_daily_returns": _csv("key-L", DAYS, LIVE_R) + _csv("key-D", DAYS[:10], DEP_R),
+        DERIVED_TABLE: [_key_inputs("key-L", LIVE_ANCHOR, DAYS[-1]), null_anchor],
+        LEGACY_TABLE: [],
+    })
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
+        result = await _run(fake)
+    assert result.outcome.name == "DONE"
+    payload = _book(fake)
+    assert payload["is_trustworthy"] is True
+    assert "departed_history_unavailable" in payload["flags"]
+    lines = [r.getMessage() for r in caplog.records if "departed_history_unavailable" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "0 with no saved inputs row" in lines[0]
+    assert "1 whose last balance read gave no anchor (balance_error=1)" in lines[0]
+
+
 # ── Task 2: the D-09 rule, ONE spec for Python and TypeScript ─────────────────
 
 import json  # noqa: E402
