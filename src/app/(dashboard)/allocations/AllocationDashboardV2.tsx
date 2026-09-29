@@ -73,7 +73,6 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // rebuilt the producer withholds the curve, and neither the curve nor any
     // factsheet KPI computed from it renders.
     equityHistoryState,
-    equityCurveSource,
     // D-06: the factsheet's return series. Empty while rebuilding.
     equityDailyReturns = [],
     equityHistoryRebuildReason = null,
@@ -85,16 +84,11 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   // null, "" or any state added later (a destructuring default fires on
   // `undefined` alone) all read as rebuilding.
   const isRebuilding = equityHistoryState !== "ready";
-  // Phase 167.1.2 / IN-01 (founder copy call 2026-09-25): a brand-new book has
-  // no history for D-02 to withhold. Its own-book series has two sources, the
-  // derived curve (`equityCurveSource === "derived"`) and the legacy snapshots
-  // (`snapshotCount > 0`), and this is true only when both are empty. It is the
-  // negation of the Scenario composer's rebuilding-note gate, so the Overview
-  // and the composer read the same book the same way. Such a book gets the
-  // warm-up note instead of the "being rebuilt" panel. An undefined count is
-  // not `=== 0`, so a malformed payload falls through to the panel.
-  const hasNoHistoryYet =
-    snapshotCount === 0 && equityCurveSource !== "derived";
+  // Phase 167.1.2 / D-15 (2026-09-27, supersedes IN-01): the rebuilding copy is
+  // chosen by state alone. The brand-new-book exception that swapped the panel
+  // for the warm-up note on a snapshot count is removed, because under
+  // "rebuilding" no number of days flips the state, so the warm-up timer would
+  // be false. The Scenario composer gates its disclosure on the same state.
 
   const holdingsEmpty = holdingsSummary.length === 0;
 
@@ -212,17 +206,12 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       {isRebuilding ? (
         // D-02: replaces BOTH the curve slot and the factsheet, and is checked
         // BEFORE the warm-up fallback, so a book whose history is withheld
-        // never sees the "appear once" copy. IN-01: a brand-new book has
-        // nothing withheld, so it gets the warm-up note alone. The curve slot
-        // stays unmounted either way, as D-02 requires.
-        hasNoHistoryYet ? (
-          <FactsheetWarmupNote snapshotCount={snapshotCount} />
-        ) : (
-          <EquityHistoryRebuilding
-            reason={equityHistoryRebuildReason}
-            notSyncingKeys={notSyncingKeys}
-          />
-        )
+        // never sees the "appear once" copy. D-15: every such book, a
+        // brand-new one included, gets the panel and its named reason.
+        <EquityHistoryRebuilding
+          reason={equityHistoryRebuildReason}
+          notSyncingKeys={notSyncingKeys}
+        />
       ) : factsheetPayload ? (
         <FactsheetProvider payload={factsheetPayload}>
           <FactsheetBody
@@ -245,9 +234,10 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
 
 /**
  * The Overview's warm-up note, shown when there is too little history to build
- * factsheet panels from. It renders in two places: the "ready" branch before
- * two days have accrued, and (Phase 167.1.2 / IN-01) a brand-new book under
- * D-02 that has no history for the rebuilding panel to describe.
+ * factsheet panels from. It renders in ONE place, the "ready" branch before two
+ * days have accrued: there the curve is shown and short, and more days do build
+ * the panels, so its timer is true. Phase 167.1.2 / D-15: it never renders while
+ * the history is rebuilding, where no number of days changes the state.
  */
 function FactsheetWarmupNote({ snapshotCount }: { snapshotCount: number }) {
   return (
