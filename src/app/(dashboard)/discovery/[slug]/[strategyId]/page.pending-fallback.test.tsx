@@ -168,23 +168,39 @@ describe("discovery page — a composite's csv_daily_returns read outage (169 D-
     return { from: () => chain };
   }
 
-  /** The service-role client: the csv read succeeds with rows. */
+  /**
+   * The service-role client: the csv read succeeds with rows.
+   *
+   * 169 review round 1 (CSV-READ-CAP): the reader pages by a date keyset. Each
+   * page after the first adds `.gt("date", cursor)`, and the read stops only on
+   * an empty page. So this fake honours the cursor, as the one in
+   * `v2/page.composite-read-error.test.tsx` does. A fake that ignores it
+   * re-serves the first page, which the reader correctly refuses as
+   * `page_order`, an outage this case is not about.
+   */
   function csvRowsAdmin() {
-    const chain = {
-      select: () => chain,
-      eq: () => chain,
-      order: () => chain,
-      limit: () =>
-        Promise.resolve({
-          data: [
-            { date: "2026-08-01", daily_return: 0.01 },
-            { date: "2026-08-02", daily_return: -0.005 },
-            { date: "2026-08-03", daily_return: 0.002 },
-          ],
-          error: null,
-        }),
+    const rows = [
+      { date: "2026-08-01", daily_return: 0.01 },
+      { date: "2026-08-02", daily_return: -0.005 },
+      { date: "2026-08-03", daily_return: 0.002 },
+    ];
+    return {
+      from: () => {
+        let after: string | null = null;
+        const chain = {
+          select: () => chain,
+          eq: () => chain,
+          gt: (_column: string, value: string) => {
+            after = value;
+            return chain;
+          },
+          order: () => chain,
+          limit: () =>
+            Promise.resolve({ data: rows.filter((r) => after === null || r.date > after), error: null }),
+        };
+        return chain;
+      },
     };
-    return { from: () => chain };
   }
 
   it("says the load failed, never KCS-10, and does not throw", async () => {
