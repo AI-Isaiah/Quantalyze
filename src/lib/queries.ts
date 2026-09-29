@@ -12,7 +12,7 @@ import {
   PERCENTILE_GATE_COLUMN,
   type SeriesState,
 } from "./closed-sets";
-import { isWorkingHolder } from "@/lib/account-share-note";
+import { isWorkingHolder, NOT_WORKING_SYNC_STATUSES } from "@/lib/account-share-note";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
 import {
@@ -2925,7 +2925,8 @@ export interface MyAllocationDashboardPayload {
   equityHistoryState: "rebuilding" | "ready";
   /**
    * Why `equityHistoryState` is not `"ready"`. Null when it is. One of
-   * `duplicate_account`, `account_identity_pending`, `awaiting_derivation`.
+   * `duplicate_account`, `key_not_syncing`, `account_identity_pending`,
+   * `awaiting_derivation`.
    */
   equityHistoryRebuildReason: EquityHistoryRebuildReason | null;
   /**
@@ -3689,6 +3690,7 @@ const ACCOUNT_IDENTITY_EXCHANGES: ReadonlySet<string> = new Set([
 
 export type EquityHistoryRebuildReason =
   | "duplicate_account"
+  | "key_not_syncing"
   | "account_identity_pending"
   | "awaiting_derivation";
 
@@ -3766,7 +3768,9 @@ function identityStillPending(
  * eligible key is a duplicate of a working holder, and every eligible key on
  * okx/bybit/binance/deribit has a venue account id, is a composite member, or
  * is a duplicate whose holder in the key list carries the shared id.
- * The reason names the first failing condition, in that order.
+ * The reason names the first failing condition, in that order. An unknown
+ * account on a key that is failing to sync is `key_not_syncing` (review C2
+ * WR-02); on any other key it is `account_identity_pending`.
  *
  * ⚠️ Review C2 fix coupling: a marked duplicate behind a NOT-working holder
  * reads as identity-known and ordinary here, so "ready" relies on the writers
@@ -3782,7 +3786,21 @@ export function equityHistoryReadiness(
   if (apiKeys.some((key) => countsAsDuplicate(key, byId))) {
     return { state: "rebuilding", reason: "duplicate_account" };
   }
-  if (apiKeys.some((key) => identityStillPending(key, byId))) {
+  const pending = apiKeys.filter((key) => identityStillPending(key, byId));
+  // Review C2 WR-02: the stamper runs only after a SUCCESSFUL poll, so a key
+  // failing to sync (`error` / `sign_in_failed`; eligibility already excludes
+  // `revoked`) is never stamped while it fails. The hold stays, because its
+  // account really is unknown and the derive still counts it, but the reason
+  // names the failing key rather than promising a sync that cannot stamp it.
+  if (
+    pending.some(
+      (key) =>
+        key.sync_status !== null && NOT_WORKING_SYNC_STATUSES.has(key.sync_status),
+    )
+  ) {
+    return { state: "rebuilding", reason: "key_not_syncing" };
+  }
+  if (pending.length > 0) {
     return { state: "rebuilding", reason: "account_identity_pending" };
   }
   if (!series) return { state: "rebuilding", reason: "awaiting_derivation" };

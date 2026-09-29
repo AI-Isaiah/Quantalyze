@@ -1633,6 +1633,44 @@ describe("equityHistoryReadiness — plan 11 ready condition", () => {
     ).toBe("account_identity_pending");
   });
 
+  // Review C2 WR-02. The stamper runs only after a SUCCESSFUL poll, so an
+  // eligible ccxt key in `error` or `sign_in_failed` with no id is never
+  // stamped while it fails. The hold stays (its account really is unknown, and
+  // the derive still counts it), but the reason must not promise a sync that
+  // cannot happen: it names the failing key instead.
+  it("an eligible ccxt key with no id that is failing to sync is key_not_syncing, not identity-pending", () => {
+    for (const status of ["error", "sign_in_failed"]) {
+      expect(
+        equityHistoryReadiness(
+          [key({ venue_account_id: null, sync_status: status })],
+          series,
+        ),
+      ).toEqual({ state: "rebuilding", reason: "key_not_syncing" });
+    }
+    // A working key with no id is still the ordinary pending case.
+    expect(
+      equityHistoryReadiness(
+        [key({ venue_account_id: null, sync_status: null })],
+        series,
+      ).reason,
+    ).toBe("account_identity_pending");
+    // One failing and one working key, both unstamped: the failing key is the
+    // one the owner can act on, so it is named.
+    expect(
+      equityHistoryReadiness(
+        [
+          key({ id: "k-ok", venue_account_id: null }),
+          key({ id: "k-bad", venue_account_id: null, sync_status: "error" }),
+        ],
+        series,
+      ).reason,
+    ).toBe("key_not_syncing");
+    // A failing key whose account IS known does not block on identity.
+    expect(
+      equityHistoryReadiness([key({ sync_status: "error" })], series),
+    ).toEqual({ state: "ready", reason: null });
+  });
+
   it("a composite member, sFOX and MT5 do not block on a missing account id", () => {
     expect(
       equityHistoryReadiness(
