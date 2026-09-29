@@ -3911,6 +3911,7 @@ Plans:
 - **SFH-08:** a key that has never polled adds $0 to the day's persisted total; only a counter records it.
 - **SFH-09:** a carried balance has no age limit (a WARNING above 3 days only). The limit is a founder call.
 - **R2-CR-02 residual:** two WORKING keys on one account that are both still unstamped are counted twice while that lasts.
+- **R3 IN-05:** one corrupt `key_inputs` row on an older key used for stitching fails the whole book permanently, while the page says the history is recomputed daily.
 - **R3-WR-02 (landing constraint, recorded here for the next writer change):** a deploy between the 04:00 poll and the 05:00 refresh writes one stale row per emptied account.
 - Success: each item is fixed with a test that fails on the old behaviour, or closed by a recorded founder decision.
 
