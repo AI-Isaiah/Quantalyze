@@ -6004,7 +6004,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # state is identical; a day present before and after the write is never
     # absent in between. Partial failure changes shape accordingly: a worker
     # death between the upsert and the delete now leaves a refused day's STALE
-    # row present until the retry heals it, instead of leaving the span empty.
+    # row present until the next successful derive heals it (a retry is not
+    # guaranteed: SFH-C3R3-02), instead of leaving the span empty.
     #
     # SPAN/SCOPE bound — the delete must NEVER remove legitimate out-of-scope
     # history. The authoritative span is EXACTLY the dense reconstructed calendar
@@ -8940,7 +8941,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # already-complete strategy, a death between the dailies upsert/reconcile-delete
     # (above; upsert-first since C3 topic H) and the scalar flip leaves old-scalar +
     # partially-rewritten dailies visible (never absent days since topic H)
-    # until the authoritative-re-derive retry heals it (_reconcile_full_delete
+    # until the next successful derive heals it (_reconcile_full_delete
     # idempotence + single-row series upserts). That transient chart/KPI mismatch
     # window is PRE-EXISTING and UNCHANGED here — 105 makes nothing worse. Strict
     # atomicity (a service-role SECDEF finalize RPC) is deliberately DEFERRED to ride
