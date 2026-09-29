@@ -17091,7 +17091,9 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     ["an unrecognised state", "partial", 3, "legacy"],
     ["ready", "ready", 3, "derived"],
   ] as const)(
-    "blank mode + equityHistoryState %s (%s snapshots, %s source): no disclosure",
+    // Review C3 SFH-C3-05 / IN-04: one placeholder per column, in row order
+    // (label, state, snapshotCount, source), so a red run names its case.
+    "blank mode + %s (equityHistoryState %s, %s snapshots, %s source): no disclosure",
     (_label, state, snapshotCount, equityCurveSource) => {
       const payload = makePayload({
         equityHistoryState: state as never,
