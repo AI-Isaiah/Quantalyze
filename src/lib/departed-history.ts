@@ -36,6 +36,7 @@ export type DepartedHistoryReason =
   | "distinct_account"
   | "same_account_as_connected_key"
   | "same_account_as_later_key"
+  | "same_account_as_earlier_key"
   | "latest_key_on_account"
   | "account_unknown"
   | "owner_excluded"
@@ -206,23 +207,45 @@ export function departedHistoryInclusion(
           : a[2] < b[2] ? -1 : a[2] > b[2] ? 1 : 0,
     );
   const position = countedDeparted.findIndex((entry) => entry[2] === key.id);
-  const successor = countedDeparted[position + 1] ?? null;
+  // SFH-C4-07: a key that stops counting before a key ordered ahead of it is
+  // COVERED — that earlier key reads the account over all its days. It counts
+  // zero days and bounds nothing; otherwise the earlier key's tail after the
+  // covered key's end would count nowhere.
+  const lastCountable = new Map(
+    [...sameAccount, key].map((k) => [k.id, ownWindow(k)?.[1] ?? BEFORE_EVERY_DAY]),
+  );
+  const covered = new Set(
+    countedDeparted
+      .filter((entry, index) =>
+        countedDeparted
+          .slice(0, index)
+          .some((earlier) => lastCountable.get(entry[2])! < lastCountable.get(earlier[2])!),
+      )
+      .map((entry) => entry[2]),
+  );
+  const isCovered = covered.has(key.id);
+  const successor = isCovered
+    ? null
+    : (countedDeparted.slice(position + 1).find((entry) => !covered.has(entry[2])) ?? null);
 
   const bounds = [until];
   if (liveFirsts.length > 0) {
     bounds.push(dayBefore(liveFirsts.reduce((a, b) => (b < a ? b : a))));
   }
+  if (isCovered) bounds.push(BEFORE_EVERY_DAY);
   if (successor !== null) bounds.push(dayBefore(successor[0]));
   const countedUntil = bounds.reduce((a, b) => (b < a ? b : a));
 
   const reason: DepartedHistoryReason =
     liveFirsts.length > 0
       ? "same_account_as_connected_key"
-      : successor !== null
-        ? "same_account_as_later_key"
-        : position > 0
-          ? "latest_key_on_account"
-          : "distinct_account";
+      : isCovered
+        ? "same_account_as_earlier_key"
+        : successor !== null
+          ? "same_account_as_later_key"
+          : position > 0
+            ? "latest_key_on_account"
+            : "distinct_account";
   return countedUntil < first
     ? { included: false, until: null, reason }
     : { included: true, until: countedUntil, reason };
@@ -261,6 +284,8 @@ export function departedHistorySentence(
       return "History not included: a key you still have connected reads the same exchange account over these days.";
     case "same_account_as_later_key":
       return "History not included: a later key read the same exchange account over these days.";
+    case "same_account_as_earlier_key":
+      return "History not included: an earlier key read the same exchange account over all of these days.";
     case "no_returns":
       return "No history to include: this key has no daily returns before it stopped.";
     default:

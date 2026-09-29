@@ -391,6 +391,60 @@ def test_no_two_counted_keys_share_a_known_account_on_any_day(case: dict[str, An
     assert account_identity_collisions(counted) == []
 
 
+def _own_days(key: dict[str, Any]) -> list[str]:
+    """Every day a departed key could count: first returns day to min(end, last)."""
+    from services.job_worker import _utc_day
+
+    first, last = key["first_returns_day"], key["last_returns_day"]
+    if not first or not last:
+        return []
+    until = min(_utc_day(key["disconnected_at"]) or last, last)
+    if until < first:
+        return []
+    return [d.date().isoformat() for d in pd.date_range(first, until, freq="D")]
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
+def test_no_day_of_a_known_account_is_dropped(case: dict[str, Any]) -> None:
+    """SFH-C4-07: the other half of B4. On a known account, every day some
+    counted-eligible departed key read (not excluded, before any live key on the
+    account takes over) is counted by exactly one key. Without it, a later key
+    that ends first cut the earlier key's tail and those days counted nowhere,
+    with no flag. A live key with no returns yet is skipped: the book rebuilds
+    until it has them (WR-04)."""
+    from services.job_worker import (
+        _is_live_key,
+        account_identity_tokens,
+        departed_history_inclusion,
+    )
+
+    keys = case["keys"]
+    tokens = account_identity_tokens(keys)
+    decisions = departed_history_inclusion(keys)
+    for token in {t for t in tokens.values() if t is not None}:
+        on_account = [k for k in keys if tokens[k["id"]] == token]
+        live = [k for k in on_account if _is_live_key(k)]
+        if any(not k["first_returns_day"] for k in live):
+            continue
+        live_start = min((k["first_returns_day"] for k in live), default=None)
+        needed = {
+            day
+            for k in on_account
+            if not _is_live_key(k) and k.get("history_inclusion") != "exclude"
+            for day in _own_days(k)
+            if live_start is None or day < live_start
+        }
+        counted: dict[str, int] = {}
+        for k in on_account:
+            decision = decisions.get(k["id"])
+            if decision is None or not decision.included:
+                continue
+            for day in _own_days({**k, "last_returns_day": decision.until}):
+                counted[day] = counted.get(day, 0) + 1
+        assert sorted(needed - set(counted)) == [], token
+        assert {d: n for d, n in counted.items() if n > 1} == {}, token
+
+
 def _fixture_supabase(case: dict[str, Any]) -> _FakeSupabase:
     """Every key of the case as an api_keys row, dense daily returns from its first
     to its last returns day, and a key_inputs row with an anchor, so the job has

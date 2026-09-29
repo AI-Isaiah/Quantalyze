@@ -10600,9 +10600,13 @@ def departed_history_inclusion(
       (founder-confirmed 2026-09-25); 'include' counts it to its end day.
     * Known account: a LIVE key on it bounds the departed key to the day before
       the live key's first returns day. The COUNTED departed keys on it (not
-      excluded, with returns) are ordered by (first, last, id), each bounded to
-      the day before the next one's first day (B4: on no day do two counted
-      keys share a known account). 'include' never lifts a bound.
+      excluded, with returns) are ordered by (first, last, id). A key whose last
+      countable day is before that of a key ordered ahead of it is COVERED (that
+      key reads the account over all its days): it counts zero days and bounds
+      nothing, so a later key that ends first never cuts an earlier key's tail
+      (SFH-C4-07). Every other one is bounded to the day before the next
+      uncovered key's first day (B4: on no day do two counted keys share a
+      known account). 'include' never lifts a bound.
     """
     identity = account_identity_tokens(keys)
     live_ids = {str(row["id"]) for row in keys if _is_live_key(row)}
@@ -10622,6 +10626,10 @@ def departed_history_inclusion(
         key_id: _own_window(row)
         for key_id, row in rows_by_id.items()
         if key_id not in live_ids
+    }
+    # The last day each departed key could count, for the COVERED test below.
+    last_countable = {
+        key_id: window[1] for key_id, window in windows.items() if window is not None
     }
     decisions: dict[str, DepartedHistoryDecision] = {}
     for key_id, row in rows_by_id.items():
@@ -10669,18 +10677,38 @@ def departed_history_inclusion(
         position = next(
             index for index, entry in enumerate(counted_departed) if entry[2] == key_id
         )
+        # SFH-C4-07: a key that stops counting before a key ordered ahead of it
+        # is COVERED — that earlier key reads the account over all its days. It
+        # counts zero days and bounds nothing; otherwise the earlier key's tail
+        # after the covered key's end would count nowhere.
+        covered = {
+            entry[2]
+            for index, entry in enumerate(counted_departed)
+            if any(
+                last_countable[entry[2]] < last_countable[earlier[2]]
+                for earlier in counted_departed[:index]
+            )
+        }
         bounds = [until]
         if live_firsts:
             bounds.append(_day_before(min(live_firsts)))
-        successor = (
-            counted_departed[position + 1]
-            if position + 1 < len(counted_departed)
-            else None
+        successor = next(
+            (
+                entry
+                for entry in counted_departed[position + 1:]
+                if entry[2] not in covered
+            ),
+            None,
         )
+        if key_id in covered:
+            bounds.append(_BEFORE_EVERY_DAY)
+            successor = None
         if successor is not None:
             bounds.append(_day_before(successor[0]))
         if live_firsts:
             reason = "same_account_as_connected_key"
+        elif key_id in covered:
+            reason = "same_account_as_earlier_key"
         elif successor is not None:
             reason = "same_account_as_later_key"
         elif position > 0:
