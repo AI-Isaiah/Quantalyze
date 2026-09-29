@@ -203,6 +203,84 @@ def eligible_key_predicate(key_row: Mapping[str, Any]) -> bool:
     return is_active and sync_status != "revoked" and disconnected_at is None
 
 
+# D-18 (founder, 2026-09-27). The last-sync statuses that make a key NOT
+# working. Twin of NOT_WORKING_SYNC_STATUSES in src/lib/account-share-note.ts and
+# of the tuple in set_departed_key_history_inclusion (migration 20260927180000);
+# a parity test pins all three.
+NOT_WORKING_SYNC_STATUSES: frozenset[str] = frozenset({"revoked", "sign_in_failed", "error"})
+
+# The two account_share_kind values that mean "this key reads the same exchange
+# account as the key named in account_shared_with_api_key_id" (D-01, D-04).
+SHARED_ACCOUNT_KINDS: frozenset[str] = frozenset({"duplicate", "composite_member"})
+
+
+def working_holder_predicate(key_row: Mapping[str, Any] | None) -> bool:
+    """D-18: the READER RULE in COMMENT ON COLUMN api_keys.account_share_kind
+    (migration 20260927180000). A key is WORKING when it is active, not
+    disconnected, and its last sync is NULL or not revoked / sign_in_failed /
+    error. A marked key counts through its holder only while that holder is
+    working; otherwise the account is counted by a working sibling instead of
+    by nobody. The NULL leg keeps a never-synced key working, as
+    ``eligible_key_predicate`` does. A missing row is not working.
+
+    Twin of ``isWorkingHolder`` in src/lib/account-share-note.ts. Every working
+    key is eligible; an ``error`` or ``sign_in_failed`` key is eligible but not
+    working, which is why a writer that swaps this rule in must also drop such a
+    holder from its sum (see ``account_groups``)."""
+    if key_row is None:
+        return False
+    sync_status = key_row.get("sync_status")
+    return (
+        key_row.get("is_active") is True
+        and key_row.get("disconnected_at") is None
+        and (sync_status is None or sync_status not in NOT_WORKING_SYNC_STATUSES)
+    )
+
+
+def account_groups(
+    key_rows: Sequence[Mapping[str, Any]],
+) -> list[list[Mapping[str, Any]]]:
+    """The allocator's keys grouped by the exchange account they read.
+
+    A group is a holder plus every key whose ``account_shared_with_api_key_id``
+    points at it with a SHARED_ACCOUNT_KINDS marker, followed transitively (a key
+    stamped against a holder that was itself once marked). A key that is
+    unmarked, carries another kind, points at itself, or points at a key that is
+    not among ``key_rows`` is a group of one: an unresolvable marker never merges
+    or removes an account.
+
+    Both allocator writers count each group ONCE (Phase 167.1.2 D-01, D-04,
+    D-18), so which key of a group is counted is a property of the group, never
+    of the order in which the stamper met the keys (C1 review WR-03: the marker's
+    direction follows stamp order, not seniority). Deterministic: members sorted
+    by id, groups by their first member's id."""
+    ids = [str(r.get("id")) for r in key_rows if r.get("id") is not None]
+    by_id = {str(r.get("id")): r for r in key_rows if r.get("id") is not None}
+    parent = {key_id: key_id for key_id in ids}
+
+    def _find(key_id: str) -> str:
+        while parent[key_id] != key_id:
+            parent[key_id] = parent[parent[key_id]]
+            key_id = parent[key_id]
+        return key_id
+
+    for key_id in ids:
+        row = by_id[key_id]
+        if row.get("account_share_kind") not in SHARED_ACCOUNT_KINDS:
+            continue
+        holder_id = row.get("account_shared_with_api_key_id")
+        if holder_id is None or str(holder_id) == key_id or str(holder_id) not in by_id:
+            continue
+        left, right = _find(key_id), _find(str(holder_id))
+        if left != right:
+            parent[max(left, right)] = min(left, right)
+
+    grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for key_id in sorted(ids):
+        grouped[_find(key_id)].append(by_id[key_id])
+    return [grouped[root] for root in sorted(grouped, key=lambda r: str(grouped[r][0].get("id")))]
+
+
 def blend_concurrent_returns(
     series_by_key: Mapping[str, pd.Series],
     weights_by_key: Mapping[str, float],

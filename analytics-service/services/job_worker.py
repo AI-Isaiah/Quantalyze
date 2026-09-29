@@ -10242,16 +10242,6 @@ def account_identity_collisions(
     return collisions
 
 
-def _holder_is_working(holder: Mapping[str, Any] | None) -> bool:
-    """READER RULE on api_keys.account_share_kind: a marked key is counted through
-    its holder only while that holder has ``disconnected_at IS NULL`` and
-    ``sync_status <> 'revoked'``. ``is_active`` is not part of the rule. A missing
-    holder is not working — the marked key then counts on its own."""
-    if holder is None:
-        return False
-    return holder.get("disconnected_at") is None and holder.get("sync_status") != "revoked"
-
-
 async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult:
     """Phase 115.1 (RD-3 Option B) — CRAWL-FREE, DECRYPTION-FREE allocator
     $-equity compose.
@@ -10278,7 +10268,12 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     import pandas as pd
 
     from services.allocator_equity_compose import compose_allocator_equity
-    from services.allocator_equity_derive import eligible_key_predicate
+    from services.allocator_equity_derive import (
+        SHARED_ACCOUNT_KINDS,
+        account_groups,
+        eligible_key_predicate,
+        working_holder_predicate,
+    )
     from services.external_flows import ExternalFlow, validate_flow_shape
     from services.nav_twr import NavReconstructionError
     from services.redact import scrub_freeform_string
@@ -10318,38 +10313,65 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     eligible_ids = {r["id"] for r in key_rows if eligible_key_predicate(r)}
     rows_by_id = {r["id"]: r for r in key_rows}
 
-    # D-04: a composite_member non-holder whose holder is also eligible is the
-    # same venue account. Drop it from the COUNTED set before any loader runs so
-    # its series cannot be summed on top of the holder. Do NOT treat its
-    # key_inputs row as an orphan — the key is still eligible; only the compose
-    # skips it. The holder stays.
-    excluded_composite: set[str] = set()
-    for row in key_rows:
-        if row["id"] not in eligible_ids:
+    # D-01 / D-04 / D-18: one exchange account is ONE counted key. Keys that read
+    # one account form a group (account_groups: a holder plus every key marked
+    # against it). Of a group's ELIGIBLE members exactly one is counted: a
+    # WORKING one (D-18) when any works, the holder first. A failing holder is
+    # still eligible, so it must LEAVE the sum when a working marked key counts
+    # the account (the holder-drop half): the marked key's venue_account_id is
+    # NULL while the holder keeps the index slot, so the collision gate below
+    # cannot see the pair and would let one account be summed twice. When no
+    # member works, the account is still counted once (through the holder, so
+    # its history is kept) and the job says so at WARNING with a payload flag.
+    # A key left out here keeps its key_inputs row (it is still eligible; only
+    # the compose skips it), so it is never cleaned up as an orphan.
+    excluded_shared: set[str] = set()
+    composite_counted_once = False
+    duplicate_counted_once = False
+    no_working_groups = 0
+    for group in account_groups(key_rows):
+        members = [row for row in group if row["id"] in eligible_ids]
+        if len(members) < 2:
             continue
-        if row.get("account_share_kind") != "composite_member":
-            continue
-        holder_id = row.get("account_shared_with_api_key_id")
-        if (
-            isinstance(holder_id, str)
-            and holder_id
-            and holder_id != row["id"]
-            and holder_id in eligible_ids
-        ):
-            excluded_composite.add(row["id"])
-    counted_ids = eligible_ids - excluded_composite
+        group_ids = {str(row["id"]) for row in group}
+        working = [row for row in members if working_holder_predicate(row)]
+        if not working:
+            no_working_groups += 1
+        pool = working or members
+
+        def _is_marked_in_group(row: Mapping[str, Any]) -> bool:
+            holder_id = row.get("account_shared_with_api_key_id")
+            return (
+                row.get("account_share_kind") in SHARED_ACCOUNT_KINDS
+                and holder_id is not None
+                and str(holder_id) != str(row["id"])
+                and str(holder_id) in group_ids
+            )
+
+        kept = min(pool, key=lambda row: (_is_marked_in_group(row), str(row["id"])))
+        excluded_shared.update(row["id"] for row in members if row is not kept)
+        kinds = {row.get("account_share_kind") for row in group}
+        composite_counted_once = composite_counted_once or "composite_member" in kinds
+        duplicate_counted_once = duplicate_counted_once or "duplicate" in kinds
+    counted_ids = eligible_ids - excluded_shared
     counted_rows = [row for row in key_rows if row["id"] in counted_ids]
 
-    # Identity gate over the COUNTED set (open intervals: these are the eligible
-    # live keys). A 'duplicate' counts as a duplicate only while its holder is
-    # working; a departed holder leaves the marked key ordinary, and a same-id
-    # overlap with another counted key is then a collision, not a duplicate.
-    # Checked BEFORE loading returns so a double-counted book never composes.
+    # Identity gate. A 'duplicate' is a duplicate while its holder is WORKING
+    # (D-18) — the same rule as queries.ts countsAsDuplicate, so the writer and
+    # the reader agree — and the curve is refused, whatever the marked key's own
+    # status. A holder that is not working leaves the marked key ordinary (the
+    # group resolution above counts the account once), and a same-id overlap
+    # with another counted key is then a collision, not a duplicate. Checked
+    # BEFORE loading returns so a double-counted book never composes.
     duplicate_keys = [
         row
-        for row in counted_rows
-        if row.get("account_share_kind") == "duplicate"
-        and _holder_is_working(rows_by_id.get(row.get("account_shared_with_api_key_id")))
+        for row in key_rows
+        if row["id"] in eligible_ids
+        and row.get("account_share_kind") == "duplicate"
+        and row.get("account_shared_with_api_key_id") != row["id"]
+        and working_holder_predicate(
+            rows_by_id.get(row.get("account_shared_with_api_key_id"))
+        )
     ]
     collisions = account_identity_collisions(
         [
@@ -10380,6 +10402,19 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             len(collisions),
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
+
+    if no_working_groups:
+        # D-18: an account none of whose keys works is still counted once,
+        # through the holder, so its history stays; its series stops on the day
+        # the keys started failing and carries flat after it. Counts only (no
+        # key id, no venue id, no USD — T-167.1.2-22).
+        logger.warning(
+            "derive_allocator_equity: %d shared account(s) for allocator %s have "
+            "no working key — each is counted once, through its holder, whose "
+            "series may have stopped (flag shared_account_no_working_key)",
+            no_working_groups,
+            allocator_id,
+        )
 
     # ── 2. Per-key returns — ISO-STRING day index built DIRECTLY from the
     #      'date' column (carry-in #3). NEVER pd.to_datetime / DatetimeIndex:
@@ -10482,9 +10517,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 orphan_kinds.append(kind)
                 continue
             if api_key_id not in counted_ids:
-                # Composite non-holder: still eligible, so the row stays. The
-                # account is counted through its holder; this series is not an
-                # input.
+                # A shared-account key left out by the group resolution: still
+                # eligible, so the row stays. The account is counted through
+                # another key of its group; this series is not an input.
                 continue
             key_inputs_ids.add(api_key_id)
             payload = row.get("payload") or {}
@@ -10557,11 +10592,16 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             flows_by_key,
             anchors_by_key,
             null_anchor_reasons,
-            benign_flag_tokens=(
-                ["composite_shared_account_counted_once"]
-                if excluded_composite
-                else None
-            ),
+            benign_flag_tokens=[
+                token
+                for token, raised in (
+                    ("composite_shared_account_counted_once", composite_counted_once),
+                    ("duplicate_shared_account_counted_once", duplicate_counted_once),
+                    ("shared_account_no_working_key", no_working_groups > 0),
+                )
+                if raised
+            ]
+            or None,
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3

@@ -1699,6 +1699,200 @@ async def test_composite_member_counted_once_and_trustworthy() -> None:
     assert "key_inputs:key-H" in kinds
 
 
+# ---------------------------------------------------------------------------
+# 167.1.2 C2 review CR-01 / SFH-01..03 — the D-18 working-holder rule.
+#
+# D-18 (founder, 2026-09-27; COMMENT ON COLUMN api_keys.account_share_kind in
+# migration 20260927180000): a marked key counts through its holder only while
+# the holder is WORKING — active, not disconnected, and a last sync that is NULL
+# or not revoked / sign_in_failed / error. Before this fix the derive used the
+# superseded rule (not disconnected, not revoked), so an inactive or failing
+# holder deleted the curve as "account_duplicate". A naive predicate swap on its
+# own would then SUM a failing-but-eligible holder and its healthy marked key:
+# the marked key's venue_account_id is NULL (_mark_shared never writes it while
+# the holder keeps the index slot), so the collision gate cannot see the pair.
+#
+# Fixtures are the production shape: the marked key carries NO venue id, the
+# holder carries the shared one, and the two anchors DIFFER so the terminal
+# equity names which key the account was counted through.
+# ---------------------------------------------------------------------------
+
+HOLDER_ANCHOR = 100_000.0
+MARKED_ANCHOR = 60_000.0
+
+
+def _shared_pair(alloc: str, kind: str, *, holder: dict[str, Any], marked: dict[str, Any] | None = None) -> _FakeSupabase:
+    csv_h, ki_h = _series_rows(alloc, "key-H", HOLDER_ANCHOR)
+    csv_m, ki_m = _series_rows(alloc, "key-M", MARKED_ANCHOR)
+    return _FakeSupabase({
+        "api_keys": [
+            _gate_key("key-H", alloc, venue_account_id="venue-shared", **holder),
+            _gate_key(
+                "key-M", alloc,
+                account_share_kind=kind,
+                account_shared_with_api_key_id="key-H",
+                **(marked or {}),
+            ),
+        ],
+        "csv_daily_returns": csv_h + csv_m,
+        DERIVED_TABLE: [ki_h, ki_m, _stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+
+
+def _composed_payload(fake: _FakeSupabase) -> dict:
+    upserts = _curve_upserts(fake)
+    assert len(upserts) == 1, (
+        f"expected one composed curve, got {len(upserts)} upserts and "
+        f"{len(fake.deletes)} deletes"
+    )
+    return _extract_payload(upserts[0][1])
+
+
+def test_working_holder_predicate_is_the_d18_rule() -> None:
+    """The truth table of the D-18 rule, including the explicit NULL leg: a key
+    that has never synced is WORKING (as eligible_key_predicate treats it)."""
+    from services.allocator_equity_derive import working_holder_predicate
+
+    base = {"is_active": True, "disconnected_at": None, "sync_status": "complete"}
+    assert working_holder_predicate(base) is True
+    assert working_holder_predicate({**base, "sync_status": None}) is True
+    assert working_holder_predicate({**base, "sync_status": "complete_with_warnings"}) is True
+    assert working_holder_predicate({**base, "sync_status": "rate_limited"}) is True
+    assert working_holder_predicate({**base, "is_active": False}) is False
+    assert working_holder_predicate({**base, "disconnected_at": "2026-09-01T00:00:00Z"}) is False
+    for status in ("revoked", "sign_in_failed", "error"):
+        assert working_holder_predicate({**base, "sync_status": status}) is False, status
+    assert working_holder_predicate(None) is False
+
+
+def test_working_holder_status_set_matches_ts_and_sql() -> None:
+    """Parity: the Python set is the TS NOT_WORKING_SYNC_STATUSES set and the SQL
+    tuple in migration 20260927180000. A status added to one side only would make
+    the writer and the reader disagree on which key an account is counted through."""
+    import re
+    from pathlib import Path
+
+    from services.allocator_equity_derive import NOT_WORKING_SYNC_STATUSES
+
+    repo = Path(__file__).resolve().parents[2]
+    ts = (repo / "src/lib/account-share-note.ts").read_text()
+    ts_block = re.search(
+        r"NOT_WORKING_SYNC_STATUSES[^=]*=\s*new Set\(\[(.*?)\]\)", ts, re.S
+    )
+    assert ts_block, "NOT_WORKING_SYNC_STATUSES not found in account-share-note.ts"
+    ts_set = set(re.findall(r'"([a-z_]+)"', ts_block.group(1)))
+
+    sql = (repo / "supabase/migrations/20260927180000_working_holder_rule_d18.sql").read_text()
+    sql_tuple = re.search(r"v_sync_status NOT IN \(([^)]*)\)", sql)
+    assert sql_tuple, "the D-18 status tuple not found in migration 20260927180000"
+    sql_set = set(re.findall(r"'([a-z_]+)'", sql_tuple.group(1)))
+
+    assert set(NOT_WORKING_SYNC_STATUSES) == ts_set == sql_set == {
+        "revoked", "sign_in_failed", "error",
+    }
+
+
+@pytest.mark.asyncio
+async def test_duplicate_of_an_inactive_holder_counts_on_its_own() -> None:
+    """D-18: an inactive holder (not disconnected, not revoked) is not working.
+    It is not eligible either, so the healthy marked key is the only key that
+    can count the account. The old rule refused the curve as a duplicate."""
+    alloc = "alloc-inactive"
+    fake = _shared_pair(alloc, "duplicate", holder={"is_active": False})
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["is_trustworthy"] is True
+    assert payload["inputs"]["n_keys"] == 1
+    assert payload["curve"][-1]["equity_usd"] == pytest.approx(MARKED_ANCHOR, rel=1e-6)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["error", "sign_in_failed"])
+async def test_duplicate_of_a_failing_holder_is_counted_once_through_the_healthy_key(
+    status: str,
+) -> None:
+    """D-18 holder-drop half: a failing holder is still ELIGIBLE (active, not
+    revoked, not disconnected), so after the predicate swap it would be summed
+    beside the now-ordinary marked key — one account counted twice, with no
+    collision to catch it. The account is counted exactly once, through the
+    healthy key; the failing holder leaves the sum (its key_inputs row stays)."""
+    alloc = f"alloc-dup-{status}"
+    fake = _shared_pair(alloc, "duplicate", holder={"sync_status": status})
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 1, "one account must be ONE counted key"
+    terminal = payload["curve"][-1]["equity_usd"]
+    assert terminal == pytest.approx(MARKED_ANCHOR, rel=1e-6), (
+        f"counted through the failing holder or summed both: {terminal}"
+    )
+    assert "duplicate_shared_account_counted_once" in payload["flags"]
+    kinds = [row["kind"] for row in fake.rows[DERIVED_TABLE]]
+    assert "key_inputs:key-H" in kinds, "an eligible key's inputs are not an orphan"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "holder",
+    [
+        pytest.param({"sync_status": "error"}, id="holder-error"),
+        pytest.param({"sync_status": "sign_in_failed"}, id="holder-sign-in-failed"),
+        pytest.param({"is_active": False}, id="holder-inactive"),
+    ],
+)
+async def test_composite_member_of_a_non_working_holder_counts_through_the_member(
+    holder: dict[str, Any],
+) -> None:
+    """SFH-03: the composite branch used eligible_key_predicate, which admits a
+    failing holder, so the stale holder was counted and the healthy member's P&L
+    left the book as flat 0% days while the payload stayed trustworthy."""
+    alloc = "alloc-comp-failing"
+    fake = _shared_pair(alloc, "composite_member", holder=holder)
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 1
+    assert payload["curve"][-1]["equity_usd"] == pytest.approx(MARKED_ANCHOR, rel=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_shared_account_with_no_working_key_is_counted_once_and_loudly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Neither key of the pair is working (both eligible, both failing). The
+    account is still counted exactly once — through the holder, whose history is
+    kept — never twice and never as $0, and the job says so at WARNING with a
+    flag on the payload."""
+    import logging
+
+    alloc = "alloc-none-working"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    fake = _shared_pair(
+        alloc, "duplicate",
+        holder={"sync_status": "error"},
+        marked={"sync_status": "sign_in_failed"},
+    )
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 1
+    assert payload["curve"][-1]["equity_usd"] == pytest.approx(HOLDER_ANCHOR, rel=1e-6)
+    assert "shared_account_no_working_key" in payload["flags"]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("no working key" in r.getMessage() for r in warnings), caplog.text
+    assert "key-H" not in caplog.text and "venue-shared" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_duplicate_whose_marked_key_fails_behind_a_working_holder_still_refuses() -> None:
+    """Reader parity (queries.ts countsAsDuplicate): an ELIGIBLE duplicate-marked
+    key whose holder is working is a duplicate, whatever the marked key's own
+    status. The curve is refused, as before."""
+    alloc = "alloc-dup-marked-failing"
+    fake = _shared_pair(alloc, "duplicate", holder={}, marked={"sync_status": "error"})
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    assert _curve_upserts(fake) == []
+    assert len(_curve_deletes(fake, alloc)) == 1
+
+
 @pytest.mark.asyncio
 async def test_compose_does_not_read_legacy_snapshots() -> None:
     """The fake raises on any read of allocator_equity_snapshots. The job still
