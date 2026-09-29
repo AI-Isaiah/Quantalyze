@@ -264,6 +264,9 @@ describe("169 D-41 — a composite's csv_daily_returns read outage is not cached
       expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(captureToSentry).mock.calls[0][1]).toMatchObject({
         tags: { stage: "factsheet-resolve", reason: "read_error", code: "57014" },
+        // SFH L-2: the event carries the PostgREST message, not only the code (a
+        // network failure has no code, and "(none)" alone names nothing).
+        extra: { errorMessage: "synthetic statement timeout" },
       });
 
       // Request 2: same run, the csv read recovers. It must BUILD, not replay

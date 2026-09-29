@@ -513,6 +513,8 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
         strategy_id: STRATEGY_ID,
         read: "csv_daily_returns",
       },
+      // SFH L-2 (review round 1): the PostgREST message rides in `extra`.
+      extra: { errorMessage: "synthetic csv outage" },
     });
     seed(outage.row, outage.csv ?? [], null, outage.csvError);
     vi.mocked(captureToSentry).mockClear();

@@ -262,14 +262,18 @@ function compositeUnbuildable(
  */
 function seriesReadError(id: string, caller: ResolveCaller, err: CompositeSeriesReadError): NotBuildable {
   const { code, read } = err;
+  const errorMessage = typeof err.cause === "string" ? err.cause : undefined;
   console.error(`[factsheet] resolve(${caller}) — ${read} read failed`, {
     id,
     caller,
-    errorMessage: typeof err.cause === "string" ? err.cause : undefined,
+    errorMessage,
     errorCode: code,
     read,
   });
   if (caller === "build") {
+    // SFH L-2 (review round 1): the event carries the PostgREST message too. A
+    // network failure has no code, so "(none)" alone named nothing.
+    // `captureToSentry` scrubs `extra` string values.
     captureToSentry(new Error(`factsheet resolve: ${read} read failed (${code})`), {
       tags: {
         stage: "factsheet-resolve",
@@ -279,6 +283,7 @@ function seriesReadError(id: string, caller: ResolveCaller, err: CompositeSeries
         strategy_id: id,
         read,
       },
+      extra: { errorMessage },
     });
   }
   return notBuildable("read_error", { code });
