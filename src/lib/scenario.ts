@@ -323,6 +323,33 @@ export function computeScenario(
     (s, x) => s + (state.weights[x.id] ?? 0),
     0,
   );
+  // Phase 167.1.2 SC-4: members present but NO weight mass (every weight 0, NaN
+  // or absent — `!(x > 0)` also catches NaN) is "no result", not a blend. Below
+  // this line `normWeight` would return 0 for every member and the day loop's
+  // `activeWeightSum > 0 ? … : 0` would write 0 every day: the founder saw 100
+  // days of a flat +0.00% curve on a book whose contributing keys all carried
+  // weight 0. Same honest empty shape as the zero-member return above, only
+  // with the real member set named, since the members did exist.
+  if (!(totalWeight > 0)) {
+    return {
+      n: 0,
+      twr: null,
+      cagr: null,
+      volatility: null,
+      sharpe: null,
+      sortino: null,
+      max_drawdown: null,
+      max_dd_days: null,
+      correlation_matrix: null,
+      avg_pairwise_correlation: null,
+      equity_curve: [],
+      effective_start: null,
+      effective_end: null,
+      portfolio_daily_returns: [],
+      member_count: members.length,
+      member_ids,
+    };
+  }
   const normWeight = (id: string) =>
     totalWeight > 0 ? (state.weights[id] ?? 0) / totalWeight : 0;
 

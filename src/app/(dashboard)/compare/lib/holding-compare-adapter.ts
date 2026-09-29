@@ -65,20 +65,22 @@ export type HoldingCompareAnalytics = {
  * withholds on My Allocation. That store can count one exchange account twice
  * when two keys read it (a +100% / -50% day inside one symbol's series), and a
  * $-level ratio reads buying or selling more of a symbol as a gain or loss.
- * Until plan 10 repairs the writer and plan 11 defines "ready", the item
- * carries NO analytics: `historyState` is "rebuilding" and `analytics` is
- * null, so the numbers never leave the server. Consumers are fail-closed:
- * anything other than an explicit "ready" renders the rebuilding note.
+ * Plan 11 (2026-09-29) DECIDED to keep this "rebuilding". My Allocation can
+ * be ready off `payload.returns`, a book-level flow-neutral series; nothing
+ * here reads it. These four numbers are still `value[i] / value[i-1] - 1`
+ * over a symbol's `breakdown` dollars (`reconstructAndAnalyze`), so buying or
+ * selling more of a symbol reads as a gain or loss. Plan 10 makes the refresh
+ * write each account once from its merge on; it does not rewrite the rows
+ * already stored, and it does not touch this ratio. No per-holding
+ * flow-adjusted source exists, and no roadmap phase owns one (measured
+ * 2026-09-29); 167.1.2-11-SUMMARY.md routes that. Flip only when this
+ * computation reads such a source. The `historyState` test seam keeps the
+ * ready branch pinned.
  *
- * Reversible by design: flipping this constant to "ready" restores the
+ * Consumers are fail-closed: anything other than an explicit "ready" renders
+ * the rebuilding note. Flipping this constant to "ready" restores the
  * pre-D-13 behaviour (the item carries the analytics computed from the
- * trustworthy rows, and availability is unchanged). That claim is pinned by
- * the adapter test through `fetchHoldingCompareItem`'s `historyState` test
- * seam, so the "ready" branch stays under test while production uses this
- * default. Plan 11 must DECIDE that flip for /compare explicitly
- * (`167.1.2-11-PLAN.md` carries it as an acceptance line); it does not follow
- * from the My Allocation curve becoming ready, because the level-ratio defect
- * is specific to this computation.
+ * trustworthy rows, and availability is unchanged).
  */
 export const HOLDING_COMPARE_HISTORY_STATE: "rebuilding" | "ready" =
   "rebuilding";
@@ -199,7 +201,7 @@ export async function fetchHoldingCompareItem(params: {
    * @internal Test seam (Phase 167.1.2 review round 2, WR-01). Production
    * callers omit it and get HOLDING_COMPARE_HISTORY_STATE (D-13). It exists so
    * the "ready" branch, which the constant makes unreachable today, stays
-   * pinned until plan 11 decides the flip.
+   * pinned. Plan 11 kept the constant "rebuilding"; see its docblock.
    */
   historyState?: "rebuilding" | "ready";
 }): Promise<HoldingCompareItem | null> {

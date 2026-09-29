@@ -54,6 +54,15 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // header. Pass undefined instead so the "vs" label disappears entirely
   // when there's nothing to compare against.
   const bn = cmpKey === "none" ? undefined : cmp.shortName;
+  // Phase 167.1.2 plan 07 (SC-5b) — observations per year for the Main Metrics
+  // warning, read from the payload this rail already renders. Absent (a stale
+  // cache) or not a positive finite number → undefined, and the warning hides.
+  const obsPerYear =
+    typeof payload.periodsPerYear === "number" &&
+    Number.isFinite(payload.periodsPerYear) &&
+    payload.periodsPerYear > 0
+      ? payload.periodsPerYear
+      : undefined;
 
   return (
     <aside className="flex flex-col gap-12">
@@ -67,11 +76,15 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
           </Kpm>
         </Panel>
         <Panel title="Main Metrics" benchHeader={bn}>
-          {m.n < 252 && (
+          {/* Phase 167.1.2 plan 07 (SC-5b): one year is the payload's own
+              annualisation basis (365 crypto / the book's blend basis), not a
+              fixed trading-day count. A payload with no basis shows no warning:
+              assuming one is the defect this replaced. */}
+          {obsPerYear != null && m.n < obsPerYear && (
             <p className="mb-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
-              ⚠ Only {m.n} observations ({(m.n / 252).toFixed(2)}y) — Sharpe / Sortino / Calmar below
+              ⚠ Only {m.n} observations ({(m.n / obsPerYear).toFixed(2)}y) — Sharpe / Sortino / Calmar below
               have wide statistical confidence intervals. Conventional reliability threshold is
-              ≥ 252 trading days (1 year).
+              ≥ {obsPerYear} observations (1 year).
             </p>
           )}
           <Kpm>

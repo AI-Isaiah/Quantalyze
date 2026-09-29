@@ -1354,6 +1354,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.1.2.1 edited: edited fields: evidence, success_criteria (criterion 7, the fast-fail race, routed 2026-09-27 from the 167.1.2-12 round-3 silent-failure review)
 - Phase 166.4.1 edited: edited fields: evidence, success_criteria (criterion 6: benchmark_comparison must use the D-A interval-matched pairing; routed 2026-09-27 from the 166.4 BENCHALIGN research)
 - Phase 169.4 edited: edited fields: success_criteria (criterion 12: the allocations scenario benchmark's innerJoinByDate must use the D-A interval-matched pairing and the day-one rule; routed 2026-09-27 from the 166.4 BENCHALIGN research)
+- Phase 167.1.1 edited: routed in: D-13 /compare per-holding metrics need a flow-neutral per-holding source (from 167.1.2 PR C2, 2026-09-29)
+- Phase 167.1.2.1 edited: routed in: 8 C2 writer-side residuals from review rounds 1-3 (SFH-05 writer half, single failing key dilution, SFH-R3-02, SFH-R3-07, SFH-08, SFH-09, R2-CR-02 residual, R3-WR-02) (from 167.1.2 PR C2, 2026-09-29)
 
 ### Decisions
 

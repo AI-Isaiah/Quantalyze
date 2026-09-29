@@ -23,23 +23,20 @@ describe("/allocations/loading.tsx — route skeleton (STATE-01)", () => {
     expect(status.getAttribute("aria-live")).toBe("polite");
   });
 
-  // Phase 167.1.2 / D-02 (review round 1 IN-04). While the equity history is
-  // rebuilt the Overview (the default tab) renders no KPI strip and no curve,
-  // only a short text panel. A skeleton that draws a 4-cell KPI grid and a
-  // 320px chart block promises numbers that will not come, then shifts layout
-  // when the paragraph swaps in. The 52-UI-SPEC KPI anchor (a 4-cell
-  // `@lg:grid-cols-4` grid on a separate `@container` host) is SUSPENDED here,
-  // not deleted from the spec: plan 11 of Phase 167.1.2 restores it, and this
-  // test, when it defines "ready".
-  it("while the history is rebuilt, draws the rebuilding panel's text shape and no KPI grid or chart block", () => {
+  // Phase 167.1.2 plan 11 restored this anchor when it defined "ready".
+  // Plan 01 had suspended it (IN-04) while every book was rebuilding.
+  it("emphasizes the KPI strip as the dominant anchor — a 4-cell grid stepped by @container width, host on a SEPARATE ancestor", () => {
     const { container } = render(<AllocationsLoading />);
-    const kpiGrid = Array.from(
+    const grid = Array.from(
       container.querySelectorAll<HTMLElement>("div.grid"),
     ).find((el) => el.className.includes("@lg:grid-cols-4"));
-    expect(kpiGrid, "no KPI-strip grid while the Overview has none").toBeUndefined();
-    expect(container.innerHTML).not.toMatch(/h-\[320px\]/);
-    const block = screen.getByTestId("allocations-loading-rebuilding-block");
-    expect(block.querySelectorAll(".animate-pulse").length).toBeGreaterThanOrEqual(3);
+    expect(grid, "the KPI-anchor grid must exist").toBeDefined();
+    expect(grid!.children.length).toBe(4);
+    expect(grid!.className).not.toContain("@container");
+    const host = grid!.closest(".\\@container");
+    expect(host, "the @container host must wrap the grid").not.toBeNull();
+    expect(host).not.toBe(grid);
+    expect(container.innerHTML).toMatch(/h-\[320px\]/);
   });
 
   // ⭐ Added 2026-08-10 (153.2 review WR-06). `loading.tsx`'s docblock claimed

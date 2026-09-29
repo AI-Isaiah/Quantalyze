@@ -24,7 +24,7 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
 // mocks DO render the curve and the Sharpe label when the state allows it.
 // ---------------------------------------------------------------------------
 
-const buildPayloadSpy = vi.fn(() => ({ stub: true }));
+const buildPayloadSpy = vi.fn((..._args: unknown[]) => ({ stub: true }));
 
 vi.mock("@/components/portfolio/InsightStrip", () => ({
   InsightStrip: () => <div data-testid="mock-insight-strip" />,
@@ -49,7 +49,8 @@ vi.mock("@/app/factsheet/[id]/v2/FactsheetView", () => ({
   ),
 }));
 vi.mock("@/lib/factsheet/allocator-portfolio-payload", () => ({
-  buildAllocatorPortfolioFactsheetPayload: () => buildPayloadSpy(),
+  buildAllocatorPortfolioFactsheetPayload: (...args: unknown[]) =>
+    buildPayloadSpy(...args),
 }));
 
 const baseProps = {
@@ -321,11 +322,153 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
   // the same fixture DOES render the curve and the factsheet, so the absences
   // asserted above are the gate, not a broken fixture.
   it("ready: the curve and the factsheet render and the rebuilding panel does not", () => {
-    render(<AllocationDashboardV2 {...baseProps} equityHistoryState="ready" />);
+    const equityDailyReturns = [
+      { date: "2026-03-11", value: 0.01 },
+      { date: "2026-03-12", value: -0.02 },
+    ];
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        equityHistoryState="ready"
+        equityDailyReturns={equityDailyReturns}
+      />,
+    );
     expect(screen.getByTestId("overview-equity-curve")).toBeInTheDocument();
     expect(screen.getByTestId("mock-factsheet-body")).toBeInTheDocument();
     expect(screen.getByText("Sharpe")).toBeInTheDocument();
     expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
-    expect(buildPayloadSpy).toHaveBeenCalled();
+    // D-06: the builder receives the persisted returns, not a curve-derived series.
+    expect(buildPayloadSpy).toHaveBeenCalledWith(
+      baseProps.equityDailyPoints,
+      expect.objectContaining({ dailyReturns: equityDailyReturns }),
+    );
+  });
+
+  it.each([
+    [
+      "duplicate_account",
+      "Two of your keys read the same exchange account. Disconnect one of them on the Exchanges page and the history rebuilds.",
+    ],
+    [
+      // Review C2 WR-02: the line no longer promises the NEXT sync succeeds.
+      // The stamper runs after every successful poll, and that is all the
+      // line claims.
+      "account_identity_pending",
+      "We are confirming which exchange account each key reads. Each daily sync checks it again.",
+    ],
+    [
+      // Review C2 round 2 IN-04: with no key list to name from (a payload
+      // without the ids), the line stays true for any number of keys.
+      "key_not_syncing",
+      "A key is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+    ],
+    [
+      "awaiting_derivation",
+      "Your history is recomputed from each account's returns and cash flows once a day.",
+    ],
+    [
+      "derivation_rejected",
+      "The latest rebuild of your history did not pass its checks, so it is not shown.",
+    ],
+    [
+      // Review C2 round 2 IN-05: active voice (DESIGN.md Voice).
+      "history_read_failed",
+      "We could not load your history just now. Reload the page to try again.",
+    ],
+    [
+      // Review C2 round 3 R3-WR-03: the cause and the unlock, never "did not
+      // pass its checks". No account and no number (T-167.1.2-22a).
+      "shared_account_no_working_key",
+      "The keys that read one of your exchange accounts are all failing to sync, so that account's history stops. Fix or reconnect one of them on the Exchanges page.",
+    ],
+    [
+      "shared_account_history_truncated",
+      "One of your exchange accounts changed keys, and we cannot join its history from before the change to the new key's yet, so your history is not shown.",
+    ],
+  ] as const)("rebuilding reason %s renders its one line", (reason, line) => {
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        equityHistoryState="rebuilding"
+        equityHistoryRebuildReason={reason}
+      />,
+    );
+    const panel = screen.getByTestId("overview-equity-rebuilding");
+    expect(panel.textContent).toContain(line);
+    // Review C2 round 3 R3-WR-03: neither shared-account line falls back to
+    // the generic refusal.
+    if (reason.startsWith("shared_account_")) {
+      expect(panel.textContent).not.toContain("did not pass its checks");
+    }
+    if (
+      reason === "duplicate_account" ||
+      reason === "key_not_syncing" ||
+      reason === "shared_account_no_working_key"
+    ) {
+      expect(screen.getByRole("link", { name: "Exchanges page" })).toHaveAttribute(
+        "href",
+        "/profile?tab=exchanges",
+      );
+    }
+  });
+
+  // Review C2 round 2 IN-04. The key_not_syncing line names the key when there
+  // is exactly one, with the label the Exchanges page and the Scenario rows
+  // use (`{Exchange} — {nickname}`, or the masked id tail when the key has no
+  // nickname). Two or more keys get a plural line, never "one of your keys".
+  const notSyncing = (id: string, exchange: string, label: string) => ({
+    id,
+    exchange,
+    label,
+    is_active: true,
+    sync_status: "error",
+    last_sync_at: null,
+    account_balance_usdt: null,
+    created_at: "2026-01-01T00:00:00Z",
+    sync_error: null,
+    last_429_at: null,
+    disconnected_at: null,
+  });
+  it.each([
+    [
+      "one key with a nickname is named",
+      [notSyncing("k-bad-0001", "okx", "Main")],
+      ["k-bad-0001"],
+      "Your key OKX — Main is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+    ],
+    [
+      "one key with no nickname is named by its masked tail",
+      [notSyncing("k-bad-7f3a", "bybit", "  ")],
+      ["k-bad-7f3a"],
+      "Your key Bybit — ••••7f3a is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+    ],
+    [
+      "two keys get the plural line",
+      [notSyncing("k-a", "okx", "Main"), notSyncing("k-b", "binance", "Spare")],
+      ["k-a", "k-b"],
+      "Some of your keys are not syncing, so we cannot confirm which exchange accounts they read. Check them on the Exchanges page.",
+    ],
+    [
+      "an id missing from the key list falls back to the unnamed line",
+      [notSyncing("k-a", "okx", "Main")],
+      ["k-gone"],
+      "A key is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+    ],
+  ])("key_not_syncing: %s", (_label, apiKeys, ids, line) => {
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        apiKeys={apiKeys as never}
+        equityHistoryState="rebuilding"
+        equityHistoryRebuildReason="key_not_syncing"
+        equityHistoryNotSyncingKeyIds={ids}
+      />,
+    );
+    const panel = screen.getByTestId("overview-equity-rebuilding");
+    expect(panel.textContent).toContain(line);
+    expect(screen.getByRole("link", { name: "Exchanges page" })).toHaveAttribute(
+      "href",
+      "/profile?tab=exchanges",
+    );
   });
 });

@@ -1064,7 +1064,28 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //                scripts/mutation-runner/run.mjs to 53.`; 53 PASSES. Each
 //                separation edit was restored from a byte backup and proved
 //                with cmp. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 53;
+//
+// ⭐ MOVED 2026-09-29 (Phase 167.1.2 ACCOUNTTRUTH PR C2, review fix B, WR-04),
+//                53 -> 54: plan 12's NEW gate file supabase/tests/test_refresh_
+//                fanout_zero_snapshot_bootstrap.sql (the zero-snapshot bootstrap
+//                of migration 20260928140000, 32 arms after its review rounds)
+//                reached this branch without its census commits. The
+//                denominator moves with it, 80 -> 81. MEASURED via ONE full lane
+//                run at a6fc18e45, no file edited during it, constants still at
+//                53 / 513 (the stale-low direction the runner cannot see), `node
+//                scripts/mutation-runner/run.mjs`: `scope: FULL 54/54 annotated
+//                files`, `coverage: files 54/81`, `arms: 545/545/0`, `biting:
+//                545`, `lane-invocations: 545 … plus 54 baseline / 54 restore
+//                leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`,
+//                `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm
+//                lane time: mean 1.3s over 545 arm run(s)`, `✅ No defects. Every
+//                annotated arm bit its own arm first.`, exit 0. Per-file line:
+//                `test_refresh_fanout_zero_snapshot_bootstrap.sql: sections 27 /
+//                judged 32 / annotated 32 / waived 0 / biting 32`. The stale-low
+//                direction was observed first in src/__tests__/mutation-runner-
+//                floors.test.ts: `RATCHET STALE: 54 of 81 gate files are now
+//                annotated but FILES_FLOOR is still 53.` WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 54;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2652,7 +2673,25 @@ export const FILES_FLOOR = 53;
 //    lines: `test_api_keys_account_identity.sql: ... biting 41` and
 //    `test_claim_compute_jobs_failed_retry_pending_pair.sql: ... biting 18`.
 //    WAIVED_CEILING stays 0.
-export const ARMS_FLOOR = 513;
+// ⭐ MOVED 2026-09-29 (Phase 167.1.2 ACCOUNTTRUTH PR C2, review fix B, WR-04):
+//    513 -> 545. THIRTY-TWO arms, all in plan 12's NEW supabase/tests/
+//    test_refresh_fanout_zero_snapshot_bootstrap.sql (which also moves
+//    FILES_FLOOR 53 -> 54), against migration 20260928140000. The file reached
+//    this branch without its census commits, so the pins are re-measured here
+//    rather than carried: the reference branch's numbers were taken against an
+//    older main. MEASURED via ONE full lane run at a6fc18e45, no file edited
+//    during it: `scope: FULL 54/54 annotated files`, `coverage: files 54/81`,
+//    `arms: 545/545/0`, `biting: 545`, `lane-invocations: 545` (plus 54
+//    baseline / 54 restore legs), `lane-blocked: 0 file(s)`, `lane-probe:
+//    pg_cron AVAILABLE`, `unreachable: 27 file(s)`, `per-arm lane time: mean
+//    1.3s over 545 arm run(s)`, `✅ No defects. Every annotated arm bit its own
+//    arm first.`, exit 0. Per-file line: `test_refresh_fanout_zero_snapshot_
+//    bootstrap.sql: sections 27 / judged 32 / annotated 32 / waived 0 / biting
+//    32`. Stale-low direction OBSERVED at 513: src/__tests__/mutation-runner-
+//    floors.test.ts FAILS with `The corpus declares 545 twin(s) of which 0 are
+//    waivers, so a green run bites 545. ARMS_FLOOR is 513.` WAIVED_CEILING
+//    stays 0 — no waiver was added.
+export const ARMS_FLOOR = 545;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
