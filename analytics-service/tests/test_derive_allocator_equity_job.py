@@ -60,6 +60,8 @@ class _FakeTable:
         self._store = store
         self._filters: list[tuple[str, Any]] = []
         self._like: list[tuple[str, str]] = []
+        self._order: list[tuple[str, bool]] = []
+        self._range: tuple[int, int] | None = None
         self._is_delete = False
 
     # --- write ops: refuse the legacy store, record on the derived surface ------
@@ -112,6 +114,17 @@ class _FakeTable:
         self._like.append((col, pattern))
         return self
 
+    def order(self, col: str, desc: bool = False) -> "_FakeTable":
+        self._order.append((col, desc))
+        self._store.orders.append((self._name, col, desc))
+        return self
+
+    def range(self, start: int, end: int) -> "_FakeTable":
+        # PostgREST's range is INCLUSIVE of `end`. A new range replaces the last
+        # one, as paginated_select re-ranges the same ordered builder per page.
+        self._range = (start, end)
+        return self
+
     def _rows(self) -> list[dict]:
         rows = self._store.rows.get(self._name, [])
         out = []
@@ -124,6 +137,10 @@ class _FakeTable:
                         ok = False
                 if ok:
                     out.append(r)
+        # Apply ORDER BY right-to-left over a stable sort, so the first column
+        # is the primary key. str() keeps a row that lacks a column sortable.
+        for col, desc in reversed(self._order):
+            out = sorted(out, key=lambda r, c=col: str(r.get(c)), reverse=desc)
         return out
 
     def execute(self) -> Any:
@@ -142,12 +159,25 @@ class _FakeTable:
             ]
             self._store.rows[self._name] = remaining
             return _R(matched)
-        return _R(self._rows())
+        out = self._rows()
+        if self._range is not None:
+            start, end = self._range
+            out = out[start:end + 1]
+        if self._store.max_rows is not None:
+            # PostgREST's per-response cap (supabase/config.toml max_rows = 1000):
+            # a bare read returns the first max_rows rows and no error.
+            out = out[: self._store.max_rows]
+        return _R(out)
 
 
 class _FakeSupabase:
-    def __init__(self, rows: dict[str, list[dict]]) -> None:
+    def __init__(
+        self, rows: dict[str, list[dict]], max_rows: int | None = None
+    ) -> None:
         self.rows = rows
+        # None = no response cap, the default every older test in this file uses.
+        self.max_rows = max_rows
+        self.orders: list[tuple[str, str, bool]] = []
         self.upserts: list[tuple[str, Any, Any]] = []
         self.deletes: list[tuple[str, dict, int]] = []
         self.selects: list[tuple[str, Any]] = []
@@ -2320,3 +2350,133 @@ def _extract_payload(payload: Any) -> dict:
             inner = r.get("payload")
             return inner if isinstance(inner, dict) else {}
     return {}
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2 C3 topic D (SFH-R3-07) — the returns read drains every page.
+# ---------------------------------------------------------------------------
+
+_LONG_ALLOC = "alloc-long"
+_LONG_DAYS = 1500  # > PostgREST's 1000-row response cap (supabase/config.toml)
+
+
+def _seed_long_history() -> tuple[dict[str, list[dict]], str, str]:
+    """One working key with 1500 consecutive days of returns, stored NEWEST
+    FIRST, so a capped bare read (the first 1000 rows) provably loses the
+    earliest 500 days rather than the latest ones."""
+    import datetime as _dt
+
+    start = _dt.date(2022, 1, 1)
+    days = [(start + _dt.timedelta(days=i)).isoformat() for i in range(_LONG_DAYS)]
+    csv = [
+        {
+            "id": _LONG_DAYS - i,
+            "api_key_id": "key-L",
+            "allocator_id": _LONG_ALLOC,
+            "date": day,
+            "daily_return": 0.001,
+        }
+        for i, day in enumerate(reversed(days))
+    ]
+    rows: dict[str, list[dict]] = {
+        "api_keys": [
+            {
+                "id": "key-L", "user_id": _LONG_ALLOC, "is_active": True,
+                "sync_status": "connected", "disconnected_at": None,
+            },
+        ],
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: [
+            {
+                "allocator_id": _LONG_ALLOC,
+                "kind": "key_inputs:key-L",
+                "payload": {
+                    "flows": [], "anchor_usd": 100_000.0,
+                    "anchor_asof": days[-1], "venue": "binance",
+                },
+            },
+        ],
+        LEGACY_TABLE: [],
+    }
+    return rows, days[0], days[-1]
+
+
+@pytest.mark.asyncio
+async def test_sfh_r3_07_returns_read_drains_past_the_response_cap() -> None:
+    """SFH-R3-07: PostgREST caps one response at 1000 rows, and PROD holds an
+    allocator with 2804 csv_daily_returns rows (measured 2026-09-29). A bare
+    `.select().eq().execute()` hands the derive an arbitrary 1000 of them, so
+    the curve starts late (and the stitch picks keys from a partial read) while
+    still being marked trustworthy. The read must drain every page under a
+    total order, so the curve starts on the key's FIRST stored day."""
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    rows, first_day, last_day = _seed_long_history()
+    fake = _FakeSupabase(rows, max_rows=1000)
+    job = {"id": "j-long", "kind": "derive_allocator_equity", "allocator_id": _LONG_ALLOC}
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "DONE", result
+    curve_upserts = [
+        u for u in fake.upserts
+        if u[0] == DERIVED_TABLE and _is_equity_curve_upsert(u[1])
+    ]
+    assert len(curve_upserts) == 1, fake.upserts
+    payload = _extract_payload(curve_upserts[0][1])
+    curve_days = [p["date"] for p in payload["curve"]]
+    assert curve_days[0] <= first_day, (
+        f"the curve starts at {curve_days[0]}, after the key's first stored day "
+        f"{first_day}: the returns read lost the earliest rows to the response cap"
+    )
+    assert curve_days[-1] == last_day, curve_days[-1]
+    assert first_day in curve_days and len(set(curve_days)) >= _LONG_DAYS, (
+        f"the curve holds {len(set(curve_days))} days; {_LONG_DAYS} were stored"
+    )
+    # Pages neither skip nor duplicate only under a TOTAL order. (api_key_id,
+    # date) is unique for per-key rows; id breaks any tie a NULL key could leave.
+    csv_orders = [(c, d) for t, c, d in fake.orders if t == "csv_daily_returns"]
+    assert csv_orders == [("api_key_id", False), ("date", False), ("id", False)], (
+        csv_orders
+    )
+
+
+@pytest.mark.asyncio
+async def test_sfh_r3_07_returns_read_truncation_is_permanent_and_deletes_curve() -> None:
+    """A returns read past paginated_select's hard cap raises
+    PaginatedSelectTruncated. Retrying re-reads the same rows, so the job must
+    end permanent FAILED (not the classifier's retrying `unknown`), delete the
+    stale equity_curve row, and never compose from partial data. The message
+    carries no allocator id (the hint is a log-only triage string)."""
+    from unittest.mock import patch
+
+    from services.db import PaginatedSelectTruncated
+    from services.job_worker import run_derive_allocator_equity_job
+
+    rows, _first, _last = _seed_long_history()
+    rows[DERIVED_TABLE].append(
+        {"allocator_id": _LONG_ALLOC, "kind": "equity_curve", "payload": {"curve": []}}
+    )
+    fake = _FakeSupabase(rows)
+    job = {"id": "j-trunc", "kind": "derive_allocator_equity", "allocator_id": _LONG_ALLOC}
+
+    def _boom(*_a: Any, **_kw: Any) -> list[dict]:
+        raise PaginatedSelectTruncated(page_count=1000, page_size=1000, hint="probe")
+
+    with patch("services.job_worker.get_supabase", return_value=fake), \
+         patch("services.job_worker.paginated_select", side_effect=_boom):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "FAILED", result
+    assert result.error_kind == "permanent", result.error_kind
+    assert _LONG_ALLOC not in (result.error_message or ""), result.error_message
+    curve_deletes = [
+        d for d in fake.deletes
+        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
+        and d[1].get("allocator_id") == _LONG_ALLOC
+    ]
+    assert len(curve_deletes) == 1, fake.deletes
+    assert not [u for u in fake.upserts if _is_equity_curve_upsert(u[1])], fake.upserts

@@ -95,7 +95,15 @@ from services.closed_sets import (  # B8b: single-sourced closed sets, re-export
     mt5_enabled_server,
     sfox_enabled_server,
 )
-from services.db import db_execute, db_read_with_retry, get_supabase, one, rows
+from services.db import (
+    PaginatedSelectTruncated,
+    db_execute,
+    db_read_with_retry,
+    get_supabase,
+    one,
+    paginated_select,
+    rows,
+)
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
     aclose_exchange,
@@ -10368,18 +10376,54 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # with no returns yet is not stitched: its anchor is today's equity, and
     # hanging it on an older member's last day would misdate it; the compose
     # already drops such a key as DROPPED_KEY (untrustworthy).
+    #
+    # C3 topic D (SFH-R3-07): the read drains every page. PostgREST caps one
+    # response at 1000 rows (supabase/config.toml max_rows), and PROD holds an
+    # allocator with 2804 rows (measured 2026-09-29), so a bare read handed the
+    # stitch and the compose an arbitrary 1000 of them: a curve built on part of
+    # each key's history, still marked trustworthy. Pages neither skip nor
+    # duplicate only under a TOTAL order. (api_key_id, date) is unique
+    # (csv_daily_returns_api_key_date_key) for every row this job consumes; id,
+    # the primary key, breaks any tie a NULL api_key_id row could leave.
     def _load_returns() -> list[dict[str, Any]]:
-        return cast(
-            list[dict[str, Any]],
+        return paginated_select(
             supabase.table("csv_daily_returns")
             .select("api_key_id,date,daily_return")
-            .eq("allocator_id", allocator_id)
-            .execute()
-            .data
-            or [],
+            .eq("allocator_id", allocator_id),
+            order_by=(("api_key_id", False), ("date", False), ("id", False)),
+            truncation_hint=f"csv_daily_returns allocator_id={allocator_id}",
         )
 
-    csv_rows = await db_execute(_load_returns)
+    try:
+        csv_rows = await db_execute(_load_returns)
+    except PaginatedSelectTruncated as trunc:
+        # The returns exceed paginated_select's hard cap, and paginated_select
+        # refuses rather than returning part of them. A retry re-reads the same
+        # rows, and this exception would otherwise reach classify_exception's
+        # catch-all as a retrying `unknown` forever (the T-74-02 class), so it
+        # ends permanent. Nothing is composed from a partial read, and the stale
+        # curve row is deleted as on every other permanent path (F2), so the book
+        # shows the rebuilding panel. The hint (with the allocator id) goes to the
+        # operator log only; the job's message carries the row cap alone.
+        logger.error(
+            "derive_allocator_equity: csv_daily_returns read for allocator %s hit "
+            "the pagination cap (page_count=%d, page_size=%d, hint=%s) — deleted "
+            "any stale equity_curve row; nothing was composed",
+            allocator_id,
+            trunc.page_count,
+            trunc.page_size,
+            trunc.hint or "n/a",
+        )
+        await _delete_equity_curve_row()
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "derive_allocator_equity: the allocator's daily returns exceed "
+                f"{trunc.page_count * trunc.page_size:,} rows; nothing was "
+                "composed and the stale equity curve was removed"
+            ),
+            error_kind="permanent",
+        )
     first_return_day: dict[str, str] = {}
     for r in csv_rows:
         day = r.get("date")
