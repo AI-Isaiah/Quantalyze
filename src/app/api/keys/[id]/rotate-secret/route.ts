@@ -489,6 +489,13 @@ export async function PATCH(
         kek_version: parsed.kek_version,
         sync_error: null,
         sync_status: "idle",
+        // Phase 167.1.2 plan 09 (PR B review round 2, RLS audit MEDIUM): this
+        // update is how a REVOKED key returns to live, and it does not go
+        // through reconnect_allocator_api_key. COMMENT ON COLUMN
+        // api_keys.history_inclusion binds every such path: a departed-history
+        // choice made for one departure never carries over to the next, so the
+        // key starts again from the default rule.
+        history_inclusion: null,
         // Backfill ONLY when the pre-read row had no identifier yet — never
         // overwrite an existing value with whatever this request's login
         // happens to be (it is, by construction, the same login: D-03 forbids

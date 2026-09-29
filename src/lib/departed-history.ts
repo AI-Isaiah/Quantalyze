@@ -227,3 +227,43 @@ export function departedHistoryInclusion(
     ? { included: false, until: null, reason }
     : { included: true, until: countedUntil, reason };
 }
+
+/**
+ * The one sentence a departed key's card shows for a decision (DESIGN.md
+ * Voice: declarative, the limitation stated with its reason). `anchored` is
+ * false when the balance the history is measured from is gone (the derive then
+ * leaves the key out under `departed_history_unavailable`), so an included key
+ * is never said to be in a book that cannot hold it.
+ */
+export function departedHistorySentence(
+  decision: DepartedHistoryDecision,
+  anchored: boolean,
+): string {
+  if (decision.included) {
+    if (!anchored) {
+      return "History not available: the balance it is measured from was deleted before departed history was kept.";
+    }
+    switch (decision.reason) {
+      case "same_account_as_connected_key":
+        return `History included until ${decision.until}. From the next day a key you still have connected reads this account.`;
+      case "same_account_as_later_key":
+        return `History included until ${decision.until}. From the next day a later key read this account.`;
+      default:
+        return `History included until ${decision.until}.`;
+    }
+  }
+  switch (decision.reason) {
+    case "account_unknown":
+      return "History not included: we cannot tell whether this key read the same exchange account as a key you still have connected. Include it if it was a different account.";
+    case "owner_excluded":
+      return "History not included: you excluded it.";
+    case "same_account_as_connected_key":
+      return "History not included: a key you still have connected reads the same exchange account over these days.";
+    case "same_account_as_later_key":
+      return "History not included: a later key read the same exchange account over these days.";
+    case "no_returns":
+      return "No history to include: this key has no daily returns before it stopped.";
+    default:
+      return "History not included.";
+  }
+}
