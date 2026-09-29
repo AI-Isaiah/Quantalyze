@@ -841,9 +841,13 @@ async def test_run_poll_allocator_positions_job_emits_sync_completed_audit_on_do
     assert kwargs["action"] == "allocator.holdings.sync_completed"
     assert kwargs["entity_type"] == "api_key"
     assert kwargs["entity_id"] == API_KEY_ID
+    # 167.1.2 C2 round 2 (R2-CR-01): the poll records its own outcome. The
+    # daily refresh reads final_status + row_count from this event as the proof
+    # that an account is empty, never the key's current sync_status.
     assert kwargs["metadata"] == {
         "row_count": 2,
         "holding_type_counts": {"spot": 1, "derivative": 1},
+        "final_status": "complete",
     }
 
 

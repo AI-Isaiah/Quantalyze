@@ -9357,6 +9357,12 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             {
                 "row_count": count,
                 "holding_type_counts": {"spot": spot_count, "derivative": deriv_count},
+                # Phase 167.1.2 C2 round 2 (R2-CR-01): this poll's own outcome.
+                # The daily refresh reads final_status + row_count from this
+                # event as its proof that an account is empty; the key's
+                # sync_status moves on after the poll (a later 429, a manual
+                # sync) and cannot stand in for it.
+                "final_status": final_status,
             },
         )
 

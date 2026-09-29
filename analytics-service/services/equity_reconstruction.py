@@ -1868,25 +1868,26 @@ async def _fetch_latest_holdings_per_eligible_key(
     The ccxt spot builder keeps only qty > 0 and ``persist_allocator_holdings``
     writes nothing for an empty list, so a fully withdrawn account that stays
     connected polls successfully forever and writes no row; the carry alone
-    would hold its last positive day for ever. The proof of emptiness is a
-    ``poll_allocator_positions`` job with status ``done`` for a member of the
-    group, CLAIMED on a day after the group's latest ``asof``: the poll takes
-    its ``asof`` after its claim, so a poll that wrote rows has ``asof`` on or
-    after its claim day. The proof is admitted only from a member on a ccxt
-    venue whose ``sync_status`` is exactly ``complete``:
-      * ``complete_with_warnings`` means a read failed (the derivative side),
-        so empty spot rows do not prove an empty account;
-      * MT5 persists an explicit empty-equity row itself, and sFOX and any
-        unsupported venue return NO rows with a warning, so a done job there
-        proves nothing (``NON_CCXT_VENUES``).
-    ``api_keys.last_sync_at`` is NOT this proof: cron-sync (routers/cron.py)
-    advances it for every active key with no new trades, every tick, and
-    writes no ``sync_status``, so it would read a merely-late poll as an empty
-    account. No proof (no done job, a claim on the rows' own day, a pruned job
-    history — done jobs are kept 30 days) keeps the D-07 carry. Residual: the
-    167.1.1 index defect (another ACCOUNT on the same venue overwriting this
-    account's (venue, symbol, asof) row) can make a real poll look empty here,
-    as it already makes that symbol vanish from the day.
+    would hold its last positive day for ever. The proof of emptiness is the
+    PROVING POLL'S OWN recorded outcome (round 2, R2-CR-01): an
+    ``allocator.holdings.sync_completed`` audit event for a member of the
+    group, created on a day after the group's latest ``asof``, whose metadata
+    says ``final_status`` ``complete`` and ``row_count`` 0 (see
+    ``_polled_empty_since``). The key's CURRENT ``sync_status`` is not read:
+    it moves on after the poll (a later 429 writes ``rate_limited``, a manual
+    sync writes ``syncing``), and round 1's gate on it re-carried a
+    proven-empty account's old balance on such a day. Only a ccxt venue can
+    supply the proof: MT5 persists an explicit empty-equity row itself, and
+    sFOX and any unsupported venue return NO rows with a warning
+    (``NON_CCXT_VENUES``). ``api_keys.last_sync_at`` is NOT this proof:
+    cron-sync (routers/cron.py) advances it for every active key with no new
+    trades, every tick, and writes no ``sync_status``, so it would read a
+    merely-late poll as an empty account. No proof (no recorded poll, a poll on
+    the rows' own day, an outcome with warnings, an event from before
+    ``final_status`` was recorded, a dropped audit row) keeps the D-07 carry.
+    Residual: the 167.1.1 index defect (another ACCOUNT on the same venue
+    overwriting this account's (venue, symbol, asof) row) can make a real poll
+    look empty here, as it already makes that symbol vanish from the day.
 
     The latest ``asof`` is reduced with ``max()`` in Python, so correctness
     never rests on the order a read returns.
@@ -1990,20 +1991,46 @@ async def _fetch_latest_holdings_per_eligible_key(
     )
 
 
+# The action a holdings poll records on success, and the most recent events
+# the emptiness proof reads per group. A daily poll writes one per key per day,
+# so a bound in the hundreds covers any carry D-07 can accumulate between
+# proofs; a bound that cut an old proof off would only keep the carry.
+_POLL_COMPLETED_ACTION = "allocator.holdings.sync_completed"
+_POLL_OUTCOME_READ_LIMIT = 200
+
+
 async def _polled_empty_since(
     supabase: Any, eligible: Sequence[Mapping[str, Any]], latest_asof: str
 ) -> bool:
-    """True when a successful holdings poll of one of ``eligible`` was claimed on
-    a day after ``latest_asof`` (see the CR-04 paragraph of
-    ``_fetch_latest_holdings_per_eligible_key`` for why that proves an empty
-    account, and why only a ccxt member whose ``sync_status`` is exactly
-    ``complete`` may supply the proof). A failed read raises, like every read of
-    this refresh."""
+    """True when a holdings poll of a ccxt member of ``eligible`` RECORDED a
+    clean, empty outcome on a day after ``latest_asof``.
+
+    The record is the ``allocator.holdings.sync_completed`` audit event the
+    poll handler emits on its success path (``run_poll_allocator_positions_job``),
+    whose metadata carries the poll's own ``final_status`` and ``row_count``.
+    Round 2 (R2-CR-01) replaced round 1's evidence, a ``done`` job row plus the
+    key's CURRENT ``sync_status == 'complete'``: that status belongs to the key,
+    not to the poll, and moves on after it, so a transient 429 or a manual sync
+    re-carried a proven-empty account's old balance. ``compute_jobs`` records no
+    outcome (``mark_compute_job_done`` takes none), so the job row cannot carry
+    the proof.
+
+    A proof needs, among the events created on or after the day after
+    ``latest_asof``:
+      * at least one with ``final_status == 'complete'`` and ``row_count == 0``
+        (``complete_with_warnings`` means a read failed, so empty spot rows do
+        not prove an empty account; an event without ``final_status`` predates
+        this round and its outcome is unknown);
+      * none with ``row_count > 0``: rows were persisted after the latest
+        ``asof`` this refresh read, so the account is not empty (the caller's
+        re-read then counts them, SFH-R2-01).
+    A failed read raises, like every read of this refresh. An audit row the
+    poll failed to write (``_emit_audit`` never fails the poll) means no proof,
+    which keeps the carry: the safe direction."""
     candidate_ids = sorted(
         str(r.get("id"))
         for r in eligible
-        if r.get("sync_status") == "complete"
-        and isinstance(r.get("exchange"), str)
+        if isinstance(r.get("exchange"), str)
         and r["exchange"].strip()
         and r["exchange"].strip().lower() not in NON_CCXT_VENUES
     )
@@ -2011,19 +2038,33 @@ async def _polled_empty_since(
         return False
     next_day = (date.fromisoformat(latest_asof) + timedelta(days=1)).isoformat()
 
-    def _sel_done_poll() -> Any:
+    def _sel_poll_outcomes() -> Any:
         return (
-            supabase.table("compute_jobs")
-            .select("id")
-            .eq("kind", "poll_allocator_positions")
-            .eq("status", "done")
-            .in_("api_key_id", candidate_ids)
-            .gte("claimed_at", f"{next_day}T00:00:00+00:00")
-            .limit(1)
+            supabase.table("audit_log")
+            .select("metadata, created_at")
+            .eq("action", _POLL_COMPLETED_ACTION)
+            .eq("entity_type", "api_key")
+            .in_("entity_id", candidate_ids)
+            .gte("created_at", f"{next_day}T00:00:00+00:00")
+            .order("created_at", desc=True)
+            .limit(_POLL_OUTCOME_READ_LIMIT)
             .execute()
         )
 
-    return bool(getattr(await db_execute(_sel_done_poll), "data", None))
+    events = getattr(await db_execute(_sel_poll_outcomes), "data", None) or []
+    clean_and_empty = False
+    for event in events:
+        metadata = event.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        row_count = metadata.get("row_count")
+        if isinstance(row_count, bool) or not isinstance(row_count, int):
+            continue
+        if row_count > 0:
+            return False
+        if metadata.get("final_status") == "complete":
+            clean_and_empty = True
+    return clean_and_empty
 
 
 # ---------------------------------------------------------------------------
