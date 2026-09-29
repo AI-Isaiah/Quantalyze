@@ -1,5 +1,6 @@
 "use client";
 
+import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { usePayload } from "./factsheet-context";
 
 /**
@@ -28,6 +29,8 @@ export function StrategyThesisPanel() {
   const startYr = payload.strategyMetrics.start.slice(0, 4);
   const endYr = payload.strategyMetrics.end.slice(0, 4);
   const observation = startYr === endYr ? startYr : `${startYr}–${endYr}`;
+  // Phase 169 D-12: the record length is stated one way on the whole factsheet.
+  const recordLength = formatRecordLength({ n: payload.strategyMetrics.n, years: payload.strategyMetrics.years });
 
   return (
     <section>
@@ -39,7 +42,7 @@ export function StrategyThesisPanel() {
         {" "}{types ? <>operates as a {types.toLowerCase()} strategy</> : <>is a systematic strategy</>}
         {markets ? <> across {markets.toLowerCase()}.</> : <>.</>}{" "}
         Performance is computed from the strategy&apos;s daily-return series over the {observation} observation window
-        ({payload.strategyMetrics.n.toLocaleString()} trading days, {payload.strategyMetrics.years.toFixed(2)} years).
+        ({recordLength.text}).
         Comparator analytics are aligned to the same calendar with each benchmark forward-filled.
       </p>
       <p className="mt-2 text-fixed-10 italic text-text-muted">
@@ -93,7 +96,8 @@ export function TermsPanel() {
         )}
         <Term label="Observation start">{start}</Term>
         <Term label="Observation end">{end}</Term>
-        <Term label="Sample size">{payload.strategyMetrics.n.toLocaleString()} days · {payload.strategyMetrics.years.toFixed(2)}y</Term>
+        {/* Phase 169 D-12: the same record-length statement as the thesis above. */}
+        <Term label="Sample size">{formatRecordLength({ n: payload.strategyMetrics.n, years: payload.strategyMetrics.years }).text}</Term>
         <Term label="Risk-free rate">0% (factsheet convention)</Term>
         <Term label="Bench frequency">Daily close, forward-filled to strategy calendar</Term>
         <Term label="Factsheet computed">{computed}</Term>

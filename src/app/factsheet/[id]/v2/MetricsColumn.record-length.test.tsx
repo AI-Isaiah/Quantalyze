@@ -15,8 +15,11 @@ import { render } from "@testing-library/react";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 
+import { formatRecordLength } from "@/lib/factsheet/record-length";
+
 import { FactsheetProvider } from "./factsheet-context";
 import { MetricsColumn } from "./MetricsColumn";
+import { StrategyThesisPanel, TermsPanel } from "./MandatePanels";
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
@@ -127,5 +130,122 @@ describe("MetricsColumn states the record length on the calendar clock (D-12)", 
   it("a record at or above the threshold count still shows no warning, however long it is on the calendar", () => {
     const { container } = renderColumn(payloadOf(dense(400), 365));
     expect(warningText(container)).toBeNull();
+  });
+});
+
+/** The row labels of a panel, in render order. */
+function rowLabels(panel: HTMLElement): string[] {
+  return [...panel.querySelectorAll("tr")].map((r) => r.querySelector("td")?.textContent ?? "");
+}
+
+/** MetricsColumn's own percentage rendering (signed, two decimals, em-dash on non-finite). */
+function pctSigned(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  const x = v * 100;
+  return `${x >= 0 ? "+" : ""}${x.toFixed(2)}%`;
+}
+
+const cumulative = (container: HTMLElement) => section(container, "Cumulative Return Metrics");
+
+/**
+ * Phase 169 D-17 / D-02 / D-11 (SC6): the 3 Year and 5 Year rows read compute()'s
+ * calendar windows and are NOT SHOWN when the record is shorter than the period.
+ *
+ * Why this matters: the rows used to clamp their look-back to the first
+ * observation, so a 0.45-year record printed its whole-record return under a
+ * "3 Year" label, and 800 daily points on a 24/7 venue (about 2.2 calendar
+ * years) counted as three "years" of 252 observations. SC6 says the rows are not
+ * shown, so the row is absent, not an em-dash.
+ */
+describe("Cumulative Return Metrics: 3 Year / 5 Year rows exist only when the record covers them (D-17)", () => {
+  it("a 0.45-year record has no 3 Year and no 5 Year row; Since Inception is unchanged and the rows keep their order", () => {
+    const payload = payloadOf(dense(166), 365);
+    const panel = cumulative(renderColumn(payload).container);
+    const labels = rowLabels(panel);
+    expect(labels).not.toContain("3 Year");
+    expect(labels).not.toContain("5 Year");
+    expect(rowValue(panel, "Since Inception")).toBe(pctSigned(payload.strategyMetrics.cum_ret));
+    const kept = ["Month-to-date", "3 Month", "Year-to-date", "Since Inception", "CAGR"];
+    expect(labels.filter((l) => kept.includes(l))).toEqual(kept);
+  });
+
+  it("800 daily points (about 2.2 calendar years) have no 3 Year row: 3 years is 3 x 365 days, not 3 x 252 observations", () => {
+    const payload = payloadOf(dense(800), 365);
+    expect(payload.strategyMetrics.years).toBeLessThan(3);
+    const labels = rowLabels(cumulative(renderColumn(payload).container));
+    expect(labels).not.toContain("3 Year");
+    expect(labels).not.toContain("5 Year");
+  });
+
+  it("a summary with p3y / p5y ABSENT (a hand-built summary) renders neither row", () => {
+    const payload = payloadOf(dense(6 * 365 + 2), 365);
+    const { p3y: _p3y, p5y: _p5y, ...rest } = payload.strategyMetrics;
+    void _p3y;
+    void _p5y;
+    const labels = rowLabels(cumulative(renderColumn({ ...payload, strategyMetrics: rest }).container));
+    expect(labels).not.toContain("3 Year");
+    expect(labels).not.toContain("5 Year");
+  });
+
+  it("a 4-year record: 3 Year is compute()'s p3y and there is no 5 Year row", () => {
+    const payload = payloadOf(dense(4 * 365 + 1), 365);
+    const m = payload.strategyMetrics;
+    expect(m.p3y).toEqual(expect.any(Number));
+    expect(m.p5y).toBeNull();
+    const panel = cumulative(renderColumn(payload).container);
+    expect(rowValue(panel, "3 Year")).toBe(pctSigned(m.p3y));
+    expect(rowLabels(panel)).not.toContain("5 Year");
+  });
+
+  it("a 6-year record: 3 Year and 5 Year are compute()'s p3y and p5y, neither the whole-record return", () => {
+    const payload = payloadOf(dense(6 * 365 + 2), 365);
+    const m = payload.strategyMetrics;
+    expect(m.p3y).toEqual(expect.any(Number));
+    expect(m.p5y).toEqual(expect.any(Number));
+    expect(pctSigned(m.p3y)).not.toBe(pctSigned(m.cum_ret));
+    const panel = cumulative(renderColumn(payload).container);
+    expect(rowValue(panel, "3 Year")).toBe(pctSigned(m.p3y));
+    expect(rowValue(panel, "5 Year")).toBe(pctSigned(m.p5y));
+  });
+
+  it("a non-finite p3y on a long record still renders the row, as the em-dash (hiding is only for a record shorter than the period)", () => {
+    const payload = payloadOf(dense(4 * 365 + 1), 365);
+    const panel = cumulative(
+      renderColumn({ ...payload, strategyMetrics: { ...payload.strategyMetrics, p3y: Number.NaN } }).container,
+    );
+    expect(rowValue(panel, "3 Year")).toBe("—");
+  });
+});
+
+/**
+ * Phase 169 D-12 (SC5): the Strategy Thesis sentence and the Terms panel's Sample
+ * size Term state the record length through the same formatter as MetricsColumn.
+ * They used to say "N trading days" (wrong for a 24/7 venue) and "N days · Xy".
+ */
+describe("MandatePanels state the record length through formatRecordLength (D-12)", () => {
+  function renderMandate(payload: FactsheetPayload) {
+    return render(
+      <FactsheetProvider payload={payload} persist={false}>
+        <StrategyThesisPanel />
+        <TermsPanel />
+      </FactsheetProvider>,
+    );
+  }
+
+  it("the thesis sentence and the Sample size Term state the same calendar length and daily-observation count", () => {
+    const payload = payloadOf(sparse166(), 365);
+    const expected = formatRecordLength({ n: payload.strategyMetrics.n, years: payload.strategyMetrics.years });
+    expect(expected.text).toBe("1.20 years, 166 daily observations");
+    const { container } = renderMandate(payload);
+
+    const thesis = section(container, "Strategy Thesis");
+    const thesisText = (thesis.textContent ?? "").replace(/\s+/g, " ");
+    expect(thesisText).toContain(`(${expected.text})`);
+    expect(thesisText).not.toContain("trading days");
+
+    const dts = [...container.querySelectorAll("dt")];
+    const sample = dts.find((dt) => dt.textContent === "Sample size");
+    if (!sample) throw new Error("no Sample size Term");
+    expect(sample.nextElementSibling?.textContent).toBe(expected.text);
   });
 });

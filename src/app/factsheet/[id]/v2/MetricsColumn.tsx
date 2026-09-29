@@ -414,23 +414,14 @@ function RollingRow({
  * trailing-window snapshot); this one walks every period for skim-readers.
  */
 function CumulativeReturnsPanel() {
-  const payload = usePayload();
   // Phase 103 (MTM-04, root-cause flip): the WHOLE panel follows the active basis.
-  // MTD/YTD/3M/6M/1Y/CAGR read the VIEW's strategyMetrics (the bundle's compute()
-  // on the MTM series under mark_to_market; `payload` by reference under cash) and
-  // the 3Y/5Y rows ride the basis-selected equity curve below — one coherent basis
-  // for every row, matching the equity CHART already MTM under the toggle.
-  const view = useBasisSeriesView(payload);
+  // Every row is a calendar window from compute() on the active basis, read from
+  // the VIEW's strategyMetrics (the bundle's compute() on the MTM series under
+  // mark_to_market; `payload` by reference under cash), and a multi-year row
+  // exists only when the record covers its window (compute() reports it null).
+  // Phase 169 D-17, 2026-09-25: 3 Year / 5 Year rows are omitted, not em-dashed, when the window is absent or null; SC6 read literally.
+  const view = useBasisSeriesView(usePayload());
   const m = view.strategyMetrics;
-  const eq = view.strategyEquity;
-  const n = eq.length;
-  const last = n > 0 ? eq[n - 1] : 1;
-  const periodReturn = (lookbackDays: number): number | null => {
-    if (n < 2) return null;
-    const startIdx = Math.max(0, n - 1 - lookbackDays);
-    const base = eq[startIdx];
-    return base > 0 ? last / base - 1 : null;
-  };
   // Inception return = cum_ret (no need to recompute).
   return (
     <Panel title="Cumulative Return Metrics">
@@ -440,8 +431,8 @@ function CumulativeReturnsPanel() {
         <Row label="6 Month" value={pct(m.p6m, true)} bench="" />
         <Row label="Year-to-date" value={pct(m.ytd, true)} bench="" />
         <Row label="1 Year" value={pct(m.p1y, true)} bench="" />
-        <Row label="3 Year" value={pct(periodReturn(3 * 252), true)} bench="" />
-        <Row label="5 Year" value={pct(periodReturn(5 * 252), true)} bench="" />
+        {m.p3y != null && <Row label="3 Year" value={pct(m.p3y, true)} bench="" />}
+        {m.p5y != null && <Row label="5 Year" value={pct(m.p5y, true)} bench="" />}
         <Row label="Since Inception" value={pct(m.cum_ret, true)} bench="" accent />
         <Row label="CAGR" value={pct(m.cagr, true)} bench="" />
       </Kpm>
