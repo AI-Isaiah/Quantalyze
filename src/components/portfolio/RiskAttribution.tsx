@@ -12,13 +12,20 @@ interface RiskAttributionProps {
    * component converts them to a fraction ONCE (`percentToFraction`) before
    * `formatPercent`, which takes fractions. `standalone_vol` is already a
    * fraction and is not converted.
+   *
+   * Sign (169 review round 1 IN-05, 2026-09-29): weights are unsigned, but a
+   * risk share is NOT. It is negative for a strategy that offsets the book's
+   * risk (a hedge), and the shares still sum to 100, so the others then exceed
+   * it. `formatPercent(..., { signed: false })` only drops the "+" and keeps
+   * the minus, which is what a hedge's share needs.
    */
   data: {
     strategy_id: string;
     strategy_name: string;
     /** null = no risk share exists (the portfolio carries no risk); shown "—". */
     marginal_risk_pct: number | null;
-    weight_pct: number;
+    /** null = the producer sent no weight (169 review SFH M-5); shown "—". */
+    weight_pct: number | null;
     standalone_vol: number;
   }[] | null;
 }
@@ -39,9 +46,13 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
 
   // 166.1 D7: a null risk share is left out of the stacked bar (a gap), never
   // plotted as a 0-width segment that reads as "no risk".
-  // 169 D-49: the bar plots the same fraction the table formats, so the shares
-  // (which sum to the whole portfolio risk) fill the fraction domain [0, 1] and
-  // the tooltip's x100 reads the table's percent.
+  // 169 D-49: the bar plots the same fraction the table formats, and the
+  // tooltip's x100 reads the table's percent. The shares sum to the whole
+  // portfolio risk, so with no hedge they fill the fraction domain [0, 1].
+  // 169 review round 1 IN-05 (2026-09-29): a hedge's share is negative, and
+  // then the positive shares sum past 1 and the negative one lies left of 0,
+  // outside this fixed domain. How the bar should draw that is an open
+  // rendering decision (SFH L-4), recorded, not settled here.
   const chartData = [
     data.reduce(
       (acc, d) => {
@@ -85,8 +96,12 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
               // assessment either — "Balanced" would be a claim about a split
               // that does not exist. The cell is a colorless "—".
               // 169 D-49: the compare stays percent against percent (both raw).
+              // 169 review SFH M-5 (2026-09-29): with no weight there is
+              // nothing to compare the share against, so no assessment either.
               const share = d.marginal_risk_pct;
-              const overweight = share !== null && share > d.weight_pct * 1.3;
+              const weight = d.weight_pct;
+              const assessable = share !== null && weight !== null;
+              const overweight = assessable && share > weight * 1.3;
               return (
                 <tr key={d.strategy_id} className="border-b border-border/50 hover:bg-page/50 transition-colors">
                   <td className="py-2 pr-4 flex items-center gap-2">
@@ -97,7 +112,7 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
                   <td className="py-2 pr-4 text-right font-metric">{formatPercent(percentToFraction(d.marginal_risk_pct), 1, { signed: false })}</td>
                   <td className="py-2 pr-4 text-right font-metric">{formatPercent(d.standalone_vol)}</td>
                   <td className="py-2 text-right">
-                    {share === null ? (
+                    {!assessable ? (
                       <span className="text-caption text-text-muted">—</span>
                     ) : (
                       <span className={`text-caption font-medium ${overweight ? "text-negative" : "text-positive"}`}>

@@ -441,6 +441,12 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
     expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
       "Includes +$300.00 from keys needing attention (P&L unavailable for 2 positions).",
     );
+    // 2026-09-29, Phase 169 review round 1 SFH M-4: the TRUSTED null row is in
+    // no key-trust part, so the total itself says it is partial, counting
+    // every row with no P&L (3 of 4, whatever its key's status).
+    expect(
+      screen.getByTestId("open-positions-pnl-unavailable-note").textContent,
+    ).toBe("Partial total: P&L unavailable for 3 of 4 positions.");
   });
 
   it("review WR-03: a known zero untrusted P&L is a real zero and carries no unavailable note", () => {

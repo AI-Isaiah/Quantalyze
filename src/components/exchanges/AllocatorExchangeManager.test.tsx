@@ -2800,3 +2800,27 @@ describe("AllocatorExchangeManager — duplicate-account note and reconnect refu
     errSpy.mockRestore();
   });
 });
+
+/**
+ * 2026-09-29, Phase 169 review round 1 IN-04. The key card's balance renders
+ * through the ONE money module (`formatUsd`, whole dollars), not a private
+ * compact copy that read "$12.3k". DESIGN.md's Currency row: amounts stay
+ * whole dollars, null and non-finite are the em-dash. Typed-literal oracles.
+ */
+describe("AllocatorExchangeManager — the key card's balance (169 IN-04)", () => {
+  it.each([
+    [12_345, "Balance $12,345"],
+    [2_500_000, "Balance $2,500,000"],
+    [null, "Balance —"],
+    [Number.NaN, "Balance —"],
+  ])("a balance of %s renders %s", (balance, expected) => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[makeKey({ account_balance_usdt: balance })]}
+      />,
+    );
+    const line = screen.getByText(/Read-only · Balance/);
+    expect(line.textContent).toContain(expected);
+  });
+});
