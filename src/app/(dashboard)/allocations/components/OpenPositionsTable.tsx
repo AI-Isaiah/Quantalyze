@@ -37,6 +37,17 @@ import {
   capitalizeFirst,
   type LiveHoldingsPart,
 } from "../lib/live-holdings-summary";
+// Phase 169 D-50 — money renders through the ONE money module. The private
+// whole-dollar formatter this file carried showed a $0.42 price as "$0", and
+// its P&L formatter picked the sign before rounding, so -0.0001 read "−$0" in
+// red. Prices keep their precision, P&L shows cents with the sign of the
+// rounded value, and notional (an amount, not a price) stays whole dollars.
+import {
+  formatUsd,
+  formatUsdPrice,
+  formatUsdSigned,
+  signAtCents,
+} from "@/lib/dollar-validation";
 
 const AMBER_CHIP_STYLE: CSSProperties = {
   color: "var(--color-warning)",
@@ -84,27 +95,6 @@ function formatQuantity(n: number): string {
   });
 }
 
-function formatUsd(n: number | null): string {
-  if (n == null) return "—";
-  return n.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  });
-}
-
-function formatPnl(n: number | null): string {
-  if (n == null) return "—";
-  const sign = n >= 0 ? "+" : "−";
-  return `${sign}${Math.abs(n).toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  })}`;
-}
-
 function sideLabel(side: OpenPositionRow["side"]): string {
   if (side === "long") return "Long";
   if (side === "short") return "Short";
@@ -117,10 +107,12 @@ function sideColor(side: OpenPositionRow["side"]): string {
   return "var(--color-text-muted)";
 }
 
+/** Phase 169 D-50: reads the same rounded-sign decision as the P&L text, so
+ *  a P&L that reads "$0.00" is never coloured. */
 function pnlColor(pnl: number | null): string | undefined {
-  if (pnl == null) return undefined;
-  if (pnl > 0) return "var(--color-positive)";
-  if (pnl < 0) return "var(--color-negative)";
+  const sign = signAtCents(pnl);
+  if (sign === "positive") return "var(--color-positive)";
+  if (sign === "negative") return "var(--color-negative)";
   return undefined;
 }
 
@@ -244,8 +236,8 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                     {sideLabel(r.side)}
                   </td>
                   <td className={numericCell}>{formatQuantity(r.quantity)}</td>
-                  <td className={numericCell}>{formatUsd(r.entry_price)}</td>
-                  <td className={numericCell}>{formatUsd(r.mark_price)}</td>
+                  <td className={numericCell}>{formatUsdPrice(r.entry_price)}</td>
+                  <td className={numericCell}>{formatUsdPrice(r.mark_price)}</td>
                   <td
                     className={
                       isUntrusted
@@ -260,7 +252,7 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                     className={numericCell}
                     style={{ color: pnlColor(r.unrealized_pnl_usd) }}
                   >
-                    {formatPnl(r.unrealized_pnl_usd)}
+                    {formatUsdSigned(r.unrealized_pnl_usd)}
                   </td>
                 </tr>
               );
@@ -278,7 +270,7 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                 className="px-4 py-2 font-metric tabular-nums text-right text-sm font-semibold"
                 style={{ color: pnlColor(totalUnrealized) }}
               >
-                {formatPnl(totalUnrealized)}
+                {formatUsdSigned(totalUnrealized)}
               </td>
             </tr>
             {/* Renders on the untrusted COUNT, not the amount (D-07): an
@@ -295,7 +287,7 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                 >
                   {capitalizeFirst(
                     buildKeyTrustClause(untrusted, unknownStatus, {
-                      amount: formatPnl,
+                      amount: formatUsdSigned,
                       missing: "P&L",
                       unit: ["position", "positions"],
                     }),
