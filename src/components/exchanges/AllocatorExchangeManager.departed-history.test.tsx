@@ -30,6 +30,8 @@ vi.mock("next/navigation", () => ({
 let RETURNS_DAYS: Record<string, [string, string]> = {};
 // Key ids whose key_inputs row carries a usable anchor.
 let ANCHORED: Set<string> = new Set();
+// Key ids whose key_inputs row EXISTS with a null anchor, and its stamped reason.
+let NULL_ANCHOR: Record<string, string | null> = {};
 const csvReads: Array<{ keyId: string; ascending: boolean; limit: number }> = [];
 const rpcMock = vi.fn();
 const holdingsCountMock = vi.fn();
@@ -62,10 +64,12 @@ vi.mock("@/lib/supabase/client", () => ({
               Promise.resolve({
                 data: kinds
                   .map((kind) => kind.replace("key_inputs:", ""))
-                  .filter((id) => ANCHORED.has(id))
+                  .filter((id) => ANCHORED.has(id) || id in NULL_ANCHOR)
                   .map((id) => ({
                     kind: `key_inputs:${id}`,
-                    payload: { anchor_usd: 1000 },
+                    payload: ANCHORED.has(id)
+                      ? { anchor_usd: 1000 }
+                      : { anchor_usd: null, anchor_null_reason: NULL_ANCHOR[id] },
                   })),
                 error: null,
               }),
@@ -94,6 +98,7 @@ beforeEach(() => {
   }
   RETURNS_DAYS = {};
   ANCHORED = new Set();
+  NULL_ANCHOR = {};
   csvReads.length = 0;
   rpcMock.mockReset();
   holdingsCountMock.mockReset();
@@ -180,6 +185,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
 
   it("a disconnected key whose account is unknown is not included by default, switch off", async () => {
     RETURNS_DAYS = { "key-dep": ["2026-06-01", "2026-06-10"] };
+    ANCHORED = new Set(["key-dep"]);
     render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[LIVE, departed()]} />);
     await waitFor(() =>
       expect(historyBlock("key-dep").textContent).toContain(
@@ -228,6 +234,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
 
   it("an RPC failure rolls the switch back and shows the error line", async () => {
     RETURNS_DAYS = { "key-dep": ["2026-06-01", "2026-06-10"] };
+    ANCHORED = new Set(["key-dep"]);
     rpcMock.mockResolvedValue({
       data: null,
       error: { code: "42501", message: "not_authenticated", details: null, hint: null },
@@ -248,6 +255,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
 
   it("maps a running recompose (55006) by code and renders its DETAIL and HINT", async () => {
     RETURNS_DAYS = { "key-dep": ["2026-06-01", "2026-06-10"] };
+    ANCHORED = new Set(["key-dep"]);
     rpcMock.mockResolvedValue({
       data: null,
       error: {
@@ -272,6 +280,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
 
   it("a 55006 without DETAIL or HINT falls back to a fixed sentence", async () => {
     RETURNS_DAYS = { "key-dep": ["2026-06-01", "2026-06-10"] };
+    ANCHORED = new Set(["key-dep"]);
     rpcMock.mockResolvedValue({
       data: null,
       error: { code: "55006", message: "HISTORY_RECOMPOSE_IN_PROGRESS", details: null, hint: null },
@@ -289,6 +298,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
 
   it("a key that is live again (55000) says so by code, never by message", async () => {
     RETURNS_DAYS = { "key-dep": ["2026-06-01", "2026-06-10"] };
+    ANCHORED = new Set(["key-dep"]);
     rpcMock.mockResolvedValue({
       data: null,
       error: { code: "55000", message: "anything at all", details: null, hint: null },
@@ -353,6 +363,53 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
     await waitFor(() =>
       expect(historyBlock("key-dep").textContent).toContain("History not available:"),
     );
+  });
+
+  it("SFH-C4-05: an included key with no saved balance reads OFF, disabled, with no recompute promise", async () => {
+    RETURNS_DAYS = { "key-dep": ["2026-06-01", "2026-06-10"] };
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[LIVE, departed({ venue_account_id: "acct-dep" })]}
+      />,
+    );
+    await waitFor(() =>
+      expect(historyBlock("key-dep").textContent).toContain("History not available:"),
+    );
+    // The derive leaves this key out whatever the switch says, so the switch
+    // must not read ON beside "not available", nor accept a change.
+    expect(historySwitch("key-dep").getAttribute("aria-checked")).toBe("false");
+    expect((historySwitch("key-dep") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(historySwitch("key-dep"));
+    expect(rpcMock).not.toHaveBeenCalled();
+    expect(historyBlock("key-dep").textContent).not.toContain("recomputed");
+  });
+
+  it("SFH-C4-05: an unknown-account key with no saved balance does not invite an include", async () => {
+    RETURNS_DAYS = { "key-dep": ["2026-06-01", "2026-06-10"] };
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[LIVE, departed()]} />);
+    await waitFor(() =>
+      expect(historyBlock("key-dep").textContent).toContain("History not available:"),
+    );
+    expect(historyBlock("key-dep").textContent).not.toContain("Include it");
+    expect((historySwitch("key-dep") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("SFH-C4-06: a row whose last balance read failed says so, not that it was deleted", async () => {
+    RETURNS_DAYS = { "key-dep": ["2026-06-01", "2026-06-10"] };
+    NULL_ANCHOR = { "key-dep": "balance_error" };
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[LIVE, departed({ venue_account_id: "acct-dep" })]}
+      />,
+    );
+    await waitFor(() =>
+      expect(historyBlock("key-dep").textContent).toContain(
+        "History not available: the last balance read before this key stopped failed, so there is no balance to measure its history from.",
+      ),
+    );
+    expect(historyBlock("key-dep").textContent).not.toContain("deleted");
   });
 
   it("the delete confirm says deleting removes the account's history, and only when deleting", async () => {

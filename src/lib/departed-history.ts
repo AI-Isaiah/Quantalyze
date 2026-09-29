@@ -17,6 +17,8 @@
  * Pure: no I/O.
  */
 
+import type { ApiKeyAccountShareKind } from "@/lib/types";
+
 /** The fields of a key the rule reads. `is_active` defaults to true when absent. */
 export interface DepartedHistoryKey {
   id: string;
@@ -35,7 +37,9 @@ export interface DepartedHistoryKey {
 export type DepartedHistoryReason =
   | "distinct_account"
   | "same_account_as_connected_key"
+  | "same_account_as_connected_key_pending"
   | "same_account_as_later_key"
+  | "same_account_as_earlier_key"
   | "latest_key_on_account"
   | "account_unknown"
   | "owner_excluded"
@@ -49,7 +53,21 @@ export interface DepartedHistoryDecision {
   reason: DepartedHistoryReason;
 }
 
-const SHARED_ACCOUNT_MARKER_KINDS = new Set(["duplicate", "composite_member"]);
+/**
+ * Which `account_share_kind` values join two keys into one account (IN-03).
+ * Keyed by the closed union, so a kind added to `ApiKeyAccountShareKind` fails
+ * to compile here until someone decides it; the Python twin reads the derive's
+ * `SHARED_ACCOUNT_KINDS` itself, never a copy.
+ */
+const MARKER_KIND_IS_SHARED: Record<ApiKeyAccountShareKind, boolean> = {
+  duplicate: true,
+  composite_member: true,
+};
+const SHARED_ACCOUNT_MARKER_KINDS: ReadonlySet<string> = new Set(
+  Object.entries(MARKER_KIND_IS_SHARED)
+    .filter(([, shared]) => shared)
+    .map(([kind]) => kind),
+);
 
 /** Sorts before every real ISO day. */
 const BEFORE_EVERY_DAY = "0000-00-00";
@@ -206,43 +224,144 @@ export function departedHistoryInclusion(
           : a[2] < b[2] ? -1 : a[2] > b[2] ? 1 : 0,
     );
   const position = countedDeparted.findIndex((entry) => entry[2] === key.id);
-  const successor = countedDeparted[position + 1] ?? null;
+  // SFH-C4-07: a key that stops counting before a key ordered ahead of it is
+  // COVERED — that earlier key reads the account over all its days. It counts
+  // zero days and bounds nothing; otherwise the earlier key's tail after the
+  // covered key's end would count nowhere.
+  const lastCountable = new Map(
+    [...sameAccount, key].map((k) => [k.id, ownWindow(k)?.[1] ?? BEFORE_EVERY_DAY]),
+  );
+  const covered = new Set(
+    countedDeparted
+      .filter((entry, index) =>
+        countedDeparted
+          .slice(0, index)
+          .some((earlier) => lastCountable.get(entry[2])! < lastCountable.get(earlier[2])!),
+      )
+      .map((entry) => entry[2]),
+  );
+  const isCovered = covered.has(key.id);
+  const successor = isCovered
+    ? null
+    : (countedDeparted.slice(position + 1).find((entry) => !covered.has(entry[2])) ?? null);
 
   const bounds = [until];
   if (liveFirsts.length > 0) {
     bounds.push(dayBefore(liveFirsts.reduce((a, b) => (b < a ? b : a))));
   }
+  if (isCovered) bounds.push(BEFORE_EVERY_DAY);
   if (successor !== null) bounds.push(dayBefore(successor[0]));
   const countedUntil = bounds.reduce((a, b) => (b < a ? b : a));
 
-  const reason: DepartedHistoryReason =
-    liveFirsts.length > 0
+  // WR-04: a live key on this account with no returns yet reads none of these
+  // days today; the decision is made again once it has returns.
+  const reason: DepartedHistoryReason = liveFirsts.includes(BEFORE_EVERY_DAY)
+    ? "same_account_as_connected_key_pending"
+    : liveFirsts.length > 0
       ? "same_account_as_connected_key"
-      : successor !== null
-        ? "same_account_as_later_key"
-        : position > 0
-          ? "latest_key_on_account"
-          : "distinct_account";
+      : isCovered
+        ? "same_account_as_earlier_key"
+        : successor !== null
+          ? "same_account_as_later_key"
+          : position > 0
+            ? "latest_key_on_account"
+            : "distinct_account";
   return countedUntil < first
     ? { included: false, until: null, reason }
     : { included: true, until: countedUntil, reason };
 }
 
 /**
- * The one sentence a departed key's card shows for a decision (DESIGN.md
- * Voice: declarative, the limitation stated with its reason). `anchored` is
- * false when the balance the history is measured from is gone (the derive then
- * leaves the key out under `departed_history_unavailable`), so an included key
- * is never said to be in a book that cannot hold it.
+ * What the derive can level a departed key's history from: its
+ * `key_inputs:<id>` row in allocator_equity_derived. `missing` is no row (the
+ * pre-plan-09 orphan cleanup deleted it); `unusable` is a row whose last
+ * balance read stamped a null anchor with `anchor_null_reason` (SFH-C4-06).
+ * Either way the derive leaves the key out under `departed_history_unavailable`.
  */
-export function departedHistorySentence(
-  decision: DepartedHistoryDecision,
-  anchored: boolean,
-): string {
+export type DepartedAnchor =
+  | { state: "anchored" }
+  | { state: "missing" }
+  | { state: "unusable"; reason: string | null };
+
+/** The anchor state of a key_inputs row, or `missing` when there is none. */
+export function departedAnchorOf(row: { payload: unknown } | undefined): DepartedAnchor {
+  if (row === undefined) return { state: "missing" };
+  const payload =
+    row.payload !== null && typeof row.payload === "object"
+      ? (row.payload as { anchor_usd?: unknown; anchor_null_reason?: unknown })
+      : {};
+  if (typeof payload.anchor_usd === "number" && Number.isFinite(payload.anchor_usd)) {
+    return { state: "anchored" };
+  }
+  const reason = payload.anchor_null_reason;
+  return {
+    state: "unusable",
+    reason: typeof reason === "string" && reason !== "" ? reason : null,
+  };
+}
+
+/** Why a departed key's history cannot be in the book, by its real cause. */
+function unavailableSentence(anchor: DepartedAnchor): string {
+  if (anchor.state !== "unusable") {
+    return "History not available: the balance it is measured from was deleted before departed history was kept.";
+  }
+  switch (anchor.reason) {
+    case "balance_error":
+      return "History not available: the last balance read before this key stopped failed, so there is no balance to measure its history from.";
+    case "nonfinite":
+      return "History not available: the last balance read before this key stopped returned a value that is not a number, so there is no balance to measure its history from.";
+    case "nonpositive":
+      return "History not available: the last balance read before this key stopped was zero or negative, so there is no balance to measure its history from.";
+    case "dust":
+      return "History not available: the last balance read before this key stopped was too small to measure its history from.";
+    case "flow_drop":
+      return "History not available: a deposit or withdrawal on this key could not be read, so its history cannot be measured from its last balance.";
+    default:
+      return "History not available: the last balance read before this key stopped gave no usable balance to measure its history from.";
+  }
+}
+
+/** What a departed key's card shows: its line, its switch state, and the one
+ * change the switch may make (null: disabled). */
+export interface DepartedHistoryCard {
+  sentence: string;
+  checked: boolean;
+  toggleTo: "include" | "exclude" | null;
+}
+
+/**
+ * The card for one departed key. The switch is ON only when the book really
+ * holds the key's history, and it is live only where flipping it changes what
+ * the book holds (SFH-C4-05): 'include' never lifts a known account's bound, a
+ * key with no returns has nothing to include, and a key with no usable anchor
+ * is left out by the derive whatever the switch says, so its card names that
+ * cause instead of inviting a change that cannot take effect.
+ */
+export function departedHistoryCard(
+  key: DepartedHistoryKey,
+  keys: readonly DepartedHistoryKey[],
+  anchor: DepartedAnchor,
+): DepartedHistoryCard {
+  const decision = departedHistoryInclusion(key, keys);
+  const next = decision.included ? "exclude" : "include";
+  const alternative = departedHistoryInclusion({ ...key, history_inclusion: next }, keys);
+  if (anchor.state !== "anchored" && (decision.included || alternative.included)) {
+    return { sentence: unavailableSentence(anchor), checked: false, toggleTo: null };
+  }
+  return {
+    sentence: departedHistorySentence(decision),
+    checked: decision.included,
+    toggleTo: alternative.included !== decision.included ? next : null,
+  };
+}
+
+/**
+ * The one sentence a departed key's card shows for a decision (DESIGN.md
+ * Voice: declarative, the limitation stated with its reason). A key with no
+ * usable anchor takes `departedHistoryCard`'s not-available line instead.
+ */
+export function departedHistorySentence(decision: DepartedHistoryDecision): string {
   if (decision.included) {
-    if (!anchored) {
-      return "History not available: the balance it is measured from was deleted before departed history was kept.";
-    }
     switch (decision.reason) {
       case "same_account_as_connected_key":
         return `History included until ${decision.until}. From the next day a key you still have connected reads this account.`;
@@ -259,8 +378,12 @@ export function departedHistorySentence(
       return "History not included: you excluded it.";
     case "same_account_as_connected_key":
       return "History not included: a key you still have connected reads the same exchange account over these days.";
+    case "same_account_as_connected_key_pending":
+      return "History not included yet: a key you still have connected reads the same exchange account and has no history yet. Once it has, this key counts for the days before that key's history starts.";
     case "same_account_as_later_key":
       return "History not included: a later key read the same exchange account over these days.";
+    case "same_account_as_earlier_key":
+      return "History not included: an earlier key read the same exchange account over all of these days.";
     case "no_returns":
       return "No history to include: this key has no daily returns before it stopped.";
     default:

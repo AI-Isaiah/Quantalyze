@@ -324,6 +324,46 @@ async def test_a_departed_key_whose_inputs_are_gone_is_left_out_and_the_book_sta
         assert curve[day] == pytest.approx(_live_level(day), rel=1e-12), day
 
 
+@pytest.mark.asyncio
+async def test_a_departed_key_whose_last_balance_read_failed_is_counted_apart(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """SFH-C4-06: a departed key whose key_inputs row EXISTS with a null anchor
+    (its last balance read failed) is not a key whose row was deleted. The
+    WARNING counts the two apart and names the stamped reason, so an operator
+    reading it is not sent looking for a cleanup that never ran. The book still
+    stays ready (the key cannot be leveled either way)."""
+    import logging
+
+    departed = _gate_key(
+        "key-D", ALLOC,
+        venue_account_id="acct-departed",
+        disconnected_at="2026-06-10T15:30:00+00:00",
+    )
+    null_anchor = _key_inputs("key-D", DEP_ANCHOR, DAYS[9])
+    null_anchor["payload"] = {
+        **null_anchor["payload"],
+        "anchor_usd": None,
+        "anchor_null_reason": "balance_error",
+    }
+    fake = _FakeSupabase({
+        "api_keys": [_gate_key("key-L", ALLOC, venue_account_id="acct-live"), departed],
+        "csv_daily_returns": _csv("key-L", DAYS, LIVE_R) + _csv("key-D", DAYS[:10], DEP_R),
+        DERIVED_TABLE: [_key_inputs("key-L", LIVE_ANCHOR, DAYS[-1]), null_anchor],
+        LEGACY_TABLE: [],
+    })
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
+        result = await _run(fake)
+    assert result.outcome.name == "DONE"
+    payload = _book(fake)
+    assert payload["is_trustworthy"] is True
+    assert "departed_history_unavailable" in payload["flags"]
+    lines = [r.getMessage() for r in caplog.records if "departed_history_unavailable" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "0 with no saved inputs row" in lines[0]
+    assert "1 whose last balance read gave no anchor (balance_error=1)" in lines[0]
+
+
 # ── Task 2: the D-09 rule, ONE spec for Python and TypeScript ─────────────────
 
 import json  # noqa: E402
@@ -391,6 +431,60 @@ def test_no_two_counted_keys_share_a_known_account_on_any_day(case: dict[str, An
     assert account_identity_collisions(counted) == []
 
 
+def _own_days(key: dict[str, Any]) -> list[str]:
+    """Every day a departed key could count: first returns day to min(end, last)."""
+    from services.job_worker import _utc_day
+
+    first, last = key["first_returns_day"], key["last_returns_day"]
+    if not first or not last:
+        return []
+    until = min(_utc_day(key["disconnected_at"]) or last, last)
+    if until < first:
+        return []
+    return [d.date().isoformat() for d in pd.date_range(first, until, freq="D")]
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
+def test_no_day_of_a_known_account_is_dropped(case: dict[str, Any]) -> None:
+    """SFH-C4-07: the other half of B4. On a known account, every day some
+    counted-eligible departed key read (not excluded, before any live key on the
+    account takes over) is counted by exactly one key. Without it, a later key
+    that ends first cut the earlier key's tail and those days counted nowhere,
+    with no flag. A live key with no returns yet is skipped: the book rebuilds
+    until it has them (WR-04)."""
+    from services.job_worker import (
+        _is_live_key,
+        account_identity_tokens,
+        departed_history_inclusion,
+    )
+
+    keys = case["keys"]
+    tokens = account_identity_tokens(keys)
+    decisions = departed_history_inclusion(keys)
+    for token in {t for t in tokens.values() if t is not None}:
+        on_account = [k for k in keys if tokens[k["id"]] == token]
+        live = [k for k in on_account if _is_live_key(k)]
+        if any(not k["first_returns_day"] for k in live):
+            continue
+        live_start = min((k["first_returns_day"] for k in live), default=None)
+        needed = {
+            day
+            for k in on_account
+            if not _is_live_key(k) and k.get("history_inclusion") != "exclude"
+            for day in _own_days(k)
+            if live_start is None or day < live_start
+        }
+        counted: dict[str, int] = {}
+        for k in on_account:
+            decision = decisions.get(k["id"])
+            if decision is None or not decision.included:
+                continue
+            for day in _own_days({**k, "last_returns_day": decision.until}):
+                counted[day] = counted.get(day, 0) + 1
+        assert sorted(needed - set(counted)) == [], token
+        assert {d: n for d, n in counted.items() if n > 1} == {}, token
+
+
 def _fixture_supabase(case: dict[str, Any]) -> _FakeSupabase:
     """Every key of the case as an api_keys row, dense daily returns from its first
     to its last returns day, and a key_inputs row with an anchor, so the job has
@@ -444,3 +538,47 @@ async def test_the_job_passes_the_rules_end_days_to_the_compose(case: dict[str, 
     assert captured.get("departed_end_by_key", {}) == expected_end
     departed = set(case["expected"])
     assert captured["returns_keys"] & departed == set(expected_end)
+
+
+# ── IN-02 / IN-03: one eligibility rule and one marker-kind set ───────────────
+
+
+@pytest.mark.parametrize("is_active", [True, False])
+@pytest.mark.parametrize("sync_status", [None, "complete", "error", "sign_in_failed", "revoked"])
+@pytest.mark.parametrize("disconnected_at", [None, "2026-06-10T00:00:00+00:00"])
+def test_the_rules_live_key_is_the_derives_eligible_key(
+    is_active: bool, sync_status: str | None, disconnected_at: str | None
+) -> None:
+    """A key the D-09 rule calls live must be exactly a key the derive counts as
+    eligible. If the two drift, the rule bounds a departed key by a key the book
+    does not count (days lost), or treats a counted key as departed (days
+    counted twice). The fixture adapter's only difference: a MISSING is_active
+    means active there, and the job always selects the column."""
+    from services.allocator_equity_derive import eligible_key_predicate
+    from services.job_worker import _is_live_key
+
+    row = {"is_active": is_active, "sync_status": sync_status, "disconnected_at": disconnected_at}
+    assert _is_live_key(row) is eligible_key_predicate(row)
+
+
+def test_account_identity_reads_the_derives_marker_kinds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The identity token and account_groups must agree on what a marker is. A
+    private copy of the kinds meant a new kind would join keys in one and not
+    the other (IN-03, the root of WR-03's divergence)."""
+    import services.allocator_equity_derive as derive
+    from services.job_worker import account_identity_tokens
+
+    monkeypatch.setattr(
+        derive, "SHARED_ACCOUNT_KINDS", derive.SHARED_ACCOUNT_KINDS | {"future_kind"}
+    )
+    tokens = account_identity_tokens([
+        {"id": "k-holder", "exchange": "okx", "venue_account_id": "acct-1"},
+        {
+            "id": "k-marked",
+            "exchange": "okx",
+            "venue_account_id": None,
+            "account_share_kind": "future_kind",
+            "account_shared_with_api_key_id": "k-holder",
+        },
+    ])
+    assert tokens["k-marked"] == tokens["k-holder"] is not None
