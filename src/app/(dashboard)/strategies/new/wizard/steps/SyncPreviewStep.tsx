@@ -50,6 +50,7 @@ import {
 import { hasBasisHeadline } from "@/lib/factsheet/basis-metrics";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { parseIsoDay, utcEpoch } from "@/lib/dateday";
+import { drainById } from "@/lib/drain-by-id";
 import type {
   SyncProgressResponse,
   MemberProgressStatus,
@@ -1438,13 +1439,32 @@ export function SyncPreviewStep({
                   )
                   .eq("strategy_id", strategyId)
                   .order("seq", { ascending: true }),
-                supabase
-                  .from("csv_daily_returns")
-                  .select("date, daily_return")
-                  .eq("strategy_id", strategyId)
-                  .order("date", { ascending: true })
-                  // Flat safety ceiling, T-36-03-03 precedent (queries.ts).
-                  .limit(20000),
+                // 167.1.2 C3 fix F (SFH-C3R2-X1 sweep): this was ONE request,
+                // `.order("date", asc).limit(20000)`, under a "flat safety
+                // ceiling" comment borrowed from queries.ts. PostgREST caps
+                // every response at max_rows (1000) whatever the limit, so a
+                // stitched composite past ~2.7 years of days read its OLDEST
+                // 1000 and lost the newest: a wrong csvRowCount, a sparkline
+                // fallback ending early, and an attribution table the R2-4
+                // reconciliation caption could not reconcile. The series now
+                // drains through `drainById` (id keyset, stops on an empty
+                // page, fails loud at its ceiling), deduplicated and sorted by
+                // date; a drain failure resolves `{ data: null, error }` and
+                // throws below like any read error.
+                drainById<{ id: number; date: string; daily_return: number }>({
+                  label: "csv_daily_returns",
+                  naturalKey: (r) => r.date,
+                  fetchPage: (afterId, pageSize) => {
+                    let page = supabase
+                      .from("csv_daily_returns")
+                      .select("id, date, daily_return")
+                      .eq("strategy_id", strategyId);
+                    if (afterId !== null) page = page.gt("id", afterId);
+                    return page
+                      .order("id", { ascending: true })
+                      .limit(pageSize);
+                  },
+                }),
                 supabase
                   .from("strategies")
                   .select("returns_denominator_config")
@@ -1527,10 +1547,11 @@ export function SyncPreviewStep({
             const perKey = Array.isArray(dq.per_key)
               ? [...dq.per_key].sort((a, b) => a.seq - b.seq)
               : [];
-            const series =
-              (seriesRes.data as
-                | { date: string; daily_return: number }[]
-                | null) ?? [];
+            // `id` was the drain's cursor only; the snapshot carries the
+            // series' own two columns, as before.
+            const series = (seriesRes.data ?? []).map(
+              ({ date, daily_return }) => ({ date, daily_return }),
+            );
 
             // R2-5 (stale-complete race): the stitch_composite worker does a
             // wholesale delete→re-upsert of csv_daily_returns. A poll landing
