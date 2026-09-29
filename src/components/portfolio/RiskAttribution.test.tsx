@@ -1,26 +1,64 @@
 import type React from "react";
 import { render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RiskAttribution } from "./RiskAttribution";
 import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
 import complete from "@/__tests__/fixtures/portfolio-analytics/complete.json";
 
-// The stacked bar is not under test here; render its containers as plain
-// wrappers so jsdom does not need a measured layout.
+type Captured = Record<string, unknown>;
+
+// 169 D-49 / PATTERNS B4: the chart's props are recorded so the stacked bar's
+// unit can be asserted against its axis domain and its tooltip. The components
+// still render nothing (no measured layout in jsdom); BarChart and
+// ResponsiveContainer pass their children through.
+const captured = vi.hoisted(() => ({
+  barChart: [] as Record<string, unknown>[],
+  xAxis: [] as Record<string, unknown>[],
+  tooltip: [] as Record<string, unknown>[],
+}));
+
 vi.mock("recharts", () => {
   const Passthrough = ({ children }: { children?: React.ReactNode }) => (
     <div>{children}</div>
   );
   const NullComponent = () => null;
+  const BarChart = (props: Captured & { children?: React.ReactNode }) => {
+    captured.barChart.push(props);
+    return <div>{props.children}</div>;
+  };
+  const XAxis = (props: Captured) => {
+    captured.xAxis.push(props);
+    return null;
+  };
   return {
     ResponsiveContainer: Passthrough,
-    BarChart: Passthrough,
+    BarChart,
     Bar: NullComponent,
-    XAxis: NullComponent,
+    XAxis,
     YAxis: NullComponent,
   };
 });
-vi.mock("@/components/charts/TouchTooltip", () => ({ TouchTooltip: () => null }));
+vi.mock("@/components/charts/TouchTooltip", () => ({
+  TouchTooltip: (props: Captured) => {
+    captured.tooltip.push(props);
+    return null;
+  },
+}));
+
+beforeEach(() => {
+  captured.barChart.length = 0;
+  captured.xAxis.length = 0;
+  captured.tooltip.length = 0;
+});
+
+/** The last render's stacked-bar datum: `{ label, [strategy_name]: plotted value }`. */
+function plottedDatum(): Record<string, string | number> {
+  const props = captured.barChart.at(-1);
+  expect(props).toBeDefined();
+  const data = props?.data as Record<string, string | number>[];
+  expect(data).toHaveLength(1);
+  return data[0];
+}
 
 /** The producer's rows, parsed exactly as `/portfolios/[id]` parses them. */
 function producerRows() {
@@ -85,6 +123,45 @@ describe("<RiskAttribution> — the producer's percent shape (169 D-49)", () => 
 });
 
 /**
+ * 169 D-49 / PATTERNS B4. The stacked bar, its axis and its tooltip must state
+ * one unit. Before, the bar plotted the producer's percent (28 + 58 + 14 = 100)
+ * against a fraction axis `[0, 1]`, and the tooltip multiplied that percent by
+ * 100 again ("2800.0%").
+ */
+describe("<RiskAttribution> — the stacked bar states the table's unit (169 D-49)", () => {
+  it("plots risk shares that fill the axis domain, and the tooltip shows the table's percent", () => {
+    const rows = producerRows();
+    render(<RiskAttribution data={rows} />);
+
+    const datum = plottedDatum();
+    const plotted = rows.map((row) => datum[row.strategy_name]);
+    for (const v of plotted) expect(typeof v).toBe("number");
+
+    const domain = captured.xAxis.at(-1)?.domain as [number, number];
+    expect(domain).toHaveLength(2);
+    const sum = (plotted as number[]).reduce((a, b) => a + b, 0);
+    // The shares apportion the whole portfolio risk, so the stacked bar
+    // spans the axis exactly (float tolerance for 0.28 + 0.58 + 0.14).
+    expect(sum).toBeGreaterThanOrEqual(domain[0]);
+    expect(sum).toBeLessThanOrEqual(domain[1] + 1e-9);
+    expect(sum).toBeCloseTo(domain[1], 9);
+
+    const formatter = captured.tooltip.at(-1)?.formatter as (
+      value: unknown,
+      name: string,
+    ) => [string, string];
+    expect(typeof formatter).toBe("function");
+    const expectedShare = ["28.0%", "58.0%", "14.0%"];
+    rows.forEach((row, i) => {
+      const [text, name] = formatter(datum[row.strategy_name], row.strategy_name);
+      expect(name).toBe(row.strategy_name);
+      expect(text).toBe(expectedShare[i]);
+      expect(text).toBe(cellsOf(row.strategy_name)[2].textContent);
+    });
+  });
+});
+
+/**
  * 166.1 D7 (founder 2026-09-26) / round-1 SFH MEDIUM-2. A portfolio that
  * carries no risk (two constant yields, or all-zero legs) has no risk share to
  * apportion, so the producer emits `marginal_risk_pct: null`. The table must
@@ -111,6 +188,9 @@ describe("<RiskAttribution> — a risk share that does not exist", () => {
     expect(within(row as HTMLElement).queryByText("Balanced")).toBeNull();
     expect(within(row as HTMLElement).queryByText("Overweight risk")).toBeNull();
     expect(cells[4].querySelector(".text-positive, .text-negative")).toBeNull();
+    // Left out of the stacked bar: a gap, never a 0-width segment.
+    expect(plottedDatum()).not.toHaveProperty("Yield A");
+    expect(plottedDatum()).not.toHaveProperty("Yield B");
   });
 
   it("keeps the assessment for a real risk share", () => {
