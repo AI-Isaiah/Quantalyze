@@ -55,6 +55,9 @@ import { WatchlistPanel } from "./components/WatchlistPanel";
 import { OptimizerPanel } from "./components/OptimizerPanel";
 import { DashboardNoteCard } from "./components/DashboardNoteCard";
 import type { FavoriteRow, OptimizerPrefetch } from "./lib/watchlist-read";
+// Review C4 WR-01: the eligible-key rule (active, not revoked, not
+// disconnected), from the pure module the Exchanges page already uses.
+import { isLiveKey } from "@/lib/departed-history";
 
 /** Honest-empty optimizer state when the prop is absent (test harnesses). */
 /** A venue's display name. The exchange ids that need more than a capital. */
@@ -117,6 +120,54 @@ export function openPositionReadDayNotes(
     const phrase = keyPhrase(keysById.get(keyId), venue);
     return `Positions from ${phrase} are as last read on ${asof}: ${symbols.join(", ")}.`;
   });
+}
+
+/**
+ * The venues whose holdings poll reads open positions through ccxt: every
+ * supported venue outside `NON_CCXT_VENUES` (mt5, sfox; closed_sets.py). On
+ * these a sync that finishes `complete_with_warnings` has exactly one cause:
+ * the derivative-side read failed and only the spot rows were saved
+ * (`fetch_allocator_holdings`, allocator_positions.py; a spot failure raises
+ * instead). MT5 and sFOX warnings mean something else, so they are left out.
+ */
+const CCXT_POSITION_VENUES: ReadonlySet<string> = new Set([
+  "binance",
+  "okx",
+  "bybit",
+  "deribit",
+]);
+
+/**
+ * Review C4 WR-01. One sentence per connected key whose last sync could not
+ * read its open positions. That sync saved the spot rows at a newer day, so
+ * under D-16 (each key's rows at its own latest read) every open position of
+ * the key leaves the table until a sync reads them again. Chosen over holding
+ * the key's latest read back to an older complete day: that would also show a
+ * stale spot book, and under repeated failures an arbitrarily old one. Reads
+ * the key's CURRENT `sync_status`, which moves on with the next sync, so the
+ * line clears when a sync reads the positions again. Departed keys are not
+ * polled, so they get no line.
+ */
+export function partialPositionReadNotes(
+  apiKeys: ReadonlyArray<{
+    exchange: string;
+    label: string | null;
+    is_active: boolean;
+    sync_status: string | null;
+    disconnected_at: string | null;
+  }>,
+): string[] {
+  return apiKeys
+    .filter(
+      (k) =>
+        isLiveKey(k) &&
+        k.sync_status === "complete_with_warnings" &&
+        CCXT_POSITION_VENUES.has(k.exchange.trim().toLowerCase()),
+    )
+    .map(
+      (k) =>
+        `Open positions from ${keyPhrase(k, k.exchange)} could not be read on its last sync. Any it holds are missing below until a sync reads them.`,
+    );
 }
 
 const EMPTY_OPTIMIZER: OptimizerPrefetch = {
@@ -320,6 +371,8 @@ export function HoldingsTabPanel(
     [derivativeHoldings, holdingsSummary, apiKeys],
   );
 
+  const partialReadNotes = useMemo(() => partialPositionReadNotes(apiKeys), [apiKeys]);
+
   const allocatorPreferences = props.mandate
     ? { max_weight: props.mandate.max_weight }
     : null;
@@ -418,6 +471,15 @@ export function HoldingsTabPanel(
           onShowRevokedChange={setShowRevoked}
         />
         <OpenPositionsTable rows={openPositionRows} />
+        {partialReadNotes.map((note) => (
+          <p
+            key={note}
+            data-testid="open-positions-partial-read-note"
+            className="text-xs text-text-muted"
+          >
+            {note}
+          </p>
+        ))}
         {readDayNotes.map((note) => (
           <p
             key={note}

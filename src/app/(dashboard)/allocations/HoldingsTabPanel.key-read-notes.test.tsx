@@ -117,3 +117,40 @@ describe("HoldingsTabPanel: open positions say how old an older key's read is (S
     expect(screen.queryByTestId("open-positions-read-day-note")).toBeNull();
   });
 });
+
+describe("HoldingsTabPanel: a live key whose last sync could not read its positions says so (WR-01)", () => {
+  it("names a connected exchange key whose last sync finished with warnings", () => {
+    renderPanel(
+      [perp("key-a", "ETH-PERP", "2026-09-29")],
+      [apiKey("key-a", "Main", { sync_status: "complete_with_warnings" })],
+    );
+    expect(
+      screen.getByTestId("open-positions-partial-read-note").textContent,
+    ).toBe(
+      "Open positions from the Binance key Main could not be read on its last sync. Any it holds are missing below until a sync reads them.",
+    );
+  });
+
+  it.each([
+    ["an MT5 account (its warnings are not a positions read)", { exchange: "mt5" }],
+    ["an sFOX account (its warnings are not a positions read)", { exchange: "sfox" }],
+    ["a disconnected key", { disconnected_at: "2026-09-01T00:00:00Z" }],
+    ["an inactive key", { is_active: false }],
+  ])("says nothing for %s", (_label, overrides) => {
+    renderPanel(
+      [perp("key-a", "ETH-PERP", "2026-09-29")],
+      [
+        apiKey("key-a", "Main", {
+          sync_status: "complete_with_warnings",
+          ...overrides,
+        }),
+      ],
+    );
+    expect(screen.queryByTestId("open-positions-partial-read-note")).toBeNull();
+  });
+
+  it("says nothing for a clean sync", () => {
+    renderPanel([perp("key-a", "ETH-PERP", "2026-09-29")], [apiKey("key-a", "Main")]);
+    expect(screen.queryByTestId("open-positions-partial-read-note")).toBeNull();
+  });
+});
