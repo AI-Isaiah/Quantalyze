@@ -20,6 +20,7 @@ import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { isLiveKey } from "@/lib/departed-history";
 import type { z } from "zod";
 
 /**
@@ -226,10 +227,12 @@ export async function PATCH(
   const newSecret = body.new_secret;
 
   // Ownership + venue-shape read, via the USER-SCOPED client (RLS applies,
-  // safe to use for a read).
+  // safe to use for a read). `disconnected_at` and `is_active` are read ONLY
+  // to decide whether the persist write below returns the key to live (167.1.2
+  // C4 review CR-01); neither is ever written by this route.
   const { data: keyRow, error: keyErr } = await supabase
     .from("api_keys")
-    .select("id, user_id, exchange, venue_account_id")
+    .select("id, user_id, exchange, venue_account_id, disconnected_at, is_active")
     .eq("id", id)
     .maybeSingle();
 
@@ -477,6 +480,29 @@ export async function PATCH(
   //   purpose (WR-03). A founder who wants BOTH the password fixed and the key
   //   reconnected uses the separate Reconnect affordance, which already clears
   //   all three fields together.
+  //
+  // `history_inclusion` (167.1.2 C4 review CR-01) — reset to NULL ONLY when
+  // this write returns the key to live. The write sets `sync_status = 'idle'`
+  // and touches neither `disconnected_at` nor `is_active`, so the key is live
+  // afterwards exactly when `isLiveKey` (src/lib/departed-history.ts, the same
+  // predicate the key card and the derive job read) holds for the pre-read's
+  // `is_active` and `disconnected_at` with `sync_status` 'idle'. A DISCONNECTED
+  // key (the card offers "Update password" there too) or an inactive key stays
+  // departed, so the owner's include/exclude choice for it still applies and
+  // is kept; writing NULL there silently reverted it to the default rule.
+  //
+  // Known limits, recorded rather than fixed here: (1) no recompose is enqueued
+  // for a revoked key whose non-NULL choice this resets. The key is live again
+  // after the write, so its history now counts as a live key's, and the next
+  // derive for this owner composes it that way; this route does not take the
+  // recompose serialisation set_departed_key_history_inclusion takes. (2) The
+  // liveness fields are read BEFORE the broker probe, so a Disconnect that
+  // lands during the probe is not seen: the reset follows the pre-read state.
+  const returnsKeyToLive = isLiveKey({
+    is_active: keyRow.is_active,
+    sync_status: "idle",
+    disconnected_at: keyRow.disconnected_at,
+  });
   const attemptPersist = (includeVenueAccountId: boolean) =>
     admin
       .from("api_keys")
@@ -494,8 +520,9 @@ export async function PATCH(
         // through reconnect_allocator_api_key. COMMENT ON COLUMN
         // api_keys.history_inclusion binds every such path: a departed-history
         // choice made for one departure never carries over to the next, so the
-        // key starts again from the default rule.
-        history_inclusion: null,
+        // key starts again from the default rule. Only on that path: see
+        // `returnsKeyToLive` above (C4 review CR-01).
+        ...(returnsKeyToLive ? { history_inclusion: null } : {}),
         // Backfill ONLY when the pre-read row had no identifier yet — never
         // overwrite an existing value with whatever this request's login
         // happens to be (it is, by construction, the same login: D-03 forbids

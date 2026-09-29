@@ -3313,6 +3313,34 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       expect(within(confirmDialog()).getByRole("button", { name: "Delete" })).toBeEnabled();
     });
 
+    it("C4-SFH-09-HISTORY: the confirm warns that deleting removes this account's history, in amber, on its own line apart from the composite warning", async () => {
+      // 167.1.2 C4 review SFH-C4-09. This Delete is a hard `api_keys` DELETE,
+      // and csv_daily_returns_api_key_id_fkey is ON DELETE CASCADE, so the
+      // key's per-key daily returns (the allocator's history for this account)
+      // go with it. Plan 09 put this sentence on AllocatorExchangeManager's
+      // delete confirm only. This card has no Disconnect (167.1.2 REVIEW
+      // WR-01), so the allocator copy's "Disconnect instead to keep it." is
+      // not repeated here: it would point at a control this card lacks.
+      const HISTORY_ORACLE = "Deleting also removes this account's history.";
+      routeFetch();
+      const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
+      await renderRows([keyA]);
+      await act(async () => {
+        fireEvent.click(cardButton("key-a", "Delete"));
+      });
+      expect(confirmDialog()).toHaveAttribute("open");
+      const warning = within(confirmDialog()).getByTestId("delete-history-warning");
+      expect(warning).toHaveTextContent(HISTORY_ORACLE);
+      expect(warning).not.toHaveTextContent(/Disconnect/);
+      // DESIGN.md: a recoverable-by-choice consequence is amber, never red.
+      expect(warning.className).toContain("text-warning");
+      expect(warning.className).not.toContain("text-negative");
+      // It informs the choice and never blocks it.
+      expect(within(confirmDialog()).getByRole("button", { name: "Delete" })).toBeEnabled();
+      // Its own line, independent of the composite warning (absent here).
+      expect(within(confirmDialog()).queryByTestId("delete-composite-warning")).not.toBeInTheDocument();
+    });
+
     it("R2-WR02-UNNAMED: a membership whose composite cannot be read is still listed, never dropped", async () => {
       // 167.2.1 D-01 (lineage): answered by the route now; oracle unchanged.
       routeFetch({ memberships: membershipsAnswer({ memberships: [membership(null)] }) });
