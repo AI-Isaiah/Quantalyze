@@ -1401,3 +1401,105 @@ describe("SMTM-01 readCompositeFactsheet — smoothed gate + gated series read",
     expect(out!.buildOpts.smoothedGate).toEqual({ available: true, reason: undefined });
   });
 });
+
+/**
+ * Phase 169 (SC4, D-10, D-25) — readSingleKeyBasisOpts supplies the single-key
+ * CASH headline from the row's persisted top-level scalars, so the factsheet
+ * reads the same CAGR and Sharpe as discovery, recommendations and
+ * my-strategies. The key is BUILT from the persisted scalars (never threaded
+ * from the raw jsonb), only for a rankable row, and it adds no read.
+ */
+describe("169 D-10 readSingleKeyBasisOpts — the persisted single-key cash headline", () => {
+  const PERSISTED = {
+    cumulative_return: 0.42,
+    volatility: 0.31,
+    max_drawdown: -0.22,
+    cagr: 0.12,
+    sharpe: 1.5,
+    sortino: 2.0,
+    calmar: 0.55,
+  };
+  const MTM = { cumulative_return: 0.9, volatility: 0.25, max_drawdown: -0.18, cagr: 0.7, sharpe: 2.2, sortino: 2.9, calmar: 0.9 };
+  /** The analytics row as a caller holds it: the seven scalars beside the other columns. */
+  const row = (over: Record<string, unknown> = {}) => ({
+    ...PERSISTED,
+    computation_status: "complete",
+    metrics_json_by_basis: null,
+    data_quality_flags: {},
+    ...over,
+  });
+  const noAdmin = () =>
+    vi.fn((): SupabaseClient => {
+      throw new Error("the persisted-headline arm must not construct the service-role handle");
+    });
+
+  it("rankable non-options row → cash_settlement built from the seven persisted scalars, no gates, no read", async () => {
+    const getAdmin = noAdmin();
+    const out = await readSingleKeyBasisOpts(getAdmin, "s-1", {}, null, "complete", row());
+    expect(out).toEqual({ metricsByBasis: { cash_settlement: PERSISTED } });
+    // No mtmGate / smoothedGate: FactsheetView's basis toggle stays hidden.
+    expect("mtmGate" in out).toBe(false);
+    expect(getAdmin).not.toHaveBeenCalled();
+  });
+
+  it.each(["failed", "computing", null, undefined])(
+    "not rankable (%s) → exactly today's result: no cash key (a failed run's leftovers never overlay)",
+    async (status) => {
+      const out = await readSingleKeyBasisOpts(noAdmin(), "s-1", {}, null, status, row({ computation_status: status }));
+      expect(out).toEqual({});
+    },
+  );
+
+  it("a persisted null scalar is kept as null in the built object (strict overlay → em-dash)", async () => {
+    const out = await readSingleKeyBasisOpts(noAdmin(), "s-1", {}, null, "complete", row({ sharpe: null }));
+    expect(out.metricsByBasis?.cash_settlement).toEqual({ ...PERSISTED, sharpe: null });
+  });
+
+  it("scalar columns not projected (structurally absent) → no cash key, today's result", async () => {
+    const out = await readSingleKeyBasisOpts(noAdmin(), "s-1", {}, null, "complete", {
+      computation_status: "complete",
+    });
+    expect(out).toEqual({});
+  });
+
+  it("no persisted row passed (the 5-argument call) → exactly today's result", async () => {
+    expect(await readSingleKeyBasisOpts(noAdmin(), "s-1", {}, null, "complete")).toEqual({});
+  });
+
+  it("options strategy: the mtm arm is unchanged and the cash headline is added beside it", async () => {
+    const getAdmin = vi.fn(
+      () =>
+        ({
+          from: () => {
+            const chain = {
+              select: () => chain,
+              eq: () => chain,
+              maybeSingle: () => Promise.resolve({ data: null, error: null }),
+            };
+            return chain;
+          },
+        }) as unknown as SupabaseClient,
+    );
+    const today = await readSingleKeyBasisOpts(getAdmin, "s-1", {}, { mark_to_market: MTM }, "complete");
+    const out = await readSingleKeyBasisOpts(
+      getAdmin,
+      "s-1",
+      {},
+      { mark_to_market: MTM },
+      "complete",
+      row({ metrics_json_by_basis: { mark_to_market: MTM } }),
+    );
+    expect(out).toEqual({
+      ...today,
+      metricsByBasis: { ...today.metricsByBasis, cash_settlement: PERSISTED },
+    });
+    expect(out.mtmGate).toEqual({ available: true, reason: undefined });
+  });
+
+  it("a lingering raw cash_settlement key → exactly today's result (the raw object is never threaded, SC-4)", async () => {
+    const raw = { cash_settlement: { ...PERSISTED, sharpe: 9.9 } };
+    const out = await readSingleKeyBasisOpts(noAdmin(), "s-1", {}, raw, "complete", row({ metrics_json_by_basis: raw }));
+    expect(out).toEqual(await readSingleKeyBasisOpts(noAdmin(), "s-1", {}, raw, "complete"));
+    expect(out.metricsByBasis?.cash_settlement).toBeUndefined();
+  });
+});

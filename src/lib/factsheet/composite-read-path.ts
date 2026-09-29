@@ -4,9 +4,9 @@ import type { DailyReturn } from "./types";
 import { MTM_DAILY_RETURNS_SERIES_KIND, SMOOTHED_MTM_DAILY_RETURNS_SERIES_KIND } from "@/lib/types";
 import { deriveSegmentMarkers } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
-import { hasBasisHeadline } from "./basis-metrics";
+import { BASIS_KPI_MAP, hasBasisHeadline } from "./basis-metrics";
 import { attributionBasisFromConfig } from "@/lib/composite/compositeAttribution";
-import { isComputedAnalytics } from "@/lib/closed-sets";
+import { isComputedAnalytics, isRankableAnalyticsRow } from "@/lib/closed-sets";
 
 /** The parsed, defensively-coerced form of an `mtm_daily_returns` series row. */
 export type ParsedMtmSeries = {
@@ -411,13 +411,17 @@ export function singleKeyDataQuality(
  *     A failed/computing
  *     row NEVER exposes a live-looking MTM object: `metricsByBasis` is threaded
  *     ONLY when `available`, so the payload is structurally MTM-free otherwise.
- *   - SC-4 (T-102-SC keystone): thread ONLY the `mark_to_market` key, NEVER the raw
- *     `metrics_json_by_basis` column. A lingering `cash_settlement` key (a composite→
- *     single stale window; 101-01 "Observed-but-out-of-scope #1") would activate the
- *     build-payload.ts:243 cash overlay and perturb the byte-identical cash headline.
+ *   - SC-4 (T-102-SC keystone): thread ONLY the by-basis MTM keys, NEVER the raw
+ *     `metrics_json_by_basis` column. A lingering raw `cash_settlement` key (a
+ *     composite→single stale window; 101-01 "Observed-but-out-of-scope #1") would
+ *     activate `buildFactsheetPayload`'s cash overlay with numbers no current run
+ *     vouches for. The single-key `cash_settlement` key a payload DOES carry since
+ *     Phase 169 (SC4, D-10) is BUILT by {@link readSingleKeyBasisOpts} from the
+ *     row's persisted top-level scalars when the row is rankable; this function
+ *     never produces it.
  *
  * Returns `{}` for every non-options single-key strategy (no MTM key AND no reason)
- * so the toggle never renders and the payload stays byte-identical to today.
+ * so the basis toggle never renders.
  * Defensive on unknown jsonb, mirroring the strict-coercion style of this file.
  */
 export function singleKeyBasisOpts(
@@ -465,7 +469,9 @@ export function singleKeyBasisOpts(
   const available = done && hasBasisHeadline(mtm);
   const smoothedAvailable = done && hasBasisHeadline(smoothed);
   // 6. Thread ONLY the available by-basis keys (F-4 structural: a failed row's payload
-  //    carries NO by-basis object), and NEVER a lingering cash_settlement key (SC-4).
+  //    carries NO by-basis object), and NEVER the raw jsonb's cash_settlement key
+  //    (SC-4). The single-key cash key is built from the persisted top-level scalars
+  //    by readSingleKeyBasisOpts, only for a rankable row (Phase 169, D-10).
   const metricsByBasis: NonNullable<BuildFactsheetOpts["metricsByBasis"]> = {};
   if (available && mtm) metricsByBasis.mark_to_market = mtm;
   if (smoothedAvailable && smoothed) metricsByBasis.smoothed_mtm = smoothed;
@@ -509,6 +515,21 @@ export function singleKeyBasisOpts(
  * series are read. The handle MUST be service-role: `strategy_analytics_series` is
  * deny-all RLS (see {@link readMtmSeries}); the caller owns the upstream
  * published/owner visibility gate, exactly as before the hoist.
+ *
+ * Phase 169 (SC4, D-10, D-25: "calculate Sharpe once; every page reads it") — the
+ * single-key arm now ALSO overlays the persisted headline, so the factsheet's CAGR
+ * and Sharpe agree with discovery, recommendations and my-strategies, which read
+ * the same stored `strategy_analytics` scalars. `persistedRow` is the analytics row
+ * the caller already holds; its seven {@link BASIS_KPI_MAP} top-level scalars become
+ * `metricsByBasis.cash_settlement` (values as persisted, a null kept as null so the
+ * strict overlay renders "—"), which `buildFactsheetPayload` overlays exactly as it
+ * does for a composite. See {@link persistedCashHeadline} for the gates: the row must
+ * be rankable (`isRankableAnalyticsRow`, the predicate recommendations uses), because
+ * a failed run leaves the previous run's scalars behind and they must not render.
+ * The factsheet resolve stage's G1 gate already refuses a non-computed row, so the
+ * not-rankable arm is reached from the discovery detail page only, until Phase 169.1
+ * plan 169.1-01 moves that page onto the shared build. It adds no read, so the admin
+ * thunk posture above is unchanged. Omitting `persistedRow` keeps the pre-169 result.
  */
 export async function readSingleKeyBasisOpts(
   getAdmin: () => SupabaseClient,
@@ -516,6 +537,7 @@ export async function readSingleKeyBasisOpts(
   dqf: { mtm_gated_reason?: unknown } | null | undefined,
   metricsJsonByBasis: unknown,
   computationStatus: unknown,
+  persistedRow?: Record<string, unknown> | null,
 ): Promise<Pick<BuildFactsheetOpts, "metricsByBasis" | "mtmGate" | "mtmSeries" | "smoothedGate" | "smoothedSeries">> {
   let admin: SupabaseClient | undefined;
   const resolveAdmin = () => (admin ??= getAdmin());
@@ -533,7 +555,55 @@ export async function readSingleKeyBasisOpts(
       ? readSmoothedSeries(resolveAdmin(), strategyId)
       : Promise.resolve(null),
   ]);
-  return singleKeyBasisOpts(dqf, metricsJsonByBasis, computationStatus, mtmSeries, smoothedSeries);
+  const opts = singleKeyBasisOpts(dqf, metricsJsonByBasis, computationStatus, mtmSeries, smoothedSeries);
+  const cashHeadline = persistedCashHeadline(strategyId, persistedRow, metricsJsonByBasis, computationStatus);
+  if (!cashHeadline) return opts;
+  return { ...opts, metricsByBasis: { ...(opts.metricsByBasis ?? {}), cash_settlement: cashHeadline } };
+}
+
+/**
+ * Phase 169 (SC4, D-10) — the single-key `cash_settlement` headline, BUILT from the
+ * analytics row's persisted top-level scalars. Returns `undefined` (the caller keeps
+ * the TypeScript headline, as before Phase 169) when:
+ *   - no row was passed;
+ *   - the row is not rankable: a `failed` or `computing` row still carries the
+ *     previous run's scalars, and rendering them is the STALE-01 class;
+ *   - the raw `metrics_json_by_basis` already carries a `cash_settlement` object: a
+ *     lingering composite→single key (SC-4 in {@link singleKeyBasisOpts}). D-10 applies
+ *     the persisted headline only where that key is absent, and the raw object itself
+ *     is never threaded;
+ *   - the row does not carry the headline structurally ({@link hasBasisHeadline}: all
+ *     seven keys present and a finite `cumulative_return`). A caller whose select did
+ *     not project the scalars would otherwise overlay seven em-dashes; it is logged.
+ * A per-scalar null on a row that passes (`sortino` with no losing day) is kept, and
+ * the strict overlay renders it "—", as the lists do.
+ */
+function persistedCashHeadline(
+  strategyId: string,
+  persistedRow: Record<string, unknown> | null | undefined,
+  metricsJsonByBasis: unknown,
+  computationStatus: unknown,
+): Record<string, number> | undefined {
+  if (persistedRow == null) return undefined;
+  if (!isRankableAnalyticsRow({ computation_status: computationStatus as string | null | undefined })) {
+    return undefined;
+  }
+  if (metricsJsonByBasis !== null && typeof metricsJsonByBasis === "object" && !Array.isArray(metricsJsonByBasis)) {
+    const rawCash = (metricsJsonByBasis as Record<string, unknown>).cash_settlement;
+    if (rawCash !== null && typeof rawCash === "object" && !Array.isArray(rawCash)) return undefined;
+  }
+  if (!hasBasisHeadline(persistedRow)) {
+    console.warn(
+      "[factsheet] readSingleKeyBasisOpts — rankable row carries no persisted headline; keeping the computed one",
+      { strategyId, missing: BASIS_KPI_MAP.filter(({ serverKey }) => !(serverKey in persistedRow)).map((k) => k.serverKey) },
+    );
+    return undefined;
+  }
+  const headline: Record<string, unknown> = {};
+  for (const { serverKey } of BASIS_KPI_MAP) headline[serverKey] = persistedRow[serverKey];
+  // `metricsByBasis` types each basis as `Record<string, number>`; a persisted null
+  // stays null here on purpose (the strict overlay turns it into "—").
+  return headline as Record<string, number>;
 }
 
 /**
