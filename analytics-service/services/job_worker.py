@@ -10568,6 +10568,17 @@ def account_identity_tokens(
     }
 
 
+# Sorts before every real ISO day: a live key with no returns yet bounds a
+# departed key on its account to no day at all.
+_BEFORE_EVERY_DAY = "0000-00-00"
+
+
+def _day_before(day: str) -> str:
+    if day == _BEFORE_EVERY_DAY:
+        return day
+    return (datetime.fromisoformat(day).date() - timedelta(days=1)).isoformat()
+
+
 def departed_history_inclusion(
     keys: Sequence[Mapping[str, Any]],
 ) -> dict[str, DepartedHistoryDecision]:
@@ -10575,33 +10586,56 @@ def departed_history_inclusion(
 
     ``keys`` is every key of the owner, live and departed, each with ``id``,
     ``exchange``, ``venue_account_id``, ``account_shared_with_api_key_id``,
-    ``account_share_kind``, ``is_active``, ``disconnected_at``,
-    ``sync_status``, ``history_inclusion``, ``first_returns_day`` and
-    ``last_returns_day``. Account identity is ``account_identity_tokens``. A
-    departed key ends on the UTC day of ``disconnected_at``, or on its last
-    returns day when it was never disconnected. Pure; never reads created_at.
+    ``account_share_kind``, ``is_active`` (optional, default true),
+    ``disconnected_at``, ``sync_status``, ``history_inclusion``,
+    ``first_returns_day`` and ``last_returns_day``. The spec is the shared
+    fixture ``tests/fixtures/departed_history_inclusion.json`` (its ``rule``
+    list); src/lib/departed-history.ts is the twin and is tested against the
+    same rows. Pure; never reads created_at.
+
+    * End day: the UTC day of ``disconnected_at``, else the last returns day. A
+      key counts at most until the earlier of its end day and last returns day.
+    * 'exclude' always excludes. No returns on or before the end day: excluded.
+    * Unknown account (``account_identity_tokens`` None): excluded by default
+      (founder-confirmed 2026-09-25); 'include' counts it to its end day.
+    * Known account: a LIVE key on it bounds the departed key to the day before
+      the live key's first returns day. The COUNTED departed keys on it (not
+      excluded, with returns) are ordered by (first, last, id), each bounded to
+      the day before the next one's first day (B4: on no day do two counted
+      keys share a known account). 'include' never lifts a bound.
     """
     identity = account_identity_tokens(keys)
     live_ids = {str(row["id"]) for row in keys if _is_live_key(row)}
-    decisions: dict[str, DepartedHistoryDecision] = {}
-    for row in keys:
-        if _is_live_key(row):
-            continue
-        key_id = str(row["id"])
+    rows_by_id = {str(row["id"]): row for row in keys}
+
+    def _own_window(row: Mapping[str, Any]) -> tuple[str, str] | None:
+        """(first returns day, last day it may count), or None: no history."""
         first = row.get("first_returns_day")
         last = row.get("last_returns_day")
+        end = _utc_day(row.get("disconnected_at")) or last
+        if not first or not last or not end:
+            return None
+        until = min(str(end), str(last))
+        return (str(first), until) if until >= str(first) else None
+
+    windows = {
+        key_id: _own_window(row)
+        for key_id, row in rows_by_id.items()
+        if key_id not in live_ids
+    }
+    decisions: dict[str, DepartedHistoryDecision] = {}
+    for key_id, row in rows_by_id.items():
+        if key_id in live_ids:
+            continue
         choice = row.get("history_inclusion")
         if choice == "exclude":
             decisions[key_id] = DepartedHistoryDecision(False, None, "owner_excluded")
             continue
-        end = _utc_day(row.get("disconnected_at")) or last
-        if not first or not last or not end:
+        window = windows[key_id]
+        if window is None:
             decisions[key_id] = DepartedHistoryDecision(False, None, "no_returns")
             continue
-        until = min(end, last)
-        if until < first:
-            decisions[key_id] = DepartedHistoryDecision(False, None, "no_returns")
-            continue
+        first, until = window
         token = identity[key_id]
         if token is None:
             if choice == "include":
@@ -10609,20 +10643,55 @@ def departed_history_inclusion(
             else:
                 decisions[key_id] = DepartedHistoryDecision(False, None, "account_unknown")
             continue
-        sharing = [
+        same_account = [
             other_id
             for other_id, other_token in identity.items()
             if other_id != key_id and other_token == token
         ]
-        if sharing:
-            reason = (
-                "same_account_as_connected_key"
-                if any(other_id in live_ids for other_id in sharing)
-                else "same_account_as_later_key"
+        live_firsts = [
+            str(rows_by_id[other_id].get("first_returns_day") or _BEFORE_EVERY_DAY)
+            for other_id in same_account
+            if other_id in live_ids
+        ]
+        # The departed keys that count on this account, this key among them,
+        # in D-09 order: first returns day, then last returns day, then id.
+        counted_departed = sorted(
+            (
+                str(rows_by_id[other_id]["first_returns_day"]),
+                str(rows_by_id[other_id]["last_returns_day"]),
+                other_id,
             )
+            for other_id in same_account + [key_id]
+            if other_id not in live_ids
+            and rows_by_id[other_id].get("history_inclusion") != "exclude"
+            and windows[other_id] is not None
+        )
+        position = next(
+            index for index, entry in enumerate(counted_departed) if entry[2] == key_id
+        )
+        bounds = [until]
+        if live_firsts:
+            bounds.append(_day_before(min(live_firsts)))
+        successor = (
+            counted_departed[position + 1]
+            if position + 1 < len(counted_departed)
+            else None
+        )
+        if successor is not None:
+            bounds.append(_day_before(successor[0]))
+        if live_firsts:
+            reason = "same_account_as_connected_key"
+        elif successor is not None:
+            reason = "same_account_as_later_key"
+        elif position > 0:
+            reason = "latest_key_on_account"
+        else:
+            reason = "distinct_account"
+        counted_until = min(bounds)
+        if counted_until < first:
             decisions[key_id] = DepartedHistoryDecision(False, None, reason)
-            continue
-        decisions[key_id] = DepartedHistoryDecision(True, until, "distinct_account")
+        else:
+            decisions[key_id] = DepartedHistoryDecision(True, counted_until, reason)
     return decisions
 
 
