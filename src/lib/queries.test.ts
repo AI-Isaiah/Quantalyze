@@ -198,6 +198,7 @@ import {
   deriveStrategyLinkedKeyIds,
   deriveStrategylessKeys,
   extractTrustworthyDerivedSeries,
+  equityHistoryReadiness,
 } from "./queries";
 import type { SupportedExchange } from "./utils";
 
@@ -1489,6 +1490,147 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     expect(result.equityDailyReturns).toEqual([]);
     // The curve itself is still well-formed, so the source stamp stays derived.
     expect(result.equityCurveSource).toBe("derived");
+  });
+});
+
+describe("equityHistoryReadiness — plan 11 ready condition", () => {
+  const series = {
+    curve: [{ date: "2026-03-10", value: 100 }],
+    returns: [{ date: "2026-03-11", value: 0.01 }],
+  };
+  // derivePhase07Fields' key type is a superset of equityHistoryReadiness',
+  // so one builder serves both.
+  type Key = Parameters<typeof derivePhase07Fields>[0][number];
+  const key = (over: Partial<Key> = {}): Key => ({
+    id: "k-live",
+    exchange: "binance",
+    is_active: true,
+    sync_status: "ok",
+    last_sync_at: null,
+    disconnected_at: null,
+    venue_account_id: "acct-1",
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+    ...over,
+  });
+  const holderKey = (over: Partial<Key> = {}): Key =>
+    key({
+      id: "k-holder",
+      venue_account_id: "acct-holder",
+      ...over,
+    });
+
+  it("a v2 series and one identified key is ready, reason null", () => {
+    expect(equityHistoryReadiness([key()], series)).toEqual({
+      state: "ready",
+      reason: null,
+    });
+  });
+
+  it("a duplicate of a working holder is not ready, even with a v2 series", () => {
+    const marked = key({
+      id: "k-dup",
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    expect(equityHistoryReadiness([holderKey(), marked], series)).toEqual({
+      state: "rebuilding",
+      reason: "duplicate_account",
+    });
+  });
+
+  it("a duplicate whose holder is disconnected or revoked counts on its own", () => {
+    const marked = key({
+      id: "k-dup",
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    for (const departed of [
+      holderKey({ disconnected_at: "2026-03-01T00:00:00Z" }),
+      holderKey({ sync_status: "revoked" }),
+      holderKey({ sync_status: "error" }),
+      holderKey({ sync_status: "sign_in_failed" }),
+    ]) {
+      expect(equityHistoryReadiness([departed, marked], series).reason).not.toBe(
+        "duplicate_account",
+      );
+      expect(equityHistoryReadiness([departed, marked], series).state).toBe(
+        "ready",
+      );
+    }
+  });
+
+  it("an eligible ccxt key with no account id is identity-pending; a blank id is not an id", () => {
+    expect(
+      equityHistoryReadiness([key({ venue_account_id: null })], series).reason,
+    ).toBe("account_identity_pending");
+    expect(
+      equityHistoryReadiness([key({ venue_account_id: "  " })], series).reason,
+    ).toBe("account_identity_pending");
+  });
+
+  it("a composite member, sFOX and MT5 do not block on a missing account id", () => {
+    expect(
+      equityHistoryReadiness(
+        [key({ account_share_kind: "composite_member", venue_account_id: null })],
+        series,
+      ).state,
+    ).toBe("ready");
+    expect(
+      equityHistoryReadiness(
+        [key({ exchange: "sfox", venue_account_id: null })],
+        series,
+      ).state,
+    ).toBe("ready");
+    expect(
+      equityHistoryReadiness(
+        [key({ exchange: "mt5", venue_account_id: null })],
+        series,
+      ).state,
+    ).toBe("ready");
+  });
+
+  it("duplicate wins over a missing account id", () => {
+    const marked = key({
+      id: "k-dup",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    expect(equityHistoryReadiness([holderKey(), marked], series).reason).toBe(
+      "duplicate_account",
+    );
+  });
+
+  it("no series, and no identity problem, is awaiting_derivation", () => {
+    expect(equityHistoryReadiness([key()], null)).toEqual({
+      state: "rebuilding",
+      reason: "awaiting_derivation",
+    });
+  });
+
+  it("legacy snapshots and no derived row stay rebuilding with an empty curve (plan 11 removed the snapshot fallback)", () => {
+    const result = derivePhase07Fields(
+      [key()],
+      [
+        {
+          asof: "2026-03-10",
+          value_usd: 10_000,
+          breakdown: null,
+          source: "exchange_primary",
+          history_depth_months: 24,
+          pre_terminus_balance_unknown: false,
+        },
+      ],
+      1,
+      [],
+      false,
+      null,
+    );
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
+    expect(result.equityDailyPoints).toEqual([]);
+    expect(result.equityDailyReturns).toEqual([]);
   });
 });
 

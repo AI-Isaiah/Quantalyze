@@ -3038,6 +3038,73 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
     expect(result.equityHistoryState).toBe("rebuilding");
     expect(result.equityDailyPoints).toEqual([]);
   });
+
+  // Phase 167.1.2 plan 11 (T-167.1.2-20a). The readiness rule is pinned on the
+  // pure helper in queries.test.ts; these two pin that the producer applies it
+  // to the key list getMyAllocationDashboard actually reads. The same v2 row
+  // is ready with one identified key and rebuilding once a second key reads
+  // the same account, so the difference is the marker and nothing else.
+  function v2Row() {
+    const row = derivedRow(true);
+    row.payload.version = 2;
+    row.payload.returns = [
+      { date: "2026-03-11", r: 0.0038 },
+      { date: "2026-03-12", r: 0.0011 },
+      { date: "2026-03-13", r: 0.0039 },
+    ];
+    return row;
+  }
+  const identifiedKey = (over: Record<string, unknown> = {}) => ({
+    id: "k-holder",
+    user_id: "user-1",
+    exchange: "binance",
+    label: "Binance main",
+    is_active: true,
+    sync_status: "ok",
+    last_sync_at: new Date().toISOString(),
+    disconnected_at: null,
+    account_balance_usdt: 1000,
+    created_at: "2026-04-01T00:00:00Z",
+    venue_account_id: "acct-synthetic-1",
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+    ...over,
+  });
+
+  it("plan 11: a version-2 row and one identified key read ready through getMyAllocationDashboard", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    state.allocatorEquityDerived = [v2Row()];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("ready");
+    expect(result.equityHistoryRebuildReason).toBeNull();
+    expect(result.equityDailyReturns).toHaveLength(3);
+  });
+
+  it("plan 11: the same row with a second key marked a duplicate of a working holder is rebuilding, reason duplicate_account", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [
+      identifiedKey(),
+      identifiedKey({
+        id: "k-dup",
+        label: "Binance copy",
+        account_share_kind: "duplicate",
+        account_shared_with_api_key_id: "k-holder",
+      }),
+    ];
+    state.allocatorEquityDerived = [v2Row()];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("duplicate_account");
+    expect(result.equityDailyPoints).toEqual([]);
+    expect(result.equityDailyReturns).toEqual([]);
+  });
 });
 
 describe("115.1 equity display-repoint", () => {
@@ -3075,11 +3142,12 @@ describe("115.1 equity display-repoint", () => {
     // Positive control: this fixture WOULD render a non-empty legacy curve, so
     // the empty series below is the D-02 gate, not an empty input.
     expect(legacyExpectedDailyPoints().length).toBeGreaterThan(0);
-    // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
-    // every allocator). With no derived row seeded, the extractor's input is
-    // `null`, so asserting on it here would be a constant (review round 2
-    // IN-03). What this case can still fail on is the source stamp below: a
-    // producer that picked the derived branch without a row would mislabel it.
+    // Phase 167.1.2 plan 11: the snapshot fallback is gone, so a book with
+    // legacy snapshots and no derived row is rebuilding and equityDailyPoints
+    // stays []. The adapter's own content remains in
+    // allocation-helpers.equity-adapter.test.ts. What this case can still fail
+    // on is the source stamp below: a producer that picked the derived branch
+    // without a row would mislabel it.
     expect(result.equityDailyPoints).toEqual([]);
     // Neuter gap: the no-row case must ALSO stamp the source 'legacy' (only the
     // derived/untrusted pins asserted the source before) — a repoint that

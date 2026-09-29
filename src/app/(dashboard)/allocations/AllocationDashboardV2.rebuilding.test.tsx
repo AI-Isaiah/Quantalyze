@@ -24,7 +24,7 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
 // mocks DO render the curve and the Sharpe label when the state allows it.
 // ---------------------------------------------------------------------------
 
-const buildPayloadSpy = vi.fn(() => ({ stub: true }));
+const buildPayloadSpy = vi.fn((..._args: unknown[]) => ({ stub: true }));
 
 vi.mock("@/components/portfolio/InsightStrip", () => ({
   InsightStrip: () => <div data-testid="mock-insight-strip" />,
@@ -342,5 +342,36 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       baseProps.equityDailyPoints,
       expect.objectContaining({ dailyReturns: equityDailyReturns }),
     );
+  });
+
+  it.each([
+    [
+      "duplicate_account",
+      "Two of your keys read the same exchange account. Disconnect one of them on the Exchanges page and the history rebuilds.",
+    ],
+    [
+      "account_identity_pending",
+      "We are confirming which exchange account each key reads. This happens on the next daily sync.",
+    ],
+    [
+      "awaiting_derivation",
+      "Your history is recomputed from each account's returns and cash flows once a day.",
+    ],
+  ] as const)("rebuilding reason %s renders its one line", (reason, line) => {
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        equityHistoryState="rebuilding"
+        equityHistoryRebuildReason={reason}
+      />,
+    );
+    const panel = screen.getByTestId("overview-equity-rebuilding");
+    expect(panel.textContent).toContain(line);
+    if (reason === "duplicate_account") {
+      expect(screen.getByRole("link", { name: "Exchanges page" })).toHaveAttribute(
+        "href",
+        "/profile?tab=exchanges",
+      );
+    }
   });
 });
