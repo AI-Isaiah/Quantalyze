@@ -1487,8 +1487,13 @@ export interface RiskDecompositionRow {
   /**
    * Unit: percent, 0 to 100 (a 40% weight is 40), from `routers/portfolio.py`,
    * same as `marginal_risk_pct` (2026-09-27, 169 D-49).
+   *
+   * null = the producer sent no weight (`_safe_float` persists None for a
+   * non-finite one). Never 0: a 0 read as "no capital" and marked every row
+   * with a risk share "Overweight risk" (2026-09-29, 169 review round 1 SFH
+   * M-5; the same rule 166.1 D7 applies to `marginal_risk_pct`).
    */
-  weight_pct: number;
+  weight_pct: number | null;
 }
 
 export interface BenchmarkComparison {

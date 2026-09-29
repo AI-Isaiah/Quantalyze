@@ -18,7 +18,8 @@ interface RiskAttributionProps {
     strategy_name: string;
     /** null = no risk share exists (the portfolio carries no risk); shown "—". */
     marginal_risk_pct: number | null;
-    weight_pct: number;
+    /** null = the producer sent no weight (169 review SFH M-5); shown "—". */
+    weight_pct: number | null;
     standalone_vol: number;
   }[] | null;
 }
@@ -85,8 +86,12 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
               // assessment either — "Balanced" would be a claim about a split
               // that does not exist. The cell is a colorless "—".
               // 169 D-49: the compare stays percent against percent (both raw).
+              // 169 review SFH M-5 (2026-09-29): with no weight there is
+              // nothing to compare the share against, so no assessment either.
               const share = d.marginal_risk_pct;
-              const overweight = share !== null && share > d.weight_pct * 1.3;
+              const weight = d.weight_pct;
+              const assessable = share !== null && weight !== null;
+              const overweight = assessable && share > weight * 1.3;
               return (
                 <tr key={d.strategy_id} className="border-b border-border/50 hover:bg-page/50 transition-colors">
                   <td className="py-2 pr-4 flex items-center gap-2">
@@ -97,7 +102,7 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
                   <td className="py-2 pr-4 text-right font-metric">{formatPercent(percentToFraction(d.marginal_risk_pct), 1, { signed: false })}</td>
                   <td className="py-2 pr-4 text-right font-metric">{formatPercent(d.standalone_vol)}</td>
                   <td className="py-2 text-right">
-                    {share === null ? (
+                    {!assessable ? (
                       <span className="text-caption text-text-muted">—</span>
                     ) : (
                       <span className={`text-caption font-medium ${overweight ? "text-negative" : "text-positive"}`}>

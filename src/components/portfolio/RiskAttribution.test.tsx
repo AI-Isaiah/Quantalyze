@@ -208,3 +208,32 @@ describe("<RiskAttribution> — a risk share that does not exist", () => {
     expect(cellsOf("Beta")[4].textContent).toBe("Balanced");
   });
 });
+
+/**
+ * 2026-09-29, Phase 169 review round 1 SFH M-5. The producer's weight can be
+ * None (`_safe_float(ordered_weights[i] * 100)`), and the adapter read it as
+ * 0: the Weight cell said "0.0%" and `share > 0 * 1.3` marked every row with a
+ * risk share "Overweight risk" in red. A weight that does not exist is the
+ * em-dash, and with no weight there is nothing to compare the share against,
+ * so the assessment is the colorless em-dash too (the null-share rule, 166.1
+ * D7). The risk share itself is still a fact and still renders.
+ */
+describe("<RiskAttribution> — a weight that does not exist (169 M-5)", () => {
+  it("renders a null weight and its assessment as a colorless dash, and keeps the share", () => {
+    render(
+      <RiskAttribution
+        data={[
+          { strategy_id: "a", strategy_name: "Alpha", marginal_risk_pct: 30, weight_pct: null, standalone_vol: 0.2 },
+          { strategy_id: "b", strategy_name: "Beta", marginal_risk_pct: 70, weight_pct: 60, standalone_vol: 0.1 },
+        ]}
+      />,
+    );
+    const alpha = cellsOf("Alpha");
+    expect(alpha[1].textContent).toBe("—");
+    expect(alpha[2].textContent).toBe("30.0%");
+    expect(alpha[4].textContent).toBe("—");
+    expect(alpha[4].querySelector(".text-positive, .text-negative")).toBeNull();
+    // Control: the row with a weight keeps its assessment (70 <= 60 x 1.3 = 78).
+    expect(cellsOf("Beta")[4].textContent).toBe("Balanced");
+  });
+});
