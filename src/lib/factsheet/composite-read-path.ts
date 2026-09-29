@@ -551,7 +551,8 @@ export function deriveHeadlineCoversFrom(raw: unknown): string | null {
  * service-role handle and deny-all RLS posture as {@link readMtmSeries}. A missing
  * row is a fact (`null`); a FAILED read throws {@link CompositeSeriesReadError}
  * (`read: "cash_settlement"`), so an outage is never rendered as "the span cannot
- * be named".
+ * be named". Review round 2 (WR-R2-03): its one caller reaches it only through
+ * {@link shouldReadSingleKeyCashSeries}, the MED-1 family's single-key gate.
  */
 async function readHeadlineCoversFrom(admin: SupabaseClient, strategyId: string): Promise<string | null> {
   const { data, error } = await admin
@@ -795,7 +796,14 @@ export async function readSingleKeyBasisOpts(
   // Review round 1 (SFH H-1): on a chain-broken row the stored headline covers only
   // the stretch after the last break, and it is still the value shown (D-25, SC4).
   // Name the start of that span from the stored cash series, so the page can say it.
-  if (cashHeadline && dqf?.twr_chain_broken === true) {
+  // Review round 2 (WR-R2-03): the read goes through the MED-1 family's single-key
+  // gate, so the DONE check sits at the read site and not only upstream in
+  // `persistedCashHeadline` (which implies it today).
+  if (
+    cashHeadline &&
+    dqf?.twr_chain_broken === true &&
+    shouldReadSingleKeyCashSeries(metricsJsonByBasis, computationStatus)
+  ) {
     const headlineCoversFrom = await readHeadlineCoversFrom(resolveAdmin(), strategyId);
     if (headlineCoversFrom === null) {
       console.warn(
@@ -1004,6 +1012,17 @@ export function shouldReadSingleKeySmoothedSeries(
  * predicate + status-gate is the guarantee; per LOW-4 the INERT-read grep
  * tripwire is NOT — it misses a reader imported via a constant).
  *
+ * 169 review round 2 (WR-R2-03), the contract as it stands: this function still
+ * has no production caller. The first production reader of a `cash_settlement`
+ * series row is the single-key H-1 reader, {@link readHeadlineCoversFrom}, and it
+ * routes through the family's single-key member,
+ * {@link shouldReadSingleKeyCashSeries}, not through this one. This one cannot
+ * serve it: its object half requires a raw `metrics_json_by_basis.cash_settlement`
+ * object, which a single-key row never carries (SC-4), so it is false on every row
+ * the H-1 reader targets. The invariant both members enforce is the one this
+ * block exists for, the DONE gate at the READ point. 105-FOLD-DECISION.md has no
+ * single-key carve-out; this note is the record of it.
+ *
  * Deliberately CHEAPER than the full `hasBasisHeadline` gate, mirroring the MTM
  * twin: a degenerate cash_settlement object may pass here; the eventual reader
  * still applies its own trust gate before surfacing a number.
@@ -1023,6 +1042,28 @@ export function shouldReadCashSettlementSeries(
   }
   const cash = (metricsJsonByBasis as Record<string, unknown>).cash_settlement;
   return cash !== null && typeof cash === "object" && !Array.isArray(cash);
+}
+
+/**
+ * 169 review round 2 (WR-R2-03) — the SINGLE-KEY member of the MED-1 predicate
+ * family ({@link shouldReadCashSettlementSeries}), and the gate the H-1 reader
+ * ({@link readHeadlineCoversFrom}) reads through. True ONLY when the status is
+ * terminal success (the same DONE half, so a series row a failure arm left behind
+ * is never read) AND `metrics_json_by_basis` carries NO raw `cash_settlement`
+ * object. A single-key row never carries one (SC-4); a row that does is a
+ * composite-to-single stale window whose cash series row belongs to another run.
+ * The two members are disjoint by construction: no row passes both.
+ */
+export function shouldReadSingleKeyCashSeries(
+  metricsJsonByBasis: unknown,
+  computationStatus: unknown,
+): boolean {
+  if (!isComputedAnalytics(computationStatus as string | null | undefined)) return false;
+  if (metricsJsonByBasis === null || typeof metricsJsonByBasis !== "object" || Array.isArray(metricsJsonByBasis)) {
+    return true;
+  }
+  const cash = (metricsJsonByBasis as Record<string, unknown>).cash_settlement;
+  return !(cash !== null && typeof cash === "object" && !Array.isArray(cash));
 }
 
 /**

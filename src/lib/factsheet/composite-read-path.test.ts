@@ -19,6 +19,7 @@ import {
   shouldReadSingleKeyMtmSeries,
   shouldReadSingleKeySmoothedSeries,
   shouldReadCashSettlementSeries,
+  shouldReadSingleKeyCashSeries,
   deriveHeadlineCoversFrom,
 } from "./composite-read-path";
 import type { ParsedMtmSeries } from "./composite-read-path";
@@ -1093,6 +1094,44 @@ describe("MED-1 shouldReadCashSettlementSeries — read-side status-gate (D3 sin
     expect(shouldReadCashSettlementSeries(null, "complete")).toBe(false);
     expect(shouldReadCashSettlementSeries([{ cash_settlement: CASH }], "complete")).toBe(false);
     expect(shouldReadCashSettlementSeries("garbage", "complete")).toBe(false);
+  });
+});
+
+/**
+ * 169 review round 2, WR-R2-03 — shouldReadSingleKeyCashSeries: the single-key
+ * member of the MED-1 predicate family, which the H-1 reader (the first
+ * production reader of a single-key `cash_settlement` series row) routes
+ * through. The DONE half is MED-1's own: a stale series row left behind by a
+ * failure arm is never read. The object half is inverted, because a single-key
+ * row never carries a raw `metrics_json_by_basis.cash_settlement` object (SC-4);
+ * a row that does is a composite-to-single stale window whose series belongs to
+ * another run. Neuter target: drop the DONE gate → RED on the status cases.
+ */
+describe("WR-R2-03 shouldReadSingleKeyCashSeries — the single-key cash series read gate", () => {
+  const CASH = { cumulative_return: 0.42 };
+
+  it("DONE + no raw cash_settlement object → true", () => {
+    for (const m of [null, undefined, {}, { mark_to_market: CASH }]) {
+      expect(shouldReadSingleKeyCashSeries(m, "complete")).toBe(true);
+      expect(shouldReadSingleKeyCashSeries(m, "complete_with_warnings")).toBe(true);
+    }
+  });
+
+  it("not terminal-success → false (a stale row after ANY failure arm is never read)", () => {
+    for (const s of ["failed", "computing", "pending", null, undefined, 0, "", "complete_x"]) {
+      expect(shouldReadSingleKeyCashSeries(null, s)).toBe(false);
+    }
+  });
+
+  it("a raw cash_settlement object → false (not a single-key row's series)", () => {
+    expect(shouldReadSingleKeyCashSeries({ cash_settlement: CASH }, "complete")).toBe(false);
+  });
+
+  it("the family is disjoint: no row passes both the composite and the single-key gate", () => {
+    const rows = [null, {}, { cash_settlement: CASH }, { cash_settlement: null }];
+    for (const m of rows) {
+      expect(shouldReadCashSettlementSeries(m, "complete") && shouldReadSingleKeyCashSeries(m, "complete")).toBe(false);
+    }
   });
 });
 
