@@ -48,7 +48,10 @@ import type {
 } from "./types";
 import { SUPPORTED_EXCHANGES, type SupportedExchange } from "./utils";
 import { holdingScopeKey } from "./keys";
-import { latestHoldingsPerKey } from "./latest-holdings-per-key";
+import {
+  fetchLatestHoldingsPerKey,
+  latestHoldingsPerKey,
+} from "./latest-holdings-per-key";
 import { getOwnPreferences, type AllocatorOwnPreferences } from "./preferences";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -4160,11 +4163,9 @@ export function derivePhase07Fields(
 
   // Collapse holdings to latest-asof-per-{venue}:{symbol}:{holding_type}
   // via linear scan of the max-asof comparator. Input order is IRRELEVANT
-  // for correctness — the `.order("asof", { ascending: false })` clause on
-  // the PostgREST query above is a log-inspection hedge (newest rows render
-  // first in debug dumps), not a correctness requirement. Do NOT flip the
-  // comparator to "first-seen wins" thinking ordering is guaranteed —
-  // removing `.order()` would silently regress that assumption.
+  // for correctness: the read (fetchLatestHoldingsPerKey) concatenates the
+  // keys' rows in no guaranteed order. Do NOT flip the comparator to
+  // "first-seen wins" thinking ordering is guaranteed.
   //
   // NEW-C03-02: Key by `${venue}:${symbol}:${holding_type}`, not just
   // `symbol`. Keying on symbol alone silently collapsed multi-venue
@@ -4379,22 +4380,25 @@ export const getMyAllocationDashboard = cache(
         // Cap to the reconstruction BACKFILL_CAP_DAYS (2 years) so the
         // payload can't grow unbounded as the table accumulates days.
         .limit(730),
-      supabase
-        .from("allocator_holdings")
-        .select(
-          // Phase 08 Plan 02 — api_key_id projected so HoldingsTable can
-          // resolve source_key_sync_status via the shared `apiKeys` array
-          // (avoids a nested PostgREST join).
-          //
-          // `side`, `entry_price`, `unrealized_pnl_usd` projected so the
-          // dashboard can render derivative rows in a separate Open
-          // Positions section without conflating notional `value_usd`
-          // with equity contribution (only `unrealized_pnl_usd` counts
-          // toward the equity curve for derivatives).
-          "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id, side, entry_price, unrealized_pnl_usd",
-        )
-        .eq("allocator_id", userId)
-        .order("asof", { ascending: false }),
+      // Phase 167.1.2 D-16: each key's rows at that key's own latest asof,
+      // read in bounded steps (the owner's key ids, then per key its latest
+      // asof, then its rows at it). Returns `{ data, error }` and never
+      // throws; a read that reaches the row cap returns a named error, so the
+      // `assertOk` below fails loud instead of rendering a partial list.
+      fetchLatestHoldingsPerKey(
+        supabase,
+        userId,
+        // Phase 08 Plan 02 — api_key_id projected so HoldingsTable can
+        // resolve source_key_sync_status via the shared `apiKeys` array
+        // (avoids a nested PostgREST join).
+        //
+        // `side`, `entry_price`, `unrealized_pnl_usd` projected so the
+        // dashboard can render derivative rows in a separate Open
+        // Positions section without conflating notional `value_usd`
+        // with equity contribution (only `unrealized_pnl_usd` counts
+        // toward the equity curve for derivatives).
+        "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id, side, entry_price, unrealized_pnl_usd",
+      ),
       getUserApiKeys(userId),
       admin
         .from("match_batches")

@@ -419,8 +419,7 @@ function buildChain(table: string) {
       // shape `then` resolves, so a `.maybeSingle()` read can be failed.
       const injected = state.tableErrors[table];
       if (injected) return { data: null, error: injected };
-      const rows = rowsFor();
-      const row = limitN !== null ? rows.slice(0, limitN)[0] : rows[0];
+      const row = servedRows()[0];
       return { data: row ?? null, error: null };
     },
     single: async () => {
@@ -1434,12 +1433,30 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
   // returns rows in a different order) must still produce the same result.
   it("TC p7-11 (WR-02): holdingsSummary picks max-asof per symbol even when input rows are ASC/unordered", async () => {
     state.portfolios = [P7_PORTFOLIO];
+    // Phase 167.1.2 plan 15 (D-16): the read is per key (the owner's key ids,
+    // then each key's latest asof), so every row names a key the allocator
+    // owns. One key here; both symbols have a row at the key's latest asof
+    // (2026-04-12), so the expectations below are unchanged under D-16.
+    state.apiKeys = [
+      {
+        id: "key-p7",
+        user_id: "user-1",
+        exchange: "binance",
+        label: "Binance",
+        is_active: true,
+        sync_status: "ok",
+        last_sync_at: "2026-04-12T00:00:00Z",
+        account_balance_usdt: 1000,
+        created_at: "2026-04-01T00:00:00Z",
+      },
+    ];
     // Deliberately pre-load holdings in ASCENDING asof order to invert the
     // query's DESC assumption. The helper under test collapses via linear
     // scan with `r.asof > existing.asof`, so ordering is irrelevant.
     state.allocatorHoldings = [
       {
         allocator_id: "user-1",
+        api_key_id: "key-p7",
         symbol: "BTC",
         quantity: 0.1,
         mark_price: 40000,
@@ -1450,6 +1467,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
       },
       {
         allocator_id: "user-1",
+        api_key_id: "key-p7",
         symbol: "BTC",
         quantity: 0.2,
         mark_price: 50000,
@@ -1460,6 +1478,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
       },
       {
         allocator_id: "user-1",
+        api_key_id: "key-p7",
         symbol: "BTC",
         quantity: 0.15,
         mark_price: 45000,
@@ -1470,6 +1489,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
       },
       {
         allocator_id: "user-1",
+        api_key_id: "key-p7",
         symbol: "ETH",
         quantity: 1.0,
         mark_price: 3000,
@@ -1480,6 +1500,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
       },
       {
         allocator_id: "user-1",
+        api_key_id: "key-p7",
         symbol: "ETH",
         quantity: 2.0,
         mark_price: 3100,
@@ -4590,5 +4611,124 @@ describe("getMyAllocationDashboard — the per-key read drains past the 1000-row
       /getMyAllocationDashboard\.csv_daily_returns: csv_daily_returns: page 1 returned id 7, not strictly after 7/,
     );
     errSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 plan 15 (item 8, D-16): the dashboard reads each key's rows at
+// that key's own latest asof, through a bounded read.
+// ---------------------------------------------------------------------------
+describe("getMyAllocationDashboard — Open Positions reads each key's own latest asof (D-16)", () => {
+  beforeEach(resetState);
+
+  const key = (id: string, exchange: string) => ({
+    id,
+    user_id: "user-1",
+    exchange,
+    label: `Key ${id}`,
+    is_active: true,
+    sync_status: "ok",
+    last_sync_at: "2026-09-27T00:00:00Z",
+    disconnected_at: null,
+    account_balance_usdt: 1000,
+    created_at: "2026-04-01T00:00:00Z",
+  });
+  const holding = (
+    api_key_id: string,
+    venue: string,
+    asof: string,
+    symbol: string,
+    value_usd: number,
+  ) => ({
+    allocator_id: "user-1",
+    api_key_id,
+    symbol,
+    quantity: 1,
+    mark_price: value_usd,
+    value_usd,
+    venue,
+    holding_type: "spot" as const,
+    asof,
+  });
+
+  it("mock self-test: order(desc) + limit(1) returns the newest row from an ASCENDING seed", async () => {
+    // Without this the SSR arm below could pass on a mock that ignores
+    // order/limit and hands back the oldest row as the "latest asof".
+    state.allocatorHoldings = [
+      holding("key-a", "binance", "2026-09-25", "BTC", 1),
+      holding("key-a", "binance", "2026-09-27", "BTC", 3),
+      holding("key-a", "binance", "2026-09-26", "BTC", 2),
+    ];
+    const { createClient } = await import("@/lib/supabase/server");
+    const client = (await createClient()) as unknown as {
+      from: (t: string) => {
+        select: (c: string) => {
+          order: (
+            c: string,
+            o: { ascending: boolean },
+          ) => { limit: (n: number) => PromiseLike<{ data: Array<{ asof: string }> }> };
+        };
+      };
+    };
+    const newest = await client
+      .from("allocator_holdings")
+      .select("asof")
+      .order("asof", { ascending: false })
+      .limit(1);
+    expect(newest.data.map((r) => r.asof)).toEqual(["2026-09-27"]);
+    const oldestTwo = await client
+      .from("allocator_holdings")
+      .select("asof")
+      .order("asof", { ascending: true })
+      .limit(2);
+    expect(oldestTwo.data.map((r) => r.asof)).toEqual([
+      "2026-09-25",
+      "2026-09-26",
+    ]);
+  });
+
+  it("two keys across three dates, seeded ASCENDING: holdingsSummary holds only each key's latest-asof rows", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [key("key-a", "binance"), key("key-b", "okx")];
+    state.allocatorHoldings = [
+      // key-a polled D-2, D-1, D. BTC was closed after D-2.
+      holding("key-a", "binance", "2026-09-25", "BTC", 500),
+      holding("key-a", "binance", "2026-09-25", "ETH", 100),
+      holding("key-a", "binance", "2026-09-26", "ETH", 110),
+      holding("key-a", "binance", "2026-09-27", "ETH", 120),
+      // key-b last polled on D-1 (quiet on D): its D-1 rows are its current book.
+      holding("key-b", "okx", "2026-09-25", "SOL", 30),
+      holding("key-b", "okx", "2026-09-26", "SOL", 40),
+      holding("key-b", "okx", "2026-09-26", "XRP", 7),
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    const got = result.holdingsSummary
+      .map((h) => `${h.api_key_id}:${h.symbol}:${h.value_usd}`)
+      .sort();
+    expect(got).toEqual(["key-a:ETH:120", "key-b:SOL:40", "key-b:XRP:7"]);
+  });
+
+  it("every allocator_holdings read carries the explicit owner filter and a per-key filter (T-167.1.2-56)", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [key("key-a", "binance")];
+    state.allocatorHoldings = [holding("key-a", "binance", "2026-09-27", "ETH", 120)];
+    const { getMyAllocationDashboard } = await import("./queries");
+    await getMyAllocationDashboard("user-1");
+
+    const holdingsReads = chainAudit.entries.filter(
+      (e) => e.table === "allocator_holdings",
+    );
+    // One latest-asof read and one rows read for the one key.
+    expect(holdingsReads).toHaveLength(2);
+    for (const read of holdingsReads) {
+      expect(read.eqs).toContainEqual({ column: "allocator_id", value: "user-1" });
+      expect(read.eqs).toContainEqual({ column: "api_key_id", value: "key-a" });
+    }
+    const idRead = chainAudit.entries.find(
+      (e) => e.table === "api_keys" && e.select === "id",
+    );
+    expect(idRead?.eqs).toContainEqual({ column: "user_id", value: "user-1" });
   });
 });
