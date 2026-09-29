@@ -115,6 +115,10 @@ const state = vi.hoisted(() => ({
   // Phase 36 / 36-03 — per-key csv_daily_returns rows read by
   // getMyAllocationDashboard for the Overview-stats repoint (D1/D2/D3).
   csvDailyReturns: [] as Array<{
+    // 167.1.2 C3 fix F — the PK the dashboard's id-keyset drain pages on.
+    // Optional: an unset id is assigned from the row's seed position (the
+    // insertion order a bigint identity would give it).
+    id?: number;
     api_key_id: string | null;
     allocator_id: string | null;
     date: string;
@@ -163,6 +167,11 @@ const state = vi.hoisted(() => ({
   // role-discriminator reads are deliberately never assertOk'd. Nothing else
   // could reach that arm — every other fixture resolves `error: null`.
   tableErrors: {} as Record<string, { message: string } | null>,
+  // 167.1.2 C3 fix F — PostgREST's `max_rows`: when set, every list response
+  // is cut to this many rows after `.order()` and `.limit()`, whatever limit
+  // the client asked for, and still answers `error: null`. Opt-in (null = no
+  // cap) so the legacy fixtures are unaffected.
+  maxRows: null as number | null,
 }));
 
 function resetState() {
@@ -181,6 +190,7 @@ function resetState() {
   state.strategies = [];
   state.strategyKeys = [];
   state.tableErrors = {};
+  state.maxRows = null;
   chainAudit.entries.length = 0;
 }
 
@@ -202,7 +212,7 @@ const chainAudit = vi.hoisted(() => ({
 type Filter = {
   column: string;
   value: unknown;
-  op: "eq" | "in" | "is" | "not-is" | "gte";
+  op: "eq" | "in" | "is" | "not-is" | "gte" | "gt";
 };
 
 /**
@@ -221,6 +231,9 @@ function buildChain(table: string) {
   };
   chainAudit.entries.push(audit);
   let limitN: number | null = null;
+  // 167.1.2 C3 fix F — `.order()` is REAL now (multi-column, asc/desc), so a
+  // fake-served page is the page PostgREST would serve.
+  const orders: Array<{ column: string; ascending: boolean }> = [];
   // Phase 07 / 07-03 — supabase.select("*", { count: "exact", head: true })
   // returns only the row count without rows. When this mode is set, the
   // terminal resolver returns { data: null, error: null, count: N }.
@@ -242,6 +255,17 @@ function buildChain(table: string) {
             typeof v === "string" &&
             typeof f.value === "string" &&
             v >= f.value
+          );
+        // 167.1.2 C3 fix F — `.gt()` is a REAL filter now (the id keyset
+        // cursor). Numbers compare numerically, strings lexicographically.
+        if (f.op === "gt")
+          return (
+            (typeof v === "number" &&
+              typeof f.value === "number" &&
+              v > f.value) ||
+            (typeof v === "string" &&
+              typeof f.value === "string" &&
+              v > f.value)
           );
         return true;
       }),
@@ -289,7 +313,10 @@ function buildChain(table: string) {
         );
       case "csv_daily_returns":
         return applyFilters(
-          state.csvDailyReturns as Array<Record<string, unknown>>,
+          state.csvDailyReturns.map((r, i) => ({
+            ...r,
+            id: r.id ?? i + 1,
+          })) as Array<Record<string, unknown>>,
         );
       case "allocator_equity_derived":
         return applyFilters(
@@ -305,6 +332,29 @@ function buildChain(table: string) {
       default:
         return [];
     }
+  }
+
+  // The list a terminal resolves: filtered rows, sorted by every `.order()`
+  // in call order, cut to `.limit()`, then cut to the server cap.
+  function servedRows(): unknown[] {
+    const rows = [...rowsFor()] as Array<Record<string, unknown>>;
+    if (orders.length > 0) {
+      rows.sort((a, b) => {
+        for (const o of orders) {
+          const x = a[o.column] as string | number | null | undefined;
+          const y = b[o.column] as string | number | null | undefined;
+          if (x === y) continue;
+          if (x == null) return 1;
+          if (y == null) return -1;
+          const c = x < y ? -1 : 1;
+          return o.ascending ? c : -c;
+        }
+        return 0;
+      });
+    }
+    let out: unknown[] = limitN !== null ? rows.slice(0, limitN) : rows;
+    if (state.maxRows !== null) out = out.slice(0, state.maxRows);
+    return out;
   }
 
   const chain = {
@@ -341,10 +391,13 @@ function buildChain(table: string) {
       }
       return chain;
     },
-    // .gt() is used by bridge_outcome_dismissals to filter active rows.
-    // The rowsFor() implementation handles the actual filtering; this
-    // method just returns chain to allow chaining.
-    gt: (_column: string, _value: unknown) => chain,
+    // .gt() is used by bridge_outcome_dismissals to filter active rows (the
+    // rowsFor() Date filter still applies there too) and by the id keyset
+    // cursor of the per-key csv_daily_returns drain (167.1.2 C3 fix F).
+    gt: (column: string, value: unknown) => {
+      filters.push({ column, value, op: "gt" });
+      return chain;
+    },
     // Phase 36 — .gte("date", iso) bounds the per-key csv_daily_returns fetch
     // by a 730-day date window. Registered as a real filter so the date-window
     // bound is exercised by the test mock (not a no-op).
@@ -352,7 +405,10 @@ function buildChain(table: string) {
       filters.push({ column, value, op: "gte" });
       return chain;
     },
-    order: (_column?: string, _opts?: { ascending?: boolean }) => chain,
+    order: (column: string, opts?: { ascending?: boolean }) => {
+      orders.push({ column, ascending: opts?.ascending !== false });
+      return chain;
+    },
     limit: (n: number) => {
       limitN = n;
       audit.limitN = n;
@@ -393,11 +449,10 @@ function buildChain(table: string) {
         resolve({ data: null, error: injected });
         return;
       }
-      const rows = rowsFor();
       if (headCountMode) {
-        resolve({ data: null, error: null, count: rows.length });
+        resolve({ data: null, error: null, count: rowsFor().length });
       } else {
-        resolve({ data: rows, error: null });
+        resolve({ data: servedRows(), error: null });
       }
     },
   };
@@ -4457,5 +4512,83 @@ describe("liveBaselineMetricsFromPerKeyDailies — [167.1.2 SC-4] zero weight ma
     expect(out.equity).toEqual([]);
     expect(out.drawdown).toEqual([]);
     expect(out.aum).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 167.1.2 C3 fix F (SFH-C3R2-X1) — the per-key read survives PostgREST's cap
+// ---------------------------------------------------------------------------
+/**
+ * WHY: PostgREST cuts every response to `max_rows` (1000 on PROD) whatever
+ * `.limit()` asked for, with HTTP 200 and `error: null`. The dashboard's
+ * per-key read used to be ONE `.order("date", asc).limit(20000)` request, so
+ * an allocator past 1000 rows got its OLDEST 1000 and lost every recent day.
+ * PROD 2026-09-29: one allocator holds 2348 rows inside the 730-day window.
+ * The fixture reproduces that count, with the server cap ON, stored
+ * newest-first so seed order, id order and date order all disagree.
+ */
+describe("getMyAllocationDashboard — the per-key read drains past the 1000-row cap (167.1.2 C3 fix F)", () => {
+  beforeEach(resetState);
+
+  const KEYS = ["k-cap-a", "k-cap-b", "k-cap-c", "k-cap-d"];
+  // 4 keys × 587 days = 2348 rows, all inside the 730-day window.
+  const DAYS = 587;
+  const dayOffset = (i: number) =>
+    new Date(Date.now() - (DAYS - i) * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+
+  function seedPastTheCap() {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = KEYS.map((id) => aum04Key(id, "bybit"));
+    state.csvDailyReturns = [];
+    for (let i = DAYS - 1; i >= 0; i -= 1) {
+      for (const api_key_id of KEYS) {
+        state.csvDailyReturns.push({
+          api_key_id,
+          allocator_id: "user-1",
+          date: dayOffset(i),
+          daily_return: 0.001 * ((i % 7) - 3),
+        });
+      }
+    }
+    state.maxRows = 1000;
+  }
+
+  it("delivers all 2348 rows, every key through its newest day, date-ascending", async () => {
+    seedPastTheCap();
+    expect(state.csvDailyReturns).toHaveLength(2348);
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    const byKey = result.perKeyReturnsByApiKeyId;
+
+    expect(Object.keys(byKey).sort()).toEqual(KEYS);
+    const total = KEYS.reduce((n, k) => n + byKey[k].length, 0);
+    expect(total).toBe(2348);
+    for (const k of KEYS) {
+      const dates = byKey[k].map((p) => p.date);
+      expect(dates[0]).toBe(dayOffset(0));
+      expect(dates[dates.length - 1]).toBe(dayOffset(DAYS - 1));
+      expect(dates).toEqual([...dates].sort());
+    }
+    // The drain paged on the id keyset: several csv_daily_returns requests,
+    // the last of them the empty page that ends it.
+    const reads = chainAudit.entries.filter((e) => e.table === "csv_daily_returns");
+    expect(reads).toHaveLength(4);
+    expect(reads.every((e) => e.limitN === 1000)).toBe(true);
+  });
+
+  it("fails LOUD (throws via assertOk) when the server ignores the cursor, never a partial series", async () => {
+    seedPastTheCap();
+    // Every row carries the same id: the second page repeats the first's ids.
+    state.csvDailyReturns = state.csvDailyReturns.map((r) => ({ ...r, id: 7 }));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    await expect(getMyAllocationDashboard("user-1")).rejects.toThrow(
+      /getMyAllocationDashboard\.csv_daily_returns: csv_daily_returns: page 1 returned id 7, not strictly after 7/,
+    );
+    errSpy.mockRestore();
   });
 });
