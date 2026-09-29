@@ -223,6 +223,13 @@ describe("compute — 169 D-11 calendar coverage for every return window", () =>
       const shortDates = dailyDatesEndingOn(END, coveredCount - 1);
       expect(shortDates[0]).toBe(short);
       expect(compute(retsFor(coveredCount - 1), shortDates, 0, 365)[key]).toBeNull();
+
+      // 169 review round 2, WR-R2-01: the calendar is read off the SERIES, never
+      // the asset class. These records trade weekends, so the 252 basis (every
+      // non-crypto class, including the DB default 'traditional') gets the same
+      // strict rule: a misclassified 24/7 record borrows no weekend tolerance.
+      expect(compute(coveredRets, coveredDates, 0, 252)[key]).toBeCloseTo(shown as number, 12);
+      expect(compute(retsFor(coveredCount - 1), shortDates, 0, 252)[key]).toBeNull();
     },
   );
 
@@ -240,9 +247,14 @@ describe("compute — 169 D-11 calendar coverage for every return window", () =>
    *
    * THE OTHER HALF MATTERS AS MUCH: a record that skipped a day the venue DID
    * trade is still not covering the window, so each case also pins the start one
-   * trading day later as null, and the same dates on the 7-day basis as null.
+   * trading day later as null, and the same start on a record that trades
+   * weekends as null.
+   *
+   * Round 2, WR-R2-01: "weekday venue" is read off the series (it spans a
+   * Saturday and has no weekend print), never off `periodsPerYear`, so each case
+   * also pins the same weekday-only dates on the 365 basis to the SAME value.
    */
-  describe("weekday venues (252 basis): non-trading days at the window start do not uncover it", () => {
+  describe("weekday-only records: non-trading days at the window start do not uncover it", () => {
     /** Weekdays from `startIso` to `endIso` inclusive, without 1 Jan and 25 Dec. */
     function weekdayDates(startIso: string, endIso: string): string[] {
       const out: string[] = [];
@@ -284,14 +296,50 @@ describe("compute — 169 D-11 calendar coverage for every return window", () =>
         expect(shown, `${key} is covered on a weekday venue`).not.toBeNull();
         // The window is the whole record, compounded strictly after the cutoff.
         expect(shown).toBeCloseTo(compoundAfter(rets, dates, cutoff), 12);
-        // The 7-day rule is unchanged: the same dates on a 24/7 venue skipped days that traded.
-        expect(compute(rets, dates, 0, 365)[key]).toBeNull();
+        // 169 review round 2, WR-R2-01: the asset class must never move a return
+        // number (closed-sets.ts, #597). A weekday-only record IS a weekday
+        // calendar whatever its class, so the 365 basis shows the same window.
+        // (This line asserted null at 365 until the calendar was keyed off the
+        // series instead of `periodsPerYear`.)
+        expect(compute(rets, dates, 0, 365)[key]).toBeCloseTo(shown as number, 12);
+        // The same start on a record that trades weekends is not covered: the
+        // venue traded the days between the cutoff and the first observation.
+        const allDays = dailyDatesEndingOn(end, (utc(end) - utc(covered)) / DAY + 1);
+        expect(allDays[0]).toBe(covered);
+        expect(compute(retsFor(allDays.length), allDays, 0, 252)[key]).toBeNull();
 
         const shortDates = weekdayDates(short, end);
         expect(shortDates[0]).toBe(short);
         expect(compute(retsFor(shortDates.length), shortDates, 0, 252)[key]).toBeNull();
       },
     );
+
+    it("WR-R2-01: one weekend observation anywhere in the record switches the tolerance off, even at 252", () => {
+      // A 24/7 strategy left on the default asset class ('traditional', 252),
+      // whose CSV happens to start on the Monday after a Saturday 3M cutoff.
+      // One Saturday print deep inside the record proves the venue trades
+      // weekends, so the Monday start missed two traded days: no 3 Month.
+      const weekdaysOnly = weekdayDates("2026-03-30", "2026-06-26");
+      expect(compute(retsFor(weekdaysOnly.length), weekdaysOnly, 0, 252).p3m).not.toBeNull();
+      // One Saturday print mid-record; END (and so the Sat 28 Mar cutoff) is unchanged.
+      const withSaturday = [...weekdaysOnly, "2026-05-16"].sort();
+      expect(new Date(utc("2026-05-16")).getUTCDay()).toBe(6);
+      expect(withSaturday[0]).toBe("2026-03-30");
+      expect(withSaturday[withSaturday.length - 1]).toBe("2026-06-26");
+      expect(compute(retsFor(withSaturday.length), withSaturday, 0, 252).p3m).toBeNull();
+    });
+
+    it("WR-R2-01: a record too short to span a weekend proves nothing, so it keeps the strict rule", () => {
+      // Mon 2 Feb to Wed 4 Feb 2026: no weekend date, but no weekend inside the
+      // span either, so the absence of weekend prints is not evidence of a
+      // weekday venue. MTD (cutoff Sat 31 Jan) stays the em-dash on both bases.
+      const dates = ["2026-02-02", "2026-02-03", "2026-02-04"];
+      expect(compute(retsFor(3), dates, 0, 252).mtd).toBeNull();
+      expect(compute(retsFor(3), dates, 0, 365).mtd).toBeNull();
+      // Spanning one weekend with no print on it is the evidence.
+      const spanned = weekdayDates("2026-02-02", "2026-02-10");
+      expect(compute(retsFor(spanned.length), spanned, 0, 365).mtd).not.toBeNull();
+    });
 
     it("a genuinely short weekday record (launched in March) still nulls YTD, 6 Month and 1 Year", () => {
       const dates = weekdayDates("2026-03-02", "2026-06-30");

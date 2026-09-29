@@ -176,6 +176,18 @@ call the research left to the plan.
   byte for byte, as "C plus one day". It never re-admits a window missing a session the venue traded;
   any other holiday fails safe as the em-dash. Implemented in `compute.ts` (commit `a592a3f14`); the
   rule chosen, the two rejected alternatives and the known limits are in `169-REVIEW-FIX-T2.md` WR-02.
+- **D-11 amended again 2026-09-29 (review round 2, fix T6, WR-R2-01 = SFH R2-7; the bullet above is
+  kept as lineage):** the venue calendar is now a property of the SERIES, not of the asset class.
+  `periodsPerYear === 252` was the wrong proxy: 252 is what every non-crypto `asset_class` gets,
+  including the DB default `traditional`, so a 24/7 record left on the default borrowed the weekend
+  tolerance and could show a window missing up to three traded days, and a change of asset class
+  could move a return number (which `closed-sets.ts` #597 forbids). The rule is now: the weekday
+  tolerance (Saturday, Sunday, 1 January, 25 December skipped) applies only when the record spans at
+  least one Saturday AND has no Saturday or Sunday observation anywhere. A single weekend print
+  proves the venue trades weekends; a record too short to span a weekend proves nothing. Both get the
+  strict "C plus one day" rule whatever the basis, so a weekday-only record on the 365 basis now
+  shows the same window as on 252, and a weekend-bearing record on 252 no longer gets the tolerance.
+  Implemented in `compute.ts`; the tests and neuters are in `169-REVIEW-FIX-T6.md` WR-R2-01.
 - **Reversibility:** reversible.
 
 ### D-12: Record length is stated one way (planner, 2026-09-25)

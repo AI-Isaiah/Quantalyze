@@ -192,7 +192,7 @@ export function compute(
   // about two on a 24/7 one.
   //
   // 169 review WR-02 (2026-09-29): "cutoff plus one day" is the window's first
-  // SESSION only on a 7-day venue. On a weekday venue (the 252 basis) the first
+  // SESSION only on a 7-day venue. On a weekday venue (see WR-R2-01 below) the first
   // session after the cutoff is the first day that is not a Saturday, a Sunday,
   // 1 January or 25 December, and a record starting there misses nothing. So
   // the rule is: covered iff every UTC day strictly between the cutoff and the
@@ -205,9 +205,26 @@ export function compute(
   // holiday differs by venue, and assuming it would admit a window missing a
   // session that traded. Known limit: a start after another holiday (a Labor
   // Day Monday on the 1st, an observed New Year Monday) is the em-dash.
-  // The basis is `periodsPerYear`: this codebase passes only 252 (weekday,
-  // `annualizationPeriods`, and the default) or 365 (7-day).
-  const weekdayVenue = periodsPerYear === 252;
+  //
+  // 169 review round 2, WR-R2-01 (2026-09-29): the calendar is a property of
+  // the SERIES, never of the asset class. It was `periodsPerYear === 252`, but
+  // 252 is what every non-crypto class gets, including the DB default
+  // 'traditional', so a 24/7 record left on the default borrowed the weekend
+  // tolerance and could show a window missing up to three traded days. It also
+  // let a change of asset class move a return number, which closed-sets.ts
+  // (#597) forbids. Now: a record is on the weekday calendar only when it spans
+  // at least one Saturday and has no Saturday or Sunday observation at all. A
+  // single weekend print anywhere proves the venue trades weekends; a record
+  // too short to span a weekend proves nothing. Both keep the strict rule
+  // (cutoff + 1 day), so the failure direction is always the em-dash.
+  const tradesWeekends = dates.some((d) => {
+    const w = new Date(d).getUTCDay();
+    return w === 0 || w === 6;
+  });
+  const firstDow = startDate.getUTCDay();
+  const spanDays = Math.round((lastDate.getTime() - startDate.getTime()) / 86_400_000);
+  const spansSaturday = (6 - firstDow + 7) % 7 <= spanDays;
+  const weekdayVenue = spansSaturday && !tradesWeekends;
   const isNonTradingDay = (d: Date): boolean => {
     if (!weekdayVenue) return false;
     const dow = d.getUTCDay();
