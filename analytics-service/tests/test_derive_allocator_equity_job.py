@@ -2560,10 +2560,12 @@ def _seed_race() -> dict[str, list[dict]]:
 
 
 def _rewrite_key_1(fake: _FakeSupabase, shape: str) -> None:
-    """The key-mode derive_broker_dailies writer's shape (job_worker
-    `_reconcile_span_delete` then the chunked upsert): delete key-1's span and
-    re-insert it with NEW ids. `day_added` appends today's new day;
-    `day_removed` leaves a day the derive refused honestly absent."""
+    """A concurrent rewrite of key-1's span, applied between two page reads:
+    delete key-1's span and re-insert it with NEW ids (the key-mode
+    derive_broker_dailies writer's shape before C3 topic H reordered it to
+    upsert-then-delete; the read must survive either shape). `day_added`
+    appends today's new day; `day_removed` leaves a day the derive refused
+    honestly absent."""
     rows = fake.rows["csv_daily_returns"]
     kept = [r for r in rows if r["api_key_id"] != "key-1"]
     days = list(range(1, _RACE_DAYS + 1))
