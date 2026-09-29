@@ -12,7 +12,7 @@ provides:
   - "The stacked bar plots the same fraction the table formats; axis [0, 1] and tooltip x100 agree with the table"
   - "RiskDecompositionRow documents marginal_risk_pct and weight_pct as percent 0 to 100"
   - "RiskAttribution.test.tsx built from the adapter's complete.json producer fixture, with a prop-capturing recharts mock"
-affects: [169-06 browser re-check of /portfolios/[id] risk decomposition, 170.1 standalone_vol copy]
+affects: ["169-06 browser re-check of /portfolios/[id] risk decomposition", "170.1 standalone_vol copy"]
 
 actuals:
   tokens: 3540
