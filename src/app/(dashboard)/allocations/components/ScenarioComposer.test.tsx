@@ -112,6 +112,15 @@ vi.mock("./KpiStrip", () => ({
   KpiStrip: vi.fn(() => <div data-testid="kpi-strip-mock" />),
 }));
 
+// Phase 167.1.2 plan 11 (D-06): a pass-through spy, so a test can read the
+// own-book return series the Scenario "vs your book" delta is computed from.
+// The real function runs; only its arguments are recorded. The composer is
+// the module's only importer.
+vi.mock("@/lib/sample-basis-ratios", async (importOriginal) => {
+  const m = await importOriginal<typeof import("@/lib/sample-basis-ratios")>();
+  return { ...m, sampleBasisRatios: vi.fn(m.sampleBasisRatios) };
+});
+
 vi.mock("./StrategyBrowseDrawer", () => ({
   StrategyBrowseDrawer: vi.fn(
     ({ isOpen }: { isOpen: boolean }) =>
@@ -16846,6 +16855,13 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     { date: "2026-01-02", value: 101_000 },
     { date: "2026-01-03", value: 99_500 },
   ];
+  // Plan 11 (D-06): the payload's persisted returns for the same book. A
+  // "ready" payload always carries both (derivePhase07Fields sets them
+  // together), so the fixtures below do too.
+  const THREE_POINT_RETURNS = [
+    { date: "2026-01-02", value: 0.01 },
+    { date: "2026-01-03", value: -0.0148 },
+  ];
   type D02ChartProps = {
     equityDailyPoints: Array<{ date: string; value: number }>;
     scenarioOwnBookDelta?: { book_n?: number } | undefined;
@@ -16860,8 +16876,11 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
   });
 
   it("rebuilding: no own-book series reaches the chart, no own-book delta, and the disclosure renders once (and not in blank mode)", () => {
+    // Returns are present too, so an absent delta is the gate and not a
+    // missing input (plan 11 moved the delta onto them).
     const payload = makePayload({
       equityDailyPoints: THREE_POINT_CURVE,
+      equityDailyReturns: THREE_POINT_RETURNS,
       equityHistoryState: "rebuilding",
     });
     render(
@@ -17021,6 +17040,7 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     const TWO_POINT_CURVE = THREE_POINT_CURVE.slice(0, 2);
     const payload = makePayload({
       equityDailyPoints: TWO_POINT_CURVE,
+      equityDailyReturns: THREE_POINT_RETURNS.slice(0, 1),
       equityHistoryState: "ready",
     });
     render(
@@ -17039,6 +17059,7 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
   it("ready (regression guard): the own-book series and delta flow as before and no disclosure renders", () => {
     const payload = makePayload({
       equityDailyPoints: THREE_POINT_CURVE,
+      equityDailyReturns: THREE_POINT_RETURNS,
       equityHistoryState: "ready",
     });
     render(
@@ -17053,6 +17074,70 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(props.scenarioOwnBookDelta).toBeDefined();
     expect(props.scenarioOwnBookDelta?.book_n).toBe(2);
     expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  });
+
+  // Plan 11 (D-06). A deposit raises the book's dollar level without earning
+  // anything. The level ratio reads 201,000 / 101,000 - 1 = +99% that day and
+  // feeds it into the book's Sharpe, Sortino and max drawdown; the persisted
+  // flow-neutral return for that day is 0. The delta must be computed from the
+  // persisted returns, so the series handed to sampleBasisRatios is exactly
+  // them and never contains the deposit.
+  it("ready + a deposit day: the own-book delta is computed from the persisted returns, not the level ratios", () => {
+    const DEPOSIT_CURVE = [
+      { date: "2026-01-01", value: 100_000 },
+      { date: "2026-01-02", value: 101_000 },
+      { date: "2026-01-03", value: 201_000 },
+      { date: "2026-01-04", value: 202_005 },
+    ];
+    const FLOW_NEUTRAL_RETURNS = [
+      { date: "2026-01-02", value: 0.01 },
+      { date: "2026-01-03", value: 0 },
+      { date: "2026-01-04", value: 0.005 },
+    ];
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          equityDailyPoints: DEPOSIT_CURVE,
+          equityDailyReturns: FLOW_NEUTRAL_RETURNS,
+          equityHistoryState: "ready",
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const props = lastChart();
+    expect(props.scenarioOwnBookDelta?.book_n).toBe(3);
+    const seriesSeen = vi
+      .mocked(sampleBasisRatios)
+      .mock.calls.map((call) => call[0]);
+    expect(seriesSeen).toContainEqual([0.01, 0, 0.005]);
+    for (const series of seriesSeen) {
+      expect(series.some((r) => r > 0.5)).toBe(false);
+    }
+  });
+
+  it("ready: the live-book KPIs (liveBaselineMetrics) still reach the KPI strip (D-03)", () => {
+    const payload = makePayload({
+      equityDailyPoints: THREE_POINT_CURVE,
+      equityDailyReturns: THREE_POINT_RETURNS,
+      equityHistoryState: "ready",
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const kpiProps = vi.mocked(KpiStrip).mock.calls.at(-1)![0];
+    const live = kpiProps.liveMetrics as unknown as {
+      twr?: number | null;
+      sharpe?: number | null;
+      max_drawdown?: number | null;
+    };
+    expect(live.twr).toBe(payload.liveBaselineMetrics.ytdTwr);
+    expect(live.sharpe).toBe(payload.liveBaselineMetrics.sharpe);
+    expect(live.max_drawdown).toBe(payload.liveBaselineMetrics.maxDd);
   });
 });
 
