@@ -2711,3 +2711,20 @@ def test_c3r2_keyset_read_hard_cap_refuses_only_real_overflow(
             fake, _RACE_ALLOC, ["key-1"], page_size=2, hard_cap_pages=2
         )
         assert [r["date"] for r in got] == [_race_day(i) for i in range(1, stored + 1)]
+
+
+def test_c3r2_keyset_read_survives_a_server_cap_below_its_page_size() -> None:
+    """The read stops on an EMPTY page, not a short one. PostgREST clamps a
+    response to max_rows, so if that cap ever sits below the page size a
+    short-page stop would end each key after its first clamped page, silently:
+    the SFH-R3-07 truncation again, by a different route."""
+    from services.job_worker import _load_allocator_daily_returns
+
+    fake = _FakeSupabase(_seed_race(), max_rows=_RACE_PAGE - 1)
+    got = _load_allocator_daily_returns(
+        fake, _RACE_ALLOC, list(_RACE_KEYS), page_size=_RACE_PAGE
+    )
+    pairs = sorted((r["api_key_id"], r["date"]) for r in got)
+    assert pairs == sorted(
+        (k, _race_day(i)) for k in _RACE_KEYS for i in range(1, _RACE_DAYS + 1)
+    ), pairs
