@@ -15,17 +15,26 @@
  *   - KEYSET pages on the table's `id` primary key. Every page after the
  *     first asks for `id > <the largest id already read>`, ordered by `id`
  *     ascending, `.limit(pageSize)`. `id` alone is a total order.
- *   - why `id` and not the natural key (`api_key_id`, `date`): the writers of
- *     these tables delete a span and re-upsert it. A re-inserted row gets a
- *     NEW, larger id, so an id cursor still reaches it later in the same
- *     drain, where a natural-key cursor that had already passed its
- *     (key, date) would skip it. Offsets (`.range()`) are worse: a delete
- *     between two pages shifts every later row up one place and the next page
- *     skips one.
+ *   - why `id` and not the natural key (`api_key_id`, `date`): since C3 fix H
+ *     the Python writers of these tables UPSERT the new payload first
+ *     (ON CONFLICT DO UPDATE keeps a present day's row and its id) and only
+ *     then delete the days the payload no longer carries. A day the payload
+ *     adds is INSERTED with a NEW, larger id, so an id cursor still reaches it
+ *     later in the same drain, where a natural-key cursor that had already
+ *     passed its (key, date) would skip it. Offsets (`.range()`) are worse: a
+ *     delete between two pages shifts every later row up one place and the
+ *     next page skips one.
  *   - the price of the id cursor: a row read, then deleted and re-inserted
- *     before the drain ends, is read TWICE under two ids. The drain collapses
+ *     before the drain ends, is read TWICE under two ids. That happens to a
+ *     day one derive refused (deleted) and a later derive accepts again
+ *     (inserted), and to any writer that still deletes and then re-inserts
+ *     (the SQL finalize fold was not opened to check). The drain collapses
  *     every natural-key duplicate to the row with the LARGEST id, which is the
  *     newer write. No natural key is ever returned twice.
+ *   - the freshness of one drain: an UPDATE in place keeps its id, so a row the
+ *     cursor already passed keeps the value read before the rewrite, while a
+ *     day inserted later in the drain comes back new. One drain can therefore
+ *     mix two derivations, the same freshness a chunked writer already allows.
  *   - the loop stops on an EMPTY page, never on a short one. A server cap
  *     below `pageSize` makes every page short, and stopping on a short page
  *     would be the very truncation this module removes.
