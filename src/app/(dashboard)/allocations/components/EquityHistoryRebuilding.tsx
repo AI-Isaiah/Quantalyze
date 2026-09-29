@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { EquityHistoryRebuildReason } from "@/lib/queries";
+import { dataSourceLabel } from "@/lib/api-key-label";
 
 /**
  * Phase 167.1.2 / D-02 ("Hide it until correct").
@@ -10,7 +11,8 @@ import type { EquityHistoryRebuildReason } from "@/lib/queries";
  * count one exchange account twice or read a day with no sync as zero; a wrong
  * number the allocator can act on is worse than an honest absence.
  *
- * Static copy only: no number, no date and no id. The body promises nothing
+ * Static copy only: no number, no date and no id (the one key label below is
+ * the owner's own, see IN-04). The body promises nothing
  * about when the history returns; plan 11's reason line names only the daily
  * cadence the sync and the recompute run on. Every sentence must be true for
  * EVERY allocator who sees it (review
@@ -23,7 +25,12 @@ import type { EquityHistoryRebuildReason } from "@/lib/queries";
  * Phase 167.1.2 plan 11 adds ONE authored line under the body, chosen by the
  * producer's `equityHistoryRebuildReason` (the first failing condition of
  * `equityHistoryReadiness`). No reason, no line. The line names a condition,
- * never an id or a number (T-167.1.2-22a).
+ * never an id or a number (T-167.1.2-22a), with one exception (review C2
+ * round 2 IN-04): when exactly one key is not syncing, the key_not_syncing
+ * line names it by the owner's own label, `{Exchange} — {nickname}`, or the
+ * masked id tail (`••••` + last 4) when the key has no nickname. That is the
+ * label the Exchanges page key note and the Scenario rows already show the
+ * same owner (`dataSourceLabel`), so it discloses nothing new.
  *
  * Tokens follow DESIGN.md (mono eyebrow at the 0.18em tracking step, DM Sans
  * on the fluid `text-h3` tier, secondary body text) and the layout is
@@ -65,6 +72,40 @@ const REASON_LINE: Record<
     "Your history could not be loaded just now. Reload the page to try again.",
 };
 
+type NotSyncingKey = { id: string; exchange: string; label: string };
+
+/**
+ * Review C2 round 2 IN-04. The key_not_syncing line. It names the key when
+ * there is exactly one, uses a plural line for two or more, and falls back to
+ * an unnamed line that is true for any count when the keys are unknown (null).
+ */
+function NotSyncingLine({ keys }: { keys: readonly NotSyncingKey[] | null }) {
+  if (keys !== null && keys.length === 1) {
+    const { exchange, nickname, maskedTail } = dataSourceLabel(keys[0]);
+    const name = `${exchange} — ${nickname ?? maskedTail}`;
+    return (
+      <>
+        Your key {name} is not syncing, so we cannot confirm which exchange
+        account it reads. Check it on the <ExchangesPageLink />.
+      </>
+    );
+  }
+  if (keys !== null && keys.length > 1) {
+    return (
+      <>
+        Some of your keys are not syncing, so we cannot confirm which exchange
+        accounts they read. Check them on the <ExchangesPageLink />.
+      </>
+    );
+  }
+  return (
+    <>
+      A key is not syncing, so we cannot confirm which exchange account it
+      reads. Check it on the <ExchangesPageLink />.
+    </>
+  );
+}
+
 function ExchangesPageLink() {
   return (
     <Link
@@ -78,8 +119,11 @@ function ExchangesPageLink() {
 
 export function EquityHistoryRebuilding({
   reason = null,
+  notSyncingKeys = null,
 }: {
   reason?: EquityHistoryRebuildReason | null;
+  /** Review C2 round 2 IN-04: the keys a key_not_syncing reason is about, or null when unknown. */
+  notSyncingKeys?: readonly NotSyncingKey[] | null;
 }) {
   return (
     <section
@@ -109,8 +153,7 @@ export function EquityHistoryRebuilding({
         </p>
       ) : reason === "key_not_syncing" ? (
         <p className="mt-2 max-w-prose text-sm text-text-secondary">
-          One of your keys is not syncing, so we cannot confirm which exchange
-          account it reads. Check it on the <ExchangesPageLink />.
+          <NotSyncingLine keys={notSyncingKeys} />
         </p>
       ) : reason ? (
         <p className="mt-2 max-w-prose text-sm text-text-secondary">

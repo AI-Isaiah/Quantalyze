@@ -1764,6 +1764,49 @@ describe("equityHistoryReadiness — plan 11 ready condition", () => {
     ).toEqual({ state: "ready", reason: null });
   });
 
+  // Review C2 round 2 IN-04. The key_not_syncing line names the key when there
+  // is exactly one, so the producer hands the renderer the ids of the keys that
+  // reason is about: eligible, account unknown, failing to sync. Nothing else,
+  // and nothing at all under any other reason, so the line can never name a
+  // key the hold is not about.
+  it("IN-04: the producer lists the failing identity-pending keys, and only under key_not_syncing", () => {
+    const call = (keys: Key[]) => derivePhase07Fields(keys, [], 0, [], false, null);
+    const one = call([
+      key({ id: "k-bad", venue_account_id: null, sync_status: "error" }),
+    ]);
+    expect(one.equityHistoryRebuildReason).toBe("key_not_syncing");
+    expect(one.equityHistoryNotSyncingKeyIds).toEqual(["k-bad"]);
+    // A working unstamped key is pending but not failing, and a failing key
+    // whose account is known holds nothing: neither is listed.
+    const mixed = call([
+      key({ id: "k-ok", venue_account_id: null }),
+      key({ id: "k-known", sync_status: "error" }),
+      key({ id: "k-bad", venue_account_id: null, sync_status: "error" }),
+      key({ id: "k-bad2", venue_account_id: null, sync_status: "sign_in_failed" }),
+    ]);
+    expect(mixed.equityHistoryRebuildReason).toBe("key_not_syncing");
+    expect(mixed.equityHistoryNotSyncingKeyIds).toEqual(["k-bad", "k-bad2"]);
+    // Any other reason lists nothing.
+    expect(
+      call([key({ venue_account_id: null })]).equityHistoryNotSyncingKeyIds,
+    ).toEqual([]);
+    expect(
+      call([
+        holderKey(),
+        key({
+          id: "k-dup",
+          venue_account_id: null,
+          account_share_kind: "duplicate",
+          account_shared_with_api_key_id: "k-holder",
+        }),
+        key({ id: "k-bad", venue_account_id: null, sync_status: "error" }),
+      ]),
+    ).toMatchObject({
+      equityHistoryRebuildReason: "duplicate_account",
+      equityHistoryNotSyncingKeyIds: [],
+    });
+  });
+
   it("a composite member, sFOX and MT5 do not block on a missing account id", () => {
     expect(
       equityHistoryReadiness(

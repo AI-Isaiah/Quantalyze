@@ -2931,6 +2931,14 @@ export interface MyAllocationDashboardPayload {
    */
   equityHistoryRebuildReason: EquityHistoryRebuildReason | null;
   /**
+   * Review C2 round 2 IN-04. When the reason is `key_not_syncing`, the ids of
+   * the keys it is about (eligible, account unknown, failing to sync), so the
+   * line can name the key when there is exactly one. `[]` under every other
+   * reason. Optional so a payload built without it (a stale cache, a hand-built
+   * fixture) renders the unnamed line rather than a wrong name.
+   */
+  equityHistoryNotSyncingKeyIds?: string[];
+  /**
    * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
    * allocator's snapshots, or null when every snapshot's column is
    * NULL (e.g., pure CoinGecko-fallback data). Drives the venue-
@@ -3841,6 +3849,28 @@ function identityStillPending(
   );
 }
 
+/** Review C2 WR-02: a key whose last sync failed (D-18's not-working statuses). */
+function failingToSync(key: EquityHistoryKey): boolean {
+  return key.sync_status !== null && NOT_WORKING_SYNC_STATUSES.has(key.sync_status);
+}
+
+/**
+ * Review C2 round 2 IN-04. The keys a `key_not_syncing` reason is about:
+ * identity-pending (the same `identityStillPending` rule the readiness check
+ * uses) AND failing to sync. `equityHistoryReadiness` returns
+ * `key_not_syncing` iff this list is non-empty and no duplicate blocks first,
+ * so the renderer can name the key when there is exactly one.
+ */
+export function notSyncingIdentityPendingKeyIds(
+  apiKeys: readonly EquityHistoryKey[],
+): string[] {
+  const byId = new Map<string, EquityHistoryKey>();
+  for (const key of apiKeys) byId.set(key.id, key);
+  return apiKeys
+    .filter((key) => identityStillPending(key, byId) && failingToSync(key))
+    .map((key) => key.id);
+}
+
 /**
  * Phase 167.1.2 plan 11. Ready iff the version-2 series is present, no
  * eligible key is a duplicate of a working holder, and every eligible key on
@@ -3871,12 +3901,7 @@ export function equityHistoryReadiness(
   // `revoked`) is never stamped while it fails. The hold stays, because its
   // account really is unknown and the derive still counts it, but the reason
   // names the failing key rather than promising a sync that cannot stamp it.
-  if (
-    pending.some(
-      (key) =>
-        key.sync_status !== null && NOT_WORKING_SYNC_STATUSES.has(key.sync_status),
-    )
-  ) {
+  if (pending.some(failingToSync)) {
     return { state: "rebuilding", reason: "key_not_syncing" };
   }
   if (pending.length > 0) {
@@ -3958,6 +3983,7 @@ export function derivePhase07Fields(
   | "derivedCurveComputedAt"
   | "equityHistoryState"
   | "equityHistoryRebuildReason"
+  | "equityHistoryNotSyncingKeyIds"
   | "minHistoryDepthMonths"
   | "activeVenues"
   | "hasConnectedKeys"
@@ -4004,6 +4030,10 @@ export function derivePhase07Fields(
   const readiness = equityHistoryReadiness(apiKeys, series, missingSeriesReason);
   const equityHistoryState = readiness.state;
   const equityHistoryRebuildReason = readiness.reason;
+  const equityHistoryNotSyncingKeyIds =
+    equityHistoryRebuildReason === "key_not_syncing"
+      ? notSyncingIdentityPendingKeyIds(apiKeys)
+      : [];
   const equityDailyPoints: DailyPoint[] =
     equityHistoryState === "ready" && series ? series.curve : [];
   const equityDailyReturns: DailyPoint[] =
@@ -4094,6 +4124,7 @@ export function derivePhase07Fields(
     derivedCurveComputedAt,
     equityHistoryState,
     equityHistoryRebuildReason,
+    equityHistoryNotSyncingKeyIds,
     minHistoryDepthMonths,
     activeVenues,
     hasConnectedKeys,
