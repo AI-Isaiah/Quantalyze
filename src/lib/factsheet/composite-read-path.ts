@@ -626,6 +626,20 @@ export function singleKeyBasisOpts(
  * not-rankable arm is reached from the discovery detail page only, until Phase 169.1
  * plan 169.1-01 moves that page onto the shared build. It adds no read, so the admin
  * thunk posture above is unchanged. Omitting `persistedRow` keeps the pre-169 result.
+ *
+ * Review round 1 (SFH H-2): `returnsDenominatorConfig` is the strategy's
+ * `returns_denominator_config`. The Python single-key runner computes the stored
+ * headline under it (a `simple` config stores the SUM of the returns, with an
+ * arithmetic CAGR and drawdown), so the curve must be drawn on the same method or
+ * the stored "Since Inception" and the equity curve drift apart with every period.
+ * The method is resolved with the composite's own rule
+ * ({@link attributionBasisFromConfig}: arithmetic only for `simple`), and returned as
+ * `cumulativeMethod` only when it is arithmetic, so a geometric strategy's opts are
+ * unchanged. Omitting the config keeps the geometric default; the discovery detail
+ * page does not pass it yet (reported to its owner, until 169.1-01).
+ *
+ * @throws {CompositeSeriesReadError} when a gated MTM or smoothed series read FAILS
+ *          (review round 1, WR-05); the factsheet resolve stage answers it `read_error`.
  */
 export async function readSingleKeyBasisOpts(
   getAdmin: () => SupabaseClient,
@@ -634,7 +648,13 @@ export async function readSingleKeyBasisOpts(
   metricsJsonByBasis: unknown,
   computationStatus: unknown,
   persistedRow?: Record<string, unknown> | null,
-): Promise<Pick<BuildFactsheetOpts, "metricsByBasis" | "mtmGate" | "mtmSeries" | "smoothedGate" | "smoothedSeries">> {
+  returnsDenominatorConfig?: unknown,
+): Promise<
+  Pick<
+    BuildFactsheetOpts,
+    "metricsByBasis" | "mtmGate" | "mtmSeries" | "smoothedGate" | "smoothedSeries" | "cumulativeMethod"
+  >
+> {
   let admin: SupabaseClient | undefined;
   const resolveAdmin = () => (admin ??= getAdmin());
   // MTM-04 (Phase 103): read the persisted MTM series only when the SHARED cheap
@@ -652,7 +672,11 @@ export async function readSingleKeyBasisOpts(
       ? readSmoothedSeries(resolveAdmin(), strategyId)
       : Promise.resolve(null),
   ]);
-  const opts = singleKeyBasisOpts(dqf, metricsJsonByBasis, computationStatus, mtmSeries, smoothedSeries);
+  const basisOpts = singleKeyBasisOpts(dqf, metricsJsonByBasis, computationStatus, mtmSeries, smoothedSeries);
+  const opts =
+    attributionBasisFromConfig(returnsDenominatorConfig) === "arithmetic"
+      ? { ...basisOpts, cumulativeMethod: "arithmetic" as const }
+      : basisOpts;
   const cashHeadline = persistedCashHeadline(strategyId, persistedRow, metricsJsonByBasis, computationStatus);
   if (!cashHeadline) return opts;
   return { ...opts, metricsByBasis: { ...(opts.metricsByBasis ?? {}), cash_settlement: cashHeadline } };

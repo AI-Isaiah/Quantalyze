@@ -360,3 +360,104 @@ describe("169 D-10 — both factsheet surfaces render the persisted CAGR and Sha
     expect(discovery!.strategyMetrics.sharpe).toBe(route!.strategyMetrics.sharpe);
   });
 });
+
+/**
+ * Review round 1, SFH H-2. A single-key strategy with a
+ * `returns_denominator_config` (the allocated-capital override, `simple` +
+ * `active`) is computed by the Python runner under that config: a `simple`
+ * stored `cumulative_return` is the SUM of the daily returns and its CAGR /
+ * Calmar / max drawdown are arithmetic. The single-key arm never resolved
+ * `cumulativeMethod` (only the composite reader did), so the page overlaid
+ * that arithmetic headline on a geometric equity curve and the two drifted
+ * apart with every period. The single-key owner now resolves the method with
+ * the composite's own rule, so the chart the page draws agrees with its
+ * stored "Since Inception".
+ */
+describe("169 SFH H-2 — a single-key allocated-capital strategy draws the curve its stored headline was computed on", () => {
+  const STRATEGY_ID = "66666666-6666-4666-8666-666666666666";
+  const SIMPLE_CONFIG = {
+    denominator: "allocated_capital",
+    pnl_basis: "cash_settlement",
+    metrics_basis: "active_day",
+    cumulative_method: "simple",
+    capital_schedule: [{ effective_from: "2024-01-01", capital_usd: 1_000_000 }],
+  };
+  /** Python's `simple` cumulative return: the plain sum of the daily returns. */
+  const SUM = SERIES.reduce((acc, d) => acc + d.value, 0);
+
+  function mockAdmin(config: unknown): SupabaseClient {
+    const from = (table: string) => {
+      const chain = {
+        select: () => chain,
+        eq: () => chain,
+        abortSignal: () => chain,
+        maybeSingle: () =>
+          Promise.resolve(
+            table === "strategies"
+              ? {
+                  data: {
+                    id: STRATEGY_ID,
+                    name: "Allocated Capital Test",
+                    codename: null,
+                    disclosure_tier: "exploratory",
+                    status: "published",
+                    markets: ["BTC"],
+                    strategy_types: ["test"],
+                    description: null,
+                    subtypes: [],
+                    supported_exchanges: ["binance"],
+                    leverage_range: null,
+                    aum: null,
+                    max_capacity: null,
+                    avg_daily_turnover: null,
+                    start_date: null,
+                    benchmark: null,
+                    asset_class: "crypto",
+                    returns_denominator_config: config,
+                    strategy_analytics: {
+                      ...analyticsRow({ cumulative_return: SUM }),
+                      daily_returns: SERIES,
+                      returns_series: null,
+                      computed_at: "2026-09-29T00:00:00.000Z",
+                    },
+                  },
+                  error: null,
+                }
+              : { data: null, error: null },
+          ),
+      };
+      return chain;
+    };
+    return { from } as unknown as SupabaseClient;
+  }
+
+  it("fixture guard: the sum and the compounded product differ, so agreement cannot be an accident", () => {
+    const product = SERIES.reduce((acc, d) => acc * (1 + d.value), 1) - 1;
+    expect(Math.abs(product - SUM)).toBeGreaterThan(0.001);
+  });
+
+  it("the payload's equity curve ends at the stored simple cumulative return", async () => {
+    vi.mocked(createAdminClient).mockReturnValue(mockAdmin(SIMPLE_CONFIG) as never);
+    const p = await fetchAndBuildPayload(STRATEGY_ID, (q) => q);
+    expect(p, "payload").not.toBeNull();
+    expect(p!.strategyMetrics.cum_ret).toBe(SUM);
+    const chartEnd = p!.strategyEquity[p!.strategyEquity.length - 1] - 1;
+    expect(chartEnd, "the curve compounds while the stored headline sums").toBeCloseTo(SUM, 12);
+  });
+
+  it("CONTROL: with no config the curve stays geometric", async () => {
+    vi.mocked(createAdminClient).mockReturnValue(mockAdmin(null) as never);
+    const p = await fetchAndBuildPayload(STRATEGY_ID, (q) => q);
+    const product = SERIES.reduce((acc, d) => acc * (1 + d.value), 1) - 1;
+    const chartEnd = p!.strategyEquity[p!.strategyEquity.length - 1] - 1;
+    expect(chartEnd).toBeCloseTo(product, 12);
+  });
+
+  it("the single-key owner resolves the method with the composite's rule", async () => {
+    const row = analyticsRow();
+    const simple = await readSingleKeyBasisOpts(neverAdmin, "s", {}, null, "complete", row, SIMPLE_CONFIG);
+    expect(simple.cumulativeMethod).toBe("arithmetic");
+    const none = await readSingleKeyBasisOpts(neverAdmin, "s", {}, null, "complete", row, null);
+    expect("cumulativeMethod" in none).toBe(false);
+  });
+});

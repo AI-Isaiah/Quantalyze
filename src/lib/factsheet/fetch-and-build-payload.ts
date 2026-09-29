@@ -542,6 +542,9 @@ async function resolveFactsheetInputs(
         analytics?.metrics_json_by_basis,
         analytics?.computation_status,
         analytics,
+        // SFH H-2 (review round 1): the stored headline was computed under this
+        // config, so the curve is drawn on the same cumulative method.
+        strategy.returns_denominator_config,
       );
     } catch (err) {
       if (!(err instanceof CompositeSeriesReadError)) throw err;
