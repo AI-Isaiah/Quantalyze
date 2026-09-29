@@ -2898,10 +2898,14 @@ export interface MyAllocationDashboardPayload {
    *     row is also a version-2 returns series and the book is `"ready"`.
    *   - `"legacy"`: no such curve. Snapshots are not rendered as the curve
    *     (plan 11 removed that fallback). The label stays because the union
-   *     is pinned and the warm-up / disclosure gates still read it.
+   *     is pinned (`equityChartWidgetDataSchema`'s enum).
    *
-   * While rebuilding, the chart does not read this field. The Overview
-   * warm-up gate and the Scenario disclosure do.
+   * The only production reader is `EquityChart`'s provenance stamp, which
+   * mounts in the `"ready"` branch only, where this is always `"derived"`.
+   * Nothing reads it while the book is rebuilding. Review C3 SFH-C3-02 /
+   * IN-02: plan 14 removed the Overview warm-up and Scenario disclosure
+   * readers. Both now choose by `equityHistoryState` alone (D-15), and no
+   * consumer may gate on this field again.
    */
   equityCurveSource: "derived" | "legacy";
   /**
@@ -3623,9 +3627,11 @@ export function buildPerKeyReturnsByApiKeyId(
 const DERIVED_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
- * The pre-167.1.2 curve gate: trustworthy + a non-empty well-formed curve.
- * Does NOT require version 2. `equityCurveSource` still uses it. The display
- * series does not — see `extractTrustworthyDerivedSeries`.
+ * The pre-167.1.2 curve check: trustworthy + a non-empty well-formed curve.
+ * Does NOT require version 2. `extractTrustworthyDerivedSeries` builds on it
+ * and adds the version-2 returns check. The producer also stamps
+ * `equityCurveSource` / `derivedCurveComputedAt` from it (a provenance stamp,
+ * not a gate: nothing renders or hides on it while the book is rebuilding).
  */
 function trustworthyDerivedCurve(payload: unknown): DailyPoint[] | null {
   if (payload === null || typeof payload !== "object") return null;
@@ -4116,9 +4122,14 @@ export function derivePhase07Fields(
     equityHistoryState === "ready" && series ? series.curve : [];
   const equityDailyReturns: DailyPoint[] =
     equityHistoryState === "ready" && series ? series.returns : [];
-  // While rebuilding the chart does not read equityCurveSource. The Overview
-  // warm-up gate and the Scenario disclosure still do, so keep the pre-167.1.2
-  // curve gate in that state. Ready always stamps "derived".
+  // Ready always stamps "derived", and EquityChart (mounted in "ready" only) is
+  // the one production reader. Review C3 SFH-C3-02 / IN-02: while rebuilding,
+  // no consumer reads either field. Plan 14 removed the Overview warm-up and
+  // Scenario disclosure readers; both choose by equityHistoryState (D-15). Do
+  // NOT restore a source-based gate. The rebuilding-state stamp is kept only
+  // because it is where the trust check stays observable while D-02 withholds
+  // the curve: FLIPRETRY-03 in queries.test.ts and the plan-05 arms in
+  // queries.my-allocation.test.ts pin it.
   const curveForSource = trustworthyDerivedCurve(derivedPayload);
   const equityCurveSource: "derived" | "legacy" =
     equityHistoryState === "ready"
