@@ -39,6 +39,7 @@ import ccxt.async_support as ccxt
 import httpx
 import pandas as pd
 
+from services.account_identity import VENUES_WITH_ACCOUNT_ID
 from services.allocator_equity_derive import (
     account_groups,
     eligible_key_predicate,
@@ -1834,6 +1835,7 @@ class _LatestHoldings:
     emptied_accounts: int
     never_polled_keys: int
     max_carry_age_days: int
+    identity_unknown_not_carried: int
 
 
 async def _fetch_latest_holdings_per_eligible_key(
@@ -1889,6 +1891,21 @@ async def _fetch_latest_holdings_per_eligible_key(
     overwriting this account's (venue, symbol, asof) row) can make a real poll
     look empty here, as it already makes that symbol vanish from the day.
 
+    An IDENTITY-UNKNOWN account that is not working is NOT carried (C2 review
+    round 2, R2-CR-02): a group none of whose eligible keys is working (D-18),
+    none of whose keys carries a ``venue_account_id``, on a venue that stamps
+    one (``VENUES_WITH_ACCOUNT_ID``), counts only rows dated today. Such a key
+    can be the old half of a pre-C1 credential rotation: it stopped working
+    before the stamper existed, so it is never stamped and never marked, and
+    the new key on the same account is an unmarked group of its own. Carrying
+    both counted the account twice, every day. Nothing can tell that key from
+    a genuinely separate account behind a failing, never-stamped key, which
+    therefore drops out on a day it has no rows, exactly as on main's
+    today-only read; ``identity_unknown_not_carried`` counts every such
+    account so the drop is not silent. A working key keeps its carry, stamped
+    or not, and so does a failing key whose account id is known or whose venue
+    stamps none (MT5, sFOX).
+
     The latest ``asof`` is reduced with ``max()`` in Python, so correctness
     never rests on the order a read returns.
 
@@ -1903,7 +1920,7 @@ async def _fetch_latest_holdings_per_eligible_key(
             supabase.table("api_keys")
             .select(
                 "id, is_active, sync_status, disconnected_at, exchange, "
-                "account_share_kind, account_shared_with_api_key_id"
+                "venue_account_id, account_share_kind, account_shared_with_api_key_id"
             )
             .eq("user_id", allocator_id)
             .execute()
@@ -1921,6 +1938,7 @@ async def _fetch_latest_holdings_per_eligible_key(
     emptied = 0
     never_polled = 0
     max_carry_age = 0
+    identity_unknown_not_carried = 0
     for group in account_groups(key_rows):
         eligible = [r for r in group if eligible_key_predicate(r)]
         if not eligible:
@@ -1952,6 +1970,11 @@ async def _fetch_latest_holdings_per_eligible_key(
             never_polled += len(eligible)
             continue
         latest = max(asofs)
+
+        if latest < today_iso and _identity_unknown_and_not_working(group, eligible):
+            # R2-CR-02: its same-day rows would have counted; it has none today.
+            identity_unknown_not_carried += 1
+            continue
 
         if latest < today_iso and await _polled_empty_since(
             supabase, eligible, latest
@@ -1988,6 +2011,28 @@ async def _fetch_latest_holdings_per_eligible_key(
         emptied_accounts=emptied,
         never_polled_keys=never_polled,
         max_carry_age_days=max_carry_age,
+        identity_unknown_not_carried=identity_unknown_not_carried,
+    )
+
+
+def _identity_unknown_and_not_working(
+    group: Sequence[Mapping[str, Any]], eligible: Sequence[Mapping[str, Any]]
+) -> bool:
+    """R2-CR-02: an account the refresh must not carry forward. No eligible key
+    of the group works (D-18), no key of the group (departed ones included)
+    carries a venue account id, and every eligible key sits on a venue that
+    stamps one, so the missing id means "never stamped", not "unstampable"."""
+    if any(working_holder_predicate(r) for r in eligible):
+        return False
+    if any(
+        isinstance(r.get("venue_account_id"), str) and r["venue_account_id"].strip()
+        for r in group
+    ):
+        return False
+    return all(
+        isinstance(r.get("exchange"), str)
+        and r["exchange"].strip().lower() in VENUES_WITH_ACCOUNT_ID
+        for r in eligible
     )
 
 
@@ -3595,6 +3640,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                     "emptied_accounts": latest.emptied_accounts,
                     "never_polled_keys": latest.never_polled_keys,
                     "max_carry_age_days": latest.max_carry_age_days,
+                    "identity_unknown_not_carried": latest.identity_unknown_not_carried,
                 },
             )
             return DispatchResult(outcome=DispatchOutcome.DONE)
@@ -3666,17 +3712,18 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 "emptied_accounts": latest.emptied_accounts,
                 "never_polled_keys": latest.never_polled_keys,
                 "max_carry_age_days": latest.max_carry_age_days,
+                "identity_unknown_not_carried": latest.identity_unknown_not_carried,
             },
         )
         logger.info(
             "refresh_allocator_equity_daily: upserted %d row for allocator=%s "
             "(key=%s, venue=%s, eligible_keys=%d, carried_keys=%d, "
             "excluded_shared_keys=%d, no_working_accounts=%d, emptied_accounts=%d, "
-            "never_polled_keys=%d)",
+            "never_polled_keys=%d, identity_unknown_not_carried=%d)",
             count, allocator_id, api_key_id, venue,
             latest.eligible_keys, latest.carried_keys, latest.excluded_shared_keys,
             latest.no_working_accounts, latest.emptied_accounts,
-            latest.never_polled_keys,
+            latest.never_polled_keys, latest.identity_unknown_not_carried,
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
     except ccxt.RateLimitExceeded as exc:

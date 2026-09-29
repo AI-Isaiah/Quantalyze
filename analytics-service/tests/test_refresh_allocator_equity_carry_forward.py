@@ -316,6 +316,134 @@ async def test_shared_account_with_no_working_key_is_carried_once_and_counted(
     assert metadata["excluded_shared_keys"] == 1
 
 
+# ---------------------------------------------------------------------------
+# C2 review round 2, R2-CR-02: an identity-unknown, not-working account is not
+# carried.
+#
+# The pre-C1 credential rotation: old key A stopped working before C1's stamper
+# existed, so its venue_account_id is NULL forever (the stamper runs only after
+# a successful poll), and new key B was stamped plainly and left UNMARKED (no
+# live holder carried the id). account_groups makes them two groups, and the
+# per-key carry summed A's last rows beside B's today: the account twice,
+# every day, first-writer-wins (the reviewer measured 2000 where 1000 is
+# right). On main the today-only read gave 1000.
+#
+# The fix is the smallest one that needs no new identity data: a group none of
+# whose eligible keys is WORKING (D-18) and none of whose keys carries a
+# venue_account_id, on a venue that stamps one, is not carried forward. Only
+# its same-day rows count, which is main's pre-C2 behaviour for such a key.
+# The trade (pinned below): a GENUINELY separate account behind a failing,
+# never-stamped key drops out of the day's row on a quiet day, exactly as on
+# main.
+# ---------------------------------------------------------------------------
+
+
+def _seed_unmarked_rotation(fake: FakeSupabaseClient, **old_key: Any) -> None:
+    """Old key A (API_KEY_ID_1): failing, never stamped, unmarked, its rows five
+    days old. New key B (API_KEY_ID_2): working, stamped, unmarked, polled the
+    same okx account today (same symbols, so today's rows carry B's id)."""
+    _seed_key(
+        fake, API_KEY_ID_1,
+        **{"exchange": "okx", "sync_status": "error", "venue_account_id": None, **old_key},
+    )
+    _seed_key(
+        fake, API_KEY_ID_2,
+        exchange="okx", sync_status="complete", venue_account_id="okx-uid-1",
+    )
+    _seed_account_day(fake, API_KEY_ID_1, TODAY - timedelta(days=5), TODAY_USD)
+    _seed_account_day(fake, API_KEY_ID_2, TODAY, TODAY_USD)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["error", "sign_in_failed"])
+async def test_unmarked_rotation_does_not_count_the_account_twice(
+    monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """The reviewer's case: 2000 persisted where the account holds 1000."""
+    fake = FakeSupabaseClient()
+    _seed_unmarked_rotation(fake, sync_status=status)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
+
+    row = _today_row(fake)
+    assert row["value_usd"] == pytest.approx(TODAY_USD), (
+        f"one account counted twice through an unstamped failing key: {row['value_usd']}"
+    )
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["identity_unknown_not_carried"] == 1
+    assert metadata["carried_keys"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_separate_account_behind_a_failing_unstamped_key_drops_out_on_a_quiet_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trade R2-CR-02 accepts, pinned so it is a decision and not an
+    accident. A bybit account that really is separate sits behind a failing
+    key that was never stamped; nothing can tell it apart from the rotation
+    above. On a day it has no rows it is not carried, as on main, and the
+    audit counts it so the drop is not silent."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="okx-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="error", venue_account_id=None)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    _seed_holding(fake, API_KEY_ID_2, "bybit", "BTC", TODAY - timedelta(days=2), 500.0)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert _refresh_complete_metadata(audit)["identity_unknown_not_carried"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "old_key",
+    [
+        pytest.param({"sync_status": "complete"}, id="working-unstamped-key"),
+        pytest.param({"venue_account_id": "okx-uid-0"}, id="failing-stamped-key"),
+        pytest.param({"exchange": "mt5"}, id="failing-key-on-a-venue-that-stamps-no-id"),
+    ],
+)
+async def test_the_identity_unknown_rule_leaves_other_carries_alone(
+    monkeypatch: pytest.MonkeyPatch, old_key: dict[str, Any]
+) -> None:
+    """The rule is narrow. A WORKING key is still carried when it has not
+    polled yet today (D-07), stamped or not. A failing key whose account id is
+    KNOWN is identity-known, so it is carried. A failing key on a venue that
+    never stamps an id (MT5, sFOX) is not "unknown", it is unstampable, and it
+    keeps its carry."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, **{"exchange": "okx", "sync_status": "error", **old_key})
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="complete", venue_account_id="b-1")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY - timedelta(days=2), 700.0)
+    _seed_holding(fake, API_KEY_ID_2, "bybit", "BTC", TODAY, HOLDER_USD)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
+
+    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD + 700.0)
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["identity_unknown_not_carried"] == 0
+    assert metadata["carried_keys"] == 1
+
+
+@pytest.mark.asyncio
+async def test_identity_unknown_not_working_key_still_counts_its_same_day_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the CARRY is withheld. Rows the key's account has TODAY are counted,
+    which is what main's today-only read did for it."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="error", venue_account_id=None)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, 400.0)
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="complete", venue_account_id="b-1")
+    _seed_holding(fake, API_KEY_ID_2, "bybit", "BTC", TODAY, HOLDER_USD)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
+
+    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD + 400.0)
+    assert _refresh_complete_metadata(audit)["identity_unknown_not_carried"] == 0
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "departed",
