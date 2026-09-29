@@ -527,7 +527,7 @@ export function singleKeyBasisOpts(
   smoothedSeries?: ParsedMtmSeries | null,
 ): Pick<BuildFactsheetOpts, "metricsByBasis" | "mtmGate" | "mtmSeries" | "smoothedGate" | "smoothedSeries"> {
   // Extract a non-null non-array by-basis object under `key` from the untrusted jsonb.
-  const extractBasisObject = (key: string): Record<string, number> | undefined => {
+  const extractBasisObject = (key: string): Record<string, number | null> | undefined => {
     if (
       metricsJsonByBasis !== null &&
       typeof metricsJsonByBasis === "object" &&
@@ -535,7 +535,7 @@ export function singleKeyBasisOpts(
     ) {
       const cand = (metricsJsonByBasis as Record<string, unknown>)[key];
       if (cand !== null && typeof cand === "object" && !Array.isArray(cand)) {
-        return cand as Record<string, number>;
+        return cand as Record<string, number | null>;
       }
     }
     return undefined;
@@ -679,7 +679,7 @@ function persistedCashHeadline(
   persistedRow: Record<string, unknown> | null | undefined,
   metricsJsonByBasis: unknown,
   computationStatus: unknown,
-): Record<string, number> | undefined {
+): Record<string, number | null> | undefined {
   if (persistedRow == null) return undefined;
   if (!isRankableAnalyticsRow({ computation_status: computationStatus as string | null | undefined })) {
     return undefined;
@@ -695,11 +695,17 @@ function persistedCashHeadline(
     );
     return undefined;
   }
-  const headline: Record<string, unknown> = {};
-  for (const { serverKey } of BASIS_KPI_MAP) headline[serverKey] = persistedRow[serverKey];
-  // `metricsByBasis` types each basis as `Record<string, number>`; a persisted null
-  // stays null here on purpose (the strict overlay turns it into "—").
-  return headline as Record<string, number>;
+  // Review round 1 (IN-02): typed as it is, `number | null`, with no cast. A
+  // persisted null (a stored Sortino with no losing day) stays null on purpose,
+  // and the strict overlay renders it "—", as the lists do. A value PostgREST
+  // did not answer as a number is carried as null, which the overlay renders
+  // the same way.
+  const headline: Record<string, number | null> = {};
+  for (const { serverKey } of BASIS_KPI_MAP) {
+    const v = persistedRow[serverKey];
+    headline[serverKey] = typeof v === "number" ? v : null;
+  }
+  return headline;
 }
 
 /**

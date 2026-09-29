@@ -585,8 +585,14 @@ export type FactsheetCommon = {
    * an MTM basis. Drives the KpiStrip/MetricsColumn basis relabel (D5).
    */
   metricsByBasis?: {
-    cash_settlement?: Record<string, number>;
-    mark_to_market?: Record<string, number>;
+    // Review round 1 (IN-02): each basis is `number | null`. Python's
+    // `_safe_float` persists JSON null for a scalar that does not exist (a
+    // Sortino with no losing day, a Calmar with no drawdown), and the single-key
+    // cash headline carries the stored null through. Every reader checks
+    // `typeof v === "number" && Number.isFinite(v)` (the strict overlay renders
+    // anything else "—"); never do arithmetic on a value without that check.
+    cash_settlement?: Record<string, number | null>;
+    mark_to_market?: Record<string, number | null>;
     /**
      * Phase 132/133 (SMTM-01) — the smoothed daily-mark basis. SAME omission
      * contract as `mark_to_market`: present ONLY when the Phase-132 worker's
@@ -594,7 +600,7 @@ export type FactsheetCommon = {
      * null, otherwise). Drives the third SegmentedControl segment + KpiStrip
      * overlay.
      */
-    smoothed_mtm?: Record<string, number>;
+    smoothed_mtm?: Record<string, number | null>;
   };
   /**
    * FS-03 — server-truth MTM gate (D1). `available` = the `mark_to_market` key
