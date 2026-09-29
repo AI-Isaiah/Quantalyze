@@ -375,6 +375,16 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       "history_read_failed",
       "We could not load your history just now. Reload the page to try again.",
     ],
+    [
+      // Review C2 round 3 R3-WR-03: the cause and the unlock, never "did not
+      // pass its checks". No account and no number (T-167.1.2-22a).
+      "shared_account_no_working_key",
+      "The keys that read one of your exchange accounts are all failing to sync, so that account's history stops. Fix or reconnect one of them on the Exchanges page.",
+    ],
+    [
+      "shared_account_history_truncated",
+      "One of your exchange accounts changed keys, and we cannot join its history from before the change to the new key's yet, so your history is not shown.",
+    ],
   ] as const)("rebuilding reason %s renders its one line", (reason, line) => {
     render(
       <AllocationDashboardV2
@@ -385,7 +395,16 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     );
     const panel = screen.getByTestId("overview-equity-rebuilding");
     expect(panel.textContent).toContain(line);
-    if (reason === "duplicate_account" || reason === "key_not_syncing") {
+    // Review C2 round 3 R3-WR-03: neither shared-account line falls back to
+    // the generic refusal.
+    if (reason.startsWith("shared_account_")) {
+      expect(panel.textContent).not.toContain("did not pass its checks");
+    }
+    if (
+      reason === "duplicate_account" ||
+      reason === "key_not_syncing" ||
+      reason === "shared_account_no_working_key"
+    ) {
       expect(screen.getByRole("link", { name: "Exchanges page" })).toHaveAttribute(
         "href",
         "/profile?tab=exchanges",

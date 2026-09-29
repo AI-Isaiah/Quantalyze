@@ -1567,6 +1567,65 @@ describe("derived-row outcomes — the reason says why there is no series", () =
     );
   });
 
+  // Review C2 round 3 R3-WR-03 / SFH-R3-04. Two blocking writer verdicts have
+  // an unlock the owner can act on or a cause the owner can be told, so the
+  // reader names them rather than "did not pass its checks". The tokens are
+  // read from the payload's `degrade_reasons` (where job_worker writes them),
+  // never from `flags` (where round 1's benign flag of the same name lived).
+  it("R3-WR-03: an untrustworthy v2 row names its shared-account cause from degrade_reasons", () => {
+    const untrusted = (degrade_reasons: unknown, extra: Record<string, unknown> = {}) =>
+      callWith({
+        payload: { ...v2(), is_trustworthy: false, degrade_reasons, ...extra },
+        computed_at: null,
+      }).equityHistoryRebuildReason;
+    expect(untrusted(["shared_account_no_working_key"])).toBe(
+      "shared_account_no_working_key",
+    );
+    expect(untrusted(["shared_account_history_truncated"])).toBe(
+      "shared_account_history_truncated",
+    );
+    // Both present: the one the owner can act on wins. The writer sorts the
+    // tokens, so "history_truncated" comes first; order must not decide.
+    expect(
+      untrusted(["shared_account_history_truncated", "shared_account_no_working_key"]),
+    ).toBe("shared_account_no_working_key");
+    // Alongside another blocker the named cause still wins.
+    expect(untrusted(["dropped_key", "shared_account_no_working_key"])).toBe(
+      "shared_account_no_working_key",
+    );
+    // Fallbacks: any other blocker, no tokens, a non-array, and the token in
+    // `flags` only all keep the generic line.
+    expect(untrusted(["dropped_key"])).toBe("derivation_rejected");
+    expect(untrusted([])).toBe("derivation_rejected");
+    expect(untrusted("shared_account_no_working_key")).toBe("derivation_rejected");
+    expect(untrusted([], { flags: ["shared_account_no_working_key"] })).toBe(
+      "derivation_rejected",
+    );
+    // Only the writer's untrustworthy verdict is read this way: a pre-v2 row
+    // waits, and a malformed v2 row stays derivation_rejected.
+    expect(
+      callWith({
+        payload: {
+          ...v2(),
+          version: 1,
+          is_trustworthy: false,
+          degrade_reasons: ["shared_account_no_working_key"],
+        },
+        computed_at: null,
+      }).equityHistoryRebuildReason,
+    ).toBe("awaiting_derivation");
+    expect(
+      callWith({
+        payload: {
+          ...v2(),
+          returns: [],
+          degrade_reasons: ["shared_account_no_working_key"],
+        },
+        computed_at: null,
+      }).equityHistoryRebuildReason,
+    ).toBe("derivation_rejected");
+  });
+
   it("a key-list reason still wins over a missing series, whatever the series outcome", () => {
     const pendingKey = {
       id: "k-1",

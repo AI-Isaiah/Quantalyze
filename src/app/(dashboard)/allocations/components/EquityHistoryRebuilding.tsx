@@ -30,7 +30,10 @@ import { dataSourceLabel } from "@/lib/api-key-label";
  * line names it by the owner's own label, `{Exchange} — {nickname}`, or the
  * masked id tail (`••••` + last 4) when the key has no nickname. That is the
  * label the Exchanges page key note and the Scenario rows already show the
- * same owner (`dataSourceLabel`), so it discloses nothing new.
+ * same owner (`dataSourceLabel`), so it discloses nothing new. Review C2
+ * round 3 R3-WR-03: a writer verdict with a shared-account cause
+ * (`shared_account_no_working_key`, `shared_account_history_truncated`) gets
+ * its own line rather than the generic `derivation_rejected` one.
  *
  * Tokens follow DESIGN.md (mono eyebrow at the 0.18em tracking step, DM Sans
  * on the fluid `text-h3` tier, secondary body text) and the layout is
@@ -55,7 +58,10 @@ const HEADING_ID = "overview-equity-rebuilding-heading";
  * names the one place the owner can fix it.
  */
 const REASON_LINE: Record<
-  Exclude<EquityHistoryRebuildReason, "duplicate_account" | "key_not_syncing">,
+  Exclude<
+    EquityHistoryRebuildReason,
+    "duplicate_account" | "key_not_syncing" | "shared_account_no_working_key"
+  >,
   string
 > = {
   account_identity_pending:
@@ -68,6 +74,12 @@ const REASON_LINE: Record<
   // awaiting_derivation.)
   derivation_rejected:
     "The latest rebuild of your history did not pass its checks, so it is not shown.",
+  // Review C2 round 3 R3-WR-03: the writer could not join an older key's
+  // history to the newer key's on one account, so the whole book is hidden.
+  // No action is named because none heals it in this release: disconnecting
+  // the old key drops its history.
+  shared_account_history_truncated:
+    "One of your exchange accounts changed keys, and we cannot join its history from before the change to the new key's yet, so your history is not shown.",
   // Review C2 round 2 IN-05: active voice (DESIGN.md Voice).
   history_read_failed:
     "We could not load your history just now. Reload the page to try again.",
@@ -155,6 +167,15 @@ export function EquityHistoryRebuilding({
       ) : reason === "key_not_syncing" ? (
         <p className="mt-2 max-w-prose text-sm text-text-secondary">
           <NotSyncingLine keys={notSyncingKeys} />
+        </p>
+      ) : reason === "shared_account_no_working_key" ? (
+        // Review C2 round 3 R3-WR-03: the payload does not say which account,
+        // so the line names none (T-167.1.2-22a) and points at the one place
+        // the owner can fix a key.
+        <p className="mt-2 max-w-prose text-sm text-text-secondary">
+          The keys that read one of your exchange accounts are all failing to
+          sync, so that account&apos;s history stops. Fix or reconnect one of
+          them on the <ExchangesPageLink />.
         </p>
       ) : reason ? (
         <p className="mt-2 max-w-prose text-sm text-text-secondary">

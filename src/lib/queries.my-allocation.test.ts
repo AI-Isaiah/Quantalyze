@@ -3201,15 +3201,14 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
   });
 
   // Review C2 SFH-05 (reader half), kept for rows that ARE version 2. A v2 row
-  // its writer marked untrustworthy (for example the shared account with no
-  // working key, which fixer A makes a non-benign outcome) already had its
-  // recompute, so it is `derivation_rejected` and reported with its token only.
+  // its writer marked untrustworthy already had its recompute, so it is
+  // `derivation_rejected` and reported with its token only.
   it("SFH-05: a v2 row the writer marked untrustworthy is derivation_rejected and reported with its rejection token", async () => {
     state.portfolios = [P1151_PORTFOLIO];
     state.apiKeys = [identifiedKey()];
     const row = v2Row();
     row.payload.is_trustworthy = false;
-    row.payload.flags = ["shared_account_no_working_key"];
+    row.payload.degrade_reasons = ["dropped_key"];
     state.allocatorEquityDerived = [row];
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const sentry = await import("./sentry-capture");
@@ -3236,6 +3235,42 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
     const logged = JSON.stringify(errSpy.mock.calls);
     expect(logged).toContain("untrustworthy");
     expect(logged).not.toContain("100500");
+    errSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  // Review C2 round 3 R3-WR-03. The shared account with no working key is the
+  // writer's untrustworthy verdict too, so it is still captured with the same
+  // rejection token, but the owner sees its own reason, read from the
+  // persisted `degrade_reasons`, and not "did not pass its checks".
+  it("R3-WR-03: a v2 row untrustworthy for shared_account_no_working_key names that reason", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    const row = v2Row();
+    row.payload.is_trustworthy = false;
+    row.payload.degrade_reasons = ["shared_account_no_working_key"];
+    state.allocatorEquityDerived = [row];
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("shared_account_no_working_key");
+    expect(result.equityDailyPoints).toEqual([]);
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: expect.objectContaining({
+          reason: "derived_row_rejected",
+          rejection: "untrustworthy",
+        }),
+      }),
+    );
     errSpy.mockRestore();
     captureSpy.mockRestore();
   });
