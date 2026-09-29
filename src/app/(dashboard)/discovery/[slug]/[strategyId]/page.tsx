@@ -10,6 +10,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import { KCS10_PUBLIC_SENTENCE } from "@/lib/status-surface-copy";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
 import {
@@ -21,6 +22,20 @@ import {
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { DailyReturn, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { notFound, redirect } from "next/navigation";
+
+/**
+ * 169-REVIEW-SFH H-3: what this page says when a composite's
+ * `csv_daily_returns` read FAILS (`CompositeSeriesReadError`). KCS-10's "not
+ * available yet" describes the row as not ready, which is false for an outage:
+ * the row may be fine and the next request reads again. Active voice with the
+ * owner lane's retry remedy (KCS09-UNREADABLE, "Reload this page to try
+ * again."). The public v2 lane has no counterpart: it renders KCS-10 on a
+ * `read_error` by design, so this sentence lives here, next to its one caller.
+ * Its home is `status-surface-copy.ts` if Phase 169.1 plan 169.1-01 does not
+ * retire this page's assembly.
+ */
+const COMPOSITE_READ_FAILED_SENTENCE =
+  "We could not load this strategy's factsheet right now. Reload this page to try again.";
 
 export default async function StrategyDetailPage({
   params,
@@ -98,16 +113,24 @@ export default async function StrategyDetailPage({
     | null
     | undefined;
   let buildOpts: BuildFactsheetOpts | undefined;
+  let compositeReadFailed = false;
   if (dqf?.composite === true) {
     ingestSource = "csv";
     const admin = createAdminClient();
     // Phase 169 (D-41): a FAILED `csv_daily_returns` read throws
     // `CompositeSeriesReadError`. It is caught here, and only it: this page is
-    // dynamic and not cached, so the placeholder is the right answer for this
-    // one request and the next request reads again. Any other throw is not an
-    // outage this page can name and stays the error boundary's. Phase 169.1
-    // plan 169.1-01 removes this assembly in favour of `fetchAndBuildPayload`,
-    // whose resolve stage already answers the same throw as `read_error`.
+    // dynamic and not cached, so the answer holds for this one request and the
+    // next request reads again. Any other throw is not an outage this page can
+    // name and stays the error boundary's. Phase 169.1 plan 169.1-01 removes
+    // this assembly in favour of `fetchAndBuildPayload`, whose resolve stage
+    // already answers the same throw as `read_error`.
+    //
+    // 169-REVIEW-SFH H-3: the outage is captured to Sentry, as the resolve
+    // stage captures it for a build (`console.error` alone never reaches Sentry:
+    // `src/instrumentation.ts` registers no console integration), and the page
+    // says the load failed rather than KCS-10's "not available yet". The
+    // reader's own error is sent, so its PostgREST message rides as `cause`,
+    // which `captureToSentry` folds, scrubbed, into the event message.
     let composite: Awaited<ReturnType<typeof readCompositeFactsheet>>;
     try {
       composite = await readCompositeFactsheet(admin, {
@@ -120,9 +143,25 @@ export default async function StrategyDetailPage({
     } catch (err) {
       if (!(err instanceof CompositeSeriesReadError)) throw err;
       console.error(
-        "[discovery/strategyDetail] composite csv_daily_returns read failed — rendering the placeholder",
-        { strategyId: strategy.id, errorCode: err.code },
+        "[discovery/strategyDetail] composite csv_daily_returns read failed, rendering the read-failure line",
+        {
+          strategyId: strategy.id,
+          errorCode: err.code,
+          errorMessage: typeof err.cause === "string" ? err.cause : undefined,
+        },
       );
+      captureToSentry(err, {
+        level: "error",
+        tags: {
+          route: "discovery/strategy-detail",
+          stage: "composite-read",
+          reason: "read_error",
+          code: err.code,
+          strategy_id: strategy.id,
+          read: "csv_daily_returns",
+        },
+      });
+      compositeReadFailed = true;
       composite = null;
     }
     if (composite) {
@@ -130,7 +169,8 @@ export default async function StrategyDetailPage({
       buildOpts = composite.buildOpts;
     } else {
       // Data defect (untrusted cash headline), or the csv read outage caught
-      // above → empty series → placeholder.
+      // above → empty series → no payload. The fallback below tells the two
+      // apart through `compositeReadFailed`.
       dailyReturns = [] as DailyReturn[];
     }
   } else {
@@ -268,7 +308,7 @@ export default async function StrategyDetailPage({
               series that cannot build, does not resolve on its own) and named
               an internal pipeline to allocators (phase 164.2 criterion 9). */}
           <p className="mt-6 text-small text-text-secondary">
-            {KCS10_PUBLIC_SENTENCE}
+            {compositeReadFailed ? COMPOSITE_READ_FAILED_SENTENCE : KCS10_PUBLIC_SENTENCE}
           </p>
         </article>
       )}
