@@ -85,7 +85,8 @@ function cellsOf(strategyName: string): HTMLElement[] {
  * unchanged. `formatPercent` takes a FRACTION, so a 28% risk share fed straight
  * to it rendered "+2800.00%". These rows come from the adapter's own fixture,
  * so a unit drift at the producer's end or at this component reddens here.
- * Weights and shares are an unsigned domain: no "+".
+ * No "+" on a weight or a share. (A share is NOT unsigned, though: a hedge's
+ * is negative and keeps its minus; see the IN-05 block at the end.)
  */
 describe("<RiskAttribution> — the producer's percent shape (169 D-49)", () => {
   it("renders each weight and risk share once, unsigned, at 1 decimal place", () => {
@@ -235,5 +236,37 @@ describe("<RiskAttribution> — a weight that does not exist (169 M-5)", () => {
     expect(alpha[4].querySelector(".text-positive, .text-negative")).toBeNull();
     // Control: the row with a weight keeps its assessment (70 <= 60 x 1.3 = 78).
     expect(cellsOf("Beta")[4].textContent).toBe("Balanced");
+  });
+});
+
+/**
+ * 2026-09-29, Phase 169 review round 1 IN-05. A risk share is NOT an unsigned
+ * domain: `compute_risk_decomposition` (analytics-service/services/
+ * portfolio_risk.py) gives component_risk = w_i * (Σw)_i / σ, which is negative
+ * for a strategy that offsets the book's risk. The shares still sum to 100, so
+ * the others then exceed it. `{ signed: false }` only drops the "+", so the
+ * minus must survive in the table cell and in the tooltip. The expected text
+ * is the hyphen-minus `formatPercent` renders product-wide today (see the
+ * report: DESIGN.md's percentage row asks for U+2212, which is utils.ts's).
+ */
+describe("<RiskAttribution> — a hedge's negative risk share (169 IN-05)", () => {
+  it("renders a negative share with its minus in the table and the tooltip", () => {
+    render(
+      <RiskAttribution
+        data={[
+          { strategy_id: "a", strategy_name: "Trend", marginal_risk_pct: 112, weight_pct: 60, standalone_vol: 0.2 },
+          { strategy_id: "b", strategy_name: "Hedge", marginal_risk_pct: -12, weight_pct: 40, standalone_vol: 0.15 },
+        ]}
+      />,
+    );
+    expect(cellsOf("Hedge")[2].textContent).toBe("-12.0%");
+    expect(cellsOf("Trend")[2].textContent).toBe("112.0%");
+
+    const formatter = captured.tooltip.at(-1)?.formatter as (
+      value: unknown,
+      name: string,
+    ) => [string, string];
+    const [text] = formatter(plottedDatum()["Hedge"], "Hedge");
+    expect(text).toBe("-12.0%");
   });
 });

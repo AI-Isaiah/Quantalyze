@@ -1475,10 +1475,14 @@ export interface RiskDecompositionRow {
    * null = the portfolio carries no risk, so no share of it exists to
    * apportion (166.1 D7, founder 2026-09-26; round-1 SFH MEDIUM-2). Never 0.
    *
-   * Unit: percent, 0 to 100 (a 28% share is 28, not 0.28), as the producer
+   * Unit: percent (a 28% share is 28, not 0.28), as the producer
    * `compute_risk_decomposition` / `routers/portfolio.py` sends it; the adapter
    * passes it through unchanged (2026-09-27, 169 D-49). `formatPercent` takes a
    * fraction, so a display converts once (`RiskAttribution`).
+   *
+   * Signed (169 review round 1 IN-05, 2026-09-29): the shares sum to 100, but
+   * one is negative for a strategy that offsets the book's risk, and the
+   * others then exceed 100. It is not bounded to 0 to 100.
    */
   marginal_risk_pct: number | null;
   standalone_vol: number;

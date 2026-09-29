@@ -12,6 +12,12 @@ interface RiskAttributionProps {
    * component converts them to a fraction ONCE (`percentToFraction`) before
    * `formatPercent`, which takes fractions. `standalone_vol` is already a
    * fraction and is not converted.
+   *
+   * Sign (169 review round 1 IN-05, 2026-09-29): weights are unsigned, but a
+   * risk share is NOT. It is negative for a strategy that offsets the book's
+   * risk (a hedge), and the shares still sum to 100, so the others then exceed
+   * it. `formatPercent(..., { signed: false })` only drops the "+" and keeps
+   * the minus, which is what a hedge's share needs.
    */
   data: {
     strategy_id: string;
@@ -40,9 +46,13 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
 
   // 166.1 D7: a null risk share is left out of the stacked bar (a gap), never
   // plotted as a 0-width segment that reads as "no risk".
-  // 169 D-49: the bar plots the same fraction the table formats, so the shares
-  // (which sum to the whole portfolio risk) fill the fraction domain [0, 1] and
-  // the tooltip's x100 reads the table's percent.
+  // 169 D-49: the bar plots the same fraction the table formats, and the
+  // tooltip's x100 reads the table's percent. The shares sum to the whole
+  // portfolio risk, so with no hedge they fill the fraction domain [0, 1].
+  // 169 review round 1 IN-05 (2026-09-29): a hedge's share is negative, and
+  // then the positive shares sum past 1 and the negative one lies left of 0,
+  // outside this fixed domain. How the bar should draw that is an open
+  // rendering decision (SFH L-4), recorded, not settled here.
   const chartData = [
     data.reduce(
       (acc, d) => {
