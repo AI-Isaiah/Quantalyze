@@ -51,7 +51,10 @@ import {
 // would dispatch a key event the source deliberately does not listen for and
 // would pass against a component with no keyboard support at all.
 import userEvent from "@testing-library/user-event";
-import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import type {
+  EquityHistoryRebuildReason,
+  MyAllocationDashboardPayload,
+} from "@/lib/queries";
 import { isoDayFromDate } from "@/lib/dateday";
 
 // --- next/navigation mock -------------------------------------------------
@@ -357,6 +360,7 @@ vi.mock("./WeightOptimizerSection", () => ({
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer } from "./ScenarioComposer";
+import { EquityHistoryRebuilding } from "./EquityHistoryRebuilding";
 // Real (un-mocked) — used to build a valid current-schema draft so the
 // onRegisterOpen handler decodes "ok" in the WR-02 regression test below.
 import {
@@ -17107,6 +17111,123 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
         "true",
       );
       expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+    },
+  );
+
+  // Review C3 SFH-C3-01: the Scenario sentence says WHY the comparison is
+  // withheld, and it must give the same kind of answer the Overview gives for
+  // the same payload. A failed read said "being rebuilt" here while the
+  // Overview said to reload, so the allocator waited on a rebuild that was not
+  // running. Three classes: a wait ("being rebuilt"), a read that failed
+  // (reload), and a key the owner must fix (the Exchanges page).
+  //
+  // The class per reason is written out here, NOT read from the component's
+  // classifier, so a reason moved to the wrong class fails this arm instead of
+  // moving both surfaces together. The type check below forces a reason added
+  // to `EquityHistoryRebuildReason` into this table.
+  const REASON_CLASSES = [
+    ["duplicate_account", "needs_action"],
+    ["key_not_syncing", "needs_action"],
+    ["shared_account_no_working_key", "needs_action"],
+    ["history_read_failed", "read_failed"],
+    ["awaiting_derivation", "rebuilding"],
+    ["account_identity_pending", "rebuilding"],
+    ["derivation_rejected", "rebuilding"],
+    ["shared_account_history_truncated", "rebuilding"],
+  ] as const satisfies ReadonlyArray<
+    readonly [EquityHistoryRebuildReason, "needs_action" | "read_failed" | "rebuilding"]
+  >;
+  type UnlistedReason = Exclude<
+    EquityHistoryRebuildReason,
+    (typeof REASON_CLASSES)[number][0]
+  >;
+  // Compile-time only: `true` is not assignable when a reason is unlisted.
+  const everyReasonListed: [UnlistedReason] extends [never] ? true : false = true;
+  void everyReasonListed;
+
+  const SCENARIO_LINE_BY_CLASS = {
+    rebuilding: OWN_BOOK_REBUILDING_COPY,
+    read_failed:
+      "We could not load your book's history just now, so the comparison with your current book is not shown; reload the page to try again.",
+    needs_action:
+      "Your book's own history is on hold until you fix a key on the Exchanges page, so the comparison with your current book is not shown.",
+  } as const;
+  const EXCHANGES_HREF = "/profile?tab=exchanges";
+
+  it.each(REASON_CLASSES)(
+    "rebuilding reason %s: the Scenario gives the %s line, the same class the Overview panel gives (SFH-C3-01)",
+    (reason, reasonClass) => {
+      // The producer's shape for a non-ready book: no curve, no returns.
+      const payload = makePayload({
+        equityHistoryState: "rebuilding",
+        equityHistoryRebuildReason: reason,
+        equityDailyPoints: [],
+        equityDailyReturns: [],
+      });
+      render(
+        <>
+          <ScenarioComposer
+            payload={payload}
+            allocatorId={ALLOCATOR_A}
+            allocatorMandate={null}
+          />
+          <EquityHistoryRebuilding reason={payload.equityHistoryRebuildReason} />
+        </>,
+      );
+      const scenario = screen.getByTestId("scenario-ownbook-rebuilding");
+      const overview = screen.getByTestId("overview-equity-rebuilding");
+      expect(scenario.textContent).toBe(SCENARIO_LINE_BY_CLASS[reasonClass]);
+      // Neither surface promises "appear once" (D-15).
+      expect(scenario.textContent).not.toMatch(/appear once/);
+
+      const exchangesLink = (el: HTMLElement) =>
+        within(el)
+          .queryAllByRole("link")
+          .filter((a) => a.getAttribute("href") === EXCHANGES_HREF);
+      const saysReload = (el: HTMLElement) => /reload the page/i.test(el.textContent ?? "");
+
+      // The same class on both surfaces: a fix names the Exchanges page on
+      // both, a failed read says reload on both, a wait does neither on either.
+      const needsAction = reasonClass === "needs_action";
+      const readFailed = reasonClass === "read_failed";
+      expect(exchangesLink(scenario).length > 0).toBe(needsAction);
+      expect(exchangesLink(overview).length > 0).toBe(needsAction);
+      expect(saysReload(scenario)).toBe(readFailed);
+      expect(saysReload(overview)).toBe(readFailed);
+    },
+  );
+
+  // Fail-closed: no reason, or a reason this build does not know (a stale
+  // client, a reason added later, a prototype key), keeps the generic wait
+  // line rather than claiming a failed read or a key to fix.
+  it.each([
+    ["null", null],
+    ["missing", undefined],
+    ["a reason this build does not know", "some_later_reason"],
+    ["a prototype key", "constructor"],
+  ] as const)(
+    "rebuilding with reason %s: the Scenario keeps the generic rebuilding line (SFH-C3-01, fail-closed)",
+    (_label, reason) => {
+      const payload = makePayload({
+        equityHistoryState: "rebuilding",
+        equityHistoryRebuildReason: reason as never,
+        equityDailyPoints: [],
+        equityDailyReturns: [],
+      });
+      if (reason === undefined) {
+        delete (payload as Partial<MyAllocationDashboardPayload>).equityHistoryRebuildReason;
+        expect("equityHistoryRebuildReason" in payload).toBe(false);
+      }
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      expect(screen.getByTestId("scenario-ownbook-rebuilding").textContent).toBe(
+        OWN_BOOK_REBUILDING_COPY,
+      );
     },
   );
 
