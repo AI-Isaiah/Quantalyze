@@ -50,6 +50,7 @@ import {
 import { hasBasisHeadline } from "@/lib/factsheet/basis-metrics";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { parseIsoDay, utcEpoch } from "@/lib/dateday";
+import { drainById } from "@/lib/drain-by-id";
 import type {
   SyncProgressResponse,
   MemberProgressStatus,
@@ -253,7 +254,8 @@ const MAX_CONSECUTIVE_POLL_ERRORS = 3;
  * `done` and `failed_final`. Everything else is still moving —
  * `done_pending_children` most of all, since it names a job whose successors are
  * exactly the `derive_broker_dailies` / `compute_analytics_from_csv` steps that
- * perform the series delete→re-upsert, and `failed_retry` is the queue retrying
+ * write the series (upsert first, then delete only the days the payload no
+ * longer carries, since C3 fix H), and `failed_retry` is the queue retrying
  * (progress, not a stall — the same reading `isAutoRetrying` already takes).
  *
  * `null` is NOT in flight: after 167.2 KCS-20 it means
@@ -634,8 +636,11 @@ export function SyncPreviewStep({
   // existing amber banner + its idempotent Retry. No new state, no new copy.
   const [kickoffEnqueuedNothing, setKickoffEnqueuedNothing] = useState(false);
   // 154-08 / TWIN-1 — the empty-series repoll is ACTIVE (either arm). A terminal
-  // status over a series that measures zero is the `csv_daily_returns`
-  // delete→re-upsert window, not a verdict, so the arm repolls; this flag is how
+  // status over a series that measures zero is not taken as a verdict, so the
+  // arm repolls. It was written for the `csv_daily_returns` delete→re-upsert
+  // window; since C3 fix H the writers upsert first and delete only the days
+  // the payload no longer carries, so a re-derive never empties a day it also
+  // writes, and the repoll stays as a fail-safe wait; this flag is how
   // the RENDER learns that the wait it is showing is a re-derive rather than a
   // first crawl, and it is why the in-flight claim below stops being rendered
   // while it is up (that sentence is false once the status is terminal).
@@ -1438,13 +1443,32 @@ export function SyncPreviewStep({
                   )
                   .eq("strategy_id", strategyId)
                   .order("seq", { ascending: true }),
-                supabase
-                  .from("csv_daily_returns")
-                  .select("date, daily_return")
-                  .eq("strategy_id", strategyId)
-                  .order("date", { ascending: true })
-                  // Flat safety ceiling, T-36-03-03 precedent (queries.ts).
-                  .limit(20000),
+                // 167.1.2 C3 fix F (SFH-C3R2-X1 sweep): this was ONE request,
+                // `.order("date", asc).limit(20000)`, under a "flat safety
+                // ceiling" comment borrowed from queries.ts. PostgREST caps
+                // every response at max_rows (1000) whatever the limit, so a
+                // stitched composite past ~2.7 years of days read its OLDEST
+                // 1000 and lost the newest: a wrong csvRowCount, a sparkline
+                // fallback ending early, and an attribution table the R2-4
+                // reconciliation caption could not reconcile. The series now
+                // drains through `drainById` (id keyset, stops on an empty
+                // page, fails loud at its ceiling), deduplicated and sorted by
+                // date; a drain failure resolves `{ data: null, error }` and
+                // throws below like any read error.
+                drainById<{ id: number; date: string; daily_return: number }>({
+                  label: "csv_daily_returns",
+                  naturalKey: (r) => r.date,
+                  fetchPage: (afterId, pageSize) => {
+                    let page = supabase
+                      .from("csv_daily_returns")
+                      .select("id, date, daily_return")
+                      .eq("strategy_id", strategyId);
+                    if (afterId !== null) page = page.gt("id", afterId);
+                    return page
+                      .order("id", { ascending: true })
+                      .limit(pageSize);
+                  },
+                }),
                 supabase
                   .from("strategies")
                   .select("returns_denominator_config")
@@ -1527,17 +1551,21 @@ export function SyncPreviewStep({
             const perKey = Array.isArray(dq.per_key)
               ? [...dq.per_key].sort((a, b) => a.seq - b.seq)
               : [];
-            const series =
-              (seriesRes.data as
-                | { date: string; daily_return: number }[]
-                | null) ?? [];
+            // `id` was the drain's cursor only; the snapshot carries the
+            // series' own two columns, as before.
+            const series = (seriesRes.data ?? []).map(
+              ({ date, daily_return }) => ({ date, daily_return }),
+            );
 
-            // R2-5 (stale-complete race): the stitch_composite worker does a
-            // wholesale delete→re-upsert of csv_daily_returns. A poll landing
-            // inside that window can read a 'complete' status with 0 series
-            // rows — rendering an empty attribution table + gantt beside stale
-            // metrics. Treat an empty series as NOT-yet-terminal: stay in the
-            // waiting/computing state and re-poll until the re-upsert lands
+            // R2-5 (stale-complete race): the stitch_composite worker used to
+            // do a wholesale delete→re-upsert of csv_daily_returns, and a poll
+            // landing inside that window could read a 'complete' status with 0
+            // series rows — rendering an empty attribution table + gantt beside
+            // stale metrics. Since C3 fix H it upserts the new series first and
+            // then deletes only the days outside or missing from it, so a
+            // re-stitch never empties a day it also writes. The guard stays,
+            // fail-safe: treat an empty series as NOT-yet-terminal, stay in the
+            // waiting/computing state and re-poll until the series lands
             // (bounded by the same elapsed WARN/RETRY affordances). A genuine
             // stitched composite always persists ≥1 day, so this never hides a
             // real result.
@@ -1925,12 +1953,13 @@ export function SyncPreviewStep({
           //
           // The composite arm above has treated an empty series as
           // NOT-yet-terminal since R2-5. `run_derive_broker_dailies_job`
-          // (`analytics-service/services/job_worker.py`) does the SAME wholesale
-          // delete→re-upsert of `csv_daily_returns` — the "series heal-delete"
-          // — on its STRATEGY-mode path, and its failure arm
+          // (`analytics-service/services/job_worker.py`) rewrites
+          // `csv_daily_returns` the same way on its STRATEGY-mode path (the
+          // "series heal-delete"; a wholesale delete→re-upsert until C3 fix H,
+          // upsert-first then delete-missing since), and its failure arm
           // deliberately OMITS `series_completeness` so a prior verdict
-          // survives — so a poll landing inside that window reads a terminal
-          // status over an empty table and an unstamped row. This arm answered
+          // survives — so a poll landing inside the old delete window read a
+          // terminal status over an empty table and an unstamped row. This arm answered
           // that with a terminal, loop-stopping red refusal: it did not find a
           // strategy without a track record, it looked while the table was
           // empty, and then it stopped looking.
@@ -1946,7 +1975,11 @@ export function SyncPreviewStep({
           // The guarded reading is the one that is INCOHERENT rather than
           // merely empty: BOTH of the sources a computation could have run on
           // measure zero, and yet no producer has reported that it is finished.
-          // The one process that manufactures that reading is the delete window.
+          // Before C3 fix H the one process that manufactured that reading was
+          // the delete window. Since fix H a re-derive never empties a day it
+          // also writes, so the reading comes from a series not written yet
+          // (or a derive whose payload carries no day at all), and the guard is
+          // kept as the fail-safe wait.
           //
           // ⚠️ THE THIRD CONJUNCT WAS `analytics != null`, AND ITS PREMISE WAS
           // FALSE. It stood on "a strategy that genuinely has nothing has no

@@ -49,7 +49,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 
 import ccxt
@@ -95,7 +95,14 @@ from services.closed_sets import (  # B8b: single-sourced closed sets, re-export
     mt5_enabled_server,
     sfox_enabled_server,
 )
-from services.db import db_execute, db_read_with_retry, get_supabase, one, rows
+from services.db import (
+    PaginatedSelectTruncated,
+    db_execute,
+    db_read_with_retry,
+    get_supabase,
+    one,
+    rows,
+)
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
     aclose_exchange,
@@ -3116,6 +3123,43 @@ def _log_marker_not_confirmed(
         )
 
 
+# C3 topic H: the most dates one reconcile DELETE names in its `in.(...)` list.
+# The two csv_daily_returns writers below upsert their fresh payload FIRST and
+# then delete only the stored days the payload does not carry, so a reader never
+# finds a rebuilt day absent. Those days are sent as an explicit date list, and
+# supabase-py puts a delete's filters in the URL query string. A span can be
+# thousands of days wide, so an unbounded list could build a request line past
+# the gateway's limit (commonly 8 to 16 KB). Measured with postgrest-py's own
+# request builder: a 200-date delete with its scope and span filters is a
+# 2,770-byte URL (each date costs 13 bytes once the comma is percent-encoded),
+# and a ten-year span refused whole is 19 statements.
+_RECONCILE_DELETE_IN_BATCH: Final[int] = 200
+
+
+def _calendar_days_absent_from(
+    span_start: str, span_end: str, payload_dates: Iterable[str]
+) -> list[str]:
+    """Every calendar day in ``[span_start, span_end]`` (ISO dates, inclusive)
+    that ``payload_dates`` does not carry, ascending.
+
+    ``csv_daily_returns.date`` is a DATE, so every stored row inside the span is
+    one of these calendar days. Deleting exactly this list therefore removes the
+    same rows a ranged ``gte/lte`` delete followed by a re-insert of the payload
+    would have removed, without first making the payload's days absent. It is
+    computed client-side, so no read of the table is needed.
+    """
+    keep = set(payload_dates)
+    day = datetime.fromisoformat(span_start).date()
+    last = datetime.fromisoformat(span_end).date()
+    out: list[str] = []
+    while day <= last:
+        iso = day.isoformat()
+        if iso not in keep:
+            out.append(iso)
+        day += timedelta(days=1)
+    return out
+
+
 async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     """Broker key full-history → daily-return series → csv_daily_returns.
 
@@ -5798,11 +5842,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # whole. The publish gate reads that verdict; an unjudged series would read
     # NULL and be silently mis-trusted.
     #
-    # ⛔ PLACEMENT IS LOAD-BEARING. This MUST stay textually ABOVE the
-    # `_reconcile_span_delete` construction (~40 lines below) and its
-    # `await db_execute(_reconcile_span_delete)`. That DELETE fires BEFORE the
-    # upsert, so an assert placed between them would refuse to write the NEW
-    # series only AFTER destroying the OLD one — turning fail-loud into data
+    # ⛔ PLACEMENT IS LOAD-BEARING. This MUST stay textually ABOVE the series
+    # write below: the chunked `_upsert_dailies` and the `_reconcile_span_delete`
+    # batches that follow it. Since C3 topic H the upsert fires FIRST and the
+    # delete after it, so an assert placed anywhere past the first upsert would
+    # refuse the NEW series only AFTER overwriting part of the OLD one (and, past
+    # the delete, after removing its refused days) — turning fail-loud into data
     # loss. A refusal must cost nothing.
     #
     # ⚠️ `mypy --strict` CANNOT enforce this. The combiners return
@@ -5945,9 +5990,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # differ from the legacy USD rows that populated the table, so recomputed track
     # records would silently mix stale legacy returns into refused days.
     #
-    # Reconcile the axis: DELETE the strategy's csv_daily_returns rows inside the
-    # derive's AUTHORITATIVE span, then re-insert the fresh payload below. A refused
-    # day thereby becomes honestly ABSENT (the load boundary reinstates its NaN).
+    # Reconcile the axis so that, within the derive's AUTHORITATIVE span, the
+    # stored series ends EXACTLY equal to the fresh payload. A refused day thereby
+    # becomes honestly ABSENT (the load boundary reinstates its NaN).
+    #
+    # ORDER — C3 topic H. Until topic H this DELETED the whole span first and then
+    # re-inserted the payload, as separate statements with no transaction, so a
+    # reader landing between them (the allocator compose, the analytics runner,
+    # a factsheet) found every rebuilt day absent and read it as a 0% day or a
+    # chain break. No read can close a hole the writer opens. Now the payload is
+    # UPSERTED FIRST (ON CONFLICT DO UPDATE keeps each row present) and only THEN
+    # are the span's calendar days the payload does not carry deleted. The end
+    # state is identical; a day present before and after the write is never
+    # absent in between. Partial failure changes shape accordingly: a worker
+    # death between the upsert and the delete now leaves a refused day's STALE
+    # row present until the next successful derive heals it (a retry is not
+    # guaranteed: SFH-C3R3-02), instead of leaving the span empty.
     #
     # SPAN/SCOPE bound — the delete must NEVER remove legitimate out-of-scope
     # history. The authoritative span is EXACTLY the dense reconstructed calendar
@@ -5958,30 +6016,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     #     series — every stored row is in-scope and authoritative.
     #   - retention-windowed (ccxt OKX/Bybit): [min,max] is only the reconstructed
     #     window. Rows OLDER than index.min() (written by an EARLIER derive when the
-    #     retention floor sat further back) are strictly < span_start and fall
-    #     OUTSIDE the ranged delete -> PRESERVED. The delete is a bounded gte/lte on
-    #     `date`, so it can only touch days this derive actually reconstructed.
+    #     retention floor sat further back) are strictly < span_start and are never
+    #     named by the delete -> PRESERVED. Every delete names only calendar days
+    #     inside [span_start, span_end] AND carries that gte/lte bound as well, so
+    #     it can only touch days this derive actually reconstructed.
+    #
+    # The deleted days are the span's calendar minus the payload, computed
+    # client-side (`_calendar_days_absent_from`) and sent in `in.(...)` lists of at
+    # most `_RECONCILE_DELETE_IN_BATCH` dates, so a span thousands of days wide
+    # never builds an unbounded request line and no read of the table is needed.
     _span_start = returns.index.min().date().isoformat()
     _span_end = returns.index.max().date().isoformat()
-
-    def _reconcile_span_delete(
-        span_start: str = _span_start, span_end: str = _span_end,
-    ) -> None:
-        _q = (
-            ctx.supabase.table("csv_daily_returns")
-            .delete()
-            .gte("date", span_start)
-            .lte("date", span_end)
-        )
-        # Scope on the SAME axis as the upsert conflict arbiter (per-key vs
-        # per-strategy) so the reconcile can never cross-wipe a sibling series.
-        if is_key_mode:
-            _q = _q.eq("api_key_id", api_key_id)
-        else:
-            _q = _q.eq("strategy_id", strategy_id)
-        _q.execute()
-
-    await db_execute(_reconcile_span_delete)
 
     _UPSERT_CHUNK = 1000
     for _start in range(0, len(rows_payload), _UPSERT_CHUNK):
@@ -5995,6 +6040,34 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             ).execute()
 
         await db_execute(_upsert_dailies)
+
+    _absent_days = _calendar_days_absent_from(
+        _span_start, _span_end, (str(r["date"]) for r in rows_payload)
+    )
+    for _dstart in range(0, len(_absent_days), _RECONCILE_DELETE_IN_BATCH):
+        _days = _absent_days[_dstart:_dstart + _RECONCILE_DELETE_IN_BATCH]
+
+        def _reconcile_span_delete(
+            days: list[str] = _days,
+            span_start: str = _span_start,
+            span_end: str = _span_end,
+        ) -> None:
+            _q = (
+                ctx.supabase.table("csv_daily_returns")
+                .delete()
+                .gte("date", span_start)
+                .lte("date", span_end)
+                .in_("date", days)
+            )
+            # Scope on the SAME axis as the upsert conflict arbiter (per-key vs
+            # per-strategy) so the reconcile can never cross-wipe a sibling series.
+            if is_key_mode:
+                _q = _q.eq("api_key_id", api_key_id)
+            else:
+                _q = _q.eq("strategy_id", strategy_id)
+            _q.execute()
+
+        await db_execute(_reconcile_span_delete)
 
     if is_key_mode:
         # Per-key series is "dark" until Phase 36 — no compute_analytics_from_csv
@@ -8475,8 +8548,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     #
     # (1) csv_daily_returns — the stitched cash_settlement series. Gap/guarded days
     # are honestly ABSENT (NaN-skip, 74-04 policy; never 0.0 as performance). The
-    # reconcile-span-delete is scoped to strategy_id over the reconstructed span so
-    # a re-derive is authoritative and idempotent.
+    # reconcile is scoped to strategy_id over the WHOLE series so a re-derive is
+    # authoritative and idempotent.
     rows_payload = [
         {
             "strategy_id": strategy_id,
@@ -8489,23 +8562,13 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # (The <2-present-day guard is hoisted ABOVE the compute — see F2 above —
     # so rows_payload is guaranteed to carry ≥2 rows here.)
 
-    def _reconcile_full_delete() -> None:
-        # F5(a): the composite fully OWNS its csv_daily_returns series — an
-        # authoritative re-derive replaces it WHOLESALE. Deleting only the NEW
-        # [span_start, span_end] left stale rows OUTSIDE a SHRUNK span (e.g. a
-        # re-derive after a member window shortened or a member was removed),
-        # which run_csv_strategy_analytics then folded back into the headline.
-        # Delete EVERY row for this strategy_id before the upsert so a shrinking
-        # re-derive is idempotent and can't resurrect orphaned days.
-        (
-            supabase.table("csv_daily_returns")
-            .delete()
-            .eq("strategy_id", strategy_id)
-            .execute()
-        )
-
-    await db_execute(_reconcile_full_delete)
-
+    # C3 topic H: UPSERT FIRST, then delete what the payload does not carry. Until
+    # topic H this deleted the whole series and then re-inserted it, as separate
+    # statements, so a reader landing between them found every day of the
+    # composite absent. ON CONFLICT DO UPDATE keeps each rebuilt row present; the
+    # end state is unchanged. A worker death between the upsert and the deletes
+    # now leaves stale rows present (healed by the authoritative retry) instead of
+    # an empty series.
     _UPSERT_CHUNK = 1000
     for _start in range(0, len(rows_payload), _UPSERT_CHUNK):
         _batch = rows_payload[_start:_start + _UPSERT_CHUNK]
@@ -8516,6 +8579,64 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             ).execute()
 
         await db_execute(_upsert_dailies)
+
+    _payload_days = [str(r["date"]) for r in rows_payload]
+    _first_day = min(_payload_days)
+    _last_day = max(_payload_days)
+
+    def _reconcile_full_delete(
+        first_day: str = _first_day, last_day: str = _last_day,
+    ) -> None:
+        # F5(a): the composite fully OWNS its csv_daily_returns series — an
+        # authoritative re-derive replaces it WHOLESALE. Deleting only the NEW
+        # [span_start, span_end] left stale rows OUTSIDE a SHRUNK span (e.g. a
+        # re-derive after a member window shortened or a member was removed),
+        # which run_csv_strategy_analytics then folded back into the headline.
+        # So every row of this strategy_id OUTSIDE the new payload's first..last
+        # day goes (two ranged statements), and the in-span days the payload does
+        # not carry go in the bounded batches below. Together they delete exactly
+        # the rows the payload does not carry, so a shrinking re-derive stays
+        # idempotent and can't resurrect orphaned days.
+        (
+            supabase.table("csv_daily_returns")
+            .delete()
+            .eq("strategy_id", strategy_id)
+            .lt("date", first_day)
+            .execute()
+        )
+        (
+            supabase.table("csv_daily_returns")
+            .delete()
+            .eq("strategy_id", strategy_id)
+            .gt("date", last_day)
+            .execute()
+        )
+
+    await db_execute(_reconcile_full_delete)
+
+    # Inside [first, last] the stitched series is SPARSE (inter-member gaps and
+    # guarded days are absent), so its calendar complement is real and can be
+    # long; it goes in bounded `in.(...)` lists (see _RECONCILE_DELETE_IN_BATCH).
+    _gap_days = _calendar_days_absent_from(_first_day, _last_day, _payload_days)
+    for _dstart in range(0, len(_gap_days), _RECONCILE_DELETE_IN_BATCH):
+        _days = _gap_days[_dstart:_dstart + _RECONCILE_DELETE_IN_BATCH]
+
+        def _reconcile_gap_delete(
+            days: list[str] = _days,
+            first_day: str = _first_day,
+            last_day: str = _last_day,
+        ) -> None:
+            (
+                supabase.table("csv_daily_returns")
+                .delete()
+                .eq("strategy_id", strategy_id)
+                .gte("date", first_day)
+                .lte("date", last_day)
+                .in_("date", days)
+                .execute()
+            )
+
+        await db_execute(_reconcile_gap_delete)
 
     # (2) + (3) ONE atomic headline + by-basis write (root-cause fix). The composite
     # HEADLINE metrics_json is the SAME cash_metrics_json spread into
@@ -8809,7 +8930,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
     # Phase 105 (SC-5 / D5): ORDERED-IDEMPOTENT finalize. BOTH basis series (cash +
     # MTM below) land BEFORE the DONE-bearing headline/by-basis scalar flip — together
-    # with the reconcile-delete + dailies upserts above (:4520-4560). A worker death
+    # with the dailies upserts + reconcile-deletes above. A worker death
     # before the flip therefore leaves NO complete scalar without its series (MED-1's
     # read gate un-trusts a scalar whose series is absent); the kill-point test pins
     # this. Cash ALWAYS persists a real row here — a rejected cash derive already
@@ -8817,9 +8938,10 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     #
     # D5 HONEST BOUNDARY: ordered-idempotent = GATED EVENTUAL CONSISTENCY, not
     # atomicity — supabase-py has no cross-.table() transaction. On a RE-derive of an
-    # already-complete strategy, a death between the dailies delete/upsert (:4520-4560,
-    # PRE-EXISTING) and the scalar flip leaves old-scalar + partial-dailies visible
-    # until the authoritative-re-derive retry heals it (_reconcile_full_delete
+    # already-complete strategy, a death between the dailies upsert/reconcile-delete
+    # (above; upsert-first since C3 topic H) and the scalar flip leaves old-scalar +
+    # partially-rewritten dailies visible (never absent days since topic H)
+    # until the next successful derive heals it (_reconcile_full_delete
     # idempotence + single-row series upserts). That transient chart/KPI mismatch
     # window is PRE-EXISTING and UNCHANGED here — 105 makes nothing worse. Strict
     # atomicity (a service-role SECDEF finalize RPC) is deliberately DEFERRED to ride
@@ -10258,6 +10380,100 @@ def account_identity_collisions(
     return collisions
 
 
+# PostgREST clamps a response to max_rows (supabase/config.toml: 1000). The read
+# below stops on an EMPTY page, not a short one, so a server cap below this size
+# costs extra requests and never truncates.
+_DAILY_RETURNS_PAGE_SIZE: Final = 1000
+_DAILY_RETURNS_HARD_CAP_PAGES: Final = 1000
+
+
+def _load_allocator_daily_returns(
+    supabase: Any,
+    allocator_id: str,
+    key_ids: Iterable[str],
+    *,
+    page_size: int | None = None,
+    hard_cap_pages: int = _DAILY_RETURNS_HARD_CAP_PAGES,
+) -> list[dict[str, Any]]:
+    """Read an allocator's per-key ``csv_daily_returns`` with keyset pagination.
+
+    C3 round 2 (WR-01 / SFH-C3R2-01). Topic D paged this read by OFFSET under a
+    total order. Every page is a separate request with its own snapshot, and a
+    key-mode ``derive_broker_dailies`` for a sibling key runs at the same time
+    (the 05:30 UTC fan-out). It rewrites its key's span, adding and removing
+    days. When that write lands between two page reads and changes the row count of a key
+    that sorts before the next offset, every later row shifts. A day is then
+    read twice (the compose takes it twice) or never read (the compose carries
+    the level at r = 0 and the curve stays trustworthy).
+
+    Keyset pagination on the total order ``(api_key_id, date)`` removes the shift.
+    It is realised as one fixed key per loop (``eq``) plus a ``date > cursor``
+    cursor, so a write can only change rows the cursor has not passed yet:
+
+    * no ``(api_key_id, date)`` pair is read twice, because the cursor strictly
+      increases within a key and the keys are read one after another;
+    * every row present for the whole read is read, because no page's start
+      depends on how many rows sort before it.
+
+    ``id`` is deliberately NOT in the cursor. ``(api_key_id, date)`` is unique
+    (``csv_daily_returns_api_key_date_key``), so a tie on it can only be the
+    same day deleted and re-inserted under a new id (the writer's shape before C3
+    topic H, and still any future delete-then-insert writer's); an ``id`` arm
+    would read that day twice.
+
+    Only the keys in ``key_ids`` are read. The derive reads ``api_keys`` by owner
+    first, and every consumer of these rows looks them up by one of those ids.
+    A NULL-``api_key_id`` row is dropped by every consumer, so it is not read.
+
+    The writer-side window this read could not close (the writer deleted a
+    key's span and then upserted it in separate statements, so a page read
+    between them saw the key's rows absent) was closed in the writer by C3
+    topic H: the derive now upserts first and deletes only the days its payload
+    does not carry, so a day present before and after a rewrite is never absent.
+
+    Past ``hard_cap_pages`` non-empty pages it raises
+    ``PaginatedSelectTruncated`` rather than returning part of the rows, as
+    ``paginated_select`` does, so the caller's permanent disposal is unchanged.
+    """
+    size = page_size if page_size is not None else _DAILY_RETURNS_PAGE_SIZE
+    out: list[dict[str, Any]] = []
+    pages = 0
+    for key_id in sorted({str(k) for k in key_ids}):
+        cursor: str | None = None
+        while True:
+            query = (
+                supabase.table("csv_daily_returns")
+                .select("api_key_id,date,daily_return")
+                .eq("allocator_id", allocator_id)
+                .eq("api_key_id", key_id)
+            )
+            if cursor is not None:
+                query = query.gt("date", cursor)
+            chunk = cast(
+                list[dict[str, Any]],
+                query.order("date", desc=False).limit(size).execute().data or [],
+            )
+            if not chunk:
+                break
+            if pages >= hard_cap_pages:
+                logger.error(
+                    "_load_allocator_daily_returns: hit hard cap of %d pages x %d "
+                    "rows (allocator %s) — raising PaginatedSelectTruncated",
+                    hard_cap_pages,
+                    size,
+                    allocator_id,
+                )
+                raise PaginatedSelectTruncated(
+                    page_count=hard_cap_pages,
+                    page_size=size,
+                    hint=f"csv_daily_returns allocator_id={allocator_id}",
+                )
+            pages += 1
+            out.extend(chunk)
+            cursor = str(chunk[-1]["date"])
+    return out
+
+
 async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult:
     """Phase 115.1 (RD-3 Option B) — CRAWL-FREE, DECRYPTION-FREE allocator
     $-equity compose.
@@ -10368,18 +10584,50 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # with no returns yet is not stitched: its anchor is today's equity, and
     # hanging it on an older member's last day would misdate it; the compose
     # already drops such a key as DROPPED_KEY (untrustworthy).
+    #
+    # C3 topic D (SFH-R3-07): the read drains every page. PostgREST caps one
+    # response at 1000 rows (supabase/config.toml max_rows), and PROD holds an
+    # allocator with 2804 rows (measured 2026-09-29), so a bare read handed the
+    # stitch and the compose an arbitrary 1000 of them: a curve built on part of
+    # each key's history, still marked trustworthy. C3 round 2 (WR-01 /
+    # SFH-C3R2-01): the pages are KEYSET, not offset, because a sibling key's
+    # dailies write runs concurrently and an offset shift skipped or doubled a
+    # day. See _load_allocator_daily_returns for the guarantee and its residual.
     def _load_returns() -> list[dict[str, Any]]:
-        return cast(
-            list[dict[str, Any]],
-            supabase.table("csv_daily_returns")
-            .select("api_key_id,date,daily_return")
-            .eq("allocator_id", allocator_id)
-            .execute()
-            .data
-            or [],
+        return _load_allocator_daily_returns(
+            supabase, allocator_id, (str(r["id"]) for r in key_rows)
         )
 
-    csv_rows = await db_execute(_load_returns)
+    try:
+        csv_rows = await db_execute(_load_returns)
+    except PaginatedSelectTruncated as trunc:
+        # The returns exceed the read's hard cap, and the read refuses rather
+        # than returning part of them. A retry re-reads the same
+        # rows, and this exception would otherwise reach classify_exception's
+        # catch-all as a retrying `unknown` forever (the T-74-02 class), so it
+        # ends permanent. Nothing is composed from a partial read, and the stale
+        # curve row is deleted as on every other permanent path (F2), so the book
+        # shows the rebuilding panel. The hint (with the allocator id) goes to the
+        # operator log only; the job's message carries the row cap alone.
+        logger.error(
+            "derive_allocator_equity: csv_daily_returns read for allocator %s hit "
+            "the pagination cap (page_count=%d, page_size=%d, hint=%s) — deleted "
+            "any stale equity_curve row; nothing was composed",
+            allocator_id,
+            trunc.page_count,
+            trunc.page_size,
+            trunc.hint or "n/a",
+        )
+        await _delete_equity_curve_row()
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "derive_allocator_equity: the allocator's daily returns exceed "
+                f"{trunc.page_count * trunc.page_size:,} rows; nothing was "
+                "composed and the stale equity curve was removed"
+            ),
+            error_kind="permanent",
+        )
     first_return_day: dict[str, str] = {}
     for r in csv_rows:
         day = r.get("date")

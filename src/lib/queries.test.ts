@@ -1643,6 +1643,44 @@ describe("derived-row outcomes — the reason says why there is no series", () =
         .equityHistoryRebuildReason,
     ).toBe("account_identity_pending");
   });
+
+  // Review C3 IN-05. A trustworthy v2 row whose curve has one point and whose
+  // returns are empty reads as `derivation_rejected` ("did not pass its
+  // checks"), not `awaiting_derivation`. That is right because the writer
+  // cannot produce the shape (read at e9050c346, cited by symbol):
+  //   - `run_derive_broker_dailies_job` (job_worker.py), the `< 2` interpretable-day
+  //     gate: a key-mode key with under two days writes NO csv_daily_returns
+  //     rows, only its key_inputs, so every per-key series the compose reads
+  //     has at least two days (the compose then drops a returns-less anchored
+  //     key as DROPPED_KEY, untrustworthy).
+  //   - `replay_key_equity` (allocator_equity_derive.py) keeps every return
+  //     day and adds flow days, so each key's level series has two or more days.
+  //   - `portfolio_returns` (allocator_equity_compose.py) emits a return on the
+  //     union's second day from the key that opened on its first, so `returns`
+  //     is non-empty whenever the curve is.
+  //   - the B2 branch of the compose handler deletes the row on an EMPTY curve.
+  // So the shape here means the writer broke its own contract, which is the
+  // case `derivation_rejected` and its Sentry capture exist for. If a writer
+  // ever emits it for a new book, map it to `awaiting_derivation` in
+  // `derivedPayloadRejection` and the producer, and flip this arm.
+  it("IN-05: a trustworthy v2 row with a one-point curve and no returns is derivation_rejected (the writer cannot emit it)", () => {
+    const onePoint = {
+      version: 2,
+      is_trustworthy: true,
+      curve: [{ date: "2026-03-10", equity_usd: 100 }],
+      returns: [],
+    };
+    expect(derivedPayloadRejection(onePoint)).toBe("malformed");
+    const result = callWith({ payload: onePoint, computed_at: null });
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("derivation_rejected");
+    expect(result.equityDailyPoints).toEqual([]);
+    expect(result.equityDailyReturns).toEqual([]);
+    // Contrast: the same row with one return is the v2() fixture, and ready.
+    expect(callWith({ payload: v2(), computed_at: null }).equityHistoryState).toBe(
+      "ready",
+    );
+  });
 });
 
 describe("equityHistoryReadiness — plan 11 ready condition", () => {

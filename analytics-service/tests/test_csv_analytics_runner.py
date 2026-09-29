@@ -74,6 +74,13 @@ def _make_supabase_mock(rows: list[dict]) -> MagicMock:
     range_chain = MagicMock()
     range_chain.execute.return_value = MagicMock(data=rows)
     order_chain.range.return_value = range_chain
+    # C3 topic H: _load_series is now KEYSET (.eq().order().limit() for the
+    # first page, .eq().gt().order().limit() after it, empty here), so the same
+    # rows are served on the limit chain and the follow-up page is empty.
+    order_chain.limit.return_value = range_chain
+    eq_chain.gt.return_value.order.return_value.limit.return_value.execute.return_value = (
+        MagicMock(data=[])
+    )
 
     # .rpc(...).execute() — used by the sibling_kinds batch upsert path.
     sb.rpc.return_value = MagicMock(execute=MagicMock())
@@ -907,6 +914,13 @@ def _make_broker_supabase_mock(
             order_chain.range.return_value.execute.return_value = MagicMock(
                 data=daily_rows
             )
+            # C3 topic H: keyset series load (first page, then an empty page).
+            order_chain.limit.return_value.execute.return_value = MagicMock(
+                data=daily_rows
+            )
+            eq_chain.gt.return_value.order.return_value.limit.return_value.execute.return_value = (
+                MagicMock(data=[])
+            )
             order_chain.execute.return_value = MagicMock(data=daily_rows)
         elif name == "strategy_analytics":
             # _read_existing_flags: .select(...).eq(...).maybe_single().execute().
@@ -1502,6 +1516,13 @@ def _make_recording_supabase_mock(
             eq_chain = tbl.select.return_value.eq.return_value
             eq_chain.order.return_value.range.return_value.execute.return_value = MagicMock(
                 data=daily_rows
+            )
+            # C3 topic H: keyset series load (first page, then an empty page).
+            eq_chain.order.return_value.limit.return_value.execute.return_value = MagicMock(
+                data=daily_rows
+            )
+            eq_chain.gt.return_value.order.return_value.limit.return_value.execute.return_value = (
+                MagicMock(data=[])
             )
             eq_chain.order.return_value.execute.return_value = MagicMock(data=daily_rows)
         elif name == "strategy_analytics":
