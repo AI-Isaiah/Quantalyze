@@ -308,3 +308,169 @@ describe("discovery page — a composite's csv_daily_returns read outage (169 D-
     expect(captureToSentry).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Phase 169 review round 1, T5 (from T1's handoff). The single-key arm calls
+ * `readSingleKeyBasisOpts`, which since T1 (WR-05 / M-3) THROWS
+ * `CompositeSeriesReadError` on a failed MTM, smoothed MTM or stored cash
+ * series read. Uncaught, that reached this page's error boundary: an options
+ * strategy's detail page broke on one timeout, and no alert named the read.
+ * It is now caught exactly as the composite arm catches it.
+ *
+ * The same call now receives the strategy's `returns_denominator_config`
+ * (SFH H-2 / M-2), so a `simple` single-key row draws the arithmetic curve its
+ * stored headline was computed on, and the leverage what-if is withheld on it,
+ * as the factsheet route already does.
+ */
+describe("discovery page — the single-key arm's series reads and returns convention (169 review T5)", () => {
+  /** 40 dated daily returns, alternating +2% / -2%: Σr and Π(1+r) diverge. */
+  const DAILY = Array.from({ length: 40 }, (_, i) => ({
+    date: new Date(Date.UTC(2026, 6, 1 + i)).toISOString().slice(0, 10),
+    value: i % 2 === 0 ? 0.02 : -0.02,
+  }));
+
+  async function seedSingleKey(opts: { metricsJsonByBasis: unknown; config: unknown }) {
+    const base = (await vi.mocked(getStrategyDetail).getMockImplementation()?.(STRATEGY_ID, SLUG, "discovery")) as unknown as {
+      strategy: Record<string, unknown>;
+      disclosureTier: unknown;
+    };
+    vi.mocked(getStrategyDetail).mockResolvedValue({
+      strategy: { ...base.strategy, returns_denominator_config: opts.config },
+      analytics: {
+        computed_at: "2026-09-01T00:00:00Z",
+        computation_status: "complete",
+        daily_returns: DAILY,
+        returns_series: null,
+        data_quality_flags: {},
+        metrics_json_by_basis: opts.metricsJsonByBasis,
+        // The seven persisted headline scalars the "discovery" projection
+        // carries (Phase 169 SC4, D-10): a rankable row overlays them.
+        cumulative_return: 0.0,
+        volatility: 0.3,
+        max_drawdown: -0.04,
+        cagr: 0.0,
+        sharpe: 0.1,
+        sortino: 0.2,
+        calmar: 0.0,
+      },
+      disclosureTier: base.disclosureTier,
+    } as never);
+  }
+
+  /** The service-role client: every `strategy_analytics_series` read fails. */
+  function seriesOutageAdmin() {
+    return {
+      from: (table: string) => {
+        if (table !== "strategy_analytics_series") throw new Error(`unexpected table ${table}`);
+        const chain = {
+          select: () => chain,
+          eq: () => chain,
+          maybeSingle: () =>
+            Promise.resolve({ data: null, error: { message: "synthetic statement timeout", code: "57014" } }),
+        };
+        return chain;
+      },
+    };
+  }
+
+  /** The FactsheetView element's payload prop, or null when the fallback rendered. */
+  function findPayload(node: unknown): Record<string, unknown> | null {
+    if (node == null || typeof node !== "object") return null;
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const hit = findPayload(child);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    const el = node as { props?: { payload?: unknown; children?: unknown } };
+    if (el.props?.payload != null) return el.props.payload as Record<string, unknown>;
+    return findPayload(el.props?.children ?? null);
+  }
+
+  it("an MTM series read outage says the load failed, captures once with the read named, and does not throw", async () => {
+    await seedSingleKey({
+      metricsJsonByBasis: { mark_to_market: { cumulative_return: 0.01 } },
+      config: null,
+    });
+    vi.mocked(createAdminClient).mockReturnValue(seriesOutageAdmin() as never);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const jsx = await StrategyDetailPage({
+        params: Promise.resolve({ slug: SLUG, strategyId: STRATEGY_ID }),
+      });
+      const text = textOf(jsx);
+      expect(findPayload(jsx), "a payload was built without the MTM series it names").toBeNull();
+      expect(text).toContain(READ_FAILED);
+      expect(text).not.toContain(KCS10_PUBLIC);
+      expect(captureToSentry).toHaveBeenCalledTimes(1);
+      const [captured, options] = vi.mocked(captureToSentry).mock.calls[0]!;
+      expect((captured as Error).name).toBe("CompositeSeriesReadError");
+      expect((captured as Error).cause).toBe("synthetic statement timeout");
+      expect(options.level).toBe("error");
+      expect(options.tags).toEqual({
+        route: "discovery/strategy-detail",
+        stage: "single-key-read",
+        reason: "read_error",
+        code: "57014",
+        strategy_id: STRATEGY_ID,
+        read: "mtm_daily_returns",
+      });
+    } finally {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("any other throw from the single-key read still propagates", async () => {
+    await seedSingleKey({
+      metricsJsonByBasis: { mark_to_market: { cumulative_return: 0.01 } },
+      config: null,
+    });
+    vi.mocked(createAdminClient).mockReturnValue({
+      from: () => {
+        throw new Error("synthetic unexpected failure");
+      },
+    } as never);
+    await expect(
+      StrategyDetailPage({ params: Promise.resolve({ slug: SLUG, strategyId: STRATEGY_ID }) }),
+    ).rejects.toThrow("synthetic unexpected failure");
+    expect(captureToSentry).not.toHaveBeenCalled();
+  });
+
+  it("a `simple` returns_denominator_config draws the arithmetic curve and withholds the leverage what-if", async () => {
+    await seedSingleKey({ metricsJsonByBasis: null, config: { cumulative_method: "simple" } });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const payload = findPayload(
+        await StrategyDetailPage({ params: Promise.resolve({ slug: SLUG, strategyId: STRATEGY_ID }) }),
+      );
+      expect(payload).not.toBeNull();
+      expect((payload!.dataQuality as { returnsConventionOverride?: unknown }).returnsConventionOverride).toBe(true);
+      // Arithmetic: the curve ends at 1 + Σr = 1 exactly (20 × +2% and 20 × -2%).
+      // Geometric would end at (1.02 × 0.98)^20 ≈ 0.99203.
+      const equity = payload!.strategyEquity as number[];
+      expect(equity[equity.length - 1]).toBeCloseTo(1, 12);
+      expect(captureToSentry).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("CONTROL: with no returns_denominator_config the curve is geometric and no override is flagged", async () => {
+    await seedSingleKey({ metricsJsonByBasis: null, config: null });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const payload = findPayload(
+        await StrategyDetailPage({ params: Promise.resolve({ slug: SLUG, strategyId: STRATEGY_ID }) }),
+      );
+      expect(payload).not.toBeNull();
+      expect((payload!.dataQuality as { returnsConventionOverride?: unknown } | undefined)?.returnsConventionOverride).toBeUndefined();
+      const equity = payload!.strategyEquity as number[];
+      expect(equity[equity.length - 1]).toBeCloseTo(Math.pow(1.02 * 0.98, 20), 12);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});

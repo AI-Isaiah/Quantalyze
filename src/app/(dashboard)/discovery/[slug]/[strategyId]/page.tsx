@@ -24,8 +24,10 @@ import type { DailyReturn, TrustTierKind, IngestSource } from "@/lib/factsheet/t
 import { notFound, redirect } from "next/navigation";
 
 /**
- * 169-REVIEW-SFH H-3: what this page says when a composite's
- * `csv_daily_returns` read FAILS (`CompositeSeriesReadError`). KCS-10's "not
+ * 169-REVIEW-SFH H-3: what this page says when a factsheet series read FAILS
+ * (`CompositeSeriesReadError`): a composite's `csv_daily_returns`, or since
+ * review round 1 (T5) any series the single-key assembly reads (the MTM,
+ * smoothed MTM or stored cash series). KCS-10's "not
  * available yet" describes the row as not ready, which is false for an outage:
  * the row may be fine and the next request reads again. Active voice with the
  * owner lane's retry remedy (KCS09-UNREADABLE, "Reload this page to try
@@ -34,8 +36,46 @@ import { notFound, redirect } from "next/navigation";
  * Its home is `status-surface-copy.ts` if Phase 169.1 plan 169.1-01 does not
  * retire this page's assembly.
  */
-const COMPOSITE_READ_FAILED_SENTENCE =
+const SERIES_READ_FAILED_SENTENCE =
   "We could not load this strategy's factsheet right now. Reload this page to try again.";
+
+/**
+ * 169-REVIEW-SFH H-3, extended to the single-key arm in review round 1 (T5): a
+ * series read outage on this page is logged and captured to Sentry once
+ * (`console.error` alone never reaches Sentry: `src/instrumentation.ts`
+ * registers no console integration). The reader's own error is sent, so its
+ * PostgREST message rides as `cause`, which `captureToSentry` folds, scrubbed,
+ * into the event message. `read` is the error's own discriminant: since T1
+ * (WR-05 / M-3) the composite reader can also throw for its MTM and smoothed
+ * reads, so a fixed `csv_daily_returns` tag would misname those. `stage` names
+ * which assembly read it.
+ */
+function reportSeriesReadFailure(
+  err: CompositeSeriesReadError,
+  strategyId: string,
+  stage: "composite-read" | "single-key-read",
+): void {
+  console.error(
+    `[discovery/strategyDetail] ${err.read} read failed, rendering the read-failure line`,
+    {
+      strategyId,
+      stage,
+      errorCode: err.code,
+      errorMessage: typeof err.cause === "string" ? err.cause : undefined,
+    },
+  );
+  captureToSentry(err, {
+    level: "error",
+    tags: {
+      route: "discovery/strategy-detail",
+      stage,
+      reason: "read_error",
+      code: err.code,
+      strategy_id: strategyId,
+      read: err.read,
+    },
+  });
+}
 
 export default async function StrategyDetailPage({
   params,
@@ -113,7 +153,9 @@ export default async function StrategyDetailPage({
     | null
     | undefined;
   let buildOpts: BuildFactsheetOpts | undefined;
-  let compositeReadFailed = false;
+  // A series read outage on either arm below (`CompositeSeriesReadError`): the
+  // payload is not built, and the fallback says the load failed.
+  let seriesReadFailed = false;
   if (dqf?.composite === true) {
     ingestSource = "csv";
     const admin = createAdminClient();
@@ -126,11 +168,8 @@ export default async function StrategyDetailPage({
     // already answers the same throw as `read_error`.
     //
     // 169-REVIEW-SFH H-3: the outage is captured to Sentry, as the resolve
-    // stage captures it for a build (`console.error` alone never reaches Sentry:
-    // `src/instrumentation.ts` registers no console integration), and the page
-    // says the load failed rather than KCS-10's "not available yet". The
-    // reader's own error is sent, so its PostgREST message rides as `cause`,
-    // which `captureToSentry` folds, scrubbed, into the event message.
+    // stage captures it for a build, and the page says the load failed rather
+    // than KCS-10's "not available yet" (`reportSeriesReadFailure`).
     let composite: Awaited<ReturnType<typeof readCompositeFactsheet>>;
     try {
       composite = await readCompositeFactsheet(admin, {
@@ -142,35 +181,17 @@ export default async function StrategyDetailPage({
       });
     } catch (err) {
       if (!(err instanceof CompositeSeriesReadError)) throw err;
-      console.error(
-        "[discovery/strategyDetail] composite csv_daily_returns read failed, rendering the read-failure line",
-        {
-          strategyId: strategy.id,
-          errorCode: err.code,
-          errorMessage: typeof err.cause === "string" ? err.cause : undefined,
-        },
-      );
-      captureToSentry(err, {
-        level: "error",
-        tags: {
-          route: "discovery/strategy-detail",
-          stage: "composite-read",
-          reason: "read_error",
-          code: err.code,
-          strategy_id: strategy.id,
-          read: "csv_daily_returns",
-        },
-      });
-      compositeReadFailed = true;
+      reportSeriesReadFailure(err, strategy.id, "composite-read");
+      seriesReadFailed = true;
       composite = null;
     }
     if (composite) {
       dailyReturns = composite.dailyReturns;
       buildOpts = composite.buildOpts;
     } else {
-      // Data defect (untrusted cash headline), or the csv read outage caught
+      // Data defect (untrusted cash headline), or the read outage caught
       // above → empty series → no payload. The fallback below tells the two
-      // apart through `compositeReadFailed`.
+      // apart through `seriesReadFailed`.
       dailyReturns = [] as DailyReturn[];
     }
   } else {
@@ -206,18 +227,49 @@ export default async function StrategyDetailPage({
     // this page onto the shared build. The series rows live behind deny-all RLS,
     // so the assembly takes the service-role factory as a thunk — the handle is
     // constructed only when a cheap gate holds (hot path stays roundtrip-free).
-    buildOpts = {
-      ...(buildOpts ?? {}),
-      dataQuality: singleKeyDataQuality(dqf),
-      ...(await readSingleKeyBasisOpts(
+    //
+    // Phase 169 review round 1 (T5, from T1's handoff):
+    //   - SFH H-2 / M-2: the strategy's `returns_denominator_config` is passed
+    //     (the 7th argument, the same column the composite arm reads above), so a
+    //     single-key `simple` row draws its arithmetic curve here too, and an
+    //     active-day or `simple` row is flagged `returnsConventionOverride`, which
+    //     withholds the leverage what-if. Without it this page kept the geometric
+    //     curve and the what-if the factsheet route no longer shows.
+    //   - WR-05 / M-3: the owner now THROWS `CompositeSeriesReadError` on a failed
+    //     MTM, smoothed MTM or stored cash series read, where it used to degrade
+    //     to cash charts. It is caught exactly as the composite arm catches it
+    //     (that class only, any other throw stays the error boundary's): the
+    //     outage is captured and the page says the load failed. A partial payload
+    //     is not built: it would show cash charts under an MTM label as if the
+    //     row had no MTM series.
+    let singleKeyOpts: Awaited<ReturnType<typeof readSingleKeyBasisOpts>> | null;
+    try {
+      singleKeyOpts = await readSingleKeyBasisOpts(
         createAdminClient,
         strategy.id,
         dqf,
         analyticsRow?.metrics_json_by_basis,
         analyticsRow?.computation_status,
         analyticsRow,
-      )),
-    };
+        (strategy as { returns_denominator_config?: unknown }).returns_denominator_config,
+      );
+    } catch (err) {
+      if (!(err instanceof CompositeSeriesReadError)) throw err;
+      reportSeriesReadFailure(err, strategy.id, "single-key-read");
+      seriesReadFailed = true;
+      singleKeyOpts = null;
+    }
+    if (singleKeyOpts) {
+      buildOpts = {
+        ...(buildOpts ?? {}),
+        dataQuality: singleKeyDataQuality(dqf),
+        ...singleKeyOpts,
+      };
+    } else {
+      // The read outage caught above → empty series → no payload, and the
+      // fallback says the load failed.
+      dailyReturns = [] as DailyReturn[];
+    }
   }
 
   // RED-TEAM-H2: Never fall back to "now" for a missing computed_at — that
@@ -308,7 +360,7 @@ export default async function StrategyDetailPage({
               series that cannot build, does not resolve on its own) and named
               an internal pipeline to allocators (phase 164.2 criterion 9). */}
           <p className="mt-6 text-small text-text-secondary">
-            {compositeReadFailed ? COMPOSITE_READ_FAILED_SENTENCE : KCS10_PUBLIC_SENTENCE}
+            {seriesReadFailed ? SERIES_READ_FAILED_SENTENCE : KCS10_PUBLIC_SENTENCE}
           </p>
         </article>
       )}
