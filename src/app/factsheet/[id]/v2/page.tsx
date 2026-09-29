@@ -133,10 +133,9 @@ function buildFactsheetPayloadCached(
   // therefore can no longer pin a placeholder under this `computed_at` for the
   // TTL while /strategies' fresh probe shows no note. Every OTHER reason is a
   // fact about the stored row and is cached as `null`, as before.
-  // ⚠️ Accepted residual under D-07, owned by Phase 169 plan 04: a composite's
-  // failed `csv_daily_returns` read still arrives as `composite_unbuildable`
-  // (`readCompositeFactsheet` folds the error into an empty series), so that
-  // outage cannot be told apart here and its `null` is still cached.
+  // The composite residual of D-07 is closed by Phase 169 plan 169-07 (169
+  // D-41): the composite reader throws on a failed `csv_daily_returns` read and
+  // the resolve stage answers `read_error`, so the throw below covers it.
   return unstable_cache(
     async () => {
       const built = await fetchAndBuildPayloadWithReason(id, withPublishedOnly);

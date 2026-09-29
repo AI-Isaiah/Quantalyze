@@ -64,11 +64,13 @@ export type StrategyVisibility = <Q>(query: Q) => Q;
 /**
  * Phase 167.2.1 (D-07) — why a factsheet cannot build, in the probe's closed
  * vocabulary. `read_error` and `not_visible` are the admin read failing or
- * finding no row under the visibility predicate; `not_computed` is an analytics
- * row that is not a terminal success; `composite_unbuildable` is EVERY composite
- * failure (a missing headline, an empty or failed csv read, too few points),
- * because `readCompositeFactsheet` folds a read error into an empty series and
- * the probe cannot tell them apart; `too_few_points` is a single-key series
+ * finding no row under the visibility predicate; since Phase 169 (D-41) a
+ * composite's failed `csv_daily_returns` read is `read_error` too (the reader
+ * throws `CompositeSeriesReadError`), because an outage is not a fact about the
+ * row; `not_computed` is an analytics row that is not a terminal success;
+ * `composite_unbuildable` is a composite that cannot build from what it stores
+ * (a missing or untrusted headline, an empty or a short series);
+ * `too_few_points` is a single-key series
  * below `MIN_FACTSHEET_SERIES_POINTS` distinct dated returns.
  * `malformed_series` (167.2.1-REVIEW-SFH M-3) is a single-key row whose stored
  * columns HOLD at least that many dated entries, but whose entries were
@@ -220,11 +222,11 @@ function singleKeyUnbuildable(
 
 /**
  * 167.2.1-REVIEW-SFH H-1 — every `composite_unbuildable` answer a BUILD
- * reaches is CAPTURED, at level warning. D-07 folds a failed
- * `csv_daily_returns` read into this reason (`readCompositeFactsheet` turns
- * the error into an empty series and only console-logs it, which never reaches
- * Sentry here), and the copy then sends the owner to support. The event is not
- * proof of an outage; it is what makes "contact support" answerable, and
+ * reaches is CAPTURED, at level warning. A failed `csv_daily_returns` read no
+ * longer reaches this reason: since Phase 169 (D-41) the reader throws
+ * `CompositeSeriesReadError` and the resolve stage answers it `read_error` with
+ * its code. The copy sends the owner to support for this reason. The event is
+ * not proof of an outage; it is what makes "contact support" answerable, and
  * 167.2.1-REVIEW-R2 IN-02 tags it with `strategy_id` so the event alone names
  * the row (before, support had to join its timestamp to the
  * `resolve(<caller>)` log line). A probe's refusal never carries an id to
