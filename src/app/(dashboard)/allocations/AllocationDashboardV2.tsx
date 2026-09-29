@@ -77,6 +77,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     equityHistoryRebuildReason = null,
     // Review C2 round 2 IN-04: the keys a key_not_syncing reason is about.
     equityHistoryNotSyncingKeyIds = [],
+    // Review C4 SFH-C4-04: the ready curve left out at least one departed
+    // account's history (its anchor balance is gone). False when absent.
+    departedHistoryUnavailable = false,
     apiKeys = [],
   } = props;
   // Fail-closed: ONLY an explicit "ready" may show the curve. A missing field,
@@ -195,6 +198,11 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       {equityBaselineUnknown && (
         <BaselineUnknownBanner historyRebuilding={isRebuilding} />
       )}
+      {/* Review C4 SFH-C4-04: the derive leaves such an account out under a
+          benign flag and still marks the curve trustworthy, so without this
+          line a ready book reads as the whole book. Ready only: nothing is
+          drawn while the history is rebuilding. */}
+      {departedHistoryUnavailable && !isRebuilding && <DepartedHistoryNote />}
       <InsightStrip
         analytics={analytics}
         portfolioId={portfolio?.id ?? null}
@@ -370,6 +378,29 @@ function BaselineUnknownBanner({
           : "Your live holdings and current AUM are accurate, and a full performance history builds up from here as daily snapshots accrue."}
       </span>
     </div>
+  );
+}
+
+/**
+ * Review C4 SFH-C4-04. One line under the Overview's banners when the curve on
+ * screen leaves out at least one disconnected account's history. The derive
+ * leaves a departed key out when the history rule includes it but the balance
+ * its history is measured from is gone (`departed_history_unavailable`); it
+ * does not block the book, which would hold it untrustworthy forever. The
+ * payload flag carries no count, so the line says "at least one". The key's
+ * own card on the profile page's Exchanges tab names which account. Muted, not a warning:
+ * the curve shown is correct for the accounts it covers.
+ */
+function DepartedHistoryNote() {
+  return (
+    <p
+      role="status"
+      data-testid="dashboard-departed-history-note"
+      className="mb-3 px-1 text-sm text-text-secondary"
+    >
+      This curve leaves out the history of at least one disconnected account,
+      because the balance that history is measured from is not available.
+    </p>
   );
 }
 

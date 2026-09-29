@@ -2957,6 +2957,16 @@ export interface MyAllocationDashboardPayload {
    */
   equityHistoryNotSyncingKeyIds?: string[];
   /**
+   * Review C4 SFH-C4-04. True when the history on screen (state "ready") left
+   * out at least one departed account the history rule includes, because the
+   * balance its history is measured from is gone. The derive raises the
+   * benign `departed_history_unavailable` flag in the payload's `flags` and
+   * still marks the curve trustworthy (job_worker.py); the Overview says so in
+   * one line. The flag carries no count. False whenever the curve is not shown.
+   * Optional so legacy fixtures compile; the producer always sets it.
+   */
+  departedHistoryUnavailable?: boolean;
+  /**
    * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
    * allocator's snapshots, or null when every snapshot's column is
    * NULL (e.g., pure CoinGecko-fallback data). Drives the venue-
@@ -3639,6 +3649,14 @@ export function buildPerKeyReturnsByApiKeyId(
 const DERIVED_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * Review C4 SFH-C4-04. The benign flag the derive raises when it leaves a
+ * departed key's history out for want of an anchor (`departed_history_unavailable`
+ * in `derive_allocator_equity`'s `benign_flag_tokens`, job_worker.py). The name
+ * is the writer's; do not rename it here.
+ */
+const DEPARTED_HISTORY_UNAVAILABLE_FLAG = "departed_history_unavailable";
+
+/**
  * The pre-167.1.2 curve check: trustworthy + a non-empty well-formed curve.
  * Does NOT require version 2. `extractTrustworthyDerivedSeries` builds on it
  * and adds the version-2 returns check. The producer also stamps
@@ -4078,6 +4096,7 @@ export function derivePhase07Fields(
   | "equityHistoryState"
   | "equityHistoryRebuildReason"
   | "equityHistoryNotSyncingKeyIds"
+  | "departedHistoryUnavailable"
   | "minHistoryDepthMonths"
   | "activeVenues"
   | "hasConnectedKeys"
@@ -4130,6 +4149,16 @@ export function derivePhase07Fields(
     equityHistoryRebuildReason === "key_not_syncing"
       ? notSyncingIdentityPendingKeyIds(apiKeys)
       : [];
+  // Review C4 SFH-C4-04: the writer's token, read defensively (the JSONB is
+  // worker-written and untrusted), and only for the curve on screen.
+  const payloadFlags =
+    derivedPayload !== null && typeof derivedPayload === "object"
+      ? (derivedPayload as Record<string, unknown>).flags
+      : undefined;
+  const departedHistoryUnavailable =
+    equityHistoryState === "ready" &&
+    Array.isArray(payloadFlags) &&
+    payloadFlags.includes(DEPARTED_HISTORY_UNAVAILABLE_FLAG);
   const equityDailyPoints: DailyPoint[] =
     equityHistoryState === "ready" && series ? series.curve : [];
   const equityDailyReturns: DailyPoint[] =
@@ -4233,6 +4262,7 @@ export function derivePhase07Fields(
     equityHistoryState,
     equityHistoryRebuildReason,
     equityHistoryNotSyncingKeyIds,
+    departedHistoryUnavailable,
     minHistoryDepthMonths,
     activeVenues,
     hasConnectedKeys,

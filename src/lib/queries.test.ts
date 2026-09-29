@@ -2221,3 +2221,54 @@ describe("derivePhase07Fields: holdingsSummary is each key's own latest asof (D-
     expect(summary[0].value_usd).toBe(200);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review C4 SFH-C4-04. The derive leaves a departed key the history rule
+// includes but whose starting balance is gone out of the book, and raises the
+// benign `departed_history_unavailable` flag on a curve it still marks
+// trustworthy (job_worker.py). The book reads "ready" while it is smaller than
+// the one the owner ran, so the reader carries the flag to the Overview.
+// ---------------------------------------------------------------------------
+describe("departedHistoryUnavailable: the derived payload's benign flag reaches the Overview (SFH-C4-04)", () => {
+  const readyRow = (flags: unknown) => ({
+    payload: {
+      version: 2,
+      is_trustworthy: true,
+      curve: [{ date: "2026-03-10", equity_usd: 100 }],
+      returns: [{ date: "2026-03-10", r: 0.01 }],
+      flags,
+    } as Record<string, unknown>,
+    computed_at: "2026-03-11T05:30:00Z",
+  });
+  const call = (row: Parameters<typeof derivePhase07Fields>[5]) =>
+    derivePhase07Fields([], [], 0, [], false, row);
+
+  it("is true on a ready book whose payload raises the flag", () => {
+    const result = call(
+      readyRow(["departed_history_unavailable", "shared_account_history_stitched"]),
+    );
+    expect(result.equityHistoryState).toBe("ready");
+    expect(result.departedHistoryUnavailable).toBe(true);
+  });
+
+  it.each([
+    ["no flags", []],
+    ["another flag only", ["duplicate_shared_account_counted_once"]],
+    ["a flags field that is not a list", "departed_history_unavailable"],
+    ["a missing flags field", undefined],
+  ])("is false for %s", (_label, flags) => {
+    expect(call(readyRow(flags)).departedHistoryUnavailable).toBe(false);
+  });
+
+  it("is false while the history is rebuilding (the curve is not shown)", () => {
+    const row = readyRow(["departed_history_unavailable"]);
+    row.payload.is_trustworthy = false;
+    const result = call(row);
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.departedHistoryUnavailable).toBe(false);
+  });
+
+  it("is false with no derived row", () => {
+    expect(call(null).departedHistoryUnavailable).toBe(false);
+  });
+});
