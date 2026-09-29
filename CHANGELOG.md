@@ -48,6 +48,7 @@
 
 ### Tests
 - `analytics-service/tests/fixtures/shared_account_resolution.json`: a 72-cell holder-state × marker-kind × marked-key-state table, asserted by `test_holder_matrix_parity.py` against the real derive and by `holder-matrix-parity.test.ts` against the real reader.
+- `.gitleaks.toml` gains one narrow allowlist block (one rule, one file, one literal) for plan 07's synthetic `api_key_id` UUID in `scenario-adapter.test.ts`, a `generic-api-key` false positive. Calibrated both ways: the two fixture hits clear while a planted high-entropy key in the same file is still caught.
 - The SQL gate `test_refresh_fanout_zero_snapshot_bootstrap.sql` (32 arms, all biting on the pg lane). The mutation census moved by measurement: `FILES_FLOOR` 53 → 54, `ARMS_FLOOR` 513 → 545; `WAIVED_CEILING` stays 0.
 
 ### Notes
