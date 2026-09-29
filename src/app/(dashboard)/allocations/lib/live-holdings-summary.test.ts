@@ -582,8 +582,11 @@ describe("buildKeyTrustClause — D-06 (b) excludes $Y from keys needing attenti
   });
 
   it("D-06 (b) / review WR-03: an excluded holding whose value was not reported says so after the excludes part, never after the includes part", () => {
+    // 169 review round 2 IN-R2-05 / SFH R2-5: a part whose every row is unavailable has
+    // no known amount (the 0 is the sum of nothing), so it names its count, never
+    // "$0". The "(… unavailable for N …)" count is unchanged.
     expect(buildKeyTrustClause(NONE, NONE, RENDER, part(0, 1, 1))).toBe(
-      "excludes $0 from keys needing attention (value unavailable for 1 holding)",
+      "excludes 1 holding from keys needing attention (value unavailable for 1 holding)",
     );
     expect(
       buildKeyTrustClause(part(12_345, 1), NONE, RENDER, part(8_000, 3, 2)),
@@ -593,8 +596,11 @@ describe("buildKeyTrustClause — D-06 (b) excludes $Y from keys needing attenti
   });
 
   it("review round 3 WR-02: an unreported INCLUDES part rules out the shared-noun form, so its '(value unavailable …)' count is never dropped and a defaulted $0 never reads as a known figure", () => {
+    // 169 review round 2 IN-R2-05 / SFH R2-5: a part whose every row is unavailable has
+    // no known amount (the 0 is the sum of nothing), so it names its count, never
+    // "$0". The "(… unavailable for N …)" count is unchanged.
     expect(buildKeyTrustClause(part(0, 1, 1), NONE, RENDER, part(8_000, 1))).toBe(
-      "includes $0 from keys needing attention (value unavailable for 1 holding), and excludes $8000 from keys needing attention",
+      "includes 1 holding from keys needing attention (value unavailable for 1 holding), and excludes $8000 from keys needing attention",
     );
   });
 
@@ -641,8 +647,11 @@ describe("buildKeyTrustClause — D-06 (b) excludes $Y from keys needing attenti
   });
 
   it("review round 3 WR-01 / D-07 / WR-03: the unknown-status exclusion renders on its COUNT, and says when its value was not reported; a zero count adds nothing", () => {
+    // 169 review round 2 IN-R2-05 / SFH R2-5: a part whose every row is unavailable has
+    // no known amount (the 0 is the sum of nothing), so it names its count, never
+    // "$0". The "(… unavailable for N …)" count is unchanged.
     expect(buildKeyTrustClause(NONE, NONE, RENDER, NONE, part(0, 1, 1))).toBe(
-      "excludes $0 from keys with an unknown sync status (value unavailable for 1 holding)",
+      "excludes 1 holding from keys with an unknown sync status (value unavailable for 1 holding)",
     );
     expect(buildKeyTrustClause(part(12_345, 1), NONE, RENDER, NONE, NONE)).toBe(
       "includes $12345 from keys needing attention",
@@ -942,10 +951,13 @@ describe("buildKeyTrustClause — [167.1.2 SC-4] the excludedTrusted part", () =
   });
 
   it("it comes after the other excluded parts, and says when its value was not reported", () => {
+    // 169 review round 2 IN-R2-05 / SFH R2-5: a part whose every row is unavailable has
+    // no known amount (the 0 is the sum of nothing), so it names its count, never
+    // "$0". The "(… unavailable for N …)" count is unchanged.
     expect(
       buildKeyTrustClause(NONE, NONE, RENDER, NONE, part(4_444, 1), part(0, 2, 2)),
     ).toBe(
-      "excludes $4444 from keys with an unknown sync status and $0 from connected keys with no return history yet (value unavailable for 2 holdings)",
+      "excludes $4444 from keys with an unknown sync status and 2 holdings from connected keys with no return history yet (value unavailable for 2 holdings)",
     );
   });
 
