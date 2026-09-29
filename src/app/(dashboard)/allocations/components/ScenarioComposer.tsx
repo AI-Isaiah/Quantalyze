@@ -901,11 +901,13 @@ const OWN_BOOK_REBUILDING_LINE: Record<EquityHistoryRebuildClass, ReactNode> = {
       with your current book is not shown; reload the page to try again.
     </>
   ),
+  // "update your keys", not "fix a key": for duplicate_account the owner
+  // disconnects one of two working keys, and nothing is broken to fix.
   needs_action: (
     <>
-      Your book&apos;s own history is on hold until you fix a key on the{" "}
-      <ExchangesPageLink />, so the comparison with your current book is not
-      shown.
+      Your book&apos;s own history is on hold until you update your keys on
+      the <ExchangesPageLink />, so the comparison with your current book is
+      not shown.
     </>
   ),
 };

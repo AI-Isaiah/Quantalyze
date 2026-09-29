@@ -17200,7 +17200,7 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     read_failed:
       "We could not load your book's history just now, so the comparison with your current book is not shown; reload the page to try again.",
     needs_action:
-      "Your book's own history is on hold until you fix a key on the Exchanges page, so the comparison with your current book is not shown.",
+      "Your book's own history is on hold until you update your keys on the Exchanges page, so the comparison with your current book is not shown.",
   } as const;
   const EXCHANGES_HREF = "/profile?tab=exchanges";
 
