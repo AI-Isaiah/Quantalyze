@@ -411,3 +411,115 @@ async def test_carried_key_keeps_the_deribit_skip_and_the_upnl_rule(monkeypatch:
     assert len(missing) == 1
     assert missing[0].kwargs["metadata"]["symbols"] == ["SOLUSDT"]
     assert _refresh_complete_metadata(audit)["carried_keys"] == 1
+
+
+# ---------------------------------------------------------------------------
+# C2 review CR-04: an EMPTIED account is $0, not its last balance forever.
+#
+# The ccxt spot builder keeps only qty > 0 and persist_allocator_holdings
+# writes nothing for an empty list, so an account that was fully withdrawn and
+# stays connected keeps polling successfully and writes no row. The carry then
+# held its last positive day forever. The evidence that an account is empty is
+# a SUCCESSFUL holdings poll claimed on a day AFTER the account's latest row:
+# the poll computes its asof after its claim, so a poll that wrote rows has
+# asof >= its claim day. api_keys.last_sync_at is NOT that evidence: cron-sync
+# (routers/cron.py) also advances it for every active key with no new trades,
+# every tick, and writes no sync_status.
+# ---------------------------------------------------------------------------
+
+
+def _seed_done_poll(fake: FakeSupabaseClient, key_id: str, claimed_at: datetime) -> None:
+    job_id = f"poll-{key_id}-{claimed_at.isoformat()}"
+    fake.store[("compute_jobs", (job_id,))] = {
+        "id": job_id,
+        "kind": "poll_allocator_positions",
+        "api_key_id": key_id,
+        "status": "done",
+        "claimed_at": claimed_at.isoformat(),
+    }
+
+
+def _at(day: date, hour: int = 4) -> datetime:
+    return datetime(day.year, day.month, day.day, hour, 3, tzinfo=timezone.utc)
+
+
+def _seed_emptied_candidate(fake: FakeSupabaseClient, **key: Any) -> None:
+    """Key 1 is a live okx account polled today. Key 2's account had BTC three
+    days ago and no row since."""
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete")
+    _seed_key(fake, API_KEY_ID_2, **{"exchange": "bybit", "sync_status": "complete", **key})
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    _seed_holding(fake, API_KEY_ID_2, "bybit", "BTC", TODAY - timedelta(days=3), 500.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claimed_days_ago", [0, 2])
+async def test_account_polled_empty_after_its_last_row_contributes_zero(
+    monkeypatch: pytest.MonkeyPatch, claimed_days_ago: int
+) -> None:
+    """Polled successfully today (or two days ago), zero rows since, rows three
+    days ago: the account is empty and contributes $0, and the audit counts it."""
+    fake = FakeSupabaseClient()
+    _seed_emptied_candidate(fake)
+    _seed_done_poll(fake, API_KEY_ID_2, _at(TODAY - timedelta(days=claimed_days_ago)))
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    row = _today_row(fake)
+    assert row["value_usd"] == pytest.approx(HOLDER_USD), (
+        f"an emptied account was carried at its last balance: {row['value_usd']}"
+    )
+    assert "BTC" not in row["breakdown"]
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["emptied_accounts"] == 1
+    assert metadata["carried_keys"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param("no_done_poll", id="no-done-poll"),
+        pytest.param("poll_same_day_as_rows", id="poll-claimed-on-the-rows-day"),
+        pytest.param("warnings", id="last-poll-had-warnings"),
+        pytest.param("failing", id="last-poll-failed"),
+        pytest.param("non_ccxt", id="mt5-writes-its-own-empty-marker"),
+        pytest.param("poll_not_done", id="poll-still-running"),
+    ],
+)
+async def test_account_without_proof_of_emptiness_is_carried(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Only a successful ccxt poll claimed after the last row proves an empty
+    account. Without that proof the D-07 carry holds (never a false $0): no done
+    poll; a poll claimed on the rows' own day (it wrote them); a last poll with a
+    warning (complete_with_warnings: a derivative read failed, so empty spot is
+    not an empty account) or a failure; a non-ccxt venue (MT5 persists an
+    explicit empty marker row itself; sFOX and unsupported venues return no
+    rows with a warning); a poll that has not finished."""
+    fake = FakeSupabaseClient()
+    key: dict[str, Any] = {}
+    if case == "warnings":
+        key = {"sync_status": "complete_with_warnings"}
+    elif case == "failing":
+        key = {"sync_status": "error"}
+    elif case == "non_ccxt":
+        key = {"exchange": "mt5"}
+    _seed_emptied_candidate(fake, **key)
+    if case == "poll_same_day_as_rows":
+        _seed_done_poll(fake, API_KEY_ID_2, _at(TODAY - timedelta(days=3), hour=23))
+    elif case == "poll_not_done":
+        _seed_done_poll(fake, API_KEY_ID_2, _at(TODAY))
+        fake.store[("compute_jobs", (f"poll-{API_KEY_ID_2}-{_at(TODAY).isoformat()}",))][
+            "status"
+        ] = "running"
+    elif case != "no_done_poll":
+        _seed_done_poll(fake, API_KEY_ID_2, _at(TODAY))
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    row = _today_row(fake)
+    assert row["value_usd"] == pytest.approx(HOLDER_USD + 500.0)
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["emptied_accounts"] == 0
+    assert metadata["carried_keys"] == 1

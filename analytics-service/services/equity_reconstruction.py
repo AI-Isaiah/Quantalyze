@@ -50,6 +50,7 @@ from services.closed_sets import (
     # kill switch is NOT inherited by adding a venue branch, and before 164.5.4
     # this module did not import it at all.
     MT5_DISABLED_DETAIL,
+    NON_CCXT_VENUES,
     STABLECOINS,
     STABLECOIN_SPLIT_SUFFIXES as _EXTRA_STABLECOIN_SUFFIXES,
     STABLECOINS_LONGEST_FIRST as _STABLECOINS_LONGEST_FIRST,
@@ -1822,6 +1823,7 @@ class _LatestHoldings:
     carried_keys: int
     excluded_shared_keys: int
     no_working_accounts: int
+    emptied_accounts: int
 
 
 async def _fetch_latest_holdings_per_eligible_key(
@@ -1852,6 +1854,30 @@ async def _fetch_latest_holdings_per_eligible_key(
     day fresh. A group none of whose eligible members is working is still
     carried once, and counted in ``no_working_accounts`` so it is not silent.
 
+    An EMPTIED account contributes $0, not its last balance (C2 review CR-04).
+    The ccxt spot builder keeps only qty > 0 and ``persist_allocator_holdings``
+    writes nothing for an empty list, so a fully withdrawn account that stays
+    connected polls successfully forever and writes no row; the carry alone
+    would hold its last positive day for ever. The proof of emptiness is a
+    ``poll_allocator_positions`` job with status ``done`` for a member of the
+    group, CLAIMED on a day after the group's latest ``asof``: the poll takes
+    its ``asof`` after its claim, so a poll that wrote rows has ``asof`` on or
+    after its claim day. The proof is admitted only from a member on a ccxt
+    venue whose ``sync_status`` is exactly ``complete``:
+      * ``complete_with_warnings`` means a read failed (the derivative side),
+        so empty spot rows do not prove an empty account;
+      * MT5 persists an explicit empty-equity row itself, and sFOX and any
+        unsupported venue return NO rows with a warning, so a done job there
+        proves nothing (``NON_CCXT_VENUES``).
+    ``api_keys.last_sync_at`` is NOT this proof: cron-sync (routers/cron.py)
+    advances it for every active key with no new trades, every tick, and
+    writes no ``sync_status``, so it would read a merely-late poll as an empty
+    account. No proof (no done job, a claim on the rows' own day, a pruned job
+    history — done jobs are kept 30 days) keeps the D-07 carry. Residual: the
+    167.1.1 index defect (another ACCOUNT on the same venue overwriting this
+    account's (venue, symbol, asof) row) can make a real poll look empty here,
+    as it already makes that symbol vanish from the day.
+
     The latest ``asof`` is reduced with ``max()`` in Python, so correctness
     never rests on the order a read returns.
 
@@ -1865,7 +1891,7 @@ async def _fetch_latest_holdings_per_eligible_key(
         return (
             supabase.table("api_keys")
             .select(
-                "id, is_active, sync_status, disconnected_at, "
+                "id, is_active, sync_status, disconnected_at, exchange, "
                 "account_share_kind, account_shared_with_api_key_id"
             )
             .eq("user_id", allocator_id)
@@ -1881,6 +1907,7 @@ async def _fetch_latest_holdings_per_eligible_key(
     counted_accounts = 0
     carried = 0
     no_working = 0
+    emptied = 0
     for group in account_groups(key_rows):
         eligible = [r for r in group if eligible_key_predicate(r)]
         if not eligible:
@@ -1908,6 +1935,12 @@ async def _fetch_latest_holdings_per_eligible_key(
             continue
         latest = max(asofs)
 
+        if latest < today_iso and await _polled_empty_since(
+            supabase, eligible, latest
+        ):
+            emptied += 1
+            continue
+
         def _sel_rows(group_ids: list[str] = group_ids, latest: str = latest) -> Any:
             return (
                 supabase.table("allocator_holdings")
@@ -1930,7 +1963,44 @@ async def _fetch_latest_holdings_per_eligible_key(
         carried_keys=carried,
         excluded_shared_keys=eligible_keys - counted_accounts,
         no_working_accounts=no_working,
+        emptied_accounts=emptied,
     )
+
+
+async def _polled_empty_since(
+    supabase: Any, eligible: list[dict[str, Any]], latest_asof: str
+) -> bool:
+    """True when a successful holdings poll of one of ``eligible`` was claimed on
+    a day after ``latest_asof`` (see the CR-04 paragraph of
+    ``_fetch_latest_holdings_per_eligible_key`` for why that proves an empty
+    account, and why only a ccxt member whose ``sync_status`` is exactly
+    ``complete`` may supply the proof). A failed read raises, like every read of
+    this refresh."""
+    candidate_ids = sorted(
+        str(r.get("id"))
+        for r in eligible
+        if r.get("sync_status") == "complete"
+        and isinstance(r.get("exchange"), str)
+        and r["exchange"].strip()
+        and r["exchange"].strip().lower() not in NON_CCXT_VENUES
+    )
+    if not candidate_ids:
+        return False
+    next_day = (date.fromisoformat(latest_asof) + timedelta(days=1)).isoformat()
+
+    def _sel_done_poll() -> Any:
+        return (
+            supabase.table("compute_jobs")
+            .select("id")
+            .eq("kind", "poll_allocator_positions")
+            .eq("status", "done")
+            .in_("api_key_id", candidate_ids)
+            .gte("claimed_at", f"{next_day}T00:00:00+00:00")
+            .limit(1)
+            .execute()
+        )
+
+    return bool(getattr(await db_execute(_sel_done_poll), "data", None))
 
 
 # ---------------------------------------------------------------------------
@@ -3449,6 +3519,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                     "carried_keys": latest.carried_keys,
                     "excluded_shared_keys": latest.excluded_shared_keys,
                     "no_working_accounts": latest.no_working_accounts,
+                    "emptied_accounts": latest.emptied_accounts,
                 },
             )
             return DispatchResult(outcome=DispatchOutcome.DONE)
@@ -3515,15 +3586,16 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 "carried_keys": latest.carried_keys,
                 "excluded_shared_keys": latest.excluded_shared_keys,
                 "no_working_accounts": latest.no_working_accounts,
+                "emptied_accounts": latest.emptied_accounts,
             },
         )
         logger.info(
             "refresh_allocator_equity_daily: upserted %d row for allocator=%s "
             "(key=%s, venue=%s, eligible_keys=%d, carried_keys=%d, "
-            "excluded_shared_keys=%d, no_working_accounts=%d)",
+            "excluded_shared_keys=%d, no_working_accounts=%d, emptied_accounts=%d)",
             count, allocator_id, api_key_id, venue,
             latest.eligible_keys, latest.carried_keys, latest.excluded_shared_keys,
-            latest.no_working_accounts,
+            latest.no_working_accounts, latest.emptied_accounts,
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
     except ccxt.RateLimitExceeded as exc:
