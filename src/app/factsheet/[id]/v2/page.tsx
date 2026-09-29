@@ -133,10 +133,9 @@ function buildFactsheetPayloadCached(
   // therefore can no longer pin a placeholder under this `computed_at` for the
   // TTL while /strategies' fresh probe shows no note. Every OTHER reason is a
   // fact about the stored row and is cached as `null`, as before.
-  // ⚠️ Accepted residual under D-07, owned by Phase 169 plan 04: a composite's
-  // failed `csv_daily_returns` read still arrives as `composite_unbuildable`
-  // (`readCompositeFactsheet` folds the error into an empty series), so that
-  // outage cannot be told apart here and its `null` is still cached.
+  // The composite residual of D-07 is closed by Phase 169 plan 169-07 (169
+  // D-41): the composite reader throws on a failed `csv_daily_returns` read and
+  // the resolve stage answers `read_error`, so the throw below covers it.
   return unstable_cache(
     async () => {
       const built = await fetchAndBuildPayloadWithReason(id, withPublishedOnly);
@@ -173,7 +172,17 @@ function buildFactsheetPayloadCached(
     // but the VALUES are not. A ratio that does not exist (Sharpe, Sortino,
     // Calmar, a peer rank) is now NaN, "—", where a v6 entry holds a fabricated
     // 0; bumping serves the fix at deploy instead of after the 1h TTL drain.
-    ["factsheet-v2-payload-v7", id, computedAt],
+    // Bumped v7→v8 (Phase 169 FACTSHEETTRUTH, 169 D-62, 2026-09-27): the shape
+    // AND the values change. 169-04: the MTD / YTD / 3M / 6M / 1Y windows are
+    // nullable (a window the record does not cover is null) and `p3y` / `p5y`
+    // are added; 169-01: the single-key headline reads the persisted analytics
+    // scalars instead of the TypeScript recompute. A v7 entry lacks `p3y` /
+    // `p5y`, and 169-05's row gates omit a null row, so serving one would HIDE
+    // correct 3 Year / 5 Year rows on a long record: a wrong page, not an old
+    // figure. `revalidate` and the admin route's tag bust are both
+    // stale-while-revalidate, so only a key move stops a pre-deploy entry being
+    // served after the deploy. Phase 169.5 moves the key again (169.5-01).
+    ["factsheet-v2-payload-v8", id, computedAt],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],

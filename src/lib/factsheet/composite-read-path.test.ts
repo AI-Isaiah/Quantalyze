@@ -15,6 +15,7 @@ import {
   readMtmSeries,
   readSmoothedSeries,
   readSingleKeyBasisOpts,
+  CompositeSeriesReadError,
   shouldReadSingleKeyMtmSeries,
   shouldReadSingleKeySmoothedSeries,
   shouldReadCashSettlementSeries,
@@ -56,7 +57,7 @@ const FULL_CASH = {
 
 function mockAdmin(
   rows: { date: string; daily_return: number }[] | null,
-  error: { message?: string } | null = null,
+  error: { message?: string; code?: string } | null = null,
 ): SupabaseClient {
   const chain = {
     select: () => chain,
@@ -243,6 +244,67 @@ describe("H-2 readCompositeFactsheet — shared composite read-path", () => {
     expect("peerPercentile" in payload).toBe(false);
     expect("allocatorPortfolios" in payload).toBe(false);
     expect("eventSignatures" in payload).toBe(false);
+  });
+});
+
+/**
+ * Phase 169 (D-41, routed from 167.2.1 D-07) — a FAILED `csv_daily_returns`
+ * read must be distinguishable from a composite whose series is genuinely
+ * empty. The reader used to log the error and map `sparseRows ?? []`, so an
+ * outage reached the resolve stage as an empty series, which answered
+ * `composite_unbuildable` (a fact about the row) and let the public factsheet
+ * cache store that null for the whole analytics run. The reader now throws
+ * `CompositeSeriesReadError` carrying the PostgREST / SQLSTATE code; the two
+ * controls prove a SUCCESSFUL empty read still resolves exactly as before.
+ */
+describe("169 D-41 readCompositeFactsheet — a failed csv_daily_returns read is not an empty composite", () => {
+  const input = {
+    strategyId: "s1",
+    dqf: DQF,
+    metricsJsonByBasis: { cash_settlement: FULL_CASH },
+    returnsDenominatorConfig: null,
+  };
+
+  it("a failed read rejects with CompositeSeriesReadError carrying its code, and the message names the table, never the strategy", async () => {
+    const err = await readCompositeFactsheet(
+      mockAdmin(null, { message: "synthetic statement timeout", code: "57014" }),
+      input,
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err, "the read resolved: the outage was folded into an empty series").not.toBeNull();
+    expect(err).toBeInstanceOf(CompositeSeriesReadError);
+    expect((err as CompositeSeriesReadError).code).toBe("57014");
+    expect((err as Error).name).toBe("CompositeSeriesReadError");
+    expect((err as Error).message).toContain("csv_daily_returns");
+    expect((err as Error).message).not.toContain(input.strategyId);
+  });
+
+  it("a failed read whose error has no code carries the code \"none\"", async () => {
+    const err = await readCompositeFactsheet(mockAdmin(null, { message: "synthetic outage, no code" }), input).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err, "the read resolved: the outage was folded into an empty series").not.toBeNull();
+    expect(err).toBeInstanceOf(CompositeSeriesReadError);
+    expect((err as CompositeSeriesReadError).code).toBe("none");
+  });
+
+  it("CONTROL: a successful EMPTY read with a valid headline resolves as before (an empty series, not a throw)", async () => {
+    const out = await readCompositeFactsheet(mockAdmin([]), input);
+    expect(out).not.toBeNull();
+    expect(out!.dailyReturns).toEqual([]);
+  });
+
+  it("CONTROL: a successful EMPTY read with no headline still resolves null", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const out = await readCompositeFactsheet(mockAdmin([]), { ...input, metricsJsonByBasis: null });
+      expect(out).toBeNull();
+    } finally {
+      err.mockRestore();
+    }
   });
 });
 

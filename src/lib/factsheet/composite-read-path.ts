@@ -164,6 +164,23 @@ export async function readSmoothedSeries(
 }
 
 /**
+ * Phase 169 (D-41 / R3, routed from 167.2.1 D-07) — the composite's
+ * `csv_daily_returns` read FAILED. Thrown by {@link readCompositeFactsheet} so
+ * an outage stays distinguishable from a genuinely empty composite (a fact
+ * about the row). `code` is the PostgREST / SQLSTATE code, `"none"` when the
+ * error carried none. The message names the table, never the strategy; the
+ * PostgREST message rides as `cause` for the catcher's log line.
+ */
+export class CompositeSeriesReadError extends Error {
+  readonly code: string;
+  constructor(code: string, postgrestMessage?: string) {
+    super(`composite series read failed: csv_daily_returns (${code})`, { cause: postgrestMessage });
+    this.name = "CompositeSeriesReadError";
+    this.code = code;
+  }
+}
+
+/**
  * Round-2 H-2 — the ONE composite read-path (D6, the milestone's "one path"
  * lesson). BOTH surfaces that render the composite factsheet — the canonical
  * `/factsheet/[id]/v2` route AND the discovery detail page
@@ -176,10 +193,11 @@ export async function readSmoothedSeries(
  *
  * Responsibilities (identical to the factsheet route's former inline block):
  *   - Read the honest SPARSE cash series from `csv_daily_returns` (gap days
- *     ABSENT, never zero-filled). A read failure logs at ERROR (console only:
- *     `console.*` does not reach Sentry in this repo) and degrades to the
- *     still-computing placeholder — never the api arm. The factsheet resolve
- *     stage captures the resulting composite refusal (167.2.1-REVIEW-SFH H-1).
+ *     ABSENT, never zero-filled). A read failure THROWS
+ *     {@link CompositeSeriesReadError} with its PostgREST / SQLSTATE code
+ *     (Phase 169, D-41), so no caller can take an outage for an empty
+ *     composite: the factsheet resolve stage answers it `read_error`, which the
+ *     public factsheet cache never stores. Never the api arm.
  *   - F1/H-1 gate: refuse to render when the persisted `cash_settlement` lacks a
  *     trustworthy headline (returns null → placeholder); a degenerate-but-valid
  *     composite renders (strict overlay shows null scalars as "—").
@@ -201,6 +219,9 @@ export async function readSmoothedSeries(
  *
  * @returns `{ dailyReturns, buildOpts }`, or `null` when the composite is a data
  *          defect (missing/untrusted cash headline) → caller renders placeholder.
+ * @throws {CompositeSeriesReadError} when the `csv_daily_returns` read FAILS
+ *          (an outage, never a fact about the row), so no caller can take it
+ *          for an empty composite (Phase 169, D-41).
  */
 export async function readCompositeFactsheet(
   admin: SupabaseClient,
@@ -231,16 +252,15 @@ export async function readCompositeFactsheet(
     .order("date", { ascending: true })
     .limit(20000); // Flat safety ceiling, T-36-03-03 precedent.
   if (sparseErr) {
-    // F3: a composite depends ENTIRELY on this sparse read — a real DB failure
-    // hides the whole published factsheet behind the placeholder. Log at ERROR
-    // (console only; the resolve stage in `fetch-and-build-payload.ts` captures
-    // the composite refusal this becomes, 167.2.1-REVIEW-SFH H-1). Fail-SAFE:
-    // below, an empty series returns null → placeholder,
-    // never the api arm / flat-zero line.
-    console.error("[factsheet] readCompositeFactsheet — composite csv_daily_returns read failed", {
-      strategyId,
-      errorMessage: sparseErr.message,
-    });
+    // F3 / Phase 169 (D-41, routed from 167.2.1 D-07): a composite depends
+    // ENTIRELY on this sparse read, and a failed read is an OUTAGE, not a fact
+    // about the row. It used to be logged here and mapped to an empty series,
+    // which the resolve stage answered `composite_unbuildable` and the public
+    // factsheet cache stored for the whole analytics run. It now throws, so no
+    // caller can take it for an empty composite; each catcher logs it (the
+    // resolve stage in `fetch-and-build-payload.ts` answers `read_error` with
+    // the code and captures a build once). Still never the api arm.
+    throw new CompositeSeriesReadError(sparseErr.code || "none", sparseErr.message);
   }
   const dailyReturns: DailyReturn[] = (sparseRows ?? []).map(
     (r): DailyReturn => ({ date: r.date as string, value: r.daily_return as number }),

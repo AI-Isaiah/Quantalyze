@@ -33,6 +33,7 @@ vi.mock("@/lib/queries", () => ({ getStrategyDetail: vi.fn() }));
 
 import StrategyDetailPage from "./page";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { getStrategyDetail } from "@/lib/queries";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 
@@ -93,5 +94,88 @@ describe("discovery page — the fallback when the factsheet payload does not bu
     expect(text).not.toMatch(/analytics service/i);
     expect(text).not.toMatch(/compute pass/i);
     expect(text).not.toMatch(/will render here/i);
+  });
+});
+
+/**
+ * Phase 169 (D-41 / R3): the composite reader now THROWS
+ * `CompositeSeriesReadError` on a failed `csv_daily_returns` read instead of
+ * folding it into an empty series. This page is dynamic and not cached, so its
+ * placeholder is the right answer for that one request: it catches that class,
+ * logs it with its code, and renders the same KCS-10 sentence. Any other throw
+ * from the reader is not an outage it can name and still propagates.
+ */
+describe("discovery page — a composite's csv_daily_returns read outage (169 D-41)", () => {
+  const FULL_CASH = {
+    cumulative_return: 0.05,
+    volatility: 0.12,
+    max_drawdown: -0.04,
+    cagr: 0.31,
+    sharpe: 1.4,
+    sortino: 2.1,
+    calmar: 3.0,
+  };
+
+  /** Re-seed the detail read as a published composite with a valid headline. */
+  async function seedComposite() {
+    const base = (await vi.mocked(getStrategyDetail).getMockImplementation()?.(STRATEGY_ID, SLUG, "discovery")) as {
+      strategy: unknown;
+      disclosureTier: unknown;
+    };
+    vi.mocked(getStrategyDetail).mockResolvedValue({
+      strategy: base.strategy,
+      analytics: {
+        computed_at: "2026-09-01T00:00:00Z",
+        computation_status: "complete",
+        daily_returns: null,
+        returns_series: null,
+        data_quality_flags: { composite: true },
+        metrics_json_by_basis: { cash_settlement: FULL_CASH },
+      },
+      disclosureTier: base.disclosureTier,
+    } as never);
+  }
+
+  /** The service-role client: the csv read answers with a failed read. */
+  function csvOutageAdmin() {
+    const chain = {
+      select: () => chain,
+      eq: () => chain,
+      order: () => chain,
+      limit: () => Promise.resolve({ data: null, error: { message: "synthetic statement timeout", code: "57014" } }),
+    };
+    return { from: () => chain };
+  }
+
+  it("renders the KCS-10 sentence and does not throw; the outage is logged with its code", async () => {
+    await seedComposite();
+    vi.mocked(createAdminClient).mockReturnValue(csvOutageAdmin() as never);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const jsx = await StrategyDetailPage({
+        params: Promise.resolve({ slug: SLUG, strategyId: STRATEGY_ID }),
+      });
+      expect(textOf(jsx)).toContain(KCS10_PUBLIC);
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining("csv_daily_returns"),
+        expect.objectContaining({ errorCode: "57014" }),
+      );
+    } finally {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("any other throw from the composite read still propagates", async () => {
+    await seedComposite();
+    vi.mocked(createAdminClient).mockReturnValue({
+      from: () => {
+        throw new Error("synthetic unexpected failure");
+      },
+    } as never);
+    await expect(
+      StrategyDetailPage({ params: Promise.resolve({ slug: SLUG, strategyId: STRATEGY_ID }) }),
+    ).rejects.toThrow("synthetic unexpected failure");
   });
 });

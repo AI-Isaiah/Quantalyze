@@ -12,7 +12,12 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
-import { readCompositeFactsheet, singleKeyDataQuality, readSingleKeyBasisOpts } from "@/lib/factsheet/composite-read-path";
+import {
+  CompositeSeriesReadError,
+  readCompositeFactsheet,
+  singleKeyDataQuality,
+  readSingleKeyBasisOpts,
+} from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { DailyReturn, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { notFound, redirect } from "next/navigation";
@@ -96,18 +101,36 @@ export default async function StrategyDetailPage({
   if (dqf?.composite === true) {
     ingestSource = "csv";
     const admin = createAdminClient();
-    const composite = await readCompositeFactsheet(admin, {
-      strategyId: strategy.id,
-      dqf,
-      metricsJsonByBasis: analyticsRow?.metrics_json_by_basis,
-      returnsDenominatorConfig: (strategy as { returns_denominator_config?: unknown })
-        .returns_denominator_config,
-    });
+    // Phase 169 (D-41): a FAILED `csv_daily_returns` read throws
+    // `CompositeSeriesReadError`. It is caught here, and only it: this page is
+    // dynamic and not cached, so the placeholder is the right answer for this
+    // one request and the next request reads again. Any other throw is not an
+    // outage this page can name and stays the error boundary's. Phase 169.1
+    // plan 169.1-01 removes this assembly in favour of `fetchAndBuildPayload`,
+    // whose resolve stage already answers the same throw as `read_error`.
+    let composite: Awaited<ReturnType<typeof readCompositeFactsheet>>;
+    try {
+      composite = await readCompositeFactsheet(admin, {
+        strategyId: strategy.id,
+        dqf,
+        metricsJsonByBasis: analyticsRow?.metrics_json_by_basis,
+        returnsDenominatorConfig: (strategy as { returns_denominator_config?: unknown })
+          .returns_denominator_config,
+      });
+    } catch (err) {
+      if (!(err instanceof CompositeSeriesReadError)) throw err;
+      console.error(
+        "[discovery/strategyDetail] composite csv_daily_returns read failed — rendering the placeholder",
+        { strategyId: strategy.id, errorCode: err.code },
+      );
+      composite = null;
+    }
     if (composite) {
       dailyReturns = composite.dailyReturns;
       buildOpts = composite.buildOpts;
     } else {
-      // Data defect (untrusted cash headline) → empty series → placeholder.
+      // Data defect (untrusted cash headline), or the csv read outage caught
+      // above → empty series → placeholder.
       dailyReturns = [] as DailyReturn[];
     }
   } else {
