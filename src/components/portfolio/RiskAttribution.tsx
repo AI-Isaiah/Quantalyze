@@ -5,6 +5,14 @@ import { TouchTooltip } from "@/components/charts/TouchTooltip";
 import { formatPercent, STRATEGY_PALETTE } from "@/lib/utils";
 
 interface RiskAttributionProps {
+  /**
+   * 169 D-49 (2026-09-27): `marginal_risk_pct` and `weight_pct` arrive in
+   * PERCENT, 0 to 100, from the producer (`compute_risk_decomposition` /
+   * `routers/portfolio.py`), passed through unchanged by the adapter. This
+   * component converts them to a fraction ONCE (`percentToFraction`) before
+   * `formatPercent`, which takes fractions. `standalone_vol` is already a
+   * fraction and is not converted.
+   */
   data: {
     strategy_id: string;
     strategy_name: string;
@@ -13,6 +21,11 @@ interface RiskAttributionProps {
     weight_pct: number;
     standalone_vol: number;
   }[] | null;
+}
+
+/** The producer's percent (0 to 100) as `formatPercent`'s fraction; null stays null. */
+function percentToFraction(pct: number | null): number | null {
+  return pct === null ? null : pct / 100;
 }
 
 export function RiskAttribution({ data }: RiskAttributionProps) {
@@ -66,6 +79,7 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
               // 166.1 D7 (founder 2026-09-26): with no risk share there is no
               // assessment either — "Balanced" would be a claim about a split
               // that does not exist. The cell is a colorless "—".
+              // 169 D-49: the compare stays percent against percent (both raw).
               const share = d.marginal_risk_pct;
               const overweight = share !== null && share > d.weight_pct * 1.3;
               return (
@@ -74,8 +88,8 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
                     <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: STRATEGY_PALETTE[i % STRATEGY_PALETTE.length] }} />
                     <span className="text-text-primary">{d.strategy_name}</span>
                   </td>
-                  <td className="py-2 pr-4 text-right font-metric">{formatPercent(d.weight_pct)}</td>
-                  <td className="py-2 pr-4 text-right font-metric">{formatPercent(d.marginal_risk_pct)}</td>
+                  <td className="py-2 pr-4 text-right font-metric">{formatPercent(percentToFraction(d.weight_pct), 1, { signed: false })}</td>
+                  <td className="py-2 pr-4 text-right font-metric">{formatPercent(percentToFraction(d.marginal_risk_pct), 1, { signed: false })}</td>
                   <td className="py-2 pr-4 text-right font-metric">{formatPercent(d.standalone_vol)}</td>
                   <td className="py-2 text-right">
                     {share === null ? (
