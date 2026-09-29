@@ -1474,11 +1474,20 @@ export interface RiskDecompositionRow {
   /**
    * null = the portfolio carries no risk, so no share of it exists to
    * apportion (166.1 D7, founder 2026-09-26; round-1 SFH MEDIUM-2). Never 0.
+   *
+   * Unit: percent, 0 to 100 (a 28% share is 28, not 0.28), as the producer
+   * `compute_risk_decomposition` / `routers/portfolio.py` sends it; the adapter
+   * passes it through unchanged (2026-09-27, 169 D-49). `formatPercent` takes a
+   * fraction, so a display converts once (`RiskAttribution`).
    */
   marginal_risk_pct: number | null;
   standalone_vol: number;
   /** null for the same reason as `marginal_risk_pct`. */
   component_var: number | null;
+  /**
+   * Unit: percent, 0 to 100 (a 40% weight is 40), from `routers/portfolio.py`,
+   * same as `marginal_risk_pct` (2026-09-27, 169 D-49).
+   */
   weight_pct: number;
 }
 

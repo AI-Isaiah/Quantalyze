@@ -39,10 +39,15 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
 
   // 166.1 D7: a null risk share is left out of the stacked bar (a gap), never
   // plotted as a 0-width segment that reads as "no risk".
+  // 169 D-49: the bar plots the same fraction the table formats, so the shares
+  // (which sum to the whole portfolio risk) fill the fraction domain [0, 1] and
+  // the tooltip's x100 reads the table's percent.
   const chartData = [
     data.reduce(
-      (acc, d) =>
-        d.marginal_risk_pct === null ? acc : { ...acc, [d.strategy_name]: d.marginal_risk_pct },
+      (acc, d) => {
+        const share = percentToFraction(d.marginal_risk_pct);
+        return share === null ? acc : { ...acc, [d.strategy_name]: share };
+      },
       { label: "Risk %" } as Record<string, string | number>,
     ),
   ];
