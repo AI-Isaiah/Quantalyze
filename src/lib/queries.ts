@@ -1,4 +1,5 @@
 import { cache } from "react";
+import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { castRow } from "@/lib/supabase/cast";
@@ -3677,6 +3678,31 @@ export function extractTrustworthyDerivedSeries(
   return { curve, returns: points };
 }
 
+/**
+ * Review C2 round 2 SFH-R2-05. Schedule a derived-row capture so it survives
+ * the response flush. `captureToSentry` returns its import chain for exactly
+ * this: a discarded chain can be reaped on a cold finish and the alert is lost.
+ * `after()` hands it to the platform's `waitUntil` (Next 16 docs: usable from
+ * Server Components, which is where `getMyAllocationDashboard` runs).
+ *
+ * The fallback is NOT optional (same shape as `ratelimit.ts`'s
+ * `scheduleLimiterCapture`): `after()` throws synchronously outside a request
+ * scope, and an observability call must never throw into the dashboard read.
+ * The console line before each capture is the local trace either way.
+ */
+function scheduleDerivedRowCapture(capture: Promise<void>): void {
+  try {
+    after(() => capture.catch(() => {}));
+  } catch {
+    console.warn(
+      "[queries.getMyAllocationDashboard] scheduling capture via queueMicrotask fallback (non-request scope)",
+    );
+    queueMicrotask(() => {
+      void capture.catch(() => {});
+    });
+  }
+}
+
 /** Why the reader refused a PRESENT derived row. A token, never a value. */
 export type DerivedPayloadRejection = "not_version_2" | "untrustworthy" | "malformed";
 
@@ -4321,13 +4347,15 @@ export const getMyAllocationDashboard = cache(
             "[queries.getMyAllocationDashboard] allocator_equity_derived read failed (rendering the history as rebuilding, reason history_read_failed):",
             res.error,
           );
-          captureToSentry(res.error, {
-            tags: {
-              op: "getMyAllocationDashboard",
-              reason: "derived_row_read_failed",
-            },
-            level: "error",
-          });
+          scheduleDerivedRowCapture(
+            captureToSentry(res.error, {
+              tags: {
+                op: "getMyAllocationDashboard",
+                reason: "derived_row_read_failed",
+              },
+              level: "error",
+            }),
+          );
           return DERIVED_ROW_READ_FAILED;
         }
         const row = (res.data ?? null) as {
@@ -4351,18 +4379,20 @@ export const getMyAllocationDashboard = cache(
             console.error(
               `[queries.getMyAllocationDashboard] allocator_equity_derived row rejected (${rejection}); rendering the history as rebuilding, reason derivation_rejected`,
             );
-            captureToSentry(
-              new Error(`allocator_equity_derived row rejected: ${rejection}`),
-              {
-                tags: {
-                  op: "getMyAllocationDashboard",
-                  reason: "derived_row_rejected",
-                  rejection,
+            scheduleDerivedRowCapture(
+              captureToSentry(
+                new Error(`allocator_equity_derived row rejected: ${rejection}`),
+                {
+                  tags: {
+                    op: "getMyAllocationDashboard",
+                    reason: "derived_row_rejected",
+                    rejection,
+                  },
+                  // A writer's own untrustworthy verdict is a data state; a
+                  // malformed row is a writer bug.
+                  level: rejection === "malformed" ? "error" : "warning",
                 },
-                // A writer's own untrustworthy verdict is a data state; a
-                // malformed row is a writer bug.
-                level: rejection === "malformed" ? "error" : "warning",
-              },
+              ),
             );
           }
         }
