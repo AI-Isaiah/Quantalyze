@@ -218,6 +218,24 @@ describe("scenario mount (FactsheetBody scenarioMode): the same rows are omitted
     expect(labels).toContain("3 Month");
   });
 
+  /**
+   * Phase 169 review round 1 (IN-03 / SFH L-1): an EMPTY blend (no dated
+   * points) takes `emptyComputeSummary`, not compute(). It used to set p6m /
+   * p1y to NaN, which passes the `!= null` gate and rendered "6 Month —" and
+   * "1 Year —", while p3y / p5y were absent and their rows hidden: two rules in
+   * one panel for one reason. A zero-observation blend is shorter than every
+   * period, so D-57 omits all four.
+   */
+  it("an empty blend: neither panel has a 6 Month, 1 Year, 3 Year or 5 Year row", () => {
+    const { container } = renderScenario([]);
+    const cumulative = rowLabels(section(container, CUMULATIVE));
+    for (const gone of ["6 Month", "1 Year", "3 Year", "5 Year"]) expect(cumulative, CUMULATIVE).not.toContain(gone);
+    expect(cumulative, CUMULATIVE).toContain("Since Inception");
+    const returns = rowLabels(section(container, RETURNS));
+    for (const gone of ["6 Month", "1 Year"]) expect(returns, RETURNS).not.toContain(gone);
+    expect(returns, RETURNS).toContain("3 Month");
+  });
+
   it("a 400-day blend: both panels show 6 Month and 1 Year", () => {
     const { container } = renderScenario(LONG());
     for (const title of [CUMULATIVE, RETURNS]) {
