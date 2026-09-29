@@ -1,14 +1,36 @@
+/** @vitest-environment jsdom */
 import { describe, it, expect, vi } from "vitest";
 
 // composite-read-path imports `server-only` (a Next.js build guard that throws
 // outside an RSC bundle). Stub it, as composite-read-path.test.ts does.
 vi.mock("server-only", () => ({}));
+// The both-surfaces case (Task 2) drives the two REAL callers: the factsheet
+// route's builder and the discovery detail page. Their data sources are stubbed;
+// the assembly under test is not. Mirrors the two page.smoothed-wiring harnesses.
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+vi.mock("next/navigation", () => ({
+  notFound: () => {
+    throw new Error("notFound() called");
+  },
+  redirect: (url: string) => {
+    throw new Error(`redirect(${url}) called`);
+  },
+}));
+vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
+vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
+vi.mock("@/lib/queries", () => ({ getStrategyDetail: vi.fn() }));
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { readSingleKeyBasisOpts, singleKeyDataQuality } from "./composite-read-path";
 import { buildFactsheetPayload } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
+import { fetchAndBuildPayload } from "./fetch-and-build-payload";
 import type { DailyReturn, FactsheetPayload } from "./types";
+import StrategyDetailPage from "@/app/(dashboard)/discovery/[slug]/[strategyId]/page";
+import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { getStrategyDetail } from "@/lib/queries";
+import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 
 /**
  * Phase 169 (SC4, D-10, D-25) — where the factsheet's headline CAGR and Sharpe
@@ -160,5 +182,111 @@ describe("169 D-10 / SC4 — the single-key factsheet headline reads the persist
     const p = await headlineFor(analyticsRow());
     const chartEnd = p.strategyEquity[p.strategyEquity.length - 1] - 1;
     expect(p.strategyMetrics.cum_ret).toBeCloseTo(chartEnd, 12);
+  });
+});
+
+/**
+ * D-10 "one shared owner, two callers": the factsheet route (through
+ * `fetchAndBuildPayload`'s resolve stage) and the discovery detail page (through
+ * its own assembly, until Phase 169.1 plan 169.1-01 consolidates it) must both hand
+ * the analytics row to `readSingleKeyBasisOpts`. Same row in, same CAGR and Sharpe
+ * out, and both equal to what the lists show. A caller that stops passing the row
+ * falls back to the TypeScript headline and reddens this case.
+ */
+describe("169 D-10 — both factsheet surfaces render the persisted CAGR and Sharpe", () => {
+  const STRATEGY_ID = "55555555-5555-4555-8555-555555555555";
+
+  function strategyColumns() {
+    return {
+      id: STRATEGY_ID,
+      name: "Headline Source Test",
+      codename: null,
+      disclosure_tier: "exploratory",
+      status: "published",
+      markets: ["BTC"],
+      strategy_types: ["test"],
+      description: null,
+      subtypes: [],
+      supported_exchanges: ["binance"],
+      leverage_range: null,
+      aum: null,
+      max_capacity: null,
+      avg_daily_turnover: null,
+      start_date: null,
+      benchmark: null,
+      asset_class: "crypto",
+      trust_tier: "api_verified",
+      returns_denominator_config: null,
+    };
+  }
+
+  /** The one analytics row both surfaces receive. */
+  function sharedAnalyticsRow() {
+    return {
+      ...analyticsRow(),
+      daily_returns: SERIES,
+      returns_series: null,
+      computed_at: "2026-09-29T00:00:00.000Z",
+    };
+  }
+
+  /** Admin stub: the route's `strategies` read returns the row; any other read is empty. */
+  function mockAdmin(): SupabaseClient {
+    const from = (table: string) => {
+      const chain = {
+        select: () => chain,
+        eq: () => chain,
+        abortSignal: () => chain,
+        maybeSingle: () =>
+          Promise.resolve(
+            table === "strategies"
+              ? { data: { ...strategyColumns(), strategy_analytics: sharedAnalyticsRow() }, error: null }
+              : { data: null, error: null },
+          ),
+      };
+      return chain;
+    };
+    return { from } as unknown as SupabaseClient;
+  }
+
+  /** Depth-first search of an RSC element tree for the FactsheetView payload prop. */
+  function findPayload(node: unknown): FactsheetPayload | null {
+    if (node == null || typeof node !== "object") return null;
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const hit = findPayload(child);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    const el = node as { props?: { payload?: unknown; children?: unknown } };
+    if (el.props?.payload != null) return el.props.payload as FactsheetPayload;
+    return findPayload(el.props?.children ?? null);
+  }
+
+  it("same row through both call shapes → equal CAGR and Sharpe, and both equal the persisted values", async () => {
+    vi.mocked(createAdminClient).mockReturnValue(mockAdmin() as never);
+    vi.mocked(createClient).mockResolvedValue({
+      auth: { getUser: () => Promise.resolve({ data: { user: { id: "user-1" } } }) },
+    } as never);
+    vi.mocked(getStrategyDetail).mockResolvedValue({
+      strategy: strategyColumns(),
+      analytics: sharedAnalyticsRow(),
+      disclosureTier: "exploratory",
+    } as never);
+
+    const route = await fetchAndBuildPayload(STRATEGY_ID, (q) => q);
+    const discovery = findPayload(
+      await StrategyDetailPage({
+        params: Promise.resolve({ slug: DISCOVERY_CATEGORIES[0]!.slug, strategyId: STRATEGY_ID }),
+      }),
+    );
+    expect(route, "factsheet route payload").not.toBeNull();
+    expect(discovery, "discovery detail payload").not.toBeNull();
+
+    expect(route!.strategyMetrics.cagr).toBe(0.12);
+    expect(route!.strategyMetrics.sharpe).toBe(1.5);
+    expect(discovery!.strategyMetrics.cagr).toBe(route!.strategyMetrics.cagr);
+    expect(discovery!.strategyMetrics.sharpe).toBe(route!.strategyMetrics.sharpe);
   });
 });
