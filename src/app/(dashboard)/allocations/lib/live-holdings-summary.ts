@@ -391,10 +391,19 @@ export function buildKeyTrustClause(
   excludedNotConnected?: LiveHoldingsPart,
 ): string {
   const phrase = (part: LiveHoldingsPart, noun: string): string => {
-    const base = `${render.amount(part.amount)} from ${noun}`;
+    const unitOf = (n: number) => (n === 1 ? render.unit[0] : render.unit[1]);
+    // 169 review round 2 IN-R2-05 / SFH R2-5: when EVERY row of the part is
+    // unavailable, `amount` is the 0 they were summed as, not a known figure.
+    // Stating it ("$0.00 from keys needing attention") put a dollar figure to
+    // the cent beside an Open Positions total that reads "—". Name the count
+    // instead; a partly reported part keeps its amount.
+    const lead =
+      part.unavailable > 0 && part.unavailable >= part.count
+        ? `${part.count} ${unitOf(part.count)}`
+        : render.amount(part.amount);
+    const base = `${lead} from ${noun}`;
     if (part.unavailable === 0) return base;
-    const unit = part.unavailable === 1 ? render.unit[0] : render.unit[1];
-    return `${base} (${render.missing} unavailable for ${part.unavailable} ${unit})`;
+    return `${base} (${render.missing} unavailable for ${part.unavailable} ${unitOf(part.unavailable)})`;
   };
   const parts: string[] = [];
   if (untrusted.count > 0) parts.push(phrase(untrusted, UNTRUSTED_KEY_SET_NOUN));

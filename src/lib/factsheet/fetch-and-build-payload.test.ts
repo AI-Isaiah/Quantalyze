@@ -69,9 +69,23 @@ vi.mock("@/lib/supabase/admin", () => {
       return { data: null, error: null };
     };
     if (table === "csv_daily_returns") {
-      // The composite read awaits the builder itself after `.limit(...)`.
+      // The composite read awaits the builder itself after `.limit(...)`, one
+      // date-keyset page at a time (review round 1, CSV-READ-CAP): a page after
+      // the first carries `.gt("date", cursor)`, and the read stops on an empty page.
+      let after: string | null = null;
+      b.gt = (_column: string, value: string) => {
+        after = value;
+        return b;
+      };
       b.then = (resolve: (v: unknown) => unknown) =>
-        resolve(fake.csvError ? { data: null, error: fake.csvError } : { data: fake.csvRows, error: null });
+        resolve(
+          fake.csvError
+            ? { data: null, error: fake.csvError }
+            : {
+                data: fake.csvRows.filter((r) => after === null || r.date > after),
+                error: null,
+              },
+        );
     }
     return b;
   }
@@ -159,9 +173,11 @@ function seed(
   row: Row | null,
   csv: { date: string; daily_return: number }[] = [],
   error: unknown = null,
+  csvError: unknown = null,
 ) {
   fake.strategyResult = { data: row, error };
   fake.csvRows = csv;
+  fake.csvError = csvError;
 }
 
 beforeEach(() => {
@@ -256,6 +272,8 @@ type Fixture = {
   row: Row | null;
   csv?: { date: string; daily_return: number }[];
   error?: unknown;
+  /** Phase 169 (D-41): the composite's `csv_daily_returns` read fails with this. */
+  csvError?: unknown;
   /** The absolute expectation: null when a reason is named, else a payload. */
   reason: NotBuildableReason | null;
 };
@@ -267,6 +285,13 @@ const PARITY: Fixture[] = [
   { name: "status computing", row: single({ computation_status: "computing", daily_returns: thirty }), reason: "not_computed" },
   { name: "composite, metrics_json_by_basis null", row: composite({ metrics_json_by_basis: null }), csv: csvRows(30), reason: "composite_unbuildable" },
   { name: "composite, valid headline, empty csv read", row: composite({ metrics_json_by_basis: { cash_settlement: FULL_CASH } }), csv: [], reason: "composite_unbuildable" },
+  // Phase 169 (D-41): a FAILED csv read is an outage, not an empty composite.
+  {
+    name: "composite, valid headline, csv read error",
+    row: composite({ metrics_json_by_basis: { cash_settlement: FULL_CASH } }),
+    csvError: { message: "synthetic csv outage", code: "57014" },
+    reason: "read_error",
+  },
   { name: "composite, valid headline, one csv row", row: composite({ metrics_json_by_basis: { cash_settlement: FULL_CASH } }), csv: csvRows(1), reason: "composite_unbuildable" },
   { name: "composite, valid headline, 30 csv rows", row: composite({ metrics_json_by_basis: { cash_settlement: FULL_CASH } }), csv: csvRows(30), reason: null },
   { name: "single-key, daily_returns and returns_series null", row: single({}), reason: "too_few_points" },
@@ -336,10 +361,10 @@ const PARITY: Fixture[] = [
 describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPayload on every fixture", () => {
   for (const f of PARITY) {
     it(`PARITY ${f.name}: ${f.reason ?? "buildable"}`, async () => {
-      seed(f.row, f.csv ?? [], f.error ?? null);
+      seed(f.row, f.csv ?? [], f.error ?? null, f.csvError ?? null);
       const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
 
-      seed(f.row, f.csv ?? [], f.error ?? null);
+      seed(f.row, f.csv ?? [], f.error ?? null, f.csvError ?? null);
       fake.tablesSeen = [];
       fake.orFilters = [];
       const buildsBefore = vi.mocked(buildFactsheetPayload).mock.calls.length;
@@ -356,7 +381,10 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
       }
       // The invariant the probe's doc comment states.
       expect(probe.buildable).toBe(payload !== null);
-      // The probe is the resolve stage and nothing else: no build, no basis reads.
+      // The probe is the resolve stage and nothing else: no build. No PARITY
+      // fixture carries a by-basis object, so none reads a basis series (the
+      // gated MTM / smoothed reads live in the resolve stage since review round
+      // 1, WR-05, and run only for a row that carries one).
       expect(vi.mocked(buildFactsheetPayload).mock.calls.length).toBe(buildsBefore);
       expect(fake.tablesSeen).not.toContain("strategy_analytics_series");
       // The visibility predicate is REQUIRED and reached the probe's query.
@@ -366,7 +394,7 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
 
   it("WR-03 WITH-REASON: the reason-carrying build answers the probe's reason from ONE resolve, on every fixture", async () => {
     for (const f of PARITY) {
-      seed(f.row, f.csv ?? [], f.error ?? null);
+      seed(f.row, f.csv ?? [], f.error ?? null, f.csvError ?? null);
       fake.tablesSeen = [];
       const built = await fetchAndBuildPayloadWithReason(STRATEGY_ID, ownerVisibility);
       // One resolve: the strategies row is read exactly once.
@@ -380,7 +408,7 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
     const warn = vi.mocked(console.warn);
     const lines = () => warn.mock.calls.map((c) => String(c[0]));
     for (const f of PARITY.filter((x) => x.reason === "not_computed" || x.reason === "too_few_points")) {
-      seed(f.row, f.csv ?? [], f.error ?? null);
+      seed(f.row, f.csv ?? [], f.error ?? null, f.csvError ?? null);
       warn.mockClear();
       await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
       expect(lines().length, f.name).toBeGreaterThan(0);
@@ -388,7 +416,7 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
         expect(line, f.name).toContain("resolve(probe)");
         expect(line, f.name).not.toContain("fetchAndBuildPayload");
       }
-      seed(f.row, f.csv ?? [], f.error ?? null);
+      seed(f.row, f.csv ?? [], f.error ?? null, f.csvError ?? null);
       warn.mockClear();
       await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
       expect(lines().some((l) => l.includes("resolve(build)")), f.name).toBe(true);
@@ -460,16 +488,42 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
         tags: { stage: "factsheet-resolve-composite", caller: "build", gate, strategy_id: STRATEGY_ID },
       });
     }
-    // The case the finding is about: a csv read OUTAGE folds into an empty
-    // series, and support has an event to look up when the factsheet is built.
-    seed(composite({ metrics_json_by_basis: { cash_settlement: FULL_CASH } }));
-    fake.csvError = { message: "synthetic csv outage", code: "57014" };
+    // The case the finding is about: a csv read OUTAGE. Phase 169 (D-41) makes
+    // it `read_error` with its code, exactly as a failed strategies read, and
+    // NOT a composite refusal: the reader throws `CompositeSeriesReadError` and
+    // the resolve stage names it, so the public factsheet cache never stores
+    // it for the run. A build captures it once, as an outage; a probe returns
+    // the code and captures nothing.
+    // Lineage (2026-09-29, 169-07): until 169 D-41 this arm pinned the fold,
+    // `fetchAndBuildPayload` null with tags `{ caller: "build", gate: "empty_series" }`.
+    const outage = PARITY.find((x) => x.name === "composite, valid headline, csv read error")!;
+    seed(outage.row, outage.csv ?? [], null, outage.csvError);
     vi.mocked(captureToSentry).mockClear();
-    expect(await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility)).toBeNull();
-    expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(captureToSentry).mock.calls[0][1]).toMatchObject({
-      tags: { caller: "build", gate: "empty_series" },
+    expect(await fetchAndBuildPayloadWithReason(STRATEGY_ID, ownerVisibility)).toEqual({
+      payload: null,
+      reason: "read_error",
     });
+    expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({
+      tags: {
+        stage: "factsheet-resolve",
+        caller: "build",
+        reason: "read_error",
+        code: "57014",
+        strategy_id: STRATEGY_ID,
+        read: "csv_daily_returns",
+      },
+      // SFH L-2 (review round 1): the PostgREST message rides in `extra`.
+      extra: { errorMessage: "synthetic csv outage" },
+    });
+    seed(outage.row, outage.csv ?? [], null, outage.csvError);
+    vi.mocked(captureToSentry).mockClear();
+    expect(await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility)).toEqual({
+      buildable: false,
+      reason: "read_error",
+      code: "57014",
+    });
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
     // A single-key series that is genuinely short is a data fact: no event.
     seed(single({ daily_returns: [{ date: "2024-01-02", value: 0.01 }] }));
     fake.csvError = null;
@@ -555,11 +609,11 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
   it("NO-NULL-AFTER-RESOLVE: every fixture the probe calls buildable builds a payload", async () => {
     let okResolves = 0;
     for (const f of PARITY) {
-      seed(f.row, f.csv ?? [], f.error ?? null);
+      seed(f.row, f.csv ?? [], f.error ?? null, f.csvError ?? null);
       const probe = await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
       if (!probe.buildable) continue;
       okResolves++;
-      seed(f.row, f.csv ?? [], f.error ?? null);
+      seed(f.row, f.csv ?? [], f.error ?? null, f.csvError ?? null);
       expect(await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility), f.name).not.toBeNull();
     }
     // The loop must have exercised the ok branch, or it proves nothing.
@@ -655,5 +709,38 @@ describe("167.2.1 WR-04 — NO-NULL-AFTER-RESOLVE holds by construction", () => 
     // The overload that makes a BuildableSeries build non-null is still there.
     expect(src).toMatch(/dailyReturns: BuildableSeries,\s*opts\?: BuildFactsheetOpts,\s*\): FactsheetPayload;/);
     expect(src).toMatch(/export function hasBuildableSeries\(rows: DailyReturn\[\]\): rows is BuildableSeries/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1 (WR-05 moved the single-key basis assembly into the resolve
+// stage; WR-01 made its persisted-headline defects reach Sentry). The probe
+// runs once per computed row on every /strategies load, so it must never
+// capture (167.2.1-REVIEW-R2 WR-01): a build captures a defect once, a probe
+// captures nothing.
+// ---------------------------------------------------------------------------
+describe("review round 1 — a persisted-headline defect is captured by a build, never by a probe", () => {
+  const SEVEN = {
+    cumulative_return: 0.05,
+    volatility: 0.12,
+    max_drawdown: -0.04,
+    cagr: 0.31,
+    sharpe: 1.4,
+    sortino: 2.1,
+    calmar: 3.0,
+  };
+
+  it.each([
+    ["the select did not project the seven scalars (missing_keys)", {}],
+    ["a rankable row stores a null cumulative_return", { ...SEVEN, cumulative_return: null }],
+  ])("%s: the build captures once, the probe captures nothing", async (_label, scalars) => {
+    seed(single({ daily_returns: points(30), ...scalars }));
+    expect(await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility)).not.toBeNull();
+    expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+
+    vi.mocked(captureToSentry).mockClear();
+    seed(single({ daily_returns: points(30), ...scalars }));
+    expect(await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility)).toEqual({ buildable: true });
+    expect(vi.mocked(captureToSentry), "the probe sent a per-row event").not.toHaveBeenCalled();
   });
 });

@@ -47,6 +47,9 @@ import {
   type DepartedAnchor,
   type DepartedHistoryKey,
 } from "@/lib/departed-history";
+// Phase 169 review round 1 IN-04: the balance is an amount, so it renders
+// through the ONE money module in whole dollars (DESIGN.md Currency row).
+import { formatUsd } from "@/lib/dollar-validation";
 import { AllocatorSyncStatus } from "./AllocatorSyncStatus";
 
 interface ExchangeConnection {
@@ -191,13 +194,6 @@ function formatRelative(iso: string | null): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
-}
-
-function formatUsd(n: number | null): string {
-  if (n == null) return "—";
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}k`;
-  return `$${n.toFixed(0)}`;
 }
 
 const SYNC_FAILED_HELPER =

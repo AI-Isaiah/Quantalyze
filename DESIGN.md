@@ -157,6 +157,7 @@ product; they format one way, everywhere.
 | Percentages | 1 decimal place, **signed** — a `+` prefix on gains, `−` on losses. A dense comparison table (e.g. `StrategyTable`) may widen to 2dp for precision; the sign rule still holds. |
 | Tail-risk (VaR, CVaR, max drawdown) | 2 decimal places |
 | Integers (counts, observations) | thousands separators |
+| Currency (prices, P&L) | A price of $1 or more: 2 decimals; under $1: 4 significant digits. P&L: 2 decimals, the sign taken from the ROUNDED value, so a value that rounds to zero shows no sign and the neutral colour. Null: the em-dash. Amounts (AUM, notional, allocations) stay whole dollars. One formatter module: `src/lib/dollar-validation.ts` (Phase 169 D-50). |
 | **Null / non-finite** | **em-dash `—`. Never `0`, never blank, never a fabricated value.** A metric that cannot be computed says so with a dash. |
 
 The `—` rule is load-bearing: a zeroed or blanked null reads as a real value and

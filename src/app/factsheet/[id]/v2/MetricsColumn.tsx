@@ -2,12 +2,55 @@
 
 import type { ReactNode } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
-import type { JointMetrics } from "@/lib/factsheet/types";
+import type { FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
+import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { usePayload, useActiveComparator } from "./factsheet-context";
-import { useBasisSeriesView } from "./basis-context";
+import { useBasisOrCash, useBasisSeriesView, type Basis } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel } from "./AnalyticalPanels";
 import { StyleDriftPanel, PeerPercentilePanel, OwnBookDeltaPanel } from "./BatchDPanels";
 import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentMandatePanel } from "./MandatePanels";
+
+/**
+ * Phase 169 review round 1 (SFH H-1) — the caveat for a chain-broken single-key
+ * row, authored once and rendered beside the headline (the KPI strip in
+ * FactsheetView.tsx) and in the two panels here that state those figures.
+ *
+ * Python compounds the stored `cumulative_return` and annualizes CAGR over the
+ * record after its last interior break (`nav_twr._last_interior_break_suffix`),
+ * and Calmar is that CAGR over the max drawdown. The page shows those stored
+ * values (D-25, SC4), while the chart, the return windows and Years Observed
+ * cover the whole series, so the page says which span the three cover.
+ *
+ * Returns null (no caveat) unless the STORED headline is the one shown:
+ *   - `twrChainBroken` is true;
+ *   - `headlineCoversFrom` is present. The resolve stage sets it, to a date or
+ *     `null`, exactly when it overlaid the persisted cash headline on a
+ *     chain-broken row. Absent means the headline was computed in TypeScript
+ *     over the whole series, and a caveat would be false;
+ *   - the basis is cash. Under mark_to_market or smoothed the figures come
+ *     from that basis's series, not from the stored cash headline.
+ * With a date it names the date; with `null` it says the same without one. It
+ * never invents a date.
+ *
+ * Round 2, IN-R2-02: `subject` names the figures by the labels the calling
+ * surface shows (the Cumulative Return Metrics panel calls the stored
+ * cumulative return "Since Inception" and shows no Calmar; the KPI strip says
+ * "Cum. Return"), so a reader never has to infer that two names are one number.
+ */
+export function headlineCoverageCaveat(
+  dataQuality: FactsheetPayload["dataQuality"],
+  basis: Basis,
+  subject: string,
+): string | null {
+  if (basis !== "cash_settlement") return null;
+  if (dataQuality?.twrChainBroken !== true) return null;
+  const from = dataQuality.headlineCoversFrom;
+  if (from === undefined) return null;
+  const date = from === null ? null : isoToMonthDay(from);
+  return date === null || date === "—"
+    ? `${subject} cover only the record after its last break in the return chain. The chart shows the whole record.`
+    : `${subject} cover the record from ${date}, after its last break in the return chain. The chart shows the whole record.`;
+}
 
 /**
  * Editorial right-column metrics. Four named sections — Performance, Risk,
@@ -63,6 +106,15 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
     payload.periodsPerYear > 0
       ? payload.periodsPerYear
       : undefined;
+  // Phase 169 D-12 / D-25 (SC5): the record length is stated one way, from the
+  // calendar years compute() reports, at Years Observed and in the warning below.
+  // Dividing the observation count by the basis read a sparse record short.
+  const recordLength = formatRecordLength({ n: m.n, years: m.years });
+  const coverageCaveat = headlineCoverageCaveat(
+    payload.dataQuality,
+    useBasisOrCash(),
+    "Cumulative Return, CAGR and Calmar",
+  );
 
   return (
     <aside className="flex flex-col gap-12">
@@ -72,19 +124,26 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
           <Kpm>
             <Row label="Start Date" value={isoToMonthDay(m.start)} bench="" />
             <Row label="End Date" value={isoToMonthDay(m.end)} bench="" />
-            <Row label="Years Observed" value={m.years.toFixed(2)} bench="" />
+            <Row label="Years Observed" value={recordLength.years} bench="" />
           </Kpm>
         </Panel>
         <Panel title="Main Metrics" benchHeader={bn}>
           {/* Phase 167.1.2 plan 07 (SC-5b): one year is the payload's own
               annualisation basis (365 crypto / the book's blend basis), not a
               fixed trading-day count. A payload with no basis shows no warning:
-              assuming one is the defect this replaced. */}
+              assuming one is the defect this replaced. The basis sets only the
+              threshold; the stated length is calendar years (Phase 169 D-12,
+              D-51). */}
           {obsPerYear != null && m.n < obsPerYear && (
             <p className="mb-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
-              ⚠ Only {m.n} observations ({(m.n / obsPerYear).toFixed(2)}y) — Sharpe / Sortino / Calmar below
+              ⚠ Only {m.n} observations ({recordLength.years}y) — Sharpe / Sortino / Calmar below
               have wide statistical confidence intervals. Conventional reliability threshold is
               ≥ {obsPerYear} observations (1 year).
+            </p>
+          )}
+          {coverageCaveat && (
+            <p className="mb-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
+              ⚠ {coverageCaveat}
             </p>
           )}
           <Kpm>
@@ -99,12 +158,15 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
           </Kpm>
         </Panel>
         <Panel title="Returns" benchHeader={bn}>
+          {/* Phase 169 D-57: 6 Month / 1 Year are omitted when the STRATEGY's
+              window is null (the record is shorter), exactly as in Cumulative
+              Return Metrics; a null bench value alone keeps the row. */}
           <Kpm>
             <Row label="Month-to-date" value={pct(m.mtd, true)} bench={pct(b?.mtd, true)} />
             <Row label="Year-to-date" value={pct(m.ytd, true)} bench={pct(b?.ytd, true)} />
             <Row label="3 Month" value={pct(m.p3m, true)} bench={pct(b?.p3m, true)} />
-            <Row label="6 Month" value={pct(m.p6m, true)} bench={pct(b?.p6m, true)} />
-            <Row label="1 Year" value={pct(m.p1y, true)} bench={pct(b?.p1y, true)} />
+            {m.p6m != null && <Row label="6 Month" value={pct(m.p6m, true)} bench={pct(b?.p6m, true)} />}
+            {m.p1y != null && <Row label="1 Year" value={pct(m.p1y, true)} bench={pct(b?.p1y, true)} />}
             <Row label="Win Rate (days)" value={pct(m.win_rate)} bench={pct(b?.win_rate)} />
             <Row label="Profit Factor" value={num(m.profit_factor)} bench={num(b?.profit_factor)} />
           </Kpm>
@@ -407,34 +469,35 @@ function RollingRow({
  * trailing-window snapshot); this one walks every period for skim-readers.
  */
 function CumulativeReturnsPanel() {
-  const payload = usePayload();
   // Phase 103 (MTM-04, root-cause flip): the WHOLE panel follows the active basis.
-  // MTD/YTD/3M/6M/1Y/CAGR read the VIEW's strategyMetrics (the bundle's compute()
-  // on the MTM series under mark_to_market; `payload` by reference under cash) and
-  // the 3Y/5Y rows ride the basis-selected equity curve below — one coherent basis
-  // for every row, matching the equity CHART already MTM under the toggle.
+  // Every row is a calendar window from compute() on the active basis, read from
+  // the VIEW's strategyMetrics (the bundle's compute() on the MTM series under
+  // mark_to_market; `payload` by reference under cash), and a multi-year row
+  // exists only when the record covers its window (compute() reports it null).
+  // Phase 169 D-17, 2026-09-25: 3 Year / 5 Year rows are omitted, not em-dashed, when the window is absent or null; SC6 read literally.
+  // Phase 169 D-57, 2026-09-27: 6 Month / 1 Year rows are omitted like 3 Year / 5 Year when the record is shorter, in this panel and in Returns, on every mount including the scenario payload; YTD is a calendar window and keeps the em-dash (D-11).
+  const payload = usePayload();
   const view = useBasisSeriesView(payload);
   const m = view.strategyMetrics;
-  const eq = view.strategyEquity;
-  const n = eq.length;
-  const last = n > 0 ? eq[n - 1] : 1;
-  const periodReturn = (lookbackDays: number): number | null => {
-    if (n < 2) return null;
-    const startIdx = Math.max(0, n - 1 - lookbackDays);
-    const base = eq[startIdx];
-    return base > 0 ? last / base - 1 : null;
-  };
+  // Phase 169 review round 1 (SFH H-1): Since Inception and CAGR are the stored
+  // headline on a chain-broken row, so the panel says which span they cover.
+  const coverageCaveat = headlineCoverageCaveat(payload.dataQuality, useBasisOrCash(), "Since Inception and CAGR");
   // Inception return = cum_ret (no need to recompute).
   return (
     <Panel title="Cumulative Return Metrics">
+      {coverageCaveat && (
+        <p className="mb-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
+          ⚠ {coverageCaveat}
+        </p>
+      )}
       <Kpm>
         <Row label="Month-to-date" value={pct(m.mtd, true)} bench="" />
         <Row label="3 Month" value={pct(m.p3m, true)} bench="" />
-        <Row label="6 Month" value={pct(m.p6m, true)} bench="" />
+        {m.p6m != null && <Row label="6 Month" value={pct(m.p6m, true)} bench="" />}
         <Row label="Year-to-date" value={pct(m.ytd, true)} bench="" />
-        <Row label="1 Year" value={pct(m.p1y, true)} bench="" />
-        <Row label="3 Year" value={pct(periodReturn(3 * 252), true)} bench="" />
-        <Row label="5 Year" value={pct(periodReturn(5 * 252), true)} bench="" />
+        {m.p1y != null && <Row label="1 Year" value={pct(m.p1y, true)} bench="" />}
+        {m.p3y != null && <Row label="3 Year" value={pct(m.p3y, true)} bench="" />}
+        {m.p5y != null && <Row label="5 Year" value={pct(m.p5y, true)} bench="" />}
         <Row label="Since Inception" value={pct(m.cum_ret, true)} bench="" accent />
         <Row label="CAGR" value={pct(m.cagr, true)} bench="" />
       </Kpm>

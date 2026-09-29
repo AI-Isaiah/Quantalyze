@@ -16348,8 +16348,11 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
       expect(aumField().value).toBe("484444");
       const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
       expect(markers).toHaveLength(1);
+      // 169 review round 2 IN-R2-05 / SFH R2-5: a part whose every row is unavailable has
+      // no known amount (the 0 is the sum of nothing), so it names its count, never
+      // "$0". The "(… unavailable for N …)" count is unchanged.
       expect(markers[0].textContent).toBe(
-        "Includes $0 from keys needing attention (value unavailable for 1 holding) and $4,444 from keys with an unknown sync status.",
+        "Includes 1 holding from keys needing attention (value unavailable for 1 holding) and $4,444 from keys with an unknown sync status.",
       );
     } finally {
       errSpy.mockRestore();

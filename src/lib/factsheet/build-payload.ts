@@ -49,13 +49,18 @@ export function deriveIngestSource(dailyRaw: unknown): IngestSource {
 }
 
 /**
- * Phase 90 (D3/D6) — optional composite opts. Additive + defaulted-undefined so
+ * Phase 90 (D3/D6) — optional build opts, first added for composites and since
+ * shared by the single-key arm (Phases 102/103/133, and 169). Additive + defaulted-undefined so
  * every existing 2-arg call site is byte-identical (GUARD-02). The field types
  * are anchored to {@link FactsheetCommon} so the payload contract and the opts
  * contract can't drift.
  */
 export type BuildFactsheetOpts = {
-  /** "arithmetic" swaps the three curve fields (composite branch); default geometric. */
+  /**
+   * "arithmetic" swaps the three curve fields; default geometric. Set by the
+   * composite reader, and since Phase 169 review round 1 (SFH H-2) by the
+   * single-key owner for a `simple` returns_denominator_config.
+   */
   cumulativeMethod?: "geometric" | "arithmetic";
   segmentBoundaries?: FactsheetCommon["segmentBoundaries"];
   missingSegments?: FactsheetCommon["missingSegments"];
@@ -461,18 +466,22 @@ function buildFromBuildableSeries(
   // eq/dd are re-derived per basis inside deriveSeriesBundle, not carried here.
   const { eq: _eq, dd: _dd, ...computedMetrics } = compute(stratRet, dates, 0, periodsPerYear);
 
-  // Phase 90 (D3) — arithmetic (composite) vs geometric curve basis; threaded
-  // into deriveSeriesBundle so all THREE curve fields move together per basis.
+  // Phase 90 (D3) — arithmetic vs geometric curve basis; threaded into
+  // deriveSeriesBundle so all THREE curve fields move together per basis.
+  // Arithmetic for a composite's "simple" method and, since Phase 169 review
+  // round 1 (SFH H-2), a single-key `simple` returns_denominator_config.
   const isArithmetic = opts?.cumulativeMethod === "arithmetic";
 
   // Phase 90 (D3) — cash-scalar overlay. The KpiStrip's seven headline scalars
   // read the PERSISTED `cash_settlement` basis so they agree with discovery /
-  // ranking / acceptance, whatever cumulative method the composite persisted
-  // (geometric mainline OR the Zavara "simple"/arithmetic override — Round-2
-  // C-1). Round-2 H-1: the overlay is now STRICT — a degenerate persisted scalar
-  // (`calmar:null` on a zero-drawdown book) renders "—", not the client-geometric
-  // value it would silently inherit. No-op (single-key byte-identical) when
-  // `cash_settlement` is absent (overlayBasisScalars returns base unchanged).
+  // ranking / acceptance, whatever cumulative method was persisted (geometric
+  // mainline OR the Zavara "simple"/arithmetic override — Round-2 C-1). Round-2
+  // H-1: the overlay is STRICT — a degenerate persisted scalar (`calmar:null` on
+  // a zero-drawdown book) renders "—", not the client-geometric value it would
+  // silently inherit. Since Phase 169 (D-10, SC4) the object is present on a
+  // composite AND on a rankable single-key row (built from its persisted
+  // top-level scalars by `readSingleKeyBasisOpts`); only where it is absent is
+  // this a no-op (overlayBasisScalars returns base unchanged).
   const strategyMetrics = overlayBasisScalars(computedMetrics, opts?.metricsByBasis?.cash_settlement);
 
   const btcRet = alignReturns(BTC_DAILY, dates);
