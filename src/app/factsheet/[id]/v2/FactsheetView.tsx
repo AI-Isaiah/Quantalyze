@@ -1188,9 +1188,16 @@ const TONE_RANK: Record<Exclude<FreshnessTone, "neutral">, number> = {
  * fact is driving the verdict: `Computed · …` while the job is the stalest
  * thing here (unchanged — every previously-shipped render still reads exactly
  * this), and `Track record · …` on the one new arm, where a recent job sits over
- * a dead track. The date line beneath is untouched and still stamps the compute
- * date: dropping it would have cost the surface its provenance, and the series'
- * own date is already spelled out by `SeriesRecencyLine` directly below.
+ * a dead track.
+ *
+ * THE DATE LINE ALWAYS BELONGS TO THE SUBJECT (Phase 169 D-16, SC5). Until 169
+ * the date line kept stamping the compute date even under "Track record", so
+ * the chip said "track record: old" over a date from this morning. On the
+ * "Track record" arm the date line now shows the series end and its age, and
+ * the compute date moves to its own line labelled "Computed", so provenance is
+ * kept and every date on the chip names what it is a date of. On the
+ * "Computed" arm the render is exactly what it was. No threshold, tone or
+ * formatter was added: the ladder is the 3d / 7d one above.
  */
 function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; seriesDates: string[] }) {
   // Hooks must run unconditionally and in the same order every render, so this
@@ -1224,9 +1231,12 @@ function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; series
   // renders, so the chip and the sentence below it can never disagree about
   // where the track record ends.
   const seriesEnd = resolveSeriesEnd(seriesDates);
+  const seriesAgeDays = seriesEnd
+    ? (nowMs - new Date(seriesEnd.iso).getTime()) / 86_400_000
+    : NaN;
   const seriesAgeTone: FreshnessTone = seriesEnd
     ? bucketByAge(
-        (nowMs - new Date(seriesEnd.iso).getTime()) / 86_400_000,
+        seriesAgeDays,
         // WR-06-UTC — the SERIES arm, and the only one whose discriminant
         // unlocks `SERIES_END_FUTURE_ALLOWANCE_DAYS`. The badge's
         // `bucketSeriesAge` reads the same constant from the same file, so
@@ -1259,6 +1269,14 @@ function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; series
     : tone === "old" ? "old"
     : tone === "future" ? "future — check data"
     : "—";
+  // Phase 169 D-16 (SC5): the date line belongs to the SUBJECT. Under
+  // "Track record" it is the series end and its age, read from the same
+  // `seriesEnd` the tone used (one derivation, so it matches SeriesRecencyLine
+  // byte for byte); an unknown end prints "—", never the compute date. The
+  // series end is a UTC DATE, so its age is whole elapsed days (floor): Math.round
+  // would call a bar dated 120 days ago "121d" every afternoon UTC.
+  const dateText = seriesIsBinding ? (seriesEnd?.formatted ?? "—") : formatIsoDate(computedAt);
+  const ageDays = seriesIsBinding ? Math.floor(seriesAgeDays) : Math.round(days);
   return (
     <div>
       <div className="flex items-center justify-end gap-1.5 text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
@@ -1266,9 +1284,14 @@ function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; series
         {subject} · {label}
       </div>
       <p className="mt-1 text-small font-mono tabular-nums text-text-secondary">
-        {formatIsoDate(computedAt)}
-        {Number.isFinite(days) && days >= 0 && <span className="ml-1 text-text-muted">({Math.round(days)}d)</span>}
+        {dateText}
+        {Number.isFinite(ageDays) && ageDays >= 0 && <span className="ml-1 text-text-muted">({ageDays}d)</span>}
       </p>
+      {seriesIsBinding && (
+        <p className="mt-0.5 text-caption font-mono tabular-nums text-text-muted">
+          Computed {formatIsoDate(computedAt)}
+        </p>
+      )}
     </div>
   );
 }
