@@ -16997,77 +16997,118 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(live.max_drawdown).toBe(payload.liveBaselineMetrics.maxDd);
   });
 
-  // Review round 1 (SFH-05): the disclosure explains an absence D-02 caused.
-  // A book with no snapshot yet (a first connect) has no own-book history to
-  // withhold, so the sentence would be false there. `snapshotCount` survives
-  // the withholding, so the composer can tell the two apart.
-  it("rebuilding + a live book with NO snapshot yet: no disclosure (nothing was withheld); with snapshots it renders", () => {
-    render(
-      <ScenarioComposer
-        payload={makePayload({ equityHistoryState: "rebuilding", snapshotCount: 0 })}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    // Book mode is live (the default fixture has holdings), so only the
-    // snapshot condition decides the absence.
-    expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
-    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  // Phase 167.1.2 D-15 (2026-09-27) supersedes IN-01 (2026-09-25): under
+  // 'rebuilding' the copy is chosen by state, never by count, because the
+  // warm-up line promises a timer the D-02 hold never honours.
+  // The two arms below replaced review round 1 SFH-05 (no disclosure for a
+  // book with no legacy snapshot) and review round 2 WR-02 (a derived curve
+  // alone turned it on, "neither source" kept it off). The Overview shows its
+  // rebuilding panel for every non-"ready" book, so the Scenario says the same
+  // thing about the same book: the disclosure follows the state alone. Do NOT
+  // restore a snapshot-count or curve-source condition on it.
+  const expectLiveBookKpis = (payload: MyAllocationDashboardPayload) => {
+    // D-03: the live-book KPIs come from the per-key blend, not the withheld
+    // curve, so they reach the KPI strip in every arm.
+    const live = vi.mocked(KpiStrip).mock.calls.at(-1)![0].liveMetrics as unknown as {
+      twr?: number | null;
+      sharpe?: number | null;
+    };
+    expect(live.twr).toBe(payload.liveBaselineMetrics.ytdTwr);
+    expect(live.sharpe).toBe(payload.liveBaselineMetrics.sharpe);
+  };
 
-    cleanup();
-    render(
-      <ScenarioComposer
-        payload={makePayload({ equityHistoryState: "rebuilding", snapshotCount: 3 })}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
-  });
+  it.each([
+    ["0 snapshots on the legacy source (SFH-05's book)", 0, "legacy"],
+    ["3 snapshots on the legacy source", 3, "legacy"],
+  ] as const)(
+    "rebuilding + %s: the disclosure renders exactly once, and the live-book KPIs stay (D-15)",
+    (_label, snapshotCount, equityCurveSource) => {
+      const payload = makePayload({
+        equityHistoryState: "rebuilding",
+        snapshotCount,
+        equityCurveSource,
+      });
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      // Book mode is live (the default fixture has holdings), so blank mode
+      // is not what decides the disclosure here.
+      expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+      const notes = screen.getAllByTestId("scenario-ownbook-rebuilding");
+      expect(notes).toHaveLength(1);
+      expect(notes[0].textContent).toBe(OWN_BOOK_REBUILDING_COPY);
+      expect(lastChart().scenarioOwnBookDelta).toBeUndefined();
+      expectLiveBookKpis(payload);
+    },
+  );
 
-  // Review round 2 (WR-02): the own-book series has TWO sources, the
-  // trustworthy derived curve and the legacy snapshots. `snapshotCount` counts
-  // only the legacy rows, so a book whose history is ALL derived (every legacy
-  // row terminus-flagged, or no legacy row at all) reports 0 snapshots while
-  // D-02 still withholds a real curve. Gating on the legacy count alone
-  // silenced the disclosure for exactly that book.
-  it("rebuilding + NO legacy snapshot but a trustworthy DERIVED curve: the disclosure renders (something was withheld)", () => {
-    render(
-      <ScenarioComposer
-        payload={makePayload({
-          equityHistoryState: "rebuilding",
-          snapshotCount: 0,
-          equityCurveSource: "derived",
-        })}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
-    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
+  // Phase 167.1.2 D-15 (2026-09-27) supersedes IN-01 (2026-09-25): under
+  // 'rebuilding' the copy is chosen by state, never by count, because the
+  // warm-up line promises a timer the D-02 hold never honours.
+  // Review round 2 WR-02's two books, 0 legacy snapshots with and without a
+  // derived curve, now read the same: the disclosure renders for both. The
+  // "neither source" book used to be the control that kept it off.
+  it.each([
+    ["a derived curve and 0 legacy snapshots", "derived"],
+    ["neither source (0 legacy snapshots, no derived curve)", "legacy"],
+  ] as const)(
+    "rebuilding + %s: the disclosure renders (D-15, state-driven)",
+    (_label, equityCurveSource) => {
+      const payload = makePayload({
+        equityHistoryState: "rebuilding",
+        snapshotCount: 0,
+        equityCurveSource,
+      });
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      expect(screen.getAllByTestId("scenario-ownbook-rebuilding")).toHaveLength(1);
+      expectLiveBookKpis(payload);
+    },
+  );
 
-    // Control: the same zero-snapshot book on the legacy source has nothing to
-    // withhold, so the case above is decided by the derived source alone.
-    cleanup();
-    render(
-      <ScenarioComposer
-        payload={makePayload({
-          equityHistoryState: "rebuilding",
-          snapshotCount: 0,
-          equityCurveSource: "legacy",
-        })}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
-  });
+  // D-15: blank mode has no own book to compare with, so the disclosure never
+  // renders there, whatever the state and whatever the history shape.
+  it.each([
+    ["rebuilding", "rebuilding", 0, "legacy"],
+    ["rebuilding", "rebuilding", 3, "derived"],
+    ["null", null, 0, "legacy"],
+    ["an unrecognised state", "partial", 3, "legacy"],
+    ["ready", "ready", 3, "derived"],
+  ] as const)(
+    "blank mode + equityHistoryState %s (%s snapshots, %s source): no disclosure",
+    (_label, state, snapshotCount, equityCurveSource) => {
+      const payload = makePayload({
+        equityHistoryState: state as never,
+        snapshotCount,
+        equityCurveSource,
+      });
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      fireEvent.click(screen.getByRole("radio", { name: /blank slate/i }));
+      expect(screen.getByRole("radio", { name: /blank slate/i })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+      expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+    },
+  );
 
   // Review round 1 (WR-02): the `bookReturns.length < 2` guard in
   // `scenarioOwnBookDelta`. A 2-point book yields ONE return, and a Sharpe or
