@@ -63,7 +63,14 @@
  * (sticky-footer right CTA) but routes the click to the callback prop.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import Link from "next/link";
 import {
   buildDateMapCache,
@@ -164,6 +171,11 @@ import {
   type SolveLeverageResult,
 } from "../lib/solve-leverage";
 import { KpiStrip } from "./KpiStrip";
+import {
+  equityHistoryRebuildClass,
+  ExchangesPageLink,
+  type EquityHistoryRebuildClass,
+} from "./EquityHistoryRebuilding";
 // `toWealth` stays (the scenario wealth series builder, imported from
 // ../widgets/performance/EquityChart); EquityChart +
 // DrawdownChart are no longer rendered here — Phase 38-03 swaps the composer's
@@ -868,6 +880,38 @@ function pruneLeverageToDraftRefs(
 // ScenarioComposer
 // ---------------------------------------------------------------------------
 
+/**
+ * Review C3 SFH-C3-01. The Scenario's one sentence about the withheld own-book
+ * comparison, keyed by the class the Overview's `equityHistoryRebuildClass`
+ * gives the same reason. A failed read says to reload, a key the owner must
+ * fix names the Exchanges page, and only a real wait says "being rebuilt".
+ * The Overview panel carries the per-reason detail. No sentence promises a
+ * date or a day count.
+ */
+const OWN_BOOK_REBUILDING_LINE: Record<EquityHistoryRebuildClass, ReactNode> = {
+  rebuilding: (
+    <>
+      Your book&apos;s own history is being rebuilt, so the comparison with
+      your current book is not shown.
+    </>
+  ),
+  read_failed: (
+    <>
+      We could not load your book&apos;s history just now, so the comparison
+      with your current book is not shown; reload the page to try again.
+    </>
+  ),
+  // "update your keys", not "fix a key": for duplicate_account the owner
+  // disconnects one of two working keys, and nothing is broken to fix.
+  needs_action: (
+    <>
+      Your book&apos;s own history is on hold until you update your keys on
+      the <ExchangesPageLink />, so the comparison with your current book is
+      not shown.
+    </>
+  ),
+};
+
 /** A stable empty own-book return series (a fresh `[]` would defeat the memo). */
 const NO_OWN_BOOK_RETURNS: MyAllocationDashboardPayload["equityDailyReturns"] = [];
 
@@ -896,6 +940,9 @@ export function ScenarioComposer({
     activeVenues,
     // Phase 167.1.2 / D-02: read below as fail-closed, matching the Overview.
     equityHistoryState,
+    // Review C3 SFH-C3-01: why the history is withheld, classed by the
+    // Overview's own table so both surfaces give the same kind of answer.
+    equityHistoryRebuildReason = null,
     // Phase 167.1.2 plan 11 (D-06): the book's persisted flow-neutral returns,
     // the ONE source of the own-book delta below. A payload without the field
     // reads as no returns.
@@ -5516,15 +5563,24 @@ export function ScenarioComposer({
             Not in blank mode, where there is no own book to compare with.
             Phase 167.1.2 / D-15 (supersedes IN-01): the Overview and the
             Scenario gate on the same state. The earlier extra condition on the
-            history's size or source is removed, so a book with no snapshot yet
-            reads here as it does on the Overview's rebuilding panel. */}
+            history's size or source is removed, so in book mode a book with no
+            snapshot yet reads here as it does on the Overview's rebuilding
+            panel. Review C3 SFH-C3-04: that parity holds only in book mode. In
+            blank mode, chosen or forced (no live book, or no allocator key
+            with a per-key series yet, so `bookEntryGateSatisfied` is false),
+            no own-book line is drawn and there is no comparison to disclose.
+            That is D-15's blank-mode exception, and the Overview may still
+            show its rebuilding panel for the same book.
+            Review C3 SFH-C3-01: the sentence is picked by the class the
+            Overview gives the same reason (`equityHistoryRebuildClass`). */}
         {isOwnBookRebuilding && !isBlankMode && (
           <p
             data-testid="scenario-ownbook-rebuilding"
             className="mt-2 text-fixed-11 text-text-muted"
           >
-            Your book&apos;s own history is being rebuilt, so the comparison
-            with your current book is not shown.
+            {OWN_BOOK_REBUILDING_LINE[
+              equityHistoryRebuildClass(equityHistoryRebuildReason)
+            ]}
           </p>
         )}
         {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted line
