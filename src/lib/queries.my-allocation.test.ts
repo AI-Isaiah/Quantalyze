@@ -3147,13 +3147,57 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
     captureSpy.mockRestore();
   });
 
-  // Review C2 SFH-05 (reader half). A PRESENT row the reader rejects used to be
-  // shown as "recomputed once a day" with nothing logged. It is now its own
-  // reason, and the rejection is reported with its token only (no values).
-  it("SFH-05: a present row the reader rejects is derivation_rejected and reported with its rejection token", async () => {
+  // Review C2 round 2 R2-CR-03 (deploy day). `version: 2` is new in C2, so
+  // every row written before the deploy is pre-v2. Such a row passed every
+  // check its writer ran; only the reader's contract moved, and the daily
+  // compose (`derive-allocator-key-dailies`, 05:30 UTC) rewrites it as v2. So
+  // it reads `awaiting_derivation` ("recomputed once a day" is TRUE for it)
+  // and it is NOT sent to Sentry: a warning per dashboard load for every book
+  // on deploy day would report a normal transition as a fault.
+  it("R2-CR-03: a pre-v2 row is awaiting_derivation, logged with its token, and not sent to Sentry", async () => {
     state.portfolios = [P1151_PORTFOLIO];
     state.apiKeys = [identifiedKey()];
     state.allocatorEquityDerived = [derivedRow(true)]; // no version: pre-v2
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
+    expect(captureSpy).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tags: expect.objectContaining({ reason: "derived_row_rejected" }),
+      }),
+    );
+    // The local trace stays: the token, and never a curve value.
+    const warned = JSON.stringify(warnSpy.mock.calls);
+    expect(warned).toContain("not_version_2");
+    expect(warned).toContain("awaiting_derivation");
+    expect(warned).not.toContain("100500");
+    expect(JSON.stringify(errSpy.mock.calls)).not.toContain("allocator_equity_derived row");
+    warnSpy.mockRestore();
+    errSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  // Review C2 SFH-05 (reader half), kept for rows that ARE version 2. A v2 row
+  // its writer marked untrustworthy (for example the shared account with no
+  // working key, which fixer A makes a non-benign outcome) already had its
+  // recompute, so it is `derivation_rejected` and reported with its token only.
+  it("SFH-05: a v2 row the writer marked untrustworthy is derivation_rejected and reported with its rejection token", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [identifiedKey()];
+    const row = v2Row();
+    row.payload.is_trustworthy = false;
+    row.payload.flags = ["shared_account_no_working_key"];
+    state.allocatorEquityDerived = [row];
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const sentry = await import("./sentry-capture");
     const captureSpy = vi
@@ -3170,13 +3214,14 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
       expect.objectContaining({
         tags: expect.objectContaining({
           reason: "derived_row_rejected",
-          rejection: "not_version_2",
+          rejection: "untrustworthy",
         }),
+        level: "warning",
       }),
     );
     // Token only: the curve's dollar values never reach the log.
     const logged = JSON.stringify(errSpy.mock.calls);
-    expect(logged).toContain("not_version_2");
+    expect(logged).toContain("untrustworthy");
     expect(logged).not.toContain("100500");
     errSpy.mockRestore();
     captureSpy.mockRestore();

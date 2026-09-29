@@ -1446,7 +1446,12 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
   });
 
   it("FAIL: the BYTE-IDENTICAL curve with is_trustworthy=false renders 'legacy' and falls back to the snapshot render", () => {
-    const result = callWith(derivedRow(false));
+    // Review C2 round 2 R2-CR-03: version 2, so this arm really exercises the
+    // writer's untrustworthy verdict. A row with no version is pre-v2, which
+    // reads `awaiting_derivation` (see the version-1 case below).
+    const row = derivedRow(false);
+    row.payload.version = 2;
+    const result = callWith(row);
 
     expect(result.equityCurveSource).toBe("legacy");
     // Phase 167.1.2 / D-02: the producer withholds the display series while the
@@ -1456,8 +1461,8 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     // allocation-helpers.equity-adapter.test.ts; this case pins the source stamp.
     expect(extractTrustworthyDerivedSeries(derivedRow(false).payload)).toBeNull();
     expect(result.equityHistoryState).toBe("rebuilding");
-    // Review C2 SFH-05: a PRESENT row the reader rejects is not "awaiting" a
-    // daily recompute. The writer already ran and said no.
+    // Review C2 SFH-05: a PRESENT v2 row the writer marked untrustworthy is not
+    // "awaiting" a daily recompute. The writer already ran and said no.
     expect(result.equityHistoryRebuildReason).toBe("derivation_rejected");
     expect(result.equityDailyPoints).toEqual([]);
     // computed_at is suppressed when the curve is not shown.
@@ -1491,7 +1496,9 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     const result = callWith(row);
     expect(extractTrustworthyDerivedSeries(row.payload)).toBeNull();
     expect(result.equityHistoryState).toBe("rebuilding");
-    expect(result.equityHistoryRebuildReason).toBe("derivation_rejected");
+    // Review C2 round 2 R2-CR-03: the daily compose rewrites a pre-v2 row as
+    // v2, so the daily-recompute line is the true one for it.
+    expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
     expect(result.equityDailyPoints).toEqual([]);
     expect(result.equityDailyReturns).toEqual([]);
     // The curve itself is still well-formed, so the source stamp stays derived.
@@ -1526,10 +1533,21 @@ describe("derived-row outcomes — the reason says why there is no series", () =
     expect(derivedPayloadRejection("not an object")).toBe("malformed");
   });
 
-  it("no row is awaiting_derivation; a present row the reader rejects is derivation_rejected; a failed read is history_read_failed", () => {
+  it("no row or a pre-v2 row is awaiting_derivation; a v2 row the reader rejects is derivation_rejected; a failed read is history_read_failed", () => {
     expect(callWith(null).equityHistoryRebuildReason).toBe("awaiting_derivation");
+    // Review C2 round 2 R2-CR-03: a pre-v2 row (every row written before C2)
+    // is rewritten as v2 by the daily compose, so it is a wait, not a refusal.
+    // An untrustworthy pre-v2 row is still pre-v2: the version is read first.
     for (const payload of [
       { ...v2(), version: 1 },
+      { ...v2(), version: undefined },
+      { ...v2(), version: 1, is_trustworthy: false },
+    ]) {
+      const result = callWith({ payload, computed_at: null });
+      expect(result.equityHistoryState).toBe("rebuilding");
+      expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
+    }
+    for (const payload of [
       { ...v2(), is_trustworthy: false },
       { ...v2(), returns: [{ date: "2026-03-10", r: Number.NaN }] },
     ]) {

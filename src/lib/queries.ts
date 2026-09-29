@@ -3684,8 +3684,10 @@ export type DerivedPayloadRejection = "not_version_2" | "untrustworthy" | "malfo
  * Review C2 SFH-05 (reader half). `null` when `extractTrustworthyDerivedSeries`
  * accepts the payload, else the first thing it refuses: a pre-v2 row, a row the
  * writer marked untrustworthy, or any other shape defect. The reader uses it
- * to report a present-but-rejected row (token only) and to tell that outcome
- * apart from "no row yet", which is the only one a daily recompute answers.
+ * to report a present-but-rejected row (token only) and to tell the outcomes
+ * the daily recompute answers (no row yet, or a pre-v2 row, which the daily
+ * compose rewrites as v2: review C2 round 2 R2-CR-03) apart from the ones it
+ * does not.
  */
 export function derivedPayloadRejection(
   payload: unknown,
@@ -3732,9 +3734,12 @@ export type EquityHistoryRebuildReason =
 
 /**
  * Why there is no display series, once the key list is clear. Only
- * `awaiting_derivation` (no row yet) is answered by the daily recompute.
- * Review C2 SFH-05 / SFH-06: a row the reader rejected, or a read that failed,
- * must not be shown as a wait.
+ * `awaiting_derivation` is answered by the daily recompute: no row yet, or a
+ * pre-v2 row. Review C2 round 2 R2-CR-03: every row written before C2 is
+ * pre-v2, and `derive-allocator-key-dailies` (05:30 UTC) re-composes each book
+ * as v2, so "recomputed once a day" is true for it. Review C2 SFH-05 / SFH-06:
+ * a v2 row the reader rejected, or a read that failed, must not be shown as a
+ * wait.
  */
 export type MissingSeriesReason = Extract<
   EquityHistoryRebuildReason,
@@ -3958,14 +3963,18 @@ export function derivePhase07Fields(
   const derivedRow = derivedReadFailed ? null : derivedEquityRow;
   const derivedPayload = derivedRow?.payload ?? null;
   const series = extractTrustworthyDerivedSeries(derivedPayload);
-  // Review C2 SFH-05 / SFH-06: only a missing row waits on the daily recompute.
-  // A present row the reader rejects already had its recompute, and a failed
-  // read says nothing about the history at all.
+  // Review C2 SFH-05 / SFH-06: a missing row waits on the daily recompute. A
+  // present v2 row the reader rejects already had its recompute, and a failed
+  // read says nothing about the history at all. Review C2 round 2 R2-CR-03: a
+  // pre-v2 row is a wait too. It passed every check its writer ran; only the
+  // reader's contract moved, and the daily compose rewrites it as v2.
+  const rejection =
+    derivedRow !== null ? derivedPayloadRejection(derivedRow.payload) : null;
   const missingSeriesReason: MissingSeriesReason = derivedReadFailed
     ? "history_read_failed"
-    : derivedRow !== null && series === null
-      ? "derivation_rejected"
-      : "awaiting_derivation";
+    : rejection === null || rejection === "not_version_2"
+      ? "awaiting_derivation"
+      : "derivation_rejected";
   const readiness = equityHistoryReadiness(apiKeys, series, missingSeriesReason);
   const equityHistoryState = readiness.state;
   const equityHistoryRebuildReason = readiness.reason;
@@ -4327,7 +4336,18 @@ export const getMyAllocationDashboard = cache(
         } | null;
         if (row !== null) {
           const rejection = derivedPayloadRejection(row.payload);
-          if (rejection !== null) {
+          if (rejection === "not_version_2") {
+            // Review C2 round 2 R2-CR-03: every row written before C2 is
+            // pre-v2, and the daily compose rewrites it. That is a normal
+            // transition, not a fault, so it is logged and NOT sent to Sentry:
+            // a capture here fired once per dashboard load for every book on
+            // deploy day. Residual (recorded, not captured): a book whose
+            // compose never runs keeps its v1 row and reads
+            // awaiting_derivation; this log line is its only trace.
+            console.warn(
+              "[queries.getMyAllocationDashboard] allocator_equity_derived row is pre-version-2 (not_version_2); rendering the history as rebuilding, reason awaiting_derivation, until the daily compose rewrites it",
+            );
+          } else if (rejection !== null) {
             console.error(
               `[queries.getMyAllocationDashboard] allocator_equity_derived row rejected (${rejection}); rendering the history as rebuilding, reason derivation_rejected`,
             );
@@ -4339,8 +4359,8 @@ export const getMyAllocationDashboard = cache(
                   reason: "derived_row_rejected",
                   rejection,
                 },
-                // A pre-v2 row or a writer's own untrustworthy verdict is a
-                // data state; a malformed row is a writer bug.
+                // A writer's own untrustworthy verdict is a data state; a
+                // malformed row is a writer bug.
                 level: rejection === "malformed" ? "error" : "warning",
               },
             );

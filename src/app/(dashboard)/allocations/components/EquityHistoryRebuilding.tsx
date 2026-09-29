@@ -55,8 +55,10 @@ const REASON_LINE: Record<
     "We are confirming which exchange account each key reads. Each daily sync checks it again.",
   awaiting_derivation:
     "Your history is recomputed from each account's returns and cash flows once a day.",
-  // Review C2 SFH-05 / SFH-06: a row the reader refused, or a read that
+  // Review C2 SFH-05 / SFH-06: a v2 row the reader refused, or a read that
   // failed, is not a wait on the daily recompute, so neither line names one.
+  // (Review C2 round 2 R2-CR-03: a pre-v2 row IS such a wait and reads
+  // awaiting_derivation.)
   derivation_rejected:
     "The latest rebuild of your history did not pass its checks, so it is not shown.",
   history_read_failed:
