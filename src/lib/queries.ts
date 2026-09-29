@@ -3713,6 +3713,39 @@ function scheduleDerivedRowCapture(capture: Promise<void>): void {
   }
 }
 
+/**
+ * Review C2 round 3 R3-WR-04. How long one (allocator, rejection) pair stays
+ * reported. `router.refresh()` re-runs the dashboard read every 30 s while the
+ * Overview is open (AllocationsTabs' PERFORMANCE_POLL_INTERVAL_MS), and an
+ * untrustworthy row can last for days. Capturing on every load was ~120 events
+ * an hour per open tab, which kept the Sentry issue permanently active.
+ */
+export const DERIVED_ROW_CAPTURE_WINDOW_MS = 6 * 60 * 60 * 1000;
+
+// ponytail: per-instance and in memory. It resets on a cold start, and each
+// warm instance keeps its own window, so the real ceiling is one event per
+// (allocator, rejection) per 6 h per instance, not per deployment. Entries are
+// never evicted; the map holds at most one per allocator per rejection token.
+const derivedRowCaptureLastAt = new Map<string, number>();
+
+/** Whether this (allocator, rejection) may be reported now; records it if so. */
+function shouldCaptureDerivedRowRejection(
+  allocatorId: string,
+  rejection: DerivedPayloadRejection,
+): boolean {
+  const key = `${allocatorId}:${rejection}`;
+  const now = Date.now();
+  const last = derivedRowCaptureLastAt.get(key);
+  if (last !== undefined && now - last < DERIVED_ROW_CAPTURE_WINDOW_MS) return false;
+  derivedRowCaptureLastAt.set(key, now);
+  return true;
+}
+
+/** @internal Test-only reset of the R3-WR-04 capture window. */
+export function __resetDerivedRowCaptureThrottleForTests(): void {
+  derivedRowCaptureLastAt.clear();
+}
+
 /** Why the reader refused a PRESENT derived row. A token, never a value. */
 export type DerivedPayloadRejection = "not_version_2" | "untrustworthy" | "malformed";
 
@@ -4455,21 +4488,25 @@ export const getMyAllocationDashboard = cache(
             console.error(
               `[queries.getMyAllocationDashboard] allocator_equity_derived row rejected (${rejection}); rendering the history as rebuilding`,
             );
-            scheduleDerivedRowCapture(
-              captureToSentry(
-                new Error(`allocator_equity_derived row rejected: ${rejection}`),
-                {
-                  tags: {
-                    op: "getMyAllocationDashboard",
-                    reason: "derived_row_rejected",
-                    rejection,
+            // Review C2 round 3 R3-WR-04: the log line above runs on every
+            // load; the capture runs once per (allocator, rejection) window.
+            if (shouldCaptureDerivedRowRejection(userId, rejection)) {
+              scheduleDerivedRowCapture(
+                captureToSentry(
+                  new Error(`allocator_equity_derived row rejected: ${rejection}`),
+                  {
+                    tags: {
+                      op: "getMyAllocationDashboard",
+                      reason: "derived_row_rejected",
+                      rejection,
+                    },
+                    // A writer's own untrustworthy verdict is a data state; a
+                    // malformed row is a writer bug.
+                    level: rejection === "malformed" ? "error" : "warning",
                   },
-                  // A writer's own untrustworthy verdict is a data state; a
-                  // malformed row is a writer bug.
-                  level: rejection === "malformed" ? "error" : "warning",
-                },
-              ),
-            );
+                ),
+              );
+            }
           }
         }
         return row;
