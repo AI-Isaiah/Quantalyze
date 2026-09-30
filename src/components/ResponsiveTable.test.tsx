@@ -150,4 +150,32 @@ describe("[A11Y-02] ResponsiveTable — overflow wrapper + scroll hint", () => {
     // floor the UI-SPEC binds this fix to — full-opacity accent only.
     expect(region.className).not.toContain("ring-accent/20");
   });
+
+  // Phase 170 / VERIFICATION gap 1 (truth 8).
+  //
+  // WHY: an `overflow-x-auto` box clips only descendants whose containing block
+  // is the box itself or lies inside it. An absolutely positioned descendant with
+  // no nearer positioned ancestor takes the initial containing block, so it is
+  // laid out against the page and escapes this scroller AND `#main-content`
+  // (also unpositioned). That is how the composer's `sr-only` weight and
+  // leverage labels, which Tailwind makes `position: absolute`, widened the
+  // DOCUMENT at 390, 640 and 960 px in CI run 36764778803 while main itself
+  // did not overflow. `relative` makes the region their containing block, so the
+  // region clips them. Removing it re-opens the page-level horizontal scroll.
+  it("[170-GAP-1] the scroll region is the containing block of its absolutely positioned content", () => {
+    render(
+      <ResponsiveTable>
+        <label className="sr-only" htmlFor="gap1-input">
+          weight
+        </label>
+        <input id="gap1-input" />
+      </ResponsiveTable>,
+    );
+    const region = screen.getByRole("region");
+    expect(region).toHaveClass("relative");
+    // The class must sit on the scroller itself, not on a wrapper around it:
+    // the element that clips (`overflow-x-auto`) and the containing block
+    // must be the same box.
+    expect(region).toHaveClass("overflow-x-auto");
+  });
 });
