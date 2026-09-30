@@ -1,5 +1,7 @@
 import { ImageResponse } from "next/og";
+import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { captureToSentry, shouldCaptureNow } from "@/lib/sentry-capture";
 import { withPublishedOnly } from "@/lib/visibility";
 import { computeOgHeadline } from "@/lib/factsheet/og-metrics";
 import { isComputedAnalytics } from "@/lib/closed-sets";
@@ -18,6 +20,32 @@ import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
  */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/** A healthy card, or a genuine not-found: amortised across many unfurl hits. */
+const LONG_CACHE_CONTROL = "public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800";
+/** Review round 1 SFH-02: a card rendered from a FAILURE is never cached, so
+ *  the next unfurl retries instead of freezing the failure for a day at the
+ *  CDN (the precedent is the BTC benchmark route's `ERROR_CACHE_CONTROL`). */
+const FAILURE_CACHE_CONTROL = "no-store";
+
+/** Log a failure, then report it to Sentry after the response (throttled per
+ *  stage, so an incident does not burn the quota). Never throws: a broken OG
+ *  image must not 500 the route. */
+function reportOgFailure(stage: "read" | "compute", id: string, err: unknown): void {
+  console.error(`[og:factsheet] ${stage} failed`, id, err);
+  try {
+    if (shouldCaptureNow(`og-factsheet:${stage}`)) {
+      after(() =>
+        captureToSentry(err, {
+          tags: { route: "api/og/factsheet", stage },
+          extra: { strategy_id: id },
+        }),
+      );
+    }
+  } catch {
+    // Scheduling the capture failed; the console.error above still stands.
+  }
+}
 
 /** The `strategy_analytics` embed shape this card reads (PostgREST returns an
  *  object for a to-one embed and an array for a to-many one — both handled).
@@ -47,6 +75,8 @@ export async function GET(
     asset_class?: string | null;
     strategy_analytics?: AnalyticsEmbed | AnalyticsEmbed[] | null;
   } | null = null;
+  // SFH-02: set on any failure path, so the card is sent no-store (see below).
+  let failed = false;
   try {
     const supabase = await createClient();
     const res = await withPublishedOnly(
@@ -81,11 +111,20 @@ export async function GET(
         .eq("id", id),
     )
       .maybeSingle();
+    // SFH-02: supabase-js does not throw on a query error, it returns
+    // `{ data: null, error }`. Without this check a statement timeout or a
+    // column error rendered the generic card as if the row were not found.
+    // A genuine not-found (`data === null`, `error === null`) is not a failure.
+    if (res.error) {
+      failed = true;
+      reportOgFailure("read", id, res.error);
+    }
     data = res.data ?? null;
   } catch (err) {
-    // Log for production debugging; OG image still renders with the fallback.
+    // OG image still renders with the fallback.
     // (deliberately doesn't throw — broken OG image must not 500 the deploy)
-    console.error("[og:factsheet] failed to load strategy", id, err);
+    failed = true;
+    reportOgFailure("read", id, err);
   }
 
   const name = data?.name ?? data?.codename ?? "Strategy";
@@ -158,7 +197,8 @@ export async function GET(
       }));
     }
   } catch (err) {
-    console.error("[og:factsheet] headline metric compute failed", id, err);
+    failed = true;
+    reportOgFailure("compute", id, err);
   }
 
   const fmtPct = (x: number) => (Number.isFinite(x) ? `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%` : "—");
@@ -209,10 +249,9 @@ export async function GET(
   // each fetch on share). 1h browser TTL + 24h CDN TTL with stale-while-
   // revalidate so a refresh after computed_at change picks up the new card
   // within the SWR window without stampeding the underlying compute.
-  response.headers.set(
-    "Cache-Control",
-    "public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800",
-  );
+  // SFH-02: a card rendered from a failed read or a failed compute is sent
+  // no-store instead, so one bad request is not served for a day.
+  response.headers.set("Cache-Control", failed ? FAILURE_CACHE_CONTROL : LONG_CACHE_CONTROL);
   return response;
 }
 
