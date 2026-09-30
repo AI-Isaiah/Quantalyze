@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import type { BenchmarkPricesOpt } from "@/lib/factsheet/build-payload";
 import type { DailyPrice, DailyReturn, FactsheetPayload } from "@/lib/factsheet/types";
@@ -112,5 +112,24 @@ describe("AllocatorSection: an unmeasurable blend is the em-dash with a dated ca
     expect(text).toContain("No 21-day window with every leg priced, so no stress window could be measured.");
     expect(text).not.toContain("never drew");
     expect(text).not.toMatch(/\+0\.00%/);
+  });
+});
+
+describe("AllocatorSection: a failed BTC read is named as the cause (review SFH MEDIUM-2)", () => {
+  it("BTC unavailable: the BTC-legged portfolios say the BTC prices are unavailable, never 'too few days'; 60/40 is untouched", () => {
+    // Mon 2025-03-03 .. Fri 2025-05-16, inside every fixture: the only missing leg is BTC.
+    const payload = buildFactsheetPayload(STRATEGY, rowsFrom("2025-03-03", 75), { benchmarkPrices: { unavailable: true } });
+    const { container } = mount(payload);
+    // 60/40 has no BTC leg: measured, no caption.
+    expect(container.textContent).not.toContain("unavailable");
+
+    for (const name of ["Multi-Asset Risk Parity", "Diversified Crypto Book"]) {
+      fireEvent.click(screen.getByRole("button", { name }));
+      const text = container.textContent ?? "";
+      expect(text, name).toContain("BTC prices are unavailable right now, so this portfolio cannot be measured.");
+      expect(text, name).not.toContain("too few days");
+      const values = Array.from(container.querySelectorAll("tbody tr td:nth-child(2)")).map(td => td.textContent);
+      expect(values.every(v => v === "—"), name).toBe(true);
+    }
   });
 });

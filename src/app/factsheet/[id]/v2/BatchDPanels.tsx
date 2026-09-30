@@ -286,16 +286,20 @@ export function AllocatorSection() {
   // each rendered as the em-dash, never 0.
   const lastDate = payload.dates[payload.dates.length - 1];
   const unmeasured = p.cum_ret === null;
+  // Review SFH MEDIUM-2: a failed price read is named as the cause; "too few days"
+  // is kept for a genuine sparse overlap of priced legs.
   const pricesCaption =
-    p.through === null
-      ? "Prices unavailable for this portfolio — too few days with every leg priced to measure it."
-      : p.through !== lastDate
-        ? `Prices through ${isoToMonthDay(p.through)}${
-            unmeasured
-              ? " — too few days with every leg priced to measure this portfolio."
-              : "; figures cover the days every leg is priced."
-          }`
-        : null;
+    p.unavailable_leg != null
+      ? `${p.unavailable_leg} prices are unavailable right now, so this portfolio cannot be measured.`
+      : p.through === null
+        ? "Prices unavailable for this portfolio — too few days with every leg priced to measure it."
+        : p.through !== lastDate
+          ? `Prices through ${isoToMonthDay(p.through)}${
+              unmeasured
+                ? " — too few days with every leg priced to measure this portfolio."
+                : "; figures cover the days every leg is priced."
+            }`
+          : null;
 
   return (
     <section className="mt-12 border-t border-border pt-8">

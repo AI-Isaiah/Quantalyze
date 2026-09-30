@@ -302,6 +302,11 @@ export type AllocatorPortfolioPayload = {
   tail_mm_pos: number | null;
   /** The last close every leg of the blend carries (D-70(4)); null when a leg has none. */
   through: string | null;
+  /**
+   * Review SFH MEDIUM-2: the leg whose price feed could not be read ("BTC" when
+   * the BTC read failed), so the caption names the outage; null otherwise.
+   */
+  unavailable_leg: string | null;
 };
 
 /** One year of monthly compounded returns. byMonth has 12 slots (Jan..Dec); null = no obs. */
