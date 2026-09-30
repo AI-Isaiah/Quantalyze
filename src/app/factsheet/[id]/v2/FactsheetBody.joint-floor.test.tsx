@@ -54,15 +54,15 @@ const STRATEGY = {
 const START = "2026-04-27";
 const N_DAYS = 30;
 
-function build(): FactsheetPayload {
+function build(start: string = START): FactsheetPayload {
   const rows: DailyReturn[] = Array.from({ length: N_DAYS }, (_, i) => ({
-    date: addDays(START, i),
+    date: addDays(start, i),
     value: ((i % 7) - 3) / 1000,
   }));
   // BTC closes from the day before the first date through the last: every
   // interval pairs with BTC, so only SPX is below the floor.
   const btc: DailyPrice[] = Array.from({ length: N_DAYS + 1 }, (_, i) => ({
-    date: addDays(START, i - 1),
+    date: addDays(start, i - 1),
     close: 90000 + ((i * 37) % 11) * 250,
   }));
   const opt: BenchmarkPricesOpt = { prices: btc, through: btc[btc.length - 1].date, dropped: [] };
@@ -119,6 +119,17 @@ describe("below the paired floor the factsheet names the cause (169.4 review rou
     expect(within(alphaRow).getAllByRole("cell")[1].textContent).toBe("—");
     const irRow = screen.getByText("Information Ratio").closest("tr")!;
     expect(within(irRow).getAllByRole("cell")[1].textContent).toBe("—");
+  });
+
+  it("a record wholly past the SPX fixture pairs 0 intervals: the cells read \"—\" and the reason says \"has 0\" (deliberate, as the widget's \"this book has 0\")", () => {
+    const base = build("2026-06-01");
+    expect(base.comparators.spx.joint).toBeNull();
+    expect(base.comparators.spx.jointWithheld).toEqual({ paired: 0, floor: MIN_PAIRED_OBSERVATIONS });
+    mount({ ...base, activeComparator: "spx" });
+    expect(cellValue("α vs SPX")).toBe("—");
+    for (const r of screen.getAllByTestId("joint-floor-reason")) {
+      expect(r.textContent).toBe(`Alpha and beta need at least ${MIN_PAIRED_OBSERVATIONS} days paired with SPX; this record has 0.`);
+    }
   });
 
   it("BTC active on the same record: the figures render and no floor reason does", () => {
