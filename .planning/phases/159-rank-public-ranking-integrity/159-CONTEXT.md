@@ -115,6 +115,13 @@ implementation's own formula (house testing law).
 
 </deferred>
 
+<post_close_decisions>
+## Post-close decisions
+
+- ⭐ **2026-09-30 (founder decision, AskUserQuestion: "Write SUMMARY and close"):** `159-01-SUMMARY.md` is written retrospectively and Phase 159 is closed at 7/7. The plan finished 2026-08-21, and `159-CENSUS.md` was committed with real PROD results in `8b06831b`, before migration commit `358fbbda`. This overrides the "No SUMMARY was retro-fitted" note in #790 (`eab976bb2`) for plan 159-01 only. That note stays true for every other plan it covers. The same override is recorded in the ROADMAP Phase 159 progress row.
+
+</post_close_decisions>
+
 ---
 
 *Phase: 159-RANK — Public-ranking integrity*

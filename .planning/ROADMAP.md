@@ -197,7 +197,7 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 159-01-PLAN.md — C-M1 PROD census artifact `159-CENSUS.md` (checkpoint: ORCHESTRATOR runs the read-only SQL against PROD and commits results — the D-01 gate) (RANK-01) [Wave 1]
+- [x] 159-01-PLAN.md — C-M1 PROD census artifact `159-CENSUS.md` (checkpoint: ORCHESTRATOR runs the read-only SQL against PROD and commits results — the D-01 gate) (RANK-01) [Wave 1]
 - [x] 159-05-PLAN.md — quantstats price-guess closed across `compute_all_metrics`: kwarg arm + P114 inline mirror for headline sharpe/sortino, benign-parity oracles, golden adjudication (RANK-05) [Wave 1]
 - [x] 159-06-PLAN.md — FILL-arm CAS `.is("category_id", null)` + observed row count + honest `raced` refusal on the real POST harness (RANK-07) [Wave 1]
 - [x] 159-07-PLAN.md — Re-mint fingerprint includes classification (both call sites + both dep arrays) + `withPublishedOrOwner` strict-UUID fail-closed validation (RANK-08, RANK-09) [Wave 1]
@@ -4419,7 +4419,7 @@ kept verbatim.
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 158. OPS-CI merge=deploy | 6/6 | Complete    | 2026-08-21 |
-| 159. RANK ranking integrity | 6/7 | Complete — plan 01 shipped its deliverable (`159-CENSUS.md` is on disk); its SUMMARY was never written. `159-VERIFICATION.md` closed 2026-09-12 (`status: passed`): its one open item, the concurrent same-session CAS race, is discharged by `src/__tests__/csv-finalize-concurrent-never-classified.test.ts` on the blocking `frontend-local-stack` lane — green in main run 34712535912 at `733a55f5` | v0.70.0.0 |
+| 159. RANK ranking integrity | 7/7 | Complete — plan 01 shipped its deliverable (`159-CENSUS.md` is on disk). ⭐ 159-01 SUMMARY written retrospectively 2026-09-30 by founder decision; overrides the #790 'no retro-fit' note for this plan (the cell said "its SUMMARY was never written" until then). `159-VERIFICATION.md` closed 2026-09-12 (`status: passed`): its one open item, the concurrent same-session CAS race, is discharged by `src/__tests__/csv-finalize-concurrent-never-classified.test.ts` on the blocking `frontend-local-stack` lane — green in main run 34712535912 at `733a55f5` | v0.70.0.0 |
 | 160. PROVENANCE venue/annualization | 6/7 | Complete — verification passed (closed with the v1.20 open items in #790); plan 07 was its `gap_closure` verification plan | v0.77.39.0 · #790 |
 | 161. WIZERR honest errors | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.72.0.0 |
 | 161.1 LEDGER-REFRESH (shipped dormant) | 5/5 | Complete | v0.73.0.0 |
