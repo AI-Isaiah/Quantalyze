@@ -135,6 +135,66 @@ export async function assertScrollsInside(
 }
 
 /**
+ * GC-01 (2026-09-30): a tab strip stays on ONE line and scrolls inside itself
+ * only when its children do not fit. It never wraps onto a second line, and it
+ * never overflows without being a scroller (that content would be cut off or
+ * would widen the page).
+ *
+ * Why not `assertScrollsInside`: an unconditional "must scroll" is wrong for a
+ * strip whose tabs fit. CI run 36764778803 failed V640 on
+ * `scrollWidth=264 clientWidth=264`, a strip that fit and was correct. That
+ * helper stays for N-SCN, where a real scroll is the contract.
+ *
+ * Wrap test: on one flex line every child's box crosses the line's centre, so
+ * no child starts at or below another child's bottom. A child on a second line
+ * does. This is robust to children of different heights under `items-center`
+ * (an Allocations tab carrying a count badge can be taller than its peers).
+ *
+ * Returns whether the strip scrolls, so the caller can log it per viewport.
+ */
+export async function assertFitsOrScrollsInside(
+  locator: Locator,
+  label: string,
+): Promise<{ scrolls: boolean }> {
+  const count = await locator.count();
+  if (count === 0) {
+    throw new Error(
+      `${label}: locator resolved to 0 elements — an empty page must not pass (W-02)`,
+    );
+  }
+  const m = await locator.first().evaluate((el) => {
+    const boxes = Array.from(el.children)
+      .map((c) => c.getBoundingClientRect())
+      .filter((r) => r.width > 0 || r.height > 0);
+    return {
+      scrollWidth: el.scrollWidth,
+      clientWidth: el.clientWidth,
+      overflowX: getComputedStyle(el).overflowX,
+      children: boxes.length,
+      maxTop: boxes.length ? Math.max(...boxes.map((r) => r.top)) : 0,
+      minBottom: boxes.length ? Math.min(...boxes.map((r) => r.bottom)) : 0,
+    };
+  });
+  if (m.children === 0) {
+    throw new Error(
+      `${label}: strip has no laid-out child — an empty strip must not pass (W-02)`,
+    );
+  }
+  if (m.children > 1 && m.maxTop >= m.minBottom - SLOP_PX) {
+    throw new Error(
+      `${label}: wraps onto more than one line (a child starts at y=${m.maxTop.toFixed(1)}, at or below another child's bottom y=${m.minBottom.toFixed(1)}) — GC-01 says never wrap`,
+    );
+  }
+  const overflows = m.scrollWidth > m.clientWidth + SLOP_PX;
+  if (overflows && m.overflowX !== "auto" && m.overflowX !== "scroll") {
+    throw new Error(
+      `${label}: overflows but does not scroll inside itself (scrollWidth=${m.scrollWidth} clientWidth=${m.clientWidth} overflow-x=${m.overflowX})`,
+    );
+  }
+  return { scrolls: overflows };
+}
+
+/**
  * Every descendant element and text node lies inside the container, 1 px
  * slop. Text nodes are measured with a Range — a wrapped word that paints
  * past the box is the defect a child-element walk misses.
