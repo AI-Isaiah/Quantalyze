@@ -9,7 +9,38 @@ export type CoveredAlignment = {
   paired: boolean[];
   /** The benchmark's last close on or before the strategy's last date; null when none. */
   through: string | null;
+  /**
+   * Phase 169.5 review WR-01: true when no date of the benchmark's OWN calendar lies
+   * in (`through`, the strategy's last date], so the benchmark has every close it
+   * could have for the strategy's range; false when `through` is null. A weekday
+   * benchmark whose last close is the Friday before a weekend last date is covered.
+   * Computed by {@link isPastCoverage}, the rule the coverage caption also calls.
+   * Optional only so a hand-built alignment (the unavailable form, the strategy leg
+   * of a correlation, both `through: null`) type-checks; absent reads as NOT covered,
+   * the safe direction (windows null, never a number the prices cannot support).
+   */
+  coveredToEnd?: boolean;
 };
+
+/**
+ * A benchmark's trading calendar: index = weekday (0 = Sunday), true when the
+ * benchmark carries a close on that weekday.
+ */
+export type WeekdayCalendar = readonly boolean[];
+
+/** Every weekday: a 7-day market (BTC, ETH). */
+export const CALENDAR_7D: WeekdayCalendar = Object.freeze([true, true, true, true, true, true, true]);
+/** Monday to Friday: an exchange-traded market (SPX, GLD, IEF). */
+export const CALENDAR_WEEKDAY: WeekdayCalendar = Object.freeze([false, true, true, true, true, true, false]);
+
+/** Each comparator key's own calendar, the one the coverage caption reads. */
+export const COMPARATOR_CALENDARS = {
+  btc: CALENDAR_7D,
+  eth: CALENDAR_7D,
+  spx: CALENDAR_WEEKDAY,
+  gld: CALENDAR_WEEKDAY,
+  ief: CALENDAR_WEEKDAY,
+} as const satisfies Record<string, WeekdayCalendar>;
 
 const DAY_MS = 86_400_000;
 
@@ -20,6 +51,29 @@ function utcDay(iso: string): number {
 /** Weekday (0 = Sunday) of a UTC day number; day 0 (1970-01-01) is a Thursday. */
 function weekdayOfDay(day: number): number {
   return (((day + 4) % 7) + 7) % 7;
+}
+
+/**
+ * Phase 169.5 review WR-01: the ONE "past coverage" rule, shared by
+ * `buildComparatorBlock`'s windows (through `coveredToEnd`) and the picker's
+ * coverage caption so the two cannot drift. A benchmark is past its coverage when
+ * `through` is null, or when a date on the benchmark's OWN `calendar` lies in
+ * (`through`, `lastDate`]. A raw-date comparison is wrong for a weekday benchmark
+ * against a 7-day strategy ending on a weekend: the Friday close determines every
+ * window, and nothing is missing.
+ */
+export function isPastCoverage(
+  through: string | null,
+  lastDate: string | undefined,
+  calendar: WeekdayCalendar,
+): boolean {
+  if (through === null) return true;
+  if (lastDate === undefined || lastDate <= through) return false;
+  const to = utcDay(lastDate);
+  for (let day = utcDay(through) + 1; day <= to; day++) {
+    if (calendar[weekdayOfDay(day)]) return true;
+  }
+  return false;
 }
 
 /** Index of the last element of ascending `xs` that is <= `x`, or -1. */
@@ -92,6 +146,7 @@ function lastAtOrBefore(xs: readonly string[], x: string): number {
  * 166.4 D-A pairing excludes it.
  *
  * `through` is the last close on or before the strategy's last date.
+ * `coveredToEnd` is {@link isPastCoverage}'s negation on the same calendar.
  */
 export function alignCoveredReturns(
   prices: readonly DailyPrice[],
@@ -101,7 +156,7 @@ export function alignCoveredReturns(
   const n = dates.length;
   const returns: Array<number | null> = new Array(n).fill(null);
   const paired: boolean[] = new Array(n).fill(false);
-  if (n === 0) return { returns, paired, through: null };
+  if (n === 0) return { returns, paired, through: null, coveredToEnd: false };
 
   const closeDates = prices.map((p) => p.date);
   const closeSet = new Set(closeDates);
@@ -156,5 +211,5 @@ export function alignCoveredReturns(
     paired[k] = count === expected;
   }
 
-  return { returns, paired, through };
+  return { returns, paired, through, coveredToEnd: !isPastCoverage(through, lastStrategyDate, calendar) };
 }

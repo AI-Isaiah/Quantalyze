@@ -2,8 +2,9 @@ import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { buildFactsheetPayload, type BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
 import { BTC_DAILY } from "@/lib/factsheet/benchmarks";
-import type { FactsheetPayload } from "@/lib/factsheet/types";
+import type { BasisSeriesBundle, FactsheetPayload } from "@/lib/factsheet/types";
 import { FactsheetProvider, useActiveComparator } from "./factsheet-context";
+import { BasisProvider, useBasis } from "./basis-context";
 import { ComparatorPicker } from "./ComparatorPicker";
 
 // Regression: "None" radio was removed in favor of toggle-off semantics.
@@ -152,14 +153,28 @@ describe("ComparatorPicker coverage caption", () => {
     expect(screen.queryByText(CAPTION)).toBeNull();
   });
 
-  it("dates SPX at its fixture's last close when SPX is active", () => {
+  // Review WR-01: coverage is read on SPX's own (weekday) calendar. Its last close on
+  // or before Sunday 2024-08-04 is Friday 2024-08-02, and no SPX trading day lies in
+  // (Fri, Sun], so SPX is fully covered: no caption, and the windows are numbers.
+  it("shows no SPX caption when SPX's Friday close covers a strategy ending that weekend", () => {
     const payload = makePayload();
-    // The SPX fixture's last close on or before Sunday 2024-08-04 is Friday 2024-08-02.
     expect(payload.comparators.spx.through).toBe("2024-08-02");
+    expect(payload.comparators.spx.summary!.mtd).not.toBeNull();
     renderPicker(payload);
     expect(screen.queryByText(CAPTION)).toBeNull(); // BTC active and fully covered
     fireEvent.click(screen.getByRole("button", { name: /SPX/ }));
-    expect(screen.getByText("SPX prices through Aug 2, 2024")).toBeDefined();
+    expect(screen.queryByText(CAPTION)).toBeNull();
+  });
+
+  it("dates SPX when an SPX trading day lies after its last close", () => {
+    const payload = makePayload();
+    // Wednesday 2024-07-31: Thu 08-01 and Fri 08-02 are SPX days with no close.
+    renderPicker({
+      ...payload,
+      comparators: { ...payload.comparators, spx: { ...payload.comparators.spx, through: "2024-07-31" } },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /SPX/ }));
+    expect(screen.getByText("SPX prices through Jul 31, 2024")).toBeDefined();
   });
 
   it("shows no caption when no comparator is active", () => {
@@ -167,5 +182,45 @@ describe("ComparatorPicker coverage caption", () => {
     fireEvent.click(screen.getByRole("button", { name: /BTC/ }));
     expect(screen.getByTestId("active-comparator").textContent).toBe("none");
     expect(screen.queryByText(CAPTION)).toBeNull();
+  });
+});
+
+// Phase 169.5 review SFH-M-07: the caption reads the ACTIVE basis view. Nothing clamps
+// an MTM axis to the cash range, so an MTM series can end after the cash one. Here the
+// cash axis ends Sunday 2024-08-04 with BTC covering it, and the MTM axis runs two days
+// further with the same BTC close: the MTM windows are past BTC's coverage, and the
+// caption must say so under MTM while staying silent under cash.
+describe("ComparatorPicker coverage caption follows the active basis", () => {
+  const CAPTION = /prices (through|unavailable)/;
+
+  function ToMtm() {
+    const { setBasis } = useBasis();
+    return (
+      <button type="button" onClick={() => setBasis("mark_to_market")}>
+        to-mtm
+      </button>
+    );
+  }
+
+  it("dates BTC under MTM when the MTM axis ends after BTC's last close", () => {
+    const cash = makePayload();
+    expect(cash.comparators.btc.through).toBe("2024-08-04");
+    const mtm = {
+      ...cash,
+      dates: [...cash.dates, "2024-08-05", "2024-08-06"],
+      comparators: cash.comparators,
+    } as unknown as BasisSeriesBundle;
+    const payload = { ...cash, seriesByBasis: { mark_to_market: mtm } } as FactsheetPayload;
+    render(
+      <FactsheetProvider payload={payload}>
+        <BasisProvider>
+          <ComparatorPicker />
+          <ToMtm />
+        </BasisProvider>
+      </FactsheetProvider>,
+    );
+    expect(screen.queryByText(CAPTION)).toBeNull(); // cash: covered to its last date
+    fireEvent.click(screen.getByRole("button", { name: "to-mtm" }));
+    expect(screen.getByText("BTC prices through Aug 4, 2024")).toBeDefined();
   });
 });
