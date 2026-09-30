@@ -15,11 +15,10 @@ export type CoveredAlignment = {
    * could have for the strategy's range; false when `through` is null. A weekday
    * benchmark whose last close is the Friday before a weekend last date is covered.
    * Computed by {@link isPastCoverage}, the rule the coverage caption also calls.
-   * Optional only so a hand-built alignment (the unavailable form, the strategy leg
-   * of a correlation, both `through: null`) type-checks; absent reads as NOT covered,
-   * the safe direction (windows null, never a number the prices cannot support).
+   * Required (review WR-02): a hand-built alignment (the unavailable form, the
+   * strategy leg of a correlation, both `through: null`) states `false` itself.
    */
-  coveredToEnd?: boolean;
+  coveredToEnd: boolean;
 };
 
 /**
@@ -33,7 +32,10 @@ export const CALENDAR_7D: WeekdayCalendar = Object.freeze([true, true, true, tru
 /** Monday to Friday: an exchange-traded market (SPX, GLD, IEF). */
 export const CALENDAR_WEEKDAY: WeekdayCalendar = Object.freeze([false, true, true, true, true, true, false]);
 
-/** Each comparator key's own calendar, the one the coverage caption reads. */
+/**
+ * Each comparator key's own calendar: the one `alignCoveredReturns` pairs on and the
+ * coverage caption reads (review WR-01, WR-02), so the two agree by construction.
+ */
 export const COMPARATOR_CALENDARS = {
   btc: CALENDAR_7D,
   eth: CALENDAR_7D,
@@ -134,8 +136,13 @@ function lastAtOrBefore(xs: readonly string[], x: string): number {
  *     points in (strategy date k-1, strategy date k] equals the number of dates
  *     in that interval falling on a weekday of the benchmark's own calendar
  *     (166.4 review WR-01, d1d1fc077: the engine's `count == expected`). The
- *     calendar is the set of weekdays on which `prices` carries a close: seven
- *     for BTC, Monday to Friday for SPX, GLD and IEF.
+ *     calendar is an INPUT, fixed per comparator ({@link COMPARATOR_CALENDARS}:
+ *     seven days for BTC and ETH, Monday to Friday for SPX, GLD and IEF). It is
+ *     never inferred from `prices` (Phase 169.5 review WR-02 / SFH-M-03): the
+ *     route hands in a window trimmed to the strategy's range, and a short window
+ *     whose only Saturday is missing would drop Saturday from an inferred
+ *     calendar and pair the very Fri-to-Mon interval the engine leaves unpaired
+ *     (the engine infers `traded` from the FULL stored series).
  *
  * Why the series and the pairing differ (the recorded deviation from reading
  * D-58 as "null after a gap too", and D-64's interior-gap half): nulling an
@@ -152,6 +159,7 @@ export function alignCoveredReturns(
   prices: readonly DailyPrice[],
   dropped: readonly string[],
   dates: readonly string[],
+  calendar: WeekdayCalendar,
 ): CoveredAlignment {
   const n = dates.length;
   const returns: Array<number | null> = new Array(n).fill(null);
@@ -166,9 +174,6 @@ export function alignCoveredReturns(
   const lastStrategyDate = dates[n - 1];
   const throughIdx = lastAtOrBefore(closeDates, lastStrategyDate);
   const through = throughIdx >= 0 ? closeDates[throughIdx] : null;
-
-  const calendar = new Array<boolean>(7).fill(false);
-  for (const d of closeDates) calendar[weekdayOfDay(utcDay(d))] = true;
 
   // Index 0: the benchmark's own return dated the first strategy date.
   const p0 = lastAtOrBefore(pointDates, dates[0]);

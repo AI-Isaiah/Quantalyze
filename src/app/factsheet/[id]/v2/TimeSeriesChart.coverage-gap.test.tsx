@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render } from "@testing-library/react";
 import type { BenchmarkPricesOpt, DailyPrice, DailyReturn } from "@/lib/factsheet/types";
 import { buildFactsheetPayload, deriveSeriesBundle } from "@/lib/factsheet/build-payload";
-import { alignCoveredReturns } from "@/lib/factsheet/align";
+import { alignCoveredReturns, CALENDAR_7D } from "@/lib/factsheet/align";
 import { cumEq } from "@/lib/factsheet/compute";
 import { rollingBeta } from "@/lib/factsheet/rolling";
 import { CHART_CONFIGS } from "./chart-configs";
@@ -146,7 +146,7 @@ describe("169.5-02 SC3 / D-09: per-day chart series are null where the helper ha
   it("full coverage: no nulls, and the arrays are exactly the compounded helper series", () => {
     const opt = btcOpt(days("2024-12-31", 41));
     const b = bundle(A_ROWS, 365, opt).comparators.btc;
-    const helper = alignCoveredReturns((opt as { prices: DailyPrice[] }).prices, [], A_DATES).returns as number[];
+    const helper = alignCoveredReturns((opt as { prices: DailyPrice[] }).prices, [], A_DATES, CALENDAR_7D).returns as number[];
     expect(helper.every((r) => r != null)).toBe(true);
     expect(b.cumulative).toEqual(cumEq(helper));
     expect(b.volMatched!.every((v) => v != null)).toBe(true);
@@ -226,7 +226,7 @@ describe("169.5-02 D-60 fix and D-64: comparator rolling beta over PAIRED interv
   it("parity pin: on a dense, fully paired BTC series the beta equals rolling.ts rollingBeta over the helper's full series (index 0 = day one)", () => {
     const opt = btcOpt(days("2024-12-31", 41));
     const btc = bundle(A_ROWS, 365, opt).comparators.btc;
-    const full = alignCoveredReturns((opt as { prices: DailyPrice[] }).prices, [], A_DATES);
+    const full = alignCoveredReturns((opt as { prices: DailyPrice[] }).prices, [], A_DATES, CALENDAR_7D);
     expect(full.paired.every(Boolean)).toBe(true);
     const ref = rollingBeta(stratValues(40), full.returns as number[], W);
     for (let i = 0; i < 40; i++) {

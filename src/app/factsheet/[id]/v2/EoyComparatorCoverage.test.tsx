@@ -24,7 +24,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render } from "@testing-library/react";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import { buildComparatorBlock } from "@/lib/factsheet/comparator-block";
-import { alignCoveredReturns } from "@/lib/factsheet/align";
+import { alignCoveredReturns, CALENDAR_7D } from "@/lib/factsheet/align";
 import { cumEq } from "@/lib/factsheet/compute";
 import type { DailyPrice, FactsheetPayload } from "@/lib/factsheet/types";
 
@@ -111,7 +111,7 @@ function barsRow(payload: FactsheetPayload, year: string): { labels: string[]; b
 describe("169.5-04 comparator dailyReturns: null wherever the comparator has no return", () => {
   it("prices ending 10 days before the strategy: the last 10 days are null, the rest the helper's series", () => {
     const p = closes("2024-12-19", "2025-01-21");
-    const a = alignCoveredReturns(p, [], DATES);
+    const a = alignCoveredReturns(p, [], DATES, CALENDAR_7D);
     const b = buildComparatorBlock("BTC-USD", "BTC", a, STRAT, cumEq(STRAT), DATES, 0.2, 5, 5, 365, 365);
     expect(b.dailyReturns).toEqual(a.returns);
     expect(b.dailyReturns!.slice(-10)).toEqual(Array(10).fill(null));
@@ -121,14 +121,14 @@ describe("169.5-04 comparator dailyReturns: null wherever the comparator has no 
   });
 
   it("no close before the first strategy date: dailyReturns[0] is null, never 0 (D-64)", () => {
-    const a = alignCoveredReturns(closes("2024-12-20", "2025-01-31"), [], DATES);
+    const a = alignCoveredReturns(closes("2024-12-20", "2025-01-31"), [], DATES, CALENDAR_7D);
     const b = buildComparatorBlock("BTC-USD", "BTC", a, STRAT, cumEq(STRAT), DATES, 0.2, 5, 5, 365, 365);
     expect(b.dailyReturns![0]).toBeNull();
   });
 
   it("a dropped close leaves its day null, never 0; the next day keeps its series value (D-58)", () => {
     const p = closes("2024-12-19", "2025-01-31");
-    const a = alignCoveredReturns(p, ["2025-01-10"], DATES);
+    const a = alignCoveredReturns(p, ["2025-01-10"], DATES, CALENDAR_7D);
     const b = buildComparatorBlock("BTC-USD", "BTC", a, STRAT, cumEq(STRAT), DATES, 0.2, 5, 5, 365, 365);
     const i = DATES.indexOf("2025-01-10");
     expect(b.dailyReturns![i]).toBeNull();

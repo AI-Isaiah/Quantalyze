@@ -47,7 +47,7 @@ vi.mock("@/lib/factsheet/benchmarks", async (importOriginal) => ({
 
 import { buildFactsheetPayload } from "./build-payload";
 import type { BenchmarkPricesOpt } from "./build-payload";
-import { alignCoveredReturns } from "./align";
+import { alignCoveredReturns, CALENDAR_7D, CALENDAR_WEEKDAY } from "./align";
 import { compute } from "./compute";
 import { jointMetrics } from "./joint";
 import { BTC_DAILY } from "./benchmarks";
@@ -126,7 +126,7 @@ describe("169.5-01 SC3: BTC coverage, `through` and null windows", () => {
       { date: "2026-03-05", close: 105 },
       { date: "2026-03-06", close: 104 },
     ];
-    const a = alignCoveredReturns(prices, [], days("2026-03-01", "2026-03-06"));
+    const a = alignCoveredReturns(prices, [], days("2026-03-01", "2026-03-06"), CALENDAR_7D);
     const expected = [0.02, -0.02, 0.010404161664665956, -0.00990099009900991, 0.05, -0.00952380952380949];
     expected.forEach((v, i) => expect(a.returns[i], `index ${i}`).toBeCloseTo(v, 12));
     expect(a.paired).toEqual([true, true, true, true, true, true]);
@@ -150,7 +150,7 @@ describe("169.5-01 D-54 / D-64: interval pairing by the engine's rule", () => {
 
   it("weekday strategy vs contiguous 7-day BTC: Monday pairs with the Friday-to-Monday move (166.4 D-A)", () => {
     const dates = weekdays("2026-03-02", "2026-03-13");
-    const a = alignCoveredReturns(btc, [], dates);
+    const a = alignCoveredReturns(btc, [], dates, CALENDAR_7D);
     const mon = dates.indexOf("2026-03-09");
     expect(a.returns[mon]).toBeCloseTo(-0.026243567571196724, 12);
     expect(a.returns[mon]).not.toBeCloseTo(-0.022917000036408064, 6); // never Sunday-to-Monday
@@ -160,7 +160,7 @@ describe("169.5-01 D-54 / D-64: interval pairing by the engine's rule", () => {
   it("D-64 interior gap: a Saturday missing inside (Fri, Mon] keeps the series value and is NOT paired; joint excludes it", () => {
     const gapped = btc.filter((p) => p.date !== "2026-03-07");
     const dates = weekdays("2026-03-02", "2026-03-20");
-    const a = alignCoveredReturns(gapped, [], dates);
+    const a = alignCoveredReturns(gapped, [], dates, CALENDAR_7D);
     const gapMon = dates.indexOf("2026-03-09");
     expect(a.returns[gapMon]).toBeCloseTo(-0.026243567571196724, 12);
     expect(a.paired[gapMon]).toBe(false);
@@ -179,7 +179,7 @@ describe("169.5-01 D-54 / D-64: interval pairing by the engine's rule", () => {
 
   it("D-64 own calendar: a weekday strategy vs a Monday-to-Friday benchmark pairs every Monday", () => {
     const dates = weekdays("2026-03-02", "2026-03-27");
-    const a = alignCoveredReturns(SYN_SPX, [], dates);
+    const a = alignCoveredReturns(SYN_SPX, [], dates, CALENDAR_WEEKDAY);
     const mondays = dates.map((d, i) => [d, i] as const).filter(([d]) => dow(d) === 1);
     expect(mondays.length).toBe(4);
     for (const [d, i] of mondays) expect(a.paired[i], d).toBe(true);
@@ -191,7 +191,7 @@ describe("169.5-01 D-54 / D-64: interval pairing by the engine's rule", () => {
       { date: "2026-03-04", close: 103 },
       { date: "2026-03-05", close: 101 },
     ];
-    const a = alignCoveredReturns(prices, [], days("2026-03-01", "2026-03-05"));
+    const a = alignCoveredReturns(prices, [], days("2026-03-01", "2026-03-05"), CALENDAR_7D);
     expect(a.returns.slice(0, 3)).toEqual([null, null, null]);
     expect(a.paired.slice(0, 3)).toEqual([false, false, false]);
     expect(a.returns[3]).toBeCloseTo(0.030000000000000027, 12);
@@ -203,7 +203,7 @@ describe("169.5-01 D-54 / D-64: interval pairing by the engine's rule", () => {
   it("a dropped close is never bridged: both intervals touching it are null and out of the summary", () => {
     const dates = days("2026-03-01", "2026-03-06");
     const prices = btc.filter((p) => p.date !== "2026-03-03");
-    const a = alignCoveredReturns(prices, ["2026-03-03"], dates);
+    const a = alignCoveredReturns(prices, ["2026-03-03"], dates, CALENDAR_7D);
     expect(a.returns[2]).toBeNull();
     expect(a.returns[3]).toBeNull();
     const block = build(STRATEGY, dates, opt(prices, ["2026-03-03"])).comparators.btc;
@@ -219,7 +219,7 @@ describe("169.5-01 D-54 / D-64: interval pairing by the engine's rule", () => {
     const dates = days("2026-03-01", "2026-03-10");
     const k = dates.indexOf("2026-03-04");
     const prices = btc.filter((p) => p.date !== "2026-03-04");
-    const a = alignCoveredReturns(prices, [], dates);
+    const a = alignCoveredReturns(prices, [], dates, CALENDAR_7D);
     expect(a.returns[k]).toBeNull();
     const k1 = close(btc, "2026-03-05") / close(btc, "2026-03-03") - 1;
     expect(a.returns[k + 1]).toBeCloseTo(k1, 12);
@@ -242,7 +242,7 @@ describe("169.5-01 D-54 / D-64: interval pairing by the engine's rule", () => {
 
   it("D-58 weekday comparator vs a 7-day strategy: weekend null, Monday the Friday-to-Monday move, unpaired", () => {
     const dates = days("2026-03-05", "2026-03-10");
-    const a = alignCoveredReturns(SYN_SPX, [], dates);
+    const a = alignCoveredReturns(SYN_SPX, [], dates, CALENDAR_WEEKDAY);
     expect(a.returns[dates.indexOf("2026-03-07")]).toBeNull();
     expect(a.returns[dates.indexOf("2026-03-08")]).toBeNull();
     const mon = dates.indexOf("2026-03-09");
@@ -296,13 +296,13 @@ describe("169.5-01 D-59: a comparator's summary annualizes on the smaller of the
   });
 
   it("index 0 (D-64, 166.4 D-05): Saturday start null; Tuesday and Monday start the comparator's own return; BTC with no prior close null", () => {
-    const sat = alignCoveredReturns(SYN_SPX, [], days("2026-03-07", "2026-03-12"));
+    const sat = alignCoveredReturns(SYN_SPX, [], days("2026-03-07", "2026-03-12"), CALENDAR_WEEKDAY);
     expect(sat.returns[0]).toBeNull();
     expect(sat.paired[0]).toBe(false);
-    const tue = alignCoveredReturns(SYN_SPX, [], days("2026-03-03", "2026-03-08"));
+    const tue = alignCoveredReturns(SYN_SPX, [], days("2026-03-03", "2026-03-08"), CALENDAR_WEEKDAY);
     expect(tue.returns[0]).toBeCloseTo(0.020319004939995722, 12);
     expect(tue.paired[0]).toBe(true);
-    const mon = alignCoveredReturns(SYN_SPX, [], days("2026-03-02", "2026-03-08"));
+    const mon = alignCoveredReturns(SYN_SPX, [], days("2026-03-02", "2026-03-08"), CALENDAR_WEEKDAY);
     expect(mon.returns[0]).toBeCloseTo(0.004702994841308872, 12);
     expect(mon.paired[0]).toBe(true);
     const firstClose = alignCoveredReturns(
@@ -312,6 +312,7 @@ describe("169.5-01 D-59: a comparator's summary annualizes on the smaller of the
       ],
       [],
       ["2026-03-01", "2026-03-02"],
+      CALENDAR_7D,
     );
     expect(firstClose.returns[0]).toBeNull();
     expect(firstClose.paired[0]).toBe(false);

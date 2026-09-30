@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildComparatorBlock } from "./comparator-block";
-import { alignCoveredReturns } from "./align";
+import { alignCoveredReturns, CALENDAR_7D, CALENDAR_WEEKDAY } from "./align";
 import { compute, cumEq } from "./compute";
 import type { DailyPrice } from "./types";
 
@@ -28,7 +28,7 @@ const DATES = days("2026-01-01", 200); // to 2026-07-19
 const STRAT = DATES.map((_, i) => ((i % 7) - 3) / 200);
 
 function block(p: DailyPrice[]) {
-  const a = alignCoveredReturns(p, [], DATES);
+  const a = alignCoveredReturns(p, [], DATES, CALENDAR_7D);
   return { a, b: buildComparatorBlock("BTC-USD", "BTC", a, STRAT, cumEq(STRAT), DATES, 0.2, 30, 60, 365, 365) };
 }
 
@@ -93,7 +93,7 @@ describe("169.5 review WR-01: past coverage on the comparator's own calendar", (
   const WINDOWS = ["mtd", "ytd", "p3m", "p6m", "p1y"] as const;
 
   function spxBlock(spx: DailyPrice[], dates: string[], strat: number[]) {
-    const a = alignCoveredReturns(spx, [], dates);
+    const a = alignCoveredReturns(spx, [], dates, CALENDAR_WEEKDAY);
     return { a, b: buildComparatorBlock("S&P 500", "SPX", a, strat, cumEq(strat), dates, 0.2, 30, 60, 365, 252) };
   }
 

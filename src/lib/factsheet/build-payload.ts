@@ -1,5 +1,5 @@
 import type { BenchmarkPricesOpt, CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, BasisSeriesBundle, TrustTierKind, IngestSource } from "./types";
-import { alignCoveredReturns } from "./align";
+import { alignCoveredReturns, COMPARATOR_CALENDARS } from "./align";
 import type { CoveredAlignment } from "./align";
 import { compute, cumEq, worstDrawdowns, arithmeticEquity, arithmeticUnderwater } from "./compute";
 import { overlayBasisScalars } from "./basis-metrics";
@@ -130,13 +130,13 @@ function alignComparators(
   const btc =
     "unavailable" in benchmarkPrices
       ? null
-      : alignCoveredReturns(benchmarkPrices.prices, benchmarkPrices.dropped, dates);
+      : alignCoveredReturns(benchmarkPrices.prices, benchmarkPrices.dropped, dates, COMPARATOR_CALENDARS.btc);
   return {
     btc,
-    spx: alignCoveredReturns(SPX_DAILY, [], dates),
-    eth: alignCoveredReturns(ETH_DAILY, [], dates),
-    gld: alignCoveredReturns(GLD_DAILY, [], dates),
-    ief: alignCoveredReturns(IEF_DAILY, [], dates),
+    spx: alignCoveredReturns(SPX_DAILY, [], dates, COMPARATOR_CALENDARS.spx),
+    eth: alignCoveredReturns(ETH_DAILY, [], dates, COMPARATOR_CALENDARS.eth),
+    gld: alignCoveredReturns(GLD_DAILY, [], dates, COMPARATOR_CALENDARS.gld),
+    ief: alignCoveredReturns(IEF_DAILY, [], dates, COMPARATOR_CALENDARS.ief),
   };
 }
 
@@ -173,7 +173,7 @@ export function fixtureBenchmarkPrices(axes: ReadonlyArray<readonly DailyReturn[
 
 /** The unavailable alignment: every return null, nothing paired. */
 function unavailableAlignment(n: number): CoveredAlignment {
-  return { returns: new Array(n).fill(null), paired: new Array(n).fill(false), through: null };
+  return { returns: new Array(n).fill(null), paired: new Array(n).fill(false), through: null, coveredToEnd: false };
 }
 
 /**
@@ -375,7 +375,12 @@ export function deriveSeriesBundle(
   //
   // Phase 169.5 (SC3, D-54, D-58 amendment): every cell is computed over the
   // intervals paired for BOTH legs; the strategy leg counts as paired everywhere.
-  const stratAl: CoveredAlignment = { returns: stratRet, paired: stratRet.map(() => true), through: null };
+  const stratAl: CoveredAlignment = {
+    returns: stratRet,
+    paired: stratRet.map(() => true),
+    through: null,
+    coveredToEnd: false,
+  };
   const correlations: CorrelationRow[] = [
     { name: "BTC", rho: pairedCorr(stratAl, btcAl) },
     { name: "ETH", rho: pairedCorr(stratAl, al.eth) },

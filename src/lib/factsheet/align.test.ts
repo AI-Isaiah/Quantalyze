@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { alignCoveredReturns } from "./align";
+import { alignCoveredReturns, CALENDAR_7D } from "./align";
 
 /**
  * The interval-pairing rule these cases pin is Phase 166.4 BENCHALIGN founder decision D-A
@@ -14,7 +14,7 @@ describe("alignCoveredReturns", () => {
       { date: "2024-01-01", close: 100 },
       { date: "2024-01-03", close: 110 },
     ];
-    const a = alignCoveredReturns(prices, [], ["2024-01-01", "2024-01-02", "2024-01-03"]);
+    const a = alignCoveredReturns(prices, [], ["2024-01-01", "2024-01-02", "2024-01-03"], CALENDAR_7D);
     expect(a.returns[0]).toBeNull(); // no close before 01-01 (D-64 day one)
     expect(a.returns[1]).toBeNull(); // no close dated 01-02 (D-58)
     expect(a.returns[2]).toBeCloseTo(0.1, 12); // the move between two real closes (D-58 amendment)
@@ -22,7 +22,7 @@ describe("alignCoveredReturns", () => {
   });
 
   it("a lone close has no prior close: day one is null, never 0", () => {
-    const a = alignCoveredReturns([{ date: "2024-01-01", close: 50 }], [], ["2024-01-01"]);
+    const a = alignCoveredReturns([{ date: "2024-01-01", close: 50 }], [], ["2024-01-01"], CALENDAR_7D);
     expect(a.returns).toEqual([null]);
     expect(a.paired).toEqual([false]);
   });
@@ -35,20 +35,21 @@ describe("alignCoveredReturns", () => {
       ],
       [],
       ["2024-01-01"],
+      CALENDAR_7D,
     );
     expect(a.returns[0]).toBeCloseTo(0.25, 12);
     expect(a.paired).toEqual([true]);
   });
 
   it("the prior close unavailable: both indices null (D-09, D-54, D-64)", () => {
-    const a = alignCoveredReturns([{ date: "2024-01-02", close: 100 }], [], ["2024-01-01", "2024-01-02"]);
+    const a = alignCoveredReturns([{ date: "2024-01-02", close: 100 }], [], ["2024-01-01", "2024-01-02"], CALENDAR_7D);
     expect(a.returns).toEqual([null, null]);
     expect(a.paired).toEqual([false, false]);
   });
 
   it("a day missing INTERIOR to one interval (weekday strategy, BTC Saturday missing): exact Monday/Friday ratio, NOT paired (d1d1fc077)", () => {
-    // 2024-01-05 is a Friday, 2024-01-08 a Monday. The week before is contiguous,
-    // so BTC's own calendar (every weekday it carries a close on) is all seven days.
+    // 2024-01-05 is a Friday, 2024-01-08 a Monday. BTC's calendar is all seven days,
+    // passed in (review WR-02), never inferred from these closes.
     const prices = [
       ...["2023-12-30", "2023-12-31", "2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"].map((date, i) => ({
         date,
@@ -58,9 +59,28 @@ describe("alignCoveredReturns", () => {
       { date: "2024-01-07", close: 104 },
       { date: "2024-01-08", close: 98 },
     ];
-    const a = alignCoveredReturns(prices, [], ["2024-01-05", "2024-01-08"]);
+    const a = alignCoveredReturns(prices, [], ["2024-01-05", "2024-01-08"], CALENDAR_7D);
     expect(a.returns[1]).toBeCloseTo(98 / 100 - 1, 12);
     expect(a.paired[1]).toBe(false);
+  });
+
+  it("review WR-02 / SFH-M-03: the calendar is BTC's seven days even when the window's only Saturday is missing", () => {
+    // Weekday strategy Thu 2025-01-02, Fri 01-03, Mon 01-06, Tue 01-07. BTC closes daily
+    // from 2025-01-01 with Saturday 01-04 missing, and the window holds no other Saturday.
+    // Inferring the calendar from these closes would drop Saturday, so (Fri, Mon] would
+    // expect 2 points, find 2 (Sunday bridges Fri->Sun) and pair. The engine infers from
+    // BTC's full stored history, expects 3, and leaves it unpaired.
+    const prices = [
+      { date: "2025-01-01", close: 100 },
+      { date: "2025-01-02", close: 101 },
+      { date: "2025-01-03", close: 103 },
+      { date: "2025-01-05", close: 99 },
+      { date: "2025-01-06", close: 102 },
+      { date: "2025-01-07", close: 104 },
+    ];
+    const a = alignCoveredReturns(prices, [], ["2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07"], CALENDAR_7D);
+    expect(a.paired).toEqual([true, true, false, true]);
+    expect(a.returns[2]).toBeCloseTo(102 / 103 - 1, 12); // the series keeps the real move (D-64(2))
   });
 
   it("the base close (166.4 D-07): a strategy date equal to the first close pairs the next interval", () => {
@@ -68,7 +88,7 @@ describe("alignCoveredReturns", () => {
       { date: "2024-01-02", close: 100 },
       { date: "2024-01-03", close: 105 },
     ];
-    const a = alignCoveredReturns(prices, [], ["2024-01-01", "2024-01-02", "2024-01-03"]);
+    const a = alignCoveredReturns(prices, [], ["2024-01-01", "2024-01-02", "2024-01-03"], CALENDAR_7D);
     expect(a.returns.slice(0, 2)).toEqual([null, null]);
     expect(a.returns[2]).toBeCloseTo(0.05, 12);
     expect(a.paired).toEqual([false, false, true]);
@@ -80,7 +100,7 @@ describe("alignCoveredReturns", () => {
       { date: "2024-01-02", close: 101 },
       { date: "2024-01-03", close: 102 },
     ];
-    const a = alignCoveredReturns(prices, [], ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]);
+    const a = alignCoveredReturns(prices, [], ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"], CALENDAR_7D);
     expect(a.through).toBe("2024-01-03");
     expect(a.returns[2]).toBeNull();
     expect(a.returns[3]).toBeNull();

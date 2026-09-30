@@ -102,7 +102,7 @@ import {
   BENCHMARK_UNAVAILABLE_MESSAGE,
 } from "./fetch-and-build-payload";
 import { buildFactsheetPayload } from "./build-payload";
-import { alignCoveredReturns } from "./align";
+import { alignCoveredReturns, CALENDAR_7D } from "./align";
 import { compute } from "./compute";
 import { BTC_DAILY } from "./benchmarks";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -260,7 +260,7 @@ describe("169.5-01 SC3: the route reads BTC from the database", () => {
     const opt = await readFactsheetBenchmark(createAdminClient(), cash, undefined);
     if ("unavailable" in opt) throw new Error("expected prices");
     expect(opt.prices.some((p) => p.date === "2024-01-01")).toBe(false);
-    const a = alignCoveredReturns(opt.prices, opt.dropped, cash.map((r) => r.date));
+    const a = alignCoveredReturns(opt.prices, opt.dropped, cash.map((r) => r.date), CALENDAR_7D);
     expect(a.returns[0]).toBeNull();
     expect(a.paired[0]).toBe(false);
   });

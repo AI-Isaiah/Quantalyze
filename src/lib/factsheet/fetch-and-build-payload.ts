@@ -38,7 +38,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { buildFactsheetPayload, deriveIngestSource, hasBuildableSeries, MIN_FACTSHEET_SERIES_POINTS } from "./build-payload";
 import type { BenchmarkPricesOpt, BuildFactsheetOpts } from "./build-payload";
-import { alignCoveredReturns } from "./align";
+import { alignCoveredReturns, COMPARATOR_CALENDARS } from "./align";
 import { mergeWithFixture, readBenchmarkPrices } from "./benchmark-source";
 import { BTC_DAILY } from "./benchmarks";
 import {
@@ -782,7 +782,7 @@ export async function readFactsheetBenchmark(
   if (prices.length === 0) return unavailableData("no_prices_in_window");
   const anyCovered = axes.some((axis) => {
     const dates = [...new Set(axis.filter((r) => r && typeof r.date === "string").map((r) => r.date))].sort();
-    return dates.length > 0 && alignCoveredReturns(prices, dropped, dates).returns.some((r) => r !== null);
+    return dates.length > 0 && alignCoveredReturns(prices, dropped, dates, COMPARATOR_CALENDARS.btc).returns.some((r) => r !== null);
   });
   if (!anyCovered) return unavailableData("no_covered_interval");
   return { prices, through: prices[prices.length - 1].date, dropped };
