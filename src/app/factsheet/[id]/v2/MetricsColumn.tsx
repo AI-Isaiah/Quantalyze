@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import type { FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
 import { formatRecordLength } from "@/lib/factsheet/record-length";
+import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
 import { usePayload, useActiveComparator } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, type Basis } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel } from "./AnalyticalPanels";
@@ -104,7 +105,10 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // comparator's figures run to, next to the numbers. Full coverage, an
   // unavailable comparator (every figure already "—") and an absent `through`
   // leave the header as it was.
-  const benchThrough = comparatorPartialThrough(jointCmp.through, view.dates[view.dates.length - 1]);
+  const benchThrough =
+    cmpKey === "none"
+      ? null
+      : comparatorPartialThrough(jointCmp.through, view.dates[view.dates.length - 1], COMPARATOR_CALENDARS[cmpKey]);
   const bnDated = bn != null && benchThrough != null ? `${bn} to ${isoToMonthDay(benchThrough)}` : bn;
   // Phase 167.1.2 plan 07 (SC-5b) — observations per year for the Main Metrics
   // warning, read from the payload this rail already renders. Absent (a stale
@@ -384,34 +388,43 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 
 /** The factsheet's "Mon D, YYYY" date (UTC); "—" for an empty or unparseable input. */
 /**
- * Phase 169.5 (SFH-M-05) — the comparator's `through` when it is EARLIER than the
- * strategy's last date (its figures then cover a shorter span), else null. Null
+ * Phase 169.5 (SFH-M-05) — the comparator's `through` when its prices stop before
+ * the strategy's last date (its figures then cover a shorter span), else null. Null
  * for an unavailable comparator (`through: null`, every figure is already "—"),
- * an absent `through` (a hand-built block, D-21) and full coverage. The comparison
- * is the ISO-string one `buildComparatorBlock` uses for its `pastThrough` windows.
+ * an absent `through` (a hand-built block, D-21) and full coverage. "Stop before"
+ * is read on the comparator's OWN `calendar` through `isPastCoverage`, the rule
+ * `buildComparatorBlock`'s `pastThrough` windows and the picker caption use (review
+ * round 2 MR-01): SPX through a Friday covers a strategy ending that weekend.
  */
 export function comparatorPartialThrough(
   through: string | null | undefined,
   lastDate: string | undefined,
+  calendar: WeekdayCalendar,
 ): string | null {
   if (typeof through !== "string" || lastDate === undefined) return null;
-  return through < lastDate ? through : null;
+  return isPastCoverage(through, lastDate, calendar) ? through : null;
 }
 
 /**
  * Phase 169.5 (SFH-M-05) — the calendar year whose comparator figure is compounded
- * over part of the year only: the year of `through` when the strategy has a date
- * after `through` in that same year. Null otherwise (a later year with no covered
- * comparator day already reads "—").
+ * over part of the year only: the year of `through` when a day of the comparator's
+ * own `calendar` lies between `through` and the strategy's last date in that same
+ * year (`isPastCoverage`, review round 2 MR-01). Null otherwise: SPX through Friday
+ * Dec 29 with the strategy's year ending on the weekend is a whole year, and a later
+ * year with no covered comparator day already reads "—".
  */
 export function comparatorPartialYear(
   through: string | null | undefined,
   dates: readonly string[],
+  calendar: WeekdayCalendar,
 ): string | null {
-  const t = comparatorPartialThrough(through, dates[dates.length - 1]);
-  if (t == null) return null;
-  const year = t.slice(0, 4);
-  return dates.some(d => d > t && d.slice(0, 4) === year) ? year : null;
+  if (typeof through !== "string") return null;
+  const year = through.slice(0, 4);
+  let lastInYear: string | undefined;
+  for (const d of dates) {
+    if (d.slice(0, 4) === year && (lastInYear === undefined || d > lastInYear)) lastInYear = d;
+  }
+  return comparatorPartialThrough(through, lastInYear, calendar) != null ? year : null;
 }
 
 export function isoToMonthDay(iso: string): string {
@@ -735,7 +748,7 @@ function EoyReturnsPanel() {
   const hasBench = cmpKey !== "none";
   const years = Array.from(new Set([...Object.keys(stratYearly), ...Object.keys(benchYearly)])).sort();
   // SFH-M-05 (keeps D-54): the year whose comparator cell covers part of it only.
-  const partialYear = hasBench ? comparatorPartialYear(cmp.through, view.dates) : null;
+  const partialYear = hasBench ? comparatorPartialYear(cmp.through, view.dates, COMPARATOR_CALENDARS[cmpKey]) : null;
   if (years.length === 0) return null;
   return (
     <Panel title="EOY Returns" benchHeader={hasBench ? cmp.shortName : undefined}>

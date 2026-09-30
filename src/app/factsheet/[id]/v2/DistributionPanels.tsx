@@ -6,6 +6,7 @@ import { useBasisSeriesView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { comparatorPartialYear, isoToMonthDay } from "./MetricsColumn";
+import { COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
 
 /**
  * Three compact analytical panels sharing a common visual language:
@@ -41,7 +42,7 @@ export function EndOfYearBarsPanel() {
   const hasBench = cmpKey !== "none" && Array.isArray(vcmp.dailyReturns);
   // Phase 169.5 (SFH-M-05, keeps D-54): the year whose comparator bar compounds
   // part of the year only, dated in the subtitle beside the bars.
-  const partialYear = hasBench ? comparatorPartialYear(vcmp.through, view.dates) : null;
+  const partialYear = hasBench ? comparatorPartialYear(vcmp.through, view.dates, COMPARATOR_CALENDARS[cmpKey]) : null;
 
   // Strategy per-year compounded — already pre-aggregated in the basis bundle.
   const stratByYear = view.strategyMetrics.yearly;
