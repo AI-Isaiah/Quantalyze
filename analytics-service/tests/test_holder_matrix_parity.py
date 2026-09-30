@@ -116,8 +116,12 @@ async def test_the_derive_resolves_each_cell_as_the_table_says(cell: dict[str, A
     counted = expected["counted"]
     assert payload["inputs"]["n_keys"] == len(counted)
     terminal = payload["curve"][-1]["equity_usd"]
-    want = sum(TABLE["anchors"][name] for name in counted)
+    # Plan 09: a departed key counts up to its end day and then leaves the
+    # book, so the last day sums only the keys still in it (`terminal`,
+    # defaulting to every counted key).
+    at_terminal = expected.get("terminal", counted)
+    want = sum(TABLE["anchors"][name] for name in at_terminal)
     assert terminal == pytest.approx(want, rel=1e-9), (
-        f"counted {counted} should end at {want}; the curve ends at {terminal}"
+        f"{at_terminal} should end at {want}; the curve ends at {terminal}"
     )
     assert payload["is_trustworthy"] is expected["trustworthy"], payload["degrade_reasons"]

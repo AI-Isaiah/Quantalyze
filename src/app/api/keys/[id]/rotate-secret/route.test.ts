@@ -313,6 +313,10 @@ beforeEach(() => {
     user_id: OWNER.id,
     exchange: "mt5",
     venue_account_id: null,
+    // 167.1.2 C4 review CR-01: the liveness fields the pre-read now selects. A
+    // revoked-but-connected key: this write returns it to live.
+    disconnected_at: null,
+    is_active: true,
   };
   READ_STATE.error = null;
   READ_STATE.queries = [];
@@ -460,6 +464,10 @@ describe("PATCH /api/keys/[id]/rotate-secret — the happy path end-to-end", () 
       // CR-01: the third field `reconnect_allocator_api_key` clears — restores
       // fan-out eligibility, not just visibility.
       sync_status: "idle",
+      // Phase 167.1.2 plan 09: a revoked key comes back to live through this
+      // update, so the departed-history choice made while it was revoked is
+      // reset to the default rule here, as reconnect_allocator_api_key does.
+      history_inclusion: null,
       // WR-03: disconnected_at is NEVER touched — every writer of it at HEAD
       // is the user-initiated Disconnect button, so clearing it here would
       // silently reconnect a deliberately parked key.
@@ -801,11 +809,64 @@ describe("PATCH /api/keys/[id]/rotate-secret — D-05 / CR-01: clear the failure
     // WR-03: disconnected_at is never part of the payload at all — asserted
     // as an absence, not merely an unmatched-object omission (toMatchObject
     // above would pass even if the key were present with a different value).
-    // The route does not even SELECT this column (see the ownership read
-    // above), so it has no way to reconnect a row it never inspected — the
-    // strongest available proof that a deliberately-disconnected row cannot
-    // be silently reconnected by a password fix.
+    // The pre-read SELECTs disconnected_at (167.1.2 C4 review CR-01) only to
+    // decide whether this write returns the key to live; it is never written,
+    // so a deliberately-disconnected row cannot be silently reconnected by a
+    // password fix.
     expect(ADMIN_STATE.updates[0].payload).not.toHaveProperty("disconnected_at");
+  });
+
+  it("resets history_inclusion to NULL when the write returns a revoked key to live, so a choice made while it was revoked never carries over to its next departure (167.1.2 plan 09)", async () => {
+    // COMMENT ON COLUMN api_keys.history_inclusion binds EVERY path that returns
+    // a departed key to live. A revoked key (disconnected_at NULL, active)
+    // returns here (sync_status 'idle'), not through
+    // reconnect_allocator_api_key, so without the reset an 'include' chosen
+    // for one revocation silently applied to the next.
+    READ_STATE.row = { ...READ_STATE.row!, disconnected_at: null, is_active: true };
+    await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(ADMIN_STATE.updates).toHaveLength(1);
+    expect(ADMIN_STATE.updates[0].payload).toHaveProperty("history_inclusion", null);
+    expect(ADMIN_STATE.updates[0].payload).toMatchObject({ sync_status: "idle" });
+  });
+
+  it("KEEPS the owner's history choice when the key stays disconnected: the payload carries no history_inclusion (167.1.2 C4 review CR-01)", async () => {
+    // "Update password" also shows on a DISCONNECTED MT5 card, and this route
+    // never clears disconnected_at (WR-03). The key is still departed after
+    // the write, so the owner's include/exclude choice for it still applies.
+    // Writing NULL here reverted it to the default rule with no word to the
+    // owner, and changed the book on the next unrelated recompose.
+    READ_STATE.row = {
+      ...READ_STATE.row!,
+      disconnected_at: "2026-09-20T10:00:00.000Z",
+      is_active: true,
+    };
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(200);
+    expect(ADMIN_STATE.updates).toHaveLength(1);
+    expect(ADMIN_STATE.updates[0].payload).not.toHaveProperty("history_inclusion");
+    // The password fix and the status clear still land; the key stays parked.
+    expect(ADMIN_STATE.updates[0].payload).toMatchObject({
+      sync_error: null,
+      sync_status: "idle",
+      api_key_encrypted: SEAM_SUCCESS_BODY.api_key_encrypted,
+    });
+    expect(ADMIN_STATE.updates[0].payload).not.toHaveProperty("disconnected_at");
+  });
+
+  it("KEEPS the owner's history choice on an INACTIVE key: is_active=false stays departed after the write (167.1.2 C4 review CR-01)", async () => {
+    // Mirrors isLiveKey (src/lib/departed-history.ts): active AND not revoked
+    // AND not disconnected. This route never restores is_active, so an
+    // inactive key is still departed after it.
+    READ_STATE.row = { ...READ_STATE.row!, disconnected_at: null, is_active: false };
+    await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(ADMIN_STATE.updates).toHaveLength(1);
+    expect(ADMIN_STATE.updates[0].payload).not.toHaveProperty("history_inclusion");
+  });
+
+  it("the ownership pre-read selects the liveness fields the reset decision reads", async () => {
+    await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    const columns = (READ_STATE.queries[0]?.columns ?? "").split(",").map((c) => c.trim());
+    expect(columns).toEqual(expect.arrayContaining(["disconnected_at", "is_active"]));
   });
 });
 
@@ -858,6 +919,7 @@ describe("PATCH /api/keys/[id]/rotate-secret — the venue-identity 23505 backst
       api_key_encrypted: SEAM_SUCCESS_BODY.api_key_encrypted,
       sync_error: null,
       sync_status: "idle",
+      history_inclusion: null,
     });
   });
 

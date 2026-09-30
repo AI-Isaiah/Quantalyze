@@ -55,8 +55,152 @@ import { WatchlistPanel } from "./components/WatchlistPanel";
 import { OptimizerPanel } from "./components/OptimizerPanel";
 import { DashboardNoteCard } from "./components/DashboardNoteCard";
 import type { FavoriteRow, OptimizerPrefetch } from "./lib/watchlist-read";
+// Review C4 WR-01: the eligible-key rule (active, not revoked, not
+// disconnected), from the pure module the Exchanges page already uses.
+import { isLiveKey } from "@/lib/departed-history";
 
 /** Honest-empty optimizer state when the prop is absent (test harnesses). */
+/** A venue's display name. The exchange ids that need more than a capital. */
+const VENUE_NAMES: Readonly<Record<string, string>> = {
+  okx: "OKX",
+  mt5: "MT5",
+  sfox: "sFOX",
+};
+
+function venueName(exchange: string): string {
+  const id = exchange.trim().toLowerCase();
+  return VENUE_NAMES[id] ?? (id ? id.charAt(0).toUpperCase() + id.slice(1) : exchange);
+}
+
+/** "the Binance key Main", or "a Binance key" when the key is not in the list. */
+function keyPhrase(
+  apiKey: { exchange: string; label: string | null } | undefined,
+  venue: string,
+): string {
+  if (apiKey === undefined) return `a ${venueName(venue)} key`;
+  const label = (apiKey.label ?? "").trim();
+  return label
+    ? `the ${venueName(apiKey.exchange)} key ${label}`
+    : `the ${venueName(apiKey.exchange)} key`;
+}
+
+/** The UTC day before `today` (`YYYY-MM-DD`), or "" when `today` is not a day. */
+function dayBefore(today: string): string {
+  const ms = Date.parse(`${today}T00:00:00Z`);
+  if (Number.isNaN(ms)) return "";
+  return new Date(ms - 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * Review C4 SFH-C4-08, made absolute by round 2 SFH-R2-03. One sentence per
+ * key whose open positions were read on a day older than either the newest
+ * read in the book, or yesterday (UTC). D-16 keeps each key's own latest read
+ * on purpose ("never flat"), so a key that stopped reading (it failed, or
+ * disconnected) keeps showing its last read; this says how old it is.
+ *
+ * Comparing only to the newest read in the book never dated a one-key book, or
+ * a book whose keys are all equally stale, so a single key failing for weeks
+ * showed undated positions. `today` is the reference that closes that. The
+ * tolerance is one day because the daily poll runs at 04:00 UTC: between
+ * midnight and the poll, a healthy key's latest read is yesterday's. So a key
+ * whose last read is yesterday is not dated; one that has missed a whole day's
+ * poll is. Rows without a read day (legacy payloads) say nothing. The sentence
+ * sits beside the Open Positions table and names the positions it dates, since
+ * the table itself carries no date column.
+ */
+export function openPositionReadDayNotes(
+  derivativeRows: ReadonlyArray<{
+    api_key_id: string;
+    symbol: string;
+    venue: string;
+    asof?: string;
+  }>,
+  allRows: ReadonlyArray<{ asof?: string }>,
+  apiKeys: ReadonlyArray<{ id: string; exchange: string; label: string | null }>,
+  today: string,
+): string[] {
+  let newest = "";
+  for (const r of allRows) {
+    if (typeof r.asof === "string" && r.asof > newest) newest = r.asof;
+  }
+  // SFH-R2-03: a row is dated when it is older than the newest read in the
+  // book, or older than yesterday, whichever is later.
+  const yesterday = dayBefore(today);
+  const datedBefore = yesterday > newest ? yesterday : newest;
+  if (datedBefore === "") return [];
+  const byKey = new Map<string, { asof: string; venue: string; symbols: string[] }>();
+  for (const r of derivativeRows) {
+    if (typeof r.asof !== "string" || r.asof >= datedBefore) continue;
+    const entry = byKey.get(r.api_key_id);
+    if (entry) entry.symbols.push(r.symbol);
+    else byKey.set(r.api_key_id, { asof: r.asof, venue: r.venue, symbols: [r.symbol] });
+  }
+  const keysById = new Map(apiKeys.map((k) => [k.id, k]));
+  return Array.from(byKey.entries()).map(([keyId, { asof, venue, symbols }]) => {
+    const phrase = keyPhrase(keysById.get(keyId), venue);
+    return `Positions from ${phrase} are as last read on ${asof}: ${symbols.join(", ")}.`;
+  });
+}
+
+/**
+ * The venues whose holdings poll reads open positions through ccxt: every
+ * supported venue outside `NON_CCXT_VENUES` (mt5, sfox; closed_sets.py). On
+ * these a sync that finishes `complete_with_warnings` has exactly one cause:
+ * the derivative-side read failed and only the spot rows were saved
+ * (`fetch_allocator_holdings`, allocator_positions.py; a spot failure raises
+ * instead). MT5 and sFOX warnings mean something else, so they are left out.
+ */
+const CCXT_POSITION_VENUES: ReadonlySet<string> = new Set([
+  "binance",
+  "okx",
+  "bybit",
+  "deribit",
+]);
+
+/**
+ * Review C4 WR-01, bound to the rows by round 2 WR-R2-03. One sentence per key
+ * whose rows on screen were written by a poll that could not read its open
+ * positions (`partialPositionReads`, from `fetchLatestHoldingsPerKey`). That
+ * poll saved the spot rows at a newer day, so under D-16 (each key's rows at
+ * its own latest read) every open position of the key is missing from the
+ * table. Chosen over holding the key's latest read back to an older complete
+ * day: that would also show a stale spot book, and under repeated failures an
+ * arbitrarily old one.
+ *
+ * The line follows the poll that wrote the rows, never the key's current
+ * `sync_status`. A later poll that fails (a 429, a venue error) or is still
+ * running writes no rows, so the partial rows stay and so does the line. It
+ * clears only when a poll writes the key's rows again. A key that is no longer
+ * connected is not polled, so its sentence does not promise a sync.
+ */
+export function partialPositionReadNotes(
+  partialReads: ReadonlyArray<{ api_key_id: string; asof: string }>,
+  apiKeys: ReadonlyArray<{
+    id: string;
+    exchange: string;
+    label: string | null;
+    is_active: boolean;
+    sync_status: string | null;
+    disconnected_at: string | null;
+  }>,
+  rows: ReadonlyArray<{ api_key_id: string; venue: string }>,
+): string[] {
+  const keysById = new Map(apiKeys.map((k) => [k.id, k]));
+  const notes: string[] = [];
+  for (const { api_key_id, asof } of partialReads) {
+    const key = keysById.get(api_key_id);
+    const venue = key?.exchange ?? rows.find((r) => r.api_key_id === api_key_id)?.venue;
+    if (venue === undefined || !CCXT_POSITION_VENUES.has(venue.trim().toLowerCase())) continue;
+    const lead = `Open positions from ${keyPhrase(key, venue)} could not be read on its sync of ${asof}.`;
+    notes.push(
+      key !== undefined && isLiveKey(key)
+        ? `${lead} Any it holds are missing below until a sync reads them.`
+        : `${lead} Any it held then are missing below.`,
+    );
+  }
+  return notes;
+}
+
 const EMPTY_OPTIMIZER: OptimizerPrefetch = {
   portfolios: [],
   defaultPortfolioId: null,
@@ -253,6 +397,24 @@ export function HoldingsTabPanel(
     [derivativeHoldings, keyStatusById],
   );
 
+  // SFH-R2-03: the UTC day the tab was opened, the absolute reference the
+  // read-day note dates rows against. UTC so it matches `asof`, which the poll
+  // stamps in UTC.
+  const [today] = useState(() => new Date().toISOString().slice(0, 10));
+  const readDayNotes = useMemo(
+    () => openPositionReadDayNotes(derivativeHoldings, holdingsSummary, apiKeys, today),
+    [derivativeHoldings, holdingsSummary, apiKeys, today],
+  );
+
+  const partialPositionReads = useMemo(
+    () => props.partialPositionReads ?? [],
+    [props.partialPositionReads],
+  );
+  const partialReadNotes = useMemo(
+    () => partialPositionReadNotes(partialPositionReads, apiKeys, holdingsSummary),
+    [partialPositionReads, apiKeys, holdingsSummary],
+  );
+
   const allocatorPreferences = props.mandate
     ? { max_weight: props.mandate.max_weight }
     : null;
@@ -351,6 +513,24 @@ export function HoldingsTabPanel(
           onShowRevokedChange={setShowRevoked}
         />
         <OpenPositionsTable rows={openPositionRows} />
+        {partialReadNotes.map((note) => (
+          <p
+            key={note}
+            data-testid="open-positions-partial-read-note"
+            className="text-xs text-text-muted"
+          >
+            {note}
+          </p>
+        ))}
+        {readDayNotes.map((note) => (
+          <p
+            key={note}
+            data-testid="open-positions-read-day-note"
+            className="text-xs text-text-muted"
+          >
+            {note}
+          </p>
+        ))}
       </section>
     </div>
   );
