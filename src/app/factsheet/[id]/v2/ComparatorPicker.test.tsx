@@ -2,8 +2,9 @@ import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { buildFactsheetPayload, type BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
 import { BTC_DAILY } from "@/lib/factsheet/benchmarks";
-import type { FactsheetPayload } from "@/lib/factsheet/types";
+import type { BasisSeriesBundle, FactsheetPayload } from "@/lib/factsheet/types";
 import { FactsheetProvider, useActiveComparator } from "./factsheet-context";
+import { BasisProvider, useBasis } from "./basis-context";
 import { ComparatorPicker } from "./ComparatorPicker";
 
 // Regression: "None" radio was removed in favor of toggle-off semantics.
@@ -181,5 +182,45 @@ describe("ComparatorPicker coverage caption", () => {
     fireEvent.click(screen.getByRole("button", { name: /BTC/ }));
     expect(screen.getByTestId("active-comparator").textContent).toBe("none");
     expect(screen.queryByText(CAPTION)).toBeNull();
+  });
+});
+
+// Phase 169.5 review SFH-M-07: the caption reads the ACTIVE basis view. Nothing clamps
+// an MTM axis to the cash range, so an MTM series can end after the cash one. Here the
+// cash axis ends Sunday 2024-08-04 with BTC covering it, and the MTM axis runs two days
+// further with the same BTC close: the MTM windows are past BTC's coverage, and the
+// caption must say so under MTM while staying silent under cash.
+describe("ComparatorPicker coverage caption follows the active basis", () => {
+  const CAPTION = /prices (through|unavailable)/;
+
+  function ToMtm() {
+    const { setBasis } = useBasis();
+    return (
+      <button type="button" onClick={() => setBasis("mark_to_market")}>
+        to-mtm
+      </button>
+    );
+  }
+
+  it("dates BTC under MTM when the MTM axis ends after BTC's last close", () => {
+    const cash = makePayload();
+    expect(cash.comparators.btc.through).toBe("2024-08-04");
+    const mtm = {
+      ...cash,
+      dates: [...cash.dates, "2024-08-05", "2024-08-06"],
+      comparators: cash.comparators,
+    } as unknown as BasisSeriesBundle;
+    const payload = { ...cash, seriesByBasis: { mark_to_market: mtm } } as FactsheetPayload;
+    render(
+      <FactsheetProvider payload={payload}>
+        <BasisProvider>
+          <ComparatorPicker />
+          <ToMtm />
+        </BasisProvider>
+      </FactsheetProvider>,
+    );
+    expect(screen.queryByText(CAPTION)).toBeNull(); // cash: covered to its last date
+    fireEvent.click(screen.getByRole("button", { name: "to-mtm" }));
+    expect(screen.getByText("BTC prices through Aug 4, 2024")).toBeDefined();
   });
 });

@@ -2,6 +2,7 @@
 
 import { usePayload, useComparator } from "./factsheet-context";
 import { trackFactsheetEvent } from "./factsheet-analytics";
+import { useBasisSeriesView } from "./basis-context";
 import { isoToMonthDay } from "./MetricsColumn";
 import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
 
@@ -44,13 +45,18 @@ function coverageCaption(
 export function ComparatorPicker() {
   const payload = usePayload();
   const { comparator, setComparator } = useComparator();
+  // Phase 169.5 review SFH-M-07: the caption reads the ACTIVE basis view, the same
+  // comparator block and date axis the windows and chart lines come from. Nothing
+  // clamps an MTM or smoothed axis to the cash range (D-64(4) Amendment A), so the
+  // cash block can be covered while the active one is not.
+  const view = useBasisSeriesView(payload);
   const caption =
     comparator === "none"
       ? null
       : coverageCaption(
           LABELS[comparator],
-          payload.comparators[comparator].through,
-          payload.dates[payload.dates.length - 1],
+          view.comparators[comparator].through,
+          view.dates[view.dates.length - 1],
           COMPARATOR_CALENDARS[comparator],
         );
   return (
