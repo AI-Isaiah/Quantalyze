@@ -771,7 +771,7 @@ export default async function StrategiesPage() {
             const shareNote = shareNotes.get(s.id);
             return (
               <Card key={s.id} data-testid="strategy-row">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div className="flex-1 min-w-0">
                     <Link href={`/strategies/${s.id}/edit`} className="font-medium text-text-primary hover:text-accent transition-colors">
                       <NowrapWords text={s.name} />
@@ -787,7 +787,7 @@ export default async function StrategiesPage() {
                       </p>
                     )}
                   </div>
-                  <div className="flex flex-wrap items-center gap-3 sm:ml-4 sm:shrink-0">
+                  <div className="flex flex-wrap items-center gap-3 md:ml-4 md:shrink-0">
                     {/* Phase 164 (SHARE-04) — the status gate is GONE, and its
                         removal is the point, not a side effect. Hiding the control
                         for unpublished rows was the other half of the same

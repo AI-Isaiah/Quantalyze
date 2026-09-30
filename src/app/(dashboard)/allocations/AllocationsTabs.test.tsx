@@ -290,6 +290,29 @@ describe("AllocationsTabs — Phase 170 item (a) narrow header strip", () => {
     }
   });
 
+  // WHY (GC-01, 2026-09-30): the tab strip is ONE scrolling line at every
+  // width. It must never wrap into a second line of tabs and never switch to
+  // visible overflow at a breakpoint. CI run 36764778803 measured both
+  // failure modes of the old `sm:flex-wrap sm:overflow-x-visible` pair: at
+  // V640 scrollWidth=264 == clientWidth=264 (the strip had stopped
+  // scrolling), and at V960 the tablist sat 13 px off the Export row (it had
+  // wrapped). From sm up it keeps sm:basis-auto, so it shares the action row
+  // with Export and shrinks, scrolling inside itself only when it must.
+  it("[GC-01] the tablist never wraps and never switches to visible overflow at any breakpoint", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const tablist = screen.getByRole("tablist", { name: "Allocation surfaces" });
+    const tokens = tablist.className.split(/\s+/).filter(Boolean);
+    // Strip any responsive/state prefix ("sm:", "md:hover:", …) so a wrap or
+    // visible-overflow token cannot hide behind a breakpoint.
+    const utilities = tokens.map((t) => t.slice(t.lastIndexOf(":") + 1));
+    expect(utilities).not.toContain("flex-wrap");
+    expect(utilities).not.toContain("overflow-x-visible");
+    for (const token of ["flex-nowrap", "overflow-x-auto", "min-w-0", "sm:basis-auto"]) {
+      expect(tokens).toContain(token);
+    }
+  });
+
   // WHY: the action row must be allowed to shrink and wrap so Export and
   // + Allocation drop to their own right-aligned row instead of widening
   // the page. justify-end keeps that wrapped row right-aligned.
