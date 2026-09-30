@@ -1,10 +1,13 @@
 "use client";
 
 import { useMemo } from "react";
+import { z } from "zod";
 import { normalizeDailyReturns, compound } from "@/lib/portfolio-math-utils";
-import { computeAlphaBeta } from "@/lib/portfolio-stats";
 import { dispersion } from "@/lib/return-stats";
 import { annualizationPeriods } from "@/lib/closed-sets";
+import { alignCoveredReturns, COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
+import { jointMetrics } from "@/lib/factsheet/joint";
+import { ALLOCATOR_PORTFOLIO_ASSET_CLASS } from "@/lib/factsheet/allocator-portfolio-payload";
 import {
   BarChart,
   Bar,
@@ -15,128 +18,135 @@ import {
 } from "recharts";
 import { TouchTooltip } from "@/components/charts/TouchTooltip";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
-import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
+import { riskWidgetDataSchema } from "../lib/widget-data";
 
 /**
- * Alpha/Beta Decomposition — decomposes portfolio returns into
- * Alpha (skill), Beta contribution (market), and Residual.
- *
- * Uses computeAlphaBeta() with portfolio daily returns vs an
- * equal-weight benchmark of all strategies.
+ * Phase 169.4 plan 02 (SC2, D-69). The widget-local contract: the shared risk
+ * contract plus the three dashboard fields this widget reads. Kept here, not in
+ * `widget-data.ts`, so no other widget's contract moves. `dailyPointSchema` is
+ * not exported there, so the `{ date, value }` shape is declared locally.
+ * `btcBenchmarkPrices` is the dashboard's `BenchmarkPricesOpt` (closes, or the
+ * unavailable marker); an array of daily points (the equity chart's BTC form)
+ * matches neither branch and the boundary rejects it.
  */
-function AlphaBetaDecompositionInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
+const bookDailyReturnSchema = z.object({ date: z.string(), value: z.number() });
+const btcBenchmarkPricesSchema = z.union([
+  z.object({
+    prices: z.array(z.object({ date: z.string(), close: z.number() })),
+    through: z.string().nullable(),
+    dropped: z.array(z.string()),
+  }),
+  z.object({ unavailable: z.literal(true) }),
+]);
+export const alphaBetaWidgetDataSchema = riskWidgetDataSchema
+  .extend({
+    equityHistoryState: z.string().optional(),
+    equityDailyReturns: z.array(bookDailyReturnSchema).optional(),
+    btcBenchmarkPrices: btcBenchmarkPricesSchema.nullable().optional(),
+  })
+  .loose(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: read-only widget render contract (withWidgetBoundary display), never spread into a write
+
+export type AlphaBetaWidgetData = z.infer<typeof alphaBetaWidgetDataSchema>;
+
+/** The book's annualization basis: the Overview factsheet's, by construction. */
+const BOOK_PERIODS_PER_YEAR = annualizationPeriods(ALLOCATOR_PORTFOLIO_ASSET_CLASS);
+
+export type BookAlphaBeta =
+  | { kind: "not_ready" }
+  | { kind: "btc_unavailable" }
+  | { kind: "undefined_beta"; benchmarkFlat: boolean }
+  | {
+      kind: "ok";
+      alpha: number;
+      beta: number;
+      pairedCount: number;
+      totalReturn: number;
+      betaContribution: number;
+      residual: number;
+    };
+
+/**
+ * Alpha and beta of the allocator's BOOK against BTC — the same computation
+ * the /allocations Overview's BTC comparator block runs (169.4 D-69), so the
+ * two figures on one page are one number:
+ *   - the book's own flow-neutral daily returns (`equityDailyReturns`),
+ *     normalized exactly as `buildFactsheetPayload` normalizes them;
+ *   - the dashboard's database BTC closes (`btcBenchmarkPrices`, read by the
+ *     factsheet's own `readFactsheetBenchmark`);
+ *   - paired by `alignCoveredReturns` on BTC's calendar: an interval is paired
+ *     only with a close at both endpoints (166.4 D-A), never bridged over a gap;
+ *   - `jointMetrics` over the paired indices, on the book's basis.
+ * No figure while the history is not ready, and none when BTC is unavailable.
+ */
+export function computeBookAlphaBeta(data: AlphaBetaWidgetData): BookAlphaBeta {
+  // D-02 fail-closed: anything other than an explicit "ready" is not ready.
+  if (data.equityHistoryState !== "ready") return { kind: "not_ready" };
+  const book = normalizeDailyReturns(data.equityDailyReturns ?? []);
+  // The Overview builds no factsheet under 2 returns; neither does this.
+  if (book.length < 2) return { kind: "not_ready" };
+
+  const btc = data.btcBenchmarkPrices;
+  if (btc == null || "unavailable" in btc) return { kind: "btc_unavailable" };
+
+  const dates = book.map((d) => d.date);
+  const aligned = alignCoveredReturns(btc.prices, btc.dropped, dates, COMPARATOR_CALENDARS.btc);
+  const strat: number[] = [];
+  const bench: number[] = [];
+  for (let i = 0; i < aligned.paired.length; i++) {
+    const b = aligned.returns[i];
+    if (aligned.paired[i] && b != null) {
+      strat.push(book[i].value);
+      bench.push(b);
+    }
+  }
+  if (strat.length === 0) return { kind: "undefined_beta", benchmarkFlat: false };
+
+  const { alpha, beta } = jointMetrics(strat, bench, 0, BOOK_PERIODS_PER_YEAR);
+  // Founder decision D7 (2026-09-26): a beta that does not exist (BTC has no
+  // dispersion over the paired intervals, or a return is non-finite) is an
+  // absence, NaN from `jointMetrics`. Alpha is built on beta, so both read "—"
+  // rather than a beta of 0 that would label the whole return "alpha". The
+  // muted line names the benchmark only when that IS the cause.
+  if (!Number.isFinite(alpha) || !Number.isFinite(beta)) {
+    const benchmarkFlat = bench.every((v) => Number.isFinite(v)) && dispersion(bench, 0).sd === 0;
+    return { kind: "undefined_beta", benchmarkFlat };
+  }
+  const totalReturn = compound(strat);
+  const betaContribution = beta * compound(bench);
+  return {
+    kind: "ok",
+    alpha,
+    beta,
+    pairedCount: strat.length,
+    totalReturn,
+    betaContribution,
+    residual: totalReturn - alpha - betaContribution,
+  };
+}
+
+/**
+ * Alpha/Beta Decomposition — decomposes the book's return into Alpha (skill),
+ * Beta contribution (market) and Residual, against BTC: the benchmark the
+ * Overview uses, over the same paired intervals (see `computeBookAlphaBeta`).
+ */
+function AlphaBetaDecompositionInner({ data }: { data: AlphaBetaWidgetData } & BaseWidgetProps) {
   const result = useMemo(() => {
-    const strategies = data.strategies;
-    if (!strategies.length) return null;
-
-    // Gather daily returns per strategy
-    const allDailys = strategies.map((s) =>
-      normalizeDailyReturns(s.strategy?.strategy_analytics?.daily_returns),
-    );
-    const nonEmpty = allDailys.filter((dr) => dr.length > 0);
-    if (nonEmpty.length < 2) return null;
-
-    // Build common date set
-    const dateSet = new Set<string>();
-    for (const dr of nonEmpty) {
-      for (const d of dr) dateSet.add(d.date);
-    }
-    const dates = Array.from(dateSet).sort();
-    if (dates.length < 10) return null;
-
-    // Build date->value maps for fast lookup
-    const dateMaps = nonEmpty.map((dr) => {
-      const m = new Map<string, number>();
-      for (const d of dr) m.set(d.date, d.value);
-      return m;
-    });
-
-    // Pre-build index map: nonEmpty[i] -> original strategy index
-    // Avoids O(n) indexOf inside the hot loop
-    const nonEmptyToStratIdx = new Map<number, number>();
-    for (let i = 0; i < nonEmpty.length; i++) {
-      const origIdx = allDailys.indexOf(nonEmpty[i]);
-      nonEmptyToStratIdx.set(i, origIdx);
-    }
-
-    // Portfolio weighted returns (using current_weight) and equal-weight benchmark
-    const portfolioReturns: number[] = [];
-    const benchmarkReturns: number[] = [];
-
-    for (const date of dates) {
-      let portSum = 0;
-      let portWeight = 0;
-      let benchSum = 0;
-      let benchCount = 0;
-
-      for (let i = 0; i < nonEmpty.length; i++) {
-        const stratIdx = nonEmptyToStratIdx.get(i)!;
-        const val = dateMaps[i].get(date);
-        if (val === undefined) continue;
-
-        const w = strategies[stratIdx]?.current_weight ?? (1 / nonEmpty.length);
-        portSum += val * w;
-        portWeight += w;
-        benchSum += val;
-        benchCount++;
-      }
-
-      if (portWeight > 0 && benchCount > 0) {
-        portfolioReturns.push(portSum / portWeight);
-        benchmarkReturns.push(benchSum / benchCount);
-      }
-    }
-
-    if (portfolioReturns.length < 10) return null;
-
-    // #597 part 2 (BLEND-02): `portfolioReturns` is the allocator's LIVE book
-    // (weighted per-strategy daily returns). Every supported venue is crypto
-    // today, so the blended series is calendar-daily → alpha annualizes ×365 via
-    // the closed-set registry (beta is a slope — basis-invariant). Kept greppable
-    // to the one registry (annualizationPeriods) rather than a bare 365 literal.
-    const { alpha, beta } = computeAlphaBeta(
-      portfolioReturns,
-      benchmarkReturns,
-      annualizationPeriods("crypto"),
-    );
-    // Founder decision D7 (2026-09-26): a beta that does not exist (the
-    // equal-weight benchmark has no dispersion, or a return is non-finite) is an
-    // absence. There is no decomposition to draw, and alpha is built on beta, so
-    // both read "—" rather than a beta of 0 that would label the whole return
-    // "alpha". The muted line names the benchmark only when that IS the cause
-    // (every benchmark return finite and none dispersing, on the same floor
-    // `beta` uses); any other cause, such as a return that overflows to a
-    // non-finite value, gets neutral wording rather than a wrong reason.
-    if (alpha === null || beta === null) {
-      const benchmarkFlat =
-        benchmarkReturns.every((v) => Number.isFinite(v)) &&
-        dispersion(benchmarkReturns, 0).sd === 0;
-      return { undefinedBeta: true as const, benchmarkFlat };
-    }
-    const totalReturn = compound(portfolioReturns);
-    const benchmarkReturn = compound(benchmarkReturns);
-    const betaContribution = beta * benchmarkReturn;
-    const residual = totalReturn - alpha - betaContribution;
-
+    const r = computeBookAlphaBeta(data);
+    if (r.kind !== "ok") return r;
     return {
-      undefinedBeta: false as const,
-      alpha,
-      beta,
-      totalReturn,
-      betaContribution,
-      residual,
+      ...r,
       chartData: [
         {
           name: "Return Decomposition",
-          Beta: betaContribution,
-          Alpha: alpha,
-          Residual: residual,
+          Beta: r.betaContribution,
+          Alpha: r.alpha,
+          Residual: r.residual,
         },
       ],
     };
   }, [data]);
 
-  if (!result) {
+  if (result.kind === "not_ready") {
     return (
       <div className="flex h-full items-center justify-center text-sm text-text-muted">
         Insufficient data for alpha/beta decomposition.
@@ -144,7 +154,15 @@ function AlphaBetaDecompositionInner({ data }: { data: RiskWidgetData } & BaseWi
     );
   }
 
-  if (result.undefinedBeta) {
+  if (result.kind === "btc_unavailable") {
+    return (
+      <div className="flex h-full items-center justify-center px-3 text-sm text-text-muted">
+        BTC prices are unavailable, so alpha and beta cannot be measured.
+      </div>
+    );
+  }
+
+  if (result.kind === "undefined_beta") {
     // D7: "—" with no sign colour (DESIGN.md: a "—" never carries a semantic
     // colour) and no chart, plus one muted line naming why.
     return (
@@ -235,10 +253,11 @@ function AlphaBetaDecompositionInner({ data }: { data: RiskWidgetData } & BaseWi
   );
 }
 
-// B21: validate `data` against the shared risk-widget contract + contain throws.
+// B21: validate `data` against the widget-local contract (the shared risk
+// contract plus the book and BTC fields) + contain throws.
 // Default export — the registry imports this module's default directly.
 export default withWidgetBoundary(
-  riskWidgetDataSchema,
+  alphaBetaWidgetDataSchema,
   AlphaBetaDecompositionInner,
   { area: "alpha-beta-decomposition" },
 );

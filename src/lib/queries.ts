@@ -15,6 +15,11 @@ import {
 } from "./closed-sets";
 import { isWorkingHolder, NOT_WORKING_SYNC_STATUSES } from "@/lib/account-share-note";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+// Phase 169.4 plan 02 (D-69, D-77): the ONE BTC read, from its server-safe home.
+// Never from `@/lib/factsheet/fetch-and-build-payload`: that module pulls
+// `server-only` (composite-read-path.ts) into every test importing this file.
+import { readFactsheetBenchmark } from "@/lib/factsheet/benchmark-read";
+import type { BenchmarkPricesOpt } from "@/lib/factsheet/types";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
 import {
   buildDateMapCache,
@@ -2904,6 +2909,25 @@ export interface MyAllocationDashboardPayload {
    */
   equityDailyReturns: DailyPoint[];
   /**
+   * Phase 169.4 plan 02 (SC3, D-09, D-69). The database BTC closes the
+   * /allocations Overview builds its BTC comparator from, read through the
+   * factsheet's own `readFactsheetBenchmark` over the book's dates
+   * (`equityDailyReturns`), so the Overview and every factsheet read one series.
+   *   - closes (`{ prices, through, dropped }`) when the history is `"ready"`;
+   *   - `{ unavailable: true }` on a read error or when the read leaves nothing
+   *     to compare (never the bundled fixture);
+   *   - `null` while the history is rebuilding: no read is issued.
+   * `getMyAllocationDashboard` ALWAYS assigns it. It is optional only so hand-
+   * built payload literals elsewhere keep type-checking; every reader treats
+   * `undefined` exactly as `null`.
+   *
+   * ⛔ NOT named `btcBenchmark`: `EquityChartWidget` receives this whole
+   * payload and its schema already types that key as an array of daily points
+   * (onInvalid "empty"), so this object under that key would blank every ready
+   * Overview's equity curve. `EquityChartWidget.payload-contract.test.tsx` pins it.
+   */
+  btcBenchmarkPrices?: BenchmarkPricesOpt | null;
+  /**
    * Phase 115.1 / BACKBONE-02, narrowed by Phase 167.1.2 plan 11.
    *   - `"derived"`: a trustworthy, well-formed `payload.curve` was present.
    *     The DISPLAY series (`equityDailyPoints`) is that curve only when the
@@ -4839,6 +4863,15 @@ export const getMyAllocationDashboard = cache(
       phase07HoldingsRes.partialReads,
     );
 
+    // Phase 169.4 plan 02 (SC3, D-09, D-69): the Overview's BTC comparator
+    // reads the database through the factsheet's one read, over the book's own
+    // dates. `admin` because the reader is typed on the admin client and the
+    // table is public-SELECT (no tenant data). No read while rebuilding (SC2).
+    const btcBenchmarkPrices: BenchmarkPricesOpt | null =
+      phase07.equityHistoryState === "ready"
+        ? await readFactsheetBenchmark(admin, phase07.equityDailyReturns, undefined, null)
+        : null;
+
     // Phase 09 / D-07 + D-08 + D-11 + finding f5
     // Derive flaggedHoldings by READING match_batches.holding_flags JSONB.
     // DO NOT derive from match_candidates + allocator_preferences (Voice A rejected that as ungrounded).
@@ -5202,6 +5235,7 @@ export const getMyAllocationDashboard = cache(
         apiKeysCount,
         mandateIsSet,
         ...phase07,
+        btcBenchmarkPrices,
       };
     }
 
@@ -5632,6 +5666,7 @@ export const getMyAllocationDashboard = cache(
       apiKeysCount,
       mandateIsSet,
       ...phase07,
+      btcBenchmarkPrices,
     };
   },
 );
