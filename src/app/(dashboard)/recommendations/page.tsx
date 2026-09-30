@@ -15,6 +15,46 @@ import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { deriveMandateIsSet } from "@/lib/queries";
 import type { AllocatorOwnPreferences } from "@/lib/preferences";
 
+/**
+ * Phase 169.3 D-66 (founder ruling 2026-09-30, WR-01): the allocator_preferences
+ * fields the match engine reads when it scores a batch. Measured in
+ * analytics-service/services/match_engine.py (eligibility, preference, capacity
+ * and mandate fit) and routers/match.py (holding flags), against the
+ * AllocatorPreferences TypedDict in services/match_defaults.py. Left out, each
+ * for a stated reason: mandate_archetype and preferred_markets (in the TypedDict,
+ * never read by the engine), scoring_weight_overrides (the feedback engine's
+ * output, not a preference anyone saves), founder_notes (not an engine input).
+ * A new engine-read field belongs here, or its allocators lose their list.
+ */
+const ENGINE_PREFERENCE_FIELDS = [
+  "max_weight",
+  "preferred_strategy_types",
+  "excluded_exchanges",
+  "max_drawdown_tolerance",
+  "correlation_ceiling",
+  "liquidity_preference",
+  "style_exclusions",
+  "target_ticket_size_usd",
+  "min_sharpe",
+  "min_track_record_days",
+  "max_aum_concentration",
+] as const;
+
+/**
+ * True when the row carries ANY engine-read preference: a non-null scalar (a
+ * saved 0 counts, as in deriveMandateIsSet) or a non-empty list. This gates only
+ * whether the list is WITHHELD; the mandate wording stays on deriveMandateIsSet
+ * (D-03), which is also the /allocations rule.
+ */
+function hasEngineUsedPreference(row: Record<string, unknown> | null): boolean {
+  if (row === null) return false;
+  return ENGINE_PREFERENCE_FIELDS.some((field) => {
+    const value = row[field];
+    if (value === null || value === undefined) return false;
+    return Array.isArray(value) ? value.length > 0 : true;
+  });
+}
+
 // Mirror /discovery/layout.tsx — the attestation gate must NEVER be cached.
 export const dynamic = "force-dynamic";
 
@@ -74,19 +114,43 @@ export default async function RecommendationsPage() {
 
   // Fetch mandate via the allocator's own user client (RLS lets each user
   // read their own allocator_preferences row).
-  const { data: preferences } = await supabase
+  const { data: preferences, error: preferencesError } = await supabase
     .from("allocator_preferences")
-    .select("max_weight, preferred_strategy_types")
+    .select(ENGINE_PREFERENCE_FIELDS.join(", "))
     .eq("user_id", user.id)
     .maybeSingle();
 
-  // Phase 169.3 D-03: the same rule /allocations uses. It reads the fields the
-  // match engine consumes; the free-text mandate_archetype is never read by it.
-  // The select projects exactly the two columns deriveMandateIsSet reads, so the
-  // narrowing cast to its full-row parameter type hides no field it touches.
-  const mandateSet = deriveMandateIsSet(
-    (preferences ?? null) as AllocatorOwnPreferences | null,
-  );
+  // Phase 169.3 CR-01: a failed read is NOT "no mandate". `data` is null on an
+  // error AND on a missing row; only `error` tells them apart. Before this, a
+  // transient PostgREST / RLS / grant fault told an allocator with a mandate
+  // that none was set, withheld their list, and logged nothing. Same breadcrumb
+  // shape as the attestation read above, but the page stays up: the mandate is
+  // UNKNOWN, so the page makes no claim about it either way.
+  if (preferencesError) {
+    console.error(
+      "[recommendations] allocator_preferences read failed:",
+      preferencesError.code,
+      preferencesError.message,
+    );
+  }
+
+  // Phase 169.3 D-03: the mandate WORDING uses the rule /allocations uses. It
+  // reads the fields the match engine consumes; the free-text mandate_archetype
+  // is never read by it. The select projects both columns deriveMandateIsSet
+  // reads (they are in ENGINE_PREFERENCE_FIELDS), so the narrowing cast to its
+  // full-row parameter type hides no field it touches.
+  const prefsRow = (preferences ?? null) as unknown as Record<string, unknown> | null;
+  const mandateState: "set" | "unset" | "unknown" = preferencesError
+    ? "unknown"
+    : deriveMandateIsSet(prefsRow as unknown as AllocatorOwnPreferences | null)
+      ? "set"
+      : "unset";
+  // Phase 169.3 D-66 (WR-01): the list is withheld only when the engine scored
+  // the batch on defaults alone, i.e. NO engine-read preference is saved. An
+  // allocator with only a drawdown tolerance keeps the D-03 "No mandate is set
+  // yet" wording and still sees the list their tolerance was scored against.
+  const withholdList =
+    mandateState !== "unknown" && !hasEngineUsedPreference(prefsRow);
 
   // Fetch batch meta + top-3 candidates via SECURITY DEFINER RPCs
   // (migration 019). Each RPC enforces "caller is the allocator or admin"
@@ -113,6 +177,13 @@ export default async function RecommendationsPage() {
       recsResult.error.message,
     );
   }
+
+  // Phase 169.3 SFH-02: an RPC error is not an empty result. Without this, a
+  // failed recommendations read under a good batch said "none matched, try
+  // relaxing your filters", and both failing said "your first batch is
+  // computing" to an allocator who has had batches for months. With no
+  // candidates to show, either error makes the empty state unknowable.
+  const rpcFailed = Boolean(batchMetaResult.error || recsResult.error);
 
   const batch = batchMetaResult.data?.[0]
     ? {
@@ -257,9 +328,11 @@ export default async function RecommendationsPage() {
       <PageHeader
         title="Recommendations"
         description={
-          mandateSet
+          mandateState === "set"
             ? "Top 3 strategies that fit your mandate. Updated daily."
-            : "Strategies matched to your mandate, updated daily. No mandate is set yet."
+            : mandateState === "unset"
+              ? "Strategies matched to your mandate, updated daily. No mandate is set yet."
+              : "Strategies from the daily match engine."
         }
         breadcrumb={[{ label: "My Allocation", href: "/allocations" }, { label: "Recommendations" }]}
         meta={
@@ -281,8 +354,16 @@ export default async function RecommendationsPage() {
           Without a mandate the list is WITHHELD, not relabelled: the card
           copy (engine reasons, the fallback reason) speaks in mandate terms
           too, and the call to action already says a mandate is what shows
-          recommendations. */}
-      {!mandateSet ? (
+          recommendations.
+          CR-01: an UNKNOWN mandate (the read failed) is neither branch. It
+          shows a neutral notice and then whatever the batch holds; it never
+          withholds the list or says no mandate is set.
+          D-66 (founder, 2026-09-30): the withhold reads a WIDER rule than the
+          header. It fires only when no engine-read preference is saved, so an
+          allocator whose saved mandate lives outside max_weight / strategy
+          types sees the list under the D-03 "No mandate is set yet" header. */}
+      {mandateState === "unknown" && <MandateUnknownNotice />}
+      {withholdList ? (
         <NoMandateState />
       ) : candidates.length > 0 ? (
         <ol className="space-y-4">
@@ -292,6 +373,8 @@ export default async function RecommendationsPage() {
             </li>
           ))}
         </ol>
+      ) : rpcFailed ? (
+        <RecommendationsLoadErrorState />
       ) : !batch ? (
         <NoBatchState />
       ) : (
@@ -320,6 +403,33 @@ function NoMandateState() {
       >
         Set preferences →
       </Link>
+    </Card>
+  );
+}
+
+function MandateUnknownNotice() {
+  return (
+    <Card className="mb-4 text-center" role="status">
+      <h2 className="text-lg font-semibold text-text-primary">
+        We couldn&apos;t load your mandate
+      </h2>
+      <p className="mt-2 text-sm text-text-secondary max-w-md mx-auto">
+        Refresh the page to try again. Any recommendations below are from your
+        latest batch.
+      </p>
+    </Card>
+  );
+}
+
+function RecommendationsLoadErrorState() {
+  return (
+    <Card className="p-8 text-center" role="status">
+      <h2 className="text-lg font-semibold text-text-primary">
+        Recommendations could not be loaded
+      </h2>
+      <p className="mt-2 text-sm text-text-secondary max-w-md mx-auto">
+        Refresh the page to try again.
+      </p>
     </Card>
   );
 }

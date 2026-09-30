@@ -52,7 +52,10 @@ vi.mock("@/components/legal/AccreditedInvestorGate", () => ({
 
 const seeded = vi.hoisted(() => ({
   prefs: null as unknown,
+  prefsError: null as unknown,
   prefsSelect: [] as string[],
+  recsError: null as unknown,
+  batchMetaError: null as unknown,
   recs: [] as unknown[],
   batchMeta: [] as unknown[],
   statusRows: [] as unknown[],
@@ -85,7 +88,10 @@ vi.mock("@/lib/supabase/server", () => ({
         Promise.resolve(
           table === "investor_attestations"
             ? { data: { attested_at: "2026-01-01T00:00:00Z" }, error: null }
-            : { data: projectPrefs(seeded.prefs), error: null },
+            : seeded.prefsError
+              ? // PostgREST on a failed read: no row, an error.
+                { data: null, error: seeded.prefsError }
+              : { data: projectPrefs(seeded.prefs), error: null },
         );
       // Like PostgREST, a column comes back only if the select projected it:
       // a row's `series_end` is dropped unless the alias was selected, so a
@@ -107,8 +113,12 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     rpc: async (name: string) =>
       name === "get_allocator_recommendations"
-        ? { data: seeded.recs, error: null }
-        : { data: seeded.batchMeta, error: null },
+        ? seeded.recsError
+          ? { data: null, error: seeded.recsError }
+          : { data: seeded.recs, error: null }
+        : seeded.batchMetaError
+          ? { data: null, error: seeded.batchMetaError }
+          : { data: seeded.batchMeta, error: null },
   }),
 }));
 
@@ -205,6 +215,9 @@ beforeEach(() => {
   seeded.analyticsSelect = [];
   seeded.analyticsIn = [];
   seeded.prefsSelect = [];
+  seeded.prefsError = null;
+  seeded.recsError = null;
+  seeded.batchMetaError = null;
 });
 
 describe("SC8 · /recommendations — one mandate branch drives the header and the list", () => {
@@ -262,11 +275,13 @@ describe("SC8 · /recommendations — one mandate branch drives the header and t
 });
 
 describe("SC8 / D-03 · /recommendations decides 'mandate set' with the /allocations rule", () => {
+  // Archetype and NOTHING else. The ticket size is null because the engine
+  // reads it (D-66): a saved ticket size would make this a scored mandate.
   const ARCHETYPE_ONLY = {
     mandate_archetype: "systematic trend, low turnover",
     max_weight: null,
     preferred_strategy_types: [],
-    target_ticket_size_usd: 1,
+    target_ticket_size_usd: null,
   };
   const MAX_WEIGHT_ONLY = {
     mandate_archetype: null,
@@ -279,6 +294,16 @@ describe("SC8 / D-03 · /recommendations decides 'mandate set' with the /allocat
     max_weight: null,
     preferred_strategy_types: ["trend"],
     target_ticket_size_usd: 1,
+  };
+
+  // A real mandate outside D-03's two fields: MandateForm autosaves each field
+  // on its own, so an allocator can hold exactly this row.
+  const DRAWDOWN_ONLY = {
+    mandate_archetype: null,
+    max_weight: null,
+    preferred_strategy_types: [],
+    target_ticket_size_usd: null,
+    max_drawdown_tolerance: 0.15,
   };
 
   async function expectNotSet() {
@@ -314,17 +339,133 @@ describe("SC8 / D-03 · /recommendations decides 'mandate set' with the /allocat
     await expectNotSet();
   });
 
-  it("MP5: for every case the page agrees with deriveMandateIsSet, the rule /allocations reads", async () => {
-    for (const row of [null, ARCHETYPE_ONLY, MAX_WEIGHT_ONLY, TYPES_ONLY]) {
+  it("MP5: for every case the page's mandate WORDING agrees with deriveMandateIsSet, the rule /allocations reads", async () => {
+    // D-66 split the two questions: the header wording is D-03's rule, the
+    // withhold is a wider one. So this compares the header, not the CTA.
+    for (const row of [null, ARCHETYPE_ONLY, MAX_WEIGHT_ONLY, TYPES_ONLY, DRAWDOWN_ONLY]) {
       seeded.prefs = row;
       seeded.prefsSelect = [];
       const { unmount } = await renderPage();
-      const pageSaysSet = screen.queryByText(CTA) === null;
+      const pageSaysSet = screen.queryByText(MANDATE_FIT_HEADER) !== null;
       expect(pageSaysSet, `page and /allocations disagree for ${JSON.stringify(row)}`).toBe(
         deriveMandateIsSet(row as Parameters<typeof deriveMandateIsSet>[0]),
       );
       unmount();
     }
+  });
+});
+
+describe("D-66 · the list is withheld only when NO engine-read preference is saved", () => {
+  // WHY (founder ruling 2026-09-30, WR-01): the engine scored this allocator's
+  // batch against their saved drawdown tolerance. Withholding it behind "set
+  // your mandate" hid a list built from the mandate they did set. The D-03
+  // wording stays, so the header still says no mandate is set.
+  it("EP1: only a drawdown tolerance — the list renders under the D-03 'No mandate is set yet' header, no CTA", async () => {
+    seeded.prefs = {
+      mandate_archetype: null,
+      max_weight: null,
+      preferred_strategy_types: [],
+      target_ticket_size_usd: null,
+      max_drawdown_tolerance: 0.15,
+    };
+    const { container } = await renderPage();
+
+    for (const name of NAMES) {
+      expect(screen.getByText(name), `${name} withheld from a scored mandate`).toBeTruthy();
+    }
+    expect(screen.queryByText(CTA)).toBeNull();
+    expect(container.textContent ?? "").toMatch(/No mandate is set yet/);
+    expect(screen.queryByText(MANDATE_FIT_HEADER)).toBeNull();
+  });
+
+  it("EP2: only empty lists (no exclusions, no styles) is no engine preference — the list is withheld", async () => {
+    seeded.prefs = {
+      mandate_archetype: null,
+      max_weight: null,
+      preferred_strategy_types: [],
+      excluded_exchanges: [],
+      style_exclusions: [],
+      target_ticket_size_usd: null,
+    };
+    const { container } = await renderPage();
+    expect(screen.getByText(CTA)).toBeTruthy();
+    expect(container.querySelector("ol")).toBeNull();
+  });
+});
+
+describe("CR-01 · a failed preferences read is UNKNOWN, never 'no mandate'", () => {
+  // WHY: `data` is null both when no row exists and when the read fails. On
+  // HEAD before this fix the page ignored `error`, so a transient PostgREST /
+  // RLS / grant fault told an allocator WITH a mandate that none was set,
+  // withheld their scored list and logged nothing.
+  it("ER1: prefs read fails + a 3-candidate batch — the list renders, no CTA, no 'no mandate' claim, and the fault is logged", async () => {
+    seeded.prefsError = { code: "42501", message: "permission denied" };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { container } = await renderPage();
+      const text = container.textContent ?? "";
+
+      expect(screen.queryByText(CTA), "a failed read rendered the set-mandate CTA").toBeNull();
+      expect(text).not.toMatch(/No mandate is set yet/);
+      // Unknown is not "set" either: the page makes no mandate-fit claim.
+      expect(screen.queryByText(MANDATE_FIT_HEADER)).toBeNull();
+      expect(screen.getByText("We couldn't load your mandate")).toBeTruthy();
+      for (const name of NAMES) {
+        expect(screen.getByText(name), `${name} withheld on a failed read`).toBeTruthy();
+      }
+      expect(
+        errSpy.mock.calls.some((c) => String(c[0]).includes("allocator_preferences read failed")),
+        "the failed read left no breadcrumb",
+      ).toBe(true);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("ER2: a missing row (no error) is still 'unset', not unknown", async () => {
+    seeded.prefs = null;
+    await renderPage();
+    expect(screen.getByText(CTA)).toBeTruthy();
+    expect(screen.queryByText("We couldn't load your mandate")).toBeNull();
+  });
+});
+
+describe("SFH-02 · a failed recommendations RPC renders a load error, never an affirmative empty state", () => {
+  // WHY: each empty state tells the allocator something they may act on.
+  // "None matched, try relaxing your filters" sends them to loosen a mandate
+  // that did match; "your first batch is computing" is false for anyone who
+  // has had batches. Neither may be said when the read itself failed.
+  const LOAD_ERROR = "Recommendations could not be loaded";
+
+  async function renderQuiet() {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      return await renderPage();
+    } finally {
+      errSpy.mockRestore();
+    }
+  }
+
+  it("RE1: recs RPC fails, batch meta succeeds — the load error, not 'No candidates match today'", async () => {
+    seeded.recsError = { code: "57014", message: "statement timeout" };
+    await renderQuiet();
+    expect(screen.queryByText("No candidates match today")).toBeNull();
+    expect(screen.getByText(LOAD_ERROR)).toBeTruthy();
+  });
+
+  it("RE2: both RPCs fail — the load error, not 'Your first batch is computing'", async () => {
+    seeded.recsError = { code: "57014", message: "statement timeout" };
+    seeded.batchMetaError = { code: "57014", message: "statement timeout" };
+    await renderQuiet();
+    expect(screen.queryByText("Your first batch is computing")).toBeNull();
+    expect(screen.getByText(LOAD_ERROR)).toBeTruthy();
+  });
+
+  it("RE3: batch meta fails but the recs RPC returned rows — the list still renders", async () => {
+    seeded.batchMetaError = { code: "57014", message: "statement timeout" };
+    await renderQuiet();
+    for (const name of NAMES) expect(screen.getByText(name)).toBeTruthy();
+    expect(screen.queryByText(LOAD_ERROR)).toBeNull();
   });
 });
 
