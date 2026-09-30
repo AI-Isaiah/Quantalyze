@@ -13,3 +13,10 @@
   into feat/169.3 at `3d2b7445a`. 169.3-03 touches none of them. The owner is whoever next plans or
   executes Phase 169 (re-anchor or retire those claims); the `plan-anchor-verify` CI job likely
   shows the same red on this branch until then (not measured in CI; the local CLI is what was run).
+
+  **RESOLVED 2026-09-30 (recorded by the 169.3-04 executor).** The orchestrator removed the three
+  pre-split Phase 169 plan copies that main no longer carries (`169-02-PLAN.md`, `169-03-PLAN.md`,
+  `169-08-PLAN.md` under `.planning/phases/169-pagetruth/`, commit `6634c5207`). Re-measured at
+  HEAD `a17a8592f`: `node scripts/verify-plan-anchors.mjs --pending` prints
+  `OK: 19 plan file(s), no stale claims.`, and `src/__tests__/verify-plan-anchors.test.ts` passes
+  58/58, both cases named above included. Nothing is left to own.
