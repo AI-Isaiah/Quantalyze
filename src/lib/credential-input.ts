@@ -36,30 +36,39 @@ export function normalizeCredentialInput(value: string): string {
   return value.replace(LEADING_RUN, "").replace(TRAILING_RUN, "");
 }
 
-function isKeystrokeInputType(inputType: string | undefined): boolean {
-  if (!inputType) return false;
-  return (
-    inputType === "insertText" ||
-    inputType === "insertCompositionText" ||
-    inputType.startsWith("delete")
-  );
+/**
+ * The `inputType`s that deliver text in bulk: paste, drop, and autofill or a
+ * password manager replacing the field (`insertReplacementText`).
+ */
+const BULK_INPUT_TYPES: ReadonlySet<string> = new Set([
+  "insertFromPaste",
+  "insertFromPasteAsQuotation",
+  "insertFromDrop",
+  "insertReplacementText",
+]);
+
+function isBulkInputType(inputType: string | undefined): boolean {
+  // An absent or empty inputType is autofill or a programmatic change.
+  return !inputType || BULK_INPUT_TYPES.has(inputType);
 }
 
 /**
  * Read a credential input's value from its change event, normalizing text
- * that arrives in bulk (paste, drop, autofill, a programmatic change: any
- * `inputType` that is not a keystroke, including an absent one) and returning
- * keystrokes and deletions raw.
+ * that arrives in bulk (paste, drop, autofill/replacement, or a change with no
+ * `inputType`) and returning every other `inputType` raw: keystrokes,
+ * deletions, undo/redo, and any type not listed, including future ones.
  *
- * Why the keystroke guard (D-76): an interior space the user types, say into
- * an MT5 investor password in the secret slot, is momentarily trailing.
- * Normalizing every change would silently delete it. The server still trims
+ * Why an allow-list of bulk types (D-76, round-3 review WR-01): the strip acts
+ * on the whole field, not on the inserted text. An interior space the user
+ * types, say into an MT5 investor password in the secret slot, is momentarily
+ * trailing, and so is one restored by undo (`pass w` + undo = `pass `).
+ * Normalizing such a change would silently delete it. The server still trims
  * the typed leading/trailing case on the routes that trim.
  */
 export function readCredentialInput(event: React.ChangeEvent<HTMLInputElement>): string {
   const value = event.target.value;
   const inputType = (event.nativeEvent as InputEvent | undefined)?.inputType;
-  return isKeystrokeInputType(inputType) ? value : normalizeCredentialInput(value);
+  return isBulkInputType(inputType) ? normalizeCredentialInput(value) : value;
 }
 
 /**

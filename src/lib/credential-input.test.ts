@@ -53,7 +53,7 @@ describe("normalizeCredentialInput (D-76)", () => {
   });
 });
 
-describe("readCredentialInput: normalizes bulk-arriving text, never keystrokes (D-76 keystroke guard)", () => {
+describe("readCredentialInput: normalizes only bulk-arriving text, returns every other inputType raw (D-76, R3 WR-01)", () => {
   it("normalizes a paste (insertFromPaste)", () => {
     expect(readCredentialInput(changeEvent("  AK_TEST_1\n", "insertFromPaste"))).toBe("AK_TEST_1");
   });
@@ -77,6 +77,27 @@ describe("readCredentialInput: normalizes bulk-arriving text, never keystrokes (
   it("returns the raw value for any deletion, so backspacing to an interior space keeps it", () => {
     expect(readCredentialInput(changeEvent("ab ", "deleteContentBackward"))).toBe("ab ");
     expect(readCredentialInput(changeEvent(" ab", "deleteWordForward"))).toBe(" ab");
+  });
+
+  it("normalizes a paste-as-quotation (insertFromPasteAsQuotation)", () => {
+    expect(readCredentialInput(changeEvent("  AK\n", "insertFromPasteAsQuotation"))).toBe("AK");
+  });
+
+  it("normalizes an autofill or password-manager replacement (insertReplacementText)", () => {
+    expect(readCredentialInput(changeEvent(" AK_TEST_1 ", "insertReplacementText"))).toBe("AK_TEST_1");
+  });
+
+  it("returns the raw value for undo, because `pass w` + undo = `pass ` and stripping it would post `password` once the user types `word`", () => {
+    expect(readCredentialInput(changeEvent("pass ", "historyUndo"))).toBe("pass ");
+  });
+
+  it("returns the raw value for redo, which restores text the user typed", () => {
+    expect(readCredentialInput(changeEvent("pass ", "historyRedo"))).toBe("pass ");
+  });
+
+  it("returns the raw value for an inputType it does not name (yank, or a future type), so only the named bulk cases are ever stripped", () => {
+    expect(readCredentialInput(changeEvent("pass ", "insertFromYank"))).toBe("pass ");
+    expect(readCredentialInput(changeEvent("pass ", "someFutureInputType"))).toBe("pass ");
   });
 });
 

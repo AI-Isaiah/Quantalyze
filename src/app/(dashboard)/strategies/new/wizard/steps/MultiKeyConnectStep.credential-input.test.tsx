@@ -141,6 +141,17 @@ describe("MultiKeyConnectStep panel credential inputs: pasted whitespace is stri
     expect(secret.value).toBe("ab cd");
   });
 
+  it("undo in a panel's secret keeps the typed interior space (R3 WR-01): `pass w` + undo stays `pass `, so typing `word` cannot post `password`", async () => {
+    const { panel1 } = renderPanels();
+    const user = userEvent.setup();
+    const secret = within(panel1).getByTestId("key-1-api-secret") as HTMLInputElement;
+    await user.click(secret);
+    await user.type(secret, "pass w");
+    // The browser's undo: the DOM value drops the `w` and the input event carries historyUndo.
+    fireEvent.input(secret, { target: { value: "pass " }, inputType: "historyUndo" });
+    expect(secret.value).toBe("pass ");
+  });
+
   it("a pasted OKX passphrase is left exactly as pasted, because it is user-chosen and its whitespace can be significant", async () => {
     const { panel1 } = renderPanels();
     const user = userEvent.setup();
