@@ -152,14 +152,28 @@ describe("ComparatorPicker coverage caption", () => {
     expect(screen.queryByText(CAPTION)).toBeNull();
   });
 
-  it("dates SPX at its fixture's last close when SPX is active", () => {
+  // Review WR-01: coverage is read on SPX's own (weekday) calendar. Its last close on
+  // or before Sunday 2024-08-04 is Friday 2024-08-02, and no SPX trading day lies in
+  // (Fri, Sun], so SPX is fully covered: no caption, and the windows are numbers.
+  it("shows no SPX caption when SPX's Friday close covers a strategy ending that weekend", () => {
     const payload = makePayload();
-    // The SPX fixture's last close on or before Sunday 2024-08-04 is Friday 2024-08-02.
     expect(payload.comparators.spx.through).toBe("2024-08-02");
+    expect(payload.comparators.spx.summary!.mtd).not.toBeNull();
     renderPicker(payload);
     expect(screen.queryByText(CAPTION)).toBeNull(); // BTC active and fully covered
     fireEvent.click(screen.getByRole("button", { name: /SPX/ }));
-    expect(screen.getByText("SPX prices through Aug 2, 2024")).toBeDefined();
+    expect(screen.queryByText(CAPTION)).toBeNull();
+  });
+
+  it("dates SPX when an SPX trading day lies after its last close", () => {
+    const payload = makePayload();
+    // Wednesday 2024-07-31: Thu 08-01 and Fri 08-02 are SPX days with no close.
+    renderPicker({
+      ...payload,
+      comparators: { ...payload.comparators, spx: { ...payload.comparators.spx, through: "2024-07-31" } },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /SPX/ }));
+    expect(screen.getByText("SPX prices through Jul 31, 2024")).toBeDefined();
   });
 
   it("shows no caption when no comparator is active", () => {

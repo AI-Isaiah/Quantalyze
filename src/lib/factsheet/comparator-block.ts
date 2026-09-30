@@ -22,7 +22,8 @@ import { rollingVol, rollingSharpe, rollingSortino, rollingBeta } from "./rollin
  * basis `benchPeriodsPerYear` (the caller passes the smaller of the strategy's
  * and the comparator's basis; it is not recomputed here). `jointMetrics` stays
  * on the strategy's `periodsPerYear` over the PAIRED indices (166.4 D-A). A
- * window (MTD, YTD, 3M, 6M, 1Y) ending after `through` is null, never +0.00%.
+ * window (MTD, YTD, 3M, 6M, 1Y) is null, never +0.00%, when the comparator is past
+ * its coverage: a date on its own calendar lies after `through` (review WR-01).
  *
  * Phase 169.5 plan 02 (SC3, D-09, D-21, D-59 as amended, D-60 fix, D-64): the
  * CHART per-day arrays are null wherever the helper's return is null, so no chart
@@ -79,8 +80,10 @@ export function buildComparatorBlock(
   }
   const benchSummary =
     coveredReturns.length > 0 ? compute(coveredReturns, coveredDates, 0, benchPeriodsPerYear) : null;
-  const lastDate = dates[dates.length - 1];
-  const pastThrough = aligned.through === null || (lastDate !== undefined && lastDate > aligned.through);
+  // Phase 169.5 review WR-01: past coverage on the comparator's OWN calendar
+  // (`isPastCoverage` in align.ts, the rule the picker caption also calls), never a
+  // raw-date compare: a weekday comparator's Friday close covers a weekend last date.
+  const pastThrough = aligned.coveredToEnd !== true;
 
   const pairedIdx: number[] = [];
   for (let i = 0; i < aligned.paired.length; i++) if (aligned.paired[i]) pairedIdx.push(i);
@@ -224,7 +227,9 @@ function toAlignment(
   const returns = [...(bench as ReadonlyArray<number | null>)];
   let through: string | null = null;
   for (let i = 0; i < returns.length; i++) if (returns[i] != null) through = dates[i] ?? through;
-  return { returns, paired: returns.map(r => r != null), through };
+  // A plain array has no calendar: covered to the end exactly when its last entry is.
+  const coveredToEnd = returns.length > 0 && returns[returns.length - 1] != null;
+  return { returns, paired: returns.map(r => r != null), through, coveredToEnd };
 }
 
 /** The "no comparator selected" block — all series null, picker still works. */

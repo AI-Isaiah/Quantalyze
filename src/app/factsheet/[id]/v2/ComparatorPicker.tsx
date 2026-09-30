@@ -3,6 +3,7 @@
 import { usePayload, useComparator } from "./factsheet-context";
 import { trackFactsheetEvent } from "./factsheet-analytics";
 import { isoToMonthDay } from "./MetricsColumn";
+import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
 
 // The "none" state is reachable by clicking the active comparator chip a
 // second time — toggle-off semantics. An explicit "None" radio used to live
@@ -21,17 +22,20 @@ const LABELS: Record<(typeof KEYS)[number], string> = {
  * last date) is earlier than that date is dated, so an em-dash window or a chart
  * line that stops short reads as missing prices, not a flat market. `through: null`
  * is the unavailable form (a failed BTC read) and says so. An ABSENT `through` (a
- * hand-built block, D-21) and full coverage render nothing. The comparison is the
- * ISO-string one `buildComparatorBlock` uses for its `pastThrough` windows.
+ * hand-built block, D-21) and full coverage render nothing. "Earlier" is read on the
+ * comparator's OWN calendar through `isPastCoverage`, the rule `buildComparatorBlock`
+ * uses for its `pastThrough` windows (review WR-01): SPX through a Friday covers a
+ * strategy ending that weekend, so no caption and no em-dash windows.
  */
 function coverageCaption(
   label: string,
   through: string | null | undefined,
   lastDate: string | undefined,
+  calendar: WeekdayCalendar,
 ): string | null {
   if (through === undefined) return null;
   if (through === null) return `${label} prices unavailable`;
-  if (lastDate !== undefined && through < lastDate) {
+  if (isPastCoverage(through, lastDate, calendar)) {
     return `${label} prices through ${isoToMonthDay(through)}`;
   }
   return null;
@@ -47,6 +51,7 @@ export function ComparatorPicker() {
           LABELS[comparator],
           payload.comparators[comparator].through,
           payload.dates[payload.dates.length - 1],
+          COMPARATOR_CALENDARS[comparator],
         );
   return (
     <div className="flex flex-col gap-1">

@@ -87,3 +87,16 @@ describe("alignCoveredReturns", () => {
     expect(a.paired.slice(2)).toEqual([false, false]);
   });
 });
+
+describe("isPastCoverage (169.5 review WR-01)", () => {
+  it("reads the gap on the benchmark's own calendar, not by raw date", async () => {
+    const { isPastCoverage, CALENDAR_7D, CALENDAR_WEEKDAY } = await import("./align");
+    // Fri 2025-03-14 -> Sun 2025-03-16: nothing missing for a weekday market, two days for a 7-day one.
+    expect(isPastCoverage("2025-03-14", "2025-03-16", CALENDAR_WEEKDAY)).toBe(false);
+    expect(isPastCoverage("2025-03-14", "2025-03-16", CALENDAR_7D)).toBe(true);
+    // Fri -> Mon is a missing weekday close.
+    expect(isPastCoverage("2025-03-14", "2025-03-17", CALENDAR_WEEKDAY)).toBe(true);
+    expect(isPastCoverage("2025-03-16", "2025-03-16", CALENDAR_7D)).toBe(false);
+    expect(isPastCoverage(null, "2025-03-16", CALENDAR_7D)).toBe(true);
+  });
+});
