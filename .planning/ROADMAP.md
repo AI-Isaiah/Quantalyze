@@ -4211,6 +4211,8 @@ Plans:
 - [ ] 169.4-07-PLAN.md — integration run + post-deploy browser re-check after Phase 170 (SC9; was 169.4-03)
 - [ ] 169.4-08-PLAN.md — returns route and its test removed, composer on the one key-label rule (SC11, SC12, D-67; split out of 169.4-04)
 
+**Amended 2026-09-30 (code review round 1, recorded at round 2):** D-70(2)'s allocator-blend calendar is narrowed to the dates every leg actually priced, so a US-market holiday is not a blend date and BTC's move across it is carried; the day after a holiday is unpaired for the weekday legs. Full text in 169.4-CONTEXT.md D-70 (AMENDED line).
+
 ### Phase 169.4.1: OGSHARPE — the OG share card's Sharpe reads the one shared sharpe() (166.2) (INSERTED)
 
 **Goal:** The OG share card for a strategy shows the same CAGR and Sharpe as its factsheet and every list: for a rankable analytics row it reads the persisted values under its own display policy (Sharpe needs 30 observations, CAGR hidden under 0.95 calendar years or non-positive growth, NaN hides), and for any other row it computes Sharpe only through the one shared `sharpe(..., {ddof: 0})` Phase 166.2 put in `computeOgHeadline`, never a local re-computation.
