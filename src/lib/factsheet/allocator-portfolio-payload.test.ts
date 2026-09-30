@@ -259,3 +259,59 @@ describe("resolveDailyReturnSeries — analytics column-drift fallback", () => {
     expect(resolveDailyReturnSeries(undefined, undefined)).toEqual([]);
   });
 });
+
+/**
+ * Phase 169.4 plan 02 (SC3, D-09, D-69). The /allocations Overview used to
+ * reach `buildFactsheetPayload` with no BTC opt, so its BTC comparator was the
+ * bundled fixture (last date 2026-05-12) while every factsheet read the fed
+ * table. These cases pin that the dashboard's database closes reach the build,
+ * and that a read error renders the unavailable comparator, never the fixture.
+ * The book is dated after the fixture's last date so a fixture close can never
+ * stand in for a database close.
+ */
+describe("buildAllocatorPortfolioFactsheetPayload — the dashboard's BTC closes (169.4-02)", () => {
+  const DAY_MS = 86_400_000;
+  const isoDay = (startIso: string, i: number) =>
+    new Date(Date.parse(`${startIso}T00:00:00Z`) + i * DAY_MS).toISOString().slice(0, 10);
+  // 60 book returns, 2026-08-01 .. 2026-09-29 ("yesterday" for these cases).
+  const BOOK: DailyReturn[] = Array.from({ length: 60 }, (_, i) => ({
+    date: isoDay("2026-08-01", i),
+    value: 0.002 * Math.sin(i / 3) + 0.0005,
+  }));
+  // BTC closes from the day before the book's first date through its last.
+  const CLOSES = Array.from({ length: 61 }, (_, i) => ({
+    date: isoDay("2026-07-31", i),
+    close: 60_000 * (1 + 0.01 * Math.cos(i / 4)),
+  }));
+  const meta = { allocatorId: "a-1", dailyReturns: BOOK };
+
+  it("closes through yesterday: the BTC comparator is dated yesterday (not the fixture's 2026-05-12) with numeric windows", () => {
+    const payload = buildAllocatorPortfolioFactsheetPayload([], {
+      ...meta,
+      btcBenchmarkPrices: { prices: CLOSES, through: "2026-09-29", dropped: [] },
+    });
+    const btc = payload!.comparators.btc;
+    expect(btc.through).toBe("2026-09-29");
+    expect(btc.summary).not.toBeNull();
+    expect(Number.isFinite(btc.summary!.cum_ret)).toBe(true);
+    expect(Number.isFinite(btc.summary!.ann_vol)).toBe(true);
+    expect(btc.joint).not.toBeNull();
+    expect(Number.isFinite(btc.joint!.beta)).toBe(true);
+  });
+
+  it("the unavailable marker: the BTC comparator is the unavailable form, never fixture closes", () => {
+    // A book dated INSIDE the bundled fixture's range, so a build that ignored
+    // the marker would fall back to fixture closes and show a BTC summary.
+    const bookInFixture: DailyReturn[] = BOOK.map((r, i) => ({ ...r, date: isoDay("2026-03-01", i) }));
+    const withoutOpt = buildAllocatorPortfolioFactsheetPayload([], { allocatorId: "a-1", dailyReturns: bookInFixture });
+    expect(withoutOpt!.comparators.btc.summary).not.toBeNull(); // the fixture path this case guards against
+    const payload = buildAllocatorPortfolioFactsheetPayload([], {
+      allocatorId: "a-1",
+      dailyReturns: bookInFixture,
+      btcBenchmarkPrices: { unavailable: true },
+    });
+    const btc = payload!.comparators.btc;
+    expect(btc.summary).toBeNull();
+    expect(btc.through ?? null).toBeNull();
+  });
+});

@@ -1,5 +1,5 @@
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
-import type { FactsheetPayload } from "./types";
+import type { BenchmarkPricesOpt, FactsheetPayload } from "./types";
 import { buildFactsheetPayload } from "./build-payload";
 import { equityCurveToDailyReturns } from "./resolve-series";
 
@@ -22,6 +22,16 @@ export interface AllocatorPortfolioMetadata {
    * callers) still derives ratios from the $-curve.
    */
   dailyReturns?: DailyPoint[];
+  /**
+   * Phase 169.4 plan 02 (SC3, D-09, D-69). The dashboard payload's database BTC
+   * closes (`MyAllocationDashboardPayload.btcBenchmarkPrices`, read through the
+   * factsheet's own `readFactsheetBenchmark`), passed on as the `benchmarkPrices`
+   * build opt so the Overview's BTC comparator is the same fed, dated series
+   * every factsheet uses. `{ unavailable: true }` renders the unavailable
+   * comparator, never the fixture. `null` / `undefined` (rebuilding, or a
+   * payload built without the field) passes no opt: today's fixture path.
+   */
+  btcBenchmarkPrices?: BenchmarkPricesOpt | null;
 }
 
 /**
@@ -87,5 +97,6 @@ export function buildAllocatorPortfolioFactsheetPayload(
       benchmark: null,
     },
     dailyReturns,
+    meta.btcBenchmarkPrices != null ? { benchmarkPrices: meta.btcBenchmarkPrices } : undefined,
   );
 }
