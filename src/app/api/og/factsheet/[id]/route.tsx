@@ -21,11 +21,15 @@ export const dynamic = "force-dynamic";
 
 /** The `strategy_analytics` embed shape this card reads (PostgREST returns an
  *  object for a to-one embed and an array for a to-many one — both handled).
- *  STALE-01 widened it by `computation_status` — see the gate at the compute. */
+ *  STALE-01 widened it by `computation_status` — see the gate at the compute.
+ *  169.4.1 OGSHARPE widened it by the stored `cagr` / `sharpe` / `max_drawdown`. */
 type AnalyticsEmbed = {
   daily_returns?: unknown;
   returns_series?: unknown;
   computation_status?: unknown;
+  cagr?: unknown;
+  sharpe?: unknown;
+  max_drawdown?: unknown;
 };
 
 export async function GET(
@@ -61,7 +65,12 @@ export async function GET(
           // `IS NOT NULL` test passes on both. Read-only widening of a
           // published row's projection; nothing new leaves the server (this
           // response is a PNG).
-          "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status )",
+          // Phase 169.4.1 OGSHARPE (SC4, D-10): the stored `cagr`, `sharpe` and
+          // `max_drawdown` join the embed, so the card shows the values the
+          // factsheet headline and every list show instead of a recomputation.
+          // They are already public on the discovery projection; nothing new
+          // leaves the server.
+          "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status, cagr, sharpe, max_drawdown )",
         )
         .eq("id", id),
     )
@@ -121,16 +130,25 @@ export async function GET(
     // NaN sentinel as "—". A non-terminal row is the same answer to the same
     // question, so it reuses the same path: name + description + three
     // em-dashes. No new layout, no error card, and the route still cannot 500.
-    const analyticsComputed = isComputedAnalytics(
+    const computationStatus =
       typeof analytics?.computation_status === "string"
         ? analytics.computation_status
-        : null,
-    );
+        : null;
+    const analyticsComputed = isComputedAnalytics(computationStatus);
     // Two points is the floor for any of the three metrics to mean anything
     // (computeOgHeadline enforces its own stricter gates above that and returns
     // NaN — the "—" sentinel — when they are not met).
+    // Phase 169.4.1 OGSHARPE (SC4, D-10, D-25): the stored scalars travel with
+    // the status, so a rankable row shows its PERSISTED figures under the card's
+    // own display gates (computeOgHeadline's docblock); only a key the embed did
+    // not carry falls back to the computation, and a stored null hides.
     if (analyticsComputed && rows.length >= 2) {
-      ({ sharpe, cagr, maxDd } = computeOgHeadline(rows, data?.asset_class));
+      ({ sharpe, cagr, maxDd } = computeOgHeadline(rows, data?.asset_class, {
+        cagr: analytics?.cagr,
+        sharpe: analytics?.sharpe,
+        max_drawdown: analytics?.max_drawdown,
+        computation_status: computationStatus,
+      }));
     }
   } catch (err) {
     console.error("[og:factsheet] headline metric compute failed", id, err);
