@@ -46,7 +46,7 @@ key-decisions:
 patterns-established:
   - "N-KPI: label scrollWidth <= clientWidth and value height <= 1.3 x computed line-height, measured over visible tiles with a count > 0 guard"
 
-requirements-completed: ["(j)", "SC2-(b)", "SC2-NOSCROLL"]
+requirements-completed: ["(j)", "SC2-(b)"]
 
 coverage: []
 
@@ -150,7 +150,7 @@ The job uses the dot reporter, so passing tests are not named. "Pass" means list
 - **Neuter 1** (three-column base restored from a `cp` byte backup): RED with the same message; restored and verified by grep `grid-cols-2 @md:grid-cols-3` = 1.
 - **Neuter 2** (a bare `grid-cols-3` added beside the ladder): RED `not to match /(^|\s)grid-cols-3(\s|$)/`; restored; 20 passed.
 - **N-KPI describe:** `factsheet KPI — N-KPI` in `e2e/layout-narrow.spec.ts`, FLOW-01 skip-guarded like its siblings, with its own prefix cleanup. It has 4 tests: V390 and V640 × (composed scenario, published factsheet `/factsheet/<seeded>/v2` anchored on `#factsheet-main`). Each test checks, over visible tiles with a count > 0 guard, that every label has `scrollWidth <= clientWidth` and every value has `height <= 1.3 × computed line-height`. It then runs `assertNoReflow` last. `CI=1 npx playwright test --list` prints 4 N-KPI rows (28 tests in the file).
-- **Expected CI result:** the published-factsheet N-KPI rows and the tile assertions of the composed rows should be GREEN. The composed rows' final `assertNoReflow` stays RED until deferred #2 (document overflow on the composed scenario) is closed. This is the same overflow that fails N-FOOT and N-SCN, and it is not a KPI defect.
+- **Expected CI result:** the tile assertions of all four rows should be GREEN. The published-factsheet rows' final `assertNoReflow` covers the whole `/factsheet/<id>/v2` page, including 170-13's panels, and no reflow row in run 36755290085 measured that route at V390/V640. It is GREEN only if that route is otherwise reflow-clean. The N-KPI label arm uses the UI-SPEC's strict `scrollWidth > clientWidth`, with no 1 px slop. The composed rows' final `assertNoReflow` stays RED until deferred #2 (document overflow on the composed scenario) is closed. This is the same overflow that fails N-FOOT and N-SCN, and it is not a KPI defect.
 - **Tracer gate:** both `<verify>` commands were re-run after the commit: vitest 20 passed, `--list` N-KPI count 4.
 
 ## Task 3: item (b) verdict
@@ -162,6 +162,12 @@ The job uses the dot reporter, so passing tests are not named. "Pass" means list
 - **This is not a clean page.** The composed-scenario page that mounts SectionNav overflows at the document at every viewport. That overflow is **unattributed**, because the walker cannot name a descendant of `#main-content` (deferred #1). It is routed to the orchestrator as deferred #2. The likely cause is the `sr-only` labels in the constituent rows, which escape `ResponsiveTable`. That is a hypothesis and was not measured.
 - `overflow-x-hidden` count in `FactsheetView.tsx`: 0 before, 0 after.
 - Verify: `npx vitest run "src/app/factsheet/[id]/v2/"` gave 59 files, 561 tests passed.
+
+## Contract sources
+
+The shipped values match `170-UI-SPEC.md` `### N-KPI` exactly: the grid string, the 448 px `@md`, 1.3 × line-height, `scrollWidth > clientWidth`, and per-cell hairlines with no filler. They also match DESIGN.md: KPI data panels are square, 1px-bordered and hairline-divided, and the `0.14em` eyebrow tracking for dense KPI strips is unchanged. `170-CONTEXT.md` agrees too; its only 170-11 constraint is the Phase 169 gate. `170-10-SUMMARY.md` leaves `SC2-NOSCROLL` open for plans 170-11 and 170-13.
+
+**`SC2-NOSCROLL` is NOT claimed complete.** "No horizontal page scroll at 390 px" does not hold at `20895bcc`: the composed-scenario page overflows the document (deferred #2). The factsheet's own markup is ruled out, but the requirement is about the page, so it stays open, shared with 170-13.
 
 ## Verification
 

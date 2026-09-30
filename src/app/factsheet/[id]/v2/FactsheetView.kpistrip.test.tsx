@@ -18,8 +18,9 @@ import { pctSigned } from "./format";
  *      `@`-prefixed variants (NOT `lg:grid-cols-9`), with the `@container` HOST
  *      on a SEPARATE ancestor (the enclosing `<section>`) — an element never
  *      queries its OWN container size, so a same-element host+variant would
- *      never reflow — and the `grid-cols-3` mobile fallback kept as the
- *      container-narrow base.
+ *      never reflow — and a container-narrow base below it. Phase 170 (j)
+ *      replaced the 52-06 `grid-cols-3` base with `grid-cols-2 @md:grid-cols-3`
+ *      (see Test 1).
  *   2. Every KPI metric VALUE cell keeps `font-mono tabular-nums` (alignment
  *      preserved under the fluid tier); the KPI LABEL keeps its
  *      `text-ellipsis whitespace-nowrap` bounded-label affordance (the
