@@ -19,6 +19,7 @@ import {
   singleKeyDataQuality,
   readSingleKeyBasisOpts,
 } from "@/lib/factsheet/composite-read-path";
+import { readFactsheetBenchmark } from "@/lib/factsheet/fetch-and-build-payload";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { DailyReturn, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { notFound, redirect } from "next/navigation";
@@ -271,6 +272,21 @@ export default async function StrategyDetailPage({
       dailyReturns = [] as DailyReturn[];
     }
   }
+
+  // Phase 169.5 (SC3, D-09, D-23, D-54): BTC from the database through the ONE
+  // read the factsheet route makes (`readFactsheetBenchmark`), with the SAME two
+  // inputs (the cash `dailyReturns` and the assembled `buildOpts`), called AFTER
+  // `buildOpts` is assembled so its MTM / smoothed series widen the bound as on
+  // the route (D-64(4) as amended). Called unconditionally: on the failure arms
+  // every date axis is empty and it answers the unavailable marker WITHOUT a
+  // query. A read error or throw is the unavailable form, logged, never the
+  // fixture. Pinned against the route by the LOCKSTEP case in
+  // `basis-context.benchmark-prices.test.tsx`; Phase 169.1 plan 169.1-01 moves
+  // this page onto `fetchAndBuildPayload` and deletes that case.
+  buildOpts = {
+    ...(buildOpts ?? {}),
+    benchmarkPrices: await readFactsheetBenchmark(createAdminClient(), dailyReturns, buildOpts),
+  };
 
   // RED-TEAM-H2: Never fall back to "now" for a missing computed_at — that
   // would make FreshnessChip show a green "fresh" badge for a strategy with
