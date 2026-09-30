@@ -138,6 +138,14 @@ export type ComparatorBlock = {
   volMatchedLabel: string | null;
   /** Strategy ÷ bench rolling 90d β. Nulls during warmup. */
   rollingBeta: Array<number | null> | null;
+  /**
+   * Phase 169.5 (SC3, D-09): the comparator's last real close on or before the
+   * strategy's last date; null in the unavailable form (with `summary` null).
+   * OPTIONAL only so a hand-built block (the 167.1.2 scenario adapter) compiles
+   * (169 D-21); `buildComparatorBlock` always sets it. Absent means "no coverage
+   * information", distinct from the unavailable form.
+   */
+  through?: string | null;
 };
 
 /** Counts at lengths 1..14+ of consecutive winning / losing day streaks. */
