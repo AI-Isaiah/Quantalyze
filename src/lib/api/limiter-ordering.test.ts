@@ -146,6 +146,12 @@ const NO_INPUT = new Set([
   // (10/min/IP), no request body (symbol hard-coded), limit-FIRST before the DB
   // read. Same shape as demo/match below (public per-IP, no body).
   "benchmark/btc/route.ts",
+  // Phase 169.4 (D-67) — public BTC closes GET, reached by the anonymous
+  // scenario-share recipient page. publicIpLimiter per IP, NO request body
+  // and no query parameter (the symbol is fixed to 'BTC' in the route), and
+  // the limit is taken FIRST, before the benchmark_prices read, so the
+  // "burn-a-token-on-bad-body" bug cannot occur.
+  "benchmark/btc/prices/route.ts",
   "demo/match/[allocator_id]/route.ts",
   "factsheet/[id]/pdf/route.ts",
   "me/audit-log/export/route.ts",

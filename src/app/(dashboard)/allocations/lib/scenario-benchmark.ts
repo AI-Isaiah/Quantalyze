@@ -47,9 +47,110 @@
  *     blend (#597 part 2). beta and correlation are basis-invariant ratios.
  */
 
+import { alignCoveredReturns, COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
+import type { BenchmarkPricesOpt, DailyPrice } from "@/lib/factsheet/types";
 import { computeAlphaBeta, computeTrackingError } from "@/lib/portfolio-stats";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { pearson, sharpe } from "@/lib/return-stats";
+
+/** BTC closes as `/api/benchmark/btc/prices` serves them: the available arm of `BenchmarkPricesOpt`. */
+export type BtcCloses = Extract<BenchmarkPricesOpt, { prices: DailyPrice[] }>;
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function isStrictlyAscendingIsoDates(dates: readonly unknown[]): dates is string[] {
+  for (let i = 0; i < dates.length; i += 1) {
+    const d = dates[i];
+    if (typeof d !== "string" || !ISO_DATE.test(d)) return false;
+    if (i > 0 && !((dates[i - 1] as string) < d)) return false;
+  }
+  return true;
+}
+
+/**
+ * Phase 169.4 ALLOCTRUTH (D-67): the shape guard for the body of
+ * `/api/benchmark/btc/prices`. Returns the closes when the body is exactly
+ * `{ prices, dropped, through }` with every close finite and positive, the
+ * price dates and the dropped dates each strictly ascending ISO dates, and
+ * `through` a string or null; null for anything else. The old returns body
+ * (an array of `{ date, value }`) is null, so a consumer that reads a stale
+ * body shows "unavailable", never a partial or misread series.
+ */
+export function parseBtcCloses(body: unknown): BtcCloses | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+  const { prices, dropped, through } = body as Record<string, unknown>;
+  if (!Array.isArray(prices) || !Array.isArray(dropped)) return null;
+  if (!(through === null || typeof through === "string")) return null;
+  const out: DailyPrice[] = [];
+  for (const p of prices) {
+    if (typeof p !== "object" || p === null) return null;
+    const { date, close } = p as Record<string, unknown>;
+    if (typeof date !== "string" || typeof close !== "number") return null;
+    if (!Number.isFinite(close) || close <= 0) return null;
+    out.push({ date, close });
+  }
+  if (!isStrictlyAscendingIsoDates(out.map((p) => p.date))) return null;
+  if (!isStrictlyAscendingIsoDates(dropped)) return null;
+  return { prices: out, dropped: [...dropped], through };
+}
+
+/**
+ * Phase 169.4 ALLOCTRUTH (SC12, D-68): the ONE pairing of a Scenario portfolio
+ * with BTC. It calls 169.5's `alignCoveredReturns` on BTC's own 7-day calendar
+ * (`COMPARATOR_CALENDARS.btc`) and keeps exactly the indices where `paired[i]`
+ * is true and the value is non-null, the filter the factsheet comparator block
+ * uses. The rule is the engine's, owned by Phase 166.4 BENCHALIGN (founder
+ * decision D-A, with D-05) and applied in TypeScript by Phase 169.5 D-64:
+ *   - day one pairs with BTC's own return dated the portfolio's first date;
+ *   - index k >= 1 pairs with BTC's move over the portfolio's own interval
+ *     (date k-1, date k], compounded, only when BTC has a close dated both
+ *     endpoints (so a Friday-to-Monday portfolio interval pairs with BTC's
+ *     Friday-to-Monday move, not its one-day Sunday-to-Monday move);
+ *   - an interval with a BTC date missing inside it is unpaired (166.4 review
+ *     WR-01, 169.5 D-64(2)), so a BTC return that bridges a missing stored day
+ *     is never paired as one day's move (SC11, D-66).
+ *
+ * `portfolioDaily` must be strictly ascending by date (the order
+ * `alignCoveredReturns` assumes). Returns the same `{ dates, p, b }` shape the
+ * date-intersection join returns: positionally aligned, ready for
+ * `computeAlphaBeta` / `computeTrackingError`.
+ */
+export function pairScenarioWithBtc(
+  portfolioDaily: readonly DailyPoint[],
+  btcCloses: Pick<BtcCloses, "prices" | "dropped">,
+): { dates: string[]; p: number[]; b: number[] } {
+  const portfolioDates = portfolioDaily.map((d) => d.date);
+  const aligned = alignCoveredReturns(
+    btcCloses.prices,
+    btcCloses.dropped,
+    portfolioDates,
+    COMPARATOR_CALENDARS.btc,
+  );
+  const dates: string[] = [];
+  const p: number[] = [];
+  const b: number[] = [];
+  for (let i = 0; i < portfolioDaily.length; i += 1) {
+    const bv = aligned.returns[i];
+    if (!aligned.paired[i] || bv === null) continue;
+    dates.push(portfolioDates[i]);
+    p.push(portfolioDaily[i].value);
+    b.push(bv);
+  }
+  return { dates, p, b };
+}
+
+/**
+ * Phase 169.4 ALLOCTRUTH (D-66): the Scenario BTC overlay as the close LEVEL,
+ * `close / first close`, one point per stored close. A missing day or a
+ * dropped (corrupt) date has no close and so no point. Compounding daily
+ * returns instead would lose the move across a dropped close for good (the
+ * returns rule refuses to bridge it), and every later level would be wrong.
+ */
+export function btcLevelsFromCloses(prices: readonly DailyPrice[]): DailyPoint[] {
+  if (prices.length === 0) return [];
+  const first = prices[0].close;
+  return prices.map((p) => ({ date: p.date, value: p.close / first }));
+}
 
 export interface ScenarioBenchmark {
   /** Aligned (intersection) overlap count — the {N} the UI heading reports. */

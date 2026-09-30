@@ -153,6 +153,7 @@ export const NODE_ENV_TEST_FILES: string[] = [
   "src/app/api/alert-digest/route.test.ts",
   "src/app/api/allocator/scenario/commit/percent-allocated-parity.test.ts",
   "src/app/api/allocator/scenario/share/revoke/route.test.ts",
+  "src/app/api/benchmark/btc/prices/route.test.ts",
   "src/app/api/benchmark/btc/route.test.ts",
   "src/app/api/cron/founder-lp-report/route.test.ts",
   "src/app/api/cron/reconcile-strategies/route.test.ts",
