@@ -1,6 +1,14 @@
 -- Migration: commit_scenario_batch fingerprint recompute reads the holdings set
 --            the client fingerprinted (Phase 167.1.2 review C4 SFH-R2-01)
 --
+-- VAC-04 (repo-vs-PROD function-body drift gate), checked 2026-09-30: PROD's live
+-- body of commit_scenario_batch/5 is NOT an out-of-band patch. It is exactly the
+-- previous migration's body (20260601120000): baseline-content-drift reports
+-- commit_scenario_batch as MATCH between the committed chain and baseline.sql on
+-- origin/main 3357a2eb5, and baseline.sql's body hashes to the same normalized
+-- sha256 VAC-04 measured on PROD. Overwriting it is this migration's intent:
+-- prod-body-ack: fc3f19023e883afa95dffaadab682d2ecef5e504b1e1d6918dc0fd43528c04b7
+--
 -- Why this migration exists
 -- -------------------------
 -- The B11 / NEW-C18-10 precondition (20260601120000) compares the draft's
