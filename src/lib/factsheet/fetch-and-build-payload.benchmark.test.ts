@@ -17,11 +17,25 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+// SFH-M-01: a passthrough over the real aligner with one switch that makes it
+// throw, so a bug in the pure merge / align code can be simulated. Off, it is
+// the real function, so every other case here runs unchanged.
+vi.mock("./align", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./align")>();
+  return {
+    ...real,
+    alignCoveredReturns: (...args: Parameters<typeof real.alignCoveredReturns>) => {
+      if (fake.alignThrows) throw new TypeError("simulated align bug");
+      return real.alignCoveredReturns(...args);
+    },
+  };
+});
 
 type Row = Record<string, unknown>;
 type BenchCall = { ascending: boolean; gte?: string; lte?: string; lt?: string };
 
 const fake = vi.hoisted(() => ({
+  alignThrows: false,
   strategyResult: { data: null as unknown, error: null as unknown },
   bench: {
     rows: [] as Array<{ date: string; close_price: number | string }>,
@@ -81,7 +95,11 @@ vi.mock("@/lib/supabase/admin", () => {
   return { createAdminClient: () => ({ from: (table: string) => builder(table) }) };
 });
 
-import { fetchAndBuildPayload, readFactsheetBenchmark, BENCHMARK_READ_FAILED_MESSAGE } from "./fetch-and-build-payload";
+import {
+  fetchAndBuildPayload,
+  readFactsheetBenchmark,
+  BENCHMARK_READ_FAILED_MESSAGE,
+} from "./fetch-and-build-payload";
 import { buildFactsheetPayload } from "./build-payload";
 import { alignCoveredReturns } from "./align";
 import { compute } from "./compute";
@@ -147,6 +165,7 @@ const reads = () => fake.bench.calls.filter((c) => !c.ascending);
 const probes = () => fake.bench.calls.filter((c) => c.ascending);
 
 beforeEach(() => {
+  fake.alignThrows = false;
   fake.strategyResult = { data: null, error: null };
   fake.bench.rows = [];
   fake.bench.error = null;
@@ -158,6 +177,10 @@ beforeEach(() => {
   vi.mocked(captureToSentry).mockClear();
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
+  // A second spyOn returns the SAME spy with its calls kept; clear them so a
+  // "not called" assertion reads this test's calls only.
+  vi.mocked(console.warn).mockClear();
+  vi.mocked(console.error).mockClear();
 });
 
 describe("169.5-01 SC3: the route reads BTC from the database", () => {
@@ -278,12 +301,16 @@ describe("169.5-01 SC3: the route reads BTC from the database", () => {
 });
 
 describe("169.5-01 SC3 / D-09 / D-52 / D-54: a read error or throw is the unavailable form", () => {
-  const cases: Array<[string, () => void]> = [
-    ["the reader answers ok:false", () => (fake.bench.error = { code: "PGRST000", message: "boom" })],
-    ["the client throws", () => (fake.bench.throws = true)],
-    ["the first-date probe answers an error", () => (fake.bench.probeError = { code: "57014", message: "timeout" })],
+  const cases: Array<[string, () => void, string]> = [
+    ["the reader answers ok:false", () => (fake.bench.error = { code: "PGRST000", message: "boom" }), "boom"],
+    ["the client throws", () => (fake.bench.throws = true), "socket hang up"],
+    [
+      "the first-date probe answers an error",
+      () => (fake.bench.probeError = { code: "57014", message: "timeout" }),
+      "timeout",
+    ],
   ];
-  for (const [name, arm] of cases) {
+  for (const [name, arm, message] of cases) {
     it(`${name}: unavailable, never BTC_DAILY, logged, not captured`, async () => {
       const dates = days("2024-01-02", "2024-01-11");
       seedStrategy(dates);
@@ -301,8 +328,30 @@ describe("169.5-01 SC3 / D-09 / D-52 / D-54: a read error or throw is the unavai
       expect(btc.summary).toBeNull(); // D-52: no window reads 0
       expect(btc.through).toBeNull();
       expect(btc.dailyReturns).toBeNull();
-      expect(vi.mocked(console.error)).toHaveBeenCalledWith(BENCHMARK_READ_FAILED_MESSAGE, expect.objectContaining({ code: expect.any(String) }));
+      // SFH-M-01: the line carries the error's message and the build's context
+      // (strategy id and read range), threaded from the route; D-54 rules out a
+      // Sentry event, so this line is the only trace.
+      expect(vi.mocked(console.error)).toHaveBeenCalledWith(BENCHMARK_READ_FAILED_MESSAGE, {
+        id: STRATEGY_ID,
+        from: "2024-01-01",
+        to: "2024-01-11",
+        code: expect.any(String),
+        message: message,
+      });
       expect(vi.mocked(captureToSentry).mock.calls.length).toBe(controlCaptures);
     });
   }
+});
+
+describe("SFH-M-01: a bug in the pure merge / align code is not reported as a DB failure", () => {
+  it("an align throw propagates as a build error and is never logged as the benchmark read failure", async () => {
+    const cash = series(days("2024-01-02", "2024-01-11"));
+    fake.bench.rows = CLOSES;
+    fake.bench.probeRows = [{ date: "2023-01-01" }];
+    fake.alignThrows = true;
+    await expect(readFactsheetBenchmark(createAdminClient(), cash, undefined, STRATEGY_ID)).rejects.toThrow(
+      "simulated align bug",
+    );
+    expect(vi.mocked(console.error)).not.toHaveBeenCalledWith(BENCHMARK_READ_FAILED_MESSAGE, expect.anything());
+  });
 });
