@@ -4213,6 +4213,8 @@ Plans:
 
 **Amended 2026-09-30 (code review round 1, recorded at round 2):** D-70(2)'s allocator-blend calendar is narrowed to the dates every leg actually priced, so a US-market holiday is not a blend date and BTC's move across it is carried; the day after a holiday is unpaired for the weekday legs. Full text in 169.4-CONTEXT.md D-70 (AMENDED line).
 
+**Amended 2026-09-30 (code review, recorded at round 3):** alpha, beta and IR are withheld below 10 days paired with the comparator on every factsheet and the alpha/beta widget, shown as "—" with one shared reason sentence. Full text in 169.4-CONTEXT.md D-69 (AMENDED line).
+
 ### Phase 169.4.1: OGSHARPE — the OG share card's Sharpe reads the one shared sharpe() (166.2) (INSERTED)
 
 **Goal:** The OG share card for a strategy shows the same CAGR and Sharpe as its factsheet and every list: for a rankable analytics row it reads the persisted values under its own display policy (Sharpe needs 30 observations, CAGR hidden under 0.95 calendar years or non-positive growth, NaN hides), and for any other row it computes Sharpe only through the one shared `sharpe(..., {ddof: 0})` Phase 166.2 put in `computeOgHeadline`, never a local re-computation.
