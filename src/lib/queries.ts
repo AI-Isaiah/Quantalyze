@@ -48,6 +48,10 @@ import type {
 } from "./types";
 import { SUPPORTED_EXCHANGES, type SupportedExchange } from "./utils";
 import { holdingScopeKey } from "./keys";
+import {
+  fetchLatestHoldingsPerKey,
+  latestHoldingsPerKey,
+} from "./latest-holdings-per-key";
 import { getOwnPreferences, type AllocatorOwnPreferences } from "./preferences";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -2858,6 +2862,13 @@ export interface MyAllocationDashboardPayload {
     side: "long" | "short" | "flat" | null;
     entry_price: number | null;
     unrealized_pnl_usd: number | null;
+    /**
+     * Review C4 SFH-C4-08: the day this row's key read it (`allocator_holdings.asof`,
+     * the key's own latest read under D-16). Open Positions dates a key's rows
+     * when that day is older than the newest read. Optional so legacy fixtures
+     * compile; the dashboard read always sets it.
+     */
+    asof?: string;
   }>;
   /** Row count of TRUSTWORTHY snapshots (flagged zero-baseline rows excluded) — drives the warm-up gate (snapshotCount < 30 → KPIs render `—`). */
   snapshotCount: number;
@@ -2945,6 +2956,25 @@ export interface MyAllocationDashboardPayload {
    * fixture) renders the unnamed line rather than a wrong name.
    */
   equityHistoryNotSyncingKeyIds?: string[];
+  /**
+   * Review C4 SFH-C4-04. True when the history on screen (state "ready") left
+   * out at least one departed account the history rule includes, because the
+   * balance its history is measured from is gone. The derive raises the
+   * benign `departed_history_unavailable` flag in the payload's `flags` and
+   * still marks the curve trustworthy (job_worker.py); the Overview says so in
+   * one line. The flag carries no count. False whenever the curve is not shown.
+   * Optional so legacy fixtures compile; the producer always sets it.
+   */
+  departedHistoryUnavailable?: boolean;
+  /**
+   * Review C4 round 2 WR-R2-03. The keys whose rows in `holdingsSummary` were
+   * written, on `asof`, by a poll that could not read their open positions
+   * (`fetchLatestHoldingsPerKey`'s `partialReads`). Bound to the poll that
+   * wrote the rows, not to the key's current `sync_status`, so a later failed
+   * poll does not clear it. Optional so legacy fixtures compile; the dashboard
+   * read always sets it.
+   */
+  partialPositionReads?: Array<{ api_key_id: string; asof: string }>;
   /**
    * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
    * allocator's snapshots, or null when every snapshot's column is
@@ -3628,6 +3658,14 @@ export function buildPerKeyReturnsByApiKeyId(
 const DERIVED_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * Review C4 SFH-C4-04. The benign flag the derive raises when it leaves a
+ * departed key's history out for want of an anchor (`departed_history_unavailable`
+ * in `derive_allocator_equity`'s `benign_flag_tokens`, job_worker.py). The name
+ * is the writer's; do not rename it here.
+ */
+const DEPARTED_HISTORY_UNAVAILABLE_FLAG = "departed_history_unavailable";
+
+/**
  * The pre-167.1.2 curve check: trustworthy + a non-empty well-formed curve.
  * Does NOT require version 2. `extractTrustworthyDerivedSeries` builds on it
  * and adds the version-2 returns check. The producer also stamps
@@ -4052,6 +4090,9 @@ export function derivePhase07Fields(
   // rebuilding. Review C2 SFH-06: or DERIVED_ROW_READ_FAILED when the read
   // itself failed, which the producer names as `history_read_failed`.
   derivedEquityRow: DerivedEquityRowRead,
+  // Review C4 round 2 WR-R2-03: the read's `partialReads`. Defaulted so
+  // callers that pass no holdings read (fixtures) name no key.
+  partialReads: ReadonlyArray<{ api_key_id: string; asof: string }> = [],
 ): Pick<
   MyAllocationDashboardPayload,
   | "equitySnapshots"
@@ -4067,6 +4108,8 @@ export function derivePhase07Fields(
   | "equityHistoryState"
   | "equityHistoryRebuildReason"
   | "equityHistoryNotSyncingKeyIds"
+  | "departedHistoryUnavailable"
+  | "partialPositionReads"
   | "minHistoryDepthMonths"
   | "activeVenues"
   | "hasConnectedKeys"
@@ -4119,6 +4162,16 @@ export function derivePhase07Fields(
     equityHistoryRebuildReason === "key_not_syncing"
       ? notSyncingIdentityPendingKeyIds(apiKeys)
       : [];
+  // Review C4 SFH-C4-04: the writer's token, read defensively (the JSONB is
+  // worker-written and untrusted), and only for the curve on screen.
+  const payloadFlags =
+    derivedPayload !== null && typeof derivedPayload === "object"
+      ? (derivedPayload as Record<string, unknown>).flags
+      : undefined;
+  const departedHistoryUnavailable =
+    equityHistoryState === "ready" &&
+    Array.isArray(payloadFlags) &&
+    payloadFlags.includes(DEPARTED_HISTORY_UNAVAILABLE_FLAG);
   const equityDailyPoints: DailyPoint[] =
     equityHistoryState === "ready" && series ? series.curve : [];
   const equityDailyReturns: DailyPoint[] =
@@ -4159,11 +4212,9 @@ export function derivePhase07Fields(
 
   // Collapse holdings to latest-asof-per-{venue}:{symbol}:{holding_type}
   // via linear scan of the max-asof comparator. Input order is IRRELEVANT
-  // for correctness — the `.order("asof", { ascending: false })` clause on
-  // the PostgREST query above is a log-inspection hedge (newest rows render
-  // first in debug dumps), not a correctness requirement. Do NOT flip the
-  // comparator to "first-seen wins" thinking ordering is guaranteed —
-  // removing `.order()` would silently regress that assumption.
+  // for correctness: the read (fetchLatestHoldingsPerKey) concatenates the
+  // keys' rows in no guaranteed order. Do NOT flip the comparator to
+  // "first-seen wins" thinking ordering is guaranteed.
   //
   // NEW-C03-02: Key by `${venue}:${symbol}:${holding_type}`, not just
   // `symbol`. Keying on symbol alone silently collapsed multi-venue
@@ -4173,8 +4224,16 @@ export function derivePhase07Fields(
   // surviving venue could flip between page loads. The scope_ref keyspace
   // used everywhere else in the pipeline already uses this triple-key
   // format (see buildHoldingRef).
+  //
+  // Phase 167.1.2 D-16: the collapse runs only over each key's rows at that
+  // key's own latest asof (latestHoldingsPerKey), so a position a key closed
+  // before its latest poll no longer survives from an older row. Review C4
+  // SFH-C4-01 / SFH-C4-02: the read already dropped a key whose account a
+  // newer reading superseded (another key on the same exchange account, or
+  // the key's own later clean poll), so this collapse never picks a departed
+  // key's row for a symbol the account has closed since.
   const holdingsMap = new Map<string, (typeof holdingsRows)[number]>();
-  for (const r of holdingsRows) {
+  for (const r of latestHoldingsPerKey(holdingsRows)) {
     // B8: same canonical triple key as the scope_ref sites above
     // (holdingScopeKey) so the dedup keyspace cannot drift from the rest of
     // the pipeline. The "holding:" prefix is immaterial to a local dedup map.
@@ -4193,6 +4252,7 @@ export function derivePhase07Fields(
     side: r.side,
     entry_price: r.entry_price,
     unrealized_pnl_usd: r.unrealized_pnl_usd,
+    asof: r.asof,
   }));
 
   return {
@@ -4215,6 +4275,8 @@ export function derivePhase07Fields(
     equityHistoryState,
     equityHistoryRebuildReason,
     equityHistoryNotSyncingKeyIds,
+    departedHistoryUnavailable,
+    partialPositionReads: partialReads.map((p) => ({ ...p })),
     minHistoryDepthMonths,
     activeVenues,
     hasConnectedKeys,
@@ -4374,22 +4436,25 @@ export const getMyAllocationDashboard = cache(
         // Cap to the reconstruction BACKFILL_CAP_DAYS (2 years) so the
         // payload can't grow unbounded as the table accumulates days.
         .limit(730),
-      supabase
-        .from("allocator_holdings")
-        .select(
-          // Phase 08 Plan 02 — api_key_id projected so HoldingsTable can
-          // resolve source_key_sync_status via the shared `apiKeys` array
-          // (avoids a nested PostgREST join).
-          //
-          // `side`, `entry_price`, `unrealized_pnl_usd` projected so the
-          // dashboard can render derivative rows in a separate Open
-          // Positions section without conflating notional `value_usd`
-          // with equity contribution (only `unrealized_pnl_usd` counts
-          // toward the equity curve for derivatives).
-          "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id, side, entry_price, unrealized_pnl_usd",
-        )
-        .eq("allocator_id", userId)
-        .order("asof", { ascending: false }),
+      // Phase 167.1.2 D-16: each key's rows at that key's own latest asof,
+      // read in bounded steps (the owner's key ids, then per key its latest
+      // asof, then its rows at it). Returns `{ data, error }` and never
+      // throws; a read that reaches the row cap returns a named error, so the
+      // `assertOk` below fails loud instead of rendering a partial list.
+      fetchLatestHoldingsPerKey(
+        supabase,
+        userId,
+        // Phase 08 Plan 02 — api_key_id projected so HoldingsTable can
+        // resolve source_key_sync_status via the shared `apiKeys` array
+        // (avoids a nested PostgREST join).
+        //
+        // `side`, `entry_price`, `unrealized_pnl_usd` projected so the
+        // dashboard can render derivative rows in a separate Open
+        // Positions section without conflating notional `value_usd`
+        // with equity contribution (only `unrealized_pnl_usd` counts
+        // toward the equity curve for derivatives).
+        "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id, side, entry_price, unrealized_pnl_usd",
+      ),
       getUserApiKeys(userId),
       admin
         .from("match_batches")
@@ -4770,6 +4835,8 @@ export const getMyAllocationDashboard = cache(
       // Phase 115.1 / BACKBONE-02 (RD-1) — the derived $-equity row (or null)
       // threaded into the ONE producer site so the repoint gates there.
       phase115DerivedRow,
+      // Review C4 round 2 WR-R2-03: keys whose rows' poll left positions unread.
+      phase07HoldingsRes.partialReads,
     );
 
     // Phase 09 / D-07 + D-08 + D-11 + finding f5

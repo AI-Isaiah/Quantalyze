@@ -39,6 +39,14 @@ import { createClient } from "@/lib/supabase/client";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 import { computeRetryAtSeconds } from "@/lib/allocator-cooldowns";
 import { accountShareNote } from "@/lib/account-share-note";
+import {
+  accountIdentityTokens,
+  departedAnchorOf,
+  departedHistoryCard,
+  isDepartedKey,
+  type DepartedAnchor,
+  type DepartedHistoryKey,
+} from "@/lib/departed-history";
 // Phase 169 review round 1 IN-04: the balance is an amount, so it renders
 // through the ONE money module in whole dollars (DESIGN.md Currency row).
 import { formatUsd } from "@/lib/dollar-validation";
@@ -211,6 +219,48 @@ const RECONNECT_ACCOUNT_ALREADY_CONNECTED =
   "This exchange account is already connected through another of your keys. Disconnect that key first, then reconnect this one.";
 const RECONNECT_FAILED_HELPER = "Reconnect failed — try again";
 
+// Phase 167.1.2 plan 09 (D-05, D-09): the departed-account overview. Each
+// departed key (disconnected, or revoked / inactive and never disconnected)
+// says whether its history counts in the book, until which UTC day and why,
+// from the same inputs the derive job reads (src/lib/departed-history.ts).
+const HISTORY_LOADING = "Checking this key's history…";
+const HISTORY_LOAD_FAILED =
+  "Could not check this key's history. Refresh the page to try again.";
+const HISTORY_RECOMPUTE_NOTICE =
+  "Your equity history is recomputed with this change within a few minutes.";
+const HISTORY_RECOMPOSE_FALLBACK =
+  "Your history is being recomputed right now. Try again in a few minutes.";
+const DELETE_REMOVES_HISTORY =
+  "Deleting also removes this account's history. Disconnect instead to keep it.";
+
+/**
+ * set_departed_key_history_inclusion's refusals, mapped BY SQLSTATE and never by
+ * message (migration 20260925120000, PR B review fix): 55000 KEY_NOT_DEPARTED
+ * (the key is working again), 55006 HISTORY_RECOMPOSE_IN_PROGRESS (nothing was
+ * written; its DETAIL says how long the recompose has run and its HINT when a
+ * worker reclaims it — shown as given, never parsed), 42501 (signed out or not
+ * the owner). 22023 HISTORY_INCLUSION_INVALID is a client bug and takes the
+ * generic line.
+ */
+function historyInclusionErrorMessage(error: {
+  code?: string | null;
+  details?: string | null;
+  hint?: string | null;
+}): string {
+  switch (error.code) {
+    case "55000":
+      return "This key is connected again, so its history always counts. Refresh the page.";
+    case "55006":
+      return error.details && error.hint
+        ? `${error.details} ${error.hint}`
+        : HISTORY_RECOMPOSE_FALLBACK;
+    case "42501":
+      return "Could not change this key's history: you are signed out or this key is not yours.";
+    default:
+      return "Could not change this key's history. Please try again.";
+  }
+}
+
 function disconnectedRefusalMessage(body: unknown): string {
   const error =
     body !== null && typeof body === "object"
@@ -336,8 +386,244 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   // re-validation, not a retry of the stored one.
   const [updatingKeyId, setUpdatingKeyId] = useState<string | null>(null);
   const [, startTransition] = useTransition();
+  // Plan 09: each key's first and last csv_daily_returns day, read through the
+  // owner's own client (policy csv_daily_returns_allocator_owner_select), and
+  // what a departed key's history is measured from: a usable anchor, no
+  // key_inputs row, or a row whose last balance read stamped a null anchor.
+  const [returnsDays, setReturnsDays] = useState<
+    Record<string, { first: string | null; last: string | null }>
+  >({});
+  const [anchorById, setAnchorById] = useState<Record<string, DepartedAnchor>>({});
+  const [historyLoadFailed, setHistoryLoadFailed] = useState<Record<string, true>>({});
+  const [historyPendingId, setHistoryPendingId] = useState<string | null>(null);
+  const [historyNotice, setHistoryNotice] = useState<
+    Record<string, { kind: "status" | "retry" | "alert"; text: string }>
+  >({});
 
   const supabase = createClient();
+
+  // The D-09 rule's inputs, one per key. The returns days and the departed
+  // keys' anchors are the only inputs not on the key row; until they load, a
+  // card says so rather than guessing. WR-R2-02: a departed key with no usable
+  // anchor neither covers nor bounds another key, as in the derive.
+  const historyKeys: DepartedHistoryKey[] = keys.map((k) => ({
+    id: k.id,
+    exchange: k.exchange,
+    venue_account_id: k.venue_account_id,
+    account_shared_with_api_key_id: k.account_shared_with_api_key_id,
+    account_share_kind: k.account_share_kind,
+    is_active: k.is_active,
+    disconnected_at: k.disconnected_at,
+    sync_status: k.sync_status,
+    history_inclusion: k.history_inclusion,
+    first_returns_day: returnsDays[k.id]?.first ?? null,
+    last_returns_day: returnsDays[k.id]?.last ?? null,
+    anchored: anchorById[k.id] === undefined || anchorById[k.id].state === "anchored",
+  }));
+  const historyKeysById = new Map(historyKeys.map((k) => [k.id, k]));
+  const departedIds = new Set(historyKeys.filter(isDepartedKey).map((k) => k.id));
+  const identity = accountIdentityTokens(historyKeys);
+  // The keys a departed key's decision reads: itself and every key on the same
+  // known account (a live key there bounds it, and so does a later departed one).
+  const historyInputIds = (keyId: string): string[] => {
+    const token = identity.get(keyId) ?? null;
+    return token === null
+      ? [keyId]
+      : historyKeys.filter((k) => identity.get(k.id) === token).map((k) => k.id);
+  };
+  const missingDayIds = [
+    ...new Set([...departedIds].flatMap((id) => historyInputIds(id))),
+  ]
+    .filter((id) => !(id in returnsDays) && !historyLoadFailed[id])
+    .sort();
+  const missingAnchorIds = [...departedIds]
+    .filter((id) => !(id in anchorById) && !historyLoadFailed[id])
+    .sort();
+  const missingDaySignature = missingDayIds.join(",");
+  const missingAnchorSignature = missingAnchorIds.join(",");
+
+  useEffect(() => {
+    if (!missingDaySignature && !missingAnchorSignature) return;
+    let cancelled = false;
+    const dayIds = missingDaySignature ? missingDaySignature.split(",") : [];
+    const anchorIds = missingAnchorSignature ? missingAnchorSignature.split(",") : [];
+    const client = createClient();
+    // One ascending and one descending limit(1) read per key: the first and
+    // last returns day, the same inputs the derive job's rule reads.
+    const readDay = async (id: string, ascending: boolean): Promise<string | null> => {
+      const { data, error } = await client
+        .from("csv_daily_returns")
+        .select("date")
+        .eq("api_key_id", id)
+        .order("date", { ascending })
+        .limit(1);
+      if (error) throw error;
+      return data?.[0]?.date ?? null;
+    };
+    (async () => {
+      try {
+        const days = await Promise.all(
+          dayIds.map(async (id) => {
+            const [first, last] = await Promise.all([
+              readDay(id, true),
+              readDay(id, false),
+            ]);
+            return [id, { first, last }] as const;
+          }),
+        );
+        const anchors: Record<string, DepartedAnchor> = {};
+        if (anchorIds.length > 0) {
+          const { data, error } = await client
+            .from("allocator_equity_derived")
+            .select("kind,payload")
+            .in(
+              "kind",
+              anchorIds.map((id) => `key_inputs:${id}`),
+            );
+          if (error) throw error;
+          const rowById = new Map(
+            (data ?? []).map((row) => [row.kind.replace(/^key_inputs:/, ""), row]),
+          );
+          for (const id of anchorIds) anchors[id] = departedAnchorOf(rowById.get(id));
+        }
+        if (cancelled) return;
+        setReturnsDays((prev) => ({ ...prev, ...Object.fromEntries(days) }));
+        setAnchorById((prev) => ({ ...prev, ...anchors }));
+      } catch (err) {
+        console.error(
+          "[AllocatorExchangeManager] departed-history read failed:",
+          err,
+        );
+        if (cancelled) return;
+        setHistoryLoadFailed((prev) => ({
+          ...prev,
+          ...Object.fromEntries(
+            [...dayIds, ...anchorIds].map((id) => [id, true as const]),
+          ),
+        }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [missingDaySignature, missingAnchorSignature]);
+
+  // Mirrors the Disconnect handler: optimistic update, the owner's own RPC
+  // (auth.uid() is the authority, T-167.1.2-34), rollback and an error line on
+  // failure.
+  async function handleHistoryToggle(
+    keyId: string,
+    next: "include" | "exclude",
+  ) {
+    const previous = keys.find((k) => k.id === keyId)?.history_inclusion ?? null;
+    setHistoryPendingId(keyId);
+    setHistoryNotice((prev) => {
+      const rest = { ...prev };
+      delete rest[keyId];
+      return rest;
+    });
+    setKeys((prev) =>
+      prev.map((k) => (k.id === keyId ? { ...k, history_inclusion: next } : k)),
+    );
+    const { error } = await supabase.rpc("set_departed_key_history_inclusion", {
+      p_api_key_id: keyId,
+      p_inclusion: next,
+    });
+    setHistoryPendingId(null);
+    if (error) {
+      console.error(
+        "[AllocatorExchangeManager] set_departed_key_history_inclusion failed:",
+        { code: error.code },
+      );
+      setKeys((prev) =>
+        prev.map((k) =>
+          k.id === keyId ? { ...k, history_inclusion: previous } : k,
+        ),
+      );
+      setHistoryNotice((prev) => ({
+        ...prev,
+        [keyId]: {
+          kind: error.code === "55006" ? "retry" : "alert",
+          text: historyInclusionErrorMessage(error),
+        },
+      }));
+      return;
+    }
+    setHistoryNotice((prev) => ({
+      ...prev,
+      [keyId]: { kind: "status", text: HISTORY_RECOMPUTE_NOTICE },
+    }));
+    startTransition(() => router.refresh());
+  }
+
+  function renderDepartedHistory(keyId: string) {
+    const input = historyKeysById.get(keyId);
+    if (!input || !isDepartedKey(input)) return null;
+    const ids = historyInputIds(keyId);
+    const failed = ids.some((id) => historyLoadFailed[id]);
+    // Every departed key on the account must have its anchor state, or a key
+    // with none would still read as able to cover this one (WR-R2-02).
+    const loaded =
+      ids.every((id) => id in returnsDays) &&
+      ids.filter((id) => departedIds.has(id)).every((id) => id in anchorById);
+    // The switch is ON only when the book holds the history, and live only
+    // where flipping it changes what the book holds (SFH-C4-05): see
+    // departedHistoryCard.
+    const card =
+      !failed && loaded ? departedHistoryCard(input, historyKeys, anchorById[keyId]) : null;
+    const line = failed
+      ? HISTORY_LOAD_FAILED
+      : card === null
+        ? HISTORY_LOADING
+        : card.sentence;
+    const included = card?.checked ?? false;
+    const next = card?.toggleTo ?? null;
+    const canToggle = next !== null && historyPendingId !== keyId;
+    const notice = historyNotice[keyId];
+    return (
+      <div data-testid={`departed-history-${keyId}`} className="mt-1">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={included}
+            aria-label="Include this account's history"
+            disabled={!canToggle}
+            onClick={() => {
+              if (next !== null) void handleHistoryToggle(keyId, next);
+            }}
+            className={`flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+              included ? "bg-accent" : "bg-border"
+            }`}
+          >
+            <span
+              aria-hidden
+              className={`h-4 w-4 rounded-full bg-white transition-transform ${
+                included ? "translate-x-4" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+          <p className="text-xs text-text-secondary">{line}</p>
+        </div>
+        {notice?.kind === "status" ? (
+          <p role="status" className="mt-1 text-xs text-text-muted">
+            {notice.text}
+          </p>
+        ) : notice ? (
+          <p
+            role="alert"
+            className={`mt-1 text-xs rounded px-3 py-2 ${
+              notice.kind === "retry"
+                ? "text-warning bg-warning/5 border border-warning/20"
+                : "text-negative bg-negative/5 border border-negative/20"
+            }`}
+          >
+            {notice.text}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
 
   async function openDeleteConfirm(keyId: string) {
     setDeleteError(null);
@@ -981,6 +1267,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                         {shareNote}
                       </p>
                     ) : null}
+                    {renderDepartedHistory(key.id)}
                   </div>
                   <div className="text-right">
                     <p className="text-fixed-10 uppercase tracking-wider text-text-muted font-semibold">
@@ -1096,6 +1383,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                         MT5 account {key.venue_account_id ?? "—"}
                       </p>
                     )}
+                    {renderDepartedHistory(key.id)}
                   </div>
                   <div className="text-right">
                     <p className="text-fixed-10 uppercase tracking-wider text-text-muted font-semibold">
@@ -1250,6 +1538,15 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     ? "Checked: holdings are permanently deleted and excluded from all historical metrics."
                     : "Unchecked: holdings are kept for audit continuity and reflected in past performance."}
                 </p>
+                {/* Plan 09, measured: this path calls delete_allocator_api_key,
+                    which hard-deletes the api_keys row, and
+                    csv_daily_returns_api_key_id_fkey is ON DELETE CASCADE, so
+                    the key's daily returns (its history) go with it. */}
+                {cascadeHoldings ? (
+                  <p className="ml-6 mt-1 text-fixed-11 text-warning">
+                    {DELETE_REMOVES_HISTORY}
+                  </p>
+                ) : null}
               </div>
             )}
 

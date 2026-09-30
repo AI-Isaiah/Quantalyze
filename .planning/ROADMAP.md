@@ -3825,6 +3825,10 @@ Plans:
 
 **D-15 amended 2026-09-29 (PR C3 review fix A; recorded in 167.1.2-CONTEXT.md):** the ready-branch warm-up note now promises panels after three days of blended history, not two (the factsheet builder needs 2 returns, and N days give N-1), and counts the days of the curve on screen. The Scenario sentence and the Overview heading follow one four-class reason classifier (C3 fixes B, G, I).
 
+**D-09 case (2) amended 2026-09-29 (PR C4 review rounds 1 and 2, SFH-C4-07 and WR-R2-02; recorded in 167.1.2-CONTEXT.md):** a departed key whose last countable day falls before that of a key ordered ahead of it on the same known account is covered (zero days, reason `same_account_as_earlier_key`), so every day of the account is counted exactly once; and a departed key with no usable saved balance neither covers nor bounds any other key, so a dropped key never leaves a gap another key would have filled. Founder-ratified 2026-09-29 (AskUserQuestion, "Ratify as built").
+
+**D-16 amended 2026-09-29 (PR C4 review rounds 1 and 2, SFH-C4-01, SFH-C4-02, SFH-R2-01; recorded in 167.1.2-CONTEXT.md):** Open Positions groups keys that read one exchange account and shows only the account's newest reading, and hides a key's rows once a newer clean poll has read it; the scenario-commit fingerprint (migration 20260929120000) applies the same row set.
+
 **Goal:** An allocator's book counts each exchange ACCOUNT exactly once, and "My Allocation" never shows an equity curve, return or ratio that the data does not support. A second key on an account that is already connected is refused. The equity history is rebuilt as one series per account from per-key returns and flows, and hidden until that series exists.
 **Requirements**: TBD. Source: founder browser UAT 2026-09-24 on the founder's own allocator book ("completely wrong, obviously"), with a read-only root-cause trace at `96b5db4c`.
 **Depends on:** Phase 167.1
@@ -3921,6 +3925,15 @@ Plans:
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1.2.1 to break down)
+
+⭐ **ROUTED IN 2026-09-29 (from 167.1.2 PR C4 review rounds 1-3 and its verification; data integrity and user-facing).** Sources: `167.1.2-C4-REVIEW-FIX-K1.md`, `-K2a.md`, `-R2C.md`, `167.1.2-C4-VERIFY.md`, `167.1.2-C4-REVIEW-R3.md`. Items (1)-(3) are the D-16 gaps the founder chose to book here (AskUserQuestion 2026-09-29, "Book them to a phase") rather than accept or fix in C4; (4)-(7) were routed out of C4's fix rounds because each needs a file set or a migration outside a fixer's topic.
+(1) **D-16, unlinked departed key:** a departed key never stamped with `venue_account_id` and never marked is not grouped with its account by `accountIdentityTokens`, so its older rows still show on Open Positions (dated, never as current dollars).
+(2) **D-16, same-day empty poll:** a clean empty poll on the same UTC day as a key's latest rows does not hide them (the supersede rule is strictly later), so a position closed and polled the same day still shows.
+(3) **D-16, Bybit UTA parse-miss:** when the Bybit unified-account id is not parsed the key stays ungrouped, with (1)'s effect.
+(4) **WR-02 (data integrity, needs a migration):** the `allocator_holdings` unique index `allocator_holdings_owner_venue_symbol_asof_key` and the writer's `on_conflict` do not include `api_key_id`, so two keys reading one account on one day can overwrite each other's rows. Any change must move `commit_scenario_batch` (migration `20260929120000`) and the TS reader together (see WR-R3-01).
+(5) **WR-03 (data integrity):** `account_groups` in `analytics-service/services/allocator_equity_derive.py` (also used by `equity_reconstruction.py`) and the dashboard reader in `src/lib/queries.ts` must change together; gating on the marker alone would reopen the double count the identity token closed.
+(6) **SFH-C4-04 remainder (user-facing):** the derive's `departed_history_unavailable` warning reaches Sentry only as a breadcrumb, not an event, and the Overview line cannot say how many accounts' history is missing (needs a count field written in `job_worker.py`).
+(7) **User-facing:** the Overview's "No positions to analyze yet" card is checked before the equity-history state, so a book whose positions are all closed (e.g. expired Deribit options) hides a ready curve (predates C4); and a stale key's spot rows in Exchange Positions carry no date (C4 dated Open Positions only).
 
 ### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
 

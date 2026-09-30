@@ -102,6 +102,23 @@ vi.mock("@/lib/supabase/client", () => ({
             },
           };
         }
+        // Phase 167.1.2 plan 09 — the departed-history reads a departed key's
+        // card makes (first/last returns day, its key_inputs anchor). Answered
+        // empty here, and kept off the holdings probe below so they can never
+        // consume a holdingsCountMock value a delete test queued. The overview
+        // itself is tested in AllocatorExchangeManager.departed-history.test.tsx.
+        if (table === "csv_daily_returns") {
+          return {
+            eq: () => ({
+              order: () => ({
+                limit: () => Promise.resolve({ data: [], error: null }),
+              }),
+            }),
+          };
+        }
+        if (table === "allocator_equity_derived") {
+          return { in: () => Promise.resolve({ data: [], error: null }) };
+        }
         // Phase 08 Plan 02 Task 1 — allocator_holdings count probe used by
         // openDeleteConfirm. Shape matches the call:
         //   .from("allocator_holdings").select("*", {count:"exact", head:true}).eq("api_key_id", keyId)

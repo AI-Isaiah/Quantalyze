@@ -10474,6 +10474,285 @@ def _load_allocator_daily_returns(
     return out
 
 
+@dataclass(frozen=True)
+class DepartedHistoryDecision:
+    """Whether a departed key's history counts, until which ISO day, and why.
+
+    ``until`` is None when ``included`` is False. ``reason`` is a machine token
+    the overview turns into its sentence (src/lib/departed-history.ts)."""
+
+    included: bool
+    until: str | None
+    reason: str
+
+
+def _is_live_key(row: Mapping[str, Any]) -> bool:
+    """The allocator's eligible-key predicate. A key that is not live is departed.
+
+    ``eligible_key_predicate`` itself (IN-02), with one difference: a MISSING
+    ``is_active`` reads as active, as the shared fixture's inputs say. The job
+    always selects the column. Imported here, as the derive imports it, to keep
+    pandas off this module's import path."""
+    from services.allocator_equity_derive import eligible_key_predicate
+
+    return eligible_key_predicate({**row, "is_active": row.get("is_active", True)})
+
+
+def _utc_day(value: object) -> str | None:
+    """The UTC calendar day of a timestamptz string, or None.
+
+    An unreadable value is None, as in the TS twin (``utcDay``), so the key ends
+    on its last returns day. Raising here sat outside the job's corrupt-input
+    disposal and would have retried the job forever (IN-05 / SFH-C4-11)."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).date().isoformat()
+
+
+def account_identity_tokens(
+    keys: Sequence[Mapping[str, Any]],
+) -> dict[str, str | None]:
+    """Which keys read the same exchange account, as one token per account.
+
+    Two keys read one account when they carry the same non-blank
+    ``(exchange, venue_account_id)`` (case-blind exchange, as
+    ``account_identity_collisions``), or when one is MARKED against the other
+    (``account_share_kind`` duplicate / composite_member naming it in
+    ``account_shared_with_api_key_id``). The marker is the stamper's own
+    evidence (D-01, D-04): the marked key hit the holder's unique account index,
+    which is exactly why its own ``venue_account_id`` stays NULL. Reading the
+    NULL alone would call it an unknown account and let an owner's 'include'
+    count one account twice. A key with neither a venue id nor a marker link is
+    unknown (``None``). The marker kinds are ``SHARED_ACCOUNT_KINDS``, the set
+    ``account_groups`` reads (IN-03), never a copy. Pure."""
+    import services.allocator_equity_derive as allocator_equity_derive
+
+    marker_kinds = allocator_equity_derive.SHARED_ACCOUNT_KINDS
+    ids = [str(row["id"]) for row in keys]
+    parent = {key_id: key_id for key_id in ids}
+
+    def _find(key_id: str) -> str:
+        while parent[key_id] != key_id:
+            parent[key_id] = parent[parent[key_id]]
+            key_id = parent[key_id]
+        return key_id
+
+    def _union(left: str, right: str) -> None:
+        root_left, root_right = _find(left), _find(right)
+        if root_left != root_right:
+            parent[max(root_left, root_right)] = min(root_left, root_right)
+
+    known: set[str] = set()
+    by_venue: dict[tuple[str, str], str] = {}
+    for row in keys:
+        key_id = str(row["id"])
+        venue_id = row.get("venue_account_id")
+        if isinstance(venue_id, str) and venue_id.strip():
+            exchange = row.get("exchange")
+            exchange_key = exchange.strip().lower() if isinstance(exchange, str) else ""
+            pair = (exchange_key, venue_id.strip())
+            known.add(key_id)
+            if pair in by_venue:
+                _union(by_venue[pair], key_id)
+            else:
+                by_venue[pair] = key_id
+    for row in keys:
+        key_id = str(row["id"])
+        holder = row.get("account_shared_with_api_key_id")
+        if (
+            row.get("account_share_kind") in marker_kinds
+            and holder is not None
+            and str(holder) != key_id
+            and str(holder) in parent
+        ):
+            known.update((key_id, str(holder)))
+            _union(key_id, str(holder))
+    return {
+        key_id: (f"account:{_find(key_id)}" if key_id in known else None)
+        for key_id in ids
+    }
+
+
+# Sorts before every real ISO day: a live key with no returns yet bounds a
+# departed key on its account to no day at all.
+_BEFORE_EVERY_DAY = "0000-00-00"
+
+
+def _day_before(day: str) -> str:
+    if day == _BEFORE_EVERY_DAY:
+        return day
+    return (datetime.fromisoformat(day).date() - timedelta(days=1)).isoformat()
+
+
+def departed_history_inclusion(
+    keys: Sequence[Mapping[str, Any]],
+) -> dict[str, DepartedHistoryDecision]:
+    """D-05 / D-09: which departed keys' history the book counts, and until when.
+
+    ``keys`` is every key of the owner, live and departed, each with ``id``,
+    ``exchange``, ``venue_account_id``, ``account_shared_with_api_key_id``,
+    ``account_share_kind``, ``is_active`` (optional, default true),
+    ``disconnected_at``, ``sync_status``, ``history_inclusion``,
+    ``first_returns_day``, ``last_returns_day`` and ``anchored`` (optional,
+    default true: false when the key has no saved balance to level its history
+    from). The spec is the shared
+    fixture ``tests/fixtures/departed_history_inclusion.json`` (its ``rule``
+    list); src/lib/departed-history.ts is the twin and is tested against the
+    same rows. Pure; never reads created_at.
+
+    * End day: the UTC day of ``disconnected_at``, else the last returns day. A
+      key counts at most until the earlier of its end day and last returns day.
+    * 'exclude' always excludes. No returns on or before the end day: excluded.
+    * Unknown account (``account_identity_tokens`` None): excluded by default
+      (founder-confirmed 2026-09-25); 'include' counts it to its end day.
+    * Known account: a LIVE key on it bounds the departed key to the day before
+      the live key's first returns day. A live key with no returns yet bounds it to
+      no day at all, under its own reason (WR-04), until that key has returns. The COUNTED departed keys on it (not
+      excluded, with returns) are ordered by (first, last, id). A key whose last
+      countable day is before that of a key ordered ahead of it is COVERED (that
+      key reads the account over all its days): it counts zero days and bounds
+      nothing, so a later key that ends first never cuts an earlier key's tail
+      (SFH-C4-07). Every other one is bounded to the day before the next
+      uncovered key's first day (B4: on no day do two counted keys share a
+      known account). 'include' never lifts a bound.
+    * WR-R2-02: a departed key with ``anchored`` false cannot be counted by the
+      book, so it neither covers nor bounds another key: it is left out of every
+      other key's ordering, as an excluded key is, and the chain re-forms around
+      the keys that can be levelled. Its own decision is taken against those
+      keys with itself added, so ``included``/``until`` on it name the days it
+      would carry that no levelled key carries; the derive leaves it out and
+      flags ``departed_history_unavailable``.
+    """
+    identity = account_identity_tokens(keys)
+    live_ids = {str(row["id"]) for row in keys if _is_live_key(row)}
+    rows_by_id = {str(row["id"]): row for row in keys}
+
+    def _own_window(row: Mapping[str, Any]) -> tuple[str, str] | None:
+        """(first returns day, last day it may count), or None: no history."""
+        first = row.get("first_returns_day")
+        last = row.get("last_returns_day")
+        end = _utc_day(row.get("disconnected_at")) or last
+        if not first or not last or not end:
+            return None
+        until = min(str(end), str(last))
+        return (str(first), until) if until >= str(first) else None
+
+    windows = {
+        key_id: _own_window(row)
+        for key_id, row in rows_by_id.items()
+        if key_id not in live_ids
+    }
+    # The last day each departed key could count, for the COVERED test below.
+    last_countable = {
+        key_id: window[1] for key_id, window in windows.items() if window is not None
+    }
+    decisions: dict[str, DepartedHistoryDecision] = {}
+    for key_id, row in rows_by_id.items():
+        if key_id in live_ids:
+            continue
+        choice = row.get("history_inclusion")
+        if choice == "exclude":
+            decisions[key_id] = DepartedHistoryDecision(False, None, "owner_excluded")
+            continue
+        window = windows[key_id]
+        if window is None:
+            decisions[key_id] = DepartedHistoryDecision(False, None, "no_returns")
+            continue
+        first, until = window
+        token = identity[key_id]
+        if token is None:
+            if choice == "include":
+                decisions[key_id] = DepartedHistoryDecision(True, until, "owner_included")
+            else:
+                decisions[key_id] = DepartedHistoryDecision(False, None, "account_unknown")
+            continue
+        same_account = [
+            other_id
+            for other_id, other_token in identity.items()
+            if other_id != key_id and other_token == token
+        ]
+        live_firsts = [
+            str(rows_by_id[other_id].get("first_returns_day") or _BEFORE_EVERY_DAY)
+            for other_id in same_account
+            if other_id in live_ids
+        ]
+        # The departed keys that count on this account, this key among them,
+        # in D-09 order: first returns day, then last returns day, then id.
+        # WR-R2-02: a key with no saved balance is never counted by the book,
+        # so it covers and bounds no other key; it is ordered only when it is
+        # the key being decided.
+        counted_departed = sorted(
+            (
+                str(rows_by_id[other_id]["first_returns_day"]),
+                str(rows_by_id[other_id]["last_returns_day"]),
+                other_id,
+            )
+            for other_id in same_account + [key_id]
+            if other_id not in live_ids
+            and rows_by_id[other_id].get("history_inclusion") != "exclude"
+            and windows[other_id] is not None
+            and (other_id == key_id or rows_by_id[other_id].get("anchored", True) is not False)
+        )
+        position = next(
+            index for index, entry in enumerate(counted_departed) if entry[2] == key_id
+        )
+        # SFH-C4-07: a key that stops counting before a key ordered ahead of it
+        # is COVERED — that earlier key reads the account over all its days. It
+        # counts zero days and bounds nothing; otherwise the earlier key's tail
+        # after the covered key's end would count nowhere.
+        covered = {
+            entry[2]
+            for index, entry in enumerate(counted_departed)
+            if any(
+                last_countable[entry[2]] < last_countable[earlier[2]]
+                for earlier in counted_departed[:index]
+            )
+        }
+        bounds = [until]
+        if live_firsts:
+            bounds.append(_day_before(min(live_firsts)))
+        successor = next(
+            (
+                entry
+                for entry in counted_departed[position + 1:]
+                if entry[2] not in covered
+            ),
+            None,
+        )
+        if key_id in covered:
+            bounds.append(_BEFORE_EVERY_DAY)
+            successor = None
+        if successor is not None:
+            bounds.append(_day_before(successor[0]))
+        if _BEFORE_EVERY_DAY in live_firsts:
+            # WR-04: the live key on this account has no returns yet (a
+            # rotation still building its history), so it reads none of these
+            # days today; the decision is made again once it has returns.
+            reason = "same_account_as_connected_key_pending"
+        elif live_firsts:
+            reason = "same_account_as_connected_key"
+        elif key_id in covered:
+            reason = "same_account_as_earlier_key"
+        elif successor is not None:
+            reason = "same_account_as_later_key"
+        elif position > 0:
+            reason = "latest_key_on_account"
+        else:
+            reason = "distinct_account"
+        counted_until = min(bounds)
+        if counted_until < first:
+            decisions[key_id] = DepartedHistoryDecision(False, None, reason)
+        else:
+            decisions[key_id] = DepartedHistoryDecision(True, counted_until, reason)
+    return decisions
+
+
 async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult:
     """Phase 115.1 (RD-3 Option B) — CRAWL-FREE, DECRYPTION-FREE allocator
     $-equity compose.
@@ -10537,7 +10816,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             .select(
                 "id,is_active,sync_status,disconnected_at,"
                 "exchange,venue_account_id,"
-                "account_shared_with_api_key_id,account_share_kind"
+                "account_shared_with_api_key_id,account_share_kind,"
+                "history_inclusion"
             )
             .eq("user_id", allocator_id)
             .execute()
@@ -10629,6 +10909,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             error_kind="permanent",
         )
     first_return_day: dict[str, str] = {}
+    last_return_day: dict[str, str] = {}
     for r in csv_rows:
         day = r.get("date")
         k = r.get("api_key_id")
@@ -10636,6 +10917,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             continue  # the strict per-row parse below disposes a corrupt row
         if k not in first_return_day or str(day) < first_return_day[k]:
             first_return_day[k] = str(day)
+        if k not in last_return_day or str(day) > last_return_day[k]:
+            last_return_day[k] = str(day)
 
     excluded_shared: set[str] = set()
     # kept key id → the members stitched before it, in first-return-day order.
@@ -10691,6 +10974,83 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     counted_ids = eligible_ids - excluded_shared
     counted_rows = [row for row in key_rows if row["id"] in counted_ids]
 
+    def _load_key_inputs() -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            supabase.table("allocator_equity_derived")
+            .select("kind,payload")
+            .eq("allocator_id", allocator_id)
+            .like("kind", "key_inputs:%")
+            .execute()
+            .data
+            or []
+        )
+
+    ki_rows = await db_execute(_load_key_inputs)
+
+    # WR-R2-02: which departed keys can be levelled is decided BEFORE the D-09
+    # rule, from the same key_inputs rows the compose reads. A departed key
+    # whose row is missing (the orphan cleanup deleted every departed key's row
+    # before plan 09) or carries a null anchor (its last balance read failed)
+    # is never counted by the book, and it is never re-derived. Deciding this
+    # after the rule let such a key cover or bound a key that CAN be levelled,
+    # and that key's days then counted nowhere on a curve shown as ready.
+    departed_anchored: set[str] = set()
+    # Departed keys whose key_inputs row exists but carries no anchor → the
+    # stamped anchor_null_reason (SFH-C4-06).
+    departed_null_anchor_reasons: dict[str, str] = {}
+    for row in ki_rows:
+        kind = str(row.get("kind", ""))
+        api_key_id = kind.split(":", 1)[1] if ":" in kind else ""
+        if api_key_id not in rows_by_id or api_key_id in eligible_ids:
+            continue
+        departed_payload = row.get("payload")
+        if not isinstance(departed_payload, Mapping):
+            departed_payload = {}
+        if departed_payload.get("anchor_usd") is not None:
+            departed_anchored.add(api_key_id)
+            continue
+        _departed_reason = departed_payload.get("anchor_null_reason")
+        departed_null_anchor_reasons[api_key_id] = (
+            _departed_reason
+            if isinstance(_departed_reason, str) and _departed_reason
+            else "unstamped"
+        )
+
+    # D-05 / D-09 (plan 09): a departed key's history stays in the book up to its
+    # end day. The rule reads first/last returns days and disconnected_at only,
+    # the same inputs the overview (src/lib/departed-history.ts) reads, plus
+    # whether the key can be levelled (the overview reads the same key_inputs
+    # rows for that).
+    departed_decisions = departed_history_inclusion(
+        [
+            {
+                **row,
+                "first_returns_day": first_return_day.get(row["id"]),
+                "last_returns_day": last_return_day.get(row["id"]),
+                "anchored": row["id"] in eligible_ids or row["id"] in departed_anchored,
+            }
+            for row in key_rows
+        ]
+    )
+    # A departed key the rule includes but that cannot be levelled is left out
+    # under a benign flag: composing it would drop it as DROPPED_KEY and hold the
+    # whole book untrustworthy forever. The book stays what it was before plan 09
+    # for that key (D-22), no worse, and the rule has already let the keys that
+    # CAN be levelled carry every day they read.
+    departed_unavailable = sorted(
+        key_id
+        for key_id, decision in departed_decisions.items()
+        if decision.included and key_id not in departed_anchored
+    )
+    departed_end_by_key: dict[str, str] = {
+        key_id: decision.until
+        for key_id, decision in departed_decisions.items()
+        if decision.included
+        and decision.until is not None
+        and key_id in departed_anchored
+    }
+
     # Identity gate. A 'duplicate' is a duplicate while its holder is WORKING
     # (D-18) — the same rule as queries.ts countsAsDuplicate, so the writer and
     # the reader agree — and the curve is refused, whatever the marked key's own
@@ -10708,16 +11068,33 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             rows_by_id.get(row.get("account_shared_with_api_key_id"))
         )
     ]
+    # B4: over the whole HISTORY set, a live key from its first returns day
+    # (open while it has none) to an open end, a departed key over the days it
+    # counts. A rotation clipped by D-09 does not collide; two live keys on one
+    # account still do.
+    # The account is the identity token (venue id OR marker link), so a
+    # departed holder and the live key marked against it are one account here.
+    identity_tokens = account_identity_tokens(key_rows)
     collisions = account_identity_collisions(
         [
             {
                 "id": row["id"],
-                "exchange": row.get("exchange"),
-                "venue_account_id": row.get("venue_account_id"),
-                "first_counted_day": None,
+                "exchange": "account",
+                "venue_account_id": identity_tokens.get(str(row["id"])),
+                "first_counted_day": first_return_day.get(row["id"]),
                 "last_counted_day": None,
             }
             for row in counted_rows
+        ]
+        + [
+            {
+                "id": key_id,
+                "exchange": "account",
+                "venue_account_id": identity_tokens.get(str(key_id)),
+                "first_counted_day": first_return_day.get(key_id),
+                "last_counted_day": until,
+            }
+            for key_id, until in departed_end_by_key.items()
         ]
     )
     if duplicate_keys or collisions:
@@ -10812,7 +11189,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     _grouped: dict[str, list[dict[str, Any]]] = {}
     for r in csv_rows:
         k = r.get("api_key_id")
-        if k is not None and (k in counted_ids or k in stitch_source_ids):
+        if k is not None and (
+            k in counted_ids or k in stitch_source_ids or k in departed_end_by_key
+        ):
             _grouped.setdefault(k, []).append(r)
     returns_by_key: dict[str, pd.Series] = {}
     # SFH-R2-03: a stitch source's own series. Not an input on its own; only
@@ -10826,7 +11205,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 index=[str(x["date"]) for x in rws_sorted],
                 dtype="float64",
             )
-            if k in counted_ids:
+            if k in counted_ids or k in departed_end_by_key:
                 returns_by_key[k] = series
             else:
                 source_returns[k] = series
@@ -10834,19 +11213,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         return await _permanent_corrupt_input(exc)
 
     # ── 3. key_inputs rows → flows_by_key + anchors_by_key; orphan cleanup. ──
-    def _load_key_inputs() -> list[dict[str, Any]]:
-        return cast(
-            list[dict[str, Any]],
-            supabase.table("allocator_equity_derived")
-            .select("kind,payload")
-            .eq("allocator_id", allocator_id)
-            .like("kind", "key_inputs:%")
-            .execute()
-            .data
-            or []
-        )
-
-    ki_rows = await db_execute(_load_key_inputs)
+    # (ki_rows was read before the D-09 rule; see WR-R2-02 there.)
     flows_by_key: dict[str, list[ExternalFlow]] = {}
     anchors_by_key: dict[str, float | None] = {}
     # F1a×F3/M2 seam: WHY the epilogue nulled an anchor ('dust' vs a real-capital
@@ -10868,11 +11235,28 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         for row in ki_rows:
             kind = str(row.get("kind", ""))
             api_key_id = kind.split(":", 1)[1] if ":" in kind else ""
-            if api_key_id not in eligible_ids:
-                # A key that is no longer eligible (revoked / disconnected /
-                # deleted) keeps a stale key_inputs row — bounded orphan cleanup
-                # below.
+            if api_key_id not in rows_by_id:
+                # Plan 09 (D-05): only a DELETED key's row is an orphan. A
+                # departed (revoked / disconnected) key keeps its anchor and
+                # flows, included or not, so the owner's switch stays
+                # reversible — bounded orphan cleanup below.
                 orphan_kinds.append(kind)
+                continue
+            if api_key_id not in eligible_ids:
+                if api_key_id in departed_end_by_key:
+                    # Anchored by construction (WR-R2-02: only a key with a
+                    # saved anchor reaches departed_end_by_key).
+                    departed_payload = row.get("payload") or {}
+                    flows_by_key[api_key_id] = [
+                        validate_flow_shape(
+                            ExternalFlow(
+                                utc_day_iso=str(_f["utc_day_iso"]),
+                                usd_signed=float(_f["usd_signed"]),
+                            )
+                        )
+                        for _f in (departed_payload.get("flows") or [])
+                    ]
+                    anchors_by_key[api_key_id] = float(departed_payload["anchor_usd"])
                 continue
             if api_key_id not in counted_ids:
                 # A shared-account key left out by the group resolution: still
@@ -10948,6 +11332,35 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED.value,
         )
 
+    # A departed key the rule includes but whose inputs are gone was left out of
+    # departed_end_by_key before the rule's end days were used (WR-R2-02), so it
+    # never reached the returns, the flows or the collision gate.
+    if departed_unavailable:
+        # Counts only (no key id, no venue id, no USD — T-167.1.2-22). A key
+        # whose row was deleted and a key whose last balance read failed are
+        # counted apart, with the stamped reasons (SFH-C4-06).
+        null_anchor_counts: dict[str, int] = {}
+        for k in departed_unavailable:
+            if k in departed_null_anchor_reasons:
+                reason_token = departed_null_anchor_reasons[k]
+                null_anchor_counts[reason_token] = null_anchor_counts.get(reason_token, 0) + 1
+        null_anchor_total = sum(null_anchor_counts.values())
+        logger.warning(
+            "derive_allocator_equity: %d departed key(s) for allocator %s are "
+            "included by the history rule but have no usable anchor: %d with no "
+            "saved inputs row, %d whose last balance read gave no anchor (%s); "
+            "their history is left out of the book (%s)",
+            len(departed_unavailable),
+            allocator_id,
+            len(departed_unavailable) - null_anchor_total,
+            null_anchor_total,
+            ", ".join(
+                f"{token}={count}" for token, count in sorted(null_anchor_counts.items())
+            )
+            or "none",
+            "departed_history_unavailable",
+        )
+
     # A key with returns but no key_inputs row → anchor None (compose honestly
     # DROPS it, exactly as an unanchored key). Never fabricate an anchor.
     for k in returns_by_key:
@@ -11003,6 +11416,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                     ("composite_shared_account_counted_once", composite_counted_once),
                     ("duplicate_shared_account_counted_once", duplicate_counted_once),
                     ("shared_account_history_stitched", stitched_accounts > 0),
+                    ("departed_history_unavailable", bool(departed_unavailable)),
                 )
                 if raised
             ]
@@ -11016,6 +11430,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 if raised
             ]
             or None,
+            departed_end_by_key=departed_end_by_key or None,
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3
