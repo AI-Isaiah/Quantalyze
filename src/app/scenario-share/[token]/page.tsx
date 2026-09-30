@@ -288,11 +288,14 @@ export default async function ScenarioSharePage({
   // `equity_curve` is cumulative RETURN (0.18 = +18%); convert via `+1` then
   // brand with toWealth (24-RESEARCH / Pitfall 1). The benchmark overlay is the
   // BTC close LEVEL (`btcLevelsFromCloses`, Phase 169.4 D-66: never compounded
-  // returns), shown when the closes are available.
+  // returns), shown when the closes are available. It is based on the last
+  // close on or before the scenario's first date (169.4 review WR-01), so BTC
+  // starts at 1.0 with the portfolio, not at the served series' first close.
   const scenarioWealth = toWealth(
     metrics.equity_curve.map((p) => ({ date: p.date, value: p.value + 1 })),
   );
-  const btcWealth = btc !== null ? btcLevelsFromCloses(btc.prices) : undefined;
+  const btcWealth =
+    btc !== null ? btcLevelsFromCloses(btc.prices, portfolioDaily[0]?.date) : undefined;
 
   // KPI strip — RETURN / PERCENTAGE form only. No USD, no AUM. Null/non-finite
   // metrics render the em-dash "—" via the shared formatters (never a 0).

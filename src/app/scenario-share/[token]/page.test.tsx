@@ -717,6 +717,34 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     expect(html).toContain("overlay:2026-06-01=1.0000,2026-06-03=1.1000,2026-06-05=1.3200");
   });
 
+  it("169.4 review WR-01 — the overlay is based at the scenario's first date (2023-01-01), not at an earlier first served close", async () => {
+    // makeSeries() starts 2023-01-01. The served closes start months earlier;
+    // a base at their first close drew BTC at 16600 / 20000 on the scenario's
+    // first day instead of 1.0. EquityChart re-anchors on the first POINT it
+    // is given, so the page must not hand it the pre-scenario closes.
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    stubFetch({
+      ok: true,
+      body: {
+        prices: [
+          { date: "2022-06-01", close: 20_000 },
+          { date: "2022-12-31", close: 16_500 },
+          { date: "2023-01-01", close: 16_600 },
+          { date: "2023-01-02", close: 16_600 * 1.05 },
+        ],
+        dropped: [],
+        through: "2023-01-02",
+      },
+    });
+
+    const html = await renderPage("wr01-anchor");
+
+    expect(html).toContain("benchmark:true");
+    expect(html).toContain("overlay:2023-01-01=1.0000,2023-01-02=1.0500");
+    expect(html).not.toContain("2022-06-01=");
+    expect(html).not.toContain("2022-12-31=");
+  });
+
   it("D-67 — a body in the OLD returns shape (an array) renders the unavailable state, never a misread series", async () => {
     rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
     stubFetch({

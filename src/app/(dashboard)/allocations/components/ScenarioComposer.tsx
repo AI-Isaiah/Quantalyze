@@ -2242,19 +2242,6 @@ export function ScenarioComposer({
     };
   }, []);
 
-  // BENCH-01 — the chart overlay series. `EquityChart.benchmark` runs
-  // `anchorFromFirstPositive` (divide-by-first), so it expects a WEALTH-level
-  // curve (~1.0 base), NOT raw daily returns. Phase 169.4 D-66: it is the close
-  // LEVEL, `close / first close` at each stored close (`btcLevelsFromCloses`),
-  // never compounded returns, which would lose the move across a dropped close
-  // for good. Suppressed (undefined) when the toggle is off or the benchmark is
-  // unavailable, which hides the overlay.
-  const btcWealth = useMemo(
-    () =>
-      showBenchmark && btc !== null ? btcLevelsFromCloses(btc.prices) : undefined,
-    [showBenchmark, btc],
-  );
-
   // Validate the trimmed name against the SQL CHECK (1..120) mirrored in the
   // save route. Returns the trimmed name on success, or null after setting the
   // inline error copy (UI-SPEC §Copywriting).
@@ -3917,6 +3904,25 @@ export function ScenarioComposer({
   const portfolioDaily = useMemo(
     () => scenarioMetrics.portfolio_daily_returns ?? [],
     [scenarioMetrics.portfolio_daily_returns],
+  );
+  // BENCH-01 — the chart overlay series. `EquityChart.benchmark` runs
+  // `anchorFromFirstPositive` (divide-by-first), so it expects a WEALTH-level
+  // curve (~1.0 base), NOT raw daily returns. Phase 169.4 D-66: it is the close
+  // LEVEL at each stored close (`btcLevelsFromCloses`), never compounded
+  // returns, which would lose the move across a dropped close for good. 169.4
+  // review WR-01: the base is the last close on or before the scenario's first
+  // date, so BTC starts at 1.0 with the portfolio rather than at the served
+  // series' first close (2023-04-26 once the fixture is prepended); the factsheet
+  // chart never re-bases a comparator. Declared here, after `portfolioDaily`,
+  // because it reads the scenario's first date. Suppressed (undefined) when the
+  // toggle is off or the benchmark is unavailable, which hides the overlay.
+  const scenarioFirstDate = portfolioDaily[0]?.date;
+  const btcWealth = useMemo(
+    () =>
+      showBenchmark && btc !== null
+        ? btcLevelsFromCloses(btc.prices, scenarioFirstDate)
+        : undefined,
+    [showBenchmark, btc, scenarioFirstDate],
   );
   const blendPanels = useMemo(
     // BLEND-01 — the rolling-window blend panels ride the SAME derived blend
