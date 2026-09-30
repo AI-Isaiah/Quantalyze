@@ -117,4 +117,71 @@ test.describe("assertNoReflow helper self-test (Phase 170 T0)", () => {
       /doc=/,
     );
   });
+
+  test("escapee fixture: an absolutely positioned label escaping both scrollers onto the document is named", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    // Mirrors CI run 36764778803's composed-scenario rows: an sr-only
+    // <label> (position absolute, no positioned ancestor) at the right end
+    // of a wide list inside an UNPOSITIONED overflow-x auto scroller. Its
+    // containing block is the initial one, so neither the scroller nor
+    // #main-content clips it and it lands on the document. main=0, doc>1.
+    await page.setContent(
+      FIXTURE_SHELL.replace("PLACEHOLDER", escapeeFixture(false)),
+    );
+    await expect(assertNoReflow(page, "#fixture-anchor")).rejects.toThrow(
+      /main=0 doc=\d+[\s\S]*offender=LABEL#escapee/,
+    );
+  });
+
+  test("contained escapee fixture: the same label inside a position:relative scroller resolves", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    // position:relative makes the scroller the label's containing block, so
+    // the scroller clips it and the document does not overflow. This is the
+    // mechanism plan 170-16 applies to ResponsiveTable. It also proves the
+    // fixed decoy at left:400px adds nothing to the document's scrollWidth.
+    await page.setContent(
+      FIXTURE_SHELL.replace("PLACEHOLDER", escapeeFixture(true)),
+    );
+    await assertNoReflow(page, "#fixture-anchor");
+  });
 });
+
+/**
+ * Markup for the two escapee fixtures. Inline sr-only styles (no Tailwind).
+ *
+ * `#fixed-decoy` sits past the 390px viewport but is position:fixed, so it
+ * adds nothing to the document's scrollWidth and must never be named (a real
+ * page's bottom nav or Tweaks panel). It comes EARLIER in DOM order than the
+ * escapee, so a walker that names fixed boxes names it first. Its wrapper is
+ * an unclipped position:absolute box with no positioned ancestor: a
+ * containing-block climb from the decoy passes through the wrapper to body
+ * and never reaches #main-content's overflow-x, so dropping the fixed-box
+ * skip is observable (the decoy gets named). The wrapper itself is zero-size
+ * at x=0 and is never a candidate.
+ */
+function escapeeFixture(positionedScroller: boolean): string {
+  const srOnly =
+    "position:absolute;width:1px;height:1px;padding:0;margin:-1px;" +
+    "overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border-width:0";
+  const item = (i: number, extra = "") =>
+    `<li style="flex:0 0 200px;width:200px;height:40px">row ${i}${extra}</li>`;
+  const scrollerStyle =
+    "max-width:100%;overflow-x:auto" +
+    (positionedScroller ? ";position:relative" : "");
+  return (
+    '<div style="position:absolute">' +
+    '<div id="fixed-decoy" style="position:fixed;left:400px;top:0;width:40px;height:40px">decoy</div>' +
+    "</div>" +
+    `<div style="${scrollerStyle}">` +
+    '<ul style="display:flex;width:max-content;margin:0;padding:0;list-style:none">' +
+    item(1) +
+    item(2) +
+    item(3) +
+    item(4, `<label id="escapee" style="${srOnly}">Weight</label>`) +
+    "</ul></div>"
+  );
+}
