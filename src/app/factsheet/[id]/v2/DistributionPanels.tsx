@@ -436,7 +436,7 @@ export function CorrelationStripPanel() {
         })}
       </ResponsiveChartFrame>
       <p className="text-micro italic text-text-muted">
-        ρ measured against the strategy&apos;s observation dates with each benchmark forward-filled to the same calendar.
+        ρ measured over the strategy&apos;s own intervals, using only those each benchmark has every close for.
       </p>
     </figure>
   );

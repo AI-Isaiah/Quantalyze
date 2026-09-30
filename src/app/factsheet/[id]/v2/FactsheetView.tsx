@@ -2416,9 +2416,9 @@ function FactsheetFooter({
   return (
     <footer className="mt-16 border-t border-text pt-6 flex flex-wrap items-start justify-between gap-6">
       <p className="max-w-3xl text-micro italic leading-relaxed text-text-muted">
-        Returns computed from the strategy&apos;s daily series. Benchmarks are daily
-        closes (forward-filled to the strategy&apos;s observation dates). Risk-free
-        rate set to 0%. Past performance is not indicative of future results.
+        Returns computed from the strategy&apos;s daily series. Benchmark returns are
+        taken from daily closes over the strategy&apos;s own intervals, never past a
+        benchmark&apos;s last close. Risk-free rate set to 0%. Past performance is not indicative of future results.
         Demo cohorts and demo portfolios are flagged inline; production replaces them
         with platform data.
       </p>
