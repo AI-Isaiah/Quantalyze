@@ -19,6 +19,21 @@ import type { EventSignature, EventSignaturesPayload, EventSignaturesSet } from 
  *
  * Events with insufficient window coverage at the series edges are skipped
  * (no padding — partial trajectories would skew the percentile bands).
+ *
+ * Nulls (Phase 169.5 D-65, Phase 169.4 D-70(1)): both return series may carry
+ * null, a day the comparator has no data for (day one without a prior close, the
+ * two intervals around a dropped close, every day past its last close). A null is
+ * never read as a 0% day, the rule `stress-windows.ts` applies to its windows:
+ *   - an event whose verdict reads a null is skipped (h1: the event day is null;
+ *     h7: any of the trailing 7 days is null);
+ *   - a trace whose window reads a null is dropped, like an edge event. A trace
+ *     reads the 28 daily returns at eventIdx-13 .. eventIdx+14 (its point at -14
+ *     is the close ending day eventIdx-14, so that day's own return is not part of
+ *     it). The benchmark trace reads `benchRet`; the equity trace's ratios are
+ *     products of the EVENT series' returns over the same span, so it is dropped
+ *     when the event series is null there. `equity` itself is `number[]`: a caller
+ *     whose event series carries nulls may build it with nulls entered as 0, since
+ *     no kept trace ever reads across one.
  */
 
 const WINDOW = 14;
@@ -70,7 +85,7 @@ function quantile(sorted: number[], p: number): number {
  * For the benchmark view we accumulate aligned daily returns. For the equity
  * view we read the equity-curve ratio relative to the event day.
  */
-function buildReturnTrace(targetRet: number[], eventIdx: number): number[] | null {
+function buildReturnTrace(targetRet: ReadonlyArray<number | null>, eventIdx: number): number[] | null {
   const start = eventIdx - WINDOW;
   const end = eventIdx + WINDOW;
   if (start < 0 || end >= targetRet.length) return null;
@@ -79,11 +94,12 @@ function buildReturnTrace(targetRet: number[], eventIdx: number): number[] | nul
   // value at -k = -(compounded backward return), so the curve is rooted at 0.
   // A return of -100% (delisting / total loss) divides by 0 and explodes; reject
   // the entire trace to avoid NaN poisoning the percentile aggregation.
+  // A null (D-65, D-70(1)) drops the trace explicitly, before the finiteness check.
   let cum = 0;
   trace[WINDOW] = 0;
   for (let k = 1; k <= WINDOW; k++) {
     const r = targetRet[eventIdx - k + 1];
-    if (!Number.isFinite(r) || r <= -0.9999) return null;
+    if (r === null || !Number.isFinite(r) || r <= -0.9999) return null;
     cum = (1 + cum) / (1 + r) - 1;
     trace[WINDOW - k] = cum;
   }
@@ -91,17 +107,24 @@ function buildReturnTrace(targetRet: number[], eventIdx: number): number[] | nul
   cum = 0;
   for (let k = 1; k <= WINDOW; k++) {
     const r = targetRet[eventIdx + k];
-    if (!Number.isFinite(r) || r <= -0.9999) return null;
+    if (r === null || !Number.isFinite(r) || r <= -0.9999) return null;
     cum = (1 + cum) * (1 + r) - 1;
     trace[WINDOW + k] = cum;
   }
   return trace;
 }
 
-function buildEquityTrace(equity: number[], eventIdx: number): number[] | null {
+function buildEquityTrace(
+  equity: ReadonlyArray<number>,
+  eventRet: ReadonlyArray<number | null>,
+  eventIdx: number,
+): number[] | null {
   const start = eventIdx - WINDOW;
   const end = eventIdx + WINDOW;
   if (start < 0 || end >= equity.length) return null;
+  // D-65, D-70(1): the ratios below compound eventRet[start + 1 .. end]; a null
+  // there would be read through whatever the caller filled it with, so drop.
+  for (let i = start + 1; i <= end; i++) if (eventRet[i] === null) return null;
   const base = equity[eventIdx];
   if (!Number.isFinite(base) || base <= 0) return null;
   const trace = new Array<number>(TRACE_LEN);
@@ -118,9 +141,9 @@ function buildEquityTrace(equity: number[], eventIdx: number): number[] | null {
  * neither (skip).
  */
 function computeHorizon(
-  stratRet: number[],
-  benchRet: number[],
-  equity: number[],
+  stratRet: ReadonlyArray<number | null>,
+  benchRet: ReadonlyArray<number | null>,
+  equity: ReadonlyArray<number>,
   eventTest: (i: number) => boolean | null,
   horizonDays: number,
 ): EventSignaturesSet {
@@ -136,7 +159,7 @@ function computeHorizon(
     if (verdict == null) continue;
     if (verdict) eligibleWinCount++; else eligibleLossCount++;
     const bTrace = buildReturnTrace(benchRet, i);
-    const eTrace = buildEquityTrace(equity, i);
+    const eTrace = buildEquityTrace(equity, stratRet, i);
     if (bTrace) (verdict ? winBench : lossBench).push(bTrace);
     if (eTrace) (verdict ? winEquity : lossEquity).push(eTrace);
   }
@@ -155,24 +178,25 @@ function computeHorizon(
 }
 
 export function computeEventSignatures(
-  stratRet: number[],
-  benchRet: number[],
-  equity: number[],
+  stratRet: ReadonlyArray<number | null>,
+  benchRet: ReadonlyArray<number | null>,
+  equity: ReadonlyArray<number>,
 ): EventSignaturesPayload {
-  // 1-day horizon: positive day = win, negative = loss, zero = skip.
+  // 1-day horizon: positive day = win, negative = loss, zero or null = skip.
   const h1 = computeHorizon(
     stratRet,
     benchRet,
     equity,
     i => {
       const r = stratRet[i];
-      if (!Number.isFinite(r) || r === 0) return null;
+      if (r === null || !Number.isFinite(r) || r === 0) return null;
       return r > 0;
     },
     1,
   );
   // 7-day horizon: rolling 7-day compounded return > 0 = win, < 0 = loss.
-  // Skip the first 6 indices since no trailing-7-day window exists.
+  // Skip the first 6 indices since no trailing-7-day window exists, and any index
+  // whose trailing 7 days hold a null (D-65, D-70(1): never compounded as 0%).
   const h7 = computeHorizon(
     stratRet,
     benchRet,
@@ -180,7 +204,11 @@ export function computeEventSignatures(
     i => {
       if (i < 6) return null;
       let cum = 1;
-      for (let k = 0; k < 7; k++) cum *= 1 + stratRet[i - k];
+      for (let k = 0; k < 7; k++) {
+        const r = stratRet[i - k];
+        if (r === null) return null;
+        cum *= 1 + r;
+      }
       const ret = cum - 1;
       if (ret === 0) return null;
       return ret > 0;
