@@ -6,6 +6,11 @@ import { Select } from "@/components/ui/Select";
 import { Button } from "@/components/ui/Button";
 import { UI_EXCHANGE_CODES } from "@/lib/utils";
 import { EXCHANGE_DISPLAY } from "@/lib/closed-sets";
+import {
+  readCredentialInput,
+  CREDENTIAL_KEY_INPUT_PROPS,
+  CREDENTIAL_SECRET_INPUT_PROPS,
+} from "@/lib/credential-input";
 
 interface VerificationFormProps {
   onResult: (result: { public_token: string; verification_id: string }) => void;
@@ -158,7 +163,8 @@ export function VerificationForm({ onResult }: VerificationFormProps) {
           label="API Key"
           placeholder="Your read-only API key"
           value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
+          onChange={(e) => setApiKey(readCredentialInput(e))}
+          {...CREDENTIAL_KEY_INPUT_PROPS}
           required
         />
 
@@ -167,7 +173,8 @@ export function VerificationForm({ onResult }: VerificationFormProps) {
           type="password"
           placeholder="Your API secret"
           value={apiSecret}
-          onChange={(e) => setApiSecret(e.target.value)}
+          onChange={(e) => setApiSecret(readCredentialInput(e))}
+          {...CREDENTIAL_SECRET_INPUT_PROPS}
           required
         />
 
@@ -178,6 +185,7 @@ export function VerificationForm({ onResult }: VerificationFormProps) {
             placeholder="OKX API passphrase"
             value={passphrase}
             onChange={(e) => setPassphrase(e.target.value)}
+            {...CREDENTIAL_SECRET_INPUT_PROPS}
             required
           />
         )}

@@ -6,6 +6,11 @@ import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Card } from "@/components/ui/Card";
 import { EXCHANGES } from "@/lib/constants";
+import {
+  readCredentialInput,
+  CREDENTIAL_KEY_INPUT_PROPS,
+  CREDENTIAL_SECRET_INPUT_PROPS,
+} from "@/lib/credential-input";
 
 interface ApiKeyFormProps {
   onSubmit: (data: {
@@ -136,12 +141,12 @@ export function ApiKeyForm({
           <Input
             label={isSfox ? "API Token" : "API Key"}
             value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
+            onChange={(e) => setApiKey(readCredentialInput(e))}
             placeholder={
               isSfox ? "Your read-only sFOX API token" : "Your read-only API key"
             }
             required
-            autoComplete="off"
+            {...CREDENTIAL_KEY_INPUT_PROPS}
           />
           {/* sFOX is token-only — render the secret block only for key+secret
               exchanges. Its `required` attr would otherwise block a sfox submit. */}
@@ -150,11 +155,11 @@ export function ApiKeyForm({
               <Input
                 label="API Secret"
                 value={apiSecret}
-                onChange={(e) => setApiSecret(e.target.value)}
+                onChange={(e) => setApiSecret(readCredentialInput(e))}
                 placeholder="Your API secret"
                 type={showSecret ? "text" : "password"}
                 required
-                autoComplete="off"
+                {...CREDENTIAL_SECRET_INPUT_PROPS}
                 className="pr-16"
               />
               <button
@@ -175,7 +180,7 @@ export function ApiKeyForm({
               onChange={(e) => setPassphrase(e.target.value)}
               placeholder="OKX passphrase"
               type="password"
-              autoComplete="off"
+              {...CREDENTIAL_SECRET_INPUT_PROPS}
             />
           )}
         </div>

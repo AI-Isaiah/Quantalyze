@@ -37,6 +37,11 @@ import { seamErrorCode } from "@/lib/seam-discriminator";
 // NaN/0/negative). A raw `Number(res.headers.get(...))` is a repo-wide ESLint
 // error by design.
 import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
+import {
+  readCredentialInput,
+  CREDENTIAL_KEY_INPUT_PROPS,
+  CREDENTIAL_SECRET_INPUT_PROPS,
+} from "@/lib/credential-input";
 
 /**
  * Phase 88 / ONB-01 — the multi-key ConnectKeyStep.
@@ -54,8 +59,10 @@ import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
  *
  * ── DELIBERATE DUPLICATION (flagged for Phase-91 QA) ──────────────────────────
  * The exchange-card grid + credential markup + credential posture below are
- * replicated VERBATIM from ConnectKeyStep (autoComplete="off", secret as
- * type="password" with show/hide, POST-body-only, no browser storage). This is
+ * replicated VERBATIM from ConnectKeyStep (secret as type="password" with
+ * show/hide, POST-body-only, no browser storage). The credential input
+ * attributes and the paste rule are NOT duplicated: both steps import them
+ * from `src/lib/credential-input.ts` (169.3 D-76). This is
  * neutrality-over-DRY: State A must stay byte-identical to ConnectKeyStep, which
  * means ConnectKeyStep exports nothing new (footerSlot is its ONLY diff), so the
  * multi-key panels cannot share ConnectKeyStep's private EXCHANGES/markup. The
@@ -2354,9 +2361,11 @@ function KeyPanel({
               <Input
                 label={keyLabel}
                 value={p.apiKey}
-                onChange={(e) => onUpdate(index, { apiKey: e.target.value })}
+                onChange={(e) =>
+                  onUpdate(index, { apiKey: readCredentialInput(e) })
+                }
                 placeholder={keyPlaceholder}
-                autoComplete="off"
+                {...CREDENTIAL_KEY_INPUT_PROPS}
                 data-testid={`key-${index}-api-key`}
               />
 
@@ -2386,10 +2395,10 @@ function KeyPanel({
                     type={p.showSecret ? "text" : "password"}
                     value={p.apiSecret}
                     onChange={(e) =>
-                      onUpdate(index, { apiSecret: e.target.value })
+                      onUpdate(index, { apiSecret: readCredentialInput(e) })
                     }
                     placeholder={secretPlaceholder}
-                    autoComplete="off"
+                    {...CREDENTIAL_SECRET_INPUT_PROPS}
                     data-testid={`key-${index}-api-secret`}
                     className="mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-body text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
                   />
@@ -2415,7 +2424,9 @@ function KeyPanel({
                       onUpdate(index, { passphrase: e.target.value })
                     }
                     placeholder={passphrasePlaceholder}
-                    autoComplete="off"
+                    {...(passphraseSecret
+                      ? CREDENTIAL_SECRET_INPUT_PROPS
+                      : CREDENTIAL_KEY_INPUT_PROPS)}
                     data-testid={`key-${index}-passphrase`}
                   />
                   <p className="mt-1 text-micro text-text-muted">
