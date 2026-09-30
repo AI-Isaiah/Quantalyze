@@ -4180,6 +4180,8 @@ Plans:
 
 *(Moved from Phase 169 on 2026-09-26, verbatim with their original numbers, D-37.)* *(Criterion 11 is new, added 2026-09-27; it is numbered past the highest id any 169.x phase uses, so it collides with none.)* *(Criterion 12 is new, added 2026-09-27, numbered past 11 for the same reason.)*
 
+⭐ **ROUTED IN 2026-09-30 (from Phase 169.5 D-65; user-facing): the api arm's synthesized panels must be null-honest about a missing comparator day.** 169.5-01 feeds `blend` / `buildAllocatorMetrics` and `computeEventSignatures` the comparator's returns with a null entered as 0 (one named local per series, commented `D-65`), so `SignaturePanels`, `CrossSignaturePanels` and `BatchDPanels` count a missing BTC day as a 0% day (at index 0 when database BTC differs from the bundled file, and over the two intervals around a dropped close). The fix here: those consumers skip or break on a null, never read it as a 0% day, pinned by a case that turns red under the 0-fill. Source: `169.5-CONTEXT.md` D-65; 169.5-05 records the boundary in its release known limits and observes the three panels in its browser re-check.
+
 **Plans:** 3 plans in 2 waves, one PR (split 2026-09-26, D-37): W1 169.4-01 RISKTAB, 169.4-02 ALLOCBENCH; W2 169.4-03 integration run + post-deploy browser re-check. Decisions carried in `169.4-CONTEXT.md`; no migration.
 
 Plans:
