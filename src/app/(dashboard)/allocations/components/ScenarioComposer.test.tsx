@@ -405,6 +405,14 @@ import { PercentileRankBadge } from "@/components/strategy/PercentileRankBadge";
 // Phase 30 — imported (mocked above) so the histogram's CUMULATIVE-wealth input
 // contract is asserted via vi.mocked(ReturnHistogram).mock.calls[0][0].
 import { ReturnHistogram } from "@/components/charts/ReturnHistogram";
+import { btcClosesFromReturns } from "../lib/btc-closes.test-utils";
+import { btcLevelsFromCloses } from "../lib/scenario-benchmark";
+
+// Phase 169.4 plan 169.4-04 (D-67): the composer reads BTC CLOSES from
+// `/api/benchmark/btc/prices`. A stub that only has to keep the benchmark fetch
+// out of the way answers an empty closes body, which the composer reads as "no
+// benchmark" (the state the old empty returns array gave).
+const EMPTY_BTC_CLOSES = { prices: [], dropped: [], through: null };
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -1341,8 +1349,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("T_C_ASSETCLASS a drawer-added non-book strategy resolves its asset_class from the widened lazy returns response (the engine leg carries 'crypto')", async () => {
     let resolveReturns: (v: unknown) => void = () => {};
     const fetchMock = vi.fn((url: string) => {
-      if (String(url).startsWith("/api/benchmark/btc")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
       }
       if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
         return new Promise((resolve) => {
@@ -1401,8 +1409,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("T_C_ASSETCLASS_PURGE remove + re-add purges the fetched asset_class (a re-add starts clean, re-null until the retry resolves)", async () => {
     let resolveReturns: (v: unknown) => void = () => {};
     const fetchMock = vi.fn((url: string) => {
-      if (String(url).startsWith("/api/benchmark/btc")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
       }
       if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
         return new Promise((resolve) => {
@@ -1467,8 +1475,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // in 111-03; this test pins the wiring tolerance at the settle seam.
     let resolveReturns: (v: unknown) => void = () => {};
     const fetchMock = vi.fn((url: string) => {
-      if (String(url).startsWith("/api/benchmark/btc")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
       }
       if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
         return new Promise((resolve) => {
@@ -1522,8 +1530,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // A deferred fetch so we can observe the in-flight [] state, then resolve.
     let resolveReturns: (v: unknown) => void = () => {};
     const fetchMock = vi.fn((url: string) => {
-      if (String(url).startsWith("/api/benchmark/btc")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
       }
       if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
         return new Promise((resolve) => {
@@ -1584,8 +1592,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
 
   it("T_C_LAZY2 a rejected lazy fetch leaves the added strategy's lookup [] and degrades honestly (no fabricated series, no crash)", async () => {
     const fetchMock = vi.fn((url: string) => {
-      if (String(url).startsWith("/api/benchmark/btc")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
       }
       if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
         return Promise.reject(new Error("network down"));
@@ -1643,8 +1651,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("WR-01 a failed lazy fetch leaves the id retryable: remove + re-add re-fetches and the retry's series reaches the projection", async () => {
     let attempt = 0;
     const fetchMock = vi.fn((url: string) => {
-      if (String(url).startsWith("/api/benchmark/btc")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
       }
       if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
         attempt += 1;
@@ -1722,8 +1730,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("WR-02 removing an added strategy mid-flight aborts the in-flight fetch and clears the loading affordance", async () => {
     let capturedSignal: AbortSignal | null = null;
     const fetchMock = vi.fn((url: string, init?: { signal?: AbortSignal }) => {
-      if (String(url).startsWith("/api/benchmark/btc")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
       }
       if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
         capturedSignal = init?.signal ?? null;
@@ -4636,25 +4644,32 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   //
   // The overlay (`EquityChart.benchmark={btcWealth}`) was previously pinned
   // ONLY by static grep: a bad rewire (wrong prop, or raw daily returns
-  // instead of cumulative-WEALTH form) would pass the whole vitest suite.
-  // This drives the real mount-effect fetch to resolve with a BTC daily-
-  // returns series and asserts EquityChart actually RECEIVES the benchmark
-  // prop, in cumulative-WEALTH form (~1.0 base), via mock.calls — mirroring
-  // the wealth-form assertion pattern in T_C19 / M-0096 above.
+  // instead of a ~1.0-base level) would pass the whole vitest suite. This
+  // drives the real mount-effect fetch to resolve with BTC closes and asserts
+  // the chart actually RECEIVES the benchmark prop, as close LEVELS (~1.0
+  // base), via mock.calls — mirroring the wealth-form assertion pattern in
+  // T_C19 / M-0096 above.
+  //
+  // Phase 169.4 plan 169.4-04 (D-66, D-67): the fetch is the closes route and
+  // the overlay is `close / first close` at each stored close. Two literals
+  // moved because of that: the curve has 4 points, not 3 (one per close; the
+  // base close the day before the first return is now a point), and its first
+  // point is 1.0, not 1.01 (the level at the first close, not the first
+  // compounded return). The second test pins the dropped-close case (SC11).
   // -------------------------------------------------------------------------
-  it("BENCH-01 ScenarioFactsheetChart.benchmark is wired in cumulative-WEALTH form (~1.0 base) once the fetch resolves", async () => {
-    // Raw BTC daily returns the /api/benchmark/btc route would return. The
-    // composer derives btcWealth = computeStrategyCurve(these) → ~1.0-base
-    // wealth curve, and passes it as EquityChart.benchmark (showBenchmark
-    // defaults to true, so the toggle is on).
-    const btcDailyReturns = [
+  it("BENCH-01 ScenarioFactsheetChart.benchmark is wired as the BTC close level (~1.0 base) once the closes fetch resolves", async () => {
+    // BTC closes whose daily returns are these three (base close 100 on
+    // 2024-01-01). The composer derives btcWealth = btcLevelsFromCloses(the
+    // closes) → a ~1.0-base level curve, and passes it as the chart's
+    // benchmark (showBenchmark defaults to true, so the toggle is on).
+    const btcCloses = btcClosesFromReturns([
       { date: "2024-01-02", value: 0.01 },
       { date: "2024-01-03", value: -0.008 },
       { date: "2024-01-04", value: 0.012 },
-    ];
+    ]);
     const fetchStub = vi.fn(async () => ({
       ok: true,
-      json: async () => btcDailyReturns,
+      json: async () => btcCloses,
     }));
     vi.stubGlobal("fetch", fetchStub);
 
@@ -4671,7 +4686,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       // The benchmark fetch fires on mount; wait until the scenario chart has
       // been re-rendered with a defined `benchmark` prop (the post-resolve render).
       await waitFor(() => {
-        expect(fetchStub).toHaveBeenCalledWith("/api/benchmark/btc");
+        expect(fetchStub).toHaveBeenCalledWith("/api/benchmark/btc/prices");
         const calls = vi.mocked(ScenarioFactsheetChart).mock.calls;
         const withBenchmark = calls.find(
           (c) => (c[0] as { benchmark?: unknown }).benchmark !== undefined,
@@ -4683,18 +4698,106 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       const last = calls[calls.length - 1][0] as {
         benchmark?: Array<{ date: string; value: number }>;
       };
-      // Defined (toggle on + series available) — NOT undefined/raw returns.
+      // Defined (toggle on + closes available) — NOT undefined/raw returns.
       expect(last.benchmark).toBeDefined();
       const benchmark = last.benchmark ?? [];
-      expect(benchmark.length).toBe(btcDailyReturns.length);
+      expect(benchmark.length).toBe(btcCloses.prices.length);
+      expect(benchmark.length).toBe(4);
 
-      // Cumulative-WEALTH form (~1.0 base), NOT raw daily returns (~0.0). A
-      // rewire passing the raw returns would fail this (values ≈ 0.01).
-      // First point = 1·(1+0.01) = 1.01.
-      expect(benchmark[0].value).toBeCloseTo(1.01, 6);
+      // Level form (~1.0 base), NOT raw daily returns (~0.0). A rewire passing
+      // the raw returns would fail this (values ≈ 0.01). First point = the
+      // first close's level = 1.0; the next = 1·(1+0.01) = 1.01.
+      expect(benchmark[0]).toEqual({ date: "2024-01-01", value: 1 });
+      expect(benchmark[1].value).toBeCloseTo(1.01, 6);
       for (const pt of benchmark) {
         expect(pt.value).toBeGreaterThan(0.5);
       }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("D-67 — a closes body with no close leaves the benchmark unavailable: the toggle is disabled (the old empty-series state)", async () => {
+    // Control first: the same flow with one real close ENABLES the toggle, so
+    // the disabled assertion below is not just the pre-fetch initial state.
+    const oneClose = { prices: [{ date: "2026-06-01", close: 100 }], dropped: [], through: "2026-06-01" };
+    for (const [body, disabled] of [
+      [oneClose, false],
+      [EMPTY_BTC_CLOSES, true],
+    ] as const) {
+      const fetchStub = vi.fn(async () => ({ ok: true, json: async () => body }));
+      vi.stubGlobal("fetch", fetchStub);
+      try {
+        const view = render(
+          <ScenarioComposer
+            payload={makePayload()}
+            allocatorId={ALLOCATOR_A}
+            allocatorMandate={null}
+          />,
+        );
+        await waitFor(() => expect(fetchStub).toHaveBeenCalledWith("/api/benchmark/btc/prices"));
+        await act(async () => {
+          await new Promise((r) => setTimeout(r, 0));
+        });
+        const toggle = within(view.container)
+          .getByText("BTC Benchmark")
+          .closest("label")!
+          .querySelector("input") as HTMLInputElement;
+        expect(toggle.disabled).toBe(disabled);
+        view.unmount();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    }
+  });
+
+  it("SC11 / D-66 — the overlay is the close level after a DROPPED close and a missing day: no point on either, every later level close / first close", async () => {
+    // 06-03 is a DROPPED (corrupt) close and 06-05 a plain missing day. The
+    // level at 06-04 is 121/100 = 1.21 and at 06-06 133.1/100 = 1.331.
+    // Compounding the returns instead loses the move across the dropped 06-03
+    // for good (the returns rule refuses to bridge it), so its curve has no
+    // 06-04 point and ends at 1.21, not 1.331.
+    const btcCloses = {
+      prices: [
+        { date: "2026-06-01", close: 100 },
+        { date: "2026-06-02", close: 110 },
+        { date: "2026-06-04", close: 121 },
+        { date: "2026-06-06", close: 133.1 },
+      ],
+      dropped: ["2026-06-03"],
+      through: "2026-06-06",
+    };
+    const fetchStub = vi.fn(async () => ({ ok: true, json: async () => btcCloses }));
+    vi.stubGlobal("fetch", fetchStub);
+
+    try {
+      render(
+        <ScenarioComposer
+          payload={makePayload()}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      await waitFor(() => {
+        const calls = vi.mocked(ScenarioFactsheetChart).mock.calls;
+        expect(
+          calls.some((c) => (c[0] as { benchmark?: unknown }).benchmark !== undefined),
+        ).toBe(true);
+      });
+      const calls = vi.mocked(ScenarioFactsheetChart).mock.calls;
+      const benchmark = (calls[calls.length - 1][0] as {
+        benchmark?: Array<{ date: string; value: number }>;
+      }).benchmark ?? [];
+
+      expect(benchmark).toEqual(btcLevelsFromCloses(btcCloses.prices));
+      expect(benchmark.map((p) => p.date)).toEqual([
+        "2026-06-01",
+        "2026-06-02",
+        "2026-06-04",
+        "2026-06-06",
+      ]);
+      expect(benchmark[2].value).toBeCloseTo(1.21, 12);
+      expect(benchmark[3].value).toBeCloseTo(1.331, 12);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -9792,8 +9895,8 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
     },
   ): ReturnType<typeof vi.fn> {
     return vi.fn(async (url: string) => {
-      if (String(url).startsWith("/api/benchmark/btc")) {
-        return { ok: true, status: 200, json: async () => [] };
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return { ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES };
       }
       return response();
     });
@@ -10272,8 +10375,8 @@ describe("ScenarioComposer — Phase 147 SCEN-01 honest empty state (SC4)", () =
   function stubReturnsFetch(body: Record<string, unknown>): () => void {
     let release: () => void = () => {};
     const fetchMock = vi.fn((url: string) => {
-      if (String(url).startsWith("/api/benchmark/btc")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
       }
       if (String(url).includes(`/api/strategies/${SYNC_ID}/returns`)) {
         return new Promise((resolve) => {
@@ -10902,8 +11005,8 @@ describe("ScenarioComposer — Phase 147 SCEN-01 hydration re-fetch (P6)", () =>
   it("HYD-1 a REOPENED draft (added strategy already in localStorage, zero user interaction) fetches its series on mount and renders it", async () => {
     let release: () => void = () => {};
     const fetchMock = vi.fn((url: string) => {
-      if (String(url).startsWith("/api/benchmark/btc")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
       }
       if (String(url).includes(`/api/strategies/${HYD_ID}/returns`)) {
         return new Promise((resolve) => {
@@ -10957,8 +11060,8 @@ describe("ScenarioComposer — Phase 147 SCEN-01 hydration re-fetch (P6)", () =>
 
   it("HYD-2 a hydrated added strategy that IS in the book fires NO lazy fetch (the book value is authoritative — same guard as the add seam)", async () => {
     const fetchMock = vi.fn((url: string) => {
-      if (String(url).startsWith("/api/benchmark/btc")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
       }
       return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
     });
@@ -11003,8 +11106,8 @@ describe("ScenarioComposer — Phase 147 SCEN-01 hydration re-fetch (P6)", () =>
   it("HYD-3 the hydration effect is idempotent: re-renders while in flight AND after settle never fire a second fetch", async () => {
     let release: () => void = () => {};
     const fetchMock = vi.fn((url: string) => {
-      if (String(url).startsWith("/api/benchmark/btc")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
       }
       if (String(url).includes(`/api/strategies/${HYD_ID}/returns`)) {
         return new Promise((resolve) => {
@@ -11082,8 +11185,8 @@ describe("ScenarioComposer — Phase 147 SCEN-01 hydration re-fetch (P6)", () =>
   it("HYD-4 a FAILED hydration fetch degrades through the existing WR-01 surface: honest [], no fabricated series, and the id stays retryable", async () => {
     let attempt = 0;
     const fetchMock = vi.fn((url: string) => {
-      if (String(url).startsWith("/api/benchmark/btc")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
       }
       if (String(url).includes(`/api/strategies/${HYD_ID}/returns`)) {
         attempt += 1;
@@ -11277,8 +11380,8 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
   }
   function aum4OkSave(): ReturnType<typeof vi.fn> {
     return vi.fn(async (url: string) => {
-      if (String(url).startsWith("/api/benchmark/btc")) {
-        return { ok: true, status: 200, json: async () => [] };
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return { ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES };
       }
       return {
         ok: true,

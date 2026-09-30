@@ -131,7 +131,20 @@ vi.mock("@/lib/queries", () => ({
 // without their client-only deps. Each emits a sentinel + echoes leak-relevant
 // props so we can assert what data flowed in.
 vi.mock("@/app/(dashboard)/allocations/widgets/performance/EquityChart", () => ({
-  EquityChart: () => <div data-testid="equity-chart">equity-chart</div>,
+  // Phase 169.4 plan 169.4-04: echo the BTC overlay the page passes, so the
+  // close-level overlay (D-66) is asserted on what reaches the chart.
+  EquityChart: ({
+    benchmark,
+  }: {
+    benchmark?: Array<{ date: string; value: number }>;
+  }) => (
+    <div data-testid="equity-chart">
+      equity-chart overlay:
+      {benchmark
+        ? benchmark.map((p) => `${p.date}=${p.value.toFixed(4)}`).join(",")
+        : "none"}
+    </div>
+  ),
   // The page calls toWealth() to convert the cumulative-RETURN equity curve to
   // wealth form before feeding EquityChart — keep the real conversion.
   toWealth: (points: Array<{ date: string; value: number }>) =>
@@ -152,14 +165,15 @@ vi.mock(
   "@/app/(dashboard)/allocations/components/ScenarioBenchmarkSection",
   () => ({
     ScenarioBenchmarkSection: ({
-      benchmarkAvailable,
+      btc,
       periodsPerYear,
     }: {
-      benchmarkAvailable: boolean;
+      btc: { prices: unknown[] } | null;
       periodsPerYear?: number;
     }) => (
       <div data-testid="benchmark-section">
-        benchmark:{String(benchmarkAvailable)} basis:{String(periodsPerYear)}
+        benchmark:{String(btc !== null)} closes:{btc === null ? 0 : btc.prices.length}{" "}
+        basis:{String(periodsPerYear)}
       </div>
     ),
   }),
@@ -272,8 +286,9 @@ async function renderPage(token = "raw-token-abc"): Promise<string> {
   return renderToStaticMarkup(element);
 }
 
-// Stub the public BTC benchmark fetch (200 [] → benchmark unavailable, which is
-// fine for these assertions; resolve→404 logic does not depend on it).
+// Stub the public BTC closes fetch (200 with an empty closes body → benchmark
+// unavailable, which is fine for these assertions; resolve→404 logic does not
+// depend on it). Phase 169.4 D-67: the page reads `/api/benchmark/btc/prices`.
 beforeEach(() => {
   notFoundMock.mockClear();
   rpcMock.mockReset();
@@ -287,7 +302,7 @@ beforeEach(() => {
     "fetch",
     vi.fn(async () => ({
       ok: true,
-      json: async () => [] as unknown,
+      json: async () => ({ prices: [], dropped: [], through: null }) as unknown,
     })),
   );
 });
@@ -628,7 +643,7 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
 
     // Simulate the AbortController firing: fetch rejects with an AbortError
     // (DOMException name "AbortError"), exactly as a timed-out self-fetch does.
-    // The page's fetchBtcDaily catch must swallow it → [] → benchmark
+    // The page's fetchBtcCloses catch must swallow it → null → benchmark
     // unavailable, and the page must still render the scenario (NOT 404, NOT a
     // thrown render). Without the AbortController + timeout this fetch would
     // hang forever on a real hung route; here we prove the catch handles the
@@ -650,12 +665,100 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     // The page rendered the scenario despite the benchmark fetch aborting.
     expect(notFoundMock).not.toHaveBeenCalled();
     expect(html).toContain("My Q3 Blend");
-    // Benchmark degraded to its honest "unavailable" state ([] → false).
+    // Benchmark degraded to its honest "unavailable" state (null → false),
+    // and no overlay reaches the chart.
     expect(html).toContain("benchmark:false");
+    expect(html).toContain("overlay:none");
     // The fetch WAS attempted with an abort signal (the timeout is wired).
     const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
     expect(fetchMock).toHaveBeenCalled();
     const init = fetchMock.mock.calls[0]?.[1] as { signal?: AbortSignal } | undefined;
     expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  // ── Phase 169.4 plan 169.4-04 (SC11, D-66, D-67) ───────────────────────────
+  // The page self-fetches the BTC CLOSES; the overlay is the close level.
+
+  function stubFetch(res: { ok: boolean; status?: number; body: unknown }) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: res.ok,
+        status: res.status ?? (res.ok ? 200 : 500),
+        json: async () => res.body,
+      })),
+    );
+  }
+
+  it("D-67 — reads /api/benchmark/btc/prices and draws the overlay at the close LEVEL, with no point on a missing or dropped day (D-66)", async () => {
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    // 06-02 is a plain missing day, 06-04 a DROPPED (corrupt) close. The close
+    // level after the dropped date is close / first close (1.32 on 06-05);
+    // compounding the returns would lose the move across 06-04 for good.
+    stubFetch({
+      ok: true,
+      body: {
+        prices: [
+          { date: "2026-06-01", close: 100 },
+          { date: "2026-06-03", close: 110 },
+          { date: "2026-06-05", close: 132 },
+        ],
+        dropped: ["2026-06-04"],
+        through: "2026-06-05",
+      },
+    });
+
+    const html = await renderPage("closes");
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    expect(String(fetchMock.mock.calls[0]?.[0])).toMatch(/\/api\/benchmark\/btc\/prices$/);
+    expect(html).toContain("benchmark:true");
+    expect(html).toContain("closes:3");
+    expect(html).toContain("overlay:2026-06-01=1.0000,2026-06-03=1.1000,2026-06-05=1.3200");
+  });
+
+  it("D-67 — a body in the OLD returns shape (an array) renders the unavailable state, never a misread series", async () => {
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    stubFetch({
+      ok: true,
+      body: [
+        { date: "2026-06-02", value: 0.01 },
+        { date: "2026-06-03", value: -0.02 },
+      ],
+    });
+
+    const html = await renderPage("old-shape");
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(html).toContain("My Q3 Blend");
+    expect(html).toContain("benchmark:false");
+    expect(html).toContain("overlay:none");
+  });
+
+  it("a closes body with no close renders the unavailable state, as the old empty series did", async () => {
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    stubFetch({ ok: true, body: { prices: [], dropped: [], through: null } });
+
+    const html = await renderPage("empty-closes");
+
+    expect(html).toContain("My Q3 Blend");
+    expect(html).toContain("benchmark:false");
+    expect(html).toContain("overlay:none");
+  });
+
+  it("WR-03 — a non-2xx closes fetch renders the unavailable state, never a thrown page", async () => {
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    stubFetch({
+      ok: false,
+      status: 503,
+      body: { prices: [{ date: "2026-06-01", close: 100 }], dropped: [], through: "2026-06-01" },
+    });
+
+    const html = await renderPage("non-2xx");
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(html).toContain("My Q3 Blend");
+    expect(html).toContain("benchmark:false");
+    expect(html).toContain("overlay:none");
   });
 });

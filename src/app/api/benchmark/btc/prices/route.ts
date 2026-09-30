@@ -38,8 +38,8 @@ import {
  * Public-cacheable: `benchmark_prices` is shared market data (date, symbol,
  * close_price; RLS `SELECT USING(true)`; writes service_role only), identical
  * for every caller, so a shared CDN/browser cache leaks nothing. The route is
- * public through the `/api/benchmark/btc` entry of `PUBLIC_ROUTES` in
- * `proxy.ts`, which matches `route + "/"`.
+ * public through the `PUBLIC_ROUTES` entry in `proxy.ts` for its parent path,
+ * /api/benchmark/btc, which matches `route + "/"`.
  *
  * Honesty on failure: a READ ERROR answers 503 with `Cache-Control: no-store`
  * and a static body (169.2 SFH MD-05), never the fixture (D-09: a stale fixture
