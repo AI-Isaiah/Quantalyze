@@ -614,3 +614,106 @@ test.describe("/compare — N-CMP", () => {
     await assertNoReflow(page, "h1");
   });
 });
+
+// Plan 170-11, item (j). The factsheet KPI strip follows a 2 / 3 / full
+// container ladder, so at V390 and V640 no label is ellipsised and no value
+// breaks inside a number. Both mounts are measured: the composer's
+// FactsheetBody (the ~326 px mount) and the published factsheet route.
+const KPI_LABEL = '[data-testid="factsheet-kpi-label"]';
+const KPI_VALUE = '[data-testid="factsheet-kpi-value"]';
+
+async function assertKpiTilesRead(page: Page, label: string): Promise<void> {
+  await expect(
+    page.locator(KPI_LABEL).first(),
+    `${label}: factsheet KPI strip did not render`,
+  ).toBeVisible({ timeout: 15_000 });
+  const m = await page.evaluate(
+    ({ labelSel, valueSel }) => {
+      const shown = (sel: string) =>
+        Array.from(document.querySelectorAll<HTMLElement>(sel)).filter(
+          (el) => el.getClientRects().length > 0,
+        );
+      return {
+        labels: shown(labelSel).map((el) => ({
+          text: (el.textContent ?? "").trim(),
+          scrollWidth: el.scrollWidth,
+          clientWidth: el.clientWidth,
+        })),
+        values: shown(valueSel).map((el) => ({
+          text: (el.textContent ?? "").trim(),
+          height: el.getBoundingClientRect().height,
+          lineHeight: parseFloat(getComputedStyle(el).lineHeight),
+        })),
+      };
+    },
+    { labelSel: KPI_LABEL, valueSel: KPI_VALUE },
+  );
+  // W-02: an unmounted strip must not pass on zero tiles.
+  expect(m.labels.length, `${label}: no visible KPI label measured`).toBeGreaterThan(0);
+  expect(m.values.length, `${label}: KPI value count differs from label count`).toBe(
+    m.labels.length,
+  );
+  for (const l of m.labels) {
+    expect(
+      l.scrollWidth <= l.clientWidth,
+      `${label}: KPI label "${l.text}" is ellipsised (scrollWidth=${l.scrollWidth} clientWidth=${l.clientWidth})`,
+    ).toBe(true);
+  }
+  for (const v of m.values) {
+    expect(
+      Number.isFinite(v.lineHeight),
+      `${label}: KPI value "${v.text}" has no numeric line-height`,
+    ).toBe(true);
+    expect(
+      v.height <= v.lineHeight * 1.3,
+      `${label}: KPI value "${v.text}" wraps (height ${v.height} > 1.3 x line-height ${v.lineHeight})`,
+    ).toBe(true);
+  }
+}
+
+test.describe("factsheet KPI — N-KPI", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+
+  test.afterAll(async () => {
+    if (HAS_SEED_ENV) {
+      await cleanupStrategiesByNamePrefix(NAME_PREFIX);
+    }
+  });
+
+  for (const vp of VIEWPORTS.filter((v) => v.width < MD_PX)) {
+    // Tile assertions first, reflow last: a red reflow then says nothing
+    // about whether the KPI tiles themselves read cleanly.
+    test(`${vp.id}: composed scenario KPI labels are whole and values stay on one line`, async ({
+      page,
+    }) => {
+      test.setTimeout(120_000);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      await openComposedScenario(page);
+      await assertKpiTilesRead(page, `${vp.id} composed scenario N-KPI`);
+      await assertNoReflow(page, ALLOC_ANCHOR);
+    });
+
+    test(`${vp.id}: published factsheet KPI labels are whole and values stay on one line`, async ({
+      page,
+    }) => {
+      test.setTimeout(90_000);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      const fixtureName = `${NAME_PREFIX} kpi ${Math.random().toString(36).slice(2, 8)}`;
+      const strategyId = await seedStrategyWithHistory({
+        days: 400,
+        name: fixtureName,
+        codename: fixtureName,
+        withDailyReturns: true,
+      });
+      const res = await page.goto(`/factsheet/${strategyId}/v2`);
+      if (res && res.status() >= 400) {
+        throw new Error(`/factsheet/<seeded>/v2 returned HTTP ${res.status()} (W-02)`);
+      }
+      await assertKpiTilesRead(page, `${vp.id} published factsheet N-KPI`);
+      await assertNoReflow(page, "#factsheet-main");
+    });
+  }
+});

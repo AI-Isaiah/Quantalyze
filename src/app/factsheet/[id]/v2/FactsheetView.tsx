@@ -1499,8 +1499,13 @@ function KpiStrip() {
   // vs the narrower composer mount), so a container query keeps it from thinking
   // it is at desktop width when it isn't. The 9-cell strip steps up to its full
   // column count only when the CONTAINER is wide (`@5xl`, ≈64rem — the old `lg:`
-  // ~1024px breakpoint as a container width); 7 cells likewise. `grid-cols-3` is
-  // the container-narrow fallback (3 rows of 3). Inline-size containment ONLY —
+  // ~1024px breakpoint as a container width); 7 cells likewise. Below that the
+  // ladder is `grid-cols-2`, then `@md:grid-cols-3` from a 28rem container.
+  // Phase 170 (j), 2026-09-30: three columns at 390 px and in the ~326 px
+  // composer mount broke values mid-number and ellipsised labels ("SOR…",
+  // "CAL…", "MAX…"), so the narrowest rung is two columns. Every cell keeps its
+  // own right + top hairline, so an odd last cell in the 2-column layout needs
+  // no filler. Inline-size containment ONLY —
   // the size-containment variant collapses the strip's block size to 0
   // (Pitfall 1), so the bare `@container` host is deliberate. The host is the
   // enclosing `<section>` (an ANCESTOR of the grid), not the grid itself — an
@@ -1553,7 +1558,7 @@ function KpiStrip() {
           border: "1px solid var(--color-border)",
         }}
       >
-      <div className={`grid grid-cols-3 ${containerCols} @5xl:divide-y-0`} style={{ }}>
+      <div className={`grid grid-cols-2 @md:grid-cols-3 ${containerCols} @5xl:divide-y-0`} style={{ }}>
         {items.map(it => (
           <div
             key={it.label}
@@ -1561,6 +1566,7 @@ function KpiStrip() {
             style={{ borderRight: "1px solid var(--color-border)", borderTop: "1px solid var(--color-border)" }}
           >
             <p
+              data-testid="factsheet-kpi-label"
               className="text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis"
               style={{ color: "var(--color-text-muted)" }}
             >
@@ -1579,6 +1585,7 @@ function KpiStrip() {
                 normal values. The LABEL <p> above KEEPS its pinned bounded-label
                 clip (short labels only). */}
             <p
+              data-testid="factsheet-kpi-value"
               className="mt-1.5 sm:mt-2 font-mono tabular-nums text-h2 leading-tight break-words"
               style={{
                 color:
