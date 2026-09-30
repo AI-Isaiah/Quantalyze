@@ -335,7 +335,7 @@ export type WizardErrorCode =
   //
   // ⚠️ AND NO INCUMBENT COULD TAKE IT, read AT THE EMITTER rather than matched
   // on names:
-  //   · `KEY_ORPHANED` — "This key is already stored, but nothing uses it."
+  //   · `KEY_ORPHANED` — "This key is already stored, but no strategy uses it."
   //     Its whole premise is that the key IS stored and IS the caller's. Here we
   //     have just measured that no live key of theirs matches, so the sentence
   //     asserts the opposite of what the reads found, and its second remedy
@@ -424,6 +424,18 @@ export type WizardErrorCode =
   // the same thing every other row on that roster buys. The field is still
   // authored honestly rather than left to whatever `actions` happened to
   // default to.
+  //
+  // ⭐ 167.1.2 REVIEW WR-04 — A SECOND EMITTER, AND THE FIRST CLIENT THAT READS
+  // THE CODE. `strategies/create-with-key`'s venue-identity race arm answers
+  // this code when the colliding live key has no strategy row but a composite
+  // uses it (`strategy_keys`); `KEY_ORPHANED`'s "no strategy uses it" is false
+  // there. Composite membership is the ONLY such signal: 167.1.2 REVIEW-R2
+  // CR-01 removed an `allocator_holdings` read, because the daily poll writes
+  // that table for every live key, orphans included. ConnectKeyStep renders it
+  // from `KNOWN_CREATE_WITH_KEY_CODES`. The copy holds on that arm
+  // clause for clause: the colliding key is the caller's own and connected, and
+  // the wizard's INSERT was refused and rolled back, so "your new key was not
+  // saved" is measured, not assumed.
   | "KEY_VENUE_ALREADY_CONNECTED"
   // 164.5.4-02 / D-03 — THE STORED CREDENTIAL CANNOT BE READ BACK, so no
   // action taken against that stored copy can succeed until it is replaced.
@@ -2362,7 +2374,8 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "The account behind these details already backs a strategy of yours, and that strategy has moved past the draft stage — so there is no half-finished session to take you back to. One account backs one strategy at a time. Nothing new was created and the existing strategy was left exactly as it was.",
     fix: [
       "Open the strategy that already uses this account from your strategies page — it keeps updating from this same account.",
-      "To list a second strategy, connect a different account: a separate broker account, or a different login on the same broker.",
+      // 167.1.2 (D-01): venue-neutral — this refusal now also fires for ccxt keys.
+      "To list a second strategy, connect a different account: a separate exchange account or sub-account.",
       "If you believe this account should be free, email security@quantalyze.com before you disconnect anything — disconnecting it stops the existing strategy from updating.",
       // ── 162-06 review / B-2b — preselect-only, and it exists because this
       // entry is NOT recoverable: `actions` carries neither member of
@@ -2413,6 +2426,33 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // whose draft was deleted" is the only way to reach this state, not a guess
   // at the likeliest one.
   //
+  // ⛔ CORRECTED 2026-09-27 (167.1.2 REVIEW WR-04 follow-up) — THAT MEASUREMENT
+  // NO LONGER HOLDS, AND THE COPY MOVED WITH THIS CORRECTION. The paragraph
+  // above is kept as lineage. The scrub trigger exempts `service_role`, so it
+  // never touched a service-role writer, and there are three writers now:
+  //   · `create_wizard_strategy`, as above;
+  //   · `keys/validate-and-encrypt`'s persist arm, a service-role INSERT that
+  //     stamps the column for MT5 (164.5.3-02) and for OKX, Bybit, Binance and
+  //     Deribit (167.1.2 plan 02). It serves the allocator Exchanges page and
+  //     the manager key card;
+  //   · the daily poll's identity stamper (`analytics-service/services/
+  //     account_identity.py`, 167.1.2 plan 04), a service-role UPDATE that
+  //     stamps allocator keys connected before plan 02.
+  // What reaches this code is what the reads measured, and no more: a live key
+  // of the caller's on this account with no `strategies.api_key_id` row
+  // (`resolveStrategiesForKey`) and no composite membership
+  // (`resolveOtherKeyUse`, 167.1.2 WR-04). A key left behind by a deleted
+  // draft is one such key. A key connected on another page (the manager key
+  // card, or the allocator Exchanges page) that no strategy uses is another,
+  // and it is correctly an orphan: "Finish setup" adopts it through the reuse
+  // arm. So the title says "no strategy uses it" rather than "nothing uses
+  // it", and the cause names the deleted draft as one possibility among
+  // others. ⚠️ 167.1.2 REVIEW-R2 CR-01: round 1 also treated an
+  // `allocator_holdings` row as "held". The daily poll writes that table for
+  // every live key, so every orphan with a balance lost this code after its
+  // first poll. The read was removed; composite membership is the only
+  // signal.
+  //
   // ⛔ THE `fix` BULLETS DIVERGE FROM 161-UI-SPEC § WIZERR-03, DELIBERATELY,
   // AND THE DIVERGENCE IS A MEASUREMENT RATHER THAN A PREFERENCE. The spec's
   // first bullet was "Disconnect the unused key under Manage keys, then connect
@@ -2457,10 +2497,18 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // ⚠️ THE RELEASE GAP IS STILL REAL AND IS STILL NOT CLOSED: nothing we ship
   // lets an owner of ANY role release their own stored key. 162-06 closed REUSE,
   // not release, and the last bullet keeps routing to us for it.
+  //
+  // ⚠️ 167.1.2 REVIEW-R2 IN-02 — THE CAUSE NAMES THE ACT THAT FAILS, NOT THE
+  // OUTCOME. It said "a new strategy cannot be created over that key" while
+  // `fix[1]` offers "Finish setup", which builds exactly that strategy from the
+  // stored key. The one emitter is the race arm, reached only after a
+  // credential submit, so what cannot work is entering this account's
+  // credentials again. The sentence names no screen or form, because the same
+  // copy renders on every surface that reads the code.
   KEY_ORPHANED: {
-    title: "This key is already stored, but nothing uses it.",
+    title: "This key is already stored, but no strategy uses it.",
     cause:
-      "These credentials were saved in an earlier session whose draft was deleted, leaving the key attached to nothing. A new strategy cannot be created over the leftover key, and it does not clear on its own.",
+      "A key for this exchange account is already saved on your account, and no strategy is built on it. You may have saved it in an earlier setup whose draft was later deleted, or connected it on another page. Entering this account's credentials again cannot build a new strategy over the saved key, and the saved key does not clear on its own.",
     fix: [
       "Connect this strategy with a different account — one whose key is not already stored here.",
       "If your account includes the My Strategies page, look for this account there under “No strategy yet”: “Finish setup” on that row builds the strategy from the key already stored, with no credentials to enter again.",
@@ -2564,13 +2612,17 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // allocator's Exchanges list, or nothing at all) — the union member's
   // docblock is the record of why no such claim survives every reachable
   // caller.
+  // 167.1.2 (D-01) — re-authored VENUE-NEUTRAL. This refusal now fires for an
+  // OKX, Bybit, Binance or Deribit key as well as an MT5 login, so "login" and
+  // "broker account" were false for most of the keys that reach it. The
+  // security-email line, `docsHref` and `actions` are unchanged.
   KEY_VENUE_ALREADY_CONNECTED: {
-    title: "You already have a connected key for this account.",
+    title: "This exchange account is already connected on your account.",
     cause:
-      "The login you just entered already identifies a key on your account, and one account can only back one connected key at a time. Your new key was not saved.",
+      "The key you just entered reads an exchange account that another of your connected keys already reads, and one account can back only one connected key at a time. Your new key was not saved.",
     fix: [
-      "Use the key you already have connected for this account instead of adding a new one.",
-      "To connect a second strategy or exchange link, use a different account — a separate broker account, or a different login on the same broker.",
+      "Use the key you already have for this account instead of adding a new one.",
+      "To connect a different account, create a key on that account (a separate exchange account or sub-account) and add it.",
       "If you believe this account should be free to connect fresh, email security@quantalyze.com with the correlation id below before disconnecting anything — the existing key keeps working until you do.",
     ],
     docsHref: "/security",
@@ -5195,6 +5247,23 @@ export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
         "different service entry point.",
     ],
     [
+      "BENCHMARK_REFRESH_FAILED",
+      "Detail: one of six arm-specific sentences, each starting 'Benchmark " +
+        "refresh' (no series, stale series, fetch raised, stored-date read " +
+        "raised, table older than yesterday, deadline exceeded), 500 " +
+        "retryable:false, no dependency. Minted by `benchmark_refresh` and " +
+        "`_benchmark_refresh_once` in analytics-service/routers/cron.py " +
+        "(Phase 169.2, `POST /api/benchmark-refresh`). NOT a key-validation code. " +
+        "MEASURED at HEAD: its only TypeScript entry point is `refreshBenchmark` " +
+        "in analytics-client, whose only caller is " +
+        "`src/app/api/cron/refresh-benchmark/route.ts`. That route has ONE catch " +
+        "arm that never reads `seamCode` and never calls " +
+        "`classifyKeyValidationError` — it logs, captures to Sentry and answers " +
+        "a static `{ok:false}` 502 so Vercel Cron alarms. No browser receives " +
+        "this code and no verdict row could ever fire. If a route ever renders " +
+        "it, that route earns its own arm, not a KEY_* verdict.",
+    ],
+    [
       "ANALYTICS_ROW_NOT_CREATED",
       "Detail: 'Could not start the analytics computation — please retry.', 503, " +
         "from `_compute_portfolio_analytics` in portfolio.py when the analytics " +
@@ -6084,6 +6153,11 @@ export const CSV_RULE_LABELS: Readonly<Record<string, string>> = {
   nav_non_zero: "NAV cannot be zero",
   daily_return_lower_bound: "Daily return cannot be ≤ -100%",
   daily_sharpe_sentinel: "Daily Sharpe > 10 looks unrealistic",
+  // 166.1 round-1 WR-01 / SFH MEDIUM-3 (amends 166.1 D-04; founder D-24 made
+  // every constant positive series reach this rule): a daily-returns column
+  // that never changes has no Sharpe at all, so it cannot share the Sharpe
+  // sentinel's label, which states a comparison that was never made.
+  daily_returns_constant: "Daily returns never change",
   currency_usd_or_blank: "Currency must be USD or left blank",
   qty_price_positive: "Quantity and price must be positive",
   // QA report 2026-05-21 ISSUE-012: the underlying pandera rule key was
@@ -6120,6 +6194,24 @@ export const CSV_RULE_LABELS: Readonly<Record<string, string>> = {
 export function formatCsvRuleCauseSingle(humanLabel: string): string {
   return `Rule violated: ${humanLabel}. Expand below for the row-level breakdown.`;
 }
+
+/**
+ * 166.1 round-1 WR-01 — the single-rule cause sentence for a rule that failed
+ * on the WHOLE file, not on a row (every error carries the absent-row sentinel
+ * `row: 0`). `formatCsvRuleCauseSingle` points at a "row-level breakdown" that
+ * does not exist for such a rule.
+ */
+export function formatCsvRuleCauseFileLevel(humanLabel: string): string {
+  return `Rule violated: ${humanLabel}. We checked the whole file, so no single row is at fault.`;
+}
+
+/**
+ * 166.1 round-1 WR-01 — the panel headline when validation failed but no REAL
+ * row did (every error is file-level, `row: 0`). The row-count headline read
+ * "1 row failed validation" for a rule that names no row. Keeps the phrase
+ * "failed validation", which `e2e/csv-upload-flow.spec.ts` matches.
+ */
+export const CSV_FILE_LEVEL_HEADLINE = "Your file failed validation";
 
 /*
  * ⚰️ REMOVED 161-REVIEW / CR-02 — `formatColumnInDataframeMessage(raw)`.

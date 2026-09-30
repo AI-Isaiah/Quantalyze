@@ -10,6 +10,7 @@ from typing import Any, Literal, TypedDict
 
 from supabase import Client
 
+from services.account_identity import VENUES_WITH_ACCOUNT_ID, venue_account_id_from
 from services.closed_sets import is_trade_side
 from services.ingestion._timestamps import coerce_to_aware_utc
 from services.metrics import _safe_float
@@ -1098,6 +1099,9 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     # derivation below can REUSE it instead of calling public/auth twice.
     # Stays None for every non-deribit exchange (their path is unchanged).
     deribit_perms: dict[str, object] | None = None
+    # Phase 167.1.2 (D-01): the account id read from the balance `info`
+    # (binance, deribit). None until the balance call succeeds.
+    balance_account_id: str | None = None
 
     try:
         try:
@@ -1154,7 +1158,22 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         # ExchangeNotAvailable, etc.) is intentionally allowed to propagate
         # to the outer handler so it lands in the right error_code branch
         # below — the outer handler is the single classification surface.
-        await exchange.fetch_balance()
+        # Phase 167.1.2 (D-01): the balance was fetched and discarded before;
+        # its `info` now also yields the venue account id for binance (spot
+        # GET /api/v3/account `uid`) and deribit (get_account_summaries `id`,
+        # present ONLY with `extended=true`: one query parameter on the call
+        # already made, no new request, and `account:read` is already required
+        # by the DRB-03 scope gate above). Every other venue's balance call is
+        # byte-unchanged.
+        if exchange.id == "deribit":
+            balance = await exchange.fetch_balance({"extended": True})
+        else:
+            balance = await exchange.fetch_balance()
+        balance_info = balance.get("info") if isinstance(balance, dict) else None
+        if isinstance(balance_info, dict):
+            balance_account_id = venue_account_id_from(exchange.id, balance_info)
+        else:
+            balance_account_id = None
         result["valid"] = True
     # IMPORTANT: order matters. ccxt's hierarchy is:
     #   PermissionDenied ⊂ AuthenticationError ⊂ ExchangeError
@@ -1304,6 +1323,32 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     elif has_trade:
         result["error"] = "Key has trading permissions. Please use a read-only key."
         result["error_code"] = "TRADE_SCOPE"
+
+    # Phase 167.1.2 (D-01): the venue account id, read from a response this
+    # function already fetched (never a new request). It exists so the
+    # connect routes can stamp `api_keys.venue_account_id`, which is what lets
+    # the venue-identity unique index refuse a second live key on one account.
+    # A missing id is None and NEVER fails validation: blocking a connect on an
+    # extra field would turn venue schema drift into an outage, while an
+    # unstamped key is backfilled later. The id is never logged; the warning
+    # below names the venue only.
+    # The detector's id (okx, bybit) wins; the balance's (binance, deribit)
+    # fills in. Neither ever changes `valid` or `read_only`.
+    account_id = perms.get("account_id")
+    if not isinstance(account_id, str):
+        account_id = balance_account_id
+    result["account_id"] = account_id
+    if (
+        result["account_id"] is None
+        and result["error"] is None
+        and exchange.id in VENUES_WITH_ACCOUNT_ID
+    ):
+        logger.warning(
+            "validate_key_permissions: %s returned no venue account id; the "
+            "key connects without one and a second key on the same account "
+            "cannot be refused until it is stamped",
+            exchange.id,
+        )
 
     return result
 

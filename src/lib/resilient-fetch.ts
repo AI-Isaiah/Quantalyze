@@ -476,7 +476,8 @@ export type SeamBudgetKey =
   | "process-key-sync"
   | "keys-permissions"
   | "keys-rotate-secret"
-  | "process-key-unified-dormant";
+  | "process-key-unified-dormant"
+  | "benchmark-refresh";
 
 /**
  * Per-call-site wall-clock budgets.
@@ -808,6 +809,57 @@ export const SEAM_BUDGETS: Record<
     notes:
       "The DEAD fetch inside keys/validate-and-encrypt's _unifiedValidateAndEncryptHandler, which today has NO timeout at all. Routed through the core so any revival inherits a budget and a breaker rather than re-introducing an unbounded hang.",
   },
+  "benchmark-refresh": {
+    timeoutMs: 100_000,
+    // Phase 169.2 / plan 02 (D-08, W2) — the daily BTC benchmark refresh
+    // (POST /api/benchmark-refresh, reached only from the cron route
+    // src/app/api/cron/refresh-benchmark/route.ts).
+    //
+    // 100 000 ms, SIZED FROM THE SERVICE'S OWN WORST CASE (review fix WR-02;
+    // this row was 60 000 ms, copied from `process-key-sync`, and that was
+    // shorter than the fetcher it waits on). On a cache miss
+    // `services/benchmark.py` `get_benchmark_returns` calls
+    // `fetch_btc_daily_prices(days + 1)`: `_fetch_from_binance` on an
+    // `httpx.AsyncClient(timeout=30)` issues 2 requests for 1001 days at
+    // `limit: 1000`, and on failure `_fetch_from_coingecko` issues 1 more on
+    // the same 30 s client. That is 90 s of per-request read bound, plus the
+    // cache read and the upsert through `db_execute`, which carry no timeout of
+    // their own; 10 s is left for those two. The service now bounds the whole
+    // refresh itself: `routers/cron.py` `benchmark_refresh` runs it under
+    // `asyncio.wait_for` with `_BENCHMARK_REFRESH_DEADLINE_S` (80 s, review
+    // round 2 IN-01), and `test_deadline_sits_below_the_typescript_seam_budget`
+    // pins that deadline at least 10 s under this row's `timeoutMs`.
+    //
+    // THE CEILING IT MUST FIT (SC-4b in `seam-budgets.invariant.test.ts`):
+    // 100 000 + the failing-state breaker-store worst case (3 commands x
+    // 4 250 ms = 12 750) = 112 750 ms, under the route's 120 s `maxDuration`
+    // with room for the uncharged `checkLimit` round before the seam call.
+    //
+    // `dependencies: []`, NARROWER than match-recompute's ["supabase"], and
+    // measured rather than copied: the endpoint (`cron.py` `benchmark_refresh`)
+    // answers exactly 500 on every failure and `services/benchmark.py` raises no
+    // `service_error` and no 503 anywhere, so no counting site exists for any
+    // dependency key. A 500 never records a breaker failure, which is the point
+    // of W2: a stale benchmark must not trip the breaker every analytics call
+    // reads. When in doubt, declare fewer (the tie-break above).
+    //
+    // ⚠️ W2 COVERS THE 500, NOT A DEADLINE. A deadline on this key is a
+    // transport failure and records on the global `BREAKER_KEY` like every
+    // seam's (the `seamBreakerVerdict(null)` arm in `resilientFetch`). With the
+    // budget above the fetcher's worst case, a deadline no longer means "a
+    // slow price source": it means the service did not answer inside its own
+    // maximum, which IS the Railway degradation the breaker exists to count.
+    // One call a day adds at most one failure against a threshold of
+    // `BREAKER_FAILURE_THRESHOLD` (5) inside `BREAKER_WINDOW`, so this seam
+    // cannot trip the breaker on its own.
+    dependencies: [],
+    // 0, by design: a failed daily refresh answers non-2xx so Vercel Cron
+    // alarms, and tomorrow's scheduled run is the retry. Its NO verdict is in
+    // RETRY_AUDIT_NO_ANALYTICS in `seam-retry-registry.ts`.
+    retries: SEAM_RETRIES,
+    notes:
+      "Daily BTC benchmark refresh (Phase 169.2, D-08). One call per cron tick; the service reads the benchmark_prices cache and refetches from the upstream only on a miss. Budget sized from the fetcher's worst case (3 upstream requests x 30 s + DB). A service failure is a 500 (never 503) and never records a breaker failure; a deadline records one on the global key, like every seam's transport failure.",
+  },
 };
 
 /**
@@ -983,6 +1035,14 @@ export const SEAM_ROUTE_BUDGETS: Record<
   "src/app/api/keys/[id]/rotate-secret/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [{ key: "keys-rotate-secret", calls: 1 }],
+  },
+  // Phase 169.2 / plan 02 (D-08, D-20) — the daily BTC benchmark refresh cron.
+  // 120 s, not 300: one 100 000 ms leg plus its failing-state breaker-store
+  // round (12 750 ms) is 112 750 ms, inside it, and a cron that hangs should be
+  // killed sooner than an interactive route.
+  "src/app/api/cron/refresh-benchmark/route.ts": {
+    expectedMaxDurationS: 120,
+    budgets: [{ key: "benchmark-refresh", calls: 1 }],
   },
 };
 

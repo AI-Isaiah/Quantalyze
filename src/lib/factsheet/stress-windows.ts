@@ -82,7 +82,11 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 export function computeStressWindows(
   dates: string[],
   stratRet: number[],
-  benchRet: number[],
+  /** Phase 169.5 CR-01 (SC3): the comparator's covered returns. A null is an
+   *  uncovered comparator day (unavailable read, dropped close, before its
+   *  coverage starts); a window containing one gets null bench fields — a gap
+   *  is null, never a 0% day. */
+  benchRet: ReadonlyArray<number | null>,
   benchName: string,
   markets: string[] = [],
 ): StressWindowPayload {
@@ -133,14 +137,20 @@ export function computeStressWindows(
     let benchPeak = 1;
     let stratMaxDD = 0;
     let benchMaxDD = 0;
+    let benchCovered = true;
     for (let i = startIdx; i <= endIdx; i++) {
       stratCum *= 1 + stratRet[i];
-      benchCum *= 1 + benchRet[i];
       if (stratCum > stratPeak) stratPeak = stratCum;
-      if (benchCum > benchPeak) benchPeak = benchCum;
       const stratDD = stratCum / stratPeak - 1;
-      const benchDD = benchCum / benchPeak - 1;
       if (stratDD < stratMaxDD) stratMaxDD = stratDD;
+      const b = benchRet[i];
+      if (b == null) {
+        benchCovered = false;
+        continue;
+      }
+      benchCum *= 1 + b;
+      if (benchCum > benchPeak) benchPeak = benchCum;
+      const benchDD = benchCum / benchPeak - 1;
       if (benchDD < benchMaxDD) benchMaxDD = benchDD;
     }
     windows.push({
@@ -152,9 +162,9 @@ export function computeStressWindows(
       expectedCalendarDays: expectedDays,
       coverage: coverageRatio >= 0.85 ? "full" : "partial",
       stratReturn: stratCum - 1,
-      benchReturn: benchCum - 1,
+      benchReturn: benchCovered ? benchCum - 1 : null,
       stratMaxDD,
-      benchMaxDD,
+      benchMaxDD: benchCovered ? benchMaxDD : null,
     });
   }
   return {

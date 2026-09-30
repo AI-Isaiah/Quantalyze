@@ -34,6 +34,13 @@ import type { DailyPoint, ScenarioState, StrategyForBuilder } from "@/lib/scenar
 import { type AddedStrategy } from "./scenario-state";
 
 /**
+ * Phase 167.1.2 plan 07 (SC-5) — the name a per-key unit carries when the
+ * caller has no label for its key. Neutral on purpose: a raw api_key_id must
+ * never reach a Scenario surface.
+ */
+export const CONNECTED_KEY_FALLBACK_NAME = "Connected key";
+
+/**
  * H5 — phantom branded type. Re-exported here so adapter callers can use it
  * without importing from the state module directly. The brand is the same
  * underlying `string & { readonly __brand: "scenario-builder-id" }` declared
@@ -127,10 +134,18 @@ function buildAddedUnits(
  * @param equityByApiKeyId  api_key_id → that key's current equity share (Σ
  *   `holdingEquityContribution` over the key's holdings, D2). Negative shares
  *   are clamped to 0; a missing entry defaults to 0.
+ * @param labelById  api_key_id → the key's display label
+ *   (`<Exchange> — <nickname or masked tail>`, built by the caller from
+ *   `dataSourceLabel`). Phase 167.1.2 plan 07 (SC-5): each unit's `name` is its
+ *   label, so every surface that reads `s.name` (the correlation heatmap
+ *   headers, the shortest-history caveat, the gantt) shows the label and never
+ *   the raw api_key_id. A key with no label reads "Connected key". REQUIRED, not
+ *   optional, so the typechecker finds every caller.
  */
 export function buildPerKeyStrategyForBuilderSet(
   perKeyReturnsByApiKeyId: Record<string, DailyPoint[]>,
   equityByApiKeyId: Record<string, number>,
+  labelById: ReadonlyMap<string, string>,
 ): { strategies: StrategyForBuilder[]; state: ScenarioState } {
   const strategies: StrategyForBuilder[] = [];
   const selected: Record<string, boolean> = {};
@@ -143,7 +158,8 @@ export function buildPerKeyStrategyForBuilderSet(
     if (!returns || returns.length === 0) continue;
     strategies.push({
       id: apiKeyId, // id === api_key_id (DSRC-01: keyed per data source)
-      name: `key ${apiKeyId}`,
+      // SC-5: the key's label, never its raw id (see @param labelById).
+      name: labelById.get(apiKeyId) ?? CONNECTED_KEY_FALLBACK_NAME,
       codename: null,
       disclosure_tier: "exploratory",
       strategy_types: [],

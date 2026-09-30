@@ -30,9 +30,11 @@ export const BASIS_KPI_MAP: { tsKey: string; serverKey: string }[] = [
  *
  * Behaviour (Round-2 H-1 — every displayed by-basis scalar comes from the
  * persisted basis, never the client-computed value):
- *   - `serverScalars` ABSENT (`undefined`/`null`) → returns `base` UNCHANGED.
- *     This is the single-key / non-composite path: no persisted by-basis object,
- *     so the client-computed `base` is the coherent value (byte-identical).
+ *   - `serverScalars` ABSENT (`undefined`/`null`) → returns `base` UNCHANGED:
+ *     no persisted object for this basis, so the client-computed `base` stands.
+ *     Since Phase 169 (D-10) that is no longer "every single-key payload": a
+ *     rankable single-key row carries a `cash_settlement` object built from its
+ *     persisted top-level scalars, and is overlaid like a composite.
  *   - `serverScalars` PRESENT → each of the seven mapped keys is rewritten to the
  *     persisted value when FINITE, else `NaN` (→ "—" via the formatters). A
  *     degenerate `calmar:null` / `sortino:null` (Python `_safe_float` persists
@@ -42,8 +44,11 @@ export const BASIS_KPI_MAP: { tsKey: string; serverKey: string }[] = [
  *
  * Used three ways, all now strict:
  *   - CASH overlay (server, build-payload.ts): `serverScalars =
- *     cash_settlement` — only passed when present (composite), so the absent
- *     branch keeps single-key byte-identical.
+ *     cash_settlement`, present on a composite (the stitch's persisted object)
+ *     AND, since Phase 169 (D-10, SC4), on a rankable single-key row (built by
+ *     `composite-read-path.ts` `readSingleKeyBasisOpts` from the persisted
+ *     top-level scalars, so the page reads the value the lists show). Absent on
+ *     a row that is not rankable, where the client-computed `base` stands.
  *   - MTM overlay (client, basis-context.tsx): `serverScalars = mark_to_market
  *     ?? {}` — an absent MTM object becomes `{}` → all seven "—", never cash.
  *
@@ -77,13 +82,20 @@ export function overlayBasisScalars<T extends Record<string, unknown>>(
  *     `sortino:null` with no losing day) → still true. Those keys are PRESENT
  *     (JSON null), and the strict {@link overlayBasisScalars} renders them "—".
  *
- * Trusted by BOTH server gates:
- *   - F1/H-1 (page.tsx cash gate): a composite whose `cash_settlement` fails
- *     this is a real data defect → still-computing placeholder. A degenerate-but-
- *     valid composite (finite `cumulative_return`, some other scalar null) RENDERS.
- *   - F2/M-1 (page.tsx MTM gate): restores locked D1 intent (key-presence, not
- *     all-seven-finite) while guarding a non-finite headline — a degenerate
- *     `sortino:null` no longer wrongly disables a displayable MTM basis.
+ * Trusted by the server gates in `composite-read-path.ts` (they lived in
+ * page.tsx when this was written):
+ *   - F1/H-1 (`readCompositeFactsheet` cash gate): a composite whose
+ *     `cash_settlement` fails this is a real data defect → still-computing
+ *     placeholder. A degenerate-but-valid composite (finite `cumulative_return`,
+ *     some other scalar null) RENDERS.
+ *   - F2/M-1 (the MTM and smoothed gates, composite and single-key): restores
+ *     locked D1 intent (key-presence, not all-seven-finite) while guarding a
+ *     non-finite headline — a degenerate `sortino:null` no longer wrongly
+ *     disables a displayable MTM basis.
+ * NOT the single-key persisted cash headline (Phase 169 review round 1, WR-01):
+ * that gate is structural only (the seven keys present), because a rankable row
+ * whose stored `cumulative_return` is null must still show the stored CAGR and
+ * Sharpe the lists show, with the em-dash where the stored value is null.
  */
 export function hasBasisHeadline(obj: unknown): boolean {
   if (!obj || typeof obj !== "object") return false;

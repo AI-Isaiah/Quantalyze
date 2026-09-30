@@ -67,6 +67,9 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    - **DEC-4** — the advisory lock, in its own phase, with a REAL concurrency test. It touches two
      RPCs that run on every job transition for every strategy; a half-applied lock discipline reads
      as protection while providing none.
+     ⭐ **TAKEN 2026-09-26 by Phase 164.5.2 BRIDGELOCK** — migration
+     `20260926120000_mark_compute_job_bridge_advisory_lock.sql` (both RPCs in one file) and the
+     LANE-ONLY two-backend gate `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql`.
 
    **B. Detection gap found during the 2026-08-25 prod outage:**
    - **0.04 — PYAPI-06 cannot detect the outage it was built for.** The client omits `X-Service-Key`
@@ -1365,6 +1368,77 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[164.6.7-RETRY-PLAIN-COMPLETE]` The transient retry keeps a factsheet published only if
+      its row was `complete_with_warnings` or warned; a plain `complete` row is not protected across
+      the retry (booked 2026-09-26, Phase 164.6.7 round-2 review WR-01 / SFH-R2-03).**
+      - **What happens.** A marked refresh whose marker re-read fails now raises
+        `RefreshMarkerRereadUnavailable` (entry read, chain edge) or, at a terminal stamp since
+        round 4, `StampIOUnavailable` through `_stamp_io`, and retries. The move to `failed_retry` runs
+        `mark_compute_job_failed`, whose bridge `sync_strategy_analytics_status` branch (a) keeps
+        `complete_with_warnings` but rewrites a plain `complete` row to `computing`. On attempt 2
+        `_read_entry_publish_state` (single-key) or `_read_existing_failed_row` inside
+        `_stamp_failed` (composite) reads `computing`, so no protection is granted and a recurring
+        failure takes the loud, un-publishing path. Both readers carry the same exposure (named
+        for both 2026-09-26, round-3 review IN-04).
+      - **Why not fixed in 164.6.7.** Keeping the attempt-1 publish state in job metadata cannot
+        close it: branch (a) has already rewritten the row before attempt 2 reads anything, and on
+        the final attempt the bridge decides in SQL with no Python running. The root fix is a
+        bridge migration (the non-terminal branch keeps a healthy publish state for a job carrying
+        a refresh marker). Migrations auto-apply to PROD on merge, so it is not a ride-along.
+      - **Reachability (dated, not re-measured).** The code comment records the live ledger cohort
+        as 0 plain `complete` and 5 `complete_with_warnings` rows, so nothing is exposed today.
+        The condition is stated at `MarkerLiveState` in `job_worker.py`, in runbook item 2 and in
+        164.6.7 CONTEXT D-10.
+      - **Destination: Phase 164.5.2 BRIDGELOCK**, the phase that already changes the terminal
+        mark RPCs fanning into this bridge (same routing as
+        `[164.6.7-COMPOSITE-REREAD-RESIDUE]` below). Dated routing line under `### Phase 164.5.2`
+        in `.planning/ROADMAP.md`.
+
+- [ ] **`[164.6.7-COMPOSITE-REREAD-RESIDUE]` A marker retraction that lands between the Python live
+      re-read and `mark_compute_job_failed` still leaves the pre-fix outcome, over a window of
+      milliseconds (booked 2026-09-25, Phase 164.6.7 COMPOSITECLAIMSNAPSHOT, decision D-03).**
+      - **What remains.** Phase 164.6.7 made the `_stamp_failed` closure of
+        `run_stitch_composite_job` re-read the live `compute_jobs` row (since round 4 through
+        `_read_refresh_marker_state` inside `_stamp_io`) before it honours the
+        `ledger-refresh-composite` marker. A
+        retraction committing AFTER that re-read and BEFORE `mark_compute_job_failed` PERFORMs the
+        SQL bridge `sync_strategy_analytics_status` still yields an error-only Python write followed by a loud SQL status: the
+        `computation_warned` residue (research H2), so a warned composite can read
+        `complete_with_warnings` again at the next bridge call over a failed run.
+      - **Both honour arms share it.** The single-key derive honour site in
+        `run_derive_broker_dailies_job`, which makes the same `_read_refresh_marker_state` read,
+        carries the identical window. A fix is one change for both.
+      - **Fix shape.** In `sync_strategy_analytics_status`, either branch (b) clears
+        `computation_warned`, or the protect/loud decision moves inside the bridge's transaction.
+        Either is a migration to a bridge every job kind shares, and a merge touching
+        `supabase/migrations/**` auto-applies to PROD, so it is not a ride-along.
+      - **Owner:** whoever next changes `sync_strategy_analytics_status`. **Trigger:** any change
+        to that function.
+      - **Not data-integrity-reachable today (2026-09-25).** The composite fan-out is unscheduled
+        (runbook precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]`, item 6 still blocking), so no
+        composite job carries the marker. Re-read this line before the composite is scheduled.
+        ⚠️ This covers the COMPOSITE arm only. The single-key arm is reachable whenever the
+        single-key fan-out is scheduled, and whether it is was not measured here (no remote
+        database is read in Phase 164.6.7).
+      - ⛔ **CORRECTED 2026-09-25 (Phase 164.6.7 round-1 review WR-04 and IN-06); the bullets
+        above are kept as lineage.**
+        - **Routed, not event-owned.** This is a data-integrity deferral, and the repo rule is
+          that one must name a phase. "Whoever next changes the function" had no date and no
+          gate, and nothing forces that change before the composite is scheduled. **Destination:
+          Phase 164.5.2 BRIDGELOCK** (dated routing line under `### Phase 164.5.2` in
+          `.planning/ROADMAP.md`), the phase that already changes the terminal mark RPCs fanning
+          into this bridge. This overrides the owner line above, which followed CONTEXT D-03.
+        - **It blocks composite scheduling, in the runbook.** "Re-read this line before the
+          composite is scheduled" is superseded. The operator's instruction now lives where it
+          is read at scheduling time: item 7 of `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in
+          `docs/runbooks/ledger-refresh-go-live.md` is ⛔ BLOCKING until this entry is closed,
+          or the founder accepts the window there with a date and a reason.
+        - **"Milliseconds" was never measured.** The window's length is unmeasured, and several
+          contributors have no bound: the error-only upsert through `db_execute`; on the
+          member-ledger-error path, the `aclose_exchange` network close in the `finally` that
+          runs after `_stamp_failed` returns; the heartbeat cancel in `main_worker`; and
+          `_safe_mark` → `db_execute` for `mark_compute_job_failed`, which can queue behind a
+          saturated `_DB_EXECUTOR`. The harm probe's zero-member driver exercises none of them.
 - [ ] **`[169-DEAD-ADMIN-JOBS-RPC]` Drop the dead `get_admin_compute_jobs` database function
       (booked 2026-09-25, Phase 169 D-01).**
       It raises "column reference `id` is ambiguous" on every call (its `RETURNS TABLE` declares an
@@ -1380,6 +1454,18 @@ true for 146 and half of 142–145, and **false for 141**.
       **Closed when:** a migration drops the function, `database.types.ts` loses it, and
       `grep -rn get_admin_compute_jobs src` finds only lineage comments.
 
+- [ ] **`[169.2-BTC-GAP-RETURN-STAMP]` A BTC return across a missing stored day is stamped as one
+      day's move (booked 2026-09-27, Phase 169.2 D-47, review round 3 WR-01).**
+      `pricesToDailyReturns` (`src/lib/factsheet/benchmark-source.ts`) bridges two stored closes with
+      a missing day between them into ONE return at the later date. The cumulative BTC overlay
+      (`ScenarioComposer`, the scenario-share page) needs that bridge to stay on BTC's real level;
+      the inner-joined metrics would rather skip it. Phase 169.2 briefly skipped every gap (round-2
+      WR-03), which made the overlay drift, so it reverted to bridging and kept only the skip across a
+      dropped corrupt close. Pre-existing and latent: the daily refresh treats any calendar gap as a
+      cache miss and refetches, so a gap in `benchmark_prices` should not persist.
+      ✅ **Destination: Phase 169.4 ALLOCTRUTH**, whose plans read BTC through `readBenchmarkPrices`
+      and `mergeWithFixture`. **Closed when:** consumers build the overlay from closes (or levels)
+      and the metrics from exactly-one-day returns, with a test for each across a missing day.
 - [ ] **`[169-SCENARIO-WINDOW-ANNUALIZATION]` A selected range on the `/allocations` Scenario tab
       shows the withheld form, because the Scenario payload carries no `periodsPerYear`
       (booked 2026-09-26, Phase 169 D-29).**
@@ -1400,6 +1486,21 @@ true for 146 and half of 142–145, and **false for 141**.
       `compute()` of the slice; and 167.1.2 records whether the leverage control should appear on
       the Scenario tab.
 
+- [ ] **`[169-PORTFOLIO-ANALYTICS-COLUMNS]` The portfolio analytics compute behind `/portfolios/[id]`
+      may never refresh (booked 2026-09-27, Phase 169 D-53; inferred from source, NOT measured).**
+      `_compute_portfolio_analytics` (`analytics-service/routers/portfolio.py`) selects
+      `strategy_analytics` columns that `supabase/schema/baseline.sql` does not carry, and reads
+      `returns_series` as daily returns while `metrics.py` writes that field as a cumulative series.
+      If so, every portfolio analytics compute fails and the risk decomposition on `/portfolios/[id]`
+      is stale or absent, and `standalone_vol`'s period cannot be confirmed end to end.
+      **Why not fixed in 169:** a Python compute path, not a page-number surface; found by the
+      169 replan research (`169-RESEARCH.md` Open Question 1).
+      **Owner:** THE FOUNDER, to route to a phase (data-integrity). *(Routed 2026-09-27: Phase 166.4.1
+      PORTFOLIOANALYTICS, inserted on main by PR #889.)* **Trigger:** one read of the
+      analytics logs for "Portfolio analytics computation failed" confirms or clears it.
+      **Closed when:** the compute selects only real columns, derives daily returns from the stored
+      series, and a test that fails on today's select pins both.
+
 - [ ] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
       queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
       **Measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).** `python` took
@@ -1411,7 +1512,7 @@ true for 146 and half of 142–145, and **false for 141**.
       `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
       evidence.
 
-- [ ] **`[164.9.5-MANUAL-BASELINE-REDUMP]` Every PROD migration apply leaves `main` red on
+- [x] **`[164.9.5-MANUAL-BASELINE-REDUMP]` Every PROD migration apply leaves `main` red on
       baseline-content-drift until someone runs a manual schema dump (booked 2026-09-26, founder
       decision).**
       **Measured 2026-09-26.** PR #864 needed a founder-run `supabase db dump --linked`. `main` was
@@ -1422,13 +1523,31 @@ true for 146 and half of 142–145, and **false for 141**.
       ✅ **Destination: Phase 164.9.5 AUTOREDUMP** — routed there 2026-09-26 via
       `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
       evidence.
+      ✅ **CLOSED 2026-09-26 by Phase 164.9.5 AUTOREDUMP.** The text above is kept as lineage.
+      `scripts/baseline-redump.mjs` reproduces the manual procedure mechanically in two halves:
+      `--gate-dump` (hash, shape counts, secret scan, gitleaks, integrity, the marker regenerated
+      from the applied merge's tree, and a no-op when nothing changed) and `--compose` (copy the
+      gated pair onto `main`, re-run the currency, content-drift and staleness gates, write the six
+      paths PR #864 changed, refuse the skip trailer), plus `--check-bot-branch` and
+      `--open-or-edit-pr`. Its self-tests are `node scripts/baseline-redump.mjs --self-test`
+      (prints `baseline-redump self-test OK: <n> assertion(s)`) and
+      `node scripts/baseline-redump.mjs --self-test --with-gitleaks` (the same line followed by
+      `... (with gitleaks)`); regenerate the count by running the command. The `redump-dump` and
+      `redump-pr` jobs in `.github/workflows/supabase-migrate.yml` run it after every successful
+      PROD `apply` on `main`, the PROD credential and the write token never sharing a job, and
+      the one bot PR is never merged by the bot. `src/__tests__/baseline-redump-wiring.test.ts`
+      pins the wiring, and `supabase/schema/BASELINE.md` "## Regenerating" documents the
+      automation beside the manual procedure, which stays the fallback. Live proof is post-merge
+      and human-run: dispatch `supabase-migrate.yml` on main and expect a no-op or one bot PR,
+      and approve the workflows on the first bot PR.
 
-- [ ] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
+- [x] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
       same (kind, allocator) makes every claim entry point raise `23505` (booked 2026-09-26, found
       on the pg-lane by the Phase 167.1.2 PR B fixer).**
       **Repro, measured 2026-09-26.** Seed a `failed_retry` `derive_allocator_equity` row with
       `next_attempt_at` in the past and a `pending` row for the same allocator. Then
-      `claim_compute_jobs_with_priority` (6-arg and 2-arg) and `claim_compute_jobs` all raise
+      `claim_compute_jobs_with_priority` (6-arg and 2-arg; ⛔ CORRECTED 2026-09-27: 5-arg, and the
+      2-arg's pre-fix result is 42725 not 23505, see 164.9.3 CONTEXT) and `claim_compute_jobs` all raise
       `23505` on `compute_jobs_one_inflight_per_kind_allocator`.
       **Why.** The claim's C39 guard skips a candidate only for a `running` or
       `done_pending_children` sibling, not a `pending` one. `_enqueue_compute_job_internal`'s dedup
@@ -1449,8 +1568,39 @@ true for 146 and half of 142–145, and **false for 141**.
       any kind is claimed until the pair clears. The full repro is kept verbatim in the Phase
       164.5.2 ROADMAP section as lineage. **Owner: Phase 164.9.3 CLAIMPAIR**, whose criterion 4
       now covers all four partitions (api_key_id, portfolio, strategy, allocator).
+      ✅ CLOSED 2026-09-27 by Phase 164.9.3 CLAIMPAIR. Migration
+      `20260927120000_claim_pair_pre_rank_exclusion.sql` (D-08): a `failed_retry` candidate whose
+      `(kind, partition)` already holds a `pending` row is dropped from the `ranked` CTE BEFORE
+      `row_number()` in all three claim bodies, `claim_compute_jobs(integer, text)`, the 5-arg
+      and the 2-arg `claim_compute_jobs_with_priority`, with one clause per partition
+      (`api_key_id`, portfolio, strategy, allocator) matching its
+      `compute_jobs_one_inflight_per_kind_*` index predicate (D-02). The 2-arg is re-based, not
+      dropped, and also gains the C39 running / done_pending_children guard. The enqueue side is
+      unchanged. Gate `supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql`,
+      18 arms (12 partition arms, W-LOST, P2-C39, regression arm W-INTRO, W-LOWTWIN from review
+      round 1, and W-C39SIB and W-C39INTRO from review round 3), each with a mutation twin.
+      Red-first census on the pre-fix lane: 14 RED, all 14 with SQLSTATE 23505, W-INTRO GREEN;
+      W-LOWTWIN RED before the probe fix (no error, 0 of 3 rows claimed); W-C39SIB and
+      W-C39INTRO RED before the round-3 widening (no error, the unrelated `low` job and the retry
+      each claimed 0 times). After the fixes: 18 of 18 green on the pg-lane.
+      Residual (i) is CLOSED in review rounds 1 and 3: the priority throttle probe counted a
+      held-back retry, which beside a `low` pending twin claimed neither row and throttled every
+      due `low` job with no error, on every tick. Both priority overloads now skip such a retry
+      in the probe (a marked `CLAIMPAIR PROBE EXCLUSION` block). Round 3 (founder decision D-11)
+      widened the block to the C39 half: a retry the C39 guard holds back beside a `running` or
+      `done_pending_children` sibling is skipped too, with the intro carve-out on the `pending`
+      sibling only. So the far-future-twin hold, the low-twin wedge and the C39-sibling hold are
+      all gone. What stays (review IN-11): the block covers `failed_retry` rows only, so a due
+      `pending` `compute_intro_snapshot` row that C39 drops beside an in-flight intro sibling is
+      still counted; it predates this phase and is latent while no writer sets `low`.
+      ⚠️ Two residuals are recorded in the migration
+      header, not fixed: (ii) a retry waits for a not-yet-due twin to run first (delay, not
+      loss); (iii) a claim racing a concurrent enqueue of the twin can still raise 23505 for one
+      tick (reasoned, not measured). The ROADMAP-booked option (a), adding `pending` to the
+      post-rank C39 list, was measured as a SILENT permanent wedge that also starves
+      `compute_intro_snapshot`, and was rejected.
 
-- [ ] **`[164.9.3.1-FANIN-GRAPH-RESIDUALS]` Three latent or loud defects on the fan-in graph and
+- [ ] **`[164.9.3.1-FANIN-GRAPH-RESIDUALS]` Four latent or loud defects on the fan-in graph and
       the bridge's decision cascade (booked 2026-09-26; routed 2026-09-25 from the Phase 164.9.1
       review round 1 to Phase 164.5.2, re-routed 2026-09-26 by founder decision).**
       (1) **Stranded child:** a fan-in child whose parent is still open at enqueue and later
@@ -1463,6 +1613,11 @@ true for 146 and half of 142–145, and **false for 141**.
       (40P01) against `mark_compute_job_done` when a child's parents include another waiting
       child. Latent. Whoever first passes parents must treat 40P01 as retryable on both the
       enqueue and the worker's mark path.
+      (4) **Lost release:** a concurrent fan-in "lost release" in `mark_compute_job_done` can
+      strand a two-parent child in `done_pending_children`. It is pre-existing: the body is
+      carried byte-for-byte from 20260603120000. Found by the Phase 164.5.2 round-1 review as
+      WR-02, and routed here 2026-09-26 (ROADMAP `### Phase 164.9.3.1`, "ROUTED IN 2026-09-26").
+      Its success test is a two-backend lane arm that fails on today's body.
       (1) and (3) are recorded in the header of M1, `20260924230827_fanin_initial_status_10param.sql`.
       ✅ **Destination: Phase 164.9.3.1 FANINGRAPH**, inserted 2026-09-26 via `/gsd-phase --insert`
       and booked under the new-phase freeze, NOT started. The ROADMAP section holds one success
@@ -7322,7 +7477,7 @@ disagreed):
 1. **KNOWN LIMITATION (D-02) — the flag-monitor error rate is ATTEMPT-grained on both sides, so retries bias it DOWNWARD.** Deliberate, and the safe direction: the alternative that 141.1's D-16 reached for (dedup on `metadata->>correlation_id`) bought a fabricated denominator above PostgREST's `max_rows` and a denominator the wire could pin to 1 through the unauthenticated teaser route. Quieter-under-retry beats false pages plus attacker-chosen silence. A true PER-REQUEST rate needs a **server-minted request id that the retry reuses** — the client-side id cannot serve, because the Python handler re-mints any non-bare-UUID inbound value. That is a cross-seam contract change with its own blast radius, and it is the deferred work. Two further honest caveats already in the docblock, repeated here because they bound what the instrument can see at all: `429`/`401` attempts are refused ABOVE the audit write and produce no row, and the write is fire-and-forget so a lost row biases the rate UPWARD.
 2. **FINDING 8 RESIDUAL — DISPOSITIONED, NOT REMEDIATED. The retry→limiter amplification is STILL LIVE.** A granted retry spends a second token of both `/process-key` limiters, including the platform-wide ceiling that is one shared bucket for every caller; draining it refuses the anonymous teaser and the CSV path, neither of which retries. The breaker structurally cannot contain it — `seamBreakerVerdict` classifies `429` caller-throttled and non-counting — and **no signal covers a ceiling drain at all**, because a 429 is refused above the audit write, so neither the breaker nor the flag-monitor denominator advances. **No limiter code was written and no constant moved.** What changed is exposure, not mechanism: post-D-01/D-03 the retry-eligible population is `onboard`-with-a-key only, and `resync` — just under half of all `/process-key` traffic ever recorded, per the 2026-08-01 production audit history — no longer retries, so the worst case applies to an order of magnitude less traffic. Recorded in the `retriesForFlow` docblock in `seam-retry-registry.ts`. *Re-raise if:* a new YES flow verdict lands, `resync` is re-granted, or `RetrySafeEntry.retries` widens past one. **Supersedes H1 above**, which named the same mechanism before it had been measured.
 3. **D-01 FOLLOW-UP — a CLIENT-MINTED stable idempotency key.** 141.2 made `onboard`'s retry conditional on the key it already had (`retriesForFlow` refuses a retry when `context.wizard_session_id` is falsy, using `Boolean()` to byte-match the Python truthiness gate). The better end state is to make the antecedent unconditionally TRUE rather than conditionally checked — and it is the same key `resync` would need to earn its grant back. Rejected in-phase on blast radius: it changes the cross-seam contract and the `strategy_verifications` uniqueness semantics, which is more than a defect fix should carry. Needs its own decision, not an inference from the registry entry.
-4. **CLASS — unbounded `.select()` on unbounded-growth tables (8 remaining sites).** 141.2 / D-02 closed the one instance the findings named (the flag-monitor denominator, proven truncating in production: `audit_log` held 7350 rows and an unbounded select returned exactly 1000 with HTTP 200 and `error: null`). The class census found 93 unbounded chains, of which these grow without bound: ⚠️ **`api/benchmark/btc` is the highest risk — ASC-ordered over one row per day forever, so past 1000 daily closes the BTC chart silently drops the NEWEST data and the series just ends**; then the two cron enqueue sweeps (`sync-funding`, `reconcile-strategies`, which would silently fund-sync/reconcile only the first 1000 strategies while reporting the truncated number as truth); then `allocator/scenario/commit`'s holdings recompute, the `queries.ts` discovery aggregates, and the marketing page's headline AUM sum. Distinct sub-shape, note only: `cron/cleanup-ack-tokens` caps its DELETE's RETURNING body, so the reported deletion COUNT is wrong, not the deletion. One entry, not eight, deliberately — the fix is the same three-way choice each time (COUNT / `.range()` pagination / an explicit `.limit()` that says so).
+4. **CLASS — unbounded `.select()` on unbounded-growth tables (8 remaining sites; 7 after Phase 169.2, see the 2026-09-27 correction at the end of this entry).** 141.2 / D-02 closed the one instance the findings named (the flag-monitor denominator, proven truncating in production: `audit_log` held 7350 rows and an unbounded select returned exactly 1000 with HTTP 200 and `error: null`). The class census found 93 unbounded chains, of which these grow without bound: ⚠️ **`api/benchmark/btc` is the highest risk — ASC-ordered over one row per day forever, so past 1000 daily closes the BTC chart silently drops the NEWEST data and the series just ends**; then the two cron enqueue sweeps (`sync-funding`, `reconcile-strategies`, which would silently fund-sync/reconcile only the first 1000 strategies while reporting the truncated number as truth); then `allocator/scenario/commit`'s holdings recompute, the `queries.ts` discovery aggregates, and the marketing page's headline AUM sum. Distinct sub-shape, note only: `cron/cleanup-ack-tokens` caps its DELETE's RETURNING body, so the reported deletion COUNT is wrong, not the deletion. One entry, not eight, deliberately — the fix is the same three-way choice each time (COUNT / `.range()` pagination / an explicit `.limit()` that says so). ⛔ **CORRECTED 2026-09-27 (Phase 169.2 BENCHFRESH, review IN-03); the sentences above are kept as lineage.** The highest-risk site, `api/benchmark/btc`, is CLOSED by Phase 169.2's branch: the route now reads through `readBenchmarkPrices` (`src/lib/factsheet/benchmark-source.ts`), the one reader of `benchmark_prices`, which pages newest-first by a keyset cursor on `date` until an EMPTY page and returns an error (never a truncated series) at its `BENCHMARK_MAX_PAGES` ceiling. It closes on `main` when that phase merges. **7 sites remain by this entry's own count (8 − 1)**: the ones named above after `api/benchmark/btc`, highest risk now the two cron enqueue sweeps. The 8 was never itemised site by site, so re-measure the census before relying on the 7.
 7. **DEF-141.2-03-A — stale route coordinates inside a skipped test's comment.** `src/__tests__/audit-coverage.test.ts:962-964` cites three `flag-monitor/route.ts:NN` coordinates, one of them a "feature_flags upsert — kill-switch flip" site Phase 106 (Stage B) retired. Already stale before 141.2 and inside an `it.skip(...)` comment rather than an assertion, so nothing reds and plan 03's edits shifted the numbers further. Comment-only drift, below the bar. Booked here because `deferred-items.md` is a per-phase scratch file and this file is the one backlog.
 8. **`Boolean()` does NOT byte-agree with Python's `bool()` for empty JSON collections — the docblock says it does.** Found by the ship red-team pass. `seam-retry-registry.ts` `retriesForFlow` gates on `Boolean(context?.wizard_session_id)` and its docblock claims "the same truthiness predicate the Python gate uses" (`process_key.py`'s `bool(body.context.get("wizard_session_id"))`). True for `null` / `undefined` / `""` / `0` / `false` — the empty-string case it explicitly names is genuinely correct. **False for `[]` and `{}`**: truthy in JS, falsy in Python. A context carrying `wizard_session_id: []` would grant the retry TS-side while Python falls to `… or str(uuid.uuid4())`, mints a fresh session per attempt, skips the duplicate pre-check, and inserts a second draft `strategy_verifications` row — the exact harm D-03 withdrew resync's grant over. **Unreachable at HEAD**, which is why it is logged and not fixed: `retriesForFlow` short-circuits to 0 for every flow but `onboard`, and `onboard`-through-`postProcessKey` has one producer (`finalize-wizard`), whose context is a hand-listed allowlist of validated scalars plus a `wizardSessionId` read off a uuid DB column. Fix when touched: `typeof context?.wizard_session_id === "string" && context.wizard_session_id.length > 0`. Founder call 2026-08-01: ship as-is, the surface is well tested. *Re-raise if:* a second `onboard` producer appears, or any context field stops being an allowlisted scalar.
 9. **`hasContractualWait`'s docblock contradicts itself on the HTTP-date form.** `resilient-fetch.ts` states "A date-form wait is a contractual wait like any other and fails fast; there is no deliberate gap here to work around" two lines after correctly noting that no `Date` header yields null. `retry-after.ts` returns null when `Date` is absent, so a date-form 503 WITHOUT a `Date` header does not fail fast — it retries. Harmless in practice (HTTP/1.1 origins must send `Date`; our own emitter uses delta-seconds), but the gap is real and the sentence denies it. Prose-only, below the bar.
@@ -8009,6 +8164,51 @@ EXECUTED, §str/None follow-through, §Discovery observation).
           card, and the `KEY_SIGN_IN_FAILED` envelope.
       **Closed when:** each item's verdict is written into `167-UAT.md` (verdict and counts only —
       no key id, account number or server name).
+
+## Phase 167.1.2 (ACCOUNTTRUTH) — PR C2 informational items (logged 2026-09-29)
+
+- [ ] **`[167.1.2-C2-R3-IN-05]` A corrupt `key_inputs` row on an older key fails the stitched book permanently (Info, C2 round-3 review IN-05, founder: "It is an informational. Just put it into todos").**
+      - **What happens.** When the derive stitches a failing older key's history onto the working key (C2 round-2 fix SFH-R2-03), one corrupt `key_inputs` row on the older key marks the whole book `shared_account_history_truncated`, so the book stays hidden, while the rebuilding line says the history is recomputed once a day.
+      - **Source.** `.planning/phases/167.1.2-accounttruth-one-exchange-account-is-counted-once-and-the-al/167.1.2-C2-REVIEW-R3.md`, IN-05.
+
+## Phase 167.1.2 (ACCOUNTTRUTH) — PR B review round 4, routed items (logged 2026-09-26)
+
+- [ ] **`[167.1.2-REUSED-RETRY-ENDS-FAILED-FINAL]` A toggle can report success while the recompose
+      it reused ends `failed_final` and the curve never shows the change (booked 2026-09-26, from
+      the PR B round-4 silent-failure-hunter, finding F-4, LOW).**
+      **What happens.** `set_departed_key_history_inclusion` reuses the caller's `failed_retry`
+      `derive_allocator_equity` row when it is the only recompose row: it goes back to `pending`,
+      due now, with `attempts` untouched, so the toggle grants no retry budget. A row one attempt
+      short of `max_attempts` that fails once more ends `failed_final`. The RPC has already
+      returned success by then, so the owner sees the toggle accepted and a curve that still
+      reads the old value. The next toggle enqueues a fresh job, but nothing tells the owner to
+      make one.
+      **Why not fixed in PR B.** It is not a database-side refusal the RPC can make: the outcome
+      is decided after commit, by the worker. What the owner sees about a failed recompose is a
+      client question (the departed-keys overview and its status line).
+      **Owner: Phase 167.1.2 PR C (plan 04)**, the client half that calls this RPC and renders the
+      departed-keys overview. It decides whether that surface shows a failed recompose, and how.
+      No earlier `TODOS.md` entry names PR C (grep `PR C`: 0 hits on 2026-09-26), so this entry
+      is its first.
+      **Trigger:** PR C's planning, or any client code that calls
+      `set_departed_key_history_inclusion`, whichever is first.
+
+- [ ] **`[167.1.2-SECOND-FAILED-RETRY-ROW-STAYS]` A second, older `failed_retry` recompose row
+      beside the caller's pending one is left in place by the toggle (booked 2026-09-26, from the
+      PR B round-4 migration-reviewer, INFO-3).**
+      **What happens.** The reuse only fires when a `failed_retry` row is the caller's ONLY
+      in-flight-or-retry recompose row. When a pre-existing `pending` or `done_pending_children`
+      row sits beside it, the RPC does not flip it (the flip would collide on
+      `compute_jobs_one_inflight_per_kind_allocator`) and folds into the in-flight row through the
+      enqueue's dedup. The `failed_retry` row stays. The RPC did not create that pairing, but it
+      does not clear it either, and once the row is due it is the claim-wedge pairing.
+      **Owner: Phase 164.9.3 CLAIMPAIR**, which owns the pairing class
+      (`[164.9.3-CLAIM-PAIR-23505]`: a due `failed_retry` row plus a `pending` twin of the same
+      (kind, allocator) makes every claim entry point raise 23505). This is one more way the pair
+      can already exist when a caller arrives; the class fix there covers it. ⚠️ At the time of
+      writing, the 164.9.3 ROADMAP section and its `TODOS.md` entry live on the unmerged docs
+      branch that inserted the phase, not on this branch.
+      **Trigger:** Phase 164.9.3 planning.
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
@@ -9542,6 +9742,22 @@ follows is what was deliberately left, with the reason.
   - **Not done in 161.1:** both files are outside the phase's declared scope, and a half-applied
     lock discipline (one RPC locking, the other not) is worse than a documented window — it reads
     as protection while providing none. Wants its own phase and its own concurrency test.
+  - ✅ CLOSED 2026-09-26 by Phase 164.5.2 BRIDGELOCK. Migration
+    `20260926120000_mark_compute_job_bridge_advisory_lock.sql` makes BOTH `mark_compute_job_done`
+    and `mark_compute_job_failed` take `pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'),
+    hashtext(<strategy id>))` inside their strategy guard, before the bridge call, in ONE
+    migration, so the half-applied discipline this entry warned about never exists. Evidence, per
+    the plan 01 SUMMARY: the LANE-ONLY two-backend gate
+    `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql` went RED naming arm L1 with the done
+    lock line removed and RED naming arm L2 with the failed lock line removed, and GREEN with each
+    restored byte-identically. ⚠️ The key is the TWO-integer form, not the single-key
+    `hashtext(p_strategy_id::text)` the fix shape above suggested, so a mark never queues behind a
+    trade sync. ⚠️ **What stays OPEN:** the lock covers terminal-mark against terminal-mark only.
+    The bridge's non-mark callers and the other writers of the rows it reads (the Python deferred
+    bridge call, both claim RPCs, `reset_stalled_compute_jobs`, the orphan terminalizer, enqueue,
+    a cross-strategy fan-in release, the refresh-marker retraction) stay unserialized, and a lock
+    inside the bridge itself is routed to **Phase 164.5.2.1 BRIDGERESIDUE**. The bridge's
+    read-order pins stay load-bearing.
 
 161.1-D2. **⚠️ A systematic enqueue failure in either fan-out is indistinguishable from "nothing
   was stale".** Both `enqueue_ledger_refresh_for_strategies` and `enqueue_ledger_composite_refresh`
@@ -9675,6 +9891,20 @@ follows is what was deliberately left, with the reason.
     protection, and its failure is suppressed exactly as the single-key case was.
   - ⚠️ The composite fan-out ships DORMANT, so this is not reachable on production until the
     schedule is registered — but it must be closed BEFORE that founder-gated go-live op, not after.
+  - ✅ **CLOSED 2026-09-25, in two halves.** The retraction call at the two TypeScript
+    `stitch_composite` enqueue sites closed in **Phase 164.6 plan 02**. ⛔ The "*honouring* side is
+    covered" sentence above was WRONG for the composite until **Phase 164.6.7
+    COMPOSITECLAIMSNAPSHOT**: the composite honour site read the claim-time snapshot, so a
+    retraction landing after the claim was never seen by the Python stamp. Since Phase 164.6.7,
+    the `_stamp_failed` closure of `run_stitch_composite_job` re-reads the live `compute_jobs` row
+    through `_refresh_marker_still_on_row` before it honours the marker, and the regression is
+    `TestPostClaimRetractionTakesTheLoudPath`. The text above is kept as lineage. A residual window
+    of milliseconds remains and is booked as `[164.6.7-COMPOSITE-REREAD-RESIDUE]` (FIX MID-TERM).
+    ⛔ CORRECTED 2026-09-25 (round-1 review IN-06): the window's length is unmeasured, not
+    "milliseconds"; that entry lists its unbounded contributors and is routed to Phase 164.5.2.
+    The residue is also runbook item 7, which blocks the composite schedule alongside item 6.
+    The composite schedule itself is still blocked by item 6 of the runbook precondition
+    `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` (its own runs are not yet watched).
 
 161.1-D14. **The redact pre-push guard cries wolf on migration timestamps — INVESTIGATED, nothing
   to fix, do not re-investigate.** `gstack-redact` flags 14-digit migration timestamps as
@@ -9740,6 +9970,10 @@ follows is what was deliberately left, with the reason.
   half-applied lock discipline reads as protection while providing none. 164.1 is otherwise guards
   and observability (low blast radius); this would dominate its risk profile. Needs a test that
   genuinely exercises concurrent bridge calls, not a unit test.
+  ⭐ **TAKEN 2026-09-26 by Phase 164.5.2 BRIDGELOCK** — its own phase, as decided: migration
+  `20260926120000_mark_compute_job_bridge_advisory_lock.sql` locks both RPCs in one file, and the
+  gate `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql` drives two real backends over
+  `dblink` on the lane (LANE-ONLY), which is the concurrent test this decision asked for.
 
 161.1-D4. **Prose/derivation nits, non-blocking.**
   - `analytics-service/tests/test_computing_started_at_stamp.py:649` — census docstring

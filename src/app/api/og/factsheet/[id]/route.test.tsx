@@ -50,6 +50,8 @@ const STATE = vi.hoisted(() => ({
   readError: null as { code: string; message: string } | null,
   /** When true, createClient() itself throws — the outer fail-soft arm. */
   clientThrows: false,
+  /** When true, computeOgHeadline throws — the compute fail-soft arm (SFH-02). */
+  computeThrows: false,
   observed: {
     select: null as string | null,
     filters: [] as Array<[string, unknown]>,
@@ -71,12 +73,15 @@ vi.mock("next/og", () => ({
   },
 }));
 
-/** (rows, assetClass, result) for every computeOgHeadline invocation. */
+/** (rows, assetClass, persisted, result) for every computeOgHeadline invocation.
+ *  169.4.1: the spy forwards EVERY argument, so the persisted-scalars argument
+ *  the route passes reaches the real implementation and is recorded here. */
 const headlineCalls = vi.hoisted(
   () =>
     [] as Array<{
       rows: ReadonlyArray<{ date: unknown; value: number }>;
       assetClass: string | null | undefined;
+      persisted: unknown;
       result: { sharpe: number; cagr: number; maxDd: number };
     }>,
 );
@@ -87,15 +92,36 @@ vi.mock("@/lib/factsheet/og-metrics", async (importOriginal) => {
   return {
     ...actual,
     computeOgHeadline: (
-      rows: ReadonlyArray<{ date: unknown; value: number }>,
-      assetClass: string | null | undefined,
+      ...args: Parameters<typeof actual.computeOgHeadline>
     ) => {
-      const result = actual.computeOgHeadline(rows, assetClass);
-      headlineCalls.push({ rows, assetClass, result });
+      if (STATE.computeThrows) throw new Error("headline compute exploded");
+      const result = actual.computeOgHeadline(...args);
+      const [rows, assetClass, persisted] = args;
+      headlineCalls.push({ rows, assetClass, persisted, result });
       return result;
     },
   };
 });
+
+// Review round 1 SFH-02: a failed read is reported to Sentry through
+// `after()`. `after()` needs a Next request scope that vitest does not provide,
+// so run the callback at once and record the capture.
+vi.mock("@/lib/sentry-capture", async (importActual) => ({
+  ...(await importActual<typeof import("@/lib/sentry-capture")>()),
+  captureToSentry: vi.fn(async () => undefined),
+}));
+const afterSpy = vi.hoisted(() =>
+  vi.fn((cb: () => unknown) => {
+    void cb();
+  }),
+);
+vi.mock("next/server", async (importActual) => ({
+  ...(await importActual<typeof import("next/server")>()),
+  after: afterSpy,
+}));
+
+/** The long cache a healthy (or genuinely not-found) card carries. */
+const LONG_CACHE = "public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800";
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => {
@@ -195,7 +221,9 @@ const LONG_WEALTH_INDEX = (() => {
   return out;
 })();
 
-beforeEach(() => {
+beforeEach(async () => {
+  const { __resetCaptureThrottleForTests } = await import("@/lib/sentry-capture");
+  __resetCaptureThrottleForTests();
   STATE.strategyRow = {
     id: PUBLISHED_ID,
     name: "Helios Momentum",
@@ -214,6 +242,7 @@ beforeEach(() => {
   };
   STATE.readError = null;
   STATE.clientThrows = false;
+  STATE.computeThrows = false;
   STATE.observed = { select: null, filters: [], tables: [] };
   ogCalls.length = 0;
   headlineCalls.length = 0;
@@ -291,6 +320,80 @@ describe("GET /api/og/factsheet/[id]", () => {
     expect(strings.filter(s => s === "—")).toHaveLength(0);
   });
 
+  it("O1d — 169.4.1 SC4: a complete row renders its PERSISTED Sharpe / CAGR / Max DD, the values every list shows", async () => {
+    // Distinctive stored values, chosen so the computation over LONG_WEALTH_INDEX
+    // cannot produce them: the card agrees with the lists only if the route
+    // projects the stored scalars AND passes them through.
+    STATE.strategyRow!.strategy_analytics = [
+      {
+        daily_returns: null,
+        returns_series: LONG_WEALTH_INDEX,
+        computation_status: "complete",
+        sharpe: 2.34,
+        cagr: 0.567,
+        max_drawdown: -0.089,
+      },
+    ];
+    const { GET } = await import("./route");
+    await GET(makeRequest(), ctx(PUBLISHED_ID));
+
+    expect(STATE.observed.select).toMatch(/strategy_analytics \([^)]*\bsharpe\b/);
+    expect(STATE.observed.select).toMatch(/strategy_analytics \([^)]*\bcagr\b/);
+    expect(STATE.observed.select).toMatch(/strategy_analytics \([^)]*\bmax_drawdown\b/);
+
+    expect(headlineCalls).toHaveLength(1);
+    expect(headlineCalls[0].persisted).toMatchObject({
+      sharpe: 2.34,
+      cagr: 0.567,
+      max_drawdown: -0.089,
+      computation_status: "complete",
+    });
+    // Anti-vacuity: the series alone computes to different figures.
+    const { computeOgHeadline: real } = await vi.importActual<
+      typeof import("@/lib/factsheet/og-metrics")
+    >("@/lib/factsheet/og-metrics");
+    const computed = real(headlineCalls[0].rows, "crypto");
+    expect(computed.sharpe.toFixed(2)).not.toBe("2.34");
+    expect(computed.cagr).not.toBeCloseTo(0.567, 3);
+
+    const strings = latestCardStrings();
+    expect(strings).toContain("2.34");
+    expect(strings).toContain("+56.7%");
+    expect(strings).toContain("-8.9%");
+  });
+
+  it("O1e — review round 1 CR-01: a chain-broken row's stored CAGR is hidden on the card; Sharpe and Max DD still show", async () => {
+    // Same stored figures as O1d, plus the flag the analytics service stamps
+    // when the stored CAGR covers only the suffix after an interior TWR chain
+    // break. The 400-day series passes the 0.95-year gate, so only the flag can
+    // hide the figure.
+    STATE.strategyRow!.strategy_analytics = [
+      {
+        daily_returns: null,
+        returns_series: LONG_WEALTH_INDEX,
+        computation_status: "complete",
+        sharpe: 2.34,
+        cagr: 0.567,
+        max_drawdown: -0.089,
+        data_quality_flags: { twr_chain_broken: true },
+      },
+    ];
+    const { GET } = await import("./route");
+    await GET(makeRequest(), ctx(PUBLISHED_ID));
+
+    expect(STATE.observed.select).toMatch(/strategy_analytics \([^)]*\bdata_quality_flags\b/);
+    expect(headlineCalls).toHaveLength(1);
+    expect(headlineCalls[0].persisted).toMatchObject({
+      data_quality_flags: { twr_chain_broken: true },
+    });
+
+    const strings = latestCardStrings();
+    expect(strings).not.toContain("+56.7%");
+    expect(strings).toContain("2.34");
+    expect(strings).toContain("-8.9%");
+    expect(strings.filter(s => s === "—")).toHaveLength(1);
+  });
+
   it("O2 — a populated daily_returns still wins over returns_series (direct-first contract)", async () => {
     const csvSeries = [
       { date: "2026-01-02", value: 0.001 },
@@ -352,6 +455,94 @@ describe("GET /api/og/factsheet/[id]", () => {
     // Fallback identity, not a crash — and the failure is logged, not silent.
     expect(latestCardStrings()).toContain("Strategy");
     expect(consoleSpy).toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+});
+
+/**
+ * Review round 1 SFH-02: supabase-js never throws on a query error, it returns
+ * `{ data: null, error }`. The route used to drop `res.error`, render the
+ * generic "Strategy — — —" card and cache it for a day at the CDN plus a week
+ * of stale-while-revalidate, with nothing logged. A failure now reaches
+ * console.error AND Sentry, and the card it produces is sent `no-store` so the
+ * next unfurl retries. A genuine not-found (no row, no error) keeps the long
+ * cache: that answer is correct and stable.
+ */
+describe("GET /api/og/factsheet/[id] — failure paths are reported and never cached long (SFH-02)", () => {
+  it("F1 — a PostgREST error is logged, captured to Sentry, and the card is sent no-store", async () => {
+    STATE.strategyRow = null;
+    STATE.readError = { code: "57014", message: "canceling statement due to statement timeout" };
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = (await GET(makeRequest(), ctx(PUBLISHED_ID))) as unknown as { headers: Headers };
+
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(consoleSpy).toHaveBeenCalled();
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+    expect(captureToSentry).toHaveBeenCalledWith(
+      STATE.readError,
+      expect.objectContaining({
+        tags: expect.objectContaining({ route: "api/og/factsheet", stage: "read" }),
+        extra: expect.objectContaining({ strategy_id: PUBLISHED_ID }),
+      }),
+    );
+    expect(latestCardStrings()).toContain("Strategy");
+    consoleSpy.mockRestore();
+  });
+
+  it("F2 — a genuine not-found (no row, no error) keeps the long cache and reports nothing", async () => {
+    STATE.strategyRow = null;
+    STATE.readError = null;
+    const { GET } = await import("./route");
+    const res = (await GET(makeRequest(), ctx(PUBLISHED_ID))) as unknown as { headers: Headers };
+
+    expect(res.headers.get("Cache-Control")).toBe(LONG_CACHE);
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+    expect(captureToSentry).not.toHaveBeenCalled();
+  });
+
+  it("F3 — a healthy card keeps the long cache", async () => {
+    STATE.strategyRow!.strategy_analytics = [
+      { daily_returns: null, returns_series: LONG_WEALTH_INDEX, computation_status: "complete" },
+    ];
+    const { GET } = await import("./route");
+    const res = (await GET(makeRequest(), ctx(PUBLISHED_ID))) as unknown as { headers: Headers };
+
+    expect(headlineCalls).toHaveLength(1);
+    expect(res.headers.get("Cache-Control")).toBe(LONG_CACHE);
+  });
+
+  it("F4 — a read that THROWS is captured and the fallback card is sent no-store", async () => {
+    STATE.clientThrows = true;
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = (await GET(makeRequest(), ctx(PUBLISHED_ID))) as unknown as { headers: Headers };
+
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+    expect(captureToSentry).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: expect.objectContaining({ stage: "read" }) }),
+    );
+    consoleSpy.mockRestore();
+  });
+
+  it("F5 — a headline compute that throws is captured and the dash card is sent no-store", async () => {
+    STATE.strategyRow!.strategy_analytics = [
+      { daily_returns: null, returns_series: LONG_WEALTH_INDEX, computation_status: "complete" },
+    ];
+    STATE.computeThrows = true;
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = (await GET(makeRequest(), ctx(PUBLISHED_ID))) as unknown as { headers: Headers };
+
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+    expect(captureToSentry).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: expect.objectContaining({ stage: "compute" }) }),
+    );
+    expect(latestCardStrings().filter(s => s === "—")).toHaveLength(3);
     consoleSpy.mockRestore();
   });
 });

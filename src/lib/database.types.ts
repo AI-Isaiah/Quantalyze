@@ -333,6 +333,8 @@ export type Database = {
       api_keys: {
         Row: {
           account_balance_usdt: number | null
+          account_share_kind: string | null
+          account_shared_with_api_key_id: string | null
           api_key_encrypted: string
           api_secret_encrypted: string | null
           attested_venue: string | null
@@ -340,6 +342,7 @@ export type Database = {
           dek_encrypted: string | null
           disconnected_at: string | null
           exchange: string
+          history_inclusion: string | null
           id: string
           is_active: boolean
           kek_version: number
@@ -357,6 +360,8 @@ export type Database = {
         }
         Insert: {
           account_balance_usdt?: number | null
+          account_share_kind?: string | null
+          account_shared_with_api_key_id?: string | null
           api_key_encrypted: string
           api_secret_encrypted?: string | null
           attested_venue?: string | null
@@ -364,6 +369,7 @@ export type Database = {
           dek_encrypted?: string | null
           disconnected_at?: string | null
           exchange: string
+          history_inclusion?: string | null
           id?: string
           is_active?: boolean
           kek_version?: number
@@ -381,6 +387,8 @@ export type Database = {
         }
         Update: {
           account_balance_usdt?: number | null
+          account_share_kind?: string | null
+          account_shared_with_api_key_id?: string | null
           api_key_encrypted?: string
           api_secret_encrypted?: string | null
           attested_venue?: string | null
@@ -388,6 +396,7 @@ export type Database = {
           dek_encrypted?: string | null
           disconnected_at?: string | null
           exchange?: string
+          history_inclusion?: string | null
           id?: string
           is_active?: boolean
           kek_version?: number
@@ -404,6 +413,13 @@ export type Database = {
           venue_account_id?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "api_keys_account_shared_with_api_key_id_fkey"
+            columns: ["account_shared_with_api_key_id"]
+            isOneToOne: false
+            referencedRelation: "api_keys"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "api_keys_user_id_fkey"
             columns: ["user_id"]
@@ -4093,6 +4109,10 @@ export type Database = {
       }
       set_compute_job_progress: {
         Args: { p_claim_token: string; p_job_id: string; p_progress: Json }
+        Returns: boolean
+      }
+      set_departed_key_history_inclusion: {
+        Args: { p_api_key_id: string; p_inclusion: string }
         Returns: boolean
       }
       set_wizard_composite_members: {

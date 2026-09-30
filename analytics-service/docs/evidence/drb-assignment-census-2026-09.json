@@ -1,0 +1,28 @@
+{
+  "_evidence": "DRB assignment census — the same-instrument sibling census recorded for one Deribit options `assignment` row (Phase 168 DRBOPTIONS, D-03)",
+  "_generated": "2026-09-23",
+  "_recorded": "2026-09-26",
+  "_subject": "One Deribit options account inside a multi-account composite failed its first reconstruction on the unknown-type refusal for an `assignment` transaction-log row. Counts and categories only: this file names no account, key, strategy, job, instrument, strike, expiry or change value.",
+  "_method": "Read-only from the production analytics log: the refusal's own describe_unclassified_row output (the OBSERVED SHAPE whitelist plus the same-instrument sibling census over the full-history (scope, currency) batch the USD twin held). No broker call was made to produce this record.",
+  "observation": {
+    "type": "assignment",
+    "currency": "BTC",
+    "option_kind": "put",
+    "instrument_expired_before_observation": true,
+    "side": "close buy",
+    "change_nonzero": true,
+    "same_instrument_sibling_census": {
+      "delivery": 0,
+      "settlement": 0,
+      "trade": 1
+    },
+    "n": 1
+  },
+  "deribit_docs_corroboration": "Deribit's private/get_transaction_log documentation (read 2026-09-26): when an option expires out of the money the transaction-log type is `expiry` and it remains the only entry for that expiration; in-the-money expiries use `assignment` or `exercise`.",
+  "classification_licence": "`assignment` is cash-bearing ONLY in the shape above: no same-instrument `delivery` or `settlement` row in the batch. The co-occurring shape was never observed and is refused (it neither sums nor skips), as is an `assignment` with no instrument_name. The reading that `assignment` is Deribit's newer label for the short in-the-money expiry formerly logged as `delivery` is an assumption, not a measurement.",
+  "limits": [
+    "n=1: one occurrence on one instrument. It shows what Deribit emitted when it emitted no sibling; it cannot show that Deribit never emits both.",
+    "Whether an `assignment` row carries `position` and `commission` is not observable through the refusal's whitelist (_SHAPE_FIELDS); a missing field fails loud through the existing guards, never defaulted.",
+    "`exercise` and `expiry` have no captured census and remain unclassified (the unknown-type refusal still fires on a nonzero change)."
+  ]
+}

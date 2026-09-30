@@ -167,6 +167,14 @@ function pickPlaceholderCodename(): string {
  *   · `orphaned`   — 161-05 / WIZERR-03. The live key exists and NOTHING hangs
  *                    off it: both strategy reads succeeded and both came back
  *                    empty. Refusable, with its own honest code.
+ *   · `held`       — 167.1.2 REVIEW WR-04, narrowed by REVIEW-R2 CR-01. No
+ *                    strategy row points at the live key, but a composite links
+ *                    it through `strategy_keys`, so it is not an orphan.
+ *                    Composite membership is the ONLY signal: see
+ *                    `resolveOtherKeyUse` for why a poll-written table is not
+ *                    one. Returned by `resolveByVenueIdentity` only (the reuse
+ *                    arm's resolver never produces it). Refused with the
+ *                    venue-neutral KEY_VENUE_ALREADY_CONNECTED.
  *   · `unresolved` — genuinely nothing to say: no live key, a read fault, or no
  *                    service-role credential. Fall through.
  *
@@ -189,12 +197,16 @@ type VenueIdentityResolution =
   | { kind: "unresolved" }
   | { kind: "draft"; strategy_id: string; api_key_id: string }
   | { kind: "connected"; strategyName: string | null }
+  | { kind: "held" }
   | { kind: "orphaned" };
 
 const UNRESOLVED: VenueIdentityResolution = { kind: "unresolved" };
 
 /** 161-05 / WIZERR-03 — the payload-free orphan answer, held once like UNRESOLVED. */
 const ORPHANED: VenueIdentityResolution = { kind: "orphaned" };
+
+/** 167.1.2 REVIEW WR-04 — the payload-free "another use holds it" answer. */
+const HELD: VenueIdentityResolution = { kind: "held" };
 
 async function resolveByVenueIdentity(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -245,7 +257,68 @@ async function resolveByVenueIdentity(
 
   if (!liveKeyId) return UNRESOLVED;
 
-  return resolveStrategiesForKey(supabase, userId, liveKeyId, secrets, "venue-identity");
+  const byStrategy = await resolveStrategiesForKey(
+    supabase,
+    userId,
+    liveKeyId,
+    secrets,
+    "venue-identity",
+  );
+  if (byStrategy.kind !== "orphaned") return byStrategy;
+  return resolveOtherKeyUse(supabase, userId, liveKeyId, secrets);
+}
+
+/**
+ * 167.1.2 REVIEW WR-04 — "NO STRATEGY ROW" IS NOT ALWAYS AN ORPHAN.
+ *
+ * `resolveStrategiesForKey` reads `strategies.api_key_id` only. A composite
+ * member has no such row: it is linked through `strategy_keys`. Until 167.1.2
+ * only an MT5 login reached this fence; now every ccxt venue that reports an
+ * account id does, so a manager whose own composite member already reads the
+ * account would have been told KEY_ORPHANED, which is false for it.
+ *
+ * One read on the user-scoped client (RLS plus the explicit owner filter, the
+ * posture `resolveStrategiesForKey` states for its own reads): `strategy_keys`,
+ * any composite membership of the key. A row → `held`. Empty → `orphaned`, as
+ * before. ⛔ A faulted read → `unresolved`: it establishes neither claim
+ * (Rule 12).
+ *
+ * ⛔ 167.1.2 REVIEW-R2 CR-01 — NEVER ADD A POLL-WRITTEN TABLE HERE. Round 1 also
+ * read `allocator_holdings` and answered `held` on any row, as if a row proved
+ * the allocator Exchanges page had connected the key. It proves only that the
+ * daily poll ran: `enqueue_poll_allocator_positions_for_all_keys` polls EVERY
+ * live key (no role filter, no strategy filter), and the handler writes
+ * `allocator_id` = the key's owner. So every true orphan with a balance read as
+ * `held` from its first poll on and lost KEY_ORPHANED, the one refusal that
+ * names "Finish setup". The table's unique key also omits `api_key_id`, so its
+ * `api_key_id` is whichever key on that venue wrote last. The read was removed.
+ * A key connected on another page with no strategy is correctly an orphan: the
+ * KEY_ORPHANED copy says so ("…or connected it on another page"), and "Finish
+ * setup" adopts it through the reuse arm. `route.test.ts` pins the read set of
+ * this path so a new table cannot re-enter it unnoticed.
+ */
+async function resolveOtherKeyUse(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+  liveKeyId: string,
+  secrets: readonly unknown[],
+): Promise<VenueIdentityResolution> {
+  const { data: member, error: memberErr } = await supabase
+    .from("strategy_keys")
+    .select("api_key_id")
+    .eq("owner_id", userId)
+    .eq("api_key_id", liveKeyId)
+    .limit(1)
+    .maybeSingle();
+  if (memberErr) {
+    console.error(
+      "[strategies/create-with-key] venue-identity strategy_keys resolve failed:",
+      scrubSeamError(memberErr, secrets),
+      memberErr.code,
+    );
+    return UNRESOLVED;
+  }
+  return member ? HELD : ORPHANED;
 }
 
 /**
@@ -1125,13 +1198,19 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
    *
    * ⭐ NARROW BY LOCKED DECISION, AND THE NARROWNESS IS THE HONEST PART. Only a
    * venue that hands back a STABLE NON-SECRET ACCOUNT ID at validation can be
-   * fenced this way, and today that is MT5 alone: the broker login, which
-   * `analytics-service/services/mt5_probe.py` asserts against the gateway. The
-   * ccxt adapter's `ValidationResult` dataclass
-   * (`analytics-service/services/ingestion/adapter.py`) carries NO
-   * account-identity field at all, so every ccxt venue has nothing to stamp,
-   * stays NULL, and the partial index excludes it. Recorded as a residual in
-   * REQUIREMENTS.md rather than papered over.
+   * fenced this way BEFORE validation, and that is MT5 alone: the broker
+   * login, which `analytics-service/services/mt5_probe.py` asserts against the
+   * gateway, is in the request itself.
+   *
+   * ⭐ 167.1.2 (D-01): a ccxt venue (OKX, Bybit, Binance, Deribit) now has an
+   * identity too, but only AFTER validation: `/api/validate-key` reads it from
+   * a response the validator already fetches and returns it as
+   * `venue_account_id`. It is taken right after the read-only verdict below
+   * (the named schema field, never a spread) and rides the RPC as
+   * `p_venue_account_id`, so a second live key on one ccxt account trips the
+   * venue-identity index and resolves through the race arm in the 23505 block
+   * (own draft → deduped, connected strategy → VENUE_ALREADY_CONNECTED, orphan
+   * → KEY_ORPHANED). sFOX has no known id and stays NULL (D-10).
    *
    * ⛔ ONE CAPTURE POINT, NOT A VENUE LITERAL SPRINKLED DOWNSTREAM. `isMt5` is
    * consulted here and nowhere below; every arm past this line is
@@ -1147,7 +1226,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
    * refuses it at the DB, and the guard at :119 already rejected a blank MT5
    * login with a 400 long before here — so this expression cannot produce one.
    */
-  const venueAccountId = isMt5 ? api_key.trim() : null;
+  let venueAccountId: string | null = isMt5 ? api_key.trim() : null;
 
   if (venueAccountId) {
     const venueMatch = await resolveByVenueIdentity(
@@ -1193,6 +1272,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // must not first burn a Railway probe and the venue's validate quota.
       return venueAlreadyConnectedResponse(venueMatch.strategyName);
     }
+    // 167.1.2 REVIEW WR-04: `held` falls through here on the same reasoning as
+    // `orphaned` below, and is answered by the race arm's own `held` branch.
     // 161-05 / WIZERR-03 — `orphaned` DELIBERATELY DOES NOT SHORT-CIRCUIT HERE,
     // unlike the two arms above, and the asymmetry is a decision rather than an
     // oversight. Both of those answer a fact about the user's OWN existing
@@ -1246,6 +1327,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         { code },
         { status: 400, headers: NO_STORE_HEADERS },
       );
+    }
+
+    // 167.1.2 (D-01) — the ccxt identity, venue-NEUTRAL: whatever id the
+    // validator read from THIS credential, or null when the venue returned
+    // none (the create proceeds unstamped, and the parameter is then omitted).
+    // An MT5 login captured above is never overwritten.
+    if (venueAccountId === null) {
+      venueAccountId = validation.venue_account_id ?? null;
     }
 
     // encryptKey() validates the response against EncryptKeyResponseSchema
@@ -1500,6 +1589,24 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             // than on the pre-RPC one.
             return venueAlreadyConnectedResponse(venueMatch.strategyName);
           }
+          if (venueMatch.kind === "held") {
+            // 167.1.2 REVIEW WR-04 (narrowed by REVIEW-R2 CR-01) — the live key
+            // on this account has no strategy row but a composite uses it
+            // (`strategy_keys`, read in `resolveOtherKeyUse`), so KEY_ORPHANED's
+            // "no strategy uses it" is false for it. KEY_VENUE_ALREADY_CONNECTED
+            // is the venue-neutral refusal whose copy holds for it: another
+            // connected key of yours already reads this account, and the new
+            // key was not saved (the INSERT above was refused and rolled back).
+            // Same body `keys/validate-and-encrypt` answers.
+            return NextResponse.json(
+              {
+                code: "KEY_VENUE_ALREADY_CONNECTED",
+                error:
+                  "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
+              },
+              { status: 409, headers: NO_STORE_HEADERS },
+            );
+          }
           if (venueMatch.kind === "orphaned") {
             // 161-05 / WIZERR-03 — THE ORPHAN, DISCRIMINATED BEFORE THE PINNED
             // FENCE RATHER THAN BY EDITING IT. This arm used to fall through to
@@ -1537,7 +1644,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             return NextResponse.json(
               {
                 code: "KEY_ORPHANED",
-                error: "This key is already stored, but nothing uses it.",
+                error: "This key is already stored, but no strategy uses it.",
               },
               { status: 409, headers: NO_STORE_HEADERS },
             );
@@ -1711,9 +1818,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // property of a DIFFERENT file's catch ordering, not of this route. Any
     // direct throw, any `AnalyticsUpstreamError` echoing a request field, or any
     // refactor of that client re-opens it.
+    // 167.1.2 REVIEW IN-05: `venueAccountId` too, as every other sink in this
+    // route scrubs it. It is set from the validator before `encryptKey` runs,
+    // so a throw from here on can echo it.
     console.error(
       "[strategies/create-with-key] caught exception:",
-      scrubSeamError(err, [api_key, apiSecretNormalized, passphraseOrNull]),
+      scrubSeamError(err, [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId]),
     );
 
     // Classify into a stable wizardErrors code so the client never sees the raw

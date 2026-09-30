@@ -24,10 +24,13 @@ describe("rolling helpers", () => {
     expect(s[ROLL_WINDOW_6MO - 1]!).toBeGreaterThan(0);
   });
 
-  it("rollingSortino returns 0 when there are no negative returns in the window", () => {
+  // Founder decision D7 (Phase 166.2 review round 2): a window with no losing
+  // day has no Sortino. It is a gap (null), never a 0 the Rolling panel's "Now"
+  // would print as "0.00".
+  it("rollingSortino returns null when there are no negative returns in the window", () => {
     const allPos = Array.from({ length: 200 }, () => 0.001);
     const s = rollingSortino(allPos);
-    expect(s[ROLL_WINDOW_6MO - 1]).toBe(0);
+    expect(s[ROLL_WINDOW_6MO - 1]).toBeNull();
   });
 
   it("custom window size is respected", () => {

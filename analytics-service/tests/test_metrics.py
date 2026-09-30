@@ -9,6 +9,11 @@ import pytest
 import quantstats as qs
 
 from services.metrics import compute_all_metrics, _safe_float, sanitize_metrics
+from tests.dispersion_fixtures import (
+    CONSTANT_YIELDS as _Q166R2_CONSTANT_YIELDS,
+    apy as _q166r2_apy,
+    nav_constant_yield as _q166r2_nav_constant_yield,
+)
 
 
 class TestSafeFloat:
@@ -513,6 +518,15 @@ class TestComputeAllMetrics:
         the post-fix contract: every benchmark-relative metric is over the
         intersection, and (anti-vacuity) the produced alpha/beta differ from what
         the OLD full-range path would have produced.
+
+        166.4 D-04 (2026-09-27, ratified by the founder 2026-09-27): the one
+        shared sample is now the 166.4 D-A interval pair, not the daily inner
+        join. The both-endpoints rule applies whichever leg is sparser, so on
+        this fixture (a DAILY strategy against a BUSINESS-DAY benchmark) every
+        Monday after index 0 has no benchmark close dated Sunday and leaves the
+        pair: the 85 inner-join rows become 69. The intent assertions are
+        unchanged (one sample for every metric; different from the full-range
+        back-fill); only the oracle pair is rebuilt, from the definition.
         """
         rng = np.random.default_rng(7)
         # Strategy trades 24/7 (every calendar day).
@@ -522,15 +536,43 @@ class TestComputeAllMetrics:
         b_dates = pd.bdate_range("2024-01-01", periods=85)
         bench = pd.Series(rng.normal(0.0005, 0.025, 85), index=b_dates, name="BTC")
 
-        # Sanity: the calendars genuinely differ (intersection < strategy length).
-        aligned = strat.align(bench, join="inner")
-        ar, ab = aligned[0], aligned[1]
+        # 166.4 D-04 oracle pair, built from the definition: a benchmark date
+        # with a finite return is a close, and so is the day before its first
+        # return (166.4 D-07); interval k >= 1 is paired iff the strategy dates
+        # k-1 and k are both closes, and its value is the price ratio
+        # price[t_k] / price[t_{k-1}] - 1; index 0 pairs with the benchmark
+        # return dated t_0 (166.4 D-05).
+        base_close = bench.index[0] - pd.Timedelta(days=1)
+        closes = set(bench.index[bench.notna()]) | {base_close}
+        price = (1.0 + bench).cumprod()
+
+        def _price_at(d):
+            return 1.0 if d == base_close else float(price[d])
+
+        s = strat.index
+        dates, values = [], []
+        if s[0] in bench.index:
+            dates.append(s[0])
+            values.append(float(bench[s[0]]))
+        for k in range(1, len(s)):
+            if s[k] in closes and s[k - 1] in closes and s[k] != base_close:
+                dates.append(s[k])
+                values.append(_price_at(s[k]) / _price_at(s[k - 1]) - 1.0)
+        ar = strat.loc[dates]
+        ab = pd.Series(values, index=pd.DatetimeIndex(dates), name="BTC")
+        # Sanity: the calendars genuinely differ (the pair < strategy length),
+        # and the rows the old inner join had but the pair lacks are exactly
+        # the Mondays after index 0.
         assert 1 < len(ar) < len(strat), "fixture must have a real calendar gap"
+        inner = s[s.isin(bench.index)]
+        dropped = inner[~inner.isin(ar.index)]
+        assert (len(inner), len(ar)) == (85, 69)
+        assert (dropped.dayofweek == 0).all() and s[0] not in dropped
 
         result = compute_all_metrics(strat, bench)
         mj = result["metrics_json"]
 
-        # Oracle: every benchmark-relative metric over the SAME inner-join sample.
+        # Oracle: every benchmark-relative metric over the SAME D-A sample.
         exp = qs.stats.greeks(ar, ab)
         exp_alpha = _safe_float(exp.get("alpha", 0))
         exp_beta = _safe_float(exp.get("beta", 0))
@@ -3397,12 +3439,11 @@ def _q166_benchmark_trigger() -> tuple[pd.Series, pd.Series]:
 def _q166_calendar_mismatch() -> tuple[pd.Series, pd.Series]:
     """(weekday strategy, 7-day benchmark) over DIFFERENT calendars.
 
-    The strategy trades business days only (160 rows). The benchmark trades
-    every calendar day and starts earlier and ends later. `set(period) !=
-    set(benchmark.index)`, so quantstats' `_prepare_benchmark` takes its
-    reindex/bfill branch. Production hits that branch on every benchmarked
-    strategy: `compute_qstats_scalars` receives the unaligned ~1000-day BTC
-    series (research Q3, Pitfall 3). Both legs are benign.
+    The strategy trades business days only (160 rows, from a Thursday). The
+    benchmark trades every calendar day and starts earlier and ends later. It
+    is the SC3 weekday-vs-7-day pair of 166.4 D-A: each Monday return is paired
+    with the benchmark's compounded Friday-to-Monday move, not its
+    Sunday-to-Monday daily move. Both legs are benign.
     """
     s_idx = pd.bdate_range("2024-02-01", periods=160)
     strategy = pd.Series(
@@ -3468,11 +3509,10 @@ def test_q166_benchmark_r_squared_is_pair_permutation_invariant():
     )
 
 
-_Q166_R_SQUARED_PARITY_PAIRS = (
-    "golden_with_benchmark",
-    "calendar_mismatch",
-    "golden_with_nan_days_and_benchmark",
-)
+# 166.4 D-06: live quantstats parity is kept only where both legs share one
+# calendar and carry no NaN; the other two cases are re-anchored below on the
+# squared correlation of the shared pair.
+_Q166_R_SQUARED_PARITY_PAIRS = ("golden_with_benchmark",)
 
 
 def _q166_benchmark_pair(
@@ -3492,10 +3532,7 @@ def _q166_benchmark_pair(
 @pytest.mark.parametrize("pair_name", _Q166_R_SQUARED_PARITY_PAIRS)
 def test_q166_parity_r_squared_matches_live_quantstats(pair_name, request):
     """BENIGN PARITY (D-08), one collected case per pair. Neither leg can trip
-    the guess, so the mirror must equal live 0.0.81 `r_squared` to rel 1e-12.
-    `calendar_mismatch` exercises the reindex/bfill branch of
-    `_prepare_benchmark`: a mirror that aligned on the inner join instead would
-    move r_squared for every benchmarked strategy (Pitfall 3)."""
+    the guess, so the mirror must equal live 0.0.81 `r_squared` to rel 1e-12."""
     strategy, benchmark = _q166_benchmark_pair(pair_name, request)
     for leg in (strategy, benchmark):
         assert not bool(leg.min() >= 0 and leg.max() > 1), "fixture would trip the guess"
@@ -3504,6 +3541,31 @@ def test_q166_parity_r_squared_matches_live_quantstats(pair_name, request):
     assert expected is not None
     assert actual == pytest.approx(expected, rel=1e-12, abs=0.0), (
         f"r_squared on {pair_name} drifted from live quantstats 0.0.81: {actual} vs {expected}"
+    )
+
+
+@pytest.mark.parametrize(
+    "pair_name", ("calendar_mismatch", "golden_with_nan_days_and_benchmark")
+)
+def test_q166_r_squared_equals_shared_pair_correlation_squared(pair_name, request):
+    """166.4 D-06 (2026-09-27, ratified by the founder 2026-09-27): r_squared is the squared correlation of the shared pair.
+
+    These two cases pinned live quantstats 0.0.81 `r_squared` until 166.4. On
+    unequal calendars quantstats back-fills the benchmark onto the strategy's
+    dates and zero-fills the first return, and on NaN strategy days it
+    zero-fills them for r_squared only, so its value is not the squared
+    correlation of any pair a benchmark metric reads. Under 166.4 D-A r_squared
+    reads the ONE interval pair, pairwise-complete, so it moves by
+    construction. Measured moves: calendar_mismatch 0.0005305518445182663 ->
+    0.0004969133053590204; golden_with_nan_days_and_benchmark
+    0.0011742485146902892 -> 0.0011740012121330516.
+    """
+    strategy, benchmark = _q166_benchmark_pair(pair_name, request)
+    mj = compute_all_metrics(strategy, benchmark)["metrics_json"]
+    assert mj["r_squared_status"] == "ok", mj["r_squared_status"]
+    assert mj["correlation"] is not None
+    assert mj["r_squared"] == pytest.approx(mj["correlation"] ** 2, rel=1e-12, abs=0.0), (
+        f"r_squared on {pair_name}={mj['r_squared']}; squared correlation is {mj['correlation'] ** 2}"
     )
 
 
@@ -3619,7 +3681,10 @@ def test_q166_greeks_undefined_beta_is_none_not_zero(caplog):
     assert fanout == [], [r.getMessage() for r in fanout]
 
 
-_Q166_GREEKS_PARITY_PAIRS = ("golden_with_benchmark", "calendar_mismatch")
+# 166.4 D-A: "calendar_mismatch" left this list. Its oracle (live quantstats on
+# the daily inner join) IS the defect; the fixture is now owned by
+# test_benchalign_weekday_beta_is_the_friday_to_monday_regression.
+_Q166_GREEKS_PARITY_PAIRS = ("golden_with_benchmark",)
 
 
 @pytest.mark.parametrize("pair_name", _Q166_GREEKS_PARITY_PAIRS)
@@ -3628,7 +3693,8 @@ def test_q166_parity_greeks_match_live_quantstats_on_nan_free_series(
 ):
     """BENIGN PARITY (D-08): on NaN-free input the D-15 pairwise restriction
     removes nothing, so alpha and beta must equal live 0.0.81 `greeks` on the
-    SAME inner-join pair `compute_all_metrics` builds (M1), to rel 1e-12."""
+    SAME pair `compute_all_metrics` builds, to rel 1e-12. Both legs share one
+    calendar here, so the 166.4 D-A interval pair equals the inner join."""
     strategy, benchmark = _q166_benchmark_pair(pair_name, request)
     assert not strategy.isna().any() and not benchmark.isna().any()
     aligned_r, aligned_b = strategy.align(benchmark, join="inner")
@@ -3738,8 +3804,12 @@ _Q166_ROLLING_PARITY_PAIRS = ("golden_with_benchmark", "calendar_mismatch")
 def _q166_rolling_pair(
     name: str, request: pytest.FixtureRequest
 ) -> tuple[pd.Series, pd.Series]:
-    """The pair inner-joined exactly as `_rolling_alpha_beta` joins it before
-    the rolling pass."""
+    """The pair inner-joined on the date intersection, both legs on one index.
+
+    It is a direct math pin of `_rolling_greeks` against live 0.0.81
+    `rolling_greeks` on equal-index input. It is not the pair production
+    passes: since 166.4 D-A `_rolling_alpha_beta` hands `_rolling_greeks` the
+    interval pair from `_benchmark_pair`."""
     strategy, benchmark = (
         _q166_benchmark_trigger()
         if name == "benchmark_trigger"
@@ -3754,8 +3824,9 @@ def test_q166_parity_rolling_beta_matches_live_quantstats(pair_name, request):
     rolling beta point must equal live 0.0.81 `rolling_greeks` at rel 1e-12,
     before any rounding, and the undefined (warm-up) points must sit on the
     same dates. `calendar_mismatch` is a weekday strategy against a 7-day
-    benchmark; after the inner join the two calendars agree, which is the
-    shape production passes."""
+    benchmark; after the inner join the two calendars agree, so this is a
+    direct math pin of `_rolling_greeks` on equal-index input, not the pair
+    production passes (that is `_benchmark_pair`'s interval pair, 166.4 D-A)."""
     r, b = _q166_rolling_pair(pair_name, request)
     for leg in (r, b):
         assert not bool(leg.min() >= 0 and leg.max() > 1), "fixture would trip the guess"
@@ -4028,40 +4099,9 @@ def test_q166r_r_squared_error_is_logged_only_when_both_legs_vary(caplog, monkey
 # ---------------------------------------------------------------------------
 
 
-def _q166r2_nav_constant_yield(
-    daily_yield: float, n: int = 366, start: float = 10_000.0, cents: bool = False
-) -> pd.Series:
-    """Returns taken the way the platform takes them: ``pct_change`` over an
-    exactly compounding NAV. Each return is ``E_t / E_{t-1} - 1``, so its
-    rounding residue is about 1e-16 ABSOLUTE, whatever the yield (CR-01). With
-    ``cents=True`` the NAV is rounded to cents first, which is real
-    quantisation dispersion, not residue."""
-    nav = start * (1.0 + daily_yield) ** np.arange(n + 1)
-    if cents:
-        nav = np.round(nav, 2)
-    idx = pd.date_range("2024-01-01", periods=n + 1, freq="D")
-    return pd.Series(nav, index=idx).pct_change().dropna().rename("returns")
-
-
-def _q166r2_apy(apy: float) -> float:
-    return (1.0 + apy) ** (1.0 / 365.0) - 1.0
-
-
-#: id -> daily yield. The daily ids are the review's table; the APY ids span
-#: SFH R2-HIGH-1's 0.01% .. 100% sweep.
-_Q166R2_CONSTANT_YIELDS: dict[str, float] = {
-    "daily_1e-5": 1e-5,
-    "daily_1e-4": 1e-4,
-    "daily_1e-3": 1e-3,
-    "apy_0.01pct": _q166r2_apy(0.0001),
-    "apy_0.1pct": _q166r2_apy(0.001),
-    "apy_1pct": _q166r2_apy(0.01),
-    "apy_3pct": _q166r2_apy(0.03),
-    "apy_5pct": _q166r2_apy(0.05),
-    "apy_10pct": _q166r2_apy(0.10),
-    "apy_50pct": _q166r2_apy(0.50),
-    "apy_100pct": _q166r2_apy(1.00),
-}
+# The compounding-NAV constant-yield generator, the APY helper and the yields
+# dict live in tests/dispersion_fixtures.py (Phase 166.1 D-03), imported at the
+# top of this file under their old names.
 
 
 def _q166r2_random_benchmark(index: pd.Index) -> pd.Series:

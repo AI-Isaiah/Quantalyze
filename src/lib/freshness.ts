@@ -248,7 +248,14 @@ export const FUTURE_SERIES_DOT = "bg-text-muted";
  * evidence of a dead one either. No new threshold, no fourth ladder.
  */
 function bucketSeriesAge(seriesEndMs: number, now: Date): SeriesVerdict {
-  const days = (now.getTime() - seriesEndMs) / (1000 * 60 * 60 * 24);
+  // 169 review WR-04: `series_end` is a UTC DATE, so its age is whole elapsed
+  // days (floor), the number the factsheet chip prints and buckets on
+  // (`FreshnessChip` in FactsheetView.tsx). Bucketing the fractional age here
+  // put a 3.6-day-old series on the series arm while the chip kept the job's
+  // verdict, and made 7.6 days red here and amber there. The future allowance
+  // holds: a bar dated tomorrow west of UTC is floor(-0.4) = -1, within
+  // SERIES_END_FUTURE_ALLOWANCE_DAYS; two days ahead is -2, still `future`.
+  const days = Math.floor((now.getTime() - seriesEndMs) / (1000 * 60 * 60 * 24));
   if (!Number.isFinite(days)) return "stale";
   if (days < 0) {
     // ⛔ DAYS, NOT MINUTES (WR-06-UTC). See SERIES_END_FUTURE_ALLOWANCE_DAYS:

@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: "169.3"
-current_phase_name: SMALLFIXES
+current_phase: 164.9.3
+current_phase_name: CLAIMPAIR
 status: executing
-stopped_at: Completed 169.3-02-PLAN.md
-last_updated: "2026-09-26T14:22:00.000Z"
-last_activity: 2026-09-26
-last_activity_desc: Plan 169.3-02 complete (/recommendations one mandate branch, track-record age on every card; match engine excludes authored strategies)
-state_head: 5975939eb9e902364d7187aea5f573f9caeb8e11
+stopped_at: Completed 164.9.3-06-PLAN.md
+last_updated: "2026-09-27T15:08:00.000Z"
+last_activity: 2026-09-27
+last_activity_desc: Phase 164.9.3 execution started
+state_head: dd42818862a2c2c9ba81cf3d0b1da5bb0fcff35d
 progress:
-  total_phases: 54
-  completed_phases: 35
-  total_plans: 310
-  completed_plans: 301
-  percent: 65
+  total_phases: 73
+  completed_phases: 41
+  total_plans: 353
+  completed_plans: 347
+  percent: 56
 ---
 
 ## ⭐ STATE lineage
@@ -179,8 +179,26 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 169.3 (SMALLFIXES) — EXECUTING
-Plan: 3 of 5 (2 of 5 DONE: `169.3-01-SUMMARY.md`, SC1: GET /api/admin/compute-jobs reads the compute_jobs_admin view with the service-role client after isAdminUser, 21 explicit columns, no migration; ComputeJobsTable shows no empty row on a failed load; SC9 neuter RED/GREEN recorded for both fixes; `169.3-02-SUMMARY.md`, SC8: /recommendations reads one mandateSet branch for header and list and withholds the list with no mandate, each card carries a SyncBadge from the bounded series_end read, the match engine hard-excludes an allocator's authored strategy as owned/authored; SC9 neuter RED/GREEN recorded for all three fixes)
+Phase: 164.9.3 (CLAIMPAIR) — EXECUTING
+Plan: 6 of 6 (01 done: the CLAIMPAIR gate, pre-fix census 14 arms RED with 23505, W-INTRO GREEN; 02 done: the pre-rank exclusion migration, all 15 arms GREEN on the replayed local-stack lane; 03 done: D-09 lane proof, corpus 78 of 78 on the replayed local-stack lane, the gate green on the pg-lane from its own SETUP list; 04 done: all 15 arms bite on the pg-lane through layered twins, runner biting 15; snapshots regenerated; three VAC-04 acks earned; 05 done: FILES_FLOOR 52 -> 53 and ARMS_FLOOR 491 -> 506 from one full run, coverage 53/80, separated in both directions, every census pin moved to its measured value; 06 done: origin/main merged again with the migration still sorting last, TODOS [164.9.3-CLAIM-PAIR-23505] closed, CHANGELOG [0.108.0.0] with VERSION/package.json at 0.108.0.0, SC3 record opened with three PENDING reviewer rows)
+Phase: 169.2 (BENCHFRESH) — EXECUTING
+Plan: 1 of 3
+Phase: 166.4 (BENCHALIGN) — EXECUTING
+Plan: 1 of 4
+Phase: 166.4 (BENCHALIGN) — PLANNED 2026-09-27 (4 plans, 4 waves; on branch feat/166.4-benchalign)
+Plan: 0 of 4
+Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
+Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
+Phase: 166.2 (COMPUTEONCE) — EXECUTING
+Plan: 1 of 7
+Phase: 166.1 (ENGINEFLOOR) — EXECUTING
+Plan: 4 of 4
+Phase: 166 (QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given) — READY TO EXECUTE
+Plan: Not started
+Phase: 168 (DRBOPTIONS — a Deribit options account ingests end to end) — EXECUTING 2026-09-26, 3 plans; plan 03 is a founder post-deploy checkpoint
+Plan: 2 of 3 DONE (`168-01-SUMMARY.md`: `assignment` cash-bearing in the census shape only, `assert_assignment_uncontested` in both twins, `_OPTION_BOOK_EVENT_TYPES` at the six literal sites in one commit, windowed-crawl backstop in `_crawl_deribit_ledger`, counts-only evidence file; `168-02-SUMMARY.md`: one pin per option-book site, each seen RED under a one-site revert, mark_to_market and smoothed_mtm end to end, `check_perp_only_eligibility` reads `_OPTION_BOOK_EVENT_TYPES`, `_SIBLING_TYPES` + assignment, `_SHAPE_FIELDS` + commission/position, prose sweep, full suite green). Next is plan 03, a founder post-deploy checkpoint.
+Phase: 164.5.2 (BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required (INSERTED)) — EXECUTED, verification human_needed, PR open (merge after #870)
+Plan: 3 of 3 DONE
 Phase: 164.6 (gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers) — EXECUTING
 Plan: 5 of 5 DONE (`164.6-01-SUMMARY.md`, OPS-08-TS: a 40001 is retried once at csv-finalize and holdings sync; `164.6-02-SUMMARY.md`, 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker; `164.6-03-SUMMARY.md`, OPS-08-F2 SQL layer: migration 20260924120000 makes both fan-outs write one counted cron_runs row naming failed candidates, arm N in both ledger gates, 36 twins re-pointed; `164.6-04-SUMMARY.md`, OPS-08-F2 pins: ARMS_FLOOR 428 from a full lane run with no defects, parser/floors/registry censuses at 428 arms and 443 steps/needles, ci.yml sentinel rows 16/19 and ARMS_FLOOR 215; `164.6-05-SUMMARY.md`, runbooks read the candidate_enqueue_failed row counts-only and carry the BLOCKING precondition [164.6-COMPOSITE-CLAIMTIME-SNAPSHOT] owned by Phase 164.6.7, phase-level vitest/typecheck/lint/anchors green)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
@@ -484,7 +502,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 169.3
+Status: Executing Phase 164.9.3
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -500,7 +518,7 @@ Status: Executing Phase 169.3
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-26 — Phase 169.3 execution started
+Last activity: 2026-09-27 — Phase 164.9.3 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -591,8 +609,6 @@ to. This block is still marked *do NOT lose this* and is still retained verbatim
 
 Retained phase: 156 (connect-refactor — the venue the server validated is the venue the server writes) — ✅ COMPLETE 2026-08-13
 Retained plan: 10 of 10 complete. PR A shipped as v0.60.0.0 (merge `25e28d3a`) and is LIVE ON PROD; PR B is authored on `feat/phase-156-migration-b` and NOT yet opened.
-Status: Phase 156 complete. ⚠️ **Read this before assuming the control is live:** Migration B (`20260814120000_wizard_rpcs_revoke_authenticated.sql`) is applied to **no database** — merging PR B is what applies it. The SQL gates plans 08/09 wrote are **state-adaptive**: they SKIP on a pre-Migration-B database and ARM after, so a green `sql-tests` on PR B is green *with the four new RPC-door assertions SKIPping*. That is by design (applying Migration B to TEST before the gates land would red `sql-tests` on every open PR), but it means **nothing in the 5d/5f/5g/5h set has been observed armed-and-green in CI**. The first run after Migration B reaches TEST is the observation.
-Last activity: 2026-08-13 -- Phase 156 plan 10 executed (five prose sites re-strengthened, PARITY-04's deferred control closed, ROADMAP/REQUIREMENTS/STATE ledgers closed, phase gate run)
 
 ⚠️ **Progress counters reconciled 2026-08-13 (plan 156-10), and the reconciliation is stated because
 the numbers moved by more than this phase's own delta.** `total_phases: 16` is v1.17's ten phases plus
@@ -823,7 +839,6 @@ The line that used to sit here claimed no such file existed; it was stale.
 
 Prior phase: 141.1 (seambackoff-…) — COMPLETE and verified, merged, NOT pushed
 Plan: 8 of 8 (142.1 executed; verification `human_needed`, 7 UAT items open)
-Status: Ready to execute
 
 Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         `feat/v1.16-141-jobs-rate-retry`. Post-merge gate after Wave 2 GREEN: tsc clean,
@@ -956,9 +971,8 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         at `finalize-wizard/route.ts:840-851`), now ledger row TS-33; its "strictly
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
-Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [██████░░░░] 60%
+Progress: [██████░░░░] 56%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1174,6 +1188,13 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.6 P04 | ~26 min | 2 tasks | 6 modified |
 | Phase 164.6 P05 | ~9 min | 2 tasks | 2 modified |
 | Phase 164.6.5 P08 | ~40 min | 2 tasks | 11 modified |
+| Phase 166.1 P09 | ~20 min | 3 tasks | 5 modified |
+| Phase 164.9.3 P01 | 20 min | 2 tasks | 1 files |
+| Phase 164.9.3 P02 | 15 min | 2 tasks | 1 files |
+| Phase 164.9.3 P03 | 6 min | 2 tasks | 1 files |
+| Phase 164.9.3 P04 | 25 min | 2 tasks | 4 files |
+| Phase 164.9.3 P05 | 57 min | 2 tasks | 5 files |
+| Phase 164.9.3 P06 | 7 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -1311,6 +1332,31 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.9.3.1 inserted after Phase 164.9.3: FANINGRAPH, the stranded fan-in child, the match_decisions cascade 23505 and the 40P01 diamond deadlock (items 1-3 of 164.5.2's routed list); owns [164.9.3.1-FANIN-GRAPH-RESIDUALS]; founder decision 2026-09-26 ("Re-route, don't start"); booked under the new-phase freeze, NOT started
 - Phase 164.9.3 edited: scope widened to the (kind, api_key_id) claim wedge, item 4 of 164.5.2's routed list, and to all four claim partitions; founder decision 2026-09-26
 - Phase 164.9.2 criterion 4 recorded 2026-09-26: preflight 36235362126 success, restore 36242946174 success (attempt 36237060668 refused by the activity gate); closes Phase 164.9 criterion 8 and [164.9-CRIT8-RESTORE-DISPATCH-RECORD]
+- Phase 166.1.1 inserted after Phase 166.1: DDSIGN, the drawdown-delta sign in the simulator, the optimizer and the match engine (found by the 166.1 round-2 review, outside its diff, pre-existing); founder decision 2026-09-26 ("Route as proposed"); booked under the new-phase freeze, NOT started
+- Phase 166.1 SPLIT into three on 2026-09-26 (founder decision: too large to review as one PR after five plan-check rounds; 166.1-CONTEXT D-23). Phase 166.1 edited (via `/gsd-phase --edit 166.1`) to ENGINEFLOOR, the Python half: plans 01, 01b, 03 and a new release plan 09.
+- Phase 166.2 COMPUTEONCE inserted after Phase 166.1 on 2026-09-26 (via `/gsd-phase --insert`, `--sibling` allocation): the TypeScript half, old 166.1 plans 04-08 moved as 166.2-01..07; does not depend on 166.1.
+- Phase 166.3 RECOMPUTE inserted after Phase 166.2 on 2026-09-26 (via `/gsd-phase --insert`, `--sibling` allocation): the founder PROD recompute, old 166.1 plan 02 moved as 166.3-01; depends only on the Phase 166 deploy.
+- Phase 164.9.3.2 DEFER40001 inserted after Phase 164.9.3 on 2026-09-27 (via `/gsd-phase --insert`; founder decision F1, "New blocker phase"): a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end. A blocker, beside 164.9.3.
+- Phase 166.4 BENCHALIGN inserted after Phase 166 on 2026-09-27 (via `/gsd-phase --insert`; founder decision D-B, "New phase under 166"): a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric (founder decision D-A). Data integrity, ahead of features. Phase 166.3 RECOMPUTE is halted until it ships.
+- Phase 170 edited: edited fields: goal, success_criteria (390px decision; narrow-width findings 2026-09-27)
+- Phase 170.1 edited: edited fields: success_criteria (390px decision; scenario copy findings 2026-09-27)
+- Phase 170 edited: edited fields: success_criteria (profile exchanges tab row and Disconnect clipped, 2026-09-27)
+- Phase 169 edited: edited fields: success_criteria (SC-6 period-row gating widened to 6M and 1Y, 2026-09-27)
+- Phase 164.6.5 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
+- Phase 167.1 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
+- Phase 167.2 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
+- Phase 167.2.1 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
+- Phase 169.3 edited (--force): routed in: credential inputs strip pasted whitespace (passphrase excluded) (founder UAT 2026-09-27)
+- Phase 169.5 inserted after Phase 169: BENCHCOMPARE — the factsheet BTC comparator read through 169.2's reader, interval-paired, gap-null, payload-carried, rolling series on the comparator basis; split from Phase 169 by topic after plan-check round 3 (169 D-60, D-61) (URGENT)
+- Phase 166.4.1 inserted after Phase 166.4: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly (data integrity; evidence verified by the orchestrator 2026-09-27) (URGENT)
+- Phase 164.9.4 edited: routed in: a docs-only push to main runs the full corpus; the short path must cover a docs-only push too (founder 2026-09-27)
+- Phase 167.1.1 edited: routed in: three holdings readers still allocator-wide (R-15-1 scenario commit route, R-15-2 _load_holding_portfolio_context, R-15-3 getLatestExposureSnapshot) (from the 167.1.2 PR C executor, 2026-09-27)
+- Phase 167.1.2.1 inserted after Phase 167.1.2: RECONMARKER — a per-key history-reconstructed marker so no key's equity history is lost or skipped (data integrity; routed from the 167.1.2 PR C executor, 2026-09-27) (URGENT)
+- Phase 167.1.2.1 edited: edited fields: evidence, success_criteria (criterion 7, the fast-fail race, routed 2026-09-27 from the 167.1.2-12 round-3 silent-failure review)
+- Phase 166.4.1 edited: edited fields: evidence, success_criteria (criterion 6: benchmark_comparison must use the D-A interval-matched pairing; routed 2026-09-27 from the 166.4 BENCHALIGN research)
+- Phase 169.4 edited: edited fields: success_criteria (criterion 12: the allocations scenario benchmark's innerJoinByDate must use the D-A interval-matched pairing and the day-one rule; routed 2026-09-27 from the 166.4 BENCHALIGN research)
+- Phase 167.1.1 edited: routed in: D-13 /compare per-holding metrics need a flow-neutral per-holding source (from 167.1.2 PR C2, 2026-09-29)
+- Phase 167.1.2.1 edited: routed in: 8 C2 writer-side residuals from review rounds 1-3 (SFH-05 writer half, single failing key dilution, SFH-R3-02, SFH-R3-07, SFH-08, SFH-09, R2-CR-02 residual, R3-WR-02) (from 167.1.2 PR C2, 2026-09-29)
 
 ### Decisions
 
@@ -1321,6 +1367,16 @@ Load-bearing sequencing (real dependencies, do not reorder):
      every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
      The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
      FIRST match is used as the append target, and they are historical archives. -->
+
+*(execution-time, Phase 168 DRBOPTIONS — plan 02, 2026-09-26)*
+
+- **D-168-02-A — `assignment` is APPENDED to `_SIBLING_TYPES`** (after delivery/settlement/trade), so the existing census rendering order is unchanged and the next unknown-type refusal (likely `exercise` or `expiry`) reports whether an assignment co-occurred. `_SHAPE_FIELDS` gains only `commission` and `position` (a fee and a signed size; no identifier). Both neutered RED.
+- **D-168-02-B — the historical Phase-82 section comment in `tests/test_deribit_txn.py` that describes PRE-FIX code as summing option `trade`/`delivery` premium is kept verbatim**: it describes code as it was, not today's option book, and rewriting it would falsify lineage.
+
+*(execution-time, Phase 168 DRBOPTIONS — plan 01, 2026-09-26)*
+
+- **D-168-01-A — the co-occurrence guard fires on EVERY `assignment`, regardless of `change`** (plan must_haves, overriding RESEARCH's nonzero-only recommendation): deciding by size would be a magnitude rule, which D-01 forbids. Pinned by ZERO-CHANGE-STILL-GUARDED, neutered RED.
+- **D-168-01-B — the guard's self-skip is by IDENTITY (`other is row`), not equality**, so two equal-but-distinct rows still contest each other. The refusal phrases are module constants (`_ASSIGNMENT_CONTESTED_PHRASE`, `_ASSIGNMENT_UNNAMED_PHRASE`) that the tests import; each appears once in `services/deribit_txn.py`.
 
 *(execution-time, Phase 167.1 AUMTRUST — plan 06, the release, 2026-09-24)*
 
@@ -1658,6 +1714,12 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.1.1.1]: 164.1.1.1-01: No-floor-move LANE-ONLY exclusion — skip execution plus the three "$out"-derived checks only; the static accounting (sentinel declaration, roster-vs-count coherence, n_arms<=RAISE-sites) stays outside the branch and runs for every file including the excluded one, so SENTINEL_FLOOR (11) and ARMS_FLOOR (213) never move.
 - [Phase 164.1.1.1]: 164.1.1.1-01 MEASURED (re-confirms the pattern above, a fourth time): `state.add-decision` and `state.update-progress` both clobber the `progress:` block downward again this session (`completed_phases` 20→18, `total_plans` 201→203, `percent` 44→40, plus stray blank-line insertions at ~L252-255). Reverted both calls; kept only the decision text, applied by hand.
 - [Phase 164.1.1.1]: 164.1.1.1-01: the static-accounting contract-test scenario counts occurrences of "completion sentinel OK: ALL 7 ARMS EXECUTED" rather than bare presence/absence, because test_sync_status_curated_sentence_survives.sql independently declares the identical "ALL 7 ARMS EXECUTED" text and a presence check could not distinguish the excluded file's line from that other file's.
+- [Phase 164.9.3]: 164.9.3-01: CLAIMPAIR gate seeds a real parent row per partition id under the replica role; replica-only seeding fails at the claim with 23503 (same-transaction FK re-check) — Measured on the local-stack lane: W-INTRO red with 23503 on the strategy foreign key until parents were seeded
+- [Phase 164.9.3]: 164.9.3-02: the migration's verify anchors pin PLACEMENT as well as text (each pre-rank clause must match between the ranked CTE opening and the deduped opening; the 2-arg C39 port between deduped and the batch UPDATE), so a later edit moving the guard post-rank, the rejected option (a), refuses at apply
+- [Phase 164.9.3]: 164.9.3-03: the CLAIMPAIR gate's pg-lane SETUP list is the enqueue dedupe gate's list plus fixtures 29 and 36-fixture-compute-jobs-claim-token.sql, with the migration last; the template entries were kept because the lane run showed no need to drop any
+- [Phase 164.9.3]: 164.9.3-04: each CLAIMPAIR twin mutates ONE body and ONE partition (OR TRUE inserted before the pre-rank NOT EXISTS, body chosen by measured nth) and stands down only that body-by-partition anchor; the VAC-04 acks are derived locally from --diff-bodies against origin/main and were cross-checked read-only against the PR's VAC-04 PROD MATCH hashes
+- [Phase 164.9.3]: 164.9.3-05: the mutation runner and pg-lane run WITHOUT the shared lane lock (coordinator correction: the lock guards only the local-stack lane); both floors were pushed to measured+1 in ONE full run, whose two defects named each floor
+- [Phase 164.9.3]: 164.9.3-06: the release is a MINOR bump to 0.108.0.0 (the migration changes the PROD claim path and auto-applies on merge); SC3 stays OPEN as a ship precondition in 164.9.3-MIGRATION-REVIEW.md (three reviewers before merge)
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -2362,9 +2424,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-23T22:48:56.456Z
-**Stopped At:** Phase 166 context gathered
-**Resume File:** .planning/phases/166-qstats-truth-every-quantstats-derived-number-reflects-the-re/166-CONTEXT.md
+**Last Date:** 2026-09-27T15:08:00.000Z
+**Stopped At:** Completed 164.9.3-06-PLAN.md
+**Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
 **Stopped At:** Completed 167.1-06-PLAN.md

@@ -1,4 +1,5 @@
 import type { ComputeResult } from "./types";
+import { dispersion, sharpe as sharpeRatio } from "@/lib/return-stats";
 
 /**
  * Headline per-series metrics for the strategy and each benchmark. Mirrors the
@@ -28,8 +29,11 @@ export function compute(
 
   const eq = cumEq(rets);
   const dd = drawdowns(eq);
-  const m = mean(rets);
-  const s = pstdev(rets, m);
+  // Phase 166.2 (D-17, D-07): the mean and the population sd come from the
+  // shared return-stats module, which reports a float-residue sd (a
+  // compounding constant yield) as exactly 0, so ann_vol, skew and kurtosis
+  // below answer such a series exactly as they answer an all-zero one.
+  const { mean: m, sd: s } = dispersion(rets, 0);
   const startDate = new Date(dates[0]);
   const endDate = new Date(dates[n - 1]);
   const days = Math.max(1, (endDate.getTime() - startDate.getTime()) / 86_400_000);
@@ -38,18 +42,33 @@ export function compute(
   const cumRet = eq[n - 1] - 1;
   const cagr = years > 0 && eq[n - 1] > 0 ? Math.pow(eq[n - 1], 1 / years) - 1 : 0;
   const annVol = s * Math.sqrt(periodsPerYear);
-  const sharpe = s > 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / (s * Math.sqrt(periodsPerYear)) : 0;
+  // The Sharpe is the shared one. A null (no dispersion, or a non-finite
+  // return) stays an absence: NaN, which every factsheet formatter renders as
+  // "—", as the OG card and the tearsheet do for the same series (founder
+  // decision D7, 2026-09-26, reversing D-07's "answer null as 0" for display).
+  // `ComputeResult.sharpe` stays a `number`; NaN (or the null a JSON cache turns
+  // it into) is the absent value, so a consumer tests `Number.isFinite`.
+  const sharpe = sharpeRatio(rets, { periodsPerYear, ddof: 0, rf }) ?? NaN;
 
   const neg = rets.filter(x => x < 0);
   const ddDev = neg.length > 0 ? Math.sqrt(neg.reduce((a, x) => a + x * x, 0) / n) * Math.sqrt(periodsPerYear) : 0;
-  const sortino = ddDev > 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / ddDev : 0;
+  // A series with no losing day has no Sortino, and one with no drawdown has no
+  // Calmar: the ratio would be infinite, which means "does not exist", not 0.
+  // Both stay NaN and render "—", as the tearsheet shows for the same series
+  // (the analytics service persists None for both) and as the Sharpe above
+  // does (founder decision D7, 2026-09-26; review round 2 HI-02).
+  const sortino = ddDev > 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / ddDev : NaN;
 
   let maxDd = 0;
   for (let i = 0; i < dd.length; i++) if (dd[i] < maxDd) maxDd = dd[i];
-  const calmar = maxDd !== 0 ? cagr / Math.abs(maxDd) : 0;
+  const calmar = maxDd !== 0 ? cagr / Math.abs(maxDd) : NaN;
 
-  const skew = s > 0 ? rets.reduce((a, x) => a + Math.pow((x - m) / s, 3), 0) / n : 0;
-  const kurt = s > 0 ? rets.reduce((a, x) => a + Math.pow((x - m) / s, 4), 0) / n - 3 : 0;
+  // With no dispersion the standardised moments are 0/0: the series has no
+  // skew and no kurtosis. NaN renders "—", never a measured-looking "+0.00"
+  // (founder decision D7; review round 3 WR3-01, superseding CONTEXT T13's
+  // "keep the s > 0 gate" answer of 0).
+  const skew = s > 0 ? rets.reduce((a, x) => a + Math.pow((x - m) / s, 3), 0) / n : NaN;
+  const kurt = s > 0 ? rets.reduce((a, x) => a + Math.pow((x - m) / s, 4), 0) / n - 3 : NaN;
 
   let longestDd = 0;
   let curRun = 0;
@@ -81,9 +100,16 @@ export function compute(
     if (r < worstDay) worstDay = r;
   }
   const winRate = n > 0 ? winCount / n : 0;
-  const avgWin = winCount > 0 ? winSum / winCount : 0;
-  const avgLoss = lossCount > 0 ? lossSum / lossCount : 0;
-  const profitFactor = lossSum !== 0 ? winSum / Math.abs(lossSum) : 0;
+  // No winning (losing) day means no average win (loss): NaN, rendered "—",
+  // never a measured-looking 0.00% (founder decision D7; review round 3
+  // SFH-R3 MEDIUM-2 for Avg Loss, and the symmetric Avg Win arm).
+  const avgWin = winCount > 0 ? winSum / winCount : NaN;
+  const avgLoss = lossCount > 0 ? lossSum / lossCount : NaN;
+  // A book with no losing day has no profit factor: gross gain over a gross
+  // loss of 0 is infinite, which means "does not exist", not 0. NaN renders
+  // "—", as omega_ratio below (the same number) and the analytics service's
+  // None already say (founder decision D7; review round 3 HI3-01).
+  const profitFactor = lossSum !== 0 ? winSum / Math.abs(lossSum) : NaN;
   const sortedRets = [...rets].sort((a, b) => a - b);
   const var95 = sortedRets[Math.max(0, Math.floor(0.05 * n))];
   const cvar95Slice = sortedRets.slice(0, Math.max(1, Math.floor(0.05 * n)));
@@ -111,6 +137,8 @@ export function compute(
   // null when there are no losses (no probability mass below threshold).
   const omegaRatio = lossSum !== 0 ? winSum / Math.abs(lossSum) : null;
   // Common-sense ratio — tail × profit_factor. null if either input is null.
+  // tailRatio is null whenever there is no losing day (p5 ≥ 0), which is the
+  // only case profitFactor is NaN, so a NaN never reaches this product.
   const commonSenseRatio = tailRatio != null ? tailRatio * profitFactor : null;
 
   // Bucketed returns — compound returns within each bucket.
@@ -154,6 +182,65 @@ export function compute(
     d.setUTCDate(d.getUTCDate() - days);
     return d;
   };
+  // Phase 169 D-11 (SC6): ONE coverage rule for every return window. A window
+  // is shown only when the record covers it, i.e. the first observation date is
+  // on or before the window's cutoff plus one UTC day; otherwise it is null.
+  // Without this, a record shorter than the window compounded its WHOLE history
+  // under the window's label (a 5-month record printed a "1 Year" return).
+  // Multi-year windows are calendar days (3 x 365, 5 x 365), never an
+  // observation count: 756 observations is three years on a weekday venue and
+  // about two on a 24/7 one.
+  //
+  // 169 review WR-02 (2026-09-29): "cutoff plus one day" is the window's first
+  // SESSION only on a 7-day venue. On a weekday venue (see WR-R2-01 below) the first
+  // session after the cutoff is the first day that is not a Saturday, a Sunday,
+  // 1 January or 25 December, and a record starting there misses nothing. So
+  // the rule is: covered iff every UTC day strictly between the cutoff and the
+  // first observation is a day the venue did not trade. The 7-day basis has no
+  // such day, which keeps its rule exactly "cutoff + 1 day". Without this a
+  // weekday strategy launched on 2 January showed YTD as the em-dash all year,
+  // and a Monday start after a Saturday cutoff dropped rows the record covers.
+  // Only those four days are assumed closed, because every weekday venue this
+  // product carries (equities, FX / CFD via MT5) is shut on them; any other
+  // holiday differs by venue, and assuming it would admit a window missing a
+  // session that traded. Known limit: a start after another holiday (a Labor
+  // Day Monday on the 1st, an observed New Year Monday) is the em-dash.
+  //
+  // 169 review round 2, WR-R2-01 (2026-09-29): the calendar is a property of
+  // the SERIES, never of the asset class. It was `periodsPerYear === 252`, but
+  // 252 is what every non-crypto class gets, including the DB default
+  // 'traditional', so a 24/7 record left on the default borrowed the weekend
+  // tolerance and could show a window missing up to three traded days. It also
+  // let a change of asset class move a return number, which closed-sets.ts
+  // (#597) forbids. Now: a record is on the weekday calendar only when it spans
+  // at least one Saturday and has no Saturday or Sunday observation at all. A
+  // single weekend print anywhere proves the venue trades weekends; a record
+  // too short to span a weekend proves nothing. Both keep the strict rule
+  // (cutoff + 1 day), so the failure direction is always the em-dash.
+  const tradesWeekends = dates.some((d) => {
+    const w = new Date(d).getUTCDay();
+    return w === 0 || w === 6;
+  });
+  const firstDow = startDate.getUTCDay();
+  const spanDays = Math.round((lastDate.getTime() - startDate.getTime()) / 86_400_000);
+  const spansSaturday = (6 - firstDow + 7) % 7 <= spanDays;
+  const weekdayVenue = spansSaturday && !tradesWeekends;
+  const isNonTradingDay = (d: Date): boolean => {
+    if (!weekdayVenue) return false;
+    const dow = d.getUTCDay();
+    const md = d.getUTCMonth() * 100 + d.getUTCDate();
+    return dow === 0 || dow === 6 || md === 1 || md === 1125;
+  };
+  const windowReturn = (cutoff: Date): number | null => {
+    const firstSession = new Date(cutoff);
+    firstSession.setUTCDate(firstSession.getUTCDate() + 1);
+    // At most three non-trading days run together (a weekend beside 1 Jan or
+    // 25 Dec); 7 is only a bound on the loop.
+    for (let i = 0; i < 7 && isNonTradingDay(firstSession); i++) {
+      firstSession.setUTCDate(firstSession.getUTCDate() + 1);
+    }
+    return startDate > firstSession ? null : compoundFrom(cutoff);
+  };
 
   const yearlyObj: Record<string, number> = {};
   yearly.forEach((v, k) => {
@@ -177,11 +264,13 @@ export function compute(
     longest_dd: longestDd,
     skew,
     kurt,
-    mtd: compoundFrom(mtdCutoff),
-    ytd: compoundFrom(ytdCutoff),
-    p3m: compoundFrom(offsetDays(90)),
-    p6m: compoundFrom(offsetDays(182)),
-    p1y: compoundFrom(offsetDays(365)),
+    mtd: windowReturn(mtdCutoff),
+    ytd: windowReturn(ytdCutoff),
+    p3m: windowReturn(offsetDays(90)),
+    p6m: windowReturn(offsetDays(182)),
+    p1y: windowReturn(offsetDays(365)),
+    p3y: windowReturn(offsetDays(3 * 365)),
+    p5y: windowReturn(offsetDays(5 * 365)),
     best_day: bestDay === -Infinity ? 0 : bestDay,
     worst_day: worstDay === Infinity ? 0 : worstDay,
     best_week: weeklyVals.length > 0 ? Math.max(...weeklyVals) : 0,
@@ -338,17 +427,4 @@ export function findDrawdownPeriods(dd: number[]): DrawdownPeriod[] {
 /** Indices of the N deepest drawdowns. Used by the Worst-N DDs chart. */
 export function worstDrawdowns(dd: number[], n = 10): DrawdownPeriod[] {
   return [...findDrawdownPeriods(dd)].sort((a, b) => a.depth - b.depth).slice(0, n);
-}
-
-function mean(xs: number[]): number {
-  let s = 0;
-  for (const x of xs) s += x;
-  return s / xs.length;
-}
-
-/** Population stdev — matches Python's `statistics.pstdev`. */
-function pstdev(xs: number[], m: number): number {
-  let s = 0;
-  for (const x of xs) s += (x - m) * (x - m);
-  return Math.sqrt(s / xs.length);
 }

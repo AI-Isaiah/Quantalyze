@@ -990,8 +990,74 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // and `stepsSeen` 460 -> 464. FOUR new arms: W/deadlock in EACH ledger
     // gate, and ANON 2 and USER 2 in test_cron_runs_rls.sql. Each carries ONE
     // `edit` step with a `find`, so both pins move by four.
-    expect(armsSeen).toBe(449);
-    expect(stepsSeen).toBe(464);
+    // ⭐ CURRENCY 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): `armsSeen` 449 -> 453
+    // and `stepsSeen` 464 -> 476. FOUR new arms, L1-L4, all in the NEW gate
+    // supabase/tests/test_mark_rpc_bridge_advisory_lock.sql; their layered twins
+    // carry twelve `find`-bearing steps between them, so the two pins move by
+    // different amounts. MEASURED: this file's own run read `expected 453 to be
+    // 449`, then, re-run after `armsSeen` moved, `expected 476 to be 464`.
+    // ⭐ CURRENCY 2026-09-25 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): `armsSeen`
+    // 449 -> 474 and `stepsSeen` 464 -> 477. TWENTY-FIVE new arms (the 24 of the
+    // new test_api_keys_account_identity.sql and 6f CCXT in
+    // test_api_keys_venue_identity_uniq.sql), but only THIRTEEN carry an `edit`
+    // step with a `find` (ACCT-h/e/i/j, HIST-writes/enqueues/reset/revoked/
+    // live/value/owner, RECON-twin/ok); the other twelve are `sql` steps. So
+    // the two pins move by DIFFERENT amounts. MEASURED: this file's own run
+    // read `expected 474 to be 449` and `expected 477 to be 464` at the
+    // pre-move pins.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, PR B pre-merge review
+    // fixes): `armsSeen` 474 -> 483 and `stepsSeen` 477 -> 487. NINE new
+    // arms in test_api_keys_account_identity.sql, all `edit` steps with a
+    // `find`, plus a SECOND edit step on the existing HIST-owner twin (it now
+    // removes both ownership layers). MEASURED: this file's run read
+    // `expected 483 to be 474` and then `expected 487 to be 477` at the pre-move
+    // pins.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 2): `stepsSeen`
+    // 487 -> 488, `armsSeen` unmoved. HIST-running's twin gained a SECOND
+    // edit step: the RPC now tests for a running job twice, and a one-step
+    // twin on either test alone was MEASURED NO-RED on the pg-lane. MEASURED:
+    // this file's run read `expected 488 to be 487` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 2), HIST-lock: `armsSeen`
+    // 483 -> 484 and `stepsSeen` 488 -> 489 (one new arm with one `edit` step).
+    // MEASURED: this file's run read `expected 484 to be 483` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 3), HIST-retry: `armsSeen`
+    // 484 -> 485 and `stepsSeen` 489 -> 490 (one new arm with one `edit` step).
+    // MEASURED: this file's run read `expected 485 to be 484` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 4), HIST-tenant: `armsSeen`
+    // 485 -> 486 and `stepsSeen` 490 -> 491 (one new arm with one `edit` step).
+    // MEASURED: this file's run read `expected 486 to be 485` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round-4 fixes), HIST-requeued:
+    // `armsSeen` 486 -> 487 and `stepsSeen` 491 -> 492 (one new arm with one `edit`
+    // step). MEASURED: this file's run read `expected 487 to be 486` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): `armsSeen` 491 and
+    // `stepsSeen` 504, the UNION of the two lineages above. Over the common base
+    // (449 / 464) this branch added 4 arms / 12 steps (L1-L4) and origin/main added
+    // 38 arms / 28 steps (test_api_keys_account_identity.sql and 6f CCXT); the two
+    // sides touch disjoint gate files. MEASURED on the merged tree by this file's own run.
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): `armsSeen` 491 -> 506
+    // and `stepsSeen` 504 -> 534. FIFTEEN new arms, all in the NEW gate
+    // supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql; each layered
+    // twin carries TWO `find`-bearing steps (the production edit, then the body's
+    // self-verify anchor stood down), so the two pins move by different amounts.
+    // MEASURED: this file's own run read `expected 506 to be 491`, and the needle
+    // census below read `expected 534 to be 504`.
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 1, WR-01): `armsSeen`
+    // 506 -> 507 and `stepsSeen` 534 -> 536: ONE new arm, W-LOWTWIN, in the same gate
+    // file, with one layered twin of two `find` steps. MEASURED: this file's own run read
+    // `expected 507 to be 506`, and the needle census below read `expected 536 to be 534`.
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01 / D-11): `armsSeen`
+    // 507 -> 509 and `stepsSeen` 536 -> 540: TWO new arms, W-C39SIB and W-C39INTRO, in the
+    // same gate file, each with one layered twin of two `find` steps. MEASURED: this file's own
+    // run read `expected 509 to be 507`, and the needle census below read `expected 540 to be 536`.
+    // ⭐ CURRENCY 2026-09-27 (merge of origin/main into Phase 167.1.2 PR C1): `armsSeen`
+    // 509 -> 513 and `stepsSeen` 540 -> 544, C1's four D-18 arms (one `edit` step each)
+    // joining CLAIMPAIR's count. MEASURED on the merged tree.
+    // ⭐ CURRENCY 2026-09-29 (Phase 167.1.2 PR C2, review fix B, WR-04): `armsSeen` 513 -> 545 and
+    // `stepsSeen` 544 -> 595: plan 12's test_refresh_fanout_zero_snapshot_bootstrap.sql (32 arms,
+    // 51 file steps) reached this branch without its census commits. MEASURED: this file's run
+    // read `expected 545 to be 513`, then `expected 595 to be 544`.
+    expect(armsSeen).toBe(545);
+    expect(stepsSeen).toBe(595);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1868,7 +1934,43 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // RUN SEPARATELY: `expected 460 to be 443` at the pre-move pin.
     // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 2): 460 -> 464,
     // moving WITH `stepsSeen`: four new `edit` steps, one needle each.
-    expect(needles.length).toBe(464);
+    // ⭐ CURRENCY 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): 464 -> 476,
+    // moving WITH `stepsSeen`: twelve new `find`-bearing steps in the new gate
+    // test_mark_rpc_bridge_advisory_lock.sql. RUN SEPARATELY: `expected 476 to
+    // be 464` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 464 -> 477,
+    // moving WITH `stepsSeen`: thirteen new `edit` steps with a `find` (the
+    // twins of test_api_keys_account_identity.sql listed at `stepsSeen`), one
+    // needle each. RUN SEPARATELY: `expected 477 to be 464` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, PR B pre-merge review
+    // fixes): 477 -> 487, moving WITH `stepsSeen`: ten new `edit` steps with a
+    // `find` (nine new twins and HIST-owner's second step), one needle each.
+    // RUN SEPARATELY: `expected 487 to be 477` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 2): 487 -> 488,
+    // moving WITH `stepsSeen`: HIST-running's second `edit` step, one needle.
+    // RUN SEPARATELY: `expected 488 to be 487` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 2), HIST-lock: 488 -> 489,
+    // one new `edit` step, one needle. RUN SEPARATELY: `expected 489 to be 488`.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 3), HIST-retry: 489 -> 490,
+    // one new `edit` step, one needle. RUN SEPARATELY: `expected 490 to be 489`.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round 4), HIST-tenant: 490 -> 491,
+    // one new `edit` step, one needle. RUN SEPARATELY: `expected 491 to be 490`.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round-4 fixes), HIST-requeued:
+    // 491 -> 492, one new `edit` step, one needle. MEASURED: `expected 492 to be 491`.
+    // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 504, moving WITH
+    // `stepsSeen`: 464 + 12 (this branch) + 28 (origin/main), one needle each.
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 504 -> 534, moving WITH
+    // `stepsSeen`: thirty new `find`-bearing steps (two per CLAIMPAIR twin), one
+    // needle each. MEASURED: `expected 534 to be 504` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 1, WR-01): 534 -> 536, one
+    // new twin of two steps. MEASURED: `expected 536 to be 534` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01 / D-11): 536 -> 540, two
+    // new twins of two steps each. MEASURED: `expected 540 to be 536` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-27 (merge into Phase 167.1.2 PR C1): 540 -> 544, moving WITH
+    // `stepsSeen`. MEASURED on the merged tree.
+    // ⭐ CURRENCY 2026-09-29 (Phase 167.1.2 PR C2, review fix B, WR-04): 544 -> 595, moving WITH
+    // `stepsSeen` (the 51 file steps of the plan 12 gate file). MEASURED: `expected 595 to be 544`.
+    expect(needles.length).toBe(595);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2429,7 +2531,25 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 76 -> 77. The one
     // added is supabase/tests/test_cron_runs_rls.sql, a NEW file (the cron_runs
     // row-security gate, three arms), so the denominator moves with it.
-    expect(corpus.filesTotal).toBe(77);
+    // ⭐ CURRENCY 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): 77 -> 78. The one
+    // added is supabase/tests/test_mark_rpc_bridge_advisory_lock.sql, a NEW file
+    // (the LANE-ONLY two-backend bridge-lock gate, four arms). MEASURED: this
+    // file's own run read `expected 78 to be 77`.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 77 -> 78. The
+    // one added is supabase/tests/test_api_keys_account_identity.sql, a NEW file
+    // (the gate for migration 20260925120000, 24 arms). RUN SEPARATELY:
+    // `expected 78 to be 77` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 78 -> 79. BOTH new
+    // files are in the corpus (test_mark_rpc_bridge_advisory_lock.sql and
+    // test_api_keys_account_identity.sql), so 77 + 1 + 1 = 79.
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 79 -> 80. The one
+    // added is supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql, a
+    // NEW file (the gate for migration 20260927120000, fifteen arms), and the five
+    // classes still sum to it: annotated 53 + pending 0 + unreachable 27 + inert 0 +
+    // lane-blocked 0 = 80. MEASURED: this file's own run read `expected 80 to be 79`.
+    // ⭐ CURRENCY 2026-09-29 (Phase 167.1.2 PR C2, review fix B, WR-04): 80 -> 81, the plan 12 gate file.
+    // MEASURED off the full lane run: `coverage: files 54/81`.
+    expect(corpus.filesTotal).toBe(81);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2472,7 +2592,23 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // denominator and the by-name list below. The one added is
     // supabase/tests/test_cron_runs_rls.sql. MEASURED over `scanCorpus`:
     // `filesTotal 77`, `filesAnnotated 50`.
-    expect(corpus.filesAnnotated).toBe(50);
+    // ⭐ CURRENCY 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): 50 -> 51, with the
+    // denominator and the by-name list below. The one added is
+    // supabase/tests/test_mark_rpc_bridge_advisory_lock.sql. MEASURED off the
+    // full lane run: `coverage: files 51/78`.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 50 -> 51, with
+    // the denominator and the by-name list below. The one added is
+    // supabase/tests/test_api_keys_account_identity.sql.
+    // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 51 -> 52, with the
+    // denominator and the by-name list below, which carries BOTH new files.
+    // MEASURED off the full lane run on the merged tree: `coverage: files 52/79`.
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52 -> 53, with the
+    // denominator and the by-name list below. The one added is
+    // supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql. MEASURED
+    // off the full lane run: `coverage: files 53/80`.
+    // ⭐ CURRENCY 2026-09-29 (Phase 167.1.2 PR C2, review fix B, WR-04): 53 -> 54, with the
+    // denominator and the by-name list below (test_refresh_fanout_zero_snapshot_bootstrap.sql).
+    expect(corpus.filesAnnotated).toBe(54);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2483,6 +2619,10 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       // arms. Two of its twins are not the ones its plan specified: both were
       // measured unfalsifiable on a real lane and replaced (164.7-02-NEUTER.log).
       "test_analytics_service_settings_and_vault_tick.sql",
+      // ⭐ ADDED 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03) — the
+      // FIFTY-FIRST annotated file: the duplicate marker, the departed-history
+      // flag and its owner RPC, and the reconnect named refusal (24 arms).
+      "test_api_keys_account_identity.sql",
       "test_api_keys_exchange_not_user_writable.sql",
       "test_api_keys_insert_not_client_writable.sql",
       // ⛔ ADDED 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix) — the
@@ -2497,6 +2637,10 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_api_keys_venue_identity_uniq.sql",
       "test_capital_ownership_allocation_guard.sql",
       "test_capital_ownership_column.sql",
+      // ⭐ ADDED 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05) — the FIFTY-THIRD
+      // annotated file: a due failed_retry job beside a pending twin of the same
+      // (kind, partition) never makes a claim entry point raise 23505 (15 arms).
+      "test_claim_compute_jobs_failed_retry_pending_pair.sql",
       "test_compute_jobs_error_kind_copy_parity.sql",
       "test_create_wizard_strategy_for_key.sql",
       // ⭐ ADDED 2026-09-24 (Phase 164.6 review fix round 1) — the FIFTIETH
@@ -2516,6 +2660,10 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_ledger_refresh_composite_arm.sql",
       "test_ledger_refresh_fanout.sql",
       "test_ledger_refresh_staleness.sql",
+      // ⭐ ADDED 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03) — the FIFTY-FIRST
+      // annotated file: the LANE-ONLY two-backend gate proving a second
+      // same-strategy terminal mark waits on the per-strategy bridge lock.
+      "test_mark_rpc_bridge_advisory_lock.sql",
       "test_metrics_by_basis_write.sql",
       // ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 01): the
       // FORTY-SEVENTH annotated file. Two arms (G1, S1) proving
@@ -2524,6 +2672,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_prod_prober_cadence.sql",
       "test_profiles_privileged_columns_locked.sql",
       "test_reconcile_dropped_enqueue_sweep.sql",
+      "test_refresh_fanout_zero_snapshot_bootstrap.sql",
       "test_resync_retry_single_job.sql",
       "test_retention_orphaned_running.sql",
       "test_scenario_downgrade_sweep.sql",
@@ -2933,7 +3082,27 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // 49 -> 50. One ADDED gate file (supabase/tests/test_cron_runs_rls.sql),
     // both halves together. MEASURED off the full lane run: annotated 50 +
     // pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 77.
-    expect(corpus.filesTotal).toBe(77);
+    // ⭐ CURRENCY 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): 77 -> 78 and
+    // 50 -> 51. One ADDED gate file (supabase/tests/test_mark_rpc_bridge_advisory_lock.sql),
+    // both halves together. MEASURED off the full lane run: annotated 51 +
+    // pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 78.
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 77 -> 78 and
+    // 50 -> 51. One ADDED gate file
+    // (supabase/tests/test_api_keys_account_identity.sql), both halves
+    // together. MEASURED off the full lane run: annotated 51 + pending 0 +
+    // unreachable 27 + inert 0 + lane-blocked 0 = 78.
+    // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 78 -> 79 and 51 -> 52.
+    // BOTH added gate files. MEASURED off the full lane run on the merged tree:
+    // annotated 52 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 79.
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 79 -> 80. The one
+    // added is supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql, a
+    // NEW file (the gate for migration 20260927120000, fifteen arms), and the five
+    // classes still sum to it: annotated 53 + pending 0 + unreachable 27 + inert 0 +
+    // lane-blocked 0 = 80. MEASURED: this file's own run read `expected 80 to be 79`.
+    // ⭐ CURRENCY 2026-09-29 (Phase 167.1.2 PR C2, review fix B, WR-04): 80 -> 81, the plan 12 gate file.
+    // MEASURED off the full lane run: annotated 54 + pending 0 + unreachable 27 + inert 0 +
+    // lane-blocked 0 = 81.
+    expect(corpus.filesTotal).toBe(81);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -2943,7 +3112,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // `lane-blocked-gate.sql` and NOT its comment-only sibling), and the
     // set-for-set PARTITION check below is the second independent guard.
     // ⭐ 49 -> 50 (Phase 164.6 review fix round 1, test_cron_runs_rls.sql).
-    expect(corpus.annotatedFiles).toHaveLength(50);
+    // ⭐ 50 -> 51 (Phase 164.5.2 BRIDGELOCK plan 03, test_mark_rpc_bridge_advisory_lock.sql).
+    // ⭐ 50 -> 51 (Phase 167.1.2 plan 03, test_api_keys_account_identity.sql).
+    // ⭐ 51 -> 52 (merge of origin/main into Phase 164.5.2: both new files).
+    // ⭐ 52 -> 53 (Phase 164.9.3 CLAIMPAIR plan 05, test_claim_compute_jobs_failed_retry_pending_pair.sql).
+    // ⭐ 53 -> 54 (Phase 167.1.2 PR C2 review fix B, WR-04: test_refresh_fanout_zero_snapshot_bootstrap.sql).
+    expect(corpus.annotatedFiles).toHaveLength(54);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

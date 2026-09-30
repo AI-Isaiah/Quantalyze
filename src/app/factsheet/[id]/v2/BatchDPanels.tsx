@@ -248,17 +248,23 @@ function signGlyph(v: number): string {
   return "";
 }
 
-function PercentileBar({ label, pct }: { label: string; pct: number }) {
+function PercentileBar({ label, pct }: { label: string; pct: number | null }) {
+  // No rank (the strategy has no Sharpe: NaN, or null after a JSON cache
+  // round-trip) renders "—" over an empty track, never "0th" or "NaNth"
+  // (founder decision D7, 2026-09-26).
+  const ranked = pct != null && Number.isFinite(pct);
   return (
     <div className="grid grid-cols-[110px_1fr_48px] items-center gap-2 text-micro">
       <span className="text-text-2">{label}</span>
       <div className="relative h-2 bg-surface-subtle rounded-sm overflow-hidden">
-        <div
-          className="absolute inset-y-0 left-0 bg-accent"
-          style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
-        />
+        {ranked && (
+          <div
+            className="absolute inset-y-0 left-0 bg-accent"
+            style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
+          />
+        )}
       </div>
-      <span className="text-right font-mono tabular-nums text-text-primary">{Math.round(pct)}th</span>
+      <span className="text-right font-mono tabular-nums text-text-primary">{ranked ? `${Math.round(pct)}th` : "—"}</span>
     </div>
   );
 }
@@ -419,7 +425,9 @@ function fmtDelta(a: number, b: number, kind: "pct" | "ratio" | "pctSigned" | "i
   return (d >= 0 ? "+" : "") + d.toFixed(2);
 }
 
-function signed(v: number): string {
+function signed(v: number | null): string {
+  // An undefined correlation (NaN, or null after a JSON round-trip) is "—" (D7).
+  if (v == null || !Number.isFinite(v)) return "—";
   return (v >= 0 ? "+" : "") + v.toFixed(2);
 }
 

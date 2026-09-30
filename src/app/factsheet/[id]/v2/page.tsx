@@ -133,10 +133,9 @@ function buildFactsheetPayloadCached(
   // therefore can no longer pin a placeholder under this `computed_at` for the
   // TTL while /strategies' fresh probe shows no note. Every OTHER reason is a
   // fact about the stored row and is cached as `null`, as before.
-  // ⚠️ Accepted residual under D-07, owned by Phase 169 plan 04: a composite's
-  // failed `csv_daily_returns` read still arrives as `composite_unbuildable`
-  // (`readCompositeFactsheet` folds the error into an empty series), so that
-  // outage cannot be told apart here and its `null` is still cached.
+  // The composite residual of D-07 is closed by Phase 169 plan 169-07 (169
+  // D-41): the composite reader throws on a failed `csv_daily_returns` read and
+  // the resolve stage answers `read_error`, so the throw below covers it.
   return unstable_cache(
     async () => {
       const built = await fetchAndBuildPayloadWithReason(id, withPublishedOnly);
@@ -169,7 +168,38 @@ function buildFactsheetPayloadCached(
     // wrongly SUPPRESSED (for cash too) during the 1h TTL drain. Busting the shape
     // version forces a fresh build carrying `bootstrapCI.n` rather than silently
     // hiding the caveat.
-    ["factsheet-v2-payload-v6", id, computedAt],
+    // Bumped v6→v7 (Phase 166.2 review round 2, IN-03): the shape is unchanged
+    // but the VALUES are not. A ratio that does not exist (Sharpe, Sortino,
+    // Calmar, a peer rank) is now NaN, "—", where a v6 entry holds a fabricated
+    // 0; bumping serves the fix at deploy instead of after the 1h TTL drain.
+    // Bumped v7→v8 (Phase 169 FACTSHEETTRUTH, 169 D-62, 2026-09-27): the shape
+    // AND the values change. 169-04: the MTD / YTD / 3M / 6M / 1Y windows are
+    // nullable (a window the record does not cover is null) and `p3y` / `p5y`
+    // are added; 169-01: the single-key headline reads the persisted analytics
+    // scalars instead of the TypeScript recompute. A v7 entry lacks `p3y` /
+    // `p5y`, and 169-05's row gates omit a null row, so serving one would HIDE
+    // correct 3 Year / 5 Year rows on a long record: a wrong page, not an old
+    // figure. `revalidate` and the admin route's tag bust are both
+    // stale-while-revalidate, so only a key move stops a pre-deploy entry being
+    // served after the deploy. Phase 169.5 moves the key again (169.5-01).
+    // Review round 1 (2026-09-29) changed the payload again before any v8 entry
+    // existed (v8 was not on origin/main): optional `dataQuality` fields
+    // (`twrChainBroken`, `headlineCoversFrom`, `returnsConventionOverride`), an
+    // arithmetic curve for a single-key `simple` config, and an MTM / smoothed /
+    // cash-series read outage that now throws instead of building a degraded
+    // payload. They ride this one v8 bump; no second move was needed.
+    // Bumped v8→v9 (Phase 169.5 BENCHCOMPARE, 169 D-48 as amended by 169 D-62):
+    // comparator blocks carry `through`, null windows past it and covered-day
+    // summaries (169.5-01); the payload carries the bounded BTC prices, their
+    // `through` and `dropped` for the browser re-derive, and comparator chart
+    // series (cumulative, cumVsBench, volMatched) are null past coverage with
+    // rolling statistics on the comparator's own basis (169.5-02); comparator
+    // `dailyReturns` are null where uncovered (169.5-04). A stale v8 entry lacks
+    // them, so during the 1 h TTL drain it would show +0.00% benchmark windows and
+    // feed the MTM / leverage re-derive no prices; one bump covers Phase 169.5
+    // because its plans deploy in one PR. Phase 169's own payload changes are
+    // covered by its v7→v8 bump (169 D-62) and are not v9 content.
+    ["factsheet-v2-payload-v9", id, computedAt],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],

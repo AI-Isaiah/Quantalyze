@@ -1,5 +1,2388 @@
 # Changelog
 
+## [0.114.0.0] - 2026-09-30 — BENCHCOMPARE: a factsheet's BTC comparator is read from the database, measured only over the days it has prices for, and dated where it stops
+
+⭐ **What changed for whoever reads this next.** Phase 169.5 (BENCHCOMPARE) ships plans 01 to 04, then two review rounds and their fixes. The branch carries 47 non-merge commits: 22 code and test commits (11 from the plans, 11 review fixes), 24 planning and review commits, and this release commit. It also carries four merges of round-1 fix branches and one merge of `origin/main`.
+- A factsheet's BTC figures now come from `benchmark_prices`, not from the bundled BTC fixture. That fixture stopped in the past, so a current factsheet showed BTC MTD and 3M as +0.00%.
+- A comparator is measured only over the days it has real closes for. A window that ends after its last close shows an em-dash, never +0.00%. The chart's comparator line stops where its prices stop. The EoY figures and the BTC stress windows count only covered days.
+- A comparator whose prices end early is dated where its figures are: the picker says "BTC prices through <date>", the metric headers read "vs BTC to <date>", and the EoY table carries a note. A failed read says "BTC prices unavailable".
+- The factsheet, its leverage and mark-to-market re-derive in the browser, and the discovery detail page all read BTC through one read, from the same closes.
+
+⚠️ **A minor bump because user-visible numbers change.** BTC windows, the win rate, beta, correlations, rolling series, EoY comparator figures and the BTC stress-window figures move on every factsheet. There is no migration and no API change. The factsheet cache shape key moves v8 → v9, so no payload built before the deploy is served after it.
+
+### Changed
+- **The BTC comparator is read from the database, bounded and coverage-aware (plan 01).** `readFactsheetBenchmark` in `src/lib/factsheet/fetch-and-build-payload.ts` is the one BTC read of a factsheet build. It reads `benchmark_prices` through 169.2's paged reader over `[earliest date on any comparator axis minus one day, latest date]`, taken over cash, mark-to-market and smoothed together (D-64(4) as amended 2026-09-30), so each view gets its own day one. With no date on any axis it issues no query. The bundled fixture is merged only for dates strictly before the database's true first stored BTC date, learned by a one-row probe. A hole inside stored history therefore stays a gap, and a database with no BTC row in the window reads "BTC prices unavailable", never the fixture. A failed read or probe is the unavailable form, logged with one stable message (see Fixed, SFH-M-01 and SFH-M-02, for what the log carries after review).
+- **One alignment for every comparator, following the Python engine's pairing rule (plan 01, D-54, D-58, D-64).** `alignCoveredReturns` in `align.ts` replaces the forward-filling `alignReturns`, and BTC, SPX, ETH, GLD and IEF all go through it. It returns each day's comparator move over the strategy's own interval, which days are paired, and `through`, the comparator's last close on or before the strategy's last date. The rule is the engine's (founder ruling 2026-09-27, "Engine's rule; 169.5 follows"):
+  - day one takes the benchmark's own return for that date, never 0 (166.4 D-05);
+  - an interval is paired only when the benchmark has a close at both endpoints and every date inside it that its own calendar trades on (the engine's review fix `d1d1fc077`). An unpaired interval keeps its return in the comparator's own series and is left out of the benchmark-relative metrics;
+  - the base close is the first stored close (166.4 D-07).
+- **Comparator blocks are covered-day blocks (plan 01).** `buildComparatorBlock` computes a comparator's own summary over its covered days only. The MTD, YTD, 3M, 6M and 1Y windows are null past `through`. The joint metrics (alpha, beta, tracking error, information ratio) and the correlations use paired intervals only. A comparator's own summary annualizes on the smaller of the strategy's and the comparator's basis (D-59 as amended). The joint metrics stay on the strategy's basis. A failed BTC read gives the unavailable block (summary null, `through` null).
+- **The payload carries the BTC series it was computed from (plan 02, D-21).** `FactsheetCommon.benchmarkPrices` holds the bounded closes and their `dropped` list, and the browser re-derive (`useBasisSeriesView`: leverage, mark-to-market, smoothed) aligns BTC from them, so a leverage toggle cannot move BTC. A payload without the field treats BTC as unavailable, never as the fixture. `deriveSeriesBundle` now requires its BTC input, and with no route read the builder bounds the fixture over the same axes (`fixtureBenchmarkPrices`).
+- **The discovery detail page reads BTC through the same function, with the same inputs (plan 02, D-23).** A LOCKSTEP test pins it against the route. Phase 169.1 plan 01 later moves this page onto `fetchAndBuildPayload` and deletes that test.
+- **Comparator chart series follow coverage (plan 02, D-60 fix).** `cumulative`, `cumVsBench` and `volMatched` are null where the comparator has no return, so the chart line breaks instead of drawing a flat market. Rolling vol, Sharpe and Sortino run over each window's non-null returns on the comparator's basis. Rolling beta runs over paired intervals only, so a weekday comparator against a 7-day strategy has no flat run over weekends.
+- **Comparator `dailyReturns` are null where uncovered, never 0 (plan 04).** The EoY table and the EoY bars skip an uncovered day, so a year with no covered comparator day shows an em-dash and no bar instead of "+0.00%". The histogram's comparator overlay no longer piles uncovered days into the 0% bin.
+- **The comparator picker dates a comparator whose prices end early (plan 03).** It shows one caption under the chips for the active comparator: "<comparator> prices through <Mon D, YYYY>" when the comparator is past coverage, "<comparator> prices unavailable" when `through` is null, and nothing at full coverage or on a hand-built block.
+- **The factsheet cache shape key moves `factsheet-v2-payload-v8` → `v9` (169 D-62, D-48 as amended).** Phase 169 made the v7 → v8 move. A v8 entry lacks `through`, the null windows and the payload's BTC series, so during its 1 h TTL it would have shown +0.00% windows. Phase 169.1's plans reason from an older key and re-derive it before execution.
+
+### Fixed
+- **Four sentences no longer describe a benchmark fill the numbers stopped doing (plan 03).** The Strategy thesis sentence and the Terms panel's "Bench frequency" (Mandate panels), the correlation strip's caption, and the footer disclaimer each said benchmarks are forward-filled to the strategy's calendar. They now say a comparator's return is taken over the strategy's own intervals from its own closes, is not measured past its last close, and that correlations use only intervals each benchmark has every close for.
+- **The stress windows no longer show BTC +0.00% when BTC is uncovered (review CR-01 = SFH-H-01).** `build-payload` handed `computeStressWindows` the BTC returns with every missing day entered as 0, so after any failed read the Stress Windows panel showed BTC +0.00% and DD 0.00% through the Aug 2024 unwind, beside a picker saying "BTC prices unavailable". A dropped close inside a window lost its move the same way. `computeStressWindows` now takes the comparator null-honest: a window with any uncovered comparator day has a null benchmark return and drawdown, shown as a muted em-dash, and the strategy side of the row stays. `StressWindow` widens both fields to `number | null`. The allocations caller is unchanged.
+- **A bug in the merge or align code is no longer reported as a database outage (review SFH-M-01).** The BTC read's `try` covered the merge, trim and align code as well as the two `benchmark_prices` calls, so a bug in that pure code rendered "BTC prices unavailable" and was logged as a DB failure. The catch now covers only the read and the first-date probe, and a throw from the pure code reaches the error boundary as a build error. The failure line carries the strategy id, the read range, the error code and its message; before, a non-PostgREST error kept only its name.
+- **The discovery page passes the strategy id to the BTC read log.** It was the one caller the SFH-M-01 fix did not update, so its log lines carried a null id. Its comment no longer says any throw gives the unavailable form.
+- **The two data-driven "unavailable" exits log a reason (review SFH-M-02).** No price in the window and no covered interval both returned the unavailable form without a log, so a stalled BTC refresh looked the same as a read outage and left no trace. Each now warns under one stable message with the reason (`no_prices_in_window` or `no_covered_interval`), the id, the range, the first stored date and the read's count and last date. Behaviour on both arms is unchanged, and nothing goes to Sentry.
+- **Each comparator's calendar is explicit, never inferred from the trimmed window (review WR-02 = SFH-M-03).** `alignCoveredReturns` inferred a benchmark's weekday calendar from the closes it was handed. The route trims BTC to the strategy's range, so a short window whose only Saturday was missing dropped Saturday from the calendar and paired a Friday-to-Monday interval the engine leaves unpaired. The calendar is now a required argument from `COMPARATOR_CALENDARS`: BTC and ETH trade 7 days, SPX, GLD and IEF Monday to Friday. The server build, the browser re-derive and the read's covered-interval probe all pass it. CONTEXT D-64(2) carries a dated amendment; the original sentence stays as lineage.
+- **A 7-day strategy ending on a weekend no longer blanks its SPX windows (review WR-01).** The block and the picker caption compared SPX's last close with the strategy's raw last date, so a Sunday end blanked every SPX window and showed a false "SPX prices through <Fri>" caption. `isPastCoverage` in `align.ts` is now the one rule: a comparator is past coverage only when a date on its own calendar falls after its last close and on or before the strategy's last date. The block reads it as `coveredToEnd`, and the caption calls the same function, so the two cannot drift.
+- **The partial-coverage note reads the comparator's own calendar too (review round 2, MR-01).** The SFH-M-05 helpers still used the raw date compare WR-01 had removed elsewhere, so a Sunday end dated the SPX, GLD and IEF headers and printed an EoY "prices through ... only" note while the caption and windows on the same page said SPX was covered. Both helpers now take the comparator's calendar and go through `isPastCoverage`.
+- **The correlation strip keeps a row it cannot compute (review SFH-M-04).** It dropped any benchmark whose correlation was not a finite number, so a failed or too-short BTC read left four rows beside a matrix that shows the same cell as an em-dash. The row now stays, reads "—" and draws no bar.
+- **A partly covered comparator is dated beside its figures (review SFH-M-05).** When BTC's prices stop before the strategy's last date, its Main Metrics, Returns and Max Drawdown figures and the current-year EoY cell cover a shorter span than the strategy's beside them, and the only disclosure was the picker caption. The Main Metrics and Returns headers now read "vs BTC to <date>", Max Drawdown gains the same header in the partial case only, and the EoY table and bars carry "BTC <year>: prices through <date> only." Full coverage and an unavailable comparator render as before. D-54's covered-days rule is unchanged.
+- **Regime shading ends where the comparator's rolling Sharpe ends (review SFH-M-06).** The last shaded segment ran to the end of the series, so a BTC stored only through an earlier date shaded the uncovered tail under a line that had already stopped. It now ends at the last point with a rolling Sharpe. Interior gaps stay bridged by design: a weekday comparator is null every weekend, and breaking there would fragment the SPX shading.
+- **The coverage caption reads the active basis (review SFH-M-07).** It checked the cash comparator against the cash dates, and nothing clamps a mark-to-market or smoothed axis to the cash range, so an MTM axis ending later showed "—" windows and short lines with no caption. The picker now reads `useBasisSeriesView`, the same block and date axis the numbers come from.
+
+### Root cause
+- **BTC +0.00% on a current factsheet.** The factsheet aligned every comparator from bundled fixtures with a forward fill, and a strategy date past the fixture's last close carried that close forward. Every day past it was a 0% BTC day, so recent windows read +0.00%, the win rate and beta were diluted, and the chart drew a flat line. The fix removes both halves: the prices come from the database, and a day with no close is a gap, never a carried level.
+- **The review findings share one shape.** Each is a place where the plan's null-honest rule stopped short: a consumer still entering an uncovered day as 0 (stress windows), a coverage test on the raw date instead of the comparator's calendar (WR-01, MR-01), a calendar inferred from a trimmed window (WR-02), or a failure that was honest on screen but silent in the logs (SFH-M-01, SFH-M-02).
+
+### Tests
+- **svg-chart-parity goldens re-baked (3 PNGs).** `full-page-desktop` moves with 169.5-03's Strategy Thesis wording (+16px) and the BTC column under the D-64 pairing rule (BTC cumulative −35.53% vs −36.89%, IR vs BTC 1.05 vs 1.11; the strategy's own figures are unchanged). `bootstrap-ci-portrait-320` and `bootstrap-ci-ultrawide-2560` move by a subpixel. Baked by CI run `36709781626`, reviewed side by side, only the changed files committed.
+- New in the plans: `build-payload.benchmark-opt.test.ts`, `fetch-and-build-payload.benchmark.test.ts` (bounds, the probe, the fixture merge, each failure arm), `comparator-block.coverage.test.ts`, `basis-context.benchmark-prices.test.tsx` (server and browser parity, and the discovery LOCKSTEP case), `TimeSeriesChart.coverage-gap.test.tsx`, `MandatePanels.comparator-coverage.test.tsx`, `FactsheetView.benchmark-method-copy.test.tsx` and `EoyComparatorCoverage.test.tsx` (every figure computed by hand from typed closes). `align.test.ts` is rewritten for the engine's rule, and `ComparatorPicker.test.tsx` covers the caption. Each plan recorded a neuter that turns its cases red.
+- New in the review fixes: `StressWindowsPanel.null-bench.test.tsx`, `CorrelationStrip.unavailable-row.test.tsx`, `TimeSeriesChart.regime-tail.test.tsx` and `MetricsColumn.comparator-through.test.tsx`. Added cases in `stress-windows.test.ts`, `build-payload.test.ts` (an unavailable BTC beside a covered control), `fetch-and-build-payload.benchmark.test.ts` (the full log payload on each error arm, both warn arms, and an aligner throw that rejects the build), `align.test.ts` (the `isPastCoverage` table and the short-window Saturday case), `comparator-block.coverage.test.ts` (a real-SPX 7-day strategy ending Sunday 2025-03-16 beside a genuine gap) and `ComparatorPicker.test.tsx` (the weekend end, a real gap, and an MTM axis past the cash one). Every fix recorded a neuter observed RED. Every existing `alignCoveredReturns` call site in the tests now passes its comparator's calendar.
+- Seven existing factsheet tests pass the BTC input explicitly now that `deriveSeriesBundle` requires it. No assertion was widened.
+- The `build-payload.test.ts` snapshot moved in plans 01, 02 and 04. In plan 04 only one key moved: SPX `dailyReturns`, 0 → null on the 19 weekend dates of a 7-day series. The CR-01 fix did not move it, because its fixture BTC covers every evaluated window. The cache-key tests move to v9.
+- The integration run on the merged branch was green before review, and was re-run after both fix rounds: `tsc` clean, the full suite green bar the known `ci-anti-skip-gate` timeout (it passes 33/33 alone), the compute-once gate 203/203, and the D-22 live lane 7/7 with the drift census at 0 findings and 10/10 contracts.
+
+### Notes
+- **Known limits, recorded rather than fixed:**
+  - **D-52.** After a transient read error, the honest "BTC prices unavailable" payload may be cached for the 1 h TTL.
+  - **D-65, routed to Phase 169.4 ALLOCTRUTH.** On API-ingested strategies, the synthesized allocator-portfolio and event-signature panels (SignaturePanels, CrossSignaturePanels, BatchDPanels) still take the comparator's returns with a missing day entered as 0. Their values move at day one, with the database-fed BTC and at a dropped close. 169.4 owns making them null-honest.
+  - **Weekend SPX on crypto factsheets (observed in plan 04).** On a 7-day strategy the weekday SPX comparator's `dailyReturns` are now null on weekends. The SPX histogram overlay loses its 0% weekend spike, and the Daily Returns CSV export writes an empty SPX cell on weekends where it wrote 0. EoY SPX figures do not move, because 0 and a skipped day compound to the same value.
+  - **US market holidays.** `isPastCoverage` treats every Monday to Friday as an SPX trading day, so a strategy ending on or just after a US market holiday can still put a date on the SPX header, the caption and the EoY note, and blank its windows.
+  - **Series vs pairing (D-58 as amended).** An interval with no benchmark close dated its strategy date is null, never 0. Beta, correlation and the other benchmark-relative metrics pair only intervals with a close at both endpoints. So a weekday comparator's Monday move against a 7-day strategy counts in its return but not in its beta or correlation.
+  - **The one recorded difference from the engine (D-64).** The TypeScript helper holds the base close as a stored price. When BTC has no close the day before a strategy's first date, day one is null here, and the engine may pair it.
+  - **Rolling edges.** A rolling window with fewer than 2 non-null (or paired) points is a gap, so rolling beta against a weekday comparator has no value on Mondays.
+- **Cross-citation, for the orchestrator to route (D-54, D-63, D-64).** 166.4 BENCHALIGN applies the same interval rule in Python (D-61). The engine's docstring on `_interval_matched_benchmark` and 166.4 D-02 still describe the TypeScript side as keeping day one at 0, with no interior-gap rule, and that is false once this ships. This phase edits no file under `analytics-service/`; the correction is booked for a follow-up tooling PR. Since 166.4 has shipped, D-63's deferred owner (166.4's planning) is no longer live either.
+- **Planning.** The plans were revised to follow the engine's pairing rule, the fixture-merge bound and the all-axis read bound were added, and the D-65 deferral was routed into 169.4 in the ROADMAP. Each plan has its completion record, and plan 05 records the integration run, the D-22 re-run and this release.
+- **Review.** Round 1 is `169.5-REVIEW.md` and `169.5-REVIEW-SFH.md`, fixed in five file-disjoint groups (`169.5-REVIEW-FIX-A.md` to `-E.md`). Round 2, a confirmation round, is `169.5-REVIEW-R2.md` and `169.5-REVIEW-SFH-R2.md`, with its one fix (MR-01) in `169.5-REVIEW-FIX-R2.md`. `169.5-VERIFICATION.md` reads `human_needed`, 15/17 must-haves verified: the other two are the post-deploy browser re-check and a D-22 live-lane re-run at HEAD, neither failed. `169.5-SECURITY.md` reads `threats_open: 0`.
+
+## [0.113.1.0] - 2026-09-30 — OGSHARPE: the OG share card shows the CAGR and Sharpe the factsheet and the lists show
+
+⭐ **What changed for whoever reads this next.** Phase 169.4.1 (OGSHARPE, split from Phase 169 by D-44) ships plan 01 (the card reads the persisted scalars) and plan 02 (the integration run), then one review round with fixes and a confirmation round. 14 commits: 4 code and test, 10 planning.
+- A strategy's OG share card, the image a link unfurls into, now shows the stored CAGR, Sharpe and max drawdown that the factsheet headline and every list read, instead of recomputing its own. The card's own display rules still apply on top: Sharpe and max drawdown need 30 observations, CAGR is hidden under 0.95 calendar years or on non-positive growth, and a non-finite value hides.
+- A row whose stored CAGR covers only the stretch after a chain break now shows CAGR as "—" on the card.
+- A failed card read is reported and is no longer cached for a day.
+
+⚠️ **A minor bump: behaviour visible to anyone who shares a link.** No migration, no API change.
+
+### Changed
+- **The card reads the persisted headline (plan 01, SC4).** `computeOgHeadline` in `src/lib/factsheet/og-metrics.ts` takes the row's persisted `cagr`, `sharpe` and `max_drawdown` for a rankable analytics row (the same `isRankableAnalyticsRow` test the lists use) and applies the card's display policy to them. A stored key that is present and null hides the figure; a key that is absent falls back to the computed value. A row that is not rankable keeps Phase 166.2's one shared `sharpe(..., {ddof: 0})`, the only Sharpe computation in the file. `src/app/api/og/factsheet/[id]/route.tsx` selects the three scalars and passes them through. The STALE-01 `isComputedAnalytics` gate is unchanged.
+- The entry gate (D-45) proved Phase 166.2 and Phase 169 on `origin/main` before any code commit.
+
+### Fixed
+- **A chain-broken row no longer puts an inflated CAGR on the card (review CR-01 = SFH-01).** The stored `cagr` is annualized over the stretch after the last chain break, while the card's 0.95-year gate measured the whole record, so a 2-year record with a short, positive post-break stretch could show a very large CAGR with no caveat. The route now reads `data_quality_flags`, and the card hides the stored CAGR when `twr_chain_broken` (or `insufficient_window`) is `true`. Sharpe and max drawdown are unchanged. Founder ruling 2026-09-30 (D-46): the card keeps the bare "—"; the factsheet keeps the figure with its "covers from" note, and that is the accepted SC4 difference. Composites inherit the flag, so the rule covers them too.
+- **A failed card read is reported and not cached long (review SFH-02; predates this phase, in the function it changed).** supabase-js does not throw on a query error, so the route never saw one: a PostgREST error rendered a card of dashes, cached for a day plus a week of stale-while-revalidate, with nothing logged. The route now checks `res.error`; a query error, a thrown read and a thrown compute each log with the strategy id, report to Sentry after the response (throttled per stage), and send the card `no-store`. A genuine not-found and a healthy card keep the long cache.
+
+### Tests
+- `og-metrics.test.ts`: the persisted branch, present-null versus absent keys, the display policy on stored values, the chain-break and `insufficient_window` hides with five negative controls (no flags, null, empty, both false, the string "true").
+- `route.test.tsx`: an argument-forwarding spy pins that the route passes the stored scalars (O1d) and the flags (O1e); F1 to F5 pin the failure paths and that not-found and healthy cards keep the long cache. `route.stale-analytics.test.tsx`: header comment corrected.
+- Test-first split: commit `3cebcaaf3` holds the new tests alone and fails on purpose; `d0ec8d07d` makes them pass. Every fix was neutered, seen RED and restored.
+
+### Notes
+- Planning: plan and integration SUMMARYs, the round-1 code and silent-failure reviews, the fix report, the round-2 confirmation reviews (reviewer and silent-failure), `169.4.1-SECURITY.md` (threats_open 0), `169.4.1-VERIFICATION.md` (human_needed: the post-deploy card re-check), and the D-46 ruling in CONTEXT and the ROADMAP.
+- **Known limits.**
+  - MR2-01 (round 2, MEDIUM, recorded, not fixed under the MEDIUM-only rule): the route does not check that the id is a UUID, so a malformed id from a crawler reaches the database as error 22P02, is reported to Sentry at error level and uses that stage's one capture slot per minute. The fix is one `isUuid` guard.
+  - Cards already unfurled keep their old image in social-network caches for up to a week, and the CDN holds a card for a day.
+  - The full-suite run fails only on the known `ci-anti-skip-gate.contract.test.ts` timeout under host load; the file passes 33/33 alone.
+
+## [0.113.0.1] - 2026-09-30 — BASELINE: automated re-dump after the PROD apply of a953d5b5
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `36679743686`, after the PROD apply of merge `a953d5b5`: sha256 `92b7d216…` → `43302190…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20260929120000_commit_scenario_batch_fingerprint_reader_set.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-09-30` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.113.0.0 → 0.113.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=283 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `36679743686` succeeded, and this entry was composed by the `redump-pr` job. Run `36679743686` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.113.0.0] - 2026-09-30 — ACCOUNTTRUTH C4: a disconnected account's history stays in the book up to its end day, and Open Positions shows each key's own latest read
+
+⭐ **What changed for whoever reads this next.** Phase 167.1.2 (ACCOUNTTRUTH) PR C4 ships plans 09 (the departed-account history, D-05 / D-09) and 15 (Open Positions per key, D-16), then three review rounds (round 1 fix topics K1, K2a, K2b; round 2 topics R2A, R2B, R2C; round 3 confirmation only). The branch carries 51 commits of C4 work.
+- A key that is disconnected, revoked or inactive no longer takes its history out of the allocator's book. Its history counts up to its end day, and its leaving is an exit, never a return and never a carried level.
+- The Exchanges page shows each departed key's card with one sentence saying whether its history counts, until which UTC day and why, and a switch to include or exclude it.
+- Open Positions reads each key's rows at that key's own latest read, one reading per exchange account. A position the account closed before its newest reading no longer shows.
+- A book-mode scenario commit no longer returns a permanent 409 once the allocator has one closed position. This needs migration `20260929120000`, which applies to TEST and then to PROD on merge.
+
+⚠️ **A minor bump: new behaviour and a PROD migration.** The migration replaces one function body (`commit_scenario_batch`, same signature, same ACL) and reads only the catalogue in its self-check, so it applies the same way on PROD and on the empty TEST database.
+
+### Added
+- **The D-05 / D-09 departed-history rule, one spec in two languages (plan 09).** `departed_history_inclusion` in `analytics-service/services/job_worker.py` decides it for the derive job. `departedHistoryInclusion` in `src/lib/departed-history.ts` shows the same decision on the key card. Both read the same inputs (first and last `csv_daily_returns` day, `disconnected_at`, the account identity, the owner's `history_inclusion` choice) and never read `created_at`. Both are tested against every case of the shared fixture `analytics-service/tests/fixtures/departed_history_inclusion.json`, whose `rule` list is the spec in prose.
+  - End day: the UTC day of `disconnected_at`, else the last returns day. 'exclude' always excludes, and a key with no returns on or before its end day has nothing to count.
+  - An unknown account is excluded by default (founder-confirmed 2026-09-25, case (3)). 'include' counts it to its end day.
+  - A known account is never counted twice on one day (B4). A live key on it bounds the departed key to the day before the live key's first returns day. A live key with no returns yet bounds it to no day at all, under its own reason, until that key has returns (WR-04). Departed keys on one account are ordered by first day, last day, then id, and each is bounded by the next one. 'include' never lifts a bound.
+  - **D-09 case (2) amended, and founder-ratified on 2026-09-29 ("Ratify as built").** The COVERED rule (SFH-C4-07): a key whose last countable day falls before that of a key ordered ahead of it is covered by that key. It counts zero days and bounds nothing, so a later key that ends first no longer cuts an earlier key's tail. The anchorless rule (WR-R2-02): a departed key with no saved balance cannot be levelled by the book, so it neither covers nor bounds another key, and the chain re-forms around the keys that can be levelled.
+  - One account identity in both languages (`account_identity_tokens` / `accountIdentityTokens`). Two keys read one account when they share a non-blank (exchange, venue account id), exchange compared case-blind, or when one is marked against the other. The marker kinds are the derive's own `SHARED_ACCOUNT_KINDS`, never a copy, and the TS set is keyed by the closed union so a new kind fails to compile until someone decides it (IN-02, IN-03). The live-key predicate is the derive's `eligible_key_predicate` itself.
+- **The departed-account card and its switch on the Exchanges page (plan 09).** `AllocatorExchangeManager` gives each departed key a line from `departedHistoryCard` and an include switch that calls `set_departed_key_history_inclusion`. The switch is on only when the book really holds the key's history, and it is enabled only where flipping it changes what the book holds: 'include' never lifts a known account's bound, a key with no returns has nothing to include, and a key with no usable anchor is left out whatever the switch says. That card names the cause instead (SFH-C4-05). A key whose saved inputs row is gone and a key whose last balance read failed get different sentences, and "deleted" is used only for the first (SFH-C4-06). A connected key with no history yet gets its own reason and true copy (WR-04). The RPC's refusals are mapped by SQLSTATE, never by message: 55000 (the key is connected again), 55006 (a recompose is running; its DETAIL and HINT are shown as given), 42501 (signed out or not the owner).
+- **Open Positions keeps each key's own latest read (plan 15, D-16).** `latestHoldingsPerKey` in the new `src/lib/latest-holdings-per-key.ts` keeps each key's rows at that key's own latest `asof`, whatever the input order. Before, the collapse kept the newest row per venue:symbol:type across every date, so a position a key closed before its latest poll survived from its last row. `fetchLatestHoldingsPerKey` replaces the dashboard's unbounded all-dates holdings read with bounded steps (the owner's keys, then per key its latest `asof` and its newest poll events, then its rows at that day). Every read asks for at most `HOLDINGS_ROW_CAP` (1000) rows, and a read that reaches the cap returns a named error, so the dashboard fails loud instead of rendering a partial list.
+  - **D-16 amended 2026-09-29 (SFH-C4-01, SFH-C4-02, SFH-R2-01), in `167.1.2-CONTEXT.md` and the ROADMAP.** Account supersede (SFH-C4-01): keys that read one exchange account are one reading, and only the keys on the account's newest reading day, with rows on it, contribute. Before, after a key rotation the old key's last poll still showed a perp the account had closed since. Clean-poll supersede (SFH-C4-02): when a key's newest clean poll (`allocator.holdings.sync_completed` with a final status of complete and a recorded day) read it on a day after its latest rows, those rows are not what the key holds now, and the key contributes nothing. That closes the expired Deribit option that showed forever because an empty poll writes no row. A poll with warnings, an event with no recorded day and a missing event are no evidence.
+- **The Holdings tab dates stale positions and names unread ones.** A key's open positions read on a day older than both the book's newest read and yesterday (UTC) carry one sentence naming the key, the day and the symbols (SFH-C4-08, made absolute by SFH-R2-03 so a one-key book, or a book of equally stale keys, is dated too). One day of tolerance, because the daily poll runs at 04:00 UTC. A key whose rows on screen were written by a poll that could not read its open positions gets its own sentence (WR-01). That sentence is bound to the poll that wrote the rows, not to the key's current `sync_status`, so a later failed poll does not clear it (WR-R2-03). It is shown only on the ccxt venues, where `complete_with_warnings` has that one cause.
+- **The Overview says when a ready curve leaves an account out (SFH-C4-04).** When the derive leaves a departed key out for want of an anchor it raises the benign `departed_history_unavailable` flag and still marks the curve trustworthy. `getMyAllocationDashboard` reads that flag for a ready curve only, and the Overview shows one muted line: the curve leaves out the history of at least one disconnected account.
+
+### Changed
+- **The compose treats a departed key's leaving as an exit (plan 09).** `compose_allocator_equity` in `allocator_equity_compose.py` takes `departed_end_by_key`. A departed key is replayed on its full series first, so its anchor hangs on its own last return day, and only then are its levels, returns and flows clipped to its end day. A departed key that still overlaps a counted key gets an exit seam (`_departure_seams`), the frozen core's rotated-out rule, so its last level is not carried. `portfolio_returns` drops it from both sums the next day, and the ledger books the exit as an outflow of its last level on the next union day. Live keys' math is unchanged. The payload carries the benign `departed_history_included` flag.
+- **The derive keeps a departed key's saved inputs.** The orphan cleanup of `key_inputs:<id>` rows now deletes only a deleted key's row. A departed key keeps its anchor and flows, included or not, so the owner's switch stays reversible. Which departed keys can be levelled is decided before the D-09 rule runs, from the same rows the compose reads (WR-R2-02). The B4 collision gate reads the identity token, so a departed holder and the live key marked against it are one account.
+- **An unreadable `disconnected_at` ends the key on its last returns day (IN-05 / SFH-C4-11).** `_utc_day` returns None instead of raising. Raising sat outside the job's corrupt-input disposal and would have retried the job forever. Fixture case 20 pins it in both languages.
+- **The derive's warning counts two causes apart (SFH-C4-06).** A departed key left out for want of an anchor is counted as either "no saved inputs row" or "last balance read gave no anchor", with the stamped `anchor_null_reason` tokens. Counts only: no key id, venue id or USD (T-167.1.2-22).
+- **Rotate-secret resets `history_inclusion` only when the key ends live (CR-01).** The route now pre-reads `disconnected_at` and `is_active` and writes NULL only when `isLiveKey` holds after its write. Before, updating the password of a disconnected key silently reverted the owner's include or exclude choice to the default rule.
+- **Deleting warns that it removes the history.** The allocator card's Delete says "Deleting also removes this account's history. Disconnect instead to keep it." (plan 09). The strategy key card's Delete (`ApiKeyManager`) now says the first sentence on every delete, because it always hard-deletes and `csv_daily_returns` cascades (SFH-C4-09). The second sentence is left out there: that card has no Disconnect.
+
+### Root cause
+- **Every book-mode commit of an allocator with one closed position returned 409 (SFH-R2-01, the 151 CR-01 class of "a remedy copy no refresh can satisfy").** The scenario commit compares the draft's holdings fingerprint with a server recompute. D-16 changed which rows the client reads (each key's latest read, one reading per account, no rows a later clean poll superseded). The server still took the newest row per (venue, symbol, holding_type) over every date, and persist only upserts, so a closed position kept its last row forever. It stayed in the server's set and left the client's, the RPC returned `portfolio_fingerprint_stale`, and a refresh rebuilt the same client set.
+
+### Fixed
+- **The scenario commit fingerprint reads the set the client shows (migration `20260929120000_commit_scenario_batch_fingerprint_reader_set.sql`).** Step (3b) of `commit_scenario_batch` now builds the reader's set in SQL. The rest of the body (the `auth.uid()` guard, the idempotency reservation, the 50-diff cap, the ownership probes, the published-strategy gates, the inserts and the audit emission) is the `20260601120000` body verbatim. `CREATE OR REPLACE` keeps the OID and the ACL. The REVOKE / GRANT pair is re-issued so the ACL is stated beside the body, and the self-check asserts one 5-argument overload and no PUBLIC EXECUTE. A route-side recompute was rejected: it would run before the idempotency step, so a replay of a committed batch would 409 after a poll, and it would take the check out of the transaction. The check now also refuses a draft listing a position that has closed since. `supabase/migrations/down/20260929120000-rollback.sql` restores the earlier body.
+- The committed SQL function snapshot `supabase/schema/functions/commit_scenario_batch.sql` is regenerated for migration `20260929120000` (`npm run schema:functions`). The PR's `snapshot-drift` gate caught the stale body; `dump-sql-functions.ts --check` now reports 123 functions current.
+- Migration `20260929120000` carries a `prod-body-ack` for VAC-04: PROD's live `commit_scenario_batch` body is the previous migration's (20260601120000), confirmed by baseline-content-drift reporting MATCH on origin/main and the same normalized sha256 on both sides, so the overwrite is intended and not an out-of-band patch.
+
+### Tests
+- **The shared fixture.** `departed_history_inclusion.json` (10 rule lines, 23 cases) runs in `test_allocator_equity_departed.py` and in `src/lib/departed-history.test.ts`. `test_no_day_of_a_known_account_is_dropped` pins exactly-once over every case. A truth-table test pins `isLiveKey` against the derive's predicate (SFH-C4-10). Round 2 also ran a 40,000-set fuzz of the two twins (0 diffs, 0 exactly-once violations); that fuzz was a review measurement and is not a committed test.
+- **The compose and the book.** Exit seams, the clipped replay, the outflow booking and the flags are pinned in `test_allocator_equity_departed.py`. `shared_account_resolution.json` and `test_holder_matrix_parity.py` keep a departed pair's history, and count holder H on the day M's earlier end dropped (SFH-C4-07 follow-up).
+- **The UI.** `AllocatorExchangeManager.departed-history.test.tsx` covers the card, the switch, each SQLSTATE refusal and the Delete warning. `AllocationDashboardV2.departed-history.test.tsx` covers the Overview line. `HoldingsTabPanel.key-read-notes.test.tsx` covers the read-day and partial-read notes. `ApiKeyManager.test.tsx` covers its Delete warning. `rotate-secret/route.test.ts` pins the reset for a live key and the kept choice for a disconnected or inactive one.
+- **The reader.** `latest-holdings-per-key.test.ts` covers ascending, descending and shuffled input, the row cap, the account and clean-poll supersede rules, and the partial-read binding. `queries.test.ts`, `queries.my-allocation.test.ts` and `queries.audit-2026-05-07.test.ts` seed a key for the per-key read. One docblock was reworded so the SI-01 complete-status census does not count prose (5010706fc).
+- **The SQL gate.** `test_commit_scenario_batch_fingerprint_precondition.sql` adds tests 10 to 14 for the reader's set. They pass 14 of 14 on the local lane, and on the old body they reproduce the SFH-R2-01 409 verbatim. The file header now names the migration tests 10 to 14 need.
+
+### Notes
+- **Known limits, routed to Phase 167.1.2.1 RECONMARKER (ROADMAP, "ROUTED IN 2026-09-29 (from 167.1.2 PR C4").** Items (1) to (3) are D-16 gaps the founder chose to book there rather than accept or fix in C4:
+  1. A departed key never stamped with `venue_account_id` and never marked is its own account, so its older rows still show on Open Positions (dated, never as current dollars).
+  2. A clean empty poll on the same UTC day as a key's latest rows does not hide them, because the supersede rule is strictly later.
+  3. A Bybit unified-account id that is not parsed leaves the key ungrouped, with (1)'s effect.
+  4. WR-02 (data integrity, needs a migration): the `allocator_holdings` unique index and the writer's `on_conflict` do not include `api_key_id`, so two keys reading one account on one day can overwrite each other's rows. Any change moves `commit_scenario_batch` and the TS reader together.
+  5. WR-03 (data integrity): `account_groups` in `allocator_equity_derive.py` (also read by `equity_reconstruction.py`) and the dashboard reader in `queries.ts` must change together.
+  6. SFH-C4-04 remainder: `departed_history_unavailable` reaches Sentry only as a breadcrumb, and the Overview line cannot say how many accounts are missing (needs a count written in `job_worker.py`).
+  7. The Overview's "No positions to analyze yet" card is checked before the history state, so a book whose positions are all closed hides a ready curve (predates C4). A stale key's spot rows in Exchange Positions carry no date (C4 dated Open Positions only).
+- **WR-R3-01 (= SFH-R3-01, MEDIUM): no test pins the SQL fingerprint copy to the TS reader.** Step (3b) is a SQL twin of `fetchLatestHoldingsPerKey` plus `accountIdentityTokens`, and no gate runs both on one fixture. Both round-3 reviewers compared them clause by clause and found them in agreement. It is recorded, not fixed, under the round-3 rule.
+- **The migration auto-applies on merge: TEST first, then PROD, with no human reviewer gate.** Under the three-reviewer rule it was reviewed by migration-reviewer (safe to merge, 0 critical, 0 high, 0 medium), rls-policy-auditor (clean) and silent-failure-hunter, at `09a1e522f`. The record is `.planning/phases/167.1.2-*/167.1.2-C4-MIGRATION-REVIEW.md`, and it closes T-167.1.2-72.
+- **Plan 08, the read-only PROD census, is still to come.** It counts, per allocator, the departed keys with no `key_inputs` row or a null anchor. Keys that departed before C4 lost that row to the old orphan cleanup, so they render "History not available" and stay out of the book. That is D-22's state and no worse. Their history cannot be rebuilt without the saved balance.
+- **Reviews.** Round 1: code review, 1 blocker (CR-01), 4 warnings and 6 info; silent-failure review, 4 high and 5 medium. Fixed in topics K1, K2a and K2b. Round 2 (confirmation): 0 critical and 3 warnings; silent-failure 1 high (SFH-R2-01) and 2 medium. Fixed in topics R2A (the migration), R2B (WR-R2-02) and R2C (the holdings notes). Round 3 (confirmation) reported MEDIUM and above only, by founder rule (2026-09-29): one medium in each review, the same finding (WR-R3-01 above). Each fix topic was worked in its own worktree and merged back. Main was merged in twice.
+- **Verification and security.** `167.1.2-C4-VERIFY.md`: human_needed, 19 of 19 truths. The human items are the browser pass at 390px and 200% zoom, the Open Positions check on real PROD books after deploy, and plan 08's census. The security audit covers 13 threats with 0 open, including T-167.1.2-71 to -75 from the fix rounds.
+- **C3 lineage in the branch history.** C4 was cut from the C3 branch before #903 squash-merged, so the 48 C3 commits (plan 14 and C3 fix topics A to I) ride in this branch's history. Their content is on main as v0.111.1.0 and adds nothing to this diff.
+
+## [0.112.0.0] - 2026-09-29 — FACTSHEETTRUTH: every factsheet number agrees with the lists, never outruns its record, and states its unit once
+
+⭐ **What changed for whoever reads this next.** Phase 169 FACTSHEETTRUTH ships plans 169-01, 169-04, 169-05, 169-07, 169-09 and 169-10, then two review rounds (round 1 fix topics T1 to T5, round 2 topic T6) and three late fixes. 169-06 integrates and releases them. The benchmark comparator plans left this phase for Phase 169.5 BENCHCOMPARE (D-61), and the OG share card's headline belongs to Phase 169.4.1 OGSHARPE (D-44).
+- A single-key factsheet's CAGR and Sharpe are now the stored figures that discovery, /recommendations and /my-strategies already show. Before, the factsheet ran its own TypeScript recompute. Where the stored figure covers less than the chart, or uses a convention the page cannot re-derive, the page now says so or withholds the what-if.
+- A return window the record does not cover is blank. Before, it showed the whole-record return under a shorter label. The 6 Month, 1 Year, 3 Year and 5 Year rows are left out for a record shorter than that period.
+- The record length is stated one way, on the basis the reader selected. The freshness chip and the discovery badge judge a series' age on the same whole days.
+- A failed series read (the composite's daily returns, the MTM series, the smoothed series, or a chain-broken row's stored cash series) is an outage (`read_error`) and is never cached. The composite now reads every daily-returns row, not the first 1000.
+- Risk attribution on /portfolios/[id] states its percent once. /allocations shows sub-dollar prices and P&L at their real precision, with no signed or red zero, and a total over missing P&L says it is partial.
+
+⚠️ **A minor bump: the numbers on several pages change.** No migration and no Python change (measured: nothing under `supabase/` or `analytics-service/` in the diff). The factsheet cache key moves v7 -> v8 (below), so no factsheet cached before the deploy is served after it.
+
+### Changed
+- **The single-key factsheet headline reads the persisted scalars (169-01, SC4, D-10, D-25).** `readSingleKeyBasisOpts` takes the analytics row the caller already holds. It overlays the row's seven persisted headline scalars as the cash-basis headline, through the same overlay a composite uses. Both surfaces pass the row: the public factsheet's resolve stage (its analytics embed now projects the seven scalars) and the discovery detail page. The overlay applies only to a rankable row, because a failed or computing row still holds the previous run's scalars. It never applies when the raw `metrics_json_by_basis` already carries a `cash_settlement` object (the SC-4 stale window). A per-scalar null renders the em-dash.
+- **The overlay's gate is the seven keys, and each refusal reaches Sentry (review M-1).** The gate used to also need a finite stored cumulative return. So a rankable row storing null there (Python persists null for a non-finite value) fell back to the whole TypeScript headline, CAGR and Sharpe included, while the lists showed the stored values. The gate is now structural: the seven keys present. A stored null renders the em-dash, as the lists do. A missing key is refused, logged and captured. A rankable row with no finite cumulative return is captured as a warning, and a lone null Sortino or Calmar captures nothing. The per-basis scalar types are now `number | null`, which drops the cast that hid a stored null (IN-02).
+- **The buildability probe never captures a headline defect; a build captures it once.** The resolve stage also serves the probe that /strategies runs for every computed row on every load. Without this, a defective row would have sent one Sentry event per row per page load, the event storm 167.2.1 removed.
+- **A single-key strategy on a `simple` returns convention draws the curve its stored headline was computed on (review H-2).** Under `simple` the stored cumulative return is a sum and CAGR, Calmar and drawdown are arithmetic. Before, only the composite path resolved that, so a single-key page drew a compounded curve under an arithmetic "Since Inception" and the two drifted apart. `readSingleKeyBasisOpts` now takes the strategy's `returns_denominator_config` and applies the composite's own rule. Both the factsheet and the discovery page pass it. PROD had no such single-key row on 2026-09-29; the path is reachable.
+- **The leverage what-if is withheld where the re-derive cannot continue the stored headline (review M-2).** At leverage 1 the headline is the stored value, and at any other leverage it is the TypeScript re-derive. On a clean series the two agree. On a chain-broken row, or a row stored under a returns convention TypeScript cannot reproduce (`simple`, or an active-day Sharpe), moving leverage from 1.00 to 1.01 moved Since Inception by far more than 1%. The caption then presented that gap as the effect of leverage. Those rows now keep the leverage-1 view, as a composite already did.
+- **The factsheet says which span a chain-broken row's headline covers (review H-1).** On a row whose return chain broke, Python compounds the stored cumulative return and CAGR only over the stretch after the last break. The chart, the windows and Years Observed cover the whole series. The payload now carries the flag and the first stored day after the last break (read from the stored cash series, and only where that date is exact; never guessed). The page renders one amber caveat beside the headline in the KPI strip, Main Metrics and Cumulative Return Metrics, naming each surface's own labels, with or without a date. It shows only while the stored headline is the one on screen (cash basis, no what-if). Measured on PROD 2026-09-29: 4 of 15 complete rows carry the flag, 2 dateable and 2 not.
+- **The cash-basis leverage view keeps the stored Sharpe and Sortino (169-01, D-25).** The levered re-pin in `basis-context.tsx` now covers the cash basis too.
+- **Every return window is null unless the record covers it (169-04, SC6, D-11).** `compute()` applies one coverage rule to MTD, YTD, 3M, 6M and 1Y: a window whose first day comes before the first observation is null. It adds `p3y` and `p5y` on calendar days (3 x 365, 5 x 365). Those replace the panel's local look-back over 3 x 252 and 5 x 252 observations, which read a 24/7 record's two years as three.
+- **A weekday record's window is covered when only non-trading days come before its first date (review WR-02, then WR-R2-01; D-11 amended twice).** A weekday strategy launched on 2 January showed YTD as the em-dash all year, because 1 January is a day it did not trade. The tolerance allows weekends, 1 January and 25 December between the cutoff and the first observation. Other holidays differ by venue, so they are not assumed. Round 2 moved the trigger from the asset class to the series itself. The tolerance applies only when the record spans a Saturday and has no weekend observation at all. Before, a 24/7 record left on the default asset class borrowed it, and changing the asset class could move a return number. Any weekend print keeps the strict rule.
+- **Period rows are left out for a shorter record (169-05, SC6, D-17, D-57).** Cumulative Return Metrics omits the 6 Month, 1 Year, 3 Year and 5 Year rows when the strategy's window is null or absent, and the Returns panel omits 6 Month and 1 Year the same way. A null benchmark value alone keeps the row. This applies on the factsheet and on the `/allocations?tab=scenario` factsheet body. An empty scenario blend now omits all four rows alike (IN-03). Before, it showed "6 Month —" and "1 Year —" and hid 3 Year and 5 Year.
+- **The record length is stated one way (169-05, SC5, D-12, D-51).** A new `formatRecordLength` in `src/lib/factsheet/record-length.ts` formats calendar years and the observation count ("0.45 years, 166 daily observations"). The Strategy Thesis, Years Observed, the Main Metrics observation warning and the Terms panel's Sample size all read it. The warning used to state `n / periodsPerYear` years, and the thesis said "trading days", which a 24/7 venue does not have.
+- **The thesis and Terms state the selected basis's record length, as the rail does (review WR-03).** Under the MTM toggle with an MTM series shorter than cash, the page stated two lengths at once. The thesis and Sample size now read the same selected-basis view as Years Observed. The backtest flag still compares the live date with the cash record, which is the record that date describes (SFH R2-1). So an MTM series that starts later no longer reads "portion before live date is backtest".
+- **The freshness chip's date line states the date its subject names (169-04, SC5).** When the series end is what makes the factsheet stale, the chip shows the series end with its age and a separate "Computed" line.
+- **The chip and the discovery badge judge a series' age on the same whole days (review WR-04).** The chip bucketed its tone on the fractional age but printed the age floored, so on a boundary day it could read "old (7d)" in red against its own ladder. Both the chip and the discovery badge (`bucketSeriesAge` in `src/lib/freshness.ts`) now floor the age once, in one commit. A first chip-only fix was reverted, because it made the two surfaces name different bands for the same row.
+- **The factsheet cache key moves v7 -> v8, once for this phase (169-07, D-62).** `src/app/factsheet/[id]/v2/page.tsx` keys on `factsheet-v2-payload-v8`. A v7 entry lacks `p3y` / `p5y` and carries the computed headline. The review rounds' payload changes (the new optional data-quality fields, the arithmetic curve, the new read outages) ride the same v8 key, because v8 had not reached main. `revalidate` and the tag bust are both stale-while-revalidate, so only a key move stops a pre-deploy entry from being served.
+- **The key card's balance on the Exchanges page reads whole dollars (review IN-04).** It used to read compactly ("$12.3k", "$2.50M"). It now uses the one money module, whose rule for amounts is whole dollars ("$12,345"). This is a visible copy change.
+
+### Fixed
+- **A failed series read is `read_error` and is never cached (169-07, R3, D-41; review M-3).** `readCompositeFactsheet` throws `CompositeSeriesReadError` with the PostgREST code instead of folding a failed `csv_daily_returns` read into an empty series. The MTM and smoothed series readers used to turn a failed read into "charts stay cash". The public cache then stored a payload whose MTM toggle drew the cash series under the MTM label for a whole analytics run. They now throw the same error with a `read` discriminant naming the series. The single-key basis assembly moved from the build into the resolve stage, so a failed read answers `read_error` on every lane (public cache, owner lane, probe). The public cached callback throws on `read_error`, so nothing is stored. The Sentry event carries the code and the PostgREST message (SFH L-2). A missing or malformed row still degrades to no bundle. The chain-broken cash series read goes through its own member of the MED-1 predicate family, `shouldReadSingleKeyCashSeries` (WR-R2-03).
+- **The composite reads every `csv_daily_returns` row, in date-keyset pages (review CSV-READ-CAP).** PostgREST caps every response at 1000 rows with HTTP 200 and no error. The read was one `.limit(20000)` call, so a composite longer than 1000 days lost its newest days. Measured on PROD 2026-09-29: one strategy holds 1112 rows. The reader now pages by date until a page comes back empty. It throws `read_error` on any of three faults: a date that does not follow the cursor, a page with neither rows nor an error, or a series past the 20000-row ceiling. It never returns a partial series as if whole.
+- **The discovery detail page says the load failed, and reports it (review H-3, T5).** Before, a composite read outage there was logged to the console only, which never reaches Sentry here, and the page rendered "not available yet", which reads as "data not ready". Both arms now catch only `CompositeSeriesReadError`: the composite arm and the single-key arm, which could now throw. They capture it once to Sentry with its `read` tag and render "We could not load this strategy's factsheet right now. Reload this page to try again." No payload is built. An untrusted composite headline (no throw) keeps the old "not available yet" line. Any other throw still propagates.
+- **Risk attribution states its percent once (169-09, R1, D-49).** `marginal_risk_pct` and `weight_pct` arrive in percent (0 to 100) and were passed straight to `formatPercent`, which takes a fraction, so a 28% share read "+2800.00%". `RiskAttribution` now converts once and shows no plus sign. A hedge's negative share keeps its minus in the table and the tooltip (IN-05). The stacked bar plots the same fraction the table formats, so its tooltip agrees with the table. `RiskDecompositionRow` documents the unit.
+- **A missing weight stays null and never drives "Overweight risk" (review M-5).** The adapter read a missing `weight_pct` as 0, so the table showed "0.0%" and marked every row with a risk share "Overweight risk" in red. A missing weight now renders the em-dash with no assessment. `portfolio-insights.ts` no longer writes "on 0% of capital" for the same row. A hedge's negative share gets the colourless em-dash too, not a green "Balanced" (WR-R2-02).
+- **Sub-dollar prices and P&L render at their real precision, with no signed zero (169-10, R2, D-50).** There are new `formatUsdPrice` (2 decimals from $1, 4 significant digits under $1), `formatUsdSigned` (2 decimals, sign taken from the value rounded to cents, U+2212 minus) and `signAtCents` in `src/lib/dollar-validation.ts`. Open Positions and Holdings use them for entry and mark prices and unrealized P&L. The P&L colour reads the same rounded sign, so a value that rounds to zero shows "$0.00", no sign and the neutral colour. AUM, notional and allocation amounts stay whole dollars. The file-local formatters are gone, and DESIGN.md's Numbers Contract gains the currency row. `formatUsdPrice` and `formatUsd` no longer print "-$0.00" / "-$0" or "$NaN"; a non-finite amount renders the em-dash (SFH L-3). A contract test fails on any private `formatUsd` copy outside the module.
+- **The Open Positions total is not an exact-looking figure over missing P&L (review M-4).** A missing P&L used to be summed as 0 with no note, so with every P&L missing the total read "$0.00" and looked exact. With none reported, the total is the em-dash. With some missing, it keeps the sum of the reported rows, and a muted note reads "Partial total: P&L unavailable for N of M positions." The key-trust note no longer prints "$0.00" for a part with no P&L reported; it names the count of positions instead (IN-R2-05). That note builder is shared, so the composer's AUM marker changes the same way.
+
+### Tests
+- New with the plans: the headline-source test drives the real builder and both surfaces and pins the clean-series invariant (the persisted cumulative return equals the chart endpoint); the cash leverage re-pin; `compute.metrics.test.ts` window-coverage boundaries; the chip date line; the record-length formatter and its four sites; the row omission in both panels, including the scenario mount; the composite read-error page test beside a CONTROL proving an empty read is still cached; risk attribution's unit in the table, bar and tooltip; sub-dollar and zero-rounding money cases.
+- New with the review rounds: a 1112-row keyset read; MTM and smoothed read outages building nothing and caching nothing; the seven-key gate and its captures; a probe that captures nothing beside a build that captures once; the arithmetic curve and the withheld what-if; the chain-break caveat, dated and undated, on each surface with its own labels; a weekday coverage table (first session, one trading day later null) with asset-class invariance, weekend-print and too-short cases; the chip and the badge on the fractional boundary at 3.6 and 7.6 days; the selected-basis record length and the cash-record backtest flag; the missing-weight and hedge rows; the money-module sign, NaN and private-copy contract cases; the partial-total note. Every fix recorded red-first and a neuter that turns it red again, in its own report.
+- Moved by measurement, never widened: `build-payload.test.ts.snap` (nullable windows and the new `p3y` / `p5y` keys, 169-04); the boundary table's fixtures now pass the 365 basis of the 7-day venue they model (WR-02); two `(0.79y)` literals in Phase 167.1.2's `MetricsColumn.periods-per-year.test.tsx` to the calendar `(0.54y)`, threshold assertions untouched (169-05, D-51); P&L literals in `untrusted-key-status.surfaces.test.tsx` to the 2-decimal form (169-10, D-50); seven key-trust note pins to the count wording (IN-R2-05); the cache-key literal in the two cache tests (169-07). A test fake was stale, not the reader: the discovery page's `csv_daily_returns` fake now honours the keyset cursor (T5). A comment that phase-148's cache-isolation gate uses as its non-vacuity witness names `fetchAndBuildPayload` again.
+- Integration on the merged branch at 439e9e259, after the last merge of main (169-06 Task 1): tsc clean, lint clean, the compute-once and critical-regressions gates 203 passed, and the D-22 parity table (`fetch-and-build-payload.test.ts`) 38 passed. The full suite passed 17524 tests with one known load flake, described below. On the private local lane, 167.2.1's SC1 live reproduction passed 7 of 7 with 0 skipped, `REPRO-SINGLE-ONE-POINT` and `CONTROL-BUILDABLE` among them. Its two composite cases drive the new keyset reader against a real PostgREST: one page of rows, then the empty page that ends it. The live-DB lane under its execution ledger reports that the failing set is exactly the ledger (7 of 7), with no arm outside it failing. No 167.1.2 C3 assertion needed moving after the merge.
+- Re-baked 7 `svg-chart-parity` goldens (0b5b4ad76) after PR CI caught them, reviewed image by image rather than blind-updated: both full-page shots grow 21px for the freshness chip's new lines (169-04, SC5), and five panels move by a subpixel with identical values and colours.
+
+### Notes
+- **Known limits.**
+  - The weekday calendar is read off the series (WR-R2-01). So a weekday FX or CFD strategy whose MT5 broker prints a weekend bar loses the weekday tolerance, and its windows read the em-dash as before the fix. This fails safe, and the size of that population is unmeasured. A start after a Monday holiday on the 1st also reads the em-dash, because only weekends, 1 January and 25 December are assumed closed.
+  - The discovery detail page still assembles the factsheet on its own. Its outage catch and its not-rankable single-key arm are interim, and it captures a defective or outage row once per view, not once per build. Phase 169.1 plan 169.1-01 moves that page onto the shared build.
+  - This release moves the factsheet cache key v7 -> v8 (D-62). Each factsheet costs one cache fill on its first read after the deploy, and Phase 169.5 moves the key again.
+  - D-53: the portfolio analytics compute behind /portfolios/[id] may never refresh (inferred from source, not measured), so its risk panel can be empty or old. Booked as `[169-PORTFOLIO-ANALYTICS-COLUMNS]` and routed to Phase 166.4.1 PORTFOLIOANALYTICS.
+  - D-57: a record shorter than six months shows no 6 Month or 1 Year row at all, on the factsheet and the scenario panel. That is the fix, not a missing row.
+  - TypeScript `compute()` has no active-day basis, so an active-day row's Sharpe and volatility cannot be re-derived. Its leverage what-if is withheld, not approximated.
+  - A hedge's negative risk share still sits in the bar's fixed 0-to-1 domain, and has no word of its own yet.
+  - D-61: the BTC comparator's coverage and interval pairing ship in Phase 169.5 BENCHCOMPARE. D-44: the OG share card may still differ from the factsheet until Phase 169.4.1 ships.
+- **Full-suite timing.** Under full-suite load, `ci-anti-skip-gate.contract.test.ts` timed out at 5 s on one case. It passes 33 of 33 when run alone, and this branch touches nothing it tests.
+- **Reviews.** Round 1 was a code review (0 blockers, 5 warnings) and a silent-failure review (3 high, 5 medium), fixed in five file-disjoint topics T1 to T5. Round 2 was a confirmation review: every round-1 high closed, 1 new user-facing medium and 1 warning, fixed in topic T6. D-11 and D-41 are amended in `169-CONTEXT.md` and the ROADMAP, with lineage kept. A phase verification ran after round 2 and asked for this entry to be regenerated over the whole branch. Security audit: 28 threats; the one left open, the integration re-run on the merged branch, is closed by 169-06 Task 1. Comments the fixes made stale are corrected (IN-01, IN-R2-01).
+- **Planning.** The phase was planned, split into one-topic phases (169.1 to 169.4, then 169.4.1 OGSHARPE and 169.5 BENCHCOMPARE), replanned against current main and plan-checked. Decisions D-44 to D-62 are recorded in `169-CONTEXT.md`. Each plan carries a SUMMARY, and each review fix topic carries a report. `TODOS.md` books `[169-PORTFOLIO-ANALYTICS-COLUMNS]`. Main was merged into the branch six times, the last bringing 167.1.2 C3 (v0.111.1.0).
+
+## [0.111.1.0] - 2026-09-29 — ACCOUNTTRUTH C3: My Allocation says why its history is held, and every daily-returns read is complete
+
+### Changed
+- **The Overview and the Scenario choose their rebuilding copy by the history's state, never by a snapshot count (plan 14, D-15).** A brand-new book with no snapshot and no derived curve now gets the rebuilding panel with its named reason. The Scenario's own-book note follows the same state, so the two screens agree.
+- **The warm-up note tells the truth about its threshold.** "Ready" needs one return, N curve days give N-1 returns, and the factsheet builder needs two, so the note now says panels appear "once at least three days of blended equity history are available". Its count line counts the days of the curve shown above it, not legacy snapshot rows. Its test runs the real builder. D-15 is amended in CONTEXT and the ROADMAP.
+- **One reason classifier decides the wording on both screens.** `equityHistoryRebuildClass()` in `EquityHistoryRebuilding.tsx` sorts every reason into rebuilding, read_failed, needs_action or held_back. The Scenario sentence and the Overview heading both read it: a failed history read says to reload, a key problem says to update your keys on the Exchanges page, and a history that waiting cannot heal (derivation_rejected, shared_account_history_truncated) says "We are holding back". An unknown reason falls back to the generic line through one guard, never a blank one.
+
+### Fixed
+- **Daily-returns reads no longer stop at 1000 rows.** PostgREST caps every response at 1000 rows and says nothing. Measured on PROD 2026-09-29: one allocator holds 2804 `csv_daily_returns` rows (2348 inside the dashboard's 730-day window).
+  - The My Allocation dashboard's per-key read now drains every row through the new `src/lib/drain-by-id.ts` (id keyset, empty-page stop, fails loud on a repeated or missing id or at its page ceiling). Before, it read the oldest 1000 and lost the newest days. The wizard's composite preview uses the same helper.
+  - The allocator derive (`job_worker.py` `_load_allocator_daily_returns`) reads every key's returns by keyset on date, so a sibling key's concurrent write cannot skip or double a day. Past its page cap it deletes the stale curve and fails permanent instead of composing from part of the rows.
+  - The CSV analytics series read (`analytics_runner.py`) pages by keyset on date too.
+- **The daily-returns writers never expose a hole.** The dailies derive and the composite stitch now upsert the new rows first and then delete only the days the new payload lacks, in bounded batches that keep their exact old scope. Before, they deleted the span first, so a reader landing between the two statements saw days missing and read them as zero.
+
+### Notes
+- The `equityCurveSource` contract comments in `src/lib/queries.ts` now name the real reader (the chart's provenance stamp, mounted only when the history is ready). A test pins that a one-point trustworthy row reads as `derivation_rejected`, which the writer cannot produce.
+- Reviews: round 1 (0 critical, 0 high), then the founder's "fix all issues, and run confirmation". Round 2 found a pre-existing CRITICAL (the dashboard read cap above) and was fixed; round 3 found 0 critical. Fix topics A to I. Verification `167.1.2-C3-VERIFY.md`: human_needed, 8/8. Security: 9 threats, 0 open (T-167.1.2-65 to -70 added for the new reads and deletes).
+- Known limits, recorded: the Overview heading still says "being rebuilt" for the read_failed and needs_action classes (a copy call); no fix-H write has yet run against a real database; allocators past 1000 rows recompose from a complete read on their next key refresh after deploy. The public composite factsheet's own read cap is fixed in Phase 169, which lands next.
+
+## [0.111.0.1] - 2026-09-29 — BASELINE: automated re-dump after the PROD apply of 6ca90e73
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `36590346974`, after the PROD apply of merge `6ca90e73`: sha256 `af1760aa…` → `92b7d216…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-09-29` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.111.0.0 → 0.111.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=282 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `36590346974` succeeded, and this entry was composed by the `redump-pr` job. Run `36590346974` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.111.0.0] - 2026-09-29 — ACCOUNTTRUTH C2: the allocator history is rebuilt one account at a time, from flow-neutral returns, and shown only when it is right
+
+⭐ **What changed for whoever reads this next.** This is the second topic PR of Phase 167.1.2 PR C (D-21). It covers plans 10, 05, 12, 06, 07 and 11. Plans 06 and 07 moved in from C3 by founder decision (2026-09-29, "Pull 06+07 into C2"), because plan 11 depends on them and edits the same files. Plan 13 already shipped alone as v0.110.0.2 (#899). C3 is now plan 14; C4 (plans 09, 15) and plan 08 follow.
+- The daily equity refresh counts each exchange account once and carries a quiet account at its latest holdings instead of $0.
+- A book with zero equity snapshots is now bootstrapped by the daily fan-out.
+- The derived book series is persisted as version 2 with flow-neutral daily returns, so a deposit is no longer read as a gain.
+- My Allocation turns "ready" only when that series exists and every account is counted once; otherwise it says, in one line, what it is waiting for.
+
+⚠️ **A minor bump: new behaviour in the daily refresh, the derive and the Overview, plus a migration.** `20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql` **auto-applies to TEST and then PROD on merge, with no human gate**. migration-reviewer, rls-policy-auditor and silent-failure-hunter reviewed it over three rounds; round 3 found no CRITICAL or HIGH.
+
+⚠️ **Landing window.** Merge so the Railway deploy lands outside roughly 03:30–05:00 UTC (between the 04:00 poll and the 05:00 refresh). A deploy in that window writes one stale row per emptied account (C2 round-3 R3-WR-02).
+
+### Added
+- **The daily refresh counts one exchange account once and carries a quiet account (plan 10, D-18).**
+  - Holdings are read per account group (a holder plus every key marked as sharing its account), at the group's latest day, and summed once. A duplicate pair counts through a working key under D-18; a non-working holder is not counted beside it.
+  - An account that did not poll today is carried at its latest holdings instead of counted as $0.
+  - An account counts as emptied, and contributes $0, only when a clean poll found zero rows after its latest holdings day AND the key's own live equity read, taken after that poll, shows no material capital. Deribit never supplies that proof. A book whose every account is proven empty writes an explicit $0 row (`book_emptied`, sent to Sentry).
+  - A key that is not working and has no account id is not carried forward (only its same-day rows count), so an unstamped rotation is not summed twice.
+  - New counters: `never_polled_keys`, `identity_unknown_not_carried`, `emptied_accounts`, and the age of the oldest carry (WARNING above 3 days).
+- **The daily fan-out bootstraps a book with zero equity snapshots (plan 12, SC-7, D-17).** Migration `20260928140000` re-bases `enqueue_refresh_allocator_equity_for_all` on migration 075. For a book with no snapshots it enqueues a capped (25 per run) whole-book reconstruct and then the refresh, and the refresh holds the book's first row while its reconstruct is in flight. Refused credentials spend no cap slot, a book whose enqueue fails is skipped alone, and each skip or failure leaves a `cron_runs` row. The rollback restores migration 075's body, COMMENT and grants.
+- **The derived book series is persisted at payload version 2 with flow-neutral returns (plan 05, D-06).**
+  - `compose_allocator_equity` writes `version: 2` and `returns` computed from each key's returns and cash flows.
+  - The derive refuses to compose when a working-holder duplicate or an account-identity collision would count one account twice; the refusal deletes the curve and is sent to Sentry with no ids.
+  - A shared account whose working key starts later has the older key's returns and flows stitched in before that day. Where that cannot be done honestly (a gap, missing inputs, cut flows), the book is marked untrustworthy (`shared_account_history_truncated`). A shared account with no working key is untrustworthy too (`shared_account_no_working_key`).
+- **My Allocation reads the version-2 series and names the wait (plan 11, D-02, D-06).**
+  - "Ready" requires a version-2 trustworthy series with well-formed returns, no working-holder duplicate and no ccxt key still waiting for its account id. The legacy snapshot-curve fallback is gone.
+  - Each rebuild reason has one authored line: `duplicate_account`, `account_identity_pending`, `key_not_syncing` (names the key when there is exactly one), `awaiting_derivation`, `history_read_failed`, `derivation_rejected`, plus lines for no working key and a truncated history.
+  - The factsheet panels and the Scenario "vs your book" delta read the persisted returns, never a dollar curve.
+  - The 44px EquityChart tap-rect gate at 320px is restored; the e2e seed writes a version-2 row and an account id.
+
+### Changed
+- **The Scenario composer is honest about empty and excluded weight (plan 06, SC-4).** Zero weight mass returns the honest empty shape and shows no result, not a flat +0.00% curve. Every toggled-on dollar is in the total or in a named excluded part; dollars from disconnected or inactive keys are named "keys that are not connected".
+- **Small fixes (plan 07, SC-5).** A key's label, never its api key id, names each Scenario unit. The short-history warning reads the payload's own annualisation basis. A tab switch on /allocations updates the URL through the History API, with no server render.
+- **`/compare` per-holding return, Sharpe, max drawdown and vol stay withheld (D-13).** They are still day-over-day ratios of dollar values; routed to Phase 167.1.1.
+- **Deploy day.** Every existing derived row is pre-version-2, so books read `awaiting_derivation` ("recomputed once a day") until the 05:30 UTC derive rewrites them; this is not sent to Sentry. A rejected version-2 row is reported at most once per allocator and reason per 6 hours per server instance.
+
+### Fixed
+- **Review round 1** (gsd-code-reviewer 4 critical / 5 warning / 2 info; silent-failure-hunter 1 critical / 4 high / 4 medium / 2 low), fixed test-first by two topic fixers (Python writers, TS reader):
+  - Both Python writers used the pre-D-18 holder rule, so an inactive or failing holder dropped an account from the saved refresh total (CR-01, SFH-01/02/03). One shared `working_holder_predicate` and `account_groups` now sit beside `eligible_key_predicate`.
+  - The per-key read carried a duplicate pair at stale rows, because holdings rows belong to whichever key polled last (CR-03); an emptied account's last balance was carried forever (CR-04).
+  - A working key behind a live but not-working holder was held in `account_identity_pending` forever (CR-02, SFH-04, WR-05); a failing never-stamped key promised a sync that never comes (WR-02).
+  - A rejected row or a failed read showed as a daily wait (SFH-05/06); disconnected dollars were called connected (WR-03); a non-finite return was filtered silently (SFH-10/11).
+  - Plan 12's census pins, never carried to this branch, were re-measured (WR-04).
+- **Review round 2** found three CRITICAL and one HIGH, fixed the same way: the emptiness proof judged the key's current status instead of the proving poll (R2-CR-01); an unstamped rotation was summed twice in the saved snapshots (R2-CR-02); pre-version-2 rows showed "did not pass its checks" and alerted on every load (R2-CR-03); a failing older key's history was dropped under a benign flag (SFH-R2-03). Riding along: a poll landing between the refresh's two reads (SFH-R2-01), a fully emptied book (SFH-R2-02), a no-working-key book shown ready (SFH-R2-04), Sentry captures scheduled with `after()` (SFH-R2-05), the venue compared case-blind (IN-02), the derive refusal reaching Sentry (SFH-07), and one shared holder-state table (R2-WR-01).
+- **Review round 3** found one HIGH: a single clean empty poll could zero a funded account (SFH-R3-01), now also requiring the live equity read. Also fixed: a poll crossing UTC midnight blocked the emptiness proof (R3-WR-01), the two new blocking states had no way forward in their copy (R3-WR-03), and the Sentry flood on every 30-second refresh (R3-WR-04). By founder decision, round 3 fixed criticals and highs only, and its confirmation round was waived; the orchestrator confirmed both Python fixes red-before, green-after.
+
+### Tests
+- `analytics-service/tests/fixtures/shared_account_resolution.json`: a 72-cell holder-state × marker-kind × marked-key-state table, asserted by `test_holder_matrix_parity.py` against the real derive and by `holder-matrix-parity.test.ts` against the real reader.
+- `.gitleaks.toml` gains one narrow allowlist block (one rule, one file, one literal) for plan 07's synthetic `api_key_id` UUID in `scenario-adapter.test.ts`, a `generic-api-key` false positive. Calibrated both ways: the two fixture hits clear while a planted high-entropy key in the same file is still caught.
+- The SQL gate `test_refresh_fanout_zero_snapshot_bootstrap.sql` (32 arms, all biting on the pg lane). The mutation census moved by measurement: `FILES_FLOOR` 53 → 54, `ARMS_FLOOR` 513 → 545; `WAIVED_CEILING` stays 0.
+
+### Notes
+- **D-22 (founder, 2026-09-29, "Accept until C4"):** until C4 (plan 09) lands, a ready curve leaves out the history of departed (revoked or disconnected) keys.
+- **Expected red:** `baseline-content-drift` reports one DRIFT on `enqueue_refresh_allocator_equity_for_all`. This is the stale-baseline class, and the post-apply re-dump clears it.
+- **Routed, not fixed:** D-13 (`/compare` per-holding metrics) to Phase 167.1.1; eight writer residuals (the writer persisting its refusal reason, a single failing key diluting a ready book, a stitch dropping a newer-key-only deposit, the 1000-row returns read, never-polled keys, carry age limit, two working unstamped keys, the landing window) to Phase 167.1.2.1. `[167.1.2-C2-R3-IN-05]` is booked in `TODOS.md`. SFH-R3-03 and SFH-R3-06 stay recorded in the round-3 review.
+- **Known, not C2's:** `src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts` times out under full-suite load on a busy machine and passes alone.
+- **Ledger housekeeping:** C1's phase-level review files are renamed `167.1.2-C1-REVIEW*.md` so C2's reports do not overwrite them; plan 10/12/13 ledger files are carried onto this branch; plan 12's migration header records the D-20 routing.
+- **Verification** (`167.1.2-C2-VERIFY.md`): human_needed, 40/40 C2 must-haves verified; open items are founder copy checks, 390px / desktop 200% browser checks and post-deploy observation of the first 05:00 refresh and 05:30 derive. **Security** (`167.1.2-SECURITY.md`): 22 C2 threats, 0 open; merge condition VAC-04 green on the PR.
+
+## [0.110.0.2] - 2026-09-28 — ACCOUNTTRUTH: an empty sole-key reconstruct no longer wipes equity history
+
+### Fixed
+- A sole-key reconstruct that produces no rows no longer calls `replace_allocator_equity_snapshots` when `allocator_equity_snapshots` already has rows, or when that head count errors or comes back without a count. The job stays done and records the refusal on the existing `reconstruct_no_data` audit (`purge_refused`, `existing_history`, `snapshot_lookup_failed`).
+- A book with no snapshots still sends one empty payload, which is the previous behavior.
+
+### Notes
+- This is plan 167.1.2-13 only. It does not ship the history rebuild (plans 05 and 11) or the rest of PR C.
+
+## [0.110.0.1] - 2026-09-28 — BASELINE: automated re-dump after the PROD apply of 0bea4a9d
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `36391461817`, after the PROD apply of merge `0bea4a9d`: sha256 `6ea5065a…` → `af1760aa…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20260927180000_working_holder_rule_d18.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-09-28` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.110.0.0 → 0.110.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=281 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `36391461817` succeeded, and this entry was composed by the `redump-pr` job. Run `36391461817` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.110.0.0] - 2026-09-27 — ACCOUNTTRUTH C1: one exchange account is connected once, and a duplicate key is named on both key cards
+
+⭐ **What changed for whoever reads this next.** This is the first topic PR of Phase 167.1.2 PR C, split by founder decision D-21. C2 (history rebuild), C3 (honest empties and small fixes), C4 (departed-account overview) and plan 08 follow, landed one at a time. It covers plans 02, 04 and 16.
+- A key's venue account id is now captured when the key connects (OKX, Bybit, Binance, Deribit).
+- A second live key on an account the owner already has connected is refused in words.
+- The daily poll stamps the id on keys connected before this PR and marks any sibling key on a held account as a duplicate.
+- Both key cards name the duplicate's holder.
+- D-18's "working holder" rule is decided and shipped.
+
+⚠️ **A minor bump: new behaviour at connect and in the daily poll, plus a migration.** `20260927180000_working_holder_rule_d18.sql` **auto-applies to TEST and then PROD on merge, with no human gate**. migration-reviewer, rls-policy-auditor and silent-failure-hunter all reviewed it before merge, and none found anything above LOW.
+
+### Added
+- **The venue account id is captured at connect (plan 02, D-01, D-10).**
+  - The analytics validator reads the account id from the venue with the credential being connected: OKX uid, Bybit, Binance and Deribit ids.
+  - Both connect routes (`validate-and-encrypt` and the wizard's `create-with-key`) write it to `api_keys.venue_account_id`. sFOX has no knowable identity (D-10).
+  - A second live key on the same (user, venue, account) is refused by `api_keys_user_exchange_venue_account_uniq`. The 23505 is answered in venue-neutral words.
+  - A composite key rotation stays exempt (D-04).
+  - A missing id never fails a connect: the key is saved without one, and the poll fills it later.
+- **The daily poll stamps identity and marks duplicates (plan 04, D-01, D-04, D-11).** `stamp_account_identity` runs inside `poll_allocator_positions`, bounded by the poll's remaining time.
+  - It stamps a key's account id.
+  - If a live key of the same owner already holds that account, it marks the key `account_share_kind = 'duplicate'`, naming that holder. A pair of members of one composite with disjoint windows is marked `composite_member` instead.
+  - The duplicate is audited once (`api_key.account_duplicate_detected`), and the marker clears itself once the holder leaves.
+  - It never raises, never writes a status column, and never disconnects or deletes a key.
+- **The duplicate note on both key cards (plan 04, plan 16).**
+  - The allocator card says "This key reads the same exchange account as <holder>. Disconnect one of them." The manager card says "Delete one of them.", because that card has no Disconnect control (review WR-01).
+  - It names the holder by its own label (exchange and nickname, or a masked tail), never an account or user id.
+  - It shows only when both the marked key and its holder are working (review WR-02, SF-L1).
+  - A reconnect into an occupied account slot is refused in words.
+- **D-18, the working-holder rule (plan 16, founder decision).** A holder is working when `is_active AND disconnected_at IS NULL AND (sync_status IS NULL OR sync_status NOT IN ('revoked','sign_in_failed','error'))`. "Active" is the repo's `eligible_key_predicate`.
+  - Migration `20260927180000` re-bases `set_departed_key_history_inclusion` on its latest definition (`20260925120000`). Its `KEY_NOT_DEPARTED` test now follows D-18, and the grants are re-issued unchanged.
+  - It rewrites the COMMENTs on `account_share_kind`, `history_inclusion` and the function, and drops "provisional".
+  - The rollback is byte-identical.
+  - The TS reader `isWorkingHolder` follows the same rule, and a parity test reads the status tuple out of the migration (review SF-L3).
+
+### Changed
+- **Key labels name Deribit, sFOX and MT5 by their display names** (review IN-03). The Scenario data-source rows share the helper, so they change too.
+- **The wizard's orphan refusal copy (`KEY_ORPHANED`)** now says only what every path to it shares (review WR-04 follow-up, IN-02). A collision with a composite-member key answers `KEY_VENUE_ALREADY_CONNECTED` instead of the orphan copy (review WR-04). The wizard knows that code.
+
+### Fixed
+- **Review round 1** (gsd-code-reviewer 0 critical / 5 warning / 6 info; silent-failure-hunter 0 high / 6 medium / 4 low). Every in-scope finding was fixed test-first by two topic fixers:
+  - An unacceptable `venue_account_id` (blank, over 128 characters, not a string) connects the key unstamped instead of failing the connect (IN-02/SF-M6).
+  - `venueAccountId` is scrubbed from create-with-key's terminal catch (IN-05).
+  - The debug validate route no longer returns the account id (IN-01).
+  - The duplicate marker and its audit run as one thread task, audited only when a row was actually marked (IN-04/SF-M2/SF-M5).
+  - Stamper failures log by whether a retry can clear them, never with a Postgres DETAIL or a ccxt message (SF-M3/SF-M4).
+  - A comment typo is corrected (IN-06).
+- **Review round 2 found one regression the WR-04 fix had introduced (CR-01).** Reading `allocator_holdings` made genuine orphans answer the wrong refusal, because the daily poll writes holdings for every live key. The read was reverted, and a regression pin fixes the set of tables the path reads. Riding along:
+  - The faulted-read test pins its fall-through and its log line (IN-01/SF2-L2).
+  - A refused id is logged at `console.error` with issue codes only (SF2-M1).
+  - The service caps the id at the same 128 characters (SF2-M1).
+  - `_safe_message` reads only a PostgREST `APIError` (SF2-L4).
+  - Transient database failures log at WARNING, not ERROR (WR-01/SF2-L3).
+  - A ccxt key still unstamped after 3 days escalates to ERROR (SF2-M2).
+- **Review round 3** was the confirmation round that the CRITICAL required. It found no CRITICAL or HIGH.
+
+### Tests
+- The SQL gate `test_api_keys_account_identity.sql` gains the arms HIST-signin, HIST-error, HIST-inactive and HIST-nullstatus. It was run red-first on the pg lane and on the local stack's PROD-dump lane with the migration replayed.
+- `20260922120000` joins its `RED-UNDER-SETUP` list, so the lane admits a `sign_in_failed` seed.
+- The twelve RPC-body arms were re-pointed at the new migration.
+- The mutation census `ARMS_FLOOR` moved by measurement to the union with 164.9.3 CLAIMPAIR's arms. `FILES_FLOOR` stayed 53 and `WAIVED_CEILING` stayed 0.
+- Each fix round added red-first vitest and pytest cases for its findings.
+
+### Notes
+- **Known limits, routed rather than fixed here.**
+  - **To the C2 replan of plans 05 and 10** (also recorded in `167.1.2-CONTEXT.md`):
+    - For keys connected before this PR, the duplicate marker's direction follows stamp order, so the older key can be the one marked (review WR-03).
+    - A working key behind a holder that is not working keeps a NULL id although its identity is known (SF-M1).
+    - How the history rebuild treats a still-connected key that is inactive, sign_in_failed or error is still open.
+  - **To the C4 replan of plan 09:**
+    - Resetting an owner's include/exclude choice when a failing key recovers.
+    - Plans 05, 08, 09 and 10 must depend on plan 16.
+  - **D-20 → Phase 167.1.2.1 RECONMARKER:** the durable per-key history-reconstructed marker class.
+  - **Until Phase 167.1.1 keys holdings per key**, the Open Positions table and the exposure panel can disagree.
+- **Accepted after the round-3 confirmation (MEDIUM or lower, no further round per policy):**
+  - A marked duplicate or composite-member key that hits a transient failure after day 3 logs a false "duplicate check not running" ERROR.
+  - The `no_id` outcome never escalates.
+  - A key held only by an archived composite answers `KEY_VENUE_ALREADY_CONNECTED`, while My Strategies offers Finish setup on it.
+  - Expect a one-off burst of ERRORs from pre-existing unstamped keys after deploy.
+- **Founder decision owed (WR-05):** a ccxt wizard collision with the user's own draft answers `deduped` and drops the credential just entered. This is intended and pinned by a test, and already true for MT5.
+- **Incident, recorded:** while writing the rollback, an unquoted shell heredoc ran two Supabase CLI commands as command substitutions. Both failed immediately with no project link in the worktree, and no database was contacted. Every later generated file used a quoted heredoc or the Write tool.
+- **Verification:** `167.1.2-C1-VERIFY.md` is human_needed with 22/22 must-haves verified; the open items are the browser copy checks at 390px and 200% zoom, WR-05, and the first post-deploy poll. `167.1.2-SECURITY.md` has 16 threats, 0 open.
+
+## [0.109.0.1] - 2026-09-27 — BASELINE: automated re-dump after the PROD apply of 5ce71a98
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `36340841055`, after the PROD apply of merge `5ce71a98`: sha256 `5a32d248…` → `6ea5065a…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20260927120000_claim_pair_pre_rank_exclusion.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-09-27` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.109.0.0 → 0.109.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=280 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `36340841055` succeeded, and this entry was composed by the `redump-pr` job. Run `36340841055` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.109.0.0] - 2026-09-27 — CLAIMPAIR: a failed_retry job beside a pending twin no longer makes every claim raise 23505
+
+⭐ **What changed for whoever reads this next.** A `failed_retry` compute job and a `pending` twin
+of the same `(kind, partition key)` used to make every claim entry point raise `23505` on a
+`compute_jobs_one_inflight_per_kind_*` unique index. The failed claim aborted the WHOLE batch, so
+an unrelated due job on another partition was not claimed either. Four consecutive ticks all
+raised: it never cleared by itself. `failed_retry` sits outside every one of those partial
+indexes, so any enqueue made while a retry is outstanding writes the pair. The defect was LATENT:
+Sentry showed 0 matching issues over 90 days and 0 matching logs over 30 days. Phase 164.9.3 closes
+it in all three claim entry points and all four partitions (`api_key_id`, portfolio, strategy,
+allocator), in ONE forward migration (`TODOS.md` `[164.9.3-CLAIM-PAIR-23505]`, now closed).
+
+⚠️ **A minor bump: the claim path's behaviour on PROD changes.** The migration
+`20260927120000_claim_pair_pre_rank_exclusion.sql` **auto-applies to TEST and then PROD on merge,
+with no human gate** (the `Production` reviewer was removed 2026-09-23). ROADMAP success
+criterion 3 therefore needs migration-reviewer, rls-policy-auditor and silent-failure-hunter to
+review it BEFORE the merge. All three reviewed it over three rounds, and the last round, on the
+round-3 fix, found no CRITICAL, HIGH or MEDIUM issue. Their verdicts are in the phase's
+`164.9.3-MIGRATION-REVIEW.md`. Before the merge the founder kept the probe-exclusion amendment to
+D-04 and chose to fix the round-2 C39 finding in this phase (D-11) rather than route it.
+
+### Fixed
+- **The claim drops the retry BEFORE ranking** (plans 01-02, founder-ratified decision D-08). In
+  each claim body the `ranked` CTE's `WHERE` gains one clause per partition. Each clause matches
+  its `compute_jobs_one_inflight_per_kind_*` index predicate, and the strategy clause excludes
+  `compute_intro_snapshot` exactly as that index does. A `failed_retry` candidate whose
+  `(kind, partition)` already holds a `pending` row is no longer a candidate, so the partition
+  holds one candidate, the twin. The twin runs (at once if due, else when due) and the retry runs
+  after it finishes, so no work is lost. The block is byte-identical in all three bodies and
+  bracketed by begin and end markers. The enqueue side is unchanged.
+- **All three entry points, by arity.** `claim_compute_jobs(integer, text)` is re-based on
+  `20260603120000`, and the 5-arg `claim_compute_jobs_with_priority` on `20260719073701`. The
+  2-arg `claim_compute_jobs_with_priority(integer, text)` is re-based on `20260428190907`, NOT
+  dropped: every call form of it raises 42725 today, but dropping it would make VAC-04 report
+  `SNAPSHOT_MISSING`, which has no acknowledgement path. The 2-arg also gains the C39
+  running / done_pending_children guard the other two bodies already carry. Measured: without it,
+  the pre-rank clause alone still let the 2-arg's second tick claim the retry beside the
+  now-running twin and raise 23505. Each body is the latest definition byte-for-byte plus the
+  marked blocks (D-04), and SECURITY DEFINER, the pinned `search_path` and the REVOKEs are kept.
+- **The priority throttle no longer counts a retry the claim holds back** (review round 1,
+  WR-01). As first written, both `claim_compute_jobs_with_priority` overloads still counted a due
+  `normal`/`high` `failed_retry` in their throttle probe after the pre-rank clause had dropped it
+  from the candidates. Beside a `low` pending twin that claimed neither row, on every tick, and
+  throttled every due `low` job queue-wide, with no error. Measured: 0 of 3 rows claimed. Each
+  probe now carries a marked `CLAIMPAIR PROBE EXCLUSION` block that drops such a retry from the
+  count, on the same four partitions as the pre-rank clause and with its `compute_intro_snapshot`
+  carve-out on the pending sibling only. It is still claim-side and before ranking, so the
+  ratified D-08 stands; D-04 now reads "no bytes outside the marked CLAIMPAIR blocks". Latent
+  today: no writer sets `priority='low'` yet, but the column comment names `low` as the
+  post-deploy backfill class.
+- **The throttle also skips a retry the C39 guard holds back** (review round 3, founder decision
+  D-11). The probe still counted a due `normal`/`high` `failed_retry` beside a `running` or
+  `done_pending_children` row of the same `(kind, partition)`, which C39 drops in `deduped`, so
+  every due `low` job was throttled while nothing claimed the retry. Beside a fan-in
+  `done_pending_children` row whose parent is `low`, the throttle would hold that parent too, so
+  the hold would never end. That consequence is reasoned, not measured. It is also latent twice
+  over: no caller passes `p_parent_job_ids` and no writer sets `low`. Inside the marked probe blocks of both overloads, the portfolio, allocator and
+  api_key sibling tests now read `p.status IN ('pending', 'running', 'done_pending_children')`.
+  The strategy test takes a split form: a `running` or `done_pending_children` sibling excludes
+  regardless of kind, as C39's strategy clause does, and the `compute_intro_snapshot` carve-out
+  gates the `pending` sibling only. So the probe skips exactly the `failed_retry` rows no claim
+  body takes this tick (see Notes, IN-11). Widening the strategy test literally would have left an intro retry beside a running
+  intro sibling counted; the arm W-C39INTRO tells the two forms apart. The apply-time anchor pins
+  the new shape, and its failure text no longer names a single cause.
+- **An apply-time `DO $verify$` block that reads catalogs only.** It pins each pre-rank clause
+  between the `ranked` CTE and `deduped`, so a clause moved post-rank fails at apply, and pins the
+  probe block inside each throttle probe. It also pins the C39 guard on all four partitions, in
+  order, inside `deduped` in all three bodies, SECURITY DEFINER, the `search_path`, the closed ACL
+  and the `service_role` grant the worker needs, and never calls a claim RPC, so
+  it cannot refuse on TEST's empty tables.
+
+### Root cause
+- **The C39 guard skipped a candidate only beside a `running` or `done_pending_children`
+  sibling, never beside a `pending` one**, while the enqueue's dedup and the unique indexes cover
+  `pending`, `running` and `done_pending_children` but not `failed_retry`. When the retry ranked
+  first in its partition, the batch UPDATE flipped it to `running` and met the pending twin at the
+  unique index. This is the 2026-04-28 worker-spin class.
+- **Why not the ROADMAP-booked option (a).** Adding `pending` to the post-rank C39 status list was
+  measured on a throwaway lane as a SILENT permanent wedge. The retry ranks first, the guard drops
+  it, the twin was already dropped by the rank filter, and neither job is ever claimed (8 of 8
+  cells). It also starved `compute_intro_snapshot` (0 of 3 claimed against 3 of 3 today). Option
+  (a) was rejected on that evidence. The enqueue-side option (b) would not heal pairs that already
+  exist on PROD, and folding a new request into an older job can lose its payload.
+
+### Tests
+- **A red-first 18-arm gate, `supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql`**
+  (plan 01, plus one arm from review round 1 and two from review round 3). It has 12 partition
+  arms (4 partitions x 3 entry points), W-LOST (three ticks, no lost work), P2-C39 (a second tick
+  beside a running twin), the regression arm W-INTRO, W-LOWTWIN (a `normal` retry beside a `low`
+  twin), W-C39SIB (a `normal` retry beside a `done_pending_children` sibling) and W-C39INTRO (an
+  intro retry beside a `running` intro sibling). The first 15 arms were written and run BEFORE the
+  migration existed: on the pre-fix lane, 14 arms were RED, all 14 with SQLSTATE 23505, and
+  W-INTRO was GREEN. W-LOWTWIN was written and run before the probe fix: RED with no error and 0
+  of its 3 rows claimed. W-C39SIB and W-C39INTRO were written and run before the round-3 widening:
+  each RED with no error, the unrelated `low` job and the retry each claimed 0 times. After the
+  fixes, all 18 arms are green in CI mode. Each partition arm also fails if the unrelated job is
+  not claimed or the retry is claimed in that tick, so a silent-wedge "fix" still reads red.
+  Review round 1 made each arm's failure text name the SQLSTATE it actually caught, so the text
+  no longer claims a 23505 for every error. Parents are seeded as real rows, because
+  the claim's own UPDATE re-checks the foreign keys of rows inserted in the same transaction.
+- **D-09 lane proof, with no remote database touched** (plan 03). A fresh local-stack lane
+  replayed the migration on top of the dump, and the whole non-LANE-ONLY `supabase/tests` corpus
+  passed on it (78 of 78, with all six claim gates green). The gate also got its single pg-lane
+  `RED-UNDER-SETUP` apply list, ending with the migration, and exits 0 there.
+- **A layered mutation twin for every arm** (plan 04, then review rounds 1 and 3). Each twin
+  neuters one body's clause for one partition and stands that body's apply-time anchor down, so it
+  can redden only its own arm. W-C39INTRO's twin is the literal-widening form of the strategy
+  test. The narrowed runner reported all 18 arms biting their own arm first, with 0 waived.
+- **Floors and census pins moved by measurement** (plan 05, then review rounds 1 and 3).
+  `FILES_FLOOR` and `ARMS_FLOOR` rise to the values a full runner pass printed with no defects.
+  Plan 05 showed each floor biting in both directions. For the review-round `ARMS_FLOOR` moves,
+  only the stale-low direction was observed; the too-high direction was not re-run (see the
+  comment beside the constant). `WAIVED_CEILING` stays 0. The annotation-parser, floors, `lint-sql-gates` and
+  `gate-family-meta` census pins move with them, and every calibration pin keeps its offset. Read
+  the floors by symbol from `scripts/mutation-runner/run.mjs`, never from here.
+
+### Changed
+- **The two claim snapshots are regenerated** (plan 04).
+  `supabase/schema/functions/claim_compute_jobs.sql` and `claim_compute_jobs_with_priority.sql`
+  were rebuilt by `npm run schema:functions`, and each body is byte-equal to its migration body.
+- **Three VAC-04 acknowledgements** (plan 04). The migration header's `VAC-04 ACKNOWLEDGEMENT`
+  block carries one `prod-body-ack` per changed body. Each was derived locally and cross-checked
+  read-only against the PR's own VAC-04 report of the PROD hashes. An ack is earned only if the
+  VAC-04 run on the release head reports the same PROD hashes. The broken-windows ledger entry
+  for the placeholder this block replaced is marked fixed.
+
+### Notes
+- ⚠️ **Two residuals are recorded in the migration header, not fixed; a third was closed.**
+  (i) CLOSED in review rounds 1 and 3: the priority throttle counted a held-back retry. The first
+  draft of this entry called that a bounded hold. It was a silent permanent wedge beside a `low`
+  twin (see Fixed). The probe now skips a retry held back beside a `pending` twin (round 1) and one
+  the C39 guard holds back beside a `running` or `done_pending_children` sibling (round 3). So the
+  far-future-twin hold, the low-twin wedge and the C39-sibling hold are all gone, and W-LOWTWIN,
+  W-C39SIB and W-C39INTRO pin them. What stays: the probe block covers `failed_retry` rows only,
+  so a due `pending` `compute_intro_snapshot` row that C39 drops beside a running or
+  `done_pending_children` intro sibling is still counted (review IN-11). Only that kind can sit
+  pending beside an in-flight row. It predates this phase and is latent while no writer sets
+  `low`. (ii) A retry waits for a not-yet-due twin to run
+  first: delay, not loss. (iii) A claim racing a concurrent enqueue of the twin can still raise
+  23505 for one tick. That one is reasoned, not measured, and C39 has the same window today.
+- **No overlap with Phase 164.9.3.2 DEFER40001 (D-05).** The migration edits none of
+  `defer_compute_job`, `mark_compute_job_done`, `mark_compute_job_failed` or
+  `_enqueue_compute_job_internal`, so no ordering constraint arises with 164.9.3.2 or 164.9.3.1
+  FANINGRAPH. Only migration-timestamp order at merge time couples them. The planning commit
+  corrected two ROADMAP sentences and the `TODOS.md` repro to match: the claim overload has 5
+  parameters, not 6, the 2-arg's pre-fix result is 42725, and CLAIMPAIR re-bases no enqueue
+  function.
+- ⚠️ **Red on the PR by construction:** VAC-08 (`test-db-drift`) and the baseline-currency check
+  stay red until apply-on-merge and the re-dump bot's baseline PR. This is expected and is not a
+  verdict on the change.
+- **Phase artifacts.** The following are under `.planning/`:
+  - the phase's context, research, patterns and validation, and the six plans and their summaries;
+  - the D-08 ratification and the 2026-09-27 founder decisions (the D-04 amendment kept, and D-11);
+  - three code-review rounds with their fix reports;
+  - the SC3 migration-review record for all three rounds;
+  - the security verification;
+  - the phase verification (`passed` once both founder items were resolved), its UAT record, and
+    STATE and ROADMAP progress.
+- **Integration merges and version.** Three integration merges of `origin/main` carry no change of
+  their own. The first resolved a STATE-only conflict. The second brought a docs-only ROADMAP
+  routing commit. The third brought Phase 166.4 BENCHALIGN, which shipped as `0.108.0.0` first, so
+  this entry, first written as `0.108.0.0`, ships as `0.109.0.0`. It is still a minor bump,
+  because the claim path's behaviour on PROD changes.
+
+## [0.108.0.0] - 2026-09-27 — BENCHALIGN: a sparser-calendar strategy is compared to BTC over the same holding interval, in every benchmark-relative metric (review rounds folded in)
+
+⭐ **What changed for whoever reads this next.** Phase 166.4 BENCHALIGN (founder decision D-A)
+pairs each strategy return with BTC's return over the SAME holding interval. A weekday strategy's
+Monday return is now paired with BTC's Friday-to-Monday move, not its Sunday-to-Monday move. One
+pairing, `_benchmark_pair` in `analytics-service/services/metrics.py`, now feeds alpha, beta,
+correlation, information ratio, Treynor, r_squared, the 90-day rolling correlation and the rolling
+alpha/beta, so r_squared equals correlation squared again. An interval without a BTC close at both
+ends, or with a BTC date missing inside it, is left unpaired, never back- or forward-filled.
+
+⚠️ **This is a minor bump because values users can see change, on purpose.** Measured by running
+the phase-base engine (merge base `8eafe105`) and the release engine side by side on the same
+committed fixtures:
+
+| fixture | metric | before | after |
+|---|---|---|---|
+| SC3 weekday strategy vs 7-day BTC (`_q166_calendar_mismatch`) | beta | +0.012560995909126458 | **−0.0074239186416205985** (sign flip) |
+| same | alpha | 0.13859455190461534 | 0.13883648147122388 |
+| same | correlation | 0.03145618628996794 | −0.022291552331747115 |
+| same | treynor | 10.244913675949753 | −17.334015226339694 |
+| same | r_squared | 0.0005305518445182663 | 0.0004969133053590204 |
+| M1's test fixture (daily strategy vs business-day benchmark) | alpha | −0.37475915258336256 | −0.3258865239753311 |
+| same | beta | 0.04181777191266626 | −0.013651163018416783 |
+
+⛔ **No PRODUCTION row was recomputed, and this release carries no migration.** A stored value
+changes only on that strategy's next compute. Phase 166.3 RECOMPUTE owns the recompute and may
+resume once this merges and the worker is deployed, with the widened set recorded in its
+`### Phase 166.3` ROADMAP section: every benchmarked strategy (166.4 D-06).
+
+### Root cause
+- **M1 `d16b2fb4c` (v0.24.9.31, #323, 2026-05-27) split the pairing.** It moved alpha and beta
+  onto a daily inner join, which pairs a weekday strategy's Monday return with BTC's
+  Sunday-to-Monday move. r_squared kept a back-filled reindex, which zero-filled the first
+  benchmark point. So beta could flip sign while r_squared did not move. Phase 166 reproduced M1's
+  pairing exactly; it did not cause it. Phase 166.3's tracer recompute (R1) surfaced it.
+
+### Fixed
+- **One interval-matched benchmark pair for the scalar fan-out** (`0f8fd291f`, red-first in
+  `cdbd84072`). `_interval_matched_benchmark` returns, per strategy date, BTC's return over
+  (t_{k-1}, t_k]: a single return verbatim, several compounded, unpaired when either endpoint has
+  no close. `compute_all_metrics` builds `_benchmark_pair` once and feeds it to alpha, beta,
+  correlation, information ratio and Treynor.
+- **The rolling greeks, the rolling correlation and r_squared read the same pair; the fill arms
+  are retired; a sparse-calendar predicate is public** (`4a55d4ba9`, red-first in `4bc1f75cd`).
+  `_rolling_alpha_beta`, `_r_squared` and `_r_squared_pair_varies` read `_benchmark_pair`.
+  `_align_benchmark_like_qs` keeps only its equal-index path and raises a ValueError naming 166.4
+  D-A on an unequal pair, so a caller that skips the pairing fails loud. Phase 166's "the reindex
+  branch is kept on purpose" rationale is superseded by D-A (166.4 D-01). A naive strategy against
+  a zone-aware benchmark now degrades inside `compute_all_metrics` instead of raising from the
+  rolling leg. `strategy_calendar_is_sparse` is the predicate Phase 166.3 selects on (166.4 D-03).
+- **A BTC date missing inside a multi-day interval now unpairs that interval** (`d1d1fc077`,
+  review round 1 WR-01, red-first). Before this, a weekday strategy's Friday-to-Monday interval
+  was still paired when BTC's Saturday return row was missing, and the missing day's move was
+  silently dropped, which is a fill across a gap that D-A forbids. The production shape that
+  reaches it is one NaN BTC close, which `prices_to_returns` turns into two dropped return rows.
+  The helper now pairs an interval only when every date of the benchmark's own calendar inside it
+  carries a return; it infers that calendar from the weekdays the benchmark carries (all seven for
+  BTC, Monday to Friday for a business-day series), so business-day pairs keep their Mondays and
+  SC4 dense parity is unchanged.
+- **A strategy return of plus or minus infinity is read as a missing value once, in
+  `_benchmark_pair`** (`a4cbd5969`, review round 1 WR-02). `_r_squared` and
+  `_r_squared_pair_varies` used to drop that row while alpha, beta, correlation and information
+  ratio did not, so r_squared could be defined while correlation was not. Now every benchmark
+  metric drops the same row, and r_squared equals correlation squared on that input too.
+
+### Changed
+- **Sparse user-CSV strategies:** every benchmark-relative metric moves on the next compute.
+  Only a user-CSV series can have a sparse calendar in production.
+- **Dense strategies:** alpha, beta, correlation, information ratio, Treynor and the rolling
+  series are bit-identical, pinned by the SC4 parity test on four dense shapes. r_squared moves on
+  EVERY benchmarked row, by construction (166.4 D-06): the old value zero-filled the first
+  benchmark point. Measured on base commit `c1b4bc062` against the release engine, on two committed
+  synthetic dense fixtures: 0.00010582832055343811 → 5.812609307917895e-05 and
+  0.001937851398314801 → 0.0019729955639240094, with correlation and beta unchanged in both.
+- **Single-key broker and `stitch_composite` paths (SC5):** both hand the engine a dense series, so
+  nothing but r_squared moves. The single-key broker cash basis carries no benchmark. The
+  `stitch_composite` cash basis is benchmarked, zero_fill-densified and dense, so the same dense
+  statement covers it. When BTC itself has a gap (the stale-fallback path), the day after the gap
+  is now unpaired instead of paired with a two-day BTC move.
+- **Sparse strategies across a BTC gap (`d1d1fc077`):** a sparse interval that spans any missing
+  BTC date is now unpaired. That includes a missing BTC PRICE row, whose next return used to
+  telescope correctly across the gap; the helper receives returns, so it cannot tell a missing
+  price from a missing return and treats both as a gap. The full 7-day BTC series production
+  serves has no such gap in the normal case.
+- **Strategies with a plus or minus infinity return (`a4cbd5969`):** alpha, beta, correlation and
+  information ratio are now computed on the remaining rows instead of being absent, matching
+  r_squared. The headline metrics (CAGR, volatility, Sharpe) on such a series are still absent.
+- **Phase 166.3's ROADMAP section carries the handoff** (`a57e81c32`): the sparse subset named by
+  `strategy_calendar_is_sparse`, the widened recompute set (every benchmarked strategy, every
+  class), two read-only counts-only queries for the founder, R1 re-entering the set, and the resume
+  condition.
+
+### Tests
+- **New `analytics-service/tests/test_benchalign.py` and `tests/benchalign_fixtures.py`**
+  (`cdbd84072`, `4bc1f75cd`, `77cd87bdb`, `42a4bb1bd`, `6d15ed80a`). They cover the SC3
+  Friday-to-Monday beta, the one-pairing checks (r_squared equals correlation squared, the rolling
+  greeks and rolling correlation are computed on the interval pair), the zone-degrade test, the D-04,
+  D-05 and D-07 conventions, the sparse predicate, SC4 dense parity, the SC5 broker_nan and
+  zero_fill paths through `derive_basis_series`, the D-06 r_squared move, and the SC2 gap tests (an
+  absent, NaN or infinite interior close unpairs both adjacent intervals).
+- **Review-round tests** (`d1d1fc077`, `a4cbd5969`):
+  `test_benchalign_gap_missing_row_inside_a_weekday_interval_unpairs_it` (a missing BTC row
+  strictly inside a weekday interval unpairs exactly that interval; every other pair matches a
+  price-ratio oracle), and a plus-infinity and a minus-infinity case added to the r_squared equals
+  correlation squared test. All three went RED on the pre-fix engine.
+- **Four existing tests re-expressed, exactly the four the research predicted:** M1's
+  `test_benchmark_metrics_share_single_aligned_sample_on_calendar_mismatch` keeps its intent
+  assertions with its oracle rebuilt on the shared pair (166.4 D-04); the greeks parity
+  `calendar_mismatch` case moved to the SC3 test; and the two r_squared parity cases are
+  re-anchored on correlation squared. `tests/qstats_gate.py`'s mirrored reason strings name the
+  166.4 D-A pair. The golden 252-day parity file is unedited and green.
+- **Neuters N1-N7 each went RED and were restored byte-identical:** the pre-166.4 inner join
+  (N1), the t_{k-1} close check (N2), the D-05 index-0 block (N3, N7), a zero-fill in
+  `_r_squared` (N4), the sparse predicate (N5) and the D-07 base close (N6).
+- Full analytics suite: 7093 passed, 90 skipped, 0 failed. mypy with CI's exact line: no issues.
+
+### Notes
+- **D-04, D-05, D-06 and D-07 were ratified by the founder on 2026-09-27** (`cfc2c18b5`). D-04:
+  the both-endpoints rule also applies when BTC is the sparser leg, so a daily strategy's Monday
+  against a business-day benchmark is unpaired. D-05: the first strategy date pairs with BTC's
+  return dated that day, so a sparse series that starts on a Monday gets one daily-shaped first
+  pair; Phase 169.5 BENCHCOMPARE adopts this day-one rule before it executes. D-06: Phase 166.3
+  recomputes every benchmarked strategy, so stored r_squared agrees with correlation squared
+  everywhere. D-07: BTC's base close is the day before its first stored return, so a dense
+  strategy older than the BTC window keeps its first in-window pair; it assumes the stored BTC
+  series is contiguous (research assumption A1).
+- **Two review rounds, then verification and security** (`a7bc6da79`, `75930bc21`, `623d801cd`,
+  `501435fcc`). Round 1 found two warnings, fixed in `d1d1fc077` and `a4cbd5969`, with
+  `288cc5019` updating the D-02 cross-citation in the helper and test module docstrings. Round 2,
+  and the silent-failure review run beside each round, found no HIGH or CRITICAL. Two round-2
+  warnings are recorded rather than fixed, because production does not reach either: the benchmark
+  calendar is inferred from the weekdays present rather than declared (a weekday-only slice of BTC
+  would still get the Sunday-to-Monday pairing; production always passes the full 7-day series),
+  and a pair whose two legs share a zone like Europe/London that crosses UTC midnight between
+  seasons loses intervals silently. Verification passed 7 of 7 success criteria; the security audit
+  closed 15 of 15 threats.
+- **The Python and TypeScript pairings now differ in two places** (`288cc5019`): the D-05 index-0
+  rule and the interior-gap rule above. Phase 169.5 BENCHCOMPARE decides whether to adopt the
+  interior-gap rule as well.
+- **Planning and tracking commits:** phase context, research, pattern map and plans
+  (`e37a4ddea`, `5b322f435`, `b19f25b3e`, `b96c076cc`); the plan summaries (`5050a0108`,
+  `130c0d2c1`, `d0f8ef169`, `4e6e50f27`, `718efbd77`); and the orchestrator's tracking updates
+  after waves 1 to 4 (`fe267ed9e`, `bc16d1d58`, `daccc1035`, `92b345157`). `c1b4bc062` and
+  `e286f427e` merge `origin/main` into the branch and carry no change of their own. `ec8a1420e`
+  was the first release commit; this entry replaces it.
+- **Same-class sites found outside this phase's scope,** each read from `.planning/ROADMAP.md` and `TODOS.md` on 2026-09-27:
+  - `analytics-service/routers/portfolio.py` `benchmark_comparison` (an inner-join correlation, and BTC's own TWR drops weekend moves): routed to Phase 166.4.1
+  - `src/app/(dashboard)/allocations/lib/scenario-benchmark.ts` `innerJoinByDate` (the allocations scenario benchmark): routed to Phase 169.4
+
+## [0.107.1.0] - 2026-09-27 — APPURL guard: a Production build refuses a non-canonical NEXT_PUBLIC_APP_URL
+
+### Fixed
+- **Share links came back on the vercel.app alias.** A factsheet share link minted from the canonical domain on 2026-09-27 pointed at the vercel.app alias instead. The same variable feeds every absolute link the app mints: scenario share, emails, PDFs, alert acks. A wrong value there is a link on the wrong host that someone has already been sent.
+
+### Root cause
+- **The Vercel Production value of `NEXT_PUBLIC_APP_URL` was the vercel.app alias.** The share route's `resolveAppUrl` prefers that variable over the request origin by design, so the code did what it was told. Nothing checked the value.
+
+### Changed
+- **Outside the repo: the Vercel Production value was set to the canonical origin on 2026-09-27** by the orchestrator, on founder approval. It takes effect on the next production build.
+- **`next.config.ts` now exports `assertCanonicalAppUrl` and calls it when the config loads.** On a `VERCEL_ENV=production` build it throws, naming the variable, when the value is unset, not a URL, not https, a vercel.app host, or localhost. Preview and development builds are unaffected, since preview deploys legitimately live on vercel.app hosts. The guard refuses and never substitutes a host.
+
+### Tests
+- **`src/__tests__/app-url-guard.test.ts`** pins four cases: production with a vercel.app host throws, production unset throws, production on an https canonical host passes, and preview on a vercel.app host passes. Observed RED with the guard absent (4 failed), GREEN with it present.
+
+### Notes
+- Verified with Next's own config loader for the build phase: it loads with `VERCEL_ENV` unset, with preview on a vercel.app host, and with production on an https host, and throws for production on a vercel.app host.
+
+## [0.107.0.0] - 2026-09-27 — BENCHFRESH: the BTC benchmark is refreshed daily, read in full, and a failed read answers 503 instead of an empty series
+
+⭐ **What changed for whoever reads this next.** Before this phase nothing kept `benchmark_prices`
+current on a schedule: its only writer was a lazy refetch during an analytics compute. The
+`/api/benchmark/btc` route also read the table in one unpaged, oldest-first select, so once the
+table held more than 1000 daily closes the series silently lost its NEWEST days. Phase 169.2
+BENCHFRESH adds a daily refresh (Vercel cron at 00:10 UTC → the analytics service's existing
+fetcher). It puts every read of the table behind one paged reader. And a stale refresh or a failed
+read now shows as a failure (a 500 or 502 on the cron, a no-store 503 on the route) instead of a
+green run or a cached `200 []`.
+
+### Added
+- **`POST /api/benchmark-refresh` on the analytics service** (`benchmark_refresh` in
+  `analytics-service/routers/cron.py`). It refreshes BTC through the ONE existing fetcher,
+  `services.benchmark.get_benchmark_returns`, and adds no fetch logic of its own. It sits under
+  `/api`, so the global service-key middleware guards it like `/api/cron-sync`. It answers 200
+  with `{symbol, through, stale, points}` only when the TABLE, read back after the refresh (via
+  `_stored_through`), holds a completed BTC day of yesterday (UTC) or later. Every other outcome is
+  a 500, never a 503, because a 503 would trip the analytics breaker that every seam shares.
+- **`/api/cron/refresh-benchmark`**, a Vercel cron route scheduled at `10 0 * * *` in
+  `vercel.json`. It checks `CRON_SECRET` first (401), then the limiter (429 on deny, 503 when
+  misconfigured), then calls `refreshBenchmark()` in `src/lib/analytics-client.ts` through the one
+  analytics seam. It returns 502 when the service fails or its `through` is older than yesterday.
+  A failed or stale refresh reaches Sentry.
+- **`readBenchmarkPrices`, the one reader of `benchmark_prices`**
+  (`src/lib/factsheet/benchmark-source.ts`), along with `pricesToDailyReturns` and
+  `mergeWithFixture`. It reads keyset pages of `BENCHMARK_PAGE_SIZE` newest-first on `date` until
+  it sees an EMPTY page. At its `BENCHMARK_MAX_PAGES` ceiling it returns an error, never a truncated
+  series. It reports the closes it drops as unusable (non-finite or non-positive) instead of
+  skipping them silently.
+- **A `benchmark-refresh` seam budget** in `src/lib/resilient-fetch.ts` (100 s, sized from the
+  fetcher's worst case plus the service's own 80 s deadline). It is registered as non-retried by
+  design in `src/lib/seam-retry-registry.ts`: the only caller is the daily cron, and tomorrow's run
+  is the retry.
+- **`BenchmarkCacheWriteError` and `get_benchmark_returns(..., require_persist=True)`** in
+  `analytics-service/services/benchmark.py`. With the flag set, the scheduled refresh raises when
+  its cache write fails. Every other caller keeps the old behaviour, where the write failure is
+  logged and the fresh series is still returned.
+
+### Changed
+- **`/api/benchmark/btc` returns the newest BTC day.** It reads through `readBenchmarkPrices`, so
+  its length no longer depends on PostgREST's row cap. This closes the highest-risk site of the
+  TODOS unbounded-`.select()` CLASS entry, which is corrected in place from 8 remaining sites to 7.
+- **A read error on `/api/benchmark/btc` answers `503` with `Cache-Control: no-store`**, instead of
+  the old `200 []`, which the CDN could pin for the whole s-maxage/SWR window. The comment on the
+  consumer in `ScenarioComposer` is updated to match; its behaviour (any non-2xx shows the fixture
+  path) is unchanged.
+- **The route's Sentry captures are throttled** by `shouldCaptureNow` keys (`read-error`,
+  `dropped-closes`). They run inside `after()`, so a capture survives the function freezing after
+  the response. The dropped-closes capture carries at most the newest 20 dates.
+
+### Fixed
+Three rounds of code review and silent-failure review, all findings fixed or dispositioned:
+- **Round 1.** The refresh answers 500 unless the STORED series reaches yesterday. Previously the
+  fetcher swallowed a failed upsert and the endpoint still read green. The cron route refuses a
+  stale `through`, reports to Sentry, and sizes its budget to the fetcher. The reader pages by date,
+  and the route never bridges a return across a DROPPED corrupt close.
+- **Round 2.** The refresh fails when its own cache write fails (`require_persist`). It is bounded
+  by `_BENCHMARK_REFRESH_DEADLINE_S` (80 s), and it reads one pinned "today"
+  (`services.benchmark._utc_today`), so a run that crosses 00:00 UTC cannot demand a day the
+  fetcher never aimed at. The route's Sentry captures were throttled and moved into `after()`.
+- **Round 3 (D-47).** Round 2 had made `pricesToDailyReturns` skip every return across a missing
+  day. That made the cumulative BTC overlay (`ScenarioComposer`, the scenario-share page) drift off
+  BTC's real level for every later date. **Reverted:** a missing stored day is bridged again, which
+  is the pre-phase behaviour and matches Python `prices_to_returns`. Only the skip across a dropped
+  corrupt close is kept.
+- **Raw-5xx census (CI).** The refresh's six failure arms raised a raw `HTTPException(500)`, which
+  skips the error contract's `_validate`, and `test_raw_5xx_census.py` went red (18 sites against
+  a quarantine of 12 that may only shrink). All six now raise
+  `service_error(500, "BENCHMARK_REFRESH_FAILED", retryable=False)` with no dependency, so the
+  census is back to 12 with no quarantine change. The status stays 500 and the cron route still
+  answers 502 on any failure. The new code has a reasoned `VENUE_WIRE_CODES_WITHOUT_VERDICT` row
+  (only the cron route calls it, and that route never reads the code) and `STATUS_CONTRACT.md`
+  row S-28.
+
+### Tests
+- New suites: `analytics-service/tests/test_benchmark_refresh.py`,
+  `src/app/api/cron/refresh-benchmark/route.test.ts` and
+  `src/lib/factsheet/benchmark-source.test.ts`. `src/app/api/benchmark/btc/route.test.ts` is
+  extended. Every fix was written red-first (neuter → RED → restore).
+- The new seam key and cron route are named in every seam census: the budget, constants-pin,
+  log-coverage, rate-limit-posture and retry-registry tests, `vercel-cron-limits`,
+  `limiter-ordering`, the limiter route coverage in Python, and `src/__tests__/contracts/REGISTRY.md`.
+
+### Notes
+- **Planning.** The phase's execution, summary, review, fix-report, verification (human_needed
+  14/16, 0 failed), security (threats_open 0) and UAT artefacts are all under
+  `.planning/phases/169.2-*`.
+- **Phase 169's planning does not ship here.** This branch carried seven Phase 169 PAGETRUTH
+  planning commits. Two commits on it remove their `.planning/phases` files again, so every phases
+  path outside 169.2 matches `main`: the 169 directory (10 files), plus 21 files under 169.1,
+  169.3, 169.4 and 169.4.1. Those plans reference the 169 RESEARCH file, and one of them anchors
+  the factsheet cache key at v6 while `main` is on v7, so `plan-anchor-verify` would have gone red.
+  All 31 files are byte-identical on Phase 169's own branch. That planning also left one TODOS
+  entry on this branch, `[169-SCENARIO-WINDOW-ANNUALIZATION]` (owner Phase 167.1.2), which ships
+  with it.
+- **Routed:** Phase 169.4 ALLOCTRUTH gains success criterion 11 for
+  `[169.2-BTC-GAP-RETURN-STAMP]` (2026-09-27, D-47).
+
+### Known limits
+- **`[169.2-BTC-GAP-RETURN-STAMP]` is booked, not fixed.** `pricesToDailyReturns` still stamps a
+  return that bridges a missing stored day as ONE day's move at the later date. The overlay needs
+  the bridge; the inner-joined metrics would rather skip it. This bug predates the phase and is
+  latent, because the daily refresh treats any calendar gap as a cache miss and refetches. It is
+  routed to Phase 169.4 as criterion 11.
+- **Two review LOWs are accepted open** (reasons in `169.2-REVIEW-FIX-A-R2.md`):
+  - The cache read's `.limit(days + 1)` against `max_rows` is left alone. Changing it would alter
+    five pinned mock chains, and the refresh outcome no longer depends on it.
+  - A short-but-current upstream series is not refused. The CoinGecko fallback's free-tier length
+    is unmeasured, so a length floor could page every day Binance is unavailable.
+- **T-169.2-03-B is open, below the block threshold.** The SHA-bound post-deploy readings can only
+  exist after merge.
+- **Post-deploy check (VERIFICATION human item 1).** After merge and deploy:
+  - Bind the Vercel and Railway deployments to the merge SHA, and confirm Railway `/health` answers
+    200.
+  - Count the CI runs bound to that SHA (zero is a FAIL).
+  - After the first scheduled 00:10 UTC run, read the Vercel cron log.
+  - Read `/api/benchmark/btc` with a cache-busting query, and confirm its last point is yesterday
+    UTC.
+- **The 00:10 UTC schedule is a decision to revisit** (D-47). Binance publishes the daily candle at
+  its 00:00 UTC close. If the first scheduled runs answer 500 on freshness, move the cron to about
+  00:30 UTC in `vercel.json`.
+- The refresh deadline cannot recall a database call already handed to a worker thread, so a write
+  may still land after a 500. The next run's read-back sees it.
+## [0.106.0.2] - 2026-09-27 — record the TEST restore and re-dump evidence; 164.9.2 and 164.5.2 close
+
+### Notes
+- **TEST restored from the new baseline.** The preflight (run `36297240593`) rolled back byte-for-byte and printed no `42501`. The restore (run `36298217485`) reported 63 tables, 155 policies, 123 functions and 279 ledger rows. Both named TEST, not PROD. This closes 164.9.1 FC-3 and both of 164.9.2's items.
+- **The automatic re-dump (164.9.5) ran for real.** The D-18 dispatch (run `36299280127`) dumped PROD on a runner. Every gate passed, and the dump was byte-identical to the one merged in #877 (`changed=false`, no PR). That verifies 164.9.5's runner-dump and no-change criteria. The one open item is approving the workflows on the first bot PR.
+- **164.5.2 closes.** Its last item wanted review WR-02 (a pre-existing fan-in "lost release" in `mark_compute_job_done`) routed in both places. `TODOS.md` `[164.9.3.1-FANIN-GRAPH-RESIDUALS]` now lists it as clause (4), beside its ROADMAP routing under 164.9.3.1 FANINGRAPH.
+- **Phases passed and ticked:** 164.9.2 and 164.5.2. 164.9.1 and 164.9.5 each keep one open item.
+
+## [0.106.0.1] - 2026-09-27 — baseline re-dump after the #870 and #873 PROD applies
+
+Same shape as v0.93.0.2: a read-only re-dump taken after migrations reached PRODUCTION, so the
+local-stack lane loads a dump that already carries them and the body-drift gate reads clean.
+
+### Changed
+- **`supabase/schema/baseline.sql` regenerated from PROD**, read-only `supabase db dump --linked`
+  (Supabase CLI 2.84.2) taken manually by the founder AFTER Supabase Migrate applied
+  `20260925120000_api_keys_account_identity.sql` (run `36266617140`, merge `74f9b5cd2`, #870) and
+  `20260926120000_mark_compute_job_bridge_advisory_lock.sql` (run `36274235531`, merge
+  `37e6e6f7a`, #873). sha256 `22cce9c0…` → `5a32d248…`, recorded in `BASELINE.md` with a dated
+  section of what was measured. Shape: 63 tables and 155 policies unchanged, function statements
+  123 → 125 (121 → 123 distinct names), **0** data statements.
+- **`supabase/schema/baseline-carried-migrations.txt` regenerated in the same commit** (DECISION F)
+  from the tree of `37e6e6f7a`: two migrations added, sha line rebound.
+  `baseline-currency: carried=279 replay=0 marker-sha=match defects=0`.
+- **`NAME_SET_RATCHET` in `scripts/dump-sql-functions.ts` shrinks to empty.** Phase 167.1.2 added
+  two `snapshot-only` rows (`enforce_api_keys_account_share_same_owner`,
+  `set_departed_key_history_inclusion`) whose `clearedBy` named exactly this regeneration. On the
+  new dump the gate reported both `ratchet-stale` ("present on BOTH sides") and exited 1, so they
+  are deleted. The list only ever shrinks; this is the shrink.
+
+### Fixed
+- **`baseline-content-drift` reads findings 0 again.** Before the dump it reported findings on
+  5 functions whose PROD bodies the committed dump predated: `enforce_api_keys_account_share_same_owner`,
+  `set_departed_key_history_inclusion`, `reconnect_allocator_api_key`, `mark_compute_job_done` and
+  `mark_compute_job_failed`. It now reads compared 125, MATCH 122, DRIFT 3 (the three allowlisted
+  `[DRIFT-06]` rows), findings **0**.
+
+### Notes
+- **Secret-scanned before commit** with all five classes from `BASELINE.md`'s own command under
+  `grep -a`: **0** matches; no home path, local username or project ref; one
+  `SET client_encoding`, no NUL bytes.
+- `#869` (`8c0871735`) merged between the dump and this commit and touches no migration, so the
+  marker's merge stays `37e6e6f7a`.
+
+## [0.106.0.0] - 2026-09-26 — AUTOREDUMP: after a PROD migration apply, the committed baseline is re-dumped, gated and proposed as one bot PR that is never auto-merged
+
+⭐ **What changed for whoever reads this next.** Until now every PROD migration apply left `main`
+red on baseline-content-drift until someone ran `supabase db dump --linked` by hand (PR #864 was
+the measured case, booked as `[164.9.5-MANUAL-BASELINE-REDUMP]`). Phase 164.9.5 AUTOREDUMP makes
+that mechanical. Two new jobs in `.github/workflows/supabase-migrate.yml` run after `apply`
+succeeds on `main`. `redump-dump` takes a read-only dump of PROD and gates it. `redump-pr` composes
+the six-path change and opens or edits ONE bot PR on `automation/baseline-redump`. Nothing in the
+automation can merge, auto-merge or approve that PR. The manual procedure in
+`supabase/schema/BASELINE.md` `## Regenerating` stays as the fallback.
+
+⚠️ **Why a minor bump.** This adds a CI capability: two jobs, a 3727-line repo script and a new
+write path to the repository. The number was taken after two open PRs: #873 claims 0.104.0.0 and
+#869 claims 0.105.0.0. If they land in a different order, the number is re-taken at merge time
+as the next minor above `main`.
+
+⛔ **FOUNDER ITEM BEFORE MERGE (D-30).** Turn on Settings > Actions > General > "Allow GitHub
+Actions to create and approve pull requests", then re-read it with
+`gh api repos/{owner}/{repo}/actions/permissions/workflow -q .can_approve_pull_request_reviews`.
+It must print `true`. The verifier measured it as `false` on 2026-09-26. While it is off, the next
+merge that touches `supabase/migrations/**` turns `redump-pr` red on `main` at `gh pr create`, and
+Railway skips the analytics deploy while `main` is red. This PR touches no migration, so its own
+merge does not fire the path.
+
+⛔ **FOUNDER ITEMS AFTER MERGE.**
+- **D-18, a post-merge dry run.** Run `gh workflow run supabase-migrate.yml --ref main`, bind the
+  reading to the run's head sha, and read every job's conclusion. Expect zero migrations applied
+  and `redump-dump` green. Then either the D-10 no-op notice (`changed=false`, `redump-pr`
+  skipped) or a diff that becomes the first bot PR and is read hunk by hunk. Only this run may
+  justify narrowing the BASELINE.md version-skew caveat.
+- **D-23, the first bot PR.** A PR created or updated by `GITHUB_TOKEN` gets its `pull_request`
+  runs in an approval-required state. Click "Approve workflows to run", then list the head-sha
+  runs with name, status and conclusion. Every run must be `completed` / `success` before merge. Branch protection is off,
+  so a merge with zero completed checks is possible and must not happen.
+
+### Added
+- **`scripts/baseline-redump.mjs`, the re-dump logic in one repo script** (`ce6adfe47` tracer,
+  then plans 02, 03, 07 and 08). It has five CLI modes, and an unknown flag exits 1:
+  - `--gate-dump` judges one dump. It checks the hash and shape counts, runs the five-class
+    secret scan (line numbers only, never the text), runs gitleaks, and checks integrity. It
+    regenerates the carried-migrations marker from the applied merge's tree, and prints the D-10
+    no-op notice with `changed=false` when nothing changed (`5a8aa5293`, `4f2d81a74`,
+    `f4ed15955`).
+  - `--compose` copies the gated pair onto `main` and runs `run.sh --check-currency`,
+    baseline-content-drift (after its `--self-test`) and the staleness gate. It judges each by its
+    verdict line and re-scans the artifact (`9dd69e65c`). It stages exactly `STAGED_PATHS` (six
+    paths), refuses any other staged path and any CI skip token, and commits as
+    `github-actions[bot]` (`566419f42`).
+  - The CHANGELOG entry, the BASELINE.md `### Regenerated` section and the PR body carry every
+    measured value. That covers the run id, merge sha, sha256 prefixes, shape counts and the gate
+    lines verbatim (`dda2ec29a`). The writers refuse by name and stay inside the Provenance span
+    (`7dbf1d3d7`).
+  - `--check-bot-branch` refuses a human commit on the bot branch and names its PR. The no-op
+    notice reports the bot PR's status (`ab459c89d`).
+  - `--open-or-edit-pr` creates or edits the one bot PR. `buildPrArgv` can return only
+    `pr create` or `pr edit` (`51e2bd6f0`).
+  - `--self-test` runs `EXPECTED_ASSERTIONS` assertions, plus `EXPECTED_GITLEAKS_ASSERTIONS`
+    more with `--with-gitleaks`. Read the counts by running the command.
+- **Two jobs in `supabase-migrate.yml`, placed before `apply:`, with the credential split between
+  them (D-21)** (`1692f0f6f`, `b7f4e3f60`).
+  - `redump-dump` has `needs: [apply]` and a `main`-only `if:`. It runs in the `Production`
+    environment with permissions `{contents: read, packages: read}`. The PROD values it uses
+    appear in step `env:` only. It logs in to ghcr, then dumps into `$RUNNER_TEMP`. An artifact
+    of exactly three files is uploaded, only when `changed == 'true'`, and kept for 1 day.
+  - `redump-pr` has permissions `{contents: write, pull-requests: write}` and holds no PROD
+    credential. It re-hashes the artifact against `measured.json` before any write. It makes one
+    leased push to a hard-coded `automation/baseline-redump` refspec.
+  - Neither job has a `${{ }}` expression in a `run:` body, and both checkouts use
+    `persist-credentials: false`.
+- **Two gitleaks rules in `.gitleaks.toml` (WR-03)** (`16f768c3d`, tightened by `330613421` and
+  `74be4b607`). `supabase-secret-key` matches Supabase's current secret-key format.
+  `baseline-dump-password` is the gitleaks copy of the script's password class, scoped to a file
+  named `baseline.sql`. Both are rules. Neither widens an allowlist.
+
+### Changed
+- **`supabase/schema/BASELINE.md` `## Regenerating` documents the automated re-dump** (`77e549b7c`,
+  `dbd8a3509`). A paragraph dated 2026-09-26 names both jobs, every dump-side refusal, the bot PR
+  that is never merged by automation, the "Approve workflows to run" step, and the manual
+  fallback.
+- **`TODOS.md` `[164.9.5-MANUAL-BASELINE-REDUMP]` is closed with evidence** (`72aa0342b`). The
+  booking text is kept as lineage.
+
+### Fixed
+These came from four code-review rounds and four silent-failure hunts. Round 4 reported 0 CRITICAL
+and 0 HIGH.
+- **SFH-01 / WR-02: a dump whose marker could disagree with it is refused** (`6aa17d6e1`). The
+  merge's `supabase/migrations/` listing is compared with current `main`'s, fetched anonymously.
+- **SFH-03: a dump that lost an extension or a schema is refused** (`8b986c18d`), by the
+  `judgeCompleteness` floor.
+- **SFH-02: compose refuses an older dump over a newer baseline** (`fe342d062`).
+- **D-31: a dump whose `main` is already ahead is skipped with a notice, not refused**
+  (`385b5de23`). A later migration merge landed after this run's apply, so its own run re-dumps.
+  `redump-dump` stays green and `redump-pr` skips.
+- **CR-03 / D-32: a re-run attempt is judged by the `main` listing, not refused by its number**
+  (`e8e7df262`). Refusing every attempt other than 1 made "Re-run failed jobs" red on `main` for
+  good.
+- **R3-01: the main-listing verdict runs before the completeness floor** (`a63a5edea`). A D-31
+  skip is decided first.
+- **CR-02: a human commit blocks the bot branch only while its PR is open** (`b1bb7f89e`). This
+  NARROWS D-24's unconditional refusal (see Notes).
+- **WR-07: the marker-subset check exempts a migration that `main`'s checkout no longer holds**
+  (`11f52b2fc`).
+- **R2-06: a re-run of an older `redump-pr` never replaces a newer open proposal** (`b447da0fa`).
+- **WR-08 / WR-10: the password class matches credential forms only, in any case, and again
+  matches the doubled-quote form pg_dump writes inside a literal** (`330613421`, `74be4b607`).
+  Ordinary SQL such as a `WHERE` comparison is not a hit.
+
+### Removed
+- **D-33: the round-2 tail-count floor is reverted** (`535205415` added it for WR-06, and
+  `33d147993` reverts it). The round-3 review found it caused a HIGH (CR-04): `ALTER TABLE … DROP
+  COLUMN` drops column-level GRANT lines without a REVOKE. That meant a correct dump was refused
+  and `main` went red, and 2 of the 277 past migrations would have triggered it. The founder
+  chose to revert it rather than patch it again. Truncation is a recorded limit again (see Notes).
+
+### Tests
+- **`src/__tests__/baseline-redump-wiring.test.ts` (new) pins the redump jobs with calibrated
+  predicates** (`ac57193f5`, `4fbcd6598`). It pins job order, `needs:`/`if:`/`environment:`/
+  `permissions:` and step-`env:`-only secrets. It also pins that no live line merges,
+  auto-merges or approves, that there is exactly one bot push, and that `SECRET_SCAN_PATTERN` is
+  byte-equal to BASELINE.md's pattern. The gitleaks pin must equal ci.yml's `GITLEAKS_VERSION`,
+  and the self-test must run.
+- **`src/__tests__/supabase-migrate-test-first.test.ts`: `SCANNED_JOBS` widens from four jobs to
+  six.** A softened redump job would report green on a refusal.
+- **`src/__tests__/contracts/ghcr-login-before-image-pull.contract.test.ts`:
+  `supabase-migrate.yml:redump-dump` joins `PULLING_JOBS`.** `supabase db dump --linked` pulls
+  the remote's postgres image.
+- **`src/__tests__/critical-regressions.test.ts`: a dated correction in the `apply`-block
+  comment.** The workflow now has 13 two-space keys above `apply`, which is still the last job.
+- Every behaviour plan was written test-first: a failing arm, then the feature (`7f445eca2`,
+  `18f7d5db7`, `51e06e6c5`, `8c7d4b4c6`, `da84965e5`, `7bea53761`, `c6ee4f99f`, `7ad41c1bb`,
+  `f92e121df`). Each round's fix was observed RED against a neutered copy before it was kept.
+
+### Security
+- **SECURED, 37/37 threats closed** (36 mitigated, 1 accepted). Accepted: T-164.9.5-23 (D-25).
+  `contents: write` in `redump-pr` could reach `main` while branch protection is off. It is
+  bounded by the one hard-coded leased refspec.
+- **D-30 accepted side effect.** With the setting ON, any workflow holding `pull-requests: write`
+  can also approve a PR. That adds little while branch protection is off, and no workflow carries
+  an approve line.
+- **zizmor was skipped by founder decision.** D-28 makes it optional, and the skip is recorded in
+  `164.9.5-06-SUMMARY.md` `## zizmor (skipped)`. actionlint is clean, and the eight-item
+  injection checklist is recorded (`543784001`).
+
+### Notes
+- **Recorded limits (D9), carried so nobody reads them as fixed:**
+  - **WR-11 (MEDIUM, wording).** The truncation limit names the wrong cut line, because a cut
+    before the first `CREATE TABLE` is refused by `judgeShapeCounts`. It also overstates the
+    reviewer's signal: a cut in the `GRANT` tail changes no shape count in the PR body.
+  - **Truncation (R2-02 / WR-06, MEDIUM), recorded again by D-33.** A dump that exits 0 but is
+    cut off after its `CREATE EXTENSION` lines passes every `gateDump` refusal. It reaches only
+    the human-reviewed bot PR, never `main`.
+  - **An out-of-band PROD extension or schema drop (MEDIUM, loud).** The completeness floor
+    refuses every later re-dump until a hand re-dump, so `redump-dump` stays red on `main` until
+    then.
+  - **A compact empty password assignment is a secret-scan hit (LOW).** This is WR-10's accepted
+    cost. The committed dump and `supabase/migrations/` have 0 hits.
+  - **WR-01 (MEDIUM).** Composing onto CURRENT `main` can give a false red when two migration PRs
+    merge close together.
+  - **WR-04 (LOW).** The concurrency group is held up to about 35 minutes longer, which widens the
+    existing pending-run cancellation window.
+  - **WR-05 (MEDIUM).** The anonymous open-PR lookup runs on the normal path. A shared-IP rate
+    limit turns it red, and it fails loud.
+  - **IN-01.** The read-only ghcr token stays in the docker config for the rest of `redump-dump`.
+  - **IN-02.** `setup-node` in the write-token job gets the job token through its default input.
+    The action is SHA-pinned and GitHub-owned.
+  - **IN-03.** On the no-op path, `botPrStatus` turns a failed lookup into a warning, by design.
+  - **IN-04.** No IN-04 finding is recorded in the phase reviews.
+  - **IN-05.** The reset releases a closed-unmerged human commit. A PR reopened between the
+    check and the push is force-updated.
+  - **IN-06.** gitleaks and the script can disagree across a line end.
+  - **IN-07.** The newer-proposal guard also blocks a re-run when the newer proposal was closed
+    unmerged.
+  - **IN-08.** The `judgeCompleteness` docstring contradicts itself about truncation.
+  - **IN-09.** The `A RED HERE IS DELIBERATE` comment above `redump-dump:` still lists "a
+    truncated dump" among the refusals.
+  - **IN-10.** The spaced password negatives are script-only. The gitleaks rule is paired with the
+    script by behaviour, not by bytes.
+- **The CR-02 narrowing.** D-24 declared an unconditional refusal on a foreign commit on the bot
+  branch. The shipped behaviour refuses only while an OPEN PR heads the bot branch. Otherwise it
+  resets under the lease with a `::notice::` that names the short shas. After a squash merge, the
+  reviewer's own commit would otherwise block every later run.
+- **Verification is `human_needed`, 4/6.** Criteria 2, 3, 4 and 6 are verified. Criteria 1 (the
+  live PROD dump on a runner) and 5 (the live `gh pr create`) are present and wired, but they run
+  only after merge. The phase is not marked complete.
+- **Planning and ledger commits on this branch:** context, research, pattern map and plan
+  (`47a2f09d5`, `b349b1b7f`, `c942458ff`, `e14079e5e`). There are also STATE and wave-tracking
+  updates (`346c73371`, `e965d7e25`, `f35fcd533`, `a9d216d0a`, `e0b620ef4`, `12ed2ffd9`,
+  `0a391b03a`) and the plan summaries (`433f34f2a`, `993d4f2d3`, `7b8f1c64a`, `d89f9d87d`,
+  `468a305bc`, `b2afb2870`, `973a50371`, `fc71a4d5a`, `7299d52d8`, `61a88a187`). Next come the
+  review reports and decision records (`d9f179572`, `21aeff837`, `730971dc0`, `a27219a74`,
+  `548c5e9d7`, `d1b55774a`, `c505c2030`), and the verification and security audit (`4c4c6b3b2`).
+- **Already shipped, and only branch ancestry here.** `1599aceee`, `2e440003b`, `76ace261a` and
+  `9d763de02` (the roadmap splits and the 164.9.3/164.9.4/164.9.5 insertions) reached `main`
+  squashed in 0.96.0.1 (#865).
+## [0.105.0.0] - 2026-09-26 — COMPOSITECLAIMSNAPSHOT: the composite run reads the live job marker, not its claim-time snapshot, and a failed marker read retries instead of un-publishing
+
+⭐ **What changed for whoever reads this next.** A `stitch_composite` run decided "protected
+background ledger refresh, or loud user-facing failure" from the `compute_jobs` metadata it was
+claimed with. The SQL bridge `sync_strategy_analytics_status` decides the same question from the
+LIVE row. A `ledger-refresh-composite` marker retracted after the claim therefore made the Python
+stamp write error-only while the SQL bridge wrote a loud status, for the same job. The composite
+`_stamp_failed` closure now re-reads the live job row before it honours the marker, and the two
+layers agree. This was shown on the local lane before the fix (three retracted arms,
+`layers_agree=false`) and after it (4/4 arms `layers_agree=true`), and the regression test goes
+RED when the fix is neutered.
+
+⚠️ **This is a minor bump because worker failure behaviour changes on purpose.** A marker re-read,
+an entry publish-state read, a chain-edge read or any database call inside a failure stamp that
+fails now writes nothing and fails the job TRANSIENT (it retries), where it used to fall through
+to the loud, un-publishing write. A non-object `data_quality_flags` value is now dropped with an
+ERROR. A failing series heal after a landed stamp is logged and captured instead of re-raised.
+Precedent: GATEHYGIENE (0.90.0.0) and MT5VALIDATEWEDGE (0.96.0.0) each took a minor bump for a
+visible behaviour change. It was first numbered 0.98.0.0. It became 0.105.0.0 when main
+reached 0.104.0.0 before it landed, and it takes the next minor above main.
+
+⛔ **Merging this deploys the new failure handling to the analytics worker.** Railway redeploys
+once `main`'s CI is green. This release carries no migration and nothing under `supabase/`. The
+composite fan-out stays UNSCHEDULED: runbook items 6 and 7 of
+`[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in `docs/runbooks/ledger-refresh-go-live.md` are still
+BLOCKING.
+
+### Fixed
+
+- **The composite failure stamp re-reads the live job before it honours the refresh marker**
+  (plan 02, `9dbda9eb0`). Inside `run_stitch_composite_job`, `_stamp_failed` reads the live row
+  only when the snapshot would grant protection (`_honour_marker`: the composite marker on a
+  terminal-success row), so the read can only narrow. Only `MarkerLiveState.PRESENT` protects;
+  a marker gone from the live row takes the loud path the SQL bridge also takes. Since round 4
+  the read is `_read_refresh_marker_state(..., LEDGER_REFRESH_COMPOSITE_SOURCE)` through
+  `_stamp_io`.
+- **A failed marker re-read retries instead of un-publishing** (round 1 and 2: `2b7ec95ba`,
+  `57d9fc8d3`, `777c7e0bb`, `0d11629c5`, `e27eee2ea`, `f7ac84f7c`; CONTEXT D-09). The composite
+  stamp, the single-key `_stamp_strategy_analytics_failed`, `_read_entry_publish_state` (before
+  any crawl or write) and the REUSE-01 chain edge (before `_enqueue_csv_analytics`) now raise
+  `RefreshMarkerRereadUnavailable` on an unreadable marker, which `classify_exception` files
+  transient. A transient re-read keeps the failure cause it postponed (`777c7e0bb`), and the
+  retry-window comment and tail log subject were corrected (`f7ac84f7c`).
+- **The composite stamp's flags and status read retries a gateway 504** (`f7db9543c`), and the
+  not-confirmed logger refuses `PRESENT` (`0936ef6b0`, SFH-R2-06).
+- **A failed stamp read keeps its cause, and a protected row pages nobody** (round 3:
+  `59bafa62f`, `6d9b342e4`). Nothing is written, the job is transient, and the curated cause leads
+  `last_error`. The unconditional pre-read ERROR is gone: the protected path logs one WARNING, no
+  ERROR, no capture. The chain edge's exhausted end state is named, an unnamed marker state is
+  refused (`MarkerStateNotLoggable`, not a `ValueError`), and a programming error in the entry read
+  is reported.
+- **Every database call in both stamp closures goes through one wrapper, `_stamp_io`** (round 4,
+  `d5e610aa2`, SFH-R4-01). One ERROR with op and cause, one capture tagged `compute_job_id`, then
+  `StampIOUnavailable`. `RefreshMarkerRereadUnavailable` and `StampIOUnavailable` both derive
+  from `HandlerIOUnavailable`, which `classify_exception` maps to transient; neither is a
+  `ValueError`, so the F-5 re-stamp cannot catch them. The stamp-site `READ_ERROR` arms were
+  deleted.
+- **Round 5** (`d87e94fe6`, `7de4a1440`, `4a8bb5369`, `9a14a3b67`, `01d8afec2`). A deadline that
+  cancels a stamp call logs the cause and re-raises. A non-object flags value no longer re-stamps
+  through F-5. A failed series heal is logged at ERROR and captured. The tail mirror logs a
+  programming error, answers `READ_ERROR` and leaves the job DONE. A code comment now says the
+  `_READ_PROGRAMMING_ERRORS` split is a heuristic.
+- **Round 6** (`d2f0fa922`, `ec6988ea6`, `7fefc10b9`). `_heal_delete_basis_series` no longer
+  re-raises a programming error after a landed stamp: it logs one ERROR, captures once and
+  returns, so the job stays `permanent` and the bridge cannot write `computing` over the stamp.
+  `_flags_object_or_dropped` copies a dict, turns `None` into `{}`, and drops any other value with
+  one ERROR and one capture, on the composite failed stamp and on the composite success path.
+
+### Added
+
+- **A local-lane harm probe, `analytics-service/scripts/probe_composite_claimtime.py`** (plan 01:
+  `707e4a27e`, `813f16a60`; round 1: `d3904ab17`, `04ecd7df5`). It drives the real composite
+  handler, the real claim RPC and the real `mark_compute_job_failed` on the loopback stack, with
+  four arms, a next-bridge reading and `--expect pre-fix|post-fix` modes. A disproved premise exits
+  3. It refuses a non-loopback database before any service import and again on the connected
+  peer, prints statuses, booleans and counts only, and releases a foreign claim before it refuses.
+  It is a recorded local run (D-01), not a CI gate, and pytest does not collect it.
+
+### Tests
+
+- The retraction regression and its control and fail-safe arms (`01043b7f5`); under the neuter,
+  8 of 29 composite nondestructive tests go RED.
+- Exact ERROR-count pins for every row of the runbook alert-volume table (`31f24dbc6`).
+- The rendered composite re-read failure line carries the probe's fragment (`acc90d31e`); every
+  stamp cause survives `classify_exception`'s 500-character cut (`909ca5386`).
+- `test_stamp_io_exhaustive.py`: an `ast` scan of both stamp closures, with 4 more paths
+  (`bd4fcee22`), and an I/O name set derived by fixpoint instead of listed (`dd72ddc6c`).
+- Full suite at the verified code: `6537 passed, 90 skipped`, strict mypy clean. The 90 skips are
+  not passes.
+
+### Changed
+
+- **The runbook precondition is restated to match the tree** (plan 03: `8df5ed256`; round 1:
+  `1b298d48e`). Items 2, 4 and 5 of `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` are MET, item 4 keeps
+  its deploy-time check, and item 6 stays BLOCKING. The new item 7 is BLOCKING until
+  `[164.6.7-COMPOSITE-REREAD-RESIDUE]` closes.
+- **Runbook currency across the review rounds** (`39dc6a899`, `227cafdf4`, `f4964a5c5`,
+  `735fbb1d8`, `24cd35de6`, `153b4e735`, `c17d048ec`, `cafd19fc7`, `380ba6d5f`). The retry's
+  plain-`complete` limit is stated flatly. The alert-volume bound was re-derived for each round;
+  earlier figures are kept as superseded lineage. "The tail mirror never raises" is scoped to a
+  failed read. The deploy-time checks now name the round-4 symbols (`_stamp_io`,
+  `_read_refresh_marker_state`, `_STAMP_OP_MARKER_READ`, `StampIOUnavailable`); the older wording
+  is kept as lineage (verification W-3).
+- **Backlog** (`699c49ed2`). `161.1-D13` is closed with the original kept as lineage, and the
+  residual re-read window is booked.
+
+### Notes
+
+- **Planning, review and verification record** (`9d40cccae`, `a4ab649e5`, `7442905ff`,
+  `1b11d8008`, `c89178029`, `3e49e28e7`, `9d10d3848`, `4153499a0`, `ff050e2ab`, `62993fb0c`,
+  `62525b2a6`, `bb83647d1`, `df33beb30`, `333f359a7`, `905ac27fe`, `acdf7ed41`, `7a7f54a7e`,
+  `bd7a723e7`, `cffa2cdcd`, `d0e46241b`, `b662dd0b9`, `b5100446c`, `e93e489c5`, `5c6b97f6d`,
+  `11a828c93`, `5e7b57cb4`, `c84fbba78`, `c543884f7`, `ddb9c80d5`, `897a8441f`, `4a1741a39`,
+  `6980a9d69`, `8da4dca7e`, `120f61209`, `33d74c566`). Research, three plans and a plan-check
+  revision, seven code-review rounds with silent-failure reviews and fix reports (the last round
+  found no HIGH), the phase verification (`human_needed`, 21/21) and the security audit
+  (`threats_open: 0`).
+- `origin/main` was merged in at `8f33ddaff`. The one conflict, in `TODOS.md`'s
+  `## 🟡 FIX MID-TERM` section, was resolved by keeping both sides.
+- **Ship-time redaction.** The round-1 review file quoted three DSN-shaped fixture literals in
+  URL form. They are now written as `<user>:<pw>` placeholders, so the tracked planning file
+  carries no connection string. The meaning (a loopback host overridden by a non-loopback
+  `host=`, `hostaddr=` or `service=` parameter) is unchanged.
+- **Verification status is `human_needed`, not `passed`.** The phase is shipped for review and is
+  not marked complete.
+
+### Known limits (recorded, not fixed)
+
+- **`[164.6.7-COMPOSITE-REREAD-RESIDUE]`.** A retraction that commits between the Python live
+  re-read and `mark_compute_job_failed` still leaves the pre-fix outcome (the `computation_warned`
+  residue). The single-key honour site has the same window. Its length is unmeasured. Routed to
+  Phase 164.5.2. Runbook item 7 blocks composite scheduling on it.
+- **`[164.6.7-RETRY-PLAIN-COMPLETE]`.** The transient retry protects a `complete_with_warnings` or
+  warned row, but not a plain `complete` one: the bridge's non-terminal branch rewrites it to
+  `computing` before attempt 2 reads it. The result is a loud failure, not a silent one. The fix
+  is a bridge migration, routed to Phase 164.5.2. ⚠️ The runbook's W-3 correction names Phase
+  164.5.2.1 BRIDGERESIDUE as the owner. That split exists only on the unmerged 164.5.2 branch,
+  and on `main` `TODOS.md` and the ROADMAP still route to 164.5.2.
+- **Security residual R-1 (low, non-blocking).** `scrub_freeform_string` redacts a `key=value`
+  pair but not a credential-keyed value whose key is quoted before the colon, as in a Python
+  `repr` or JSON. The malformed-flags ERROR line can therefore carry one unredacted. The Sentry
+  message itself carries only the type name. The limit is older than this phase and applies
+  wherever the scrubber sees a dict-shaped repr. The suggested fix is in `services/redact.py`.
+- **Static-scan blind spots.** The scan cannot see a method call, a function defined outside
+  `services/`, or I/O reached only through a passed callable (such as the write in
+  `upsert_or_drop_provenance`). The discovery test cannot see off-thread calls.
+- **From review rounds 5 to 7.** A programming-error class raised in a stamp call is filed
+  `unknown`, and the curated cause then appears only on the ERROR line (SFH-R5-06). The executor
+  thread behind a cancelled stamp write keeps running, so that write can land after the job is
+  filed transient. `services/analytics_runner.py`'s `_read_existing_flags` still uses
+  `dict(... or {})`. That fails loud, not silent. `_refresh_marker_still_on_row` now only logs a
+  programming error. The runbook's alert bound assumes the 3-attempt budget
+  (`max_attempts DEFAULT 3`).
+
+### Deploy-time human items
+
+- On the worker's DEPLOYED commit, confirm that both stamp closures read the live marker through
+  `_stamp_io(lambda: _read_refresh_marker_state(...), op=_STAMP_OP_MARKER_READ)`, and that a
+  failed read raises `StampIOUnavailable` (founder or operator, at scheduling time).
+- Count the live composite `strategy_analytics` rows with `computation_warned = TRUE` (research
+  A1; founder, before scheduling). This needs a PROD read, which this phase did not run.
+- Re-count the Sentry event bound on the deployed commit (operator). Single-key, or a composite
+  with object flags: at most 10 per job (13 with a provenance refusal). A composite with non-object
+  flags: at most 15 (18).
+## [0.104.0.0] - 2026-09-26 — BRIDGELOCK: a second terminal mark on the same strategy waits on a per-strategy lock
+
+⭐ **What changed for whoever reads this next.** `mark_compute_job_done` and
+`mark_compute_job_failed` both call the strategy bridge (`sync_strategy_analytics_status`) at the
+end of a job. Until now neither serialized per strategy, so two terminal marks on one strategy
+could interleave their bridge reads and writes (`TODOS.md` `161.1-D1`). Phase 164.5.2 adds the SAME
+transaction-scoped advisory lock to BOTH RPCs, in ONE migration, so the half-applied lock
+discipline that entry warned about never exists. A second mark on the same strategy now waits for
+the first to commit. Marks on different strategies, and jobs with no strategy, do not wait.
+
+⚠️ **A minor bump: the database contract of two RPCs changes (they now serialize).** The migration
+`20260926120000_mark_compute_job_bridge_advisory_lock.sql` **auto-applies to TEST and then PROD on
+merge, with no human gate** (the `Production` reviewer was removed 2026-09-23). Every review had
+to happen before the merge, and it did (see `### Security`). It was first numbered 0.101.0.0. It
+became 0.104.0.0 when main reached 0.103.0.0 (Phases 166.1, 166.2 and PR #870) before it landed.
+
+⛔ **Merge ONLY after PR #870** (PR B, migration `20260925120000`). This migration sorts after it.
+PR #870 has merged and its migration has applied to TEST and PROD.
+Merging this one first would make PR B's migration backdated, and the backdated-migration policy
+would then block PR B. Do not allowlist around it.
+
+### Added
+- **The per-strategy bridge lock in `mark_compute_job_done`** (plan 01). The first statement
+  inside the existing `IF v_strategy_id IS NOT NULL` guard, directly before the bridge call, is
+  `pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text))`. It
+  uses the TWO-integer key form, in its own namespace, NOT the single-key `hashtext(strategy_id)`
+  the `161.1-D1` fix shape suggested, so a mark never queues behind a trade sync that takes the
+  single-key lock on the same strategy. The body is re-based byte-for-byte on its latest
+  definition (`20260603120000`) plus that one line.
+- **The same lock in `mark_compute_job_failed`, in the same migration** (plan 01). It is re-based
+  on `20260529180000` plus the one line. Both `REVOKE`s are re-issued word for word, SECURITY
+  DEFINER and the pinned `search_path` are kept, and no grant moves.
+- **An apply-time `DO $verify$` block that reads catalogs only** (plan 01). It pins guard, then
+  lock, then bridge as consecutive statements in both bodies. It re-checks the carried-forward
+  anchors, SECURITY DEFINER, the `search_path` value and the ACL, and it proves the namespace
+  differs from the only other two-key namespace (`admin_role_mutate`). Because it reads no table
+  data, it cannot refuse on TEST's empty tables.
+
+### Tests
+- **A LANE-ONLY two-backend concurrency gate, `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql`**
+  (plan 01). It opens two real backends over `dblink` on the pg-lane, with committed seeds and no
+  wrapping transaction, and observes WHICH lock the second backend waits on (`locktype =
+  'advisory'`, plus `classid`/`objsubid`), never merely WHETHER it waits. Four counted arms:
+  L1 (done lock removed) and L2 (failed lock removed) each went RED naming their own arm and GREEN
+  with the line restored byte-identically. L3 pins the namespace and key, and L4 pins the strategy
+  scope. A new lane fixture, `scripts/pg-lane/fixtures/36-fixture-dblink.sql`, installs `dblink`
+  for the lane only. The file is registered in `LANE_ONLY_SITES`, so `sql-tests` never runs it.
+- **Floors and every corpus census moved by measurement** (plan 03). `FILES_FLOOR` 50 → 51 and
+  `ARMS_FLOOR` 449 → 453, from a full local runner pass with no defects. `WAIVED_CEILING` stays 0.
+  The annotation-parser, floors, `lint-sql-gates`, `gate-family-meta` and `ci-anti-skip-gate`
+  census pins move with them, and the stale-low runner leg was re-run clean with no file edited
+  during it. Read the floors by symbol from `scripts/mutation-runner/run.mjs`, never from here.
+
+### Changed
+- **Both mark-RPC function snapshots regenerated, with two earned VAC-04 acks** (plan 02).
+  `supabase/schema/functions/mark_compute_job_done.sql` and `mark_compute_job_failed.sql` now name
+  `20260926120000` as their source and differ only by the lock line. The migration header carries
+  one `prod-body-ack` line per RPC, derived with `sql-body-normalize --diff-bodies` against
+  `origin/main`'s snapshot. That snapshot stands in for PROD, because no remote database command
+  was run.
+- **A loud `dblink` probe in the `sql-mutation` CI job** (plan 02). It reads the same
+  `--print-pgbin` answer and `pg_config` the lane boots, and fails with a named `::error::` if
+  `dblink.so` or `dblink.control` is missing. It has no `if:` and no `continue-on-error`. Nothing
+  is installed pre-emptively. The step's comment was then corrected to say that `dblink` on the
+  lane had run only on the authoring box, and the census attribution was measured and recorded.
+
+### Security
+- **Three pre-merge migration reviews, recorded in `164.5.2-MIGRATION-REVIEWS.md`.**
+  migration-reviewer APPROVE (0 CRITICAL, 0 HIGH, 1 MEDIUM: the merge order after PR #870).
+  rls-policy-auditor PASS (0 findings, no leak scope). silent-failure-hunter 0 CRITICAL/HIGH/MEDIUM
+  and 4 LOW. `/gsd-secure-phase`: `secured`, `threats_open: 0`. Anon and authenticated still
+  cannot call either RPC, and the lock key is derived from the job row only after the claim-token
+  fence.
+
+### Notes
+- **Pre-merge reads, all on the PR's CI bound to the head SHA.** (1) VAC-04 in
+  `migration-drift-check` must report, for each RPC, the same PROD hash as that RPC's
+  `prod-body-ack` line. On a mismatch, fold the PROD difference into the migration and re-derive
+  the ack. Never edit an ack to match the log. (2) In `sql-mutation`, the `dblink` probe must
+  pass on ubuntu. That is RESEARCH assumption A1, which has never run on the runner. L1 to L4 must
+  each print RED (identity ok), and the run must end at `arms: 453/453/0` with no defects and
+  exit 0.
+- **Expected red checks, none allowlisted.** `baseline-content-drift` (already red on `main`;
+  this PR adds the two mark-RPC rows) and VAC-08 in `test-db-drift` (red by construction until
+  apply-on-merge). VAC-04 is red only if read (1) above disagrees.
+- **Owed after the PROD apply: the baseline re-dump.** Both applies should print the
+  `mark-compute-job-bridge-lock:` NOTICE and raise nothing. The committed baseline must then be
+  re-dumped, which clears the two new `baseline-content-drift` rows.
+- **Known limits, recorded rather than fixed** (review round 1 was MEDIUM/LOW only, so no fix round
+  ran). **WR-01:** the gate never drives the FAILED RPC's key or namespace, and no arm pairs done
+  with failed on one strategy. The migration's shared lock anchor on both bodies catches that
+  instead, so it is a mutation-coverage gap and not a shipped-behaviour gap. **IN-02:** there is no
+  "all arms executed" completion sentinel; the arm count is guarded by `ARMS_FLOOR` and the parser
+  pins only. **SFH LOW 1–4:** no failed/failed twin of L3's key predicate; the gate's schema is
+  narrower than PROD's (VAC-04 and snapshot drift bind the PROD body); the namespace check does not
+  cover the CI mutex's key, which would need a zero hash; a stalled holder surfaces as a generic
+  statement timeout, which is not a new wait class.
+- **What stays OPEN.** The lock covers terminal mark against terminal mark only. The bridge's other
+  callers and the other writers of the rows it reads stay unserialized. A lock inside the bridge
+  itself is routed to Phase 164.5.2.1 BRIDGERESIDUE, and the bridge's read-order pins stay
+  load-bearing.
+- **Routed items.** **WR-02**, a pre-existing concurrent fan-in "lost release" in
+  `mark_compute_job_done` that can strand a two-parent child, goes to Phase 164.9.3.1 FANINGRAPH.
+  Its routing is carried in PR #871. This phase carried the body byte-for-byte and neither
+  introduced nor closed it. **IN-01**, the bridge's read-order comment that still says neither mark
+  RPC takes a per-strategy lock, goes to Phase 164.5.2.1, which re-bases that function. The
+  kind-scope drift pin found in research also goes to 164.5.2.1.
+- **`TODOS.md`:** `161.1-D1` is CLOSED on the RED-then-GREEN evidence and names what stays open.
+  Both DEC-4 lines now say TAKEN by Phase 164.5.2. No 164.6.7 entry was touched.
+- **Planning trail.** Context (derived autonomously), research (which split the two bridge residues
+  into 164.5.2.1), the validation strategy, the pattern map, and three plans in three waves, which
+  passed plan-check in round 3. Then the three plan SUMMARYs, the round-1 code review and
+  silent-failure review, the security verification, the phase verification (`human_needed`: the
+  pre-merge CI reads above, the post-merge apply, and the founder's closure decision), and
+  `STATE.md` recording the phase as executing. `origin/main` was merged in, with only
+  `.planning/STATE.md` and `.planning/ROADMAP.md` in conflict. Both kept `main`'s content, which
+  includes the founder re-route of this phase's four 164.9.1 items to 164.9.3 and 164.9.3.1.
+
+## [0.103.0.0] - 2026-09-26 — ACCOUNTTRUTH PR B: the account-identity migration ships alone, ahead of every reader
+
+⭐ **What changed for whoever reads this next.** Phase 167.1.2 (ACCOUNTTRUTH) makes one exchange
+account count once in the allocator's history, even when more than one key reads it. D-12 splits the
+phase into three PRs. PR A (0.92.0.0) hid the history. This PR B is the one migration,
+`20260925120000_api_keys_account_identity.sql`. It carries every DDL change the phase needs and
+ships ALONE, before any TypeScript reads a new column. If a key-list SELECT named a column PROD
+lacked, the Exchanges page would break for every allocator (RESEARCH Pitfall 1). PR C ships every
+reader, the stamper and the recompose that honours the new flag.
+
+⚠️ **This is a minor bump because the database contract changes on purpose.** It adds three
+`api_keys` columns, a same-owner trigger, an owner-callable SECURITY DEFINER RPC, and a new named
+refusal on `reconnect_allocator_api_key`. The only TypeScript change is the regenerated
+`src/lib/database.types.ts`, which reads nothing at runtime. JOBRPCTRUTH (0.93.0.0) took a minor
+for a migration-carrying contract change too. It was first numbered 0.99.0.0. It became 0.103.0.0 when
+main reached 0.102.0.0 (Phases 166.1 and 166.2) before it landed, and it takes the next minor above main.
+
+⛔ **Merging this applies the migration to shared TEST and then to PROD, with no human gate.**
+`supabase-migrate.yml`'s `apply-test` runs first, and PROD's `apply` follows once it succeeds. The
+`Production` reviewer gate was removed on 2026-09-23, so all review happened before the merge.
+migration-reviewer, rls-policy-auditor and silent-failure-hunter all passed at `39772766a` with
+0 CRITICAL and 0 HIGH, over five review rounds in total.
+
+⛔ **DEPLOY ORDER (D-12).** PR C starts only after this PR's PROD `apply` job has concluded success
+on its merge commit. Plan 03 Task 4 checks that and prints `D12_ORDER_OK`. Until PR C lands, a
+successful call to `set_departed_key_history_inclusion` stores the choice and enqueues a
+`derive_allocator_equity` recompose, but the recompose IGNORES `history_inclusion`. No reader of
+the column exists yet. No UI calls the RPC, so only a direct PostgREST call by the key's owner can
+reach it today.
+
+### Added
+- **The account-share marker on `api_keys` (D-11)** (`ffc0d7f4d`, then `27e149fc7` M1 and L2/L3).
+  `account_shared_with_api_key_id` and `account_share_kind` are both-or-neither and never point at
+  their own row. The FK is `ON DELETE SET NULL`. A same-owner trigger,
+  `enforce_api_keys_account_share_same_owner`, applies these rules when a marker is written:
+  - the holder must exist (23503 `ACCOUNT_SHARE_HOLDER_NOT_FOUND`);
+  - it must belong to the same owner (42501);
+  - it must be live (55000 `ACCOUNT_SHARE_HOLDER_NOT_LIVE`);
+  - it must not be marked itself, so no chains and no 2-cycles (23000
+    `ACCOUNT_SHARE_HOLDER_IS_MARKED`);
+  - a key that already holds another cannot be marked (23000 `ACCOUNT_SHARE_KEY_IS_A_HOLDER`).
+
+  The holder row is read `FOR SHARE`, so racing writers serialise. A holder cleared to NULL takes
+  its kind with it only when the writer left the kind unchanged, so a contradictory write still
+  reaches the CHECK. Nothing is ever auto-disconnected or deleted (D-01).
+- **`api_keys.history_inclusion` and the owner RPC `set_departed_key_history_inclusion(uuid, text)`
+  (D-05, D-09)** (`ffc0d7f4d`). The key's owner can choose `include` or `exclude` for a DEPARTED
+  key's history. The RPC answers 22023 `HISTORY_INCLUSION_INVALID` on a bad value and 55000
+  `KEY_NOT_DEPARTED` on a live key (`27e149fc7` L6). Only `authenticated` holds EXECUTE on it. Its
+  `search_path` is `public, pg_catalog` and it schema-qualifies its relations (`06b9afa52`).
+- **Column SELECT on the three new columns goes to `authenticated` only** (`ffc0d7f4d`). Every DO
+  block in the migration is catalogue-only. Shared TEST holds PROD's catalogue and none of its
+  data, and a data-reading DO block could refuse there and block the PROD apply.
+- **The rollback `supabase/migrations/down/20260925120000-rollback.sql`** (`168114b2a`, then
+  `c30b5d627` M4 and `178881008`). It drops the RPC, the trigger, the holder index and the three
+  columns. It restores `reconnect_allocator_api_key` and both COMMENTs, which were measured
+  byte-identical to `baseline.sql` after an up, down, up round trip. A precondition refuses a
+  database that never had the migration, where every `IF EXISTS` DROP would otherwise report a
+  hollow success. A post-verify refuses if anything the migration added survives. It also checks
+  that the restored reconnect body, its COMMENT, both column and index COMMENTs and the EXECUTE
+  grants (`authenticated` and `service_role`, never `anon`) all match. Its header says the
+  `schema_migrations` row stays, so `db push` will not re-apply the migration until that row is
+  handled.
+- **Database types for the new columns and RPC** (`3a27db675`). They were measured against
+  `supabase gen types` over the loopback local-stack lane, never a linked project.
+
+### Changed
+- **`reconnect_allocator_api_key` refuses a live twin by name** (`ffc0d7f4d`, then `27e149fc7` M3
+  and L4). It is re-based on `20260422101911`. It answers 23505 `KEY_VENUE_ALREADY_CONNECTED` when
+  a live key of the same user already holds the same exchange and `venue_account_id`, so the
+  database no longer surfaces an anonymous unique-index violation (Pitfall 5). Another tenant's key,
+  or the same account id on another exchange, does not block. A reconnect also resets
+  `history_inclusion` to NULL. The refusal ships now because PR C's plan 02 stamps ccxt account ids,
+  which makes the collision reachable beyond MT5. The VAC-04 acknowledgement is recorded.
+- **The `venue_account_id` column COMMENT and the `api_keys_user_exchange_venue_account_uniq` index
+  COMMENT now say what is true (D-10)** (`ffc0d7f4d`, `168114b2a`). ccxt venues carry an account
+  id, and sFOX stays NULL because its account id cannot be known, not because it is pending. PROD's
+  index COMMENT was MEASURED to be a shorter text that no migration produces. The new COMMENT keeps
+  every PROD sentence and drops "venue-confirmed". The rollback restores PROD's text.
+- **The column COMMENTs carry the reader contract** (`90c587336`, `9bacdde33`). A marked key is
+  counted through its holder only while the holder is working (`disconnected_at IS NULL` and
+  `sync_status <> 'revoked'`). Otherwise it counts on its own. That working-holder definition is
+  marked PROVISIONAL. It moves together with the RPC's `KEY_NOT_DEPARTED` test, and PR C plan 04
+  decides it with the founder. The `history_inclusion` COMMENT says the "never carries over" rule
+  binds every path that returns a departed key to live, including the rotate-secret route.
+
+### Fixed
+- **The history toggle cannot report success over a stale curve** (`27e149fc7` M2, `06b9afa52`,
+  `5991c08ac`, `9255dc600`, `20a366853`). Five review-round fixes, all in the RPC:
+  - it locks every in-flight or retry `derive_allocator_equity` row of the caller;
+  - it refuses 55006 `HISTORY_RECOMPOSE_IN_PROGRESS`, writing nothing, while a recompose is
+    running;
+  - it re-checks the job it hands back, and passes only a pending or `done_pending_children` job;
+  - a job that finished in between gets one more pass, and a second finished job answers 55006
+    `HISTORY_RECOMPOSE_RACED`;
+  - a lost enqueue race (40001 from `_enqueue_compute_job_internal`) is re-raised as the same
+    `RACED`, so no raw 40001 reaches the client;
+  - a NULL job id answers XX000 `HISTORY_RECOMPOSE_NOT_QUEUED`.
+
+  The function COMMENT tells clients to branch on MESSAGE_TEXT within 55006: `IN_PROGRESS` means
+  wait, `REQUEUED` and `RACED` mean retry now. No client reads any of these names yet.
+- **The toggle reuses a `failed_retry` recompose and never queues its pending twin** (`061be6526`,
+  `5991c08ac`, `9255dc600`, `e7b467d3b`). MEASURED on the pg-lane: a due `failed_retry` row beside
+  a pending row for the same allocator makes every claim entry point raise 23505 on
+  `compute_jobs_one_inflight_per_kind_allocator`, the worker-spin class of 2026-04-28. The reuse
+  now does all of this:
+  - it puts the row back to `pending`, due now, with `attempts` untouched;
+  - it clears `claimed_at`, `claimed_by` and `claim_token`, as `reset_stalled_compute_jobs` does;
+  - it re-checks `status = 'failed_retry'` in the flip, so a row a claimer took is never put back;
+  - it skips the flip when a pending, `done_pending_children` or running sibling exists;
+  - it re-raises a 23505 on the flip as 55006 `HISTORY_RECOMPOSE_REQUEUED`.
+
+### Tests
+- **New gate `supabase/tests/test_api_keys_account_identity.sql`, 37 arms, each `RED-UNDER-M`
+  annotated and observed RED (identity ok)** (`ffc0d7f4d`, `27e149fc7`, `a6b39abc6`,
+  `061be6526`, `1c366e115`, `fa01ab33f`):
+  - the ACCT arms cover the marker rules;
+  - the HIST arms include `HIST-lock` (the returned job is locked), `HIST-retry` (the reuse, then
+    the cleared claim), `HIST-tenant` (the reuse never touches another tenant's row) and
+    `HIST-requeued` (a test-local trigger measures the flip's 23505 handler in one session);
+  - the RECON arms cover the reconnect refusal, including the tenant and other-exchange twins and
+    the reset.
+
+  Follow-ups: `d01399b02` pins heap-order scans in `ACCT-s`, `77618abe7` narrows `HIST-lock`'s
+  RED-UNDER claim to what it proves, and `39772766a` moves the 23505 handler from the RPC's
+  REASONED list to the gated list.
+- **`test_api_keys_venue_identity_uniq.sql` gains arm 6f CCXT** (`168114b2a`, `d01399b02`). A second
+  live okx row on one account id is refused 23505 and admitted once the first disconnects. Any
+  other SQLSTATE now fails as `TEST FAILED (6f CCXT)`, not as an anonymous abort.
+- **New pg-lane fixture `36-fixture-compute-jobs-claim-token.sql`** (`e7b467d3b`). It stands in for
+  `compute_jobs.claim_token` so the reuse's claim clear runs on the lane without re-basing five
+  claim functions.
+- **Census pins moved by measurement, each observed RED at its old value** (`a25012815`,
+  `82beb2ea1`, `a6b39abc6`, `061be6526`, `1c366e115`, `fa01ab33f`). `FILES_FLOOR` 50 → 51,
+  `ARMS_FLOOR` 449 → 487, and `WAIVED_CEILING` stays 0. The `gate-family-meta` registry, the
+  annotation-parser pins, the floors `GREEN_LOG` fixture (with its three deliberate mismatches kept
+  one apart) and `COMPARED_FLOOR` 123 → 125 all moved too. The full lane run at `39772766a` printed
+  arms 487/487/0 with no defects.
+- **Function snapshots regenerated** under `supabase/schema/functions/`
+  (`enforce_api_keys_account_share_same_owner`, `set_departed_key_history_inclusion`,
+  `reconnect_allocator_api_key`), with two dated snapshot-only `NAME_SET_RATCHET` rows in
+  `scripts/dump-sql-functions.ts`. `COMPARED_FLOOR` lives in
+  `scripts/baseline-content-drift-check.mjs`.
+
+### Notes
+- **Known limit (round 5, M-1, recorded rather than fixed by founder rule): the reuse lookup's
+  `running` narrowing is not gated.** No arm reddens if the `NOT EXISTS` stops covering a running
+  sibling (`9255dc600`). The shape needs a second backend, and the SQL corpus runs one session.
+- **Known limit (round 5, M-2, recorded rather than fixed): the `serialization_failure` wrapper
+  around the enqueue is not gated** (`20a366853`). It is reasoned, not measured, for the same
+  reason. The round-5 INFO items are recorded and were not fixed.
+- **Known limit: until PR C, the recompose ignores `history_inclusion`.** See DEPLOY ORDER above.
+- **Known limit: the Exchanges page shows its generic reconnect-failure copy for
+  `KEY_VENUE_ALREADY_CONNECTED`.** `AllocatorExchangeManager` logs the RPC error but does not map
+  the name. Before this PR the same collision would have surfaced as the index's raw 23505
+  (reasoned, not measured on the reconnect path).
+- **Known limit: the rotate-secret route does not yet reset `history_inclusion` when a revoked key
+  returns to live.** The column COMMENT says so, and PR C owns the fix.
+- **Routed in `TODOS.md`** (`7fdd1fe02`): `[167.1.2-REUSED-RETRY-ENDS-FAILED-FINAL]` goes to PR C
+  plan 04, and `[167.1.2-SECOND-FAILED-RETRY-ROW-STAYS]` goes to Phase 164.9.3 CLAIMPAIR.
+- **The committed baseline needs a re-dump after the PROD apply.** Phase 164.9.5 AUTOREDUMP is not
+  merged yet, so this is manual. Until it happens, `supabase/schema/baseline.sql` lacks this
+  migration. The local-stack lane replays it on top of the dump
+  (`baseline-replay: 1 migration(s) newer than the dump: 20260925120000_api_keys_account_identity.sql`,
+  measured after merging `main`). Until then the drift check reports the two new functions as
+  `SNAPSHOT_MISSING` and the re-based `reconnect_allocator_api_key` as `DRIFT`. The two
+  `NAME_SET_RATCHET` rows clear at that refresh.
+- **Merged `origin/main` twice** (`bf1a25bb6`, and the ship merge `035be2ae4`, which brings in `main` at `3b923498e`, v0.97.0.0). Both
+  merged with no conflicts. Main added no migration in between, so the replay set names only this
+  branch's migration.
+## [0.102.0.0] - 2026-09-26 — COMPUTEONCE: each TypeScript Sharpe, correlation and beta is computed once, in one floored module, and a statistic that does not exist reads "—" on every page
+
+⭐ **What changed for whoever reads this next.** Phase 166.2 is the TypeScript half of the
+dispersion-residue fix. About twenty TS sites each carried their own copy of a Sharpe, correlation
+or beta formula behind a `> 0` guard. On a compounding-NAV constant yield the standard deviation
+is about 1e-16, never exactly 0, so every copy passed its guard and printed a Sharpe in the
+trillions or a correlation computed from rounding noise. The founder's direction (D-17, verbatim:
+"Why don't you calculate Sharpe once and the 20 places all read it from there?") replaced the
+twenty copies with ONE module, `src/lib/return-stats.ts`, and every site now calls it.
+
+⚠️ **This is a minor bump because values a user can see change, on purpose.** For a series with no
+real dispersion, the Sharpe, correlation, beta, information ratio and related cells on `/compare`,
+in the scenario composer and its benchmark and stress panels, on the Risk tab, on the factsheet and
+on the OG card no longer show a residue number. ⭐ **Founder decision D7 (2026-09-26, "Show —
+everywhere"), taken in the review round:** a statistic that does not exist stays empty end to end
+and reads "—" or a gap on EVERY page, never 0.00 and never "unchanged", and every page agrees. The
+plans first mapped it to whatever each site showed for an exact constant (D-07), which was 0.00 at
+eight sites; D7 reversed that for display. Review rounds 2 and 3 carried D7 to the statistics that
+still printed a 0 for "does not exist": Sortino, Calmar, Profit Factor, Calmar by Year, skew,
+kurtosis, Avg Loss, Avg Win, the rolling Sortino and the empty scenario body. Series with real
+dispersion are unchanged: every shared function keeps the arithmetic order the factsheet already
+used, and the factsheet snapshot moved only by six additive resample counts (D-28, below), with no
+number changed.
+
+⛔ **This entry claims the TypeScript half only.** Since the 2026-09-26 split (D-23), the Python
+floor sites shipped as Phase 166.1 (`[0.100.0.0]`, below) and the PROD recompute of rows computed
+before Phase 166 ships as Phase 166.3. Neither is in this release. This release carries no
+migration and no `analytics-service/` or `supabase/` path of its own.
+
+**Version.** `origin/main` read `0.100.0.0` at ship time and open PR #873 claims `0.101.0.0`, so this
+release takes `0.102.0.0`. It replaces the `0.97.0.0` that this branch carried through two earlier
+release commits (`bd42a740c`, then `be37c440e` folding review round 1); main has since used
+`0.97.0.0` for DRBOPTIONS, and that entry below is main's and is untouched.
+
+### Added
+
+- **`src/lib/return-stats.ts`, the one TypeScript home of dispersion, Sharpe, Pearson and beta**
+  (plan 01, `ff613e350`). It holds Phase 166's floor (`DISPERSION_RESIDUE_REL`, `residueFloor`,
+  `dispersionIsResidue`, `dispersionIsReal`, the Python rule verbatim) and the four ratio functions
+  `dispersion`, `sharpe`, `pearson` and `beta`. `dispersion` returns an sd of exactly 0 when the
+  dispersion is residue, so "no dispersion" answers what an exact constant answers, stated once.
+  It builds on the existing `mean` and `stdDev` in `src/lib/portfolio-math-utils.ts`, so there is
+  one mean and one sd, not a third copy. `/compare`'s holding Sharpe (T1) is its first reader.
+- **The bootstrap panel names how many resamples a ratio rests on** (SFH-R2-M2 / IN-01,
+  `9769f8dfa`). `bootstrapCI` carries `n_valid` on its Sharpe and Sortino entries (optional on
+  `BootstrapCISummary` and `BootstrapCIPayload`; a payload cached before it reads as all
+  resamples). The caption appends "Sharpe from k of n resamples (the rest have no Sharpe)" when
+  k < n, and says "no resample has a Sharpe" when none has one (IN3-01, `5cf32da75`). `BootHist`'s
+  no-variance line says "all resamples produced X" only when every resample has the metric.
+- **The KPI strip's Avg |ρ| states its pair coverage** (SFH-R2-M3, `0c6f0ba98`). It counts the
+  measured off-diagonal cells behind the value it shows, with the same `pairCoverage` count the
+  heatmap uses, and appends "· k of n pairs measured" when k < n.
+
+### Fixed
+
+- **T2-T5: the composer and the what-if blend** (plan 01, `c2cddfb4a`). `sampleBasisRatios`,
+  `computeScenario`'s Sharpe and correlation matrix, and `diversificationRatio` compute through the
+  shared module.
+- **T6, T7: one TS Pearson** (plan 02, `ac1946d31`, `90476b60b`). `/compare`'s correlation matrix
+  and the Risk tab's `CorrelationMatrix` widget both call the shared `pearson`; the widget's local
+  copy is gone.
+- **T8-T12: portfolio stats and the scenario libraries** (plan 03, `dc0e63d19`, `839fff99b`).
+  `computeAlphaBeta`'s beta and `computeRiskDecomposition` use the shared functions, and
+  `scenario-benchmark.ts` and `scenario-stress.ts` replace their hand-written relative floors with
+  the shared predicate and the shared `pearson`.
+- **T13-T15, T18: the factsheet headline** (plan 04, `8b0577585`, `22bfcdca0`). `compute`'s Sharpe,
+  skewness, kurtosis and `ann_vol`, `bootstrapCI`'s resampled Sharpe, and the Sharpe arm of
+  `computeOgHeadline` that still computes go through the shared module. T18 is fixed at its
+  source: `compute`'s snapped `ann_vol` is 0 on residue, so `comparator-block.ts`'s existing
+  `ann_vol > 0` guard is right with no edit to that file.
+- **T16, T17, T19, T20: the factsheet's joint, rolling and correlation sites** (plan 05,
+  `7b8053e98`, `32ceb7236`). `jointMetrics`' beta, correlation and information ratio (now
+  `sharpe` over the active series), `rollingBeta`, `rollingSharpe`, `build-payload.ts`'s
+  `pearsonCorr` body and `buildAllocatorMetrics`' correlation all call the shared module, and
+  their local `mean` / `pstdev` helpers are gone.
+
+### Fixed (review round 1, founder decision D7: an absent statistic reads "—" everywhere)
+
+- **The factsheet Sharpe that does not exist reads "—", as the OG card does** (CR-01 / SFH-H1,
+  `9670242ae`). `compute`'s Sharpe was 0 ("0.00") where the OG card and tearsheet said "—" for the
+  same series; it is NaN now, which also reaches the levered browser re-derive, the benchmark
+  column and the style-drift halves. The peer rank of a strategy with no Sharpe is "—", not the
+  0th percentile. The bootstrap drops resamples with no Sharpe instead of counting them as 0, and
+  its CI reads "—" below 40 resamples that have one (`MIN_SHARPE_RESAMPLES`).
+- **`jointMetrics` reads "—" for every ratio that does not exist** (WR-01 / SFH-M3, `9d07bbec0`):
+  beta, correlation, R², information ratio, Treynor and alpha, and the up / down capture against a
+  benchmark with no dispersion or no up / down days. The page used to say "Correlation 0.00" in
+  one panel and "—" in the next for one pair; a constant-yield benchmark's up capture read -0.012
+  to -4.47.
+- **The Risk tab's correlation matrix renders an unmeasurable pair "—"** titled "Insufficient
+  data", as `/compare` does, instead of "0.00" on the neutral colour; a missing precomputed cell is
+  the same absence (WR-02 / SFH-H2, `2b32a15f3`).
+- **"Avg |ρ|" no longer counts an undefined pair as ρ = 0** (WR-03 / SFH-M2, `c772b173b`). The
+  pair leaves the matrix and the average's sum and count, and the heatmap caption says how many
+  pairs it averages when some are missing. One all-zero member used to pull a three-member
+  fixture's average from 0.654 to 0.218, a "better diversified" book by construction.
+- **Rolling Sharpe and beta leave a gap, the allocator correlation reads "—", and alpha / beta
+  can be absent** (WR-04 / SFH-M1 / SFH-M4 / SFH-M5 / IN-04, `339d1c9e7`, `9a36a749b`). A window
+  with no ratio is null (a gap, not a drawn 0); `buildAllocatorMetrics` refuses legs of unequal
+  length and drops the grid scan's cross term when the correlation is undefined (it is 0 there by
+  construction); `computeAlphaBeta` returns `{ alpha: null, beta: null }` for an undefined beta and
+  `AlphaBetaDecomposition` shows "—"; the shared `beta()` returns null for a non-finite value in
+  EITHER leg (a NaN in `y` used to come back as NaN).
+- **One σ_p floor, and every local sd reads the shared module** (WR-06 / SFH-M6 / SFH-M7,
+  `d8c98e54c`, with the `rollingVol` and scenario-volatility moves in `339d1c9e7` and
+  `c772b173b`). `percentContributionToRisk` uses the same floor as `diversificationRatio`, so the
+  panel can no longer show a DR beside "—" for PCR and ENB. `computeTrackingError`, `rollingVol`,
+  the scenario's volatility and the benchmark / stress degeneracy tests use the shared
+  `dispersion`; scenario-benchmark's own local test is gone, because `computeAlphaBeta` now answers
+  a constant benchmark with null itself.
+
+### Fixed (review round 2)
+
+- **Beta is exactly 0 for a strategy leg with no dispersion** (HI-01, `1afe06ea6`). `beta` floored
+  only the benchmark leg, so a constant-yield strategy against a real benchmark gave a beta of
+  about ±1e-15, and `jointMetrics`' Treynor guard (`beta !== 0`) divided by it: the public
+  factsheet's default BTC panel read a Treynor of ±1e10 to 1e15 and a Beta of "-0.00". Beta now
+  answers 0, what an all-zero strategy gives, so Treynor is "—" through the existing guard and
+  `rollingBeta` and `computeAlphaBeta` read 0.
+- **Sortino and Calmar that do not exist are NaN, not 0** (HI-02, `0dd022822`). A series with no
+  losing day read "Sortino 0.00", one with no drawdown "Calmar 0.00", beside "Sharpe —", and the
+  peer bar ranked the fabricated 0 at the 5th percentile. `compute`'s Sortino and Calmar arms and
+  `headlineStats`' Sortino are NaN; `bootstrapCI` drops resamples with no Sortino as it drops those
+  with no Sharpe; `computePeerPercentile` gives a non-finite Sortino no rank. Every renderer shows
+  NaN and its JSON-cache null as "—".
+- **`rollingSortino` leaves a window with no losing day as a gap, not 0** (`fd97c010a`), as
+  `rollingSharpe` already did for a window with no dispersion.
+- **The Rolling Metrics "Now" column is the current window** (SFH-R2-H1, `bb61e178a`). It walked
+  back to the most recent non-null value, so a strategy flat over its last window showed a
+  months-old Sharpe as current beside a 0.0% current volatility. "Now" is the last element of each
+  rolling series and reads "—" when that window has no value.
+- **The v2 factsheet payload cache key moves to v7** (IN-03, `89521ac23`), so an entry cached
+  before this release cannot keep serving a fabricated 0 for up to the 3600 s revalidate.
+- **The empty scenario body shows "—", not zeros** (SFH-R2-M1 / WR-01, `2a50833ae`). With no
+  usable daily returns the composer's body read "Sharpe 0.00 · Sortino 0.00 · Calmar 0.00" under a
+  KPI strip showing "—". `emptyComputeSummary` (renamed from `zeroedComputeSummary`, which
+  described the defect) carries NaN for every statistic; only the counts and spans (`n`, `years`,
+  `longest_dd`) stay 0. `emptyBootstrapCI` carries NaN points and bounds.
+- **`AlphaBetaDecomposition` names the benchmark only when it is flat** (IN-02, `dbcef5337`). An
+  undefined beta can also come from a non-finite return, so that case now reads "Alpha and beta
+  cannot be measured over this window" instead of blaming the benchmark.
+
+### Fixed (review round 3)
+
+- **Profit Factor is "—" for a book with no losing day** (HI3-01, `7edee5002`). It printed "Profit
+  Factor 0.00", the worst reading for the best record, directly above "Omega (θ=0) —", the same
+  number. The analytics service already persists None for this case.
+- **Calmar by Year is "—" for a year with no drawdown** (HI3-02, `18671b090`), matching the
+  headline Calmar in the same column; the composer builds its rows through the same function.
+- **Skew and kurtosis are "—" for a series with no dispersion** (WR3-01, `a85060a43`). They printed
+  "Skew +0.00" and "Kurtosis 0.00" under "Sharpe —". This supersedes T13's "stay 0" answer (D-27).
+- **Avg Loss (and Avg Win) are "—" when there is no such day** (SFH-R3 MEDIUM-2, `b9d7c7590`). The
+  Max Drawdown panel printed "Avg Loss +0.00%" for a book that never lost.
+
+### Changed
+
+- **What a user sees for a constant-yield series.** The TS-computed Sharpe, correlation, beta,
+  information-ratio and ratio cells listed above read "—" (or leave a gap on a rolling chart)
+  instead of a residue value, on `/compare`, the scenario composer and benchmark panel, the Risk
+  tab, the factsheet and the OG card's computed Sharpe (`ff613e350`, `c2cddfb4a`, `ac1946d31`,
+  `90476b60b`, `839fff99b`, `8b0577585`, `22bfcdca0`, `7b8053e98`, `32ceb7236`, and the review-round
+  commits above). Beta for a flat STRATEGY leg is 0, not "—" (HI-01).
+- **Two `og-metrics.test.ts` assertions now say the constant series has no Sharpe** (plan 04,
+  `22bfcdca0`). Both `expect(Number.isFinite(sharpe))` side assertions became
+  `expect(Number.isNaN(sharpe))`, each with a one-line D-07 comment. They were in "CAGR hidden
+  (NaN) for a dense sub-year series" (300 days at 0.001, sd about 6.5e-19, a Sharpe of about
+  2.9e16) and "single / duplicate / unsorted dates never produce Infinity" (40 days at 0.002). The
+  finite value they asserted was the defect itself. The owner of the D-07 fix owns the assertions
+  that pinned the defect (the D-19 amendment, below).
+- **Four test-file comments name the cache key as `-vN`, not the stale v6** (IN3-03, `252211514`),
+  and `zipDrop`'s comment says it drops every null, not only the warm-up prefix, naming the
+  line-join as a recorded limit (SFH-R3 LOW-1, `a3592327a`). Both are comment-only.
+
+### Removed
+
+- **`src/lib/correlation-math.ts` and its test** (plan 02, `ac1946d31`). `pearson` moved into
+  `return-stats.ts`; `rollingCorrelation` had no production caller, since `CorrelationWithBenchmark`
+  already reads the persisted rolling correlation.
+- **`computeRollingMetric`**, dead (0 production callers), deleted with its describe block
+  (plan 03, `dc0e63d19`).
+- **Every private copy of the Sharpe, Pearson, beta, mean and pstdev formulas** the sites carried
+  (plans 01-05, the commits under Fixed), and two comments that still named the retired
+  correlation module and `rollingCorrelation` (plan 06, `eef6a8319`).
+
+### Root cause
+
+- **A standard deviation derived from a compounding NAV is about 1e-16, never exactly 0**, so a
+  `> 0` guard never catches "no dispersion". Phase 166 fixed the Python side with a relative floor;
+  the TS side had twenty private copies of the same ratio formula, each with the same guard. That
+  is why D-17 computes each figure once: a floor pasted into twenty copies still leaves twenty
+  formulas to drift.
+- **A 0 answer for "does not exist" survived the floor.** Once the floor made residue exactly 0,
+  every ratio whose denominator can be 0 (a Sortino with no losing day, a Calmar with no drawdown,
+  a Profit Factor with no loss, a standardised moment with no dispersion) still had a `: 0` arm,
+  and 0.00 reads as a measured value. D7 is the rule that closes that class; rounds 2 and 3 swept
+  the `: 0` fallbacks on displayed ratios.
+- **The full suite, not a plan's own verify list, is where an unclassified env read shows up**
+  (`4c50d206b`). Plan 06's gate reads `QZ_166_2_06_SCAN_ROOT` to point its merge-base scan at an
+  archived tree; the release sweep caught that the env-manifest contract test did not classify
+  the read. It is now in `TEST_ONLY_KEYS` with a dated comment, and `.env.example` is untouched
+  because this is test wiring.
+
+### Tests
+
+- **A red test first for every site, on a compounding-NAV constant yield** (`1b518ebf6`,
+  `e4ee8e31c`, `02b522b47`, `22478ef83`, and the site and residue test files landed with
+  `ff613e350`, `ac1946d31`, `dc0e63d19`, `8b0577585`, `22bfcdca0`, `7b8053e98`). The deleted
+  module's `pearson` cases carry over as `src/lib/return-stats.pearson-contract.test.ts`. Each
+  site test asserts the D-07 invariant: the constant yield produces exactly what an all-zero
+  series of the same length produces at that site, with a cent-rounded NAV as the control on the
+  other side of the floor, so widening the floor goes red. The shared fixture is
+  `src/__tests__/fixtures/dispersion-nav.ts`.
+- **A cross-language pin** in `src/lib/return-stats.test.ts`: exactly one numeric-literal
+  definition of `DISPERSION_RESIDUE_REL` exists across the Python service's `dispersion.py` and
+  `metrics.py`, and it equals the TS constant (`ff613e350`). Re-run on the tree merged with 166.1:
+  the one literal is now in `dispersion.py`, and the pin passes.
+- **The compute-once gate** (plan 06, `35704c641`),
+  `src/lib/return-stats.single-source.test.ts`: every Tier-2 site file imports
+  `@/lib/return-stats`, the retired local formulas and dead functions are absent from live code, a
+  whole-tree shape matcher finds any Sharpe, Pearson or beta shape outside the module against a
+  count-pinned allowlist, and liveness fixtures prove the matcher fires. A second copy of a formula
+  now fails CI instead of waiting for a reviewer.
+- **The env-key registration above** (`4c50d206b`).
+- **The review-round tests** (every one seen RED under a neuter of its fix first, then GREEN after a
+  byte-verified restore). Round 1: one test renders the factsheet page AND the OG card from one
+  constant series and asserts "—" on both, plus no literal "NaN" on the page (`9670242ae`); the site
+  tests that pinned 0 now pin the absence; T16 covers every field that divides by the benchmark's
+  dispersion (`9d07bbec0`); the Risk-tab residue test asserts "—" where it pinned "0.00"
+  (`2b32a15f3`); a leverage test that held as 0 = 2 * 0 now runs on a real beta (`9d07bbec0`).
+  Rounds 2 and 3: a flat-strategy twin for T16 and T17 (`1afe06ea6`), rolling "Now" on a real
+  300-active-then-200-flat payload (`bb61e178a`), pair coverage through the real `computeScenario`
+  (`0c6f0ba98`), an overflowing-benchmark attribution case (`dbcef5337`), the resample-count
+  captions (`9769f8dfa`, `5cf32da75`), the cache-key shape pins (`89521ac23`), and per-arm tests
+  for Profit Factor, Calmar by Year, skew / kurtosis and Avg Win / Avg Loss (`7edee5002`,
+  `18671b090`, `a85060a43`, `b9d7c7590`).
+- **The compute-once gate, hardened** (WR-05 / IN-01 / IN-02, `4ae579ca2`). Five new shapes and
+  two widened ones catch the spellings the review measured at 0 hits (the textbook
+  `(m - rf) / sd * Math.sqrt(N)`, `m * periodsPerYear / sd`, `annRet / annVol`, `sxy / sxx`,
+  `cov / sx / sy` and more), each with its own fixture; the live tree gained 0 hits and no
+  allowlist entry. The seven known-unmatched forms are pinned at 0. The 26-hit merge-base pin
+  runs in CI: the test archives the diff base with `git archive` and fails loudly if the commit is
+  unreachable. On the merged tree it reads `shape-scan-base: hits=26 unallowlisted=20
+  allowlisted=6`, unchanged.
+- **Two `og-metrics.test.ts` Sharpe arms test what they claim again** (IN-03, `a05d06851`): the
+  sub-year CAGR case asserts a finite Sharpe on a dispersing fixture, the below-30 case bites on
+  the observation gate alone, and the constant-series "—" has its own named case.
+- **Gates on the merged tree** (sweep SHA `a5e4e710b`, `origin/main` at `d9c173346` merged in):
+  `tsc --noEmit` exit 0; vitest over `src/lib`, `src/app/factsheet`, the allocations dashboard,
+  `src/app/api/og`, `src/app/factsheet-share`, `src/components` and `critical-regressions` 542
+  files, 9458 passed, 9 skipped (pre-existing skips; this branch adds none); the compute-once gate
+  34 of 34; `eslint` over the 64 changed `src/` files exit 0.
+
+### Security
+
+- **No new trust boundary.** The phase changes pure computation and rendering; the audit
+  (`166.2-SECURITY.md`) closed with 0 open threats at or above the block level. The three
+  repudiation threats it left for the ship (T-166.2-14 the unified entry, T-166.2-34 the re-run on
+  the merged tree, T-166.2-36 the version above main's) are closed by this release.
+
+### Notes
+
+- **One TS home, pinned to the Python constant.** `src/lib/return-stats.ts` is where a new TS
+  Sharpe, correlation or beta goes.
+- **The D-17 / D-19 split with Phase 169 PAGETRUTH.** T14 has two arms. Its persisted read (the
+  rankable strategy's stored Sharpe) is Phase 169 plan 04's; its computed arm is this phase's.
+  Phase 169 plan 14's zoom-window KPIs go through `compute()` and `jointMetrics` and inherit the
+  floored versions with no further edit here. `comparator-block.ts` needs no edit (T18 is fixed at
+  its source), so 169's list can drop it. Recorded for the orchestrator and not acted on here: the
+  strategy arm's factsheet skewness and kurtosis could read the persisted values, and its rolling
+  Sharpe could read the persisted rolling metrics (a different day basis); both readers are on
+  169-owned paths, so that is 169's call.
+- **The D-19 amendment** (`c19e0f9e4`): because phases still in planning (169 included) may not
+  start execution, 166.2 plan 04 owns the two `og-metrics.test.ts` assertions that pinned the D-07
+  defect. Not taken: keeping `s > 0`, mapping null to a finite number, or widening a floor.
+- **D7, D-24** (`c03c991c7`): founder decision D7 is recorded in `166.2-CONTEXT.md` as an amendment
+  to D-07, with D-24 listing the sites it moved, and in the ROADMAP. ⚠️ D-24 also records a
+  deviation: the round-1 IN-03 fix (`a05d06851`) edits Phase 169's `og-metrics.test.ts` beyond the
+  two lines D-19 admitted.
+- **D-26** (`20b0b6821`): PAYLOAD-05's "never NaN/Inf" for the scenario payload is narrowed by D7.
+  It still holds for the chart ARRAYS; the empty-blend summary and bootstrap CI carry NaN for a
+  statistic that does not exist, and every renderer shows "—".
+- **D-27** (`cd2349d42`): T13's "skew and kurtosis stay 0 with no dispersion" is superseded by D7;
+  Profit Factor, Calmar by Year, Avg Loss and Avg Win moved the same way.
+- **D-28** (`c4dccafcb`): the additive `n_valid` snapshot change is accepted. Measured against
+  `origin/main`, `build-payload.test.ts.snap` gains exactly six `"n_valid":2000` insertions and no
+  number moves. Any snapshot change that moves a number still needs its own decision.
+- **D-29, and a rebase note for Phase 169** (`83dea7b82`): a recorded deviation from D-17. The D7
+  fix rounds edited two Phase-169-owned files, `src/app/factsheet/[id]/v2/types.ts` (NaN / null
+  statistic fields, the optional `n_valid`) and `fetch-and-build-payload.ts` (the v7 cache-key
+  note). ⚠️ **Phase 169 must rebase its planned edits to those two files over this release**, and
+  its executor re-reads both at HEAD before editing. The ROADMAP's Phase 169 section carries the
+  same note.
+- **Known limits, recorded rather than fixed** (review round 4 found 0 CRITICAL and 0 HIGH; the
+  founder rule books MEDIUM-or-lower without a fix round):
+  - **WR4-01 (pre-existing):** `compute`'s drawdown starts its peak at the first equity point, so a
+    loss on the first day of a window is never counted. A year that opens with a loss and then only
+    gains reads "Max DD 0.00% · Calmar —", and the headline max drawdown shares the defect. The fix
+    (seed the peak at 1.0) needs a parity decision with the analytics service's drawdown series and
+    belongs to a separate phase.
+  - **SFH-R4 MEDIUM-1 / IN4-02 (pre-existing):** `computeRiskDecomposition` reads 0% per strategy
+    when the book has no variance, and the widget's covariance matrix is all-zero with fewer than 2
+    common dates, so "no overlap" shows as "zero risk" (authenticated allocations dashboard only).
+  - **SFH-R4 MEDIUM-2 (pre-existing):** the KPI strip's Avg |ρ| delta against the live baseline can
+    compare averages over two different pair sets. The coverage qualifier shows the count, not the
+    mismatch.
+  - **D-26 limits:** the empty scenario body still reports 0 observations for a 1-9-day blend; the
+    scenario-share page's own Avg |ρ| cell carries no pair-coverage qualifier; `emptyQuantiles`
+    stays 0 because the box plot does arithmetic on it.
+  - **Rolling charts join across a gap in the composer:** `zipDrop` drops a null window, so the
+    blend's rolling line is drawn across an interior gap. It never draws a 0. The factsheet rolling
+    charts do break.
+  - **IN4-01:** the payload cache key stays `factsheet-v2-payload-v7` although `compute`'s outputs
+    changed again in round 3. v7 never shipped, so production has no v7 entry; a preview entry
+    filled before round 3 can serve pre-pass values for up to 3600 s.
+- **Six post-deploy browser checks** (open; `166.2-VERIFICATION.md` human items, run in the
+  logged-in browser):
+  1. The factsheet of a constant-yield strategy and its OG card: KPI and Main Metrics Sharpe, Beta,
+     Correlation, R², Information Ratio, Treynor, Up / Down Capture, Skew, Kurtosis, Profit Factor,
+     Avg Loss, the headline Calmar and the peer Sharpe bar read "—", matching the OG card. Avg Win
+     reads a positive number. Nothing reads 0.00.
+  2. The allocations Risk tab with a flat leg: the leg's CorrelationMatrix cells read "—" on the
+     neutral background, titled "Insufficient data"; the noisy pair keeps its coloured value.
+  3. A scenario with one flat member: the heatmap caption reads "Avg |ρ| … · k of n pairs
+     measured", the undefined cell reads "—", and the KPI strip's Avg |ρ| states its coverage.
+  4. AlphaBetaDecomposition: a flat benchmark gives "—" and names the benchmark as flat; a flat
+     strategy leg gives beta 0, not "—".
+  5. The Bootstrap CI panel: a constant yield reads "no resample has a Sharpe"; partial survival
+     states the resample count, with "—" below 40.
+  6. Calmar by Year and the rolling panels: a no-drawdown year reads "—", the rolling Sharpe and
+     Beta charts break at a flat window (never a drop to 0), and "Now" shows the current window.
+- **Planning, review and release records on this branch**: execution start, per-plan SUMMARYs and
+  tracking (`f2ad38a02`, `78d521b94`, `df75f6a77`, `0b1028968`, `bcd5b2d42`, `dc9f3a174`,
+  `2e1070bd2`, `ba6cd782c`, `160e13a05`, `ea5db9cae`, `520b34a93`, `20784b5a7`, `e9a19682d`,
+  `92bcaf85a`, `0fdca6ed1`); the plan-07 setup (`d04945785`); the review reports for four rounds
+  (`9382856a1`, `66db2b143`, `10f16f1eb`, `ceb73b631`, `4a94bdde8`) and the round-1 fix report and
+  its addendum (`7cb2d0f4f`, `a86ea1601`); the security audit (`c4dccafcb`) and the phase
+  verification (`83dea7b82`); and the two earlier release commits this entry replaces
+  (`bd42a740c`, `be37c440e`).
+- **The pre-split planning lineage rides on this branch.** The phase was planned as 166.1 and
+  split on 2026-09-26 (D-23); 166.1 landed on `main` by squash (#872), so these planning commits
+  are ancestors here but not on `main`: research, plans and five plan-check revisions (`1f6b2213e`,
+  `3f26b01e5`, `a7240515d`, `d1bd9f50f`, `df4d9921d`, `de4f44277`, `7f7518231`), the split and its
+  revisions (`40f683fee`, `44151866e`, `a78ca118a`, `ae543bf92`). They carry no code.
+- **Merges.** `origin/main` was merged in three times: before wave 1 (`7bfce8490`), before the
+  release sweep at `ea4167a3f` (`39ea421d8`), and at ship time (`a5e4e710b`, bringing 166.1
+  ENGINEFLOOR `0.100.0.0` and its siblings). The plan branches came in as `31ef14268`,
+  `7703e190e`, `63bddd450`, `0aadc910c`, with `f2d8adc38` bringing wave 2 into plan 04 before its
+  Task 2. The other phases' work those merges bring is covered by their own entries.
+- **The 2026-09-26 split**: the Python floor sites shipped as Phase 166.1 and the PROD recompute is
+  Phase 166.3; this entry claims neither. **No migration.**
+
+## [0.100.0.0] - 2026-09-26 — ENGINEFLOOR: every Python ratio site reads the one dispersion floor, so a constant yield never produces a fabricated ratio
+
+⭐ **What changed for whoever reads this next.** Phase 166 put a relative dispersion floor into
+`services/metrics.py`: a standard deviation at or below `1e-12 * max(1, |mean|)` is float residue,
+not dispersion. Phase 166.1 is the Python half of carrying that floor to every other place the
+analytics service divides by a standard deviation or takes a correlation. Before this release,
+seven of the eight variance sites and all eight correlation sites outside `metrics.py` still
+tested `== 0` or `> 0`, or did not test at all. The eighth variance site, S6, already used an
+absolute 1e-12, which is correct for `|mean| <= 1`, and is re-pointed to the shared floor as a pin
+(D-06). So a constant yield taken from a compounding NAV (standard
+deviation about 1e-16, never exactly 0) could give an optimizer Sharpe of 1.28e13, a CSV error
+reading "Daily Sharpe 2296215230173376.50", a 48.6% / 51.4% split of zero risk, and a 1.0
+correlation that made two same-yield strategies "match" each other. Each site now gives exactly
+what an all-zero series already gives there (D-07). ⭐ **Founder decision D7 (2026-09-26), taken
+in the round-1 review:** where that all-zero output was itself a 0 or "unchanged" one layer out,
+the statistic now stays empty end to end and renders "—" (see Changed).
+
+⚠️ **This is a minor bump because values users see change, on purpose.** Optimizer suggestions,
+the risk decomposition, correlation cells and match status can all change for a constant-yield
+strategy. And an upload that passed before can now be refused (D-24, below). Precedent:
+MT5VALIDATEWEDGE (0.96.0.0) and JOBRPCTRUTH (0.93.0.0) each took a minor bump for a visible
+behaviour change. This release carries **no migration** (D-13). ⛔ **CORRECTED in the round-1
+review fix:** it said "no TypeScript change". Under D7 it now changes the direct TypeScript
+consumers of its own Python outputs, and nothing else under `src/` (the rest is Phase 166.2's).
+
+⚠️ **Why the number is 0.100.0.0 (T-166.1-35).** This entry was first committed as 0.97.0.0
+(`46fcca88e`). Phase 168 DRBOPTIONS then took 0.97.0.0 on `main`, and the open PRs #868, #869 and
+#870 already claim 0.97.0.1, 0.98.0.0 and 0.99.0.0. A minor bump past all of them is 0.100.0.0. The
+release commit moves this heading only; exactly one `[0.97.0.0]` heading remains, Phase 168's.
+
+### Root cause
+
+- A standard deviation derived from a compounding NAV is about 1e-16 in absolute terms whatever
+  the yield, because `pct_change` rounds relative to `1 + r`, not to `r`. It is never exactly 0.
+  So a guard of the form `std == 0` or `std > 0` lets a ratio of about 1e15 through, and a Pearson
+  correlation over such a leg comes back as a residue value (measured 1.0 between two strategies
+  with the same yield) instead of NaN.
+
+### Fixed
+
+- **The floor has one home, `services/dispersion.py`** (plan 01, `6484229f6`). It holds
+  `DISPERSION_RESIDUE_REL`, `residue_floor`, `dispersion_is_residue` and `dispersion_is_real`,
+  moved verbatim from `metrics.py`. It is a leaf module (numpy and pandas only, no `services`
+  import), so the optimizer, the CSV validator and the allocated-capital code can read the floor
+  without pulling in quantstats. `metrics.py` re-binds the three functions under their old private
+  names and does not bind the constant (D-03, D-23 revision), so its values and its tests are
+  byte-identical and the qstats-gate census is unchanged.
+- **The variance sites S1-S8 read the floor** (plan 01, `6484229f6`, `614d7d8de`; plan 01b,
+  `8dae1306a`):
+  - S1 `portfolio_optimizer._compute_sharpe` returns None on residue;
+  - S2 the M-0701 exclusion in `find_improvement_candidates` tests residue on the candidate;
+  - S3 `csv_validator._check_sharpe_sentinel` keeps its verdict and drops the fabricated number
+    (D-04), and with D-24 now judges every constant positive series the same way, under its own
+    rule key since the round-1 review (see Changed);
+  - S4 `allocated_capital._annualised_sharpe` returns NaN on residue;
+  - S5 `EquityCurveBuilder.compute_sharpe` returns None on residue;
+  - S6 the constant-column gate in `optimizer.optimize_weights` uses `residue_floor` elementwise.
+    This is an honest pin, not a fix: the behaviour is identical for `|mean| <= 1` (D-06);
+  - S7 `portfolio_risk.compute_risk_decomposition` sends a residue portfolio volatility to its
+    existing zero branch (D-05), which since the round-1 review reports the undefined shares as
+    None (see Changed);
+  - S8 the SQN block in `analytics_runner._compute_derived_trade_metrics` publishes a value only
+    over real R-multiple dispersion (D-16). Identical losses of 7.7 gave -4.03e16 and now give
+    None, the answer identical losses of 1.0 always gave. The `std_r > 0` divide guard stays in
+    front of the floor, which has a NaN hole of its own (round-1 IN-01, `a3fd59304`).
+- **The correlation sites C1-C8 read the floor** (plan 03, `64af22b25`, `89cc5f0b2`,
+  `d44fb8598`), through two new helpers in `services/dispersion.py`,
+  `pairwise_correlation_or_none` and `dispersing_corrwith` (D-02):
+  - C1 `compute_correlation_matrix` masks a non-dispersing leg's row, column and diagonal;
+  - C2 `compute_rolling_correlation` applies the `both_move` mask before `dropna`;
+  - C3 `corr_with_portfolio` in `find_improvement_candidates` answers None over a residue leg, and
+    its dead `else 0` arm is gone (round-1 IN-02, `d9341680f`). C4 `_avg_corr` skips a residue
+    leg's pairs; see Changed for the one average rule;
+  - C5 `match_engine._compute_corr_with_portfolio` and C6 the BTC `benchmark_comparison` block in
+    `routers/portfolio.py` use `pairwise_correlation_or_none`;
+  - C7 the `verify_strategy` matching block and C8 `strategy_matching.find_matched_strategy` (the
+    two `corrwith` matching sites) use `dispersing_corrwith`, and C8 returns an explicit no-match
+    on an empty candidate set before `idxmax`.
+
+### Changed
+
+- **Optimizer suggestions no longer rank a constant-yield candidate on a fabricated ratio**, and
+  the risk decomposition no longer splits a zero risk into shares.
+- **Correlation cells and match status for a constant-yield strategy show the existing honest
+  absence** (an empty cell, no match) instead of a residue correlation.
+- **The CSV Sharpe sentinel rejects an exactly constant POSITIVE daily-returns CSV at EVERY
+  length** (D-24, founder decision 2026-09-26; `a6007b3d4`, `d1b91d5d0`). Before this release the
+  verdict was decided by float summation: a short constant series has a standard deviation of
+  exactly 0 and skipped the sentinel, so it was ACCEPTED, while a longer one left float residue
+  and was REJECTED. A flat series carries no real returns data, so its length no longer decides.
+  ⚠️ **An upload that used to pass can now be refused.** Exact 0 and residue get one message,
+  which names no number (D-04). A constant ZERO series keeps its verdict (accepted), and a series
+  that really varies is judged by the Sharpe over its standard deviation exactly as before.
+  ⛔ **CORRECTED in the round-1 review fix:** this bullet said the rule name and its label were
+  unchanged. See the next bullet.
+- **A constant-returns rejection has its own rule and reads as a file-level failure** (round-1
+  WR-01 / SFH MEDIUM-3, amends D-04, `95c577929`). It shared `daily_sharpe_sentinel`, so a 2-row
+  constant upload read "1 row failed validation" and "Rule violated: Daily Sharpe > 10 looks
+  unrealistic. Expand below for the row-level breakdown." No row failed, no Sharpe was measured,
+  and there is no row-level breakdown. The rule is now `daily_returns_constant`, labelled "Daily
+  returns never change". The wizard's error panel counts only real rows (`row >= 1`). With none,
+  it says "Your file failed validation" and gives a cause sentence with no row pointer. The
+  Sharpe-number rule keeps its key and label.
+- ⭐ **A statistic that does not exist now shows "—" everywhere, never 0 or "unchanged"** (founder
+  decision D7, 2026-09-26). A constant-yield series and an all-zero series read the same:
+  - **"What we'd do" optimizer card** (round-1 SFH HIGH-1, `a7616d7e8`). A constant-yield book
+    gave `corr_with_portfolio` None, the adapter's `?? 0` turned it into 0, and the card said
+    "reduce average correlation toward 0.00". The adapter now carries null, and the card drops the
+    sentence. `sharpe_lift` over a book with no Sharpe is now None rather than 0.0. It hides only
+    the Sharpe sentence, not the card, and the score still ranks on an explicit 0.
+  - **Portfolio impact simulator and replacement cards** (round-1 SFH HIGH-2 / WR-02,
+    `c30c5d99d`, `b9a542407`). Both `_delta` helpers coerced a None side to 0.0, which read
+    "Correlation unchanged" or a green "+0.00 Sharpe". A delta with either side missing is now
+    None. The simulator shows "—" and "not computable", and ReplacementCard shows a colorless
+    "— Sharpe". The bridge schema and type accept null. The bridge composite still ranks every
+    candidate, with an explicit 0 for a missing axis.
+  - **Risk attribution** (round-1 SFH MEDIUM-2, `e61e9152a`). A portfolio that carries no risk
+    reported every share as 0, which read "+0.00%" and "Balanced". The share and the assessment
+    are now "—", and the row is left out of the stacked bar.
+- **One rule for "average pairwise correlation", with the pair count stated** (round-1 WR-03 /
+  SFH MEDIUM-1, `ae8619c8f`). The risk panel averaged the defined pairs, while the scorers'
+  `_avg_corr` went None for the whole book when any one leg was flat. So one constant-yield sleeve
+  dropped the diversification axis from every optimizer, match, simulator and replacement score.
+  Both now skip the undefined pairs and average the rest, through
+  `dispersion.average_pairwise_correlation`. The portfolio row's `data_quality` records
+  `avg_pairwise_correlation_pairs_used` and `avg_pairwise_correlation_pairs_total` beside the KPI.
+  A scorer whose added or swapped leg is flat reports its correlation delta as None, never as the
+  0.0 that two averages over the same pairs would give.
+
+### Tests
+
+- `tests/test_dispersion_floor_sites.py` (the variance sites) and
+  `tests/test_correlation_residue_sites.py` (the correlation sites), with the shared fixture module
+  `tests/dispersion_fixtures.py` (`6484229f6`, `614d7d8de`, `9d007cff6`, `8dae1306a`,
+  `64af22b25`, `aea667ad8`, `89cc5f0b2`, `ebbcfb239`, `d44fb8598`). Each site has a red test from
+  a compounding-NAV constant yield with a cent-rounded control on the other side of the floor, and
+  each was observed RED on the unedited site before its fix. Every fix has a neuter, RED, restore
+  drill restored from a byte backup. S6 is an honest pin, not a red test (D-06).
+- **The D-24 tests in `tests/test_csv_validator.py`** (`a6007b3d4`, `d1b91d5d0`): a constant
+  0.001 series at 2, 3, 5, 20, 120 and 365 rows, a compounding-NAV yield, one message across all of
+  them, and a constant-zero control. On the unedited sentinel they ran `5 failed, 33 passed`, with
+  the 2, 3 and 5 row cases red. Two drills prove each half can fail: restoring the old exact-zero
+  gate turns the short lengths red, and a `>= 0` positive test turns the zero control red. The
+  pinned 5-row constant fixture now asserts REJECTED, and the fixtures that relied on a constant
+  CSV being accepted moved to varied series.
+- **The round-1 review fixes** each carry a test first seen RED under a neuter, restored from a
+  byte backup and compared with `cmp`:
+  - Python: the flat-book Sharpe lift and the narrative; ten simulator and bridge flat-leg deltas;
+    the one average rule and its 1-of-3 pair count, end to end through the router; the
+    match_engine flat candidate; S7's None shares; the `daily_returns_constant` key; S8's divide
+    guard.
+  - TypeScript: the adapter, the optimizer card, the bridge schema and card, the simulator
+    panel's null chips, a new `RiskAttribution.test.tsx`, and the CSV panel's file-level headline.
+  - Four older tests pinned a behaviour D7 reverses (a `_delta` of 0.0, zero-vol shares of 0, and
+    the all-or-nothing C4 average), and each now pins the new rule (`b9a542407`, `e61e9152a`,
+    `ae8619c8f`).
+  - C7 now runs through the real `verify_strategy` rather than a hand copy of its block (IN-04 /
+    SFH LOW-2, `6bb5108ba`).
+  - Every S-site constant-yield test asserts its residue precondition (SFH LOW-3, `b70ed1e0c`).
+  - The C6 helper restores the module's compute semaphore (IN-06, `8b03ce40c`).
+
+### Notes
+
+- **D-24 supersedes plan 01's reason for the exact-zero skip.** Plan 01 kept the length-decided
+  boundary on purpose (D-04 verdict preservation); the founder's D-24 replaced that reason.
+- **D-11:** `strategy_verifications.metrics_snapshot` rows are point-in-time records and are not
+  recomputed.
+- ⚠️ **Accepted loss (round-1 IN-05): two exactly identical constant-yield series can no longer
+  match each other** at the `verify_strategy` block (C7) or `find_matched_strategy` (C8). Before
+  this release they correlated at 1.0 because they were the same bytes. Matching is best-effort
+  enrichment, and a flat leg has no correlation (D-02, D7), so no equality fallback was added.
+- **Round-1 review (2026-09-26).** Two reports: `166.1-REVIEW.md` (3 Warnings, 6 Info,
+  `dc815328e`) and `166.1-REVIEW-SFH.md` (2 HIGH, 3 MEDIUM, 3 LOW, 2 INFO, `29152a912`). The fixes are the commits cited above,
+  plus the decision record `d4f5df0fd` (CONTEXT and ROADMAP). The per-finding outcomes are in
+  `166.1-REVIEW-FIX.md`. The two review reports and the fix report are planning commits and change
+  no shipped file.
+- ⚠️ **STORED `portfolio_analytics` values computed before this release keep any residue value
+  until that portfolio's next analytics compute.** That is the correlation matrix, the risk
+  decomposition and the average pairwise correlation. The recompute touches `strategy_analytics`
+  only.
+- **Phase 166.3 RECOMPUTE's state at release time: founder-gated, pending** (D-14). Its plan 01
+  SUMMARY does not exist yet, so no before/after counts are carried here.
+- ⚠️ **The SQN residual (D-21 W1).** S8 floors the SQN formula, but that function has had no
+  production caller since Phase 106 (`b196de6c8`), and both current success writers store
+  `trade_metrics` as NULL. So this fix changes no displayed SQN by itself. A STORED residue SQN
+  (absolute value above 1e10) stays on its row until that row is rewritten, and a ledger venue
+  never recomputes on its own. A Phase 166.3 recompute clears it by NULLing the row's whole
+  `trade_metrics`, which also empties that row's trade panel. The Q6 counts before and after,
+  split published / not published, are founder-gated, pending.
+- **The 2026-09-26 split (D-23).** This release is the Python half. The TypeScript half ships as
+  Phase 166.2 COMPUTEONCE, and the production recompute runs as Phase 166.3 RECOMPUTE. This entry
+  claims neither. The planning commits for the phase, the split and the 166.2 / 166.3 plans are
+  recorded here and change no shipped file.
+- **Three merges of `origin/main`** bring other phases' work, which their own entries cover:
+  `7bfce8490` (PR #859, before wave 1), `3a8f8ad01` (main at `ea4167a3f`, before the release
+  sweep, no conflicted path) and `1664bd800` (main at `3b923498e`, Phase 168, at ship). The last
+  conflicted in `CHANGELOG.md` and `.planning/STATE.md` only, and no code path: this entry sits
+  above main's, and STATE takes main's version plus this branch's three split lines.
+- **Round-1 review records** (planning commits, no shipped file): the fix report `84d252bfc`, its
+  frontmatter counting the 17 actionable findings `dc690c802`, and the CHANGELOG commit that
+  folded the round-1 fixes into this entry `1c2fff365`.
+- **Round-2 confirmation review (2026-09-26, `09fc1649f`):** `166.1-REVIEW.md` round 2 and
+  `166.1-REVIEW-SFH-R2.md`. **0 CRITICAL, 0 HIGH**; both round-1 HIGHs are closed at HEAD and the
+  fix pass added no new HIGH. Under the review policy MEDIUM-or-lower earns no fix round, so the
+  findings below ship as recorded limits.
+- ⚠️ **Known limits carried by this release (none fixed here):**
+  - **MEDIUM-A: the pair counts are stored but not shown.** `data_quality` records
+    `avg_pairwise_correlation_pairs_used` and `avg_pairwise_correlation_pairs_total`, but no page
+    reads them yet. The average-correlation KPI and `generate_narrative`'s sentence still present
+    an average over the defined pairs as the whole book's. On the TypeScript side, Phase 166.2's
+    KpiStrip is planned to show "k of n pairs measured".
+  - **MEDIUM-B: the replacement fit label is computed from the axes that exist.** In
+    `bridge_scoring.find_replacement_candidates`, a flat book's candidate shows "— Sharpe" and
+    "— Corr" beside a fit badge judged from the drawdown axis alone, with 0 standing in for the
+    two missing axes, and the badge does not say so.
+  - **SFH MEDIUM-1: the file-level cause line on a parse error.** A single-rule payload whose
+    errors all carry `row: 0` now reads "We checked the whole file, so no single row is at fault".
+    That is false for `parse_error`, whose parser message names a line; the line number is still
+    on the page, inside the collapsed details, and the upload is still refused. `parse_error` also
+    has no `CSV_RULE_LABELS` entry, so the raw key is shown.
+  - **LOW-A:** `WhatWedDoCard` falls back to "diversify the portfolio" when the lift and the
+    correlation are both null and no drawdown win exists. Pre-existing phrase; before this release
+    the same row read "toward 0.00".
+  - **LOW-B:** `simulator_scoring._zero_deltas` still sends 0.0 deltas on the insufficient-data
+    branch. Nothing renders them today (the panel gates on `status === "ok"`).
+  - **IN-05:** two exactly identical constant-yield series no longer match (see the accepted-loss
+    bullet above).
+- ⭐ **D-25 (founder, 2026-09-26, "Keep the rule"; `0365d4f13`).** The average pairwise
+  correlation averages only the defined pairs and records the pair counts, and a flat added or
+  swapped leg shows "—" for its correlation change. The stricter "—"-when-any-pair-is-undefined
+  rule was declined. This closes verification human item 3.
+- **Verification (`c8218585f`): `human_needed`, 10/10 must-haves verified.** The human items:
+  (1) re-derive the version on the merged tree, closed by this release; (2) the Phase 166.3 PROD
+  recompute, founder-gated and pending; (3) the WR-03 product call, closed by D-25; (4) the
+  post-deploy browser check, pending: the wizard's constant-CSV copy and the D7 "—" on the
+  optimizer, replacement, simulator and risk-attribution surfaces, in the logged-in browser.
+- **Security (`7777438db`): secured, no threat at or above the blocking threshold open.** The two
+  medium ship-time threats close here: T-166.1-34 (green sweep on the wrong tree) by merging
+  `origin/main` at `3b923498e` and re-running the gates on the merged tree `1664bd800`, and
+  T-166.1-35 (duplicated version) by the 0.100.0.0 re-derivation above.
+- ⚠️ **Pending after merge:** the Phase 166.3 RECOMPUTE of PROD rows (founder, PROD access) and the
+  post-deploy browser check above. Neither has run.
+- **Routed out, pre-existing and outside this diff** (both routed in PR #871, open at ship time):
+  - the drawdown-delta sign is inverted in `simulator_scoring.simulate_add_candidate`,
+    `portfolio_optimizer.find_improvement_candidates` and
+    `match_engine._compute_portfolio_fit_components`, so a shallower drawdown reads as worse. It
+    goes to **Phase 166.1.1 DDSIGN**;
+  - `RiskAttribution` formats `marginal_risk_pct` and `weight_pct`, which are already percent, as
+    percent a second time. It goes to **Phase 169**.
+- **Gates at the sweep SHA `3a8f8ad01`:** the full analytics-service suite `6737 passed, 90
+  skipped`; `qstats-gate census: 13 quantstats node(s) in services/metrics.py, 11 mirror(s), 0
+  violation(s)`; strict mypy `Success: no issues found in 101 source files`; ruff with no new
+  finding over the phase's Python files; `verify-plan-anchors --pending` `OK: 12 plan file(s), no
+  stale claims.`
+- **Gates after the round-1 review fixes, at `d4f5df0fd`, all run in the phase worktree:**
+  - the full analytics-service suite: `6760 passed, 90 skipped`;
+  - `qstats-gate census: 13 quantstats node(s) in services/metrics.py, 11 mirror(s), 0
+    violation(s)`;
+  - strict mypy over `services/ routers/ models/`: `Success: no issues found in 97 source files`;
+  - ruff over the 15 changed Python files: the same 6 findings before and after, so no new
+    finding;
+  - vitest over every test file that reads a changed field: `25 passed (25)` files, `806 passed
+    (806)` tests;
+  - `tsc --noEmit` and eslint on the 16 changed TypeScript files: both clean.
+- **Gates at ship, on the merged tree `1664bd800` (the SWEEP_SHA that closes T-166.1-34):**
+  - the full analytics-service suite: `6847 passed, 90 skipped`;
+  - strict mypy over `services/ routers/ models/`: `Success: no issues found in 97 source files`;
+  - `tsc --noEmit`: exit 0;
+  - `src/__tests__/critical-regressions.test.ts`: `169 passed (169)`.
+## [0.97.0.1] - 2026-09-26 — Phase 169.3 plan 01: `/admin` Compute Jobs loads again, and a failed load no longer claims the queue is empty
+
+⭐ **What changed for whoever reads this next.** The `/admin` Compute Jobs tab was broken. Its list
+request returned HTTP 500 on every call, and the table then said "No compute jobs found" while the
+header counted a job in progress. The route called the `get_admin_compute_jobs` database function.
+That function fails on every call: its `id` OUT column collides with `profiles.id` in its own admin
+check ("column reference id is ambiguous"). Behind that, the check reads `auth.uid()`, which is NULL
+under the service-role client, so even a repaired body would return no rows. The route now reads
+the `compute_jobs_admin` view instead, and the table shows its empty-queue row only after a load
+that succeeded.
+
+⚠️ **A patch bump: a bug fix that ships alone by founder decision D11.** It is plan 01 of Phase
+169.3 SMALLFIXES. Plans 02–05 stay on `feat/169.3` until 167.1.2 PR C lands. This release carries
+no migration and touches no `supabase/` path. The dead function stays in the catalogue, unused.
+
+### Fixed
+- **`GET /api/admin/compute-jobs` reads the `compute_jobs_admin` view** (plan 01, SC1). The read
+  runs with the service-role client and only AFTER the existing `isAdminUser` gate. It selects an
+  explicit list of the 21 columns the client row type consumes: never a star select, never
+  `claim_token`, and not the view's `strategy_user_id` / `portfolio_user_id`. Each present
+  `status`, `kind` or `exchange` filter adds one `.eq`, and an absent or empty one adds none, as the
+  old `|| null` handling did. Rows come newest first and are ranged by the existing limit/offset. A
+  view read error is still the generic 500, now logged as `compute_jobs_admin view read failed`.
+- **`ComputeJobsTable` never shows "No compute jobs found." after a failed load** (plan 01, SC1).
+  The empty-queue row now also requires `!error`, so an HTTP 500 or a rejected fetch shows the
+  error alert alone.
+
+### Tests
+- **The route test pins the view read** (plan 01). A chainable, awaitable query-builder mock
+  records every call, `rpc` included, so going back to the function fails on an assertion rather
+  than a missing-method `TypeError`. A non-admin gets 403, and the test proves no service-role
+  client is built and nothing is read.
+- **Four `ComputeJobsTable` cases: a failed load is not an empty queue** (plan 01). HTTP 500 and a
+  rejected fetch each show the alert and NOT the empty-queue row. OK with `[]` shows the empty row
+  and no alert, and OK with rows shows neither.
+
+### Notes
+- **Planning slice for the D11 split.** The branch carries `169.3-CONTEXT`, `169.3-01-PLAN` and
+  `169.3-01-SUMMARY`, byte-identical to `feat/169.3`. It also adds a minimal `### Phase 169.3`
+  ROADMAP section with the dated D11 note, and the `[169-DEAD-ADMIN-JOBS-RPC]` TODOS entry that the
+  route's comment cites. That entry was booked on `feat/169.3` and had not reached `main`.
+  Dropping the function is a migration, and the entry routes it to the next migration-carrying
+  phase.
+- **Known limit.** The phase's post-deploy browser re-check (SC9, plan 169.3-05) ships with plans
+  02–05. It is not part of this release.
+
+## [0.97.0.0] - 2026-09-26 — DRBOPTIONS: a Deribit options account with an `assignment` row can be ingested, and every shape the census did not see still refuses
+
+⭐ **What changed for whoever reads this next.** On 2026-09-23 a Deribit options account inside a
+multi-account composite failed its first reconstruction. Its transaction log held an `assignment`
+row, a type the ingester had never classified, so the unknown-type refusal stopped the whole stitch
+job. Phase 168 classifies `assignment` as cash-bearing, but ONLY in the one shape a captured census
+licenses: a named option instrument with no same-instrument `delivery`, `settlement` or second
+`assignment` row in the batch. Every other shape still refuses loudly. It neither sums nor skips
+the row. The census is recorded as counts only in
+`analytics-service/docs/evidence/drb-assignment-census-2026-09.json`.
+
+⚠️ **This is a minor bump because ingestion behaviour changes on purpose.** A row type that used to
+fail the job is now summed into realized cash on both twins (the USD daily records and the native
+ledger). There is a new mark-to-market degrade reason and new factsheet copy. The smoothed replay
+now closes an option at its `expiry` row. Precedent: MT5VALIDATEWEDGE (0.96.0.0) and JOBRPCTRUTH
+(0.93.0.0) each took a minor bump for a behaviour change. This release carries no migration and
+touches no `supabase/` path.
+
+⛔ **Merging this deploys new ingestion to production.** Railway redeploys the analytics service
+once `main`'s CI is green. The phase is NOT complete: verification is `human_needed` at 12/13. The
+one open item is the founder's post-deploy retry (plan 168-03), described under Notes.
+
+### Added
+- **`assignment` is cash-bearing, in the census shape only** (plan 01). It joins
+  `CASH_BEARING_TYPES`, cited to the new evidence file. The file records one row: census delivery 0,
+  settlement 0, trade 1, n 1. The reading that `assignment` is Deribit's newer label for the short
+  in-the-money expiry once logged as `delivery` is marked an ASSUMPTION, not a measurement. No
+  change magnitude is cited anywhere.
+- **`assert_assignment_uncontested`, called in both twins at the correction-gate position** (plan
+  01, then widened in review). It refuses with `LedgerValuationError` in four cases: a
+  same-instrument `delivery`/`settlement`/second `assignment`, an assignment naming no instrument,
+  one naming a non-option instrument, or one naming an instrument that is not a string. Each refusal
+  uses a unique module constant (`_ASSIGNMENT_CONTESTED_PHRASE`, `_ASSIGNMENT_UNNAMED_PHRASE` and
+  `_ASSIGNMENT_NON_OPTION_PHRASE`), and the tests import those constants. It fires on every
+  assignment whatever its `change`, because a size rule would be a magnitude rule. Its verdict does
+  not depend on row order.
+- **A windowed crawl refuses an assignment** (plan 01). `_crawl_deribit_ledger` raises
+  "assignment classification requires a full-history crawl" when a `since_ms` batch holds one. It
+  runs right after pagination, before the settlement-index fetch and before the USD twin. It is
+  inert on every production path, because all of them crawl with `since_ms=None`.
+- **One option-book vocabulary** (plan 01). `_OPTION_EXPIRY_TYPES` (`delivery`, `assignment`) and
+  `_OPTION_BOOK_EVENT_TYPES` (those plus `trade`) replace six literal trade/delivery sites: coverage
+  days, trailing-edge activity, the smoothed cross-check, the option-book replay, the native option
+  arm and its non-derivative guard. An import-time assert keeps the book a subset of
+  `CASH_BEARING_TYPES`. `assignment` is NOT in `_NATIVE_OPTIONS_SUMMARY_TYPES`, and `exercise` and
+  `expiry` are NOT cash-bearing.
+- **The refusal evidence reports more** (plan 02). `_SIBLING_TYPES` gains `assignment`, so the next
+  unknown-type refusal shows whether an assignment co-occurred on the instrument. `_SHAPE_FIELDS`
+  gains `commission` and `position`, a fee and a signed size, neither of them an identifier.
+- **A named degrade reason for a missing option fee or position** (SFH-04, round 1).
+  `OptionRowFieldMissingError` subclasses `LedgerValuationError`, so every existing handler still
+  catches it. The job worker's mark-to-market degrade stamps it `mtm_option_row_field_missing`
+  (`MTM_REASON_OPTION_ROW_FIELD`, owned by `stitch_composite.py`), instead of the summary-coverage
+  reason that named the wrong cause. The cash headline still ships. The factsheet's
+  `mtmDisabledReasonCopy` renders it in the steady tone.
+
+### Changed
+- **The smoothed replay closes an option at its `expiry` row** (D-09, founder decision D6,
+  2026-09-26). Deribit logs an out-of-the-money expiry as a zero-cash `expiry` row, the only entry
+  for that expiration. The replay ignored it, so an OTM short stayed open past its life. Any later
+  option activity then raised the daily-MTM hole, and the smoothed basis was lost for the whole
+  account. A zero-cash `expiry` now sets the position to 0 on its day
+  (`_OPTION_BOOK_CLOSE_TYPES`). An `expiry` carrying nonzero cash or a nonzero position refuses. An
+  `exercise` row on an option refuses too, because its shape is unmeasured. Recorded as scope
+  amendment D-09 in the phase CONTEXT and in the ROADMAP.
+- **The acceptance eligibility check reads the book vocabulary** (plan 02).
+  `check_perp_only_eligibility` counts option rows by membership in `_OPTION_BOOK_EVENT_TYPES`. A key
+  whose only option-book event is an assignment is therefore not accepted as a byte-identity
+  control.
+- **Every prose description of the option book names `assignment`** (plan 02). This covers the
+  `deribit_txn.py` docstrings and comments, the WR-05 comment in `build_deribit_native_ledger`, the
+  design doc's INCLUDE list with its census licence and the D-02 refusal, and the test prose. A
+  dated CORRECTED note sits on the 2026-09-12 design-doc block. Deribit's transaction-log docs do
+  list `expiry`, `assignment` and `exercise`. The old block stays as lineage.
+
+### Fixed
+- **WR-01 / SFH-01** (round 1): the assignment guard refuses any non-option instrument on both
+  twins.
+- **WR-02** (round 1): the census stays inside one subaccount on the native twin. Each retained raw
+  row is a copy stamped with its scope under `ROW_SCOPE_KEY`, and a sibling from another scope is
+  skipped. The stamp is not in `_SHAPE_FIELDS`, so it never reaches a message.
+- **SFH-02**: a second same-instrument assignment contests the first. The self-skip is by identity,
+  so two equal-but-distinct rows still contest each other.
+- **SFH-03**: the contested refusal names the contesting row by id and type.
+- **SFH-05**: sibling matching normalises `instrument_name` (stripped, upper-cased) and refuses a
+  non-string name.
+- **SFH-06**: one non-Mapping row no longer blanks the refusal census. It used to raise
+  `AttributeError`, and the renderer's broad except swallowed the whole shape.
+
+### Tests
+- `analytics-service/tests/test_deribit_assignment.py` is new. It covers the census shape end to
+  end through `build_deribit_native_ledger`, summed once on both twins with the balance identity
+  closed. It also covers each refusal class, order independence, the zero-change guard, the
+  windowed refusal before the USD twin, per-site pins with one-site-revert RED runs, the
+  `combine_native_ledger` MTM run and the assigned-short smoothed run ending flat.
+- The evidence-file leak test (IN-02) now catches an ISO-dated or lower-cased expiry. It was seen RED
+  under two neuters on a byte backup, each restored and compared.
+- `basis-context.test.tsx` pins the new reason copy. The acceptance, txn, unclassified-evidence,
+  single-key MTM and smoothed-core suites are updated for the vocabulary.
+
+### Notes
+- **Planning and review record**: phase context, research, pattern map and validation strategy.
+  Three plans passed plan-check after two revision rounds. Two code-review rounds and two
+  silent-failure rounds ran, with a fix report for each round (the round-1 report carries the
+  plan-anchor reading and founder decision D6). The verification is `human_needed` 12/13, and the
+  security verification is SECURED 13/13. STATE.md records the phase as planned, written by hand.
+- **The founder's post-deploy retry is still owed** (plan 168-03). Once the analytics service runs
+  the merge commit, retry the Deribit options strategy whose stitch job failed on 2026-09-23. Report
+  counts only. Expected: the job completes, no assignment refusal appears, and the return-point
+  count is nonzero. Any other refusal class gets its own phase.
+- ⚠️ **`SMOOTHED_MTM_ENABLED` caveat.** The smoothed pass, and with it the D-09 expiry close, runs
+  only when that flag is on. Its production value was not measured, so the retry may not exercise
+  D-09 at all.
+- **Known limits, recorded and not fixed:**
+  - **WR-01 (round 2): a malformed expiry timestamp fails the job.** An `expiry` row whose timestamp
+    cannot be parsed makes `replay_option_positions` raise a bare `ValueError`, not
+    `LedgerValuationError`. It escapes the smoothed pass's structural catch, is retried as
+    transient and ends `failed_final`, so the healthy cash headline does not ship. The verifier
+    reproduced it. It is reachable only with `SMOOTHED_MTM_ENABLED` on and an undatable expiry row
+    from the venue.
+  - **LR-01**: a whitespace-padded assignment instrument name passes the guard as an option but is
+    unknown elsewhere, so the twins can still disagree.
+  - **LR-02 / SFH-R2-02**: the smoothed replay keys the option book on the raw `instrument_name`. A
+    case or padding variant splits one position, and a variant-named expiry closes a phantom
+    instrument.
+  - **LR-03 / SFH-R2-03**: a non-numeric option commission is still stamped with the
+    summary-coverage reason. Only an absent one gets `mtm_option_row_field_missing`.
+  - **SFH-R2-01**: a case-variant or padded exercise type skips the D-09 refusal, and a
+    case-variant expiry does not close.
+  - **SFH-R2-04**: no test pins the mixed stamped/unstamped rule, which keeps the stricter
+    batch-wide check.
+  - **IN-01**: the WR-02 scope stamp is inert in production today, because each crawl covers one
+    scope.
+  - **IN-05**: the new factsheet copy says "fee or position", but only a missing fee can stamp that
+    reason today.
+  - The census is n=1. It shows what Deribit emitted when it emitted no sibling. It cannot show that
+    Deribit never emits both.
+
 ## [0.96.0.1] - 2026-09-26 — the unstarted phases split into one-topic phases, and the backlog re-routed to them
 
 ### Notes

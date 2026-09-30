@@ -196,7 +196,9 @@ describe("fetchHoldingCompareItem — 167.1.2 D-13 analytics withheld while rebu
     { asof: "2026-01-03", breakdown: { BTC: 100 }, pre_terminus_balance_unknown: false },
   ];
 
-  it("the switch is 'rebuilding' (plan 11 owns the flip)", () => {
+  it("plan 11 keeps the switch 'rebuilding': breakdown level ratios are not flow-neutral returns", () => {
+    // D-13 decided here, not inherited from My Allocation turning ready.
+    // reconstructAndAnalyze is still value[i] / value[i-1] - 1.
     expect(HOLDING_COMPARE_HISTORY_STATE).toBe("rebuilding");
   });
 

@@ -1519,6 +1519,35 @@ BEGIN
     FROM compute_jobs
     WHERE status IN ('pending', 'failed_retry')
       AND next_attempt_at <= now()
+      -- CLAIMPAIR PRE-RANK EXCLUSION BEGIN (D-08)
+      -- Phase 164.9.3: a failed_retry row whose (kind, partition) already
+      -- holds a pending row is not a candidate. Applied here, BEFORE
+      -- row_number(), never in `deduped`: excluded after ranking, the retry
+      -- would still rank first and take its pending twin down with it (a
+      -- silent, permanent partition wedge). One clause per partition, each
+      -- matching its compute_jobs_one_inflight_per_kind_* index predicate;
+      -- that strategy index excludes compute_intro_snapshot, so this does too.
+      AND (portfolio_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = compute_jobs.kind
+           AND x.portfolio_id = compute_jobs.portfolio_id
+           AND x.status       = 'pending'))
+      AND (strategy_id IS NULL OR status <> 'failed_retry' OR kind = 'compute_intro_snapshot' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind        = compute_jobs.kind
+           AND x.strategy_id = compute_jobs.strategy_id
+           AND x.status      = 'pending'))
+      AND (allocator_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = compute_jobs.kind
+           AND x.allocator_id = compute_jobs.allocator_id
+           AND x.status       = 'pending'))
+      AND (api_key_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind       = compute_jobs.kind
+           AND x.api_key_id = compute_jobs.api_key_id
+           AND x.status     = 'pending'))
+      -- CLAIMPAIR PRE-RANK EXCLUSION END
   ),
   deduped AS (
     SELECT id FROM ranked
@@ -1621,12 +1650,54 @@ BEGIN
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
 
+  -- Throttle probe: count normal/high jobs that are ready to claim.
+  -- Includes failed_retry rows whose backoff has elapsed (per migration 089).
   SELECT count(*) INTO v_high_pending
     FROM compute_jobs
    WHERE priority IN ('normal','high')
      AND status IN ('pending', 'failed_retry')
+     -- CLAIMPAIR PROBE EXCLUSION BEGIN (D-08, D-04 amendment)
+     -- Phase 164.9.3 review round 1 (WR-01): a failed_retry row that the
+     -- pre-rank block below holds back (its (kind, partition) holds a
+     -- pending row) is not claimable this tick, so it must not trip the
+     -- throttle either. Counted, it held back a `low` pending twin and every
+     -- other due `low` job while never being claimed itself: a silent,
+     -- permanent wedge. Review round 3 (founder decision D-11): the same
+     -- holds for a failed_retry the C39 guard in `deduped` holds back beside
+     -- a running or done_pending_children row of the same (kind, partition),
+     -- so every sibling test also names those two statuses. Four partitions,
+     -- one negated disjunction. The intro carve-out gates the pending sibling
+     -- only, as in the pre-rank block; C39's strategy clause has none, so a
+     -- running or done_pending_children sibling holds an intro retry too.
+     AND NOT (status = 'failed_retry' AND (
+           (portfolio_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM compute_jobs p
+              WHERE p.kind         = compute_jobs.kind
+                AND p.portfolio_id = compute_jobs.portfolio_id
+                AND p.status       IN ('pending', 'running', 'done_pending_children')))
+        OR (strategy_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM compute_jobs p
+              WHERE p.kind        = compute_jobs.kind
+                AND p.strategy_id = compute_jobs.strategy_id
+                AND (p.status IN ('running', 'done_pending_children')
+                     OR (p.status = 'pending' AND compute_jobs.kind <> 'compute_intro_snapshot'))))
+        OR (allocator_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM compute_jobs p
+              WHERE p.kind         = compute_jobs.kind
+                AND p.allocator_id = compute_jobs.allocator_id
+                AND p.status       IN ('pending', 'running', 'done_pending_children')))
+        OR (api_key_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM compute_jobs p
+              WHERE p.kind       = compute_jobs.kind
+                AND p.api_key_id = compute_jobs.api_key_id
+                AND p.status     IN ('pending', 'running', 'done_pending_children')))))
+     -- CLAIMPAIR PROBE EXCLUSION END
      AND next_attempt_at <= now();
 
+  -- Atomic claim with priority precedence + throttle guard + partition dedupe.
+  -- The CTE picks at most one winner per (kind, partition_id) tuple BEFORE
+  -- the FOR UPDATE SKIP LOCKED scan, so the ensuing batch UPDATE cannot
+  -- 23505 on the partial inflight indices.
   RETURN QUERY
   WITH ranked AS (
     SELECT id, kind, priority, portfolio_id, strategy_id, allocator_id, api_key_id,
@@ -1656,6 +1727,35 @@ BEGIN
     WHERE status IN ('pending', 'failed_retry')
       AND next_attempt_at <= now()
       AND (v_high_pending = 0 OR priority IN ('normal','high'))
+      -- CLAIMPAIR PRE-RANK EXCLUSION BEGIN (D-08)
+      -- Phase 164.9.3: a failed_retry row whose (kind, partition) already
+      -- holds a pending row is not a candidate. Applied here, BEFORE
+      -- row_number(), never in `deduped`: excluded after ranking, the retry
+      -- would still rank first and take its pending twin down with it (a
+      -- silent, permanent partition wedge). One clause per partition, each
+      -- matching its compute_jobs_one_inflight_per_kind_* index predicate;
+      -- that strategy index excludes compute_intro_snapshot, so this does too.
+      AND (portfolio_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = compute_jobs.kind
+           AND x.portfolio_id = compute_jobs.portfolio_id
+           AND x.status       = 'pending'))
+      AND (strategy_id IS NULL OR status <> 'failed_retry' OR kind = 'compute_intro_snapshot' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind        = compute_jobs.kind
+           AND x.strategy_id = compute_jobs.strategy_id
+           AND x.status      = 'pending'))
+      AND (allocator_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = compute_jobs.kind
+           AND x.allocator_id = compute_jobs.allocator_id
+           AND x.status       = 'pending'))
+      AND (api_key_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind       = compute_jobs.kind
+           AND x.api_key_id = compute_jobs.api_key_id
+           AND x.status     = 'pending'))
+      -- CLAIMPAIR PRE-RANK EXCLUSION END
   ),
   deduped AS (
     SELECT id FROM ranked
@@ -1663,6 +1763,32 @@ BEGIN
       AND (strategy_id  IS NULL OR rn_s = 1)
       AND (allocator_id IS NULL OR rn_a = 1)
       AND (api_key_id   IS NULL OR rn_k = 1)
+      -- CLAIMPAIR C39 PORT BEGIN (from claim_compute_jobs)
+      AND (portfolio_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = ranked.kind
+           AND x.portfolio_id = ranked.portfolio_id
+           AND x.status IN ('running', 'done_pending_children')
+      ))
+      AND (strategy_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind        = ranked.kind
+           AND x.strategy_id = ranked.strategy_id
+           AND x.status IN ('running', 'done_pending_children')
+      ))
+      AND (allocator_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = ranked.kind
+           AND x.allocator_id = ranked.allocator_id
+           AND x.status IN ('running', 'done_pending_children')
+      ))
+      AND (api_key_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind       = ranked.kind
+           AND x.api_key_id = ranked.api_key_id
+           AND x.status IN ('running', 'done_pending_children')
+      ))
+      -- CLAIMPAIR C39 PORT END
   )
   UPDATE compute_jobs
      SET status     = 'running',
@@ -1727,6 +1853,42 @@ BEGIN
       FROM compute_jobs
      WHERE priority IN ('normal','high')
        AND status IN ('pending', 'failed_retry')
+       -- CLAIMPAIR PROBE EXCLUSION BEGIN (D-08, D-04 amendment)
+       -- Phase 164.9.3 review round 1 (WR-01): a failed_retry row that the
+       -- pre-rank block below holds back (its (kind, partition) holds a
+       -- pending row) is not claimable this tick, so it must not trip the
+       -- throttle either. Counted, it held back a `low` pending twin and every
+       -- other due `low` job while never being claimed itself: a silent,
+       -- permanent wedge. Review round 3 (founder decision D-11): the same
+       -- holds for a failed_retry the C39 guard in `deduped` holds back beside
+       -- a running or done_pending_children row of the same (kind, partition),
+       -- so every sibling test also names those two statuses. Four partitions,
+       -- one negated disjunction. The intro carve-out gates the pending sibling
+       -- only, as in the pre-rank block; C39's strategy clause has none, so a
+       -- running or done_pending_children sibling holds an intro retry too.
+       AND NOT (status = 'failed_retry' AND (
+             (portfolio_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM compute_jobs p
+                WHERE p.kind         = compute_jobs.kind
+                  AND p.portfolio_id = compute_jobs.portfolio_id
+                  AND p.status       IN ('pending', 'running', 'done_pending_children')))
+          OR (strategy_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM compute_jobs p
+                WHERE p.kind        = compute_jobs.kind
+                  AND p.strategy_id = compute_jobs.strategy_id
+                  AND (p.status IN ('running', 'done_pending_children')
+                       OR (p.status = 'pending' AND compute_jobs.kind <> 'compute_intro_snapshot'))))
+          OR (allocator_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM compute_jobs p
+                WHERE p.kind         = compute_jobs.kind
+                  AND p.allocator_id = compute_jobs.allocator_id
+                  AND p.status       IN ('pending', 'running', 'done_pending_children')))
+          OR (api_key_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM compute_jobs p
+                WHERE p.kind       = compute_jobs.kind
+                  AND p.api_key_id = compute_jobs.api_key_id
+                  AND p.status     IN ('pending', 'running', 'done_pending_children')))))
+       -- CLAIMPAIR PROBE EXCLUSION END
        AND next_attempt_at <= now()
        AND (p_kind_include IS NULL OR kind = ANY(p_kind_include))
        AND (p_kind_exclude IS NULL OR NOT (kind = ANY(p_kind_exclude)))
@@ -1773,6 +1935,35 @@ BEGIN
       -- FLIPRETRY-02: kind filter. NULL/NULL => byte-identical to prod today.
       AND (p_kind_include IS NULL OR kind = ANY(p_kind_include))
       AND (p_kind_exclude IS NULL OR NOT (kind = ANY(p_kind_exclude)))
+      -- CLAIMPAIR PRE-RANK EXCLUSION BEGIN (D-08)
+      -- Phase 164.9.3: a failed_retry row whose (kind, partition) already
+      -- holds a pending row is not a candidate. Applied here, BEFORE
+      -- row_number(), never in `deduped`: excluded after ranking, the retry
+      -- would still rank first and take its pending twin down with it (a
+      -- silent, permanent partition wedge). One clause per partition, each
+      -- matching its compute_jobs_one_inflight_per_kind_* index predicate;
+      -- that strategy index excludes compute_intro_snapshot, so this does too.
+      AND (portfolio_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = compute_jobs.kind
+           AND x.portfolio_id = compute_jobs.portfolio_id
+           AND x.status       = 'pending'))
+      AND (strategy_id IS NULL OR status <> 'failed_retry' OR kind = 'compute_intro_snapshot' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind        = compute_jobs.kind
+           AND x.strategy_id = compute_jobs.strategy_id
+           AND x.status      = 'pending'))
+      AND (allocator_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = compute_jobs.kind
+           AND x.allocator_id = compute_jobs.allocator_id
+           AND x.status       = 'pending'))
+      AND (api_key_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind       = compute_jobs.kind
+           AND x.api_key_id = compute_jobs.api_key_id
+           AND x.status     = 'pending'))
+      -- CLAIMPAIR PRE-RANK EXCLUSION END
   ),
   deduped AS (
     SELECT id FROM ranked
@@ -1917,7 +2108,7 @@ COMMENT ON FUNCTION "public"."cleanup_abandoned_wizard_drafts"() IS 'CLEAN-01 + 
 CREATE OR REPLACE FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text" DEFAULT NULL::"text", "p_request_hash" "text" DEFAULT NULL::"text", "p_portfolio_fingerprint" "text" DEFAULT NULL::"text") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
-    AS $$
+    AS $_$
 DECLARE
   v_caller            uuid := auth.uid();
   v_diff              jsonb;
@@ -2045,11 +2236,46 @@ BEGIN
   -- (position cron refreshed a snapshot, another tab/device edited) → the
   -- frozen diffs would write outcomes against a stale shape (lost-update).
   --
+  -- Phase 167.1.2 review C4 SFH-R2-01: "current holdings" is the set the
+  -- client fingerprinted, which is `holdingsSummary` as
+  -- fetchLatestHoldingsPerKey (src/lib/latest-holdings-per-key.ts) reads it.
+  -- The server used to take the newest row per triple over EVERY date, so a
+  -- position closed on an earlier day stayed in its set and was missing from
+  -- the client's, and every book-mode commit of such an allocator returned
+  -- portfolio_fingerprint_stale, which no refresh cleared. The CTE below is
+  -- that reader's rule, step for step:
+  --   1. the owner's keys, departed ones included;
+  --   2. per key, its latest asof, and its newest audit event
+  --      'allocator.holdings.sync_completed' with final_status 'complete'
+  --      (newest by created_at DESC, NULLs first, as PostgREST orders). That
+  --      event is evidence only when row_count is a non-negative whole number
+  --      and asof is a YYYY-MM-DD string (cleanPollDay). When its day is
+  --      STRICTLY after the key's latest rows, the key's reading is that day
+  --      with no rows (SFH-C4-02); otherwise it is the latest asof with rows;
+  --   3. keys grouped by exchange account (accountIdentityTokens, the D-09
+  --      identity: a shared non-blank venue_account_id on one exchange, or an
+  --      account_shared_with_api_key_id marker of a shared kind, joined
+  --      transitively). A key with neither is its own account. Only the keys
+  --      whose reading is the account's newest, and have rows on it,
+  --      contribute (SFH-C4-01);
+  --   4. the contributing keys' rows at their reading day, one token per
+  --      (venue, symbol, holding_type).
+  -- Days are compared as 'YYYY-MM-DD' text under COLLATE "C", as the reader
+  -- compares strings. They are never cast to date, so a malformed day in an
+  -- audit event can never raise here. Everything is scoped to p_allocator_id,
+  -- which (1) proved equals auth.uid().
+  --
+  -- ⚠️ TWIN. This is the third copy of the rule (TypeScript reader, this, and
+  -- the grain rule in plan 10's Python helper). A change to
+  -- latest-holdings-per-key.ts or to accountIdentityTokens that is not made
+  -- here re-opens SFH-R2-01. The gate is
+  -- supabase/tests/test_commit_scenario_batch_fingerprint_precondition.sql
+  -- tests 10-14.
+  --
   -- The token format MIRRORS computeHoldingsFingerprint (scenario-state.ts):
-  -- symbol-first "symbol:venue:holding_type", latest-asof-per-(venue,symbol,
-  -- holding_type) to match the client dedup, and NO value_usd filter (the
-  -- client fingerprint includes value_usd<=0 latest rows; the ownership
-  -- probe's value_usd>0 is WRONG here). We do NOT reproduce the client's JS
+  -- symbol-first "symbol:venue:holding_type", and NO value_usd filter (the
+  -- client fingerprint includes value_usd<=0 rows; the ownership probe's
+  -- value_usd>0 is WRONG here). We do NOT reproduce the client's JS
   -- localeCompare sort (no Postgres collation is byte-identical to it):
   -- instead we compare the order-invariant token SET, sorting BOTH sides with
   -- the SAME COLLATE "C" so equality is set equality, collation-independent.
@@ -2057,12 +2283,136 @@ BEGIN
   -- here, so a network retry of an already-committed batch is not re-checked
   -- against now-changed holdings).
   IF p_portfolio_fingerprint IS NOT NULL THEN
-    SELECT COALESCE(array_agg(tok ORDER BY tok COLLATE "C"), ARRAY[]::text[])
+    WITH RECURSIVE
+    owner_keys AS (
+      SELECT k.id,
+             lower(btrim(k.exchange)) AS exchange_norm,
+             NULLIF(btrim(k.venue_account_id), '') AS venue_norm,
+             k.account_share_kind,
+             k.account_shared_with_api_key_id
+        FROM api_keys k
+       WHERE k.user_id = p_allocator_id
+    ),
+    account_edges AS (
+      -- one exchange account id on one exchange
+      SELECT a.id AS a, b.id AS b
+        FROM owner_keys a
+        JOIN owner_keys b
+          ON b.exchange_norm = a.exchange_norm
+         AND b.venue_norm    = a.venue_norm
+         AND b.id           <> a.id
+      UNION
+      -- a shared-account marker naming another key of this owner, both ways
+      SELECT m.id, m.account_shared_with_api_key_id
+        FROM owner_keys m
+       WHERE m.account_share_kind IN ('duplicate', 'composite_member')
+         AND m.account_shared_with_api_key_id <> m.id
+         AND m.account_shared_with_api_key_id IN (SELECT id FROM owner_keys)
+      UNION
+      SELECT m.account_shared_with_api_key_id, m.id
+        FROM owner_keys m
+       WHERE m.account_share_kind IN ('duplicate', 'composite_member')
+         AND m.account_shared_with_api_key_id <> m.id
+         AND m.account_shared_with_api_key_id IN (SELECT id FROM owner_keys)
+    ),
+    known_account AS (
+      SELECT id FROM owner_keys WHERE venue_norm IS NOT NULL
+      UNION
+      SELECT a FROM account_edges
+    ),
+    reach (root, node) AS (
+      SELECT id, id FROM known_account
+      UNION
+      SELECT r.root, e.b
+        FROM reach r
+        JOIN account_edges e ON e.a = r.node
+    ),
+    key_account AS (
+      SELECT k.id,
+             COALESCE(
+               (SELECT 'account:' || min(r.root::text COLLATE "C")
+                  FROM reach r
+                 WHERE r.node = k.id),
+               'key:' || k.id::text
+             ) AS account
+        FROM owner_keys k
+    ),
+    key_evidence AS (
+      SELECT k.id,
+             (SELECT max(h.asof)
+                FROM allocator_holdings h
+               WHERE h.allocator_id = p_allocator_id
+                 AND h.api_key_id   = k.id) AS latest_asof,
+             (SELECT al.metadata
+                FROM audit_log al
+               WHERE al.user_id     = p_allocator_id
+                 AND al.action      = 'allocator.holdings.sync_completed'
+                 AND al.entity_type = 'api_key'
+                 AND al.entity_id   = k.id
+                 AND al.metadata->>'final_status' = 'complete'
+               ORDER BY al.created_at DESC
+               LIMIT 1) AS poll_meta
+        FROM owner_keys k
+    ),
+    key_poll AS (
+      SELECT e.id,
+             e.latest_asof,
+             to_char(e.latest_asof, 'YYYY-MM-DD') AS latest_day,
+             -- cleanPollDay. CASE arms run in order, so the numeric cast only
+             -- ever sees a JSON number.
+             CASE
+               WHEN e.poll_meta IS NULL THEN NULL
+               WHEN jsonb_typeof(e.poll_meta) <> 'object' THEN NULL
+               WHEN jsonb_typeof(e.poll_meta->'row_count') IS DISTINCT FROM 'number' THEN NULL
+               WHEN (e.poll_meta->>'row_count')::numeric < 0 THEN NULL
+               WHEN (e.poll_meta->>'row_count')::numeric
+                    <> trunc((e.poll_meta->>'row_count')::numeric) THEN NULL
+               WHEN jsonb_typeof(e.poll_meta->'asof') IS DISTINCT FROM 'string' THEN NULL
+               WHEN (e.poll_meta->>'asof') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN NULL
+               ELSE e.poll_meta->>'asof'
+             END AS poll_day
+        FROM key_evidence e
+    ),
+    key_reading AS (
+      SELECT p.id,
+             p.latest_asof,
+             (p.poll_day IS NOT NULL
+              AND (p.latest_day IS NULL
+                   OR p.poll_day COLLATE "C" > p.latest_day COLLATE "C")) AS polled_after_rows
+        FROM key_poll p
+    ),
+    key_day AS (
+      SELECT r.id,
+             r.latest_asof,
+             NOT r.polled_after_rows AS has_rows,
+             CASE WHEN r.polled_after_rows THEN p.poll_day ELSE p.latest_day END AS day
+        FROM key_reading r
+        JOIN key_poll p ON p.id = r.id
+    ),
+    account_newest AS (
+      SELECT a.account, max(d.day COLLATE "C") AS day
+        FROM key_day d
+        JOIN key_account a ON a.id = d.id
+       WHERE d.day IS NOT NULL
+       GROUP BY a.account
+    ),
+    contributing AS (
+      SELECT d.id, d.latest_asof
+        FROM key_day d
+        JOIN key_account a    ON a.id = d.id
+        JOIN account_newest n ON n.account = a.account
+                             AND n.day COLLATE "C" = d.day COLLATE "C"
+       WHERE d.has_rows
+    )
+    SELECT COALESCE(array_agg(latest.tok ORDER BY latest.tok COLLATE "C"), ARRAY[]::text[])
       INTO v_server_fp_tokens
       FROM (
         SELECT DISTINCT ON (ah.venue, ah.symbol, ah.holding_type)
                ah.symbol || ':' || ah.venue || ':' || ah.holding_type AS tok
           FROM allocator_holdings ah
+          JOIN contributing c
+            ON c.id = ah.api_key_id
+           AND ah.asof = c.latest_asof
          WHERE ah.allocator_id = p_allocator_id
          ORDER BY ah.venue, ah.symbol, ah.holding_type, ah.asof DESC
       ) latest;
@@ -2351,13 +2701,13 @@ BEGIN
 
   RETURN jsonb_build_object('ok', true, 'recorded', v_recorded);
 END;
-$$;
+$_$;
 
 
 ALTER FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") IS 'audit-2026-05-07 H-0974 / H-0976 / H-0977 + mig 131 idempotency dedup + B11 NEW-C18-10 portfolio-fingerprint precondition. SECURITY DEFINER RPC that commits a batch of <=50 scenario diffs in a single Postgres transaction. auth.uid() = p_allocator_id guard. Per-row ownership probe with asof + value_usd > 0 filter (mig 128 P1957). voluntary_modify uses single canonical percent_allocated encoding (mig 128 P1956). Idempotency-Key reservation lives in the same tx as the data inserts (mig 131). When p_portfolio_fingerprint is supplied, the CURRENT latest-asof holdings token set is recompared against it (order-invariant, COLLATE "C", no value_usd filter) and a divergence returns ok:false code=portfolio_fingerprint_stale (route -> 409). On success, emits one scenario.commit audit_log row attributed to the allocator (fail-soft).';
+COMMENT ON FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") IS 'audit-2026-05-07 H-0974 / H-0976 / H-0977 + mig 131 idempotency dedup + B11 NEW-C18-10 portfolio-fingerprint precondition. SECURITY DEFINER RPC that commits a batch of <=50 scenario diffs in a single Postgres transaction. auth.uid() = p_allocator_id guard. Per-row ownership probe with asof + value_usd > 0 filter (mig 128 P1957). voluntary_modify uses single canonical percent_allocated encoding (mig 128 P1956). Idempotency-Key reservation lives in the same tx as the data inserts (mig 131). When p_portfolio_fingerprint is supplied, the CURRENT holdings token set is recompared against it (order-invariant, COLLATE "C", no value_usd filter) and a divergence returns ok:false code=portfolio_fingerprint_stale (route -> 409). Since 20260929120000 (Phase 167.1.2 SFH-R2-01) the current set is the one the My Allocation reader shows (fetchLatestHoldingsPerKey): each key''s rows at its own latest reading, one reading per exchange account, and no rows from a key whose newer clean poll read nothing. On success, emits one scenario.commit audit_log row attributed to the allocator (fail-soft).';
 
 
 
@@ -3461,6 +3811,100 @@ ALTER FUNCTION "public"."enforce_allocator_holdings_owner_coherence"() OWNER TO 
 
 
 COMMENT ON FUNCTION "public"."enforce_allocator_holdings_owner_coherence"() IS 'f5: asserts allocator_holdings.allocator_id matches api_keys.user_id for the linked api_key_id. Prevents silent ownership fork if api_keys.user_id is reassigned. SECURITY DEFINER so the owner lookup bypasses RLS on api_keys.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."enforce_api_keys_account_share_same_owner"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+DECLARE
+  v_holder_owner  uuid;
+  v_holder_disc   timestamptz;
+  v_holder_holder uuid;
+BEGIN
+  -- (1) NULL holder: no lookup, never a refusal. Every ordinary key INSERT, the
+  -- stamper's marker-clearing UPDATE and the FK's ON DELETE SET NULL action
+  -- take this branch.
+  IF NEW.account_shared_with_api_key_id IS NULL THEN
+    IF TG_OP = 'UPDATE' THEN
+      IF OLD.account_shared_with_api_key_id IS NOT NULL
+         AND NEW.account_share_kind IS NOT DISTINCT FROM OLD.account_share_kind THEN
+        -- The holder is being cleared and the writer left the kind alone (the
+        -- FK action after the holder was hard-deleted names ONLY the holder
+        -- column). Clear the kind in the same row write, or
+        -- api_keys_account_share_both_or_neither aborts the statement, and
+        -- with it the owner's delete of the holder key. A writer that sets the
+        -- holder to NULL AND writes a DIFFERENT non-NULL kind is contradicting
+        -- itself; its kind is kept, so the CHECK refuses it by name.
+        NEW.account_share_kind := NULL;
+      END IF;
+    END IF;
+    -- On INSERT the kind is left as supplied, so a kind without a holder is
+    -- still refused by the CHECK.
+    RETURN NEW;
+  END IF;
+
+  -- (2) a holder is named. SECURITY DEFINER so the lookup reads the holder row
+  -- whatever the caller's RLS view is; the only thing it returns is a refusal.
+  -- FOR SHARE serialises this write against a concurrent write that marks the
+  -- holder itself, so two racing writers cannot build a chain between them.
+  SELECT user_id, disconnected_at, account_shared_with_api_key_id
+    INTO v_holder_owner, v_holder_disc, v_holder_holder
+    FROM public.api_keys
+   WHERE id = NEW.account_shared_with_api_key_id
+     FOR SHARE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_NOT_FOUND'
+      USING ERRCODE = '23503',
+            DETAIL  = 'api_keys.account_shared_with_api_key_id names no api_keys row.';
+  END IF;
+
+  IF v_holder_owner IS DISTINCT FROM NEW.user_id THEN
+    RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER'
+      USING ERRCODE = '42501',
+            DETAIL  = 'api_keys.account_shared_with_api_key_id must name a key of the same user_id.';
+  END IF;
+
+  -- The holder must be LIVE in the sense api_keys_user_exchange_venue_account_uniq
+  -- uses: disconnected_at IS NULL. A revoked key is still live here, exactly as
+  -- it is for that index (it is recovered in place by a reconnect).
+  IF v_holder_disc IS NOT NULL THEN
+    RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_NOT_LIVE'
+      USING ERRCODE = '55000',
+            DETAIL  = 'api_keys.account_shared_with_api_key_id must name a key whose disconnected_at is NULL.';
+  END IF;
+
+  -- No chains and no cycles: the book counts a marked account once, through
+  -- its holder, so a holder that is itself marked would leave the account
+  -- counted by nobody (a 2-cycle) or resolved through a key that is not
+  -- counted (a chain). Both directions are refused.
+  IF v_holder_holder IS NOT NULL THEN
+    RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_IS_MARKED'
+      USING ERRCODE = '23000',
+            DETAIL  = 'The named holder is itself marked as sharing another key''s account; name that key instead.';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+      FROM public.api_keys d
+     WHERE d.account_shared_with_api_key_id = NEW.id
+  ) THEN
+    RAISE EXCEPTION 'ACCOUNT_SHARE_KEY_IS_A_HOLDER'
+      USING ERRCODE = '23000',
+            DETAIL  = 'Another key already names this key as its holder, so this key cannot itself be marked.';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."enforce_api_keys_account_share_same_owner"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."enforce_api_keys_account_share_same_owner"() IS 'Phase 167.1.2 D-11. BEFORE INSERT OR UPDATE OF account_shared_with_api_key_id on api_keys. A NULL holder short-circuits with no lookup (so no ordinary insert pays for it or can be refused by it), and on an UPDATE that clears a holder while leaving the kind as it was, it clears account_share_kind too, so the FK''s ON DELETE SET NULL action never trips api_keys_account_share_both_or_neither (a write that clears the holder but sets a different kind keeps that kind and is refused by the CHECK). A non-NULL holder is refused: 23503 ACCOUNT_SHARE_HOLDER_NOT_FOUND when no such row exists; 42501 ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER when it belongs to another user_id; 55000 ACCOUNT_SHARE_HOLDER_NOT_LIVE when its disconnected_at is set; 23000 ACCOUNT_SHARE_HOLDER_IS_MARKED when the holder is itself marked, and 23000 ACCOUNT_SHARE_KEY_IS_A_HOLDER when another key already names this row as its holder (no chains, no cycles). Enforced in the database AT THE MOMENT THE MARKER IS WRITTEN, not only in the stamper, so no writer can point a key at another tenant''s key, at a departed key, or into a chain. A holder that departs LATER keeps its dependents'' markers until the stamper re-evaluates them; this trigger does not fire on a disconnect.';
 
 
 
@@ -5014,7 +5458,19 @@ CREATE OR REPLACE FUNCTION "public"."enqueue_refresh_allocator_equity_for_all"()
     AS $$
 DECLARE
   v_key   RECORD;
+  v_book  RECORD;
+  v_rkey  RECORD;
   v_today TEXT := to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD');
+  -- A reconstruct runs up to 30 minutes, and the first run after this
+  -- migration applies must not flood the worker. The cap is soft at book
+  -- granularity: splitting a book lets a sibling's first snapshot row strand
+  -- the rest. Books beyond it drain on later runs (the cap is per call, and
+  -- pg_cron calls once a day).
+  v_bootstrap_cap CONSTANT integer := 25;
+  v_bootstrap_enqueued integer := 0;
+  v_boot_key uuid;
+  v_loop_state text;
+  v_loop_msg   text;
 BEGIN
   IF NOT pg_try_advisory_lock(hashtext('daily_equity_refresh')) THEN
     RAISE NOTICE 'enqueue_refresh_allocator_equity_for_all: another run holds the lock; skipping';
@@ -5022,15 +5478,147 @@ BEGIN
   END IF;
 
   BEGIN
+    -- Phase 167.1.2 D-17: bootstrap a zero-snapshot book. Whole books, newest
+    -- qualifying key first; never split a book across runs.
+    -- ISOLATED (167.1.2-12 review SFH-02): this loop runs in its own
+    -- sub-block. An error that escapes the per-book block below (the
+    -- book-selection query itself, for one) rolls back every bootstrap
+    -- enqueue of this run, logs a WARNING and falls through to the refresh
+    -- loop, so a failure here never cancels the daily refresh of every
+    -- allocator. That is safe by construction: a book whose reconstructs were
+    -- rolled back is not bootstrapped, so the refresh loop still withholds its
+    -- refresh.
+    BEGIN
+      FOR v_book IN
+        SELECT bq.user_id AS owner_id
+        FROM api_keys bq
+        WHERE bq.is_active = TRUE
+          AND bq.sync_status IS DISTINCT FROM 'revoked'
+          AND coalesce(bq.sync_status, '') NOT IN ('sign_in_failed', 'error')
+          AND bq.disconnected_at IS NULL
+          AND lower(bq.exchange) <> 'deribit'
+          AND NOT EXISTS (SELECT 1 FROM strategies bqs WHERE bqs.api_key_id = bq.id AND bqs.user_id = bq.user_id AND bqs.status <> 'archived')
+          AND NOT EXISTS (SELECT 1 FROM strategy_keys bqsk JOIN strategies bqks ON bqks.id = bqsk.strategy_id WHERE bqsk.api_key_id = bq.id AND bqks.user_id = bq.user_id AND bqks.status <> 'archived')
+          AND NOT EXISTS (SELECT 1 FROM compute_jobs bqj WHERE bqj.api_key_id = bq.id AND bqj.kind = 'reconstruct_allocator_history' AND bqj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done'))
+          AND NOT EXISTS (SELECT 1 FROM allocator_equity_snapshots bqe WHERE bqe.allocator_id = bq.user_id)
+        GROUP BY bq.user_id
+        ORDER BY max(bq.created_at) DESC, bq.user_id
+      LOOP
+        EXIT WHEN v_bootstrap_enqueued >= v_bootstrap_cap;
+        -- ONE BOOK AT A TIME (167.1.2-12 review SFH-R2-03): any other error
+        -- while enqueueing this book rolls back THIS book's enqueues only and
+        -- the loop moves on to the next book, so one key whose enqueue fails
+        -- every day cannot cancel every other book's bootstrap. The skipped
+        -- book has no in-flight-or-done reconstruct row, so the refresh loop
+        -- still withholds its refresh, and the next run takes it again.
+        v_boot_key := NULL;
+        BEGIN
+          FOR v_rkey IN
+            SELECT rk.id AS api_key_id
+            FROM api_keys rk
+            WHERE rk.user_id = v_book.owner_id
+              AND rk.is_active = TRUE
+              AND rk.sync_status IS DISTINCT FROM 'revoked'
+              AND coalesce(rk.sync_status, '') NOT IN ('sign_in_failed', 'error')
+              AND rk.disconnected_at IS NULL
+              AND lower(rk.exchange) <> 'deribit'
+              AND NOT EXISTS (SELECT 1 FROM strategies rks WHERE rks.api_key_id = rk.id AND rks.user_id = rk.user_id AND rks.status <> 'archived')
+              AND NOT EXISTS (SELECT 1 FROM strategy_keys rksk JOIN strategies rkks ON rkks.id = rksk.strategy_id WHERE rksk.api_key_id = rk.id AND rkks.user_id = rk.user_id AND rkks.status <> 'archived')
+              AND NOT EXISTS (SELECT 1 FROM compute_jobs rkj WHERE rkj.api_key_id = rk.id AND rkj.kind = 'reconstruct_allocator_history' AND rkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done'))
+            ORDER BY rk.created_at DESC, rk.id
+          LOOP
+            v_boot_key := v_rkey.api_key_id;
+            BEGIN
+              PERFORM enqueue_compute_job(
+                p_strategy_id     := NULL,
+                p_kind            := 'reconstruct_allocator_history',
+                p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial',
+                p_api_key_id      := v_rkey.api_key_id
+              );
+            -- serialization_failure is the enqueue helper's lost-race signal
+            -- (the winner already left the in-flight statuses). unique_violation
+            -- cannot fire today (the helper inserts ON CONFLICT DO NOTHING) and
+            -- is kept as belt. Either skips ONE key, never the run.
+            EXCEPTION WHEN unique_violation OR serialization_failure THEN
+              RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: reconstruct enqueue skipped for api_key % (SQLSTATE %)', v_rkey.api_key_id, SQLSTATE;
+            END;
+            v_bootstrap_enqueued := v_bootstrap_enqueued + 1;
+          END LOOP;
+        EXCEPTION WHEN OTHERS THEN
+          -- v_boot_key is the key being enqueued, or NULL when the per-key
+          -- query itself failed before the first key.
+          RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap of one book was rolled back and skipped; the other books continue (api_key %, SQLSTATE %)', v_boot_key, SQLSTATE;
+          -- DURABLE TRACE (review SFH-R2-02, MIG-R2-01): a WARNING lives only
+          -- in the server log, and pg_cron records the run as succeeded. One
+          -- public.cron_runs row per skipped book, the sink the ledger fan-outs
+          -- write their candidate_enqueue_failed rows to; row security lets
+          -- only platform admins and service_role read it. Deliberately NOT
+          -- wrapped: if the sink refuses this row, the error reaches the
+          -- sub-block below, which rolls this run's bootstrap back and writes
+          -- its own row, so a skip is never left with no trace at all.
+          INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+          VALUES ('equity_refresh_fanout', 'error', now(), 'bootstrap_book_skipped',
+                  jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',
+                                     'cause', 'bootstrap_book_skipped',
+                                     'owner_id', v_book.owner_id,
+                                     'api_key_id', v_boot_key,
+                                     'sqlstate', SQLSTATE,
+                                     'message', SQLERRM));
+        END;
+      END LOOP;
+    EXCEPTION WHEN OTHERS THEN
+      v_loop_state := SQLSTATE;
+      v_loop_msg   := SQLERRM;
+      RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap loop failed and was rolled back; the refresh loop still runs (SQLSTATE %: %)', v_loop_state, v_loop_msg;
+      -- DURABLE TRACE (review SFH-R2-02, MIG-R2-01), the same sink as the
+      -- per-book row. Wrapped, unlike that row: this is the last handler
+      -- before the refresh loop, and a sink that refuses this row too must
+      -- not cancel the daily refresh of every allocator.
+      BEGIN
+        INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+        VALUES ('equity_refresh_fanout', 'error', now(), 'bootstrap_loop_failed',
+                jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',
+                                   'cause', 'bootstrap_loop_failed',
+                                   'sqlstate', v_loop_state,
+                                   'message', v_loop_msg));
+      EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap failure row could not be written (SQLSTATE %)', SQLSTATE;
+      END;
+    END;
+
+    -- The refresh loop runs AFTER the bootstrap loop on purpose: its
+    -- bootstrapped test reads the reconstruct rows the loop above just
+    -- enqueued in this transaction, so a book taken this run is refreshed this
+    -- run, and a book beyond the cap is refreshed only once a later run has
+    -- enqueued its reconstructs. A reconstruct row counts only while it is in
+    -- flight or done: a book whose only reconstruct ended failed_final is not
+    -- bootstrapped, so no refresh row closes its zero-snapshot gate before the
+    -- retry the loop above enqueues.
     FOR v_key IN
       SELECT ak.id AS api_key_id, ak.user_id
       FROM api_keys ak
       WHERE ak.is_active = TRUE
+        AND ak.sync_status IS DISTINCT FROM 'revoked'
         AND ak.disconnected_at IS NULL  -- migration 075
-        AND EXISTS (
-          SELECT 1 FROM allocator_equity_snapshots aes
-          WHERE aes.allocator_id = ak.user_id
-          LIMIT 1
+        AND (
+          EXISTS (SELECT 1 FROM allocator_equity_snapshots aes WHERE aes.allocator_id = ak.user_id)
+          OR (
+            NOT EXISTS (SELECT 1 FROM strategies aks WHERE aks.api_key_id = ak.id AND aks.user_id = ak.user_id AND aks.status <> 'archived')
+            AND NOT EXISTS (SELECT 1 FROM strategy_keys aksk JOIN strategies akks ON akks.id = aksk.strategy_id WHERE aksk.api_key_id = ak.id AND akks.user_id = ak.user_id AND akks.status <> 'archived')
+            AND NOT EXISTS (
+              SELECT 1
+              FROM api_keys bk
+              WHERE bk.user_id = ak.user_id
+                AND bk.is_active = TRUE
+                AND bk.sync_status IS DISTINCT FROM 'revoked'
+                AND coalesce(bk.sync_status, '') NOT IN ('sign_in_failed', 'error')
+                AND bk.disconnected_at IS NULL
+                AND lower(bk.exchange) <> 'deribit'
+                AND NOT EXISTS (SELECT 1 FROM strategies bks WHERE bks.api_key_id = bk.id AND bks.user_id = bk.user_id AND bks.status <> 'archived')
+                AND NOT EXISTS (SELECT 1 FROM strategy_keys bksk JOIN strategies bkks ON bkks.id = bksk.strategy_id WHERE bksk.api_key_id = bk.id AND bkks.user_id = bk.user_id AND bkks.status <> 'archived')
+                AND NOT EXISTS (SELECT 1 FROM compute_jobs bkj WHERE bkj.api_key_id = bk.id AND bkj.kind = 'reconstruct_allocator_history' AND bkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done'))
+            )
+          )
         )
     LOOP
       BEGIN
@@ -5040,8 +5628,8 @@ BEGIN
           p_idempotency_key := 'daily-equity-' || v_key.api_key_id::text || '-' || v_today,
           p_api_key_id      := v_key.api_key_id
         );
-      EXCEPTION WHEN unique_violation THEN
-        NULL;
+      EXCEPTION WHEN unique_violation OR serialization_failure THEN
+        RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: refresh enqueue skipped for api_key % (SQLSTATE %)', v_key.api_key_id, SQLSTATE;
       END;
     END LOOP;
   EXCEPTION WHEN OTHERS THEN
@@ -5057,7 +5645,7 @@ $$;
 ALTER FUNCTION "public"."enqueue_refresh_allocator_equity_for_all"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."enqueue_refresh_allocator_equity_for_all"() IS 'Daily cron fan-out for per-allocator equity refresh. Migration 075 added disconnected_at IS NULL filter so soft-disconnected keys stop receiving refresh jobs. Preserves advisory lock + per-key loop from migration 070.';
+COMMENT ON FUNCTION "public"."enqueue_refresh_allocator_equity_for_all"() IS 'Daily cron fan-out for the per-allocator legacy equity store. Two arms, inside one advisory lock. (1) Bootstrap, first, in its own sub-block, one book per inner block (an error enqueueing one book rolls back and skips that book only; an error outside any book rolls back every bootstrap enqueue of the run; neither cancels the refresh; both are logged as a WARNING and as one public.cron_runs row, cron_name equity_refresh_fanout, error bootstrap_book_skipped or bootstrap_loop_failed): for an owner with ZERO allocator_equity_snapshots rows, one reconstruct_allocator_history job for every qualifying key with no reconstruct job in flight (pending, running, done_pending_children, failed_retry) or done, so a failed_final reconstruct is retried; qualifying = active, not revoked, sync_status not sign_in_failed or error, not disconnected, not linked to one of its owner''s non-archived strategies (strategies.api_key_id or strategy_keys, mirroring deriveStrategyLinkedKeyIds) and not Deribit. The job carries idempotency key reconstruct-alloc-<key>-initial, the RPC''s correlation label; dedupe is the in-flight partial unique index plus the in-flight-or-done gate, not that key. Whole books, newest key first, stopping before a new book once 25 keys (v_bootstrap_cap) were enqueued this call. (2) Refresh: one refresh_allocator_equity_daily job per eligible key (active, not revoked, not disconnected) whose owner has a snapshot row, or which is unlinked on a book where every qualifying key has a reconstruct job in flight or done. A lost enqueue race (serialization_failure) skips one key with a WARNING. Phase 167.1.2 D-17; re-based on migration 075.';
 
 
 
@@ -6744,6 +7332,7 @@ BEGIN
 
   -- Phase 18: atomic UI bridge (preserved from mig 099).
   IF v_strategy_id IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));
     PERFORM sync_strategy_analytics_status(v_strategy_id);
   END IF;
 END;
@@ -6841,6 +7430,7 @@ BEGIN
 
   -- Phase 18: atomic UI bridge (preserved from mig 099).
   IF v_strategy_id IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));
     PERFORM sync_strategy_analytics_status(v_strategy_id);
   END IF;
 
@@ -7427,6 +8017,8 @@ CREATE OR REPLACE FUNCTION "public"."reconnect_allocator_api_key"("p_api_key_id"
 DECLARE
   v_owner        UUID;
   v_already_disc TIMESTAMPTZ;
+  v_exchange     TEXT;
+  v_venue_acct   TEXT;
   v_uid          UUID := auth.uid();
 BEGIN
   IF v_uid IS NULL THEN
@@ -7434,7 +8026,8 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  SELECT user_id, disconnected_at INTO v_owner, v_already_disc
+  SELECT user_id, disconnected_at, exchange, venue_account_id
+    INTO v_owner, v_already_disc, v_exchange, v_venue_acct
     FROM api_keys WHERE id = p_api_key_id;
 
   IF v_owner IS NULL OR v_owner <> v_uid THEN
@@ -7447,10 +8040,29 @@ BEGIN
     RETURN false;
   END IF;
 
+  -- Phase 167.1.2 Pitfall 5: a LIVE sibling already holds this account. Refuse
+  -- by name before the UPDATE reaches api_keys_user_exchange_venue_account_uniq.
+  -- A concurrent race past this check still hits the index and raises the SAME
+  -- SQLSTATE, so one client mapping covers both.
+  IF v_venue_acct IS NOT NULL AND EXISTS (
+    SELECT 1
+      FROM api_keys s
+     WHERE s.user_id = v_uid
+       AND s.exchange = v_exchange
+       AND s.venue_account_id = v_venue_acct
+       AND s.disconnected_at IS NULL
+       AND s.id <> p_api_key_id
+  ) THEN
+    RAISE EXCEPTION 'KEY_VENUE_ALREADY_CONNECTED'
+      USING ERRCODE = 'unique_violation',
+            DETAIL  = 'Another connected key of this user already reads the same exchange account.';
+  END IF;
+
   UPDATE api_keys
     SET disconnected_at = NULL,
         sync_error      = NULL,
-        sync_status     = 'idle'
+        sync_status     = 'idle',
+        history_inclusion = NULL
     WHERE id = p_api_key_id
       AND user_id = v_uid
       AND disconnected_at IS NOT NULL;
@@ -7463,7 +8075,7 @@ $$;
 ALTER FUNCTION "public"."reconnect_allocator_api_key"("p_api_key_id" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."reconnect_allocator_api_key"("p_api_key_id" "uuid") IS 'Migration 075: reverse of disconnect_allocator_api_key. Clears disconnected_at + resets sync_error and sync_status=idle so the next cron tick picks the key up fresh. Returns false if the key was not disconnected.';
+COMMENT ON FUNCTION "public"."reconnect_allocator_api_key"("p_api_key_id" "uuid") IS 'Migration 075: reverse of disconnect_allocator_api_key. Clears disconnected_at + resets sync_error and sync_status=idle so the next cron tick picks the key up fresh. Returns false if the key was not disconnected. Phase 167.1.2: refuses with SQLSTATE 23505 and message KEY_VENUE_ALREADY_CONNECTED, leaving the key disconnected, when a LIVE key of the same user, exchange and venue_account_id exists; a race that reaches api_keys_user_exchange_venue_account_uniq raises the same SQLSTATE. A successful reconnect also resets history_inclusion to NULL, so an include/exclude choice made for a past departure never applies to a later one.';
 
 
 
@@ -8350,6 +8962,306 @@ ALTER FUNCTION "public"."set_compute_job_progress"("p_job_id" "uuid", "p_claim_t
 
 
 COMMENT ON FUNCTION "public"."set_compute_job_progress"("p_job_id" "uuid", "p_claim_token" "uuid", "p_progress" "jsonb") IS 'Phase 95 / PROG-02: claim-token-fenced JSONB-merge of per-member stitch progress (member_progress array) + a server-stamped member_progress_at heartbeat into compute_jobs.metadata. Merges (||) so source / correlation_id / unified_backbone_at_claim survive. Fence mirrors the P97 mark/defer RPCs (claim_token IS NOT DISTINCT FROM p_claim_token AND claim_token IS NOT NULL AND status=running): a stale/NULLed token or a non-running row no-ops. Best-effort — RETURN FOUND, never raises; the worker treats false as lost ownership and never fails the stitch. service_role only. See migration 20260712130000 + .planning/phases/95-stitch-progress-transparency/.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."set_departed_key_history_inclusion"("p_api_key_id" "uuid", "p_inclusion" "text") RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+DECLARE
+  v_uid          uuid := auth.uid();
+  v_owner        uuid;
+  v_disconnected timestamptz;
+  v_sync_status  text;
+  v_is_active    boolean;
+  v_previous     text;
+  v_job          uuid;
+  v_job_status   text;
+  v_claimed_at   timestamptz;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'not_authenticated'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Scoped to the caller, so another user's row is never even locked.
+  SELECT user_id, disconnected_at, sync_status, history_inclusion, is_active
+    INTO v_owner, v_disconnected, v_sync_status, v_previous, v_is_active
+    FROM public.api_keys
+   WHERE id = p_api_key_id
+     AND user_id = v_uid
+     FOR UPDATE;
+
+  IF v_owner IS NULL OR v_owner <> v_uid THEN
+    RAISE EXCEPTION 'set_departed_key_history_inclusion: caller does not own api_key %', p_api_key_id
+      USING ERRCODE = '42501';  -- insufficient_privilege
+  END IF;
+
+  -- NULL resets to the default rule; anything else outside the two choices is
+  -- refused rather than stored.
+  IF p_inclusion IS NOT NULL AND p_inclusion NOT IN ('include', 'exclude') THEN
+    RAISE EXCEPTION 'HISTORY_INCLUSION_INVALID'
+      USING ERRCODE = '22023',
+            DETAIL  = 'p_inclusion must be ''include'', ''exclude'' or NULL (the default rule).';
+  END IF;
+
+  -- Only a departed key has an end day, so only a departed key has a choice.
+  -- D-18 (founder, 2026-09-27): a WORKING key is active, not disconnected, and
+  -- its last sync was not revoked, sign_in_failed or error. It is the same
+  -- definition as the working holder in COMMENT ON COLUMN
+  -- api_keys.account_share_kind, and the two move together. The explicit NULL
+  -- leg keeps a key that has never synced WORKING, as the allocator's
+  -- eligible-key predicate does: without it the status test is NULL for such
+  -- a key, IF treats NULL as false, and the key would be accepted as departed.
+  IF v_is_active AND v_disconnected IS NULL
+     AND (v_sync_status IS NULL OR v_sync_status NOT IN ('revoked', 'sign_in_failed', 'error')) THEN
+    RAISE EXCEPTION 'KEY_NOT_DEPARTED'
+      USING ERRCODE = '55000',
+            DETAIL  = 'Only a key that is disconnected, inactive, or whose last sync was revoked, sign_in_failed or error has a history choice; a working key always counts.';
+  END IF;
+
+  -- A recompose that is already RUNNING has read (or may have read) the old
+  -- value, and enqueue_compute_job would fold this request into it: its
+  -- in-flight dedup AND the partial unique index
+  -- compute_jobs_one_inflight_per_kind_allocator both cover pending, running
+  -- and done_pending_children, so no second job for (allocator, kind) can be
+  -- queued behind a running one. MEASURED 2026-09-26 over the 9-arg
+  -- enqueue_compute_job (20260515210300) and the 10-arg
+  -- _enqueue_compute_job_internal (20260924230827): p_idempotency_key is not
+  -- part of the dedup, p_run_at only sets next_attempt_at, and a fan-in child
+  -- (p_parent_job_ids) starts done_pending_children, which the same index
+  -- covers. Refusing by name, with nothing written, is therefore the option
+  -- that stays inside that contract for every other caller; the owner retries
+  -- once the running compose ends.
+  --
+  -- Step 1. Lock EVERY claimable or in-flight row for the caller's recompose.
+  -- Both claim functions take candidates with status IN ('pending',
+  -- 'failed_retry') through FOR UPDATE SKIP LOCKED, so a row locked here cannot
+  -- be claimed (and so cannot read the old value) before this transaction
+  -- commits. PERFORM, not SELECT INTO: a failed_retry row lies outside the
+  -- partial unique index and can coexist with a pending one, and a SELECT INTO
+  -- stops at the first row, locking only that one.
+  PERFORM 1
+     FROM public.compute_jobs
+    WHERE allocator_id = v_uid
+      AND kind = 'derive_allocator_equity'
+      AND status IN ('pending', 'failed_retry', 'running', 'done_pending_children')
+      FOR UPDATE;
+
+  -- Step 2. A running recompose is refused before anything is written. The
+  -- DETAIL carries how long it has run, so a busy recompose can be told from a
+  -- stuck one. The reclaim wording tracks analytics-service/main_worker.py:
+  -- watchdog_tick passes p_stale_threshold '10 minutes' to
+  -- reset_stalled_compute_jobs, which measures claimed_at, and
+  -- WATCHDOG_PER_KIND_OVERRIDES has no derive_allocator_equity entry. The
+  -- watchdog runs inside the worker process, so the reclaim happens only while
+  -- a worker is up. Change the HINT if either constant moves.
+  SELECT status, claimed_at INTO v_job_status, v_claimed_at
+    FROM public.compute_jobs
+   WHERE allocator_id = v_uid
+     AND kind = 'derive_allocator_equity'
+     AND status = 'running'
+   LIMIT 1;
+
+  IF v_job_status = 'running' THEN
+    RAISE EXCEPTION 'HISTORY_RECOMPOSE_IN_PROGRESS'
+      USING ERRCODE = '55006',
+            DETAIL  = format('A recompose of your equity history has been running for %s. Try again when it finishes; nothing was changed.',
+                             CASE WHEN v_claimed_at IS NULL THEN 'an unknown time'
+                                  ELSE floor(extract(epoch FROM now() - v_claimed_at) / 60)::int || ' minute(s)' END),
+            HINT    = 'If it does not finish, a running worker reclaims a recompose that has run for more than 10 minutes and queues it again. Retry after that.';
+  END IF;
+
+  UPDATE public.api_keys
+     SET history_inclusion = p_inclusion
+   WHERE id = p_api_key_id
+     AND user_id = v_uid;
+
+  -- Recompose the caller's curve, never by queuing a pending TWIN of a
+  -- failed_retry recompose. enqueue_compute_job's in-flight dedup and the
+  -- partial unique index compute_jobs_one_inflight_per_kind_allocator both
+  -- ignore failed_retry, so an enqueue beside a failed_retry row inserts a
+  -- second, pending row for the same allocator. MEASURED on the pg-lane
+  -- 2026-09-26: a due failed_retry derive_allocator_equity row beside a pending
+  -- one makes claim_compute_jobs and both claim_compute_jobs_with_priority
+  -- overloads raise 23505 on that index (the worker-spin class of 2026-04-28).
+  -- So when a failed_retry row is the caller's ONLY recompose row, it is
+  -- REUSED: it goes back to status 'pending' with next_attempt_at = now() and
+  -- claimed_at, claimed_by and claim_token all NULL, the claim state
+  -- reset_stalled_compute_jobs writes for a reclaimed job (its claim_token =
+  -- NULL is the mig-117 fence invalidation). A
+  -- pending row sits inside that unique index and inside the enqueue's dedup,
+  -- so a later enqueue for the caller (a derive_broker_dailies epilogue among
+  -- them) folds onto it instead of inserting a twin, which merely moving
+  -- next_attempt_at forward would not prevent: the failed_retry row would rank
+  -- first in its claim partition beside the epilogue's pending row, the same
+  -- 23505. attempts is left alone, so the toggle grants no retry budget: a row
+  -- one attempt short of max_attempts ends failed_final if it fails again, and
+  -- the next toggle then enqueues a fresh job. last_error and error_kind are
+  -- left alone, unlike the watchdog, which writes last_error =
+  -- 'worker_stalled': the failed attempt's own error stays visible until the
+  -- next claim, and both claim functions (claim_compute_jobs and
+  -- claim_compute_jobs_with_priority) set last_error and error_kind to NULL
+  -- when they take the row. The job reads history_inclusion when it runs, so
+  -- it picks up the new value.
+  -- The NOT EXISTS narrowing is still needed. The flip is a write into that
+  -- unique index, so beside a visible pending or done_pending_children row it
+  -- would raise 23505 every time and refuse a toggle that can succeed: without
+  -- the flip, the enqueue's dedup hands that in-flight row back and the toggle
+  -- takes effect on it. The failed_retry row is then left where it is (a
+  -- pairing this RPC did not create). The narrowing covers 'running' too. Step
+  -- 2 refused every running row visible to it, so a running row seen here was
+  -- claimed after step 2. Flipping beside it would collide on the same index,
+  -- and the 23505 handler would answer "retry now" for a job that is RUNNING.
+  -- Skipping the flip instead lets the enqueue's dedup hand that running row
+  -- back, and step 3 refuses it with the running DETAIL (wait for it to end).
+  -- The flip's WHERE repeats status = 'failed_retry'. A failed_retry row that
+  -- appeared after step 1 is not locked by it, and if a claimer takes that row
+  -- first, the repeated predicate fails on the re-read, nothing is written, and
+  -- the enqueue below hands back the running row for step 3 to refuse; a flip
+  -- keyed on the id alone would put a running job back to pending.
+  -- The 23505 handler covers the one sibling the NOT EXISTS cannot see: an
+  -- in-flight row another transaction inserts after that lookup, which the
+  -- flip's unique check waits on and then collides with once it commits. That
+  -- row may be pending or already claimed, so its refusal has its own name,
+  -- HISTORY_RECOMPOSE_REQUEUED (retry now: the retry either folds into it or
+  -- meets the running refusal), distinct from HISTORY_RECOMPOSE_IN_PROGRESS
+  -- (a job is running: wait for it to end).
+  --
+  -- Step 3. Lock and re-check the job the reuse or the enqueue returned.
+  -- Step 1 cannot see a job that another transaction enqueued, and a worker
+  -- claimed, after step 1 ran; the enqueue's dedup (a plain read, no lock)
+  -- would then hand back that RUNNING job, which read the old value. The row
+  -- is locked here, so if a claimer holds it this waits, re-reads it as READ
+  -- COMMITTED does, and judges what it finds. Only 'pending' or
+  -- 'done_pending_children' passes (a reused row is 'pending' by now): such a
+  -- job has not run, and every claimer skips it until the new value commits.
+  -- 'running' is refused, and the refusal rolls the UPDATE above back. A job
+  -- that FINISHED between the dedup and this lock (done, failed_retry,
+  -- failed_final, or a row that is gone) read the old value too, and
+  -- refusing it would be wrong because nothing is in flight any more: the
+  -- right outcome is one fresh job that reads the new value, so the reuse or
+  -- the enqueue runs once more. The second pass sees an in-flight set without
+  -- that row (a failed_retry result is reused rather than given a twin, and
+  -- this transaction holds its lock). If that pass also hands back a finished
+  -- job, two recomposes started and ended inside this one call; that is too
+  -- close to call, so it is refused by name, 55006
+  -- HISTORY_RECOMPOSE_RACED, rather than retried without bound.
+  -- A NULL job id is refused outright (HISTORY_RECOMPOSE_NOT_QUEUED): no path
+  -- in enqueue_compute_job returns one today, and a toggle that queues nothing
+  -- must not report success.
+  -- REASONED, NOT MEASURED: steps 1 and 3, the second pass and the
+  -- serialization_failure wrapper around the enqueue close races between TWO
+  -- backends, and the SQL gate corpus runs one session, so none of those
+  -- windows has been exercised. Step 3's running refusal is gated (arm
+  -- HIST-running) only in the single-session shape where the job is already
+  -- running. The 23505 handler is gated (arm HIST-requeued) in a
+  -- single-session stand-in: a test-local trigger inserts the pending twin
+  -- under the flip, so the collision and the REQUEUED answer are measured.
+  -- What stays reasoned there is a real second backend, whose row the flip's
+  -- unique check waits on before it collides.
+  FOR v_attempt IN 1..2 LOOP
+    SELECT cj.id INTO v_job
+      FROM public.compute_jobs cj
+     WHERE cj.allocator_id = v_uid
+       AND cj.kind = 'derive_allocator_equity'
+       AND cj.status = 'failed_retry'
+       AND NOT EXISTS (
+             SELECT 1
+               FROM public.compute_jobs o
+              WHERE o.allocator_id = v_uid
+                AND o.kind = 'derive_allocator_equity'
+                AND o.status IN ('pending', 'running', 'done_pending_children'))
+     ORDER BY cj.next_attempt_at, cj.id
+     LIMIT 1;
+
+    IF v_job IS NOT NULL THEN
+      BEGIN
+        UPDATE public.compute_jobs
+           SET status = 'pending',
+               next_attempt_at = now(),
+               claimed_at = NULL,
+               claimed_by = NULL,
+               claim_token = NULL
+         WHERE id = v_job
+           AND status = 'failed_retry'
+        RETURNING id INTO v_job;
+      EXCEPTION WHEN unique_violation THEN
+        RAISE EXCEPTION 'HISTORY_RECOMPOSE_REQUEUED'
+          USING ERRCODE = '55006',
+                DETAIL  = 'Another recompose of your equity history was queued or started while this change was being saved. Try again; nothing was changed.',
+                HINT    = 'Retry now. A retry folds your change into the queued recompose, or reports the one that has started.';
+      END;
+    END IF;
+
+    IF v_job IS NULL THEN
+      -- Allocator-scoped, so enqueue_compute_job's own gate requires
+      -- p_allocator_id = auth.uid(), and its in-flight dedup hands back the
+      -- pending job locked above, so a burst of toggles is one job.
+      -- _enqueue_compute_job_internal raises serialization_failure (40001)
+      -- when it loses the insert race to another transaction and the winning
+      -- job has already left the in-flight statuses. That is the same finished-
+      -- in-between shape as the second pass below, so it gets the same name,
+      -- 55006 HISTORY_RECOMPOSE_RACED (retry now), instead of reaching the
+      -- client as a raw 40001 its SQLSTATE map does not list. REASONED, NOT
+      -- MEASURED: the lost race needs a second backend.
+      BEGIN
+        v_job := enqueue_compute_job(
+          p_strategy_id  := NULL,
+          p_kind         := 'derive_allocator_equity',
+          p_allocator_id := v_uid
+        );
+      EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'HISTORY_RECOMPOSE_RACED'
+          USING ERRCODE = '55006',
+                DETAIL  = 'Another recompose of your equity history was queued and finished while this change was being saved. Try again; nothing was changed.',
+                HINT    = 'Retry now. The next attempt either queues a recompose that reads your change or reports the one that is running.';
+      END;
+    END IF;
+
+    IF v_job IS NULL THEN
+      RAISE EXCEPTION 'HISTORY_RECOMPOSE_NOT_QUEUED'
+        USING ERRCODE = 'XX000',
+              DETAIL  = 'enqueue_compute_job returned no job id for the caller''s recompose; nothing was changed.';
+    END IF;
+
+    SELECT status, claimed_at INTO v_job_status, v_claimed_at
+      FROM public.compute_jobs
+     WHERE id = v_job
+       FOR UPDATE;
+
+    IF v_job_status = 'running' THEN
+      RAISE EXCEPTION 'HISTORY_RECOMPOSE_IN_PROGRESS'
+        USING ERRCODE = '55006',
+              DETAIL  = format('A recompose of your equity history has been running for %s. Try again when it finishes; nothing was changed.',
+                               CASE WHEN v_claimed_at IS NULL THEN 'an unknown time'
+                                    ELSE floor(extract(epoch FROM now() - v_claimed_at) / 60)::int || ' minute(s)' END),
+              HINT    = 'If it does not finish, a running worker reclaims a recompose that has run for more than 10 minutes and queues it again. Retry after that.';
+    END IF;
+
+    EXIT WHEN v_job_status IN ('pending', 'done_pending_children');
+
+    IF v_attempt = 2 THEN
+      RAISE EXCEPTION 'HISTORY_RECOMPOSE_RACED'
+        USING ERRCODE = '55006',
+              DETAIL  = format('A recompose of your equity history finished (%s) while this change was being saved, and so did the one queued after it. Try again; nothing was changed.',
+                               COALESCE(v_job_status, 'removed')),
+              HINT    = 'Retry now. The next attempt either queues a recompose that reads your change or reports the one that is running.';
+    END IF;
+  END LOOP;
+
+  RAISE NOTICE 'set_departed_key_history_inclusion: recompose job % queued for the caller', v_job;
+
+  RETURN v_previous IS DISTINCT FROM p_inclusion;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."set_departed_key_history_inclusion"("p_api_key_id" "uuid", "p_inclusion" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."set_departed_key_history_inclusion"("p_api_key_id" "uuid", "p_inclusion" "text") IS 'Phase 167.1.2 D-05. The founder: "do not delete the data when a key is disconnected. Leave it in an overview of disconnected accounts that can be toggled on or off, to be included or excluded. They would be included only till the day that the key was deleted." Writes api_keys.history_inclusion for the CALLER''s departed key (D-18: disconnected, is_active false, or whose last sync was revoked, sign_in_failed or error) and enqueues derive_allocator_equity for the caller (the job id is RAISEd as a NOTICE). It never queues a pending twin of a failed_retry recompose: when a failed_retry row is the caller''s only recompose row it is reused, put back to status pending with next_attempt_at = now() and claimed_at, claimed_by and claim_token NULL (the claim state the stall watchdog reset_stalled_compute_jobs writes; attempts untouched; last_error and error_kind left as the failed attempt wrote them, where the watchdog writes worker_stalled, and cleared by the next claim), so a later enqueue folds onto it, and its id is the one RAISEd; a pending or done_pending_children row is reused through the enqueue''s own dedup. Clients map by SQLSTATE: 42501 when unauthenticated or not the owner; 22023 HISTORY_INCLUSION_INVALID on a value other than include / exclude / NULL (NULL resets to the default rule); 55000 KEY_NOT_DEPARTED on a WORKING key (D-18: active, not disconnected, and a last sync that is NULL or not revoked, sign_in_failed or error); 55006 HISTORY_RECOMPOSE_IN_PROGRESS when a recompose for the caller is already RUNNING, because it may have read the old value and no second job can queue behind it (retry once it ends; nothing is written; DETAIL says how long it has been running, HINT says a running worker reclaims one that has run for more than 10 minutes). 55006 HISTORY_RECOMPOSE_REQUEUED answers a recompose another request queued or started while the reused row was being put back to pending (retry now: the retry folds into it or reports it running). Within 55006 clients branch on MESSAGE_TEXT: IN_PROGRESS = wait for the running recompose to end; REQUEUED and RACED = retry now. The job is judged twice: before the write, and again on the job the reuse or the enqueue returns, which is locked FOR UPDATE and passes only while pending or done_pending_children. A job enqueued and claimed by another transaction in between is refused as running; a job that also FINISHED in between read the old value, so the reuse or the enqueue runs once more and the fresh job reads the new one; if that one has finished too, 55006 HISTORY_RECOMPOSE_RACED (retry now). The same 55006 HISTORY_RECOMPOSE_RACED, with a different DETAIL, replaces the serialization_failure (40001) enqueue_compute_job raises when it loses the insert race to a job that has already finished, so no raw 40001 reaches the client. A NULL job id raises XX000 HISTORY_RECOMPOSE_NOT_QUEUED, never success. Every pending, failed_retry, running or done_pending_children recompose row of the caller is locked until commit, so no worker can claim one before the new value is visible. Those two-backend orderings are reasoned from the claim functions (FOR UPDATE SKIP LOCKED), not measured. Returns true iff the stored value changed; the recompose is requested either way. EXECUTE: authenticated only.';
 
 
 
@@ -10245,8 +11157,15 @@ CREATE TABLE IF NOT EXISTS "public"."api_keys" (
     "disconnected_at" timestamp with time zone,
     "attested_venue" "text",
     "venue_account_id" "text",
+    "account_shared_with_api_key_id" "uuid",
+    "account_share_kind" "text",
+    "history_inclusion" "text",
+    CONSTRAINT "api_keys_account_share_both_or_neither" CHECK ((("account_shared_with_api_key_id" IS NULL) = ("account_share_kind" IS NULL))),
+    CONSTRAINT "api_keys_account_share_kind_valid" CHECK ((("account_share_kind" IS NULL) OR ("account_share_kind" = ANY (ARRAY['duplicate'::"text", 'composite_member'::"text"])))),
+    CONSTRAINT "api_keys_account_share_not_self" CHECK ((("account_shared_with_api_key_id" IS NULL) OR ("account_shared_with_api_key_id" <> "id"))),
     CONSTRAINT "api_keys_attested_venue_matches_exchange" CHECK ((("attested_venue" IS NULL) OR ("attested_venue" = "exchange"))),
     CONSTRAINT "api_keys_exchange_check" CHECK (("exchange" = ANY (ARRAY['binance'::"text", 'okx'::"text", 'bybit'::"text", 'deribit'::"text", 'sfox'::"text", 'mt5'::"text"]))),
+    CONSTRAINT "api_keys_history_inclusion_valid" CHECK ((("history_inclusion" IS NULL) OR ("history_inclusion" = ANY (ARRAY['include'::"text", 'exclude'::"text"])))),
     CONSTRAINT "api_keys_sync_status_check" CHECK (("sync_status" = ANY (ARRAY['idle'::"text", 'syncing'::"text", 'computing'::"text", 'complete'::"text", 'complete_with_warnings'::"text", 'error'::"text", 'revoked'::"text", 'rate_limited'::"text", 'sign_in_failed'::"text"]))),
     CONSTRAINT "api_keys_venue_account_id_nonblank" CHECK ((("venue_account_id" IS NULL) OR ("btrim"("venue_account_id") <> ''::"text")))
 );
@@ -10295,7 +11214,19 @@ COMMENT ON COLUMN "public"."api_keys"."attested_venue" IS 'RPC-WRITTEN venue (mi
 
 
 
-COMMENT ON COLUMN "public"."api_keys"."venue_account_id" IS 'Phase 154/WIZCONT-02, RE-STAMPED by 164.5.3/MT5CREDS (founder decision D-01-PRIME, 2026-09-20; full reasoning in 164.5.3-CONTEXT.md AMENDMENT section, not restated here). NON-SECRET account identity for the credential in this row: the MT5 broker login today, which analytics-service/services/mt5_probe.py asserts against the gateway at validation time. It is an ACCOUNT NUMBER, not a credential. The secret half lives in api_key_encrypted and never comes near this column. TRUST BOUNDARY, STATED HONESTLY: DO NOT CALL THIS VALUE VENUE-CONFIRMED. What is enforced, by FOUR independent fences (see the header of this migration file for the full argument): a direct client INSERT is scrubbed to NULL by the scrub_client_supplied_venue_account_id trigger (20260812083206); direct client INSERT and UPDATE on api_keys are both fully revoked (20260823120000, 20260810120000 respectively); and authenticated holds NO EXECUTE on either wizard RPC (20260814120000), though that REVOKE is NOT durable across a future DROP+CREATE of either RPC unless the REVOKE/GRANT pair is re-issued in the same change (see the header of that migration). What is NOT enforced: the value has no in-database oracle. The real guarantee is a login the server has authenticated credentials for. The value is persisted only after the credentials it is derived from authenticated read-only against the live broker at connect time, or by decrypting the stored ciphertext already on this same row on an update, never accepted as a fresh caller-supplied string with no server-side step behind it. A caller can choose which of their own working broker logins to connect; they cannot mint one they do not hold. Treat the value as what the server derived, not what the venue confirmed: the CR-01 provenance residual (164.5.3-CONTEXT.md AMENDMENT, D-01-PRIME) stays OPEN. NULL is the NORMAL value and means this venue exposes no stable non-secret account id at validation: every ccxt venue today, whose ValidationResult carries no account-identity field at all. That is why api_keys_user_exchange_venue_account_uniq is PARTIAL: under a total index every NULL would collide and no user could hold two ccxt keys. api_keys_venue_account_id_nonblank forbids blank and whitespace-only values, because a blank string is non-NULL and would otherwise be governed by that index as if it were a real identity, collapsing two DIFFERENT accounts onto one row. OVERRIDE, RECORDED HONESTLY (164.5.3/MT5CREDS, founder decision D-01-PRIME, 2026-09-20): the prior form of this comment said never to echo this value to the browser, and said it was not readable by anon or authenticated anyway. BOTH ARE NOW FALSE BY DESIGN. This migration GRANTs authenticated SELECT on this column so the key card can display it. That is a bounded confidentiality delta under the threat model migration 027 states: a compromised user account or an XSS-captured JWT can now also read this identifier, not just exchange/label. It is accepted because the founder demonstrably needs the identifier to tell same-venue MT5 cards apart, and because publishing discloses nothing ACROSS a tenant boundary, since RLS still scopes every row to its own owner. anon still has NO grant on this column: migration 20260410225608 REVOKE-then-allowlist governs it and anon is not on the allowlist.';
+COMMENT ON COLUMN "public"."api_keys"."venue_account_id" IS 'Phase 154/WIZCONT-02, RE-STAMPED by 164.5.3/MT5CREDS (founder decision D-01-PRIME, 2026-09-20; full reasoning in 164.5.3-CONTEXT.md AMENDMENT section, not restated here), and by Phase 167.1.2/ACCOUNTTRUTH (D-10). NON-SECRET account identity for the credential in this row: the MT5 broker login, which analytics-service/services/mt5_probe.py asserts against the gateway at validation time, and since Phase 167.1.2 the venue''s own account id for OKX, Bybit, Binance and Deribit, read at connect validation or stamped by the service-role poll-time identity stamper. It is an ACCOUNT NUMBER, not a credential. The secret half lives in api_key_encrypted and never comes near this column. TRUST BOUNDARY, STATED HONESTLY: DO NOT CALL THIS VALUE VENUE-CONFIRMED. What is enforced, by FOUR independent fences (see the header of migration 20260920120000 for the full argument): a direct client INSERT is scrubbed to NULL by the scrub_client_supplied_venue_account_id trigger (20260812083206); direct client INSERT and UPDATE on api_keys are both fully revoked (20260823120000, 20260810120000 respectively); and authenticated holds NO EXECUTE on either wizard RPC (20260814120000), though that REVOKE is NOT durable across a future DROP+CREATE of either RPC unless the REVOKE/GRANT pair is re-issued in the same change (see the header of that migration). What is NOT enforced: the value has no in-database oracle. The real guarantee is an account the server has authenticated credentials for. The value is persisted only after the credentials it is derived from authenticated read-only against the live venue, at connect time or by decrypting the stored ciphertext already on this same row, never accepted as a fresh caller-supplied string with no server-side step behind it. A caller can choose which of their own working accounts to connect; they cannot mint one they do not hold. Treat the value as what the server derived, not what the venue confirmed: the CR-01 provenance residual (164.5.3-CONTEXT.md AMENDMENT, D-01-PRIME) stays OPEN. NULL means no server-derived account id is recorded for this row. For sFOX it is PERMANENT: no stable non-secret account id is known in its balance response, so its identity is UNKNOWABLE, not pending (Phase 167.1.2 D-10), and api_keys_user_exchange_venue_account_uniq cannot fence an sFOX duplicate. For any other venue it means neither the connect validation nor the identity stamper has recorded one for this row yet. api_keys_user_exchange_venue_account_uniq is PARTIAL so that it governs only rows that carry a real identity. api_keys_venue_account_id_nonblank forbids blank and whitespace-only values, because a blank string is non-NULL and would otherwise be governed by that index as if it were a real identity, collapsing two DIFFERENT accounts onto one row. OVERRIDE, RECORDED HONESTLY (164.5.3/MT5CREDS, founder decision D-01-PRIME, 2026-09-20): the prior form of this comment said never to echo this value to the browser, and said it was not readable by anon or authenticated anyway. BOTH ARE NOW FALSE BY DESIGN. Migration 20260920120000 GRANTs authenticated SELECT on this column so the key card can display it. That is a bounded confidentiality delta under the threat model migration 027 states: a compromised user account or an XSS-captured JWT can now also read this identifier, not just exchange/label. It is accepted because the founder demonstrably needs the identifier to tell same-venue cards apart, and because publishing discloses nothing ACROSS a tenant boundary, since RLS still scopes every row to its own owner. anon still has NO grant on this column: migration 20260410225608 REVOKE-then-allowlist governs it and anon is not on the allowlist.';
+
+
+
+COMMENT ON COLUMN "public"."api_keys"."account_shared_with_api_key_id" IS 'Phase 167.1.2 D-11. The LIVE key of the same owner that already holds the exchange account this key reads, or NULL. Written only by the service-role identity stamper; no client INSERT or UPDATE path exists. Always set together with account_share_kind (api_keys_account_share_both_or_neither), never this row itself (api_keys_account_share_not_self), and, when written, the holder must exist, belong to the same user_id, be live (disconnected_at NULL) and be unmarked itself, and this row must not be anyone''s holder (trigger api_keys_account_share_same_owner). A holder that is disconnected LATER keeps this value until the stamper re-evaluates it. ON DELETE SET NULL: hard-deleting the holder clears this column AND account_share_kind together, so the delete never aborts. Nothing is ever auto-disconnected or deleted because of this marker (D-01): the owner decides, from the key card.';
+
+
+
+COMMENT ON COLUMN "public"."api_keys"."account_share_kind" IS 'Phase 167.1.2 D-11. Why account_shared_with_api_key_id is set, or NULL. Written only by the service-role identity stamper. ''duplicate'' = a second live key on an exchange account another live key of the same owner already holds; the allocator book counts that account once, through the holder. ''composite_member'' = the D-04 exemption: both keys are members of one composite strategy with disjoint declared windows (a key rotation inside a composite), so the pair is legitimate and is not a duplicate. READER CONTRACT: a marked key is counted THROUGH its holder only while that holder is WORKING (Phase 167.1.2 D-18, founder 2026-09-27): its is_active is true, its disconnected_at IS NULL, and its sync_status is NULL or is not ''revoked'', ''sign_in_failed'' or ''error''. A NULL sync_status (a key that has not synced yet) counts as working, as in the allocator''s eligible-key predicate. Once the holder is inactive, disconnected or revoked, or its last sync was sign_in_failed or error, the marked key counts on its own, as if unmarked, so an account whose only other holder is inactive or failing is counted by the healthy key instead of by nobody. The marker is not cleared when the holder departs or starts failing (the same-owner trigger fires only when the holder column is written, and admits a revoked holder), so a reader that resolved through a holder that is not working would count the account up to that holder''s end day only, or not at all if the owner excluded its history, while a working key still reads the account. This definition of a working holder is the same as the KEY_NOT_DEPARTED test in set_departed_key_history_inclusion; the two move together. Nothing is ever auto-disconnected or deleted because of this value.';
+
+
+
+COMMENT ON COLUMN "public"."api_keys"."history_inclusion" IS 'Phase 167.1.2 D-05 / D-09. Whether a DEPARTED key''s history counts in the allocator''s rebuilt equity series. Departed means soft-disconnected (disconnected_at set) or credential-revoked (sync_status = ''revoked''). Under D-18 (founder, 2026-09-27) a key that is still connected (disconnected_at NULL) and is is_active false, or whose last sync was sign_in_failed or error, is also departed, but FOR THIS COLUMN ONLY in the sense that its owner MAY record an include/exclude choice for it through set_departed_key_history_inclusion. How the allocator''s history rebuild treats such a still-connected inactive, sign_in_failed or error key is NOT decided by this migration: whether it counts as departed for the rebuild at all, whether the unknown-identity default-exclude applies to it, and what its end day is. That is owned by the Phase 167.1.2 C2 replan of plans 05 and 10 and the C4 replan of plan 09; until it lands, this column states no default for such a key. The END DAY and NULL default rules that follow apply to disconnected and revoked keys, exactly as before. The history runs up to the key''s END DAY, never past it: the UTC day of disconnected_at, or for a revoked key its last returns day. NULL = the default rule: included up to the end day, UNLESS the key''s account identity is unknown (venue_account_id NULL), in which case it is excluded by default, because an unknown account could be one a counted key already reads and would be summed twice (founder-confirmed 2026-09-25). ''include'' / ''exclude'' = the owner''s explicit choice; ''include'' overrides only the unknown-identity default and never re-opens days on which another counted key holds the same known account. Written only by set_departed_key_history_inclusion, and RESET to NULL by reconnect_allocator_api_key: a choice made for one departure never carries over to a later one. That contract binds EVERY path that returns a departed key to live, not only the reconnect RPC. A REVOKED key (disconnected_at NULL) comes back through the rotate-secret route''s service-role update (sync_status back to idle), which must reset this column to NULL in the same write. Adding that reset to the route is owned by Phase 167.1.2 plan 09 (PR C4); until it lands, a choice made while a key was revoked carries over to its next revocation. A key that departed by failing or by is_active false and recovers on an ordinary worker tick passes no reset path, so resetting the choice on recovery is owned by Phase 167.1.2 plan 09 (PR C4), which also ships the only product caller of set_departed_key_history_inclusion; until it lands, no product path stores such a choice.';
 
 
 
@@ -12463,6 +13394,10 @@ COMMENT ON INDEX "public"."allocator_holdings_ownership_probe_idx" IS 'audit-202
 
 
 
+CREATE INDEX "api_keys_account_shared_with_idx" ON "public"."api_keys" USING "btree" ("account_shared_with_api_key_id") WHERE ("account_shared_with_api_key_id" IS NOT NULL);
+
+
+
 CREATE INDEX "api_keys_active_by_user_idx" ON "public"."api_keys" USING "btree" ("user_id") WHERE ("disconnected_at" IS NULL);
 
 
@@ -12471,7 +13406,7 @@ CREATE UNIQUE INDEX "api_keys_user_exchange_venue_account_uniq" ON "public"."api
 
 
 
-COMMENT ON INDEX "public"."api_keys_user_exchange_venue_account_uniq" IS 'Phase 154 / WIZCONT-02: at most one LIVE api_keys row per (user, venue, account id). FAILS TOWARD THE EXISTING ROW — the duplicate INSERT raises 23505 and the route resolves to the row already there; never overwrite. ⭐ SCOPED TO LIVE ROWS (disconnected_at IS NULL): api_keys rows are RETAINED on soft-disconnect (20260422101911), so without that conjunct a DEAD row squats the slot forever and a re-connecting user gets a key every cron dispatcher skips — a strategy that silently never syncs. sync_status = ''revoked'' is deliberately NOT in the predicate. PARTIAL because NULL is the majority value; api_keys_venue_account_id_nonblank keeps '''' out. user_id LEADS deliberately — a non-tenant-leading unique index is the C-08 cross-tenant leak. Gate: supabase/tests/test_api_keys_venue_identity_uniq.sql.';
+COMMENT ON INDEX "public"."api_keys_user_exchange_venue_account_uniq" IS 'Phase 154 / WIZCONT-02: at most one LIVE api_keys row per (user, venue, account id). The DB half of "one fence, two keys" — the app fence in /api/strategies/create-with-key keys on wizard_session_id, this one keys on the credential identity, so a re-connect from a context that LOST the session token still dedups. CONTRACT: it FAILS TOWARD THE EXISTING ROW — the duplicate INSERT raises 23505 and the route resolves to the row already there. It must never be "resolved" by overwriting: the existing api_keys row carries strategy_keys membership and synced history other strategies depend on. ⭐ SCOPED TO LIVE ROWS (disconnected_at IS NULL): api_keys rows are RETAINED on soft-disconnect (20260422101911), so without that conjunct a DEAD row squats the slot forever and the contract above hands a re-connecting user a key every cron dispatcher skips — a strategy that silently never syncs, which is worse than the duplicate this index prevents. sync_status = ''revoked'' is deliberately NOT in the predicate (the worker rewrites sync_status on every tick, and revoked is recovered in place by reconnect_allocator_api_key); see the migration header. Since Phase 167.1.2, reconnect_allocator_api_key refuses a reconnect into an occupied slot BY NAME before reaching this index (KEY_VENUE_ALREADY_CONNECTED, SQLSTATE 23505), and a race that gets past that check is refused here with the same SQLSTATE. PARTIAL because NULL means no server-derived account id is recorded for the row: always for sFOX, whose identity is UNKNOWABLE (Phase 167.1.2 D-10), so this index cannot fence an sFOX duplicate; for OKX, Bybit, Binance and Deribit only until the connect validation or the poll-time identity stamper records one (Phase 167.1.2). api_keys_venue_account_id_nonblank keeps '''' out, since '''' is non-NULL and would otherwise let two DIFFERENT accounts collide onto one row. user_id LEADS deliberately — a non-tenant-leading unique index is the C-08 cross-tenant leak (see 20260726000225 and 20260728120000). ⛔ The uniqueness target is the PLAINTEXT identity, never api_key_encrypted: that column carries a per-row dek_encrypted + nonce, so two encryptions of one secret differ and an index over it would dedup nothing. Gate: supabase/tests/test_api_keys_venue_identity_uniq.sql.';
 
 
 
@@ -13027,6 +13962,14 @@ CREATE OR REPLACE TRIGGER "allocator_holdings_set_updated_at" BEFORE UPDATE ON "
 
 
 
+CREATE OR REPLACE TRIGGER "api_keys_account_share_same_owner" BEFORE INSERT OR UPDATE OF "account_shared_with_api_key_id" ON "public"."api_keys" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_api_keys_account_share_same_owner"();
+
+
+
+COMMENT ON TRIGGER "api_keys_account_share_same_owner" ON "public"."api_keys" IS 'Phase 167.1.2 D-11. Fires only when account_shared_with_api_key_id is written, so ordinary worker writes (sync_status, last_sync_at, cursors) never hit it.';
+
+
+
 CREATE OR REPLACE TRIGGER "api_keys_lock_exchange" BEFORE UPDATE OF "exchange" ON "public"."api_keys" FOR EACH ROW EXECUTE FUNCTION "public"."prevent_api_key_venue_change"();
 
 
@@ -13240,6 +14183,11 @@ ALTER TABLE ONLY "public"."allocator_preferences"
 
 ALTER TABLE ONLY "public"."allocator_preferences"
     ADD CONSTRAINT "allocator_preferences_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."api_keys"
+    ADD CONSTRAINT "api_keys_account_shared_with_api_key_id_fkey" FOREIGN KEY ("account_shared_with_api_key_id") REFERENCES "public"."api_keys"("id") ON DELETE SET NULL;
 
 
 
@@ -15003,6 +15951,11 @@ GRANT ALL ON FUNCTION "public"."enforce_allocator_holdings_owner_coherence"() TO
 
 
 
+REVOKE ALL ON FUNCTION "public"."enforce_api_keys_account_share_same_owner"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."enforce_api_keys_account_share_same_owner"() TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."enforce_api_keys_published_composite_integrity"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."enforce_api_keys_published_composite_integrity"() TO "service_role";
 
@@ -15387,6 +16340,12 @@ GRANT ALL ON FUNCTION "public"."set_compute_job_progress"("p_job_id" "uuid", "p_
 
 
 
+REVOKE ALL ON FUNCTION "public"."set_departed_key_history_inclusion"("p_api_key_id" "uuid", "p_inclusion" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."set_departed_key_history_inclusion"("p_api_key_id" "uuid", "p_inclusion" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."set_departed_key_history_inclusion"("p_api_key_id" "uuid", "p_inclusion" "text") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."set_wizard_composite_members"("p_user_id" "uuid", "p_strategy_id" "uuid", "p_members" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."set_wizard_composite_members"("p_user_id" "uuid", "p_strategy_id" "uuid", "p_members" "jsonb") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."set_wizard_composite_members"("p_user_id" "uuid", "p_strategy_id" "uuid", "p_members" "jsonb") TO "service_role";
@@ -15595,6 +16554,18 @@ GRANT SELECT("disconnected_at") ON TABLE "public"."api_keys" TO "authenticated";
 
 
 GRANT SELECT("venue_account_id") ON TABLE "public"."api_keys" TO "authenticated";
+
+
+
+GRANT SELECT("account_shared_with_api_key_id") ON TABLE "public"."api_keys" TO "authenticated";
+
+
+
+GRANT SELECT("account_share_kind") ON TABLE "public"."api_keys" TO "authenticated";
+
+
+
+GRANT SELECT("history_inclusion") ON TABLE "public"."api_keys" TO "authenticated";
 
 
 

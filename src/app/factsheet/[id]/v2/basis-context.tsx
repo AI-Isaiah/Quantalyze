@@ -86,11 +86,12 @@ export function useBasisOrCash(): Basis {
  * server-side D3 overlay — payload-as-arg avoids coupling to the frozen
  * FactsheetProvider).
  *
- *   - `cash_settlement` → `payload.strategyMetrics` UNTOUCHED. For composites,
- *     build-payload already overlaid the persisted cash scalars onto it (geometric
- *     or arithmetic per `returns_denominator_config` — Round-2 C-1; arithmetic
- *     only for the "simple"/allocated-capital override), so this is coherent with
- *     the persisted headline and byte-identical to today for single-key.
+ *   - `cash_settlement` → `payload.strategyMetrics` UNTOUCHED. build-payload
+ *     already overlaid the persisted cash scalars onto it (geometric or arithmetic
+ *     per `returns_denominator_config` — Round-2 C-1; arithmetic only for the
+ *     "simple"/allocated-capital override): for a composite from the stitch's
+ *     object, and since Phase 169 (D-10) for a rankable single-key row from its
+ *     persisted top-level scalars. So this is the persisted headline the lists show.
  *   - `mark_to_market` → a shallow copy overlaying ONLY the seven mapped
  *     {@link overlayBasisScalars} scalars from the PERSISTED
  *     `metrics_json_by_basis.mark_to_market`. α/IR and every unmapped key keep
@@ -158,8 +159,12 @@ export function useBasisMetrics(payload: FactsheetPayload): {
  *
  * The four guards each return `base` BY REFERENCE (no re-derive, no fabrication):
  *   1. L === 1                            — SC-4 unity short-circuit
- *   2. dataQuality.composite === true     — A2: leverage is single-key only (arithmetic
- *                                            is composite-only; composites also hide the slider)
+ *   2. dataQuality.composite === true     — A2: leverage is single-key only (composites
+ *                                            also hide the slider); since Phase 169 review
+ *                                            round 1 (SFH M-2) also a chain-broken or
+ *                                            convention-override single-key row, whose
+ *                                            stored L=1 headline the re-derive cannot
+ *                                            continue (see `leverageEligibleFor`)
  *   3. periodsPerYear == null             — fail-closed (stale cache with no annualization basis)
  *   4. MTM basis + no MTM bundle OR no     — no-fabrication: an unresolved MTM label falls back
  *      persisted MTM scalar cache            to cash data (levering it renders levered-cash as
@@ -304,6 +309,9 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     const levered = base.strategyReturns.map((r, i) => ({ date: base.dates[i], value: L * r }));
     const lb = deriveSeriesBundle(levered, {
       periodsPerYear: base.periodsPerYear!,
+      // Geometric is right here: an arithmetic payload (a composite, or since review
+      // round 1 a single-key `simple` config, SFH H-2) is leverage-ineligible, so it
+      // never reaches this re-derive.
       isArithmetic: false,
       markets: base.markets,
       strategyName: base.strategyName,
@@ -312,6 +320,11 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
       // ann_vol would un-lever the comparator vol-match). missingSegments passed
       // through so the bundle spread does not clobber the base mask with undefined.
       missingSegments: base.missingSegments,
+      // Phase 169.5 (SC3, D-09, D-21): BTC is re-aligned from the SAME closes and
+      // `dropped` list the server used, carried on the payload. A payload without
+      // the field (hand-built) has no coverage information: BTC is the unavailable
+      // form, never the bundled fixture.
+      benchmarkPrices: base.benchmarkPrices ?? { unavailable: true },
     });
     // WR-02 (Phase 107 review): Sharpe and Sortino are LEVERAGE-INVARIANT at rf=0 —
     // r→L·r cancels in `mean·√P/sd` and `mean·P/ddDev` (compute.ts:41,45). At L=1 the
@@ -328,26 +341,34 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     // so it is genuinely leverage-VARIANT — its boundary change under leverage is honest,
     // and pinning it to the unlevered persisted value would HIDE a real effect (see the
     // Phase 107 review-fix note; the reviewer's suggested calmar pin was declined for
-    // this reason). Only MTM carries a persisted per-basis overlay; cash's `basisM`
-    // already equals the client recompute, so there is no cash jump to reconcile.
+    // this reason). Phase 169 (D-25, SC4): cash carries a persisted overlay too now.
+    // A rankable single-key payload's L=1 cash headline is the stored value from
+    // `metricsByBasis.cash_settlement` (composite-read-path `readSingleKeyBasisOpts`),
+    // so without this re-pin the cash Sharpe/Sortino would jump to the client
+    // recompute purely by engaging leverage, exactly as MTM's did.
     //
     // B-1 (Phase 107 Fable red team): the invariance holds ONLY for L > 0. At L=0
     // (a reachable, intended state — input min="0", sanitizeLeverage keeps 0 valid)
     // the returns are all-zeros (r→0·r), so `mean·√P/sd` is 0/0 and the derive
-    // honestly yields sharpe=0 / sortino=0 / ann_vol=0 with flat charts. Pinning the
+    // honestly yields sharpe "—" (NaN, no dispersion; founder decision D7,
+    // 2026-09-26) / sortino "—" (NaN, no losing day) / ann_vol=0 with flat charts. Pinning the
     // persisted non-zero Sharpe/Sortino there would render e.g. "Sharpe 1.85" next to
     // "Cum 0.0% / Ann. Vol 0.0%" and flat charts — a fresh dishonesty. So apply the
     // pin only when L > 0; at L=0 let the honest derived zeros stand.
     const strategyMetrics = ((): typeof lb.strategyMetrics => {
-      // Phase 133 (SMTM-01): the re-pin applies under BOTH persisted-overlay bases
-      // (mark_to_market and smoothed_mtm) — each pins Sharpe/Sortino to its OWN
-      // persisted scalar cache so the L=1↔L≠1 boundary is continuous for the two
-      // invariant metrics. Cash carries no persisted per-basis overlay, so it is
-      // excluded (its L=1 KPIs already equal the client recompute).
-      if (basis === "cash_settlement" || L <= 0) return lb.strategyMetrics;
-      const persisted = (basis === "mark_to_market"
-        ? payload.metricsByBasis?.mark_to_market
-        : payload.metricsByBasis?.smoothed_mtm) as
+      // Phase 133 (SMTM-01) + Phase 169 (D-25): the re-pin applies under EVERY
+      // persisted-overlay basis — mark_to_market, smoothed_mtm, and cash_settlement
+      // when the payload carries a persisted cash headline — each pinning
+      // Sharpe/Sortino to its OWN persisted scalar cache so the L=1↔L≠1 boundary is
+      // continuous for the two invariant metrics. A cash payload with no persisted
+      // cash object (a row the owner declined to overlay) keeps the client
+      // recompute below.
+      if (L <= 0) return lb.strategyMetrics;
+      const persisted = (basis === "cash_settlement"
+        ? payload.metricsByBasis?.cash_settlement
+        : basis === "mark_to_market"
+          ? payload.metricsByBasis?.mark_to_market
+          : payload.metricsByBasis?.smoothed_mtm) as
         | Record<string, unknown>
         | undefined
         | null;
@@ -434,12 +455,26 @@ export function useAppliedLeverage(): AppliedLeverage {
  * FABRICATE the very MTM headline scalars the L=1 arm withholds. Requiring the scalar cache
  * keeps MTM leverage-ineligible in that state → the view returns base by-reference → the
  * KPIs stay "—" at every L, symmetric with guard 4. It also proves it can never disable a
- * legitimately-leverable book (a real MTM basis always has both). Cash is unaffected — it
- * carries no persisted-overlay-or-dash contract.
+ * legitimately-leverable book (a real MTM basis always has both).
+ *
+ * Phase 169 review round 1 (SFH M-2): since 169-01 the single-key cash headline at
+ * L=1 is the STORED value, and the levered arm re-derives the leverage-variant
+ * scalars (Since Inception, CAGR, volatility, drawdown) from the displayed series.
+ * D-25 (i) accepts that seam where the two agree. Two kinds of row are ineligible
+ * because they do not agree by construction, so the first step off L=1 would present
+ * the gap between them as the effect of leverage:
+ *   - `dataQuality.twrChainBroken` (SFH H-1): the stored figure covers only the
+ *     stretch after the last chain break, the re-derive the whole series;
+ *   - `dataQuality.returnsConventionOverride` (SFH H-2): the stored figure was
+ *     computed under a `simple` or active-day convention the re-derive cannot
+ *     reproduce.
+ * The view then returns `base` by reference at every L, as for a composite.
  */
 export function leverageEligibleFor(payload: FactsheetPayload, basis: Basis): boolean {
   return (
     payload.dataQuality?.composite !== true &&
+    payload.dataQuality?.twrChainBroken !== true &&
+    payload.dataQuality?.returnsConventionOverride !== true &&
     payload.periodsPerYear != null &&
     !(
       basis === "mark_to_market" &&
@@ -566,6 +601,13 @@ export function mtmDisabledReasonCopy(reason?: string): string {
       // "mtm_anchor_race" string literal is the cross-language contract — both
       // plans pin the same literal.
       return "Mark-to-market temporarily unavailable: the account changed during reconstruction; it will be recomputed on the next data refresh.";
+    case "mtm_option_row_field_missing":
+      // Phase 168 (SFH-04): stamped by the single-key MTM second pass when an
+      // options ledger row lacks its commission or position
+      // (`OptionRowFieldMissingError`; the constant is `MTM_REASON_OPTION_ROW_FIELD`
+      // in stitch_composite.py, the vocabulary owner). Steady tone: a missing
+      // field does not heal on the next refresh.
+      return "Mark-to-market unavailable: an options entry in the venue ledger is missing its fee or position, so a mark-to-market series cannot be reconstructed.";
     default:
       return "Mark-to-market unavailable for this strategy.";
   }

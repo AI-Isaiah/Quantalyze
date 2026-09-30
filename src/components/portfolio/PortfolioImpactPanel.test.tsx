@@ -734,6 +734,45 @@ describe("<PortfolioImpactPanel>", () => {
     expect(status.textContent).toMatch(/Sharpe unchanged/);
   });
 
+  // 166.1 D7 (founder 2026-09-26) / round-1 SFH HIGH-2: a constant-yield or
+  // all-zero candidate (or book) leaves the correlation or the Sharpe delta
+  // undefined. The producer now emits null there instead of 0.0, and the panel
+  // must say "not computable" and show "—", never "unchanged".
+  it("166.1 D7: a null Sharpe and Correlation delta read 'not computable', never 'unchanged'", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            deltas: {
+              sharpe_delta: null,
+              dd_delta: 0.01,
+              corr_delta: null,
+              concentration_delta: 0.05,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Constant Yield"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText(/Sharpe not computable/)).toBeInTheDocument(),
+    );
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/Correlation not computable/);
+    expect(status.textContent).not.toMatch(/Sharpe unchanged|Correlation unchanged/);
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
+  });
+
   // -------------------------------------------------------------------------
   // H-1130 — EquityOverlay gap handling + empty-axis branches
   // -------------------------------------------------------------------------

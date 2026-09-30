@@ -26,6 +26,7 @@ from models.schemas import (
 from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
 from services.db import chunked_in_query, get_supabase, one, rows
+from services.dispersion import dispersing_corrwith, pairwise_correlation_or_none
 # PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
 # PYAPIFIX2-01 — the FLAT venue-transient shape. C7 (the verify-strategy verdict
@@ -43,7 +44,7 @@ from services.portfolio_metrics import compute_mwr, compute_period_returns
 from services.portfolio_optimizer import find_improvement_candidates, generate_narrative
 from services.portfolio_risk import (
     compute_attribution,
-    compute_avg_pairwise_correlation,
+    compute_avg_pairwise_correlation_with_pairs,
     compute_correlation_matrix,
     compute_risk_decomposition,
     compute_rolling_correlation,
@@ -886,7 +887,12 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # Correlation matrix + rolling + avg pairwise
         corr_matrix = compute_correlation_matrix(dict(strategy_returns))
         rolling_corr = compute_rolling_correlation(dict(strategy_returns))
-        avg_pairwise_corr = compute_avg_pairwise_correlation(corr_matrix)
+        # Round-1 WR-03 / SFH MEDIUM-1: the average covers only the DEFINED
+        # pairs (a leg that does not disperse is masked by C1), so the count of
+        # pairs it used is recorded in data_quality beside it.
+        avg_pairwise_corr, avg_corr_pairs_used, avg_corr_pairs_total = (
+            compute_avg_pairwise_correlation_with_pairs(corr_matrix)
+        )
 
         # Risk decomposition + attribution
         ordered_sids = list(df.columns)
@@ -988,7 +994,10 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                 aligned = portfolio_returns_series.reindex(benchmark_rets.index).dropna()
                 b_aligned = benchmark_rets.reindex(aligned.index).dropna()
                 if len(aligned) >= 30:
-                    corr = _safe_float(float(aligned.corr(b_aligned)))
+                    # Phase 166.1 (C6, D-02): no correlation when either leg
+                    # does not disperse (a constant-yield portfolio), as for
+                    # an all-zero one; pandas divides by the residue std.
+                    corr = _safe_float(pairwise_correlation_or_none(aligned, b_aligned))
                     btc_twr = total_return_from_equity((1 + b_aligned).cumprod())
                     benchmark_comparison = {
                         "symbol": "BTC",
@@ -1134,6 +1143,8 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
             "sharpe_status": sharpe_status,
             "cov_history_sufficient": cov_history_sufficient,
             "correlation_history_sufficient": correlation_history_sufficient,
+            "avg_pairwise_correlation_pairs_used": avg_corr_pairs_used,
+            "avg_pairwise_correlation_pairs_total": avg_corr_pairs_total,
             "benchmark_error": benchmark_error,
             "matching_status": None,  # populated only on verify_strategy
         }
@@ -2520,10 +2531,14 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
                     df = pd.DataFrame(existing)
                     aligned = pd.concat([returns.rename("_target"), df], axis=1).dropna()
                     if len(aligned) >= 30:
-                        corrs = aligned.drop(columns=["_target"]).corrwith(aligned["_target"])
-                        # Filter NaN before idxmax — corrwith returns all-NaN when
-                        # every candidate has zero variance over the aligned window,
-                        # and corrs[NaN] raises KeyError.
+                        # Phase 166.1 (C7, D-02): only legs that really disperse can
+                        # match; a raw corrwith gave two same-yield constant
+                        # strategies a 1.0 correlation, a false "matched".
+                        corrs = dispersing_corrwith(
+                            aligned.drop(columns=["_target"]), aligned["_target"]
+                        )
+                        # Filter NaN before idxmax — idxmax over an all-NaN Series
+                        # raises, and corrs[NaN] raises KeyError.
                         corrs_clean = corrs.dropna()
                         if not corrs_clean.empty:
                             best = corrs_clean.idxmax()

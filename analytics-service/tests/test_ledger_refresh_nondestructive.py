@@ -21,6 +21,9 @@ The guard is therefore keyed on the fan-out's job marker and on the row's CURREN
 status, and its fail-safe direction is NON-NEGOTIABLE: anything unrecognised —
 no metadata, a different source, an unreadable status, no row at all — falls
 through to the LOUD destructive stamp. Never fail toward suppression.
+⚠️ Amended 2026-09-26 (Phase 164.6.7 D-09, round 2): an UNREADABLE status is no
+longer in that list. A read that failed is not an answer, so the handler writes
+nothing and fails TRANSIENT before the crawl (test 7).
 
 The failure is re-routed, not hidden. It still lands in ``compute_jobs`` (which
 is what the fan-out's ATTEMPT cooldown reads), in ``computation_error``, in the
@@ -56,7 +59,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
+from services.job_worker import (
+    DispatchOutcome,
+    RefreshMarkerRereadUnavailable,
+    run_derive_broker_dailies_job,
+)
 from tests.test_derive_broker_dailies_dualmode import (
     _build_ctx,
     _patches,
@@ -331,16 +338,55 @@ class TestGuardIsNotABlanketSuppression:
         _assert_destructive(capture, "5b: different source / complete_with_warnings")
 
     @pytest.mark.asyncio
-    async def test_7_unreadable_status_falls_through_to_the_loud_path(self) -> None:
-        """⛔ The fail-safe DIRECTION. If the status cannot be read the guard must
-        NOT assume the row is precious — a wrongly-suppressed failure is invisible,
-        and this repo's rule is to fail loud."""
-        capture = await _drive_failure(
-            metadata={"source": _MARKER},
-            existing_row={"computation_status": "complete_with_warnings"},
-            read_raises=True,
+    async def test_7_unreadable_status_writes_nothing_and_raises_transient(
+        self,
+    ) -> None:
+        """⛔ The fail-safe DIRECTION, as amended by D-09 (Phase 164.6.7 round 2,
+        SFH-R2-02). A status read that FAILED is not an answer in either
+        direction. The guard must NOT assume the row is precious (that would
+        suppress a failure), and it must NOT assume the row is unpublished either
+        (that un-publishes a funded account on one gateway blip). So nothing is
+        written and the handler raises ``RefreshMarkerRereadUnavailable``, which
+        ``classify_exception`` maps to TRANSIENT, before any crawl.
+
+        📜 Lineage: until 2026-09-26 this was
+        ``test_7_unreadable_status_falls_through_to_the_loud_path`` and asserted
+        the destructive stamp. The dispatch-level pin, with the neuter recorded,
+        is ``TestEntryPublishStateReadFailsTransient`` in
+        tests/test_ledger_refresh_reuse_collision.py."""
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-1", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={
+                "id": _STRATEGY_ID,
+                "user_id": "user-1",
+                "returns_denominator_config": {"denominator": "not-a-real-denominator"},
+            },
         )
-        _assert_destructive(capture, "7: status read raises / marked refresh")
+        _stub_status_read(
+            ctx,
+            capture,
+            row={"computation_status": "complete_with_warnings"},
+            raises=True,
+        )
+        patches = _patches(ctx, key_mode=False, returns=_two_day_returns())
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+             patches[6], pytest.raises(RefreshMarkerRereadUnavailable):
+            await run_derive_broker_dailies_job(
+                {
+                    "id": "job-1",
+                    "kind": "derive_broker_dailies",
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+        assert any(
+            sel["table"] == "strategy_analytics" for sel in capture["selects"]
+        ), "the status read never ran, so nothing here tested the failure path"
+        assert not [u for u in capture["upserts"] if u[0] == "strategy_analytics"], (
+            "a failed status read still wrote to strategy_analytics: "
+            f"{capture['upserts']!r}"
+        )
+        assert not _series_deletes(capture), capture["deletes"]
 
 
 class TestFreshnessColumnSurvivesEveryPath:
@@ -359,7 +405,9 @@ class TestFreshnessColumnSurvivesEveryPath:
             ("marked / failed", {"source": _MARKER}, {"computation_status": "failed"}, False),
             ("unmarked", None, {"computation_status": "complete_with_warnings"}, False),
             ("other source", {"source": "ledger-refresh-tracer"}, {"computation_status": "complete_with_warnings"}, False),
-            ("read raises", {"source": _MARKER}, {"computation_status": "complete_with_warnings"}, True),
+            # ⚠️ "read raises" left this list on 2026-09-26 (D-09, round 2): a
+            # failed status read now raises before any write, so it has no stamp
+            # to inspect. Test 7 pins that it writes nothing at all.
         ]
         for case, metadata, existing_row, read_raises in cases:
             capture = await _drive_failure(

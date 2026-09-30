@@ -449,8 +449,9 @@ class TestCR02OneChokePoint:
             # _heal_delete_basis_series().`, so deleting the closure's real
             # terminating call left the gate satisfied by PROSE. The sibling
             # file's `_assert_region` already pinned the awaited form for this
-            # exact reason; this one did not.
-            "await _heal_delete_basis_series()",
+            # exact reason; this one did not. Round 6 (R6-01): the call
+            # passes the stamp's cause, which the heal's ERROR line carries.
+            "await _heal_delete_basis_series(cause=_cause)",
         )
         assert fn_start < guard_start and guard_end <= fn_end, (
             "the choke point is no longer nested inside the handler; the "
@@ -743,6 +744,15 @@ def _runner_supabase(
             data = {"data_quality_flags": {"csv_source": True}}
         elif "daily_return" in columns:
             data = rows
+            # C3 topic H: the series load is KEYSET — .order().limit() serves the
+            # first page, then .gt(date, cursor) starts a page that must come
+            # back EMPTY to stop the read (a self-chain would repeat the rows).
+            chain.limit.return_value = chain
+            after_cursor = MagicMock()
+            after_cursor.order.return_value = after_cursor
+            after_cursor.limit.return_value = after_cursor
+            after_cursor.execute.return_value = MagicMock(data=[])
+            chain.gt.return_value = after_cursor
         else:
             data = {"id": "s1", "user_id": "u1"}
         chain.execute.return_value = MagicMock(data=data)

@@ -15,6 +15,7 @@
  * same cumulative-product semantics.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { dispersion, sharpe as returnStatsSharpe } from "@/lib/return-stats";
 
 export type ParsedHoldingCompareId = {
   venue: string;
@@ -64,20 +65,22 @@ export type HoldingCompareAnalytics = {
  * withholds on My Allocation. That store can count one exchange account twice
  * when two keys read it (a +100% / -50% day inside one symbol's series), and a
  * $-level ratio reads buying or selling more of a symbol as a gain or loss.
- * Until plan 10 repairs the writer and plan 11 defines "ready", the item
- * carries NO analytics: `historyState` is "rebuilding" and `analytics` is
- * null, so the numbers never leave the server. Consumers are fail-closed:
- * anything other than an explicit "ready" renders the rebuilding note.
+ * Plan 11 (2026-09-29) DECIDED to keep this "rebuilding". My Allocation can
+ * be ready off `payload.returns`, a book-level flow-neutral series; nothing
+ * here reads it. These four numbers are still `value[i] / value[i-1] - 1`
+ * over a symbol's `breakdown` dollars (`reconstructAndAnalyze`), so buying or
+ * selling more of a symbol reads as a gain or loss. Plan 10 makes the refresh
+ * write each account once from its merge on; it does not rewrite the rows
+ * already stored, and it does not touch this ratio. No per-holding
+ * flow-adjusted source exists, and no roadmap phase owns one (measured
+ * 2026-09-29); 167.1.2-11-SUMMARY.md routes that. Flip only when this
+ * computation reads such a source. The `historyState` test seam keeps the
+ * ready branch pinned.
  *
- * Reversible by design: flipping this constant to "ready" restores the
+ * Consumers are fail-closed: anything other than an explicit "ready" renders
+ * the rebuilding note. Flipping this constant to "ready" restores the
  * pre-D-13 behaviour (the item carries the analytics computed from the
- * trustworthy rows, and availability is unchanged). That claim is pinned by
- * the adapter test through `fetchHoldingCompareItem`'s `historyState` test
- * seam, so the "ready" branch stays under test while production uses this
- * default. Plan 11 must DECIDE that flip for /compare explicitly
- * (`167.1.2-11-PLAN.md` carries it as an acceptance line); it does not follow
- * from the My Allocation curve becoming ready, because the level-ratio defect
- * is specific to this computation.
+ * trustworthy rows, and availability is unchanged).
  */
 export const HOLDING_COMPARE_HISTORY_STATE: "rebuilding" | "ready" =
   "rebuilding";
@@ -111,9 +114,13 @@ export class HoldingCompareLoadError extends Error {
  * - Drop absent/zero days (RESEARCH Pitfall 2 — no forward-fill)
  * - pct_change semantics: return[i] = value[i] / value[i-1] - 1
  * - cumulative_return = product(1 + r) - 1
- * - sharpe = mean(returns) / std(returns) * sqrt(365) [population std]
+ * - sharpe = `return-stats` `sharpe(returns, { periodsPerYear: 365, ddof: 0 })`
+ *   [population std], the ONE TS Sharpe (Phase 166.1 D-17): null when the
+ *   returns have no dispersion, including the float residue of a compounding
+ *   constant yield, exactly as for a flat NAV (D-07)
  * - max_drawdown via cumulative-product running-peak
- * - vol = std(returns) * sqrt(365)
+ * - vol = `return-stats` `dispersion(returns, 0).sd * sqrt(365)` (a residue sd
+ *   reads as 0, the flat-NAV value)
  * Returns null metrics when fewer than 2 symbol-present data points exist.
  *
  * @internal Exported for unit testing only (Phase 167.1.2 / D-13): while the
@@ -144,16 +151,12 @@ export function reconstructAndAnalyze(
     return { cumulative_return: null, sharpe: null, max_drawdown: null, vol: null };
   }
 
-  const n = returns.length;
-  const mean = returns.reduce((a, b) => a + b, 0) / n;
-  // Population variance (matches numpy ddof=0 default)
-  const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / n;
-  const std = Math.sqrt(variance);
   const ANNUAL = 365;
 
   const cumulative_return = returns.reduce((acc, r) => acc * (1 + r), 1) - 1;
-  const vol = std * Math.sqrt(ANNUAL);
-  const sharpe = std > 0 ? (mean / std) * Math.sqrt(ANNUAL) : null;
+  // Population sd (numpy ddof=0 default).
+  const vol = dispersion(returns, 0).sd * Math.sqrt(ANNUAL);
+  const sharpe = returnStatsSharpe(returns, { periodsPerYear: ANNUAL, ddof: 0 });
 
   // Max drawdown via running peak on the raw value series
   let peak = values[0];
@@ -198,7 +201,7 @@ export async function fetchHoldingCompareItem(params: {
    * @internal Test seam (Phase 167.1.2 review round 2, WR-01). Production
    * callers omit it and get HOLDING_COMPARE_HISTORY_STATE (D-13). It exists so
    * the "ready" branch, which the constant makes unreachable today, stays
-   * pinned until plan 11 decides the flip.
+   * pinned. Plan 11 kept the constant "rebuilding"; see its docblock.
    */
   historyState?: "rebuilding" | "ready";
 }): Promise<HoldingCompareItem | null> {

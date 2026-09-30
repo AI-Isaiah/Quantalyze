@@ -1346,7 +1346,16 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
             recoverable=result["error_code"] not in PERMANENT_VALIDATION_ERROR_CODES,
         )
 
-    return {"valid": result["valid"], "read_only": result["read_only"]}
+    # Phase 167.1.2 (D-01): the ccxt success path also carries the venue
+    # account id (None when the venue returned none), so the connect routes can
+    # stamp `api_keys.venue_account_id`. `.get`, never `[...]`: a missing key
+    # is None, never a 500. This is the ONLY place the id leaves the service;
+    # the failure paths above and the sFOX / MT5 returns never carry it.
+    return {
+        "valid": result["valid"],
+        "read_only": result["read_only"],
+        "venue_account_id": result.get("account_id"),
+    }
 
 
 @router.post("/encrypt-key")

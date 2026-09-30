@@ -155,6 +155,11 @@ describe("basis-context", () => {
     expect(mtmDisabledReasonCopy("mtm_anchor_race")).toBe(
       "Mark-to-market temporarily unavailable: the account changed during reconstruction; it will be recomputed on the next data refresh.",
     );
+    // Phase 168 (SFH-04): an options ledger entry missing its fee or position.
+    // Its own copy, so the reader is not sent to a settlement-coverage story.
+    expect(mtmDisabledReasonCopy("mtm_option_row_field_missing")).toBe(
+      "Mark-to-market unavailable: an options entry in the venue ledger is missing its fee or position, so a mark-to-market series cannot be reconstructed.",
+    );
     // Fallback: unknown reason AND undefined both hit the basis-agnostic default
     // (the old "for this composite" default was wrong for single-key — RESEARCH A4).
     const fallback = "Mark-to-market unavailable for this strategy.";
@@ -173,6 +178,8 @@ describe("basis-context", () => {
     // self-healing; RESEARCH Pitfall 4).
     expect(mtmReasonTone("mtm_summary_coverage_incomplete")).toBe("steady");
     expect(mtmReasonTone("mtm_series_uncomputable")).toBe("steady");
+    // A missing ledger field does not heal on the next refresh (Phase 168).
+    expect(mtmReasonTone("mtm_option_row_field_missing")).toBe("steady");
     expect(mtmReasonTone("mtm_basis_unavailable_for_venue")).toBe("steady");
     expect(mtmReasonTone("unsmoothed_options_book")).toBe("steady");
     // Unknown + undefined default to steady.

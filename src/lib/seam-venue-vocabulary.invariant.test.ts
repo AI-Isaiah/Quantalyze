@@ -742,6 +742,12 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   "ADMIN_CHECK_UNAVAILABLE",
   "ANALYTICS_ROW_NOT_CREATED",
   "AUTH_FAILED",
+  // 169.2 / BENCHFRESH (2026-09-27) — minted by `benchmark_refresh` and
+  // `_benchmark_refresh_once` in routers/cron.py when their six raw
+  // HTTPException(500) arms were re-homed onto `service_error` (the raw-5xx
+  // census forbids a raw 5xx outside its quarantine). Takes a reasoned row in
+  // `VENUE_WIRE_CODES_WITHOUT_VERDICT`: its only caller is the refresh cron.
+  "BENCHMARK_REFRESH_FAILED",
   "CSV_FORMAT_UNSUPPORTED",
   "CSV_TOO_LARGE",
   "CSV_VALIDATION_FAILED",

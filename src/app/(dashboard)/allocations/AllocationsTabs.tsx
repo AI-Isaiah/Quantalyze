@@ -239,9 +239,14 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
  * Here, browser back/forward updates the URL → searchParams changes →
  * re-render → activeTab recomputes → visible tab toggles correctly.
  *
- * Tab clicks call `router.replace(url, { scroll: false })` to update
- * the URL without scrolling; the URL change triggers a re-render which
- * re-derives activeTab. No local state for `activeTab` is kept.
+ * Tab clicks call `window.history.replaceState(null, "", url)` to update
+ * the URL (Phase 167.1.2 plan 07, SC-5c). Next integrates the native History
+ * API with `useSearchParams`, so the URL change re-renders this component and
+ * re-derives activeTab, WITHOUT a navigation: the router's replace to a changed
+ * query on this force-dynamic page refetched the RSC payload and re-ran
+ * getMyAllocationDashboard on every tab click. replaceState adds no history
+ * entry (as the router's replace did not) and never scrolls. No local state
+ * for `activeTab` is kept.
  *
  * Live-refresh polling (Phase 06 D-11 inheritance): 30s router.refresh()
  * while Overview is active AND document.visibilityState is visible.
@@ -354,8 +359,8 @@ const TAB_COUNT_BADGE_INACTIVE =
  * visible (the no-op case). This deliberately models ONLY the horizontal axis:
  * the prior `scrollIntoView({ block: "nearest" })` also moved the nearest
  * VERTICAL scroll container, which yanked the page back up to the strip after a
- * user had scrolled down — defeating `changeTab`'s intentional
- * `router.replace(..., { scroll: false })`. Keeping the math pure here makes the
+ * user had scrolled down — defeating `changeTab`'s intentional no-scroll URL
+ * write (now `window.history.replaceState`). Keeping the math pure here makes the
  * reduced-motion branch (WCAG — never animate a forced scroll for reduce users)
  * and the already-visible no-op directly unit-testable without a layout engine.
  */
@@ -451,17 +456,21 @@ export function AllocationsTabs(
   // Scroll-safe URL cleanup: if the allocator lands on ?tab=overview
   // (the new default — redundant) OR ?tab=performance (legacy Phase 07
   // alias — bookmark compat), strip it so the canonical URL is
-  // /allocations. Runs after render to avoid touching render-phase state;
-  // shallow-replace does not trigger another data fetch.
+  // /allocations. Runs after render to avoid touching render-phase state.
+  // Phase 167.1.2 plan 07 (SC-5c): the native History API, not the router.
+  // An App Router navigation to a changed query on this force-dynamic page
+  // refetches the RSC payload (the old comment's "shallow replace does not
+  // refetch" was wrong for the App Router); history.replaceState does not,
+  // and Next syncs useSearchParams to it.
   useEffect(() => {
     const current = searchParams.get("tab");
     if (current === "overview" || current === "performance") {
       const params = new URLSearchParams(searchParams.toString());
       params.delete("tab");
       const qs = params.toString();
-      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+      window.history.replaceState(null, "", qs ? `${pathname}?${qs}` : pathname);
     }
-  }, [searchParams, router, pathname]);
+  }, [searchParams, pathname]);
 
   // Live-refresh polling — only while on Overview + document visible
   // (Phase 06 D-11 inherited pattern). Never polls on Holdings / Outcomes /
@@ -487,13 +496,14 @@ export function AllocationsTabs(
   }, [activeTab, router]);
 
   // Tab change — update URL; the URL change triggers a re-render which
-  // re-derives activeTab. No local state for activeTab.
+  // re-derives activeTab. No local state for activeTab. The native History API
+  // (SC-5c): no RSC refetch, no history entry, no scroll.
   const changeTab = (key: TabKey) => {
     const params = new URLSearchParams(searchParams.toString());
     if (key === "overview") params.delete("tab");
     else params.set("tab", key);
     const qs = params.toString();
-    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+    window.history.replaceState(null, "", qs ? `${pathname}?${qs}` : pathname);
   };
 
   // Phase 116 / ADDALLOC — context-aware header "+ Allocation" button.
@@ -681,7 +691,7 @@ export function AllocationsTabs(
   // The earlier `el.scrollIntoView({ block: "nearest" })` also moved the
   // nearest VERTICAL scroll container, so switching tabs after scrolling down
   // yanked the page back up to the strip — defeating changeTab's deliberate
-  // router.replace(..., { scroll: false }). `computeTabStripScroll` returns null
+  // no-scroll URL write (history.replaceState). `computeTabStripScroll` returns null
   // when the tab is already visible (and at >=sm where the strip wraps and never
   // overflows), so this is a no-op except when a horizontal correction is
   // actually needed. Honor prefers-reduced-motion: instant ("auto") for reduce,

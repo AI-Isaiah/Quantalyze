@@ -1,9 +1,10 @@
-import type { CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, BasisSeriesBundle, TrustTierKind, IngestSource } from "./types";
-import { alignReturns } from "./align";
+import type { BenchmarkPricesOpt, CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, BasisSeriesBundle, TrustTierKind, IngestSource } from "./types";
+import { alignCoveredReturns, COMPARATOR_CALENDARS } from "./align";
+import type { CoveredAlignment } from "./align";
 import { compute, cumEq, worstDrawdowns, arithmeticEquity, arithmeticUnderwater } from "./compute";
 import { overlayBasisScalars } from "./basis-metrics";
 import { rollingVol, rollingSharpe, rollingSortino, pickRollingWindow, ROLL_WINDOW_90D, ROLL_WINDOW_30D } from "./rolling";
-import { buildComparatorBlock, noneComparatorBlock } from "./comparator-block";
+import { buildComparatorBlock, noneComparatorBlock, unavailableComparatorBlock } from "./comparator-block";
 import {
   BTC_DAILY,
   SPX_DAILY,
@@ -14,6 +15,7 @@ import {
 import { computeStyleDrift } from "./style-drift";
 import { computePeerPercentile } from "./peer-cohort";
 import { annualizationPeriods } from "@/lib/closed-sets";
+import { pearson } from "@/lib/return-stats";
 import { blend, buildAllocatorMetrics } from "./allocator";
 import { streakLengths, streakHistogram } from "./streak";
 import { calmarByYear } from "./calmar-by-year";
@@ -48,13 +50,27 @@ export function deriveIngestSource(dailyRaw: unknown): IngestSource {
 }
 
 /**
- * Phase 90 (D3/D6) — optional composite opts. Additive + defaulted-undefined so
+ * Phase 169.5 BENCHCOMPARE (SC3, D-09, D-54) — the BTC comparator's prices; the
+ * type lives in `./types` (the payload carries it, D-21) and is re-exported here
+ * for the build opt's callers. As a build opt, ABSENT (the allocator path until
+ * Phase 169.4) means the bundled BTC fixture, bounded by
+ * {@link fixtureBenchmarkPrices}.
+ */
+export type { BenchmarkPricesOpt };
+
+/**
+ * Phase 90 (D3/D6) — optional build opts, first added for composites and since
+ * shared by the single-key arm (Phases 102/103/133, and 169). Additive + defaulted-undefined so
  * every existing 2-arg call site is byte-identical (GUARD-02). The field types
  * are anchored to {@link FactsheetCommon} so the payload contract and the opts
  * contract can't drift.
  */
 export type BuildFactsheetOpts = {
-  /** "arithmetic" swaps the three curve fields (composite branch); default geometric. */
+  /**
+   * "arithmetic" swaps the three curve fields; default geometric. Set by the
+   * composite reader, and since Phase 169 review round 1 (SFH H-2) by the
+   * single-key owner for a `simple` returns_denominator_config.
+   */
   cumulativeMethod?: "geometric" | "arithmetic";
   segmentBoundaries?: FactsheetCommon["segmentBoundaries"];
   missingSegments?: FactsheetCommon["missingSegments"];
@@ -90,7 +106,86 @@ export type BuildFactsheetOpts = {
     dailyReturns: DailyReturn[];
     gapSpans: Array<{ start: string; end: string }>;
   };
+  /** Phase 169.5 (SC3, D-09) — BTC from the database; see {@link BenchmarkPricesOpt}. */
+  benchmarkPrices?: BenchmarkPricesOpt;
 };
+
+/**
+ * Phase 169.5 (D-54, D-09) — the five comparators aligned on one date axis through
+ * the ONE coverage-aware helper. BTC comes from `benchmarkPrices` (null when it is
+ * the unavailable marker); the four others from their fixtures. A fixture has no
+ * `dropped` list. BTC is an ARGUMENT here, never read from the bundled fixture, so
+ * the server build and the browser re-derive align it from the same closes.
+ */
+function alignComparators(
+  dates: string[],
+  benchmarkPrices: BenchmarkPricesOpt,
+): {
+  btc: CoveredAlignment | null;
+  spx: CoveredAlignment;
+  eth: CoveredAlignment;
+  gld: CoveredAlignment;
+  ief: CoveredAlignment;
+} {
+  const btc =
+    "unavailable" in benchmarkPrices
+      ? null
+      : alignCoveredReturns(benchmarkPrices.prices, benchmarkPrices.dropped, dates, COMPARATOR_CALENDARS.btc);
+  return {
+    btc,
+    spx: alignCoveredReturns(SPX_DAILY, [], dates, COMPARATOR_CALENDARS.spx),
+    eth: alignCoveredReturns(ETH_DAILY, [], dates, COMPARATOR_CALENDARS.eth),
+    gld: alignCoveredReturns(GLD_DAILY, [], dates, COMPARATOR_CALENDARS.gld),
+    ief: alignCoveredReturns(IEF_DAILY, [], dates, COMPARATOR_CALENDARS.ief),
+  };
+}
+
+function isoMinusOneDay(iso: string): string {
+  return new Date(Date.parse(`${iso}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * Phase 169.5 (SC3, D-09, D-64(4) Amendment A, RESEARCH Pitfall 2) — the
+ * bundled BTC fixture bounded as the route bounds its read: `[earliest date on any
+ * axis minus one day, latest date on any axis]`, min / max over every entry, with an
+ * empty `dropped` list and `through` its last carried close. The day before the
+ * earliest date carries the prior close day one's return is taken from (D-64).
+ * No close in the bound is the unavailable marker. Used only when a build is
+ * handed no `benchmarkPrices` opt, so the payload still carries the exact closes
+ * its BTC comparator was computed from.
+ */
+export function fixtureBenchmarkPrices(axes: ReadonlyArray<readonly DailyReturn[]>): BenchmarkPricesOpt {
+  let min: string | null = null;
+  let max: string | null = null;
+  for (const axis of axes) {
+    for (const r of axis) {
+      if (min === null || r.date < min) min = r.date;
+      if (max === null || r.date > max) max = r.date;
+    }
+  }
+  if (min === null || max === null) return { unavailable: true };
+  const from = isoMinusOneDay(min);
+  const to = max;
+  const prices = BTC_DAILY.filter(p => p.date >= from && p.date <= to);
+  if (prices.length === 0) return { unavailable: true };
+  return { prices, through: prices[prices.length - 1].date, dropped: [] };
+}
+
+/** The unavailable alignment: every return null, nothing paired. */
+function unavailableAlignment(n: number): CoveredAlignment {
+  return { returns: new Array(n).fill(null), paired: new Array(n).fill(false), through: null, coveredToEnd: false };
+}
+
+/**
+ * Phase 169.5 (D-65) — a comparator series for a `number[]` consumer that is NOT a
+ * comparator block (the api arm's allocator portfolios and event signatures): a
+ * null enters as 0. Stress windows are NOT such a consumer (CR-01): they take the
+ * null-honest returns. The null-honest fix of those panels is owned by
+ * Phase 169.4 ALLOCTRUTH; this boundary is a recorded decision, not an oversight.
+ */
+function nullAsZero(a: CoveredAlignment): number[] {
+  return a.returns.map(r => r ?? 0);
+}
 
 /**
  * Derive FS-01 segment boundaries + FS-02 missing segments from a persisted
@@ -239,6 +334,12 @@ export function deriveSeriesBundle(
     strategyName: string;
     comparatorAnnVol?: number;
     missingSegments?: FactsheetCommon["missingSegments"];
+    /**
+     * Phase 169.5 (SC3, D-09) — the BTC prices this bundle aligns BTC from (the
+     * payload's own `benchmarkPrices`), or the unavailable marker. Required: the
+     * bundle never falls back to the bundled fixture on its own.
+     */
+    benchmarkPrices: BenchmarkPricesOpt;
   },
 ): BasisSeriesBundle {
   const { periodsPerYear, isArithmetic, markets, strategyName } = args;
@@ -258,12 +359,11 @@ export function deriveSeriesBundle(
   const stratEquity = isArithmetic ? arithmeticEquity(stratRet) : cumEq(stratRet);
   const stratDd = isArithmetic ? arithmeticUnderwater(stratRet) : fullMetrics.dd;
 
-  // Benchmark alignments on THIS bundle's own date axis.
-  const btcRet = alignReturns(BTC_DAILY, dates);
-  const spxRet = alignReturns(SPX_DAILY, dates);
-  const ethRet = alignReturns(ETH_DAILY, dates);
-  const gldRet = alignReturns(GLD_DAILY, dates);
-  const iefRet = alignReturns(IEF_DAILY, dates);
+  // Benchmark alignments on THIS bundle's own date axis (169.5 D-54: one
+  // coverage-aware helper for all five; BTC from the database when the route
+  // passed it).
+  const al = alignComparators(dates, args.benchmarkPrices);
+  const btcAl = al.btc ?? unavailableAlignment(dates.length);
 
   // Phase 103 (MTM-04, correction) — correlations + the pairwise matrix are
   // derived HERE, per basis, NOT top-level cash. A correlation is
@@ -272,26 +372,35 @@ export function deriveSeriesBundle(
   // ρ. Nothing bypasses the backbone. Pearson is a standard stat (no valuation
   // math). Under MTM the asset legs realign onto the MTM axis (Pitfall-1: same
   // axis as the strategy leg), so every cell compares like-for-like windows.
+  //
+  // Phase 169.5 (SC3, D-54, D-58 amendment): every cell is computed over the
+  // intervals paired for BOTH legs; the strategy leg counts as paired everywhere.
+  const stratAl: CoveredAlignment = {
+    returns: stratRet,
+    paired: stratRet.map(() => true),
+    through: null,
+    coveredToEnd: false,
+  };
   const correlations: CorrelationRow[] = [
-    { name: "BTC", rho: pearsonCorr(stratRet, btcRet) },
-    { name: "ETH", rho: pearsonCorr(stratRet, ethRet) },
-    { name: "S&P 500", rho: pearsonCorr(stratRet, spxRet) },
-    { name: "Gold", rho: pearsonCorr(stratRet, gldRet) },
-    { name: "US 10Y (IEF)", rho: pearsonCorr(stratRet, iefRet) },
+    { name: "BTC", rho: pairedCorr(stratAl, btcAl) },
+    { name: "ETH", rho: pairedCorr(stratAl, al.eth) },
+    { name: "S&P 500", rho: pairedCorr(stratAl, al.spx) },
+    { name: "Gold", rho: pairedCorr(stratAl, al.gld) },
+    { name: "US 10Y (IEF)", rho: pairedCorr(stratAl, al.ief) },
   ];
   // Full pairwise matrix — strategy short-name on the diagonal head so the matrix
   // reads as a self-similarity heatmap with one corner for the strategy.
-  const matrixSeries: Array<{ name: string; rets: number[] }> = [
-    { name: strategyName.length > 12 ? strategyName.slice(0, 11) + "…" : strategyName, rets: stratRet },
-    { name: "BTC", rets: btcRet },
-    { name: "ETH", rets: ethRet },
-    { name: "SPX", rets: spxRet },
-    { name: "Gold", rets: gldRet },
-    { name: "IEF", rets: iefRet },
+  const matrixSeries: Array<{ name: string; al: CoveredAlignment }> = [
+    { name: strategyName.length > 12 ? strategyName.slice(0, 11) + "…" : strategyName, al: stratAl },
+    { name: "BTC", al: btcAl },
+    { name: "ETH", al: al.eth },
+    { name: "SPX", al: al.spx },
+    { name: "Gold", al: al.gld },
+    { name: "IEF", al: al.ief },
   ];
   const correlationLabels = matrixSeries.map(s => s.name);
   const correlationMatrix: number[][] = matrixSeries.map((a, i) =>
-    matrixSeries.map((b, j) => (i === j ? 1 : pearsonCorr(a.rets, b.rets))),
+    matrixSeries.map((b, j) => (i === j ? 1 : pairedCorr(a.al, b.al))),
   );
 
   // Cash overrides with the persisted-overlay ann_vol; MTM uses its own.
@@ -317,9 +426,14 @@ export function deriveSeriesBundle(
     rollingWindow: rollWindow,
     rollingBetaWindow: rollBetaWindow,
     strategyWorst10: worstDrawdowns(stratDd, 10),
+    // Phase 169.5 D-59 (as amended 2026-09-27, Alternative A): each comparator's own
+    // summary annualizes on the SMALLER of the strategy's and the comparator's basis
+    // (vol / Sharpe / Sortino ride the observation clock, #597: a 7-day strategy sees
+    // a weekday comparator ~252 times a year, a weekday strategy sees 7-day BTC ~252
+    // times a year); the joint metrics keep the strategy's basis (166.4 D-A).
     comparators: {
-      btc: buildComparatorBlock("BTC-USD", "BTC", btcRet, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear),
-      spx: buildComparatorBlock("S&P 500", "SPX", spxRet, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear),
+      btc: al.btc === null ? unavailableComparatorBlock("BTC-USD", "BTC") : buildComparatorBlock("BTC-USD", "BTC", al.btc, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear, Math.min(periodsPerYear, annualizationPeriods("crypto"))),
+      spx: buildComparatorBlock("S&P 500", "SPX", al.spx, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear, Math.min(periodsPerYear, annualizationPeriods("traditional"))),
       none: noneComparatorBlock,
     },
     monthlyReturns: monthlyReturnsMatrix(stratRet, dates),
@@ -338,7 +452,9 @@ export function deriveSeriesBundle(
     calmarByYear: calmarByYear(stratRet, dates),
     bootstrapCI: bootstrapCI(stratRet, 2000, 5, 42, periodsPerYear),
     styleDrift: computeStyleDrift(stratRet, dates),
-    stressWindows: computeStressWindows(dates, stratRet, btcRet, "BTC", markets),
+    // CR-01 (SC3): stress windows take BTC null-honest — a window with an uncovered
+    // BTC day gets null bench fields, never a compounded 0% day. Not under D-65.
+    stressWindows: computeStressWindows(dates, stratRet, btcAl.returns, "BTC", markets),
     strategyMetrics: bundleMetrics,
     correlations,
     correlationMatrix: { labels: correlationLabels, matrix: correlationMatrix },
@@ -411,13 +527,13 @@ export function buildFactsheetPayload(
 ): FactsheetPayload | null {
   if (!dailyReturns.length) return null;
 
-  // The strategy series is the source of truth. Benchmark fixtures
-  // (BTC/SPX/etc.) carry a fixed date range; `alignReturns` forward-fills
-  // benchmark prices on dates outside that range so the strategy panel
-  // set still renders even when the strategy is entirely outside the
-  // bench window — comparator series just go flat on the unsupported
-  // dates instead of dropping the whole factsheet. Drop only when the
-  // raw series itself doesn't have 2 distinct dated observations.
+  // The strategy series is the source of truth. A comparator is measured
+  // only over the days it has real prices for (169 D-09, 169.5 D-54): an
+  // uncovered or unpaired interval is null in its summary and joint metrics,
+  // never a fabricated 0% day, and a window past its `through` is null. The
+  // strategy panel set still renders when the strategy lies outside a
+  // comparator's prices. Drop only when the raw series itself doesn't have 2
+  // distinct dated observations.
   // D-04 (Phase 167.2.1): the gate is the shared predicate, so it normalizes a
   // second time; O(n log n) on a few thousand rows, accepted for one gate.
   if (!hasBuildableSeries(dailyReturns)) {
@@ -460,25 +576,45 @@ function buildFromBuildableSeries(
   // eq/dd are re-derived per basis inside deriveSeriesBundle, not carried here.
   const { eq: _eq, dd: _dd, ...computedMetrics } = compute(stratRet, dates, 0, periodsPerYear);
 
-  // Phase 90 (D3) — arithmetic (composite) vs geometric curve basis; threaded
-  // into deriveSeriesBundle so all THREE curve fields move together per basis.
+  // Phase 90 (D3) — arithmetic vs geometric curve basis; threaded into
+  // deriveSeriesBundle so all THREE curve fields move together per basis.
+  // Arithmetic for a composite's "simple" method and, since Phase 169 review
+  // round 1 (SFH H-2), a single-key `simple` returns_denominator_config.
   const isArithmetic = opts?.cumulativeMethod === "arithmetic";
 
   // Phase 90 (D3) — cash-scalar overlay. The KpiStrip's seven headline scalars
   // read the PERSISTED `cash_settlement` basis so they agree with discovery /
-  // ranking / acceptance, whatever cumulative method the composite persisted
-  // (geometric mainline OR the Zavara "simple"/arithmetic override — Round-2
-  // C-1). Round-2 H-1: the overlay is now STRICT — a degenerate persisted scalar
-  // (`calmar:null` on a zero-drawdown book) renders "—", not the client-geometric
-  // value it would silently inherit. No-op (single-key byte-identical) when
-  // `cash_settlement` is absent (overlayBasisScalars returns base unchanged).
+  // ranking / acceptance, whatever cumulative method was persisted (geometric
+  // mainline OR the Zavara "simple"/arithmetic override — Round-2 C-1). Round-2
+  // H-1: the overlay is STRICT — a degenerate persisted scalar (`calmar:null` on
+  // a zero-drawdown book) renders "—", not the client-geometric value it would
+  // silently inherit. Since Phase 169 (D-10, SC4) the object is present on a
+  // composite AND on a rankable single-key row (built from its persisted
+  // top-level scalars by `readSingleKeyBasisOpts`); only where it is absent is
+  // this a no-op (overlayBasisScalars returns base unchanged).
   const strategyMetrics = overlayBasisScalars(computedMetrics, opts?.metricsByBasis?.cash_settlement);
 
-  const btcRet = alignReturns(BTC_DAILY, dates);
-  const spxRet = alignReturns(SPX_DAILY, dates);
-  const ethRet = alignReturns(ETH_DAILY, dates);
-  const gldRet = alignReturns(GLD_DAILY, dates);
-  const iefRet = alignReturns(IEF_DAILY, dates);
+  // The api arm's synthesized panels below (allocator portfolios, event
+  // signatures) take number[] series: D-65, a comparator null enters them as 0
+  // through one named local per series; Phase 169.4 ALLOCTRUTH owns their
+  // null-honest fix.
+  // Phase 169.5 (SC3, D-09, D-21): the ONE BTC input of this build. The route's
+  // opt is carried verbatim (already bounded over every axis and trimmed); with no
+  // opt, the bundled fixture bounded over the same axes. It feeds every alignment
+  // below AND rides on the payload, so the browser re-derive uses the same closes.
+  const benchmarkPrices: BenchmarkPricesOpt =
+    opts?.benchmarkPrices ??
+    fixtureBenchmarkPrices([
+      clipped,
+      opts?.mtmSeries?.dailyReturns ?? [],
+      opts?.smoothedSeries?.dailyReturns ?? [],
+    ]);
+  const apiAl = alignComparators(dates, benchmarkPrices);
+  const btcRet = nullAsZero(apiAl.btc ?? unavailableAlignment(dates.length));
+  const spxRet = nullAsZero(apiAl.spx);
+  const ethRet = nullAsZero(apiAl.eth);
+  const gldRet = nullAsZero(apiAl.gld);
+  const iefRet = nullAsZero(apiAl.ief);
 
   // Default to "csv" (conservative) when the caller doesn't specify — avoids
   // exposing non-derivable panels for strategies whose source isn't explicitly
@@ -499,6 +635,7 @@ function buildFromBuildableSeries(
     strategyName: strategy.name,
     comparatorAnnVol: strategyMetrics.ann_vol,
     missingSegments: opts?.missingSegments,
+    benchmarkPrices,
   });
 
   // Phase 103 (MTM-04) — the MTM per-basis bundle, derived by the SAME function
@@ -521,6 +658,7 @@ function buildFromBuildableSeries(
           // comparatorAnnVol omitted → the MTM comparator uses the MTM series'
           // own computed vol (honest MTM; no persisted cash overlay applies).
           missingSegments: deriveSegmentMarkers({ gap_spans: opts.mtmSeries.gapSpans }).missingSegments,
+          benchmarkPrices,
         }),
       };
     }
@@ -543,6 +681,7 @@ function buildFromBuildableSeries(
           // comparatorAnnVol omitted → the smoothed comparator vol-matches the
           // smoothed series' own computed vol (honest; no persisted cash overlay).
           missingSegments: deriveSegmentMarkers({ gap_spans: opts.smoothedSeries.gapSpans }).missingSegments,
+          benchmarkPrices,
         }),
       };
     }
@@ -612,6 +751,9 @@ function buildFromBuildableSeries(
     // Phase 103 (MTM-04) — additive per-basis bundle; undefined (dropped from the
     // serialized blob) when no persisted MTM series feeds the build (SC-4).
     seriesByBasis,
+    // Phase 169.5 (SC3, D-09, D-21) — the BTC series every comparator above was
+    // computed from; the browser re-derive reads it instead of the fixture.
+    benchmarkPrices,
   };
 
   // No-invented-data contract (NEW-C20-01, RED-TEAM-M2/M3, B6): the synthesized
@@ -689,28 +831,28 @@ function buildFromBuildableSeries(
   return { ...common, ingestSource: "csv" };
 }
 
+/**
+ * Phase 169.5 (D-54, D-58 amendment) — the correlation of two aligned legs over
+ * the indices paired for BOTH; NaN when fewer than two such indices remain.
+ */
+function pairedCorr(a: CoveredAlignment, b: CoveredAlignment): number {
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (let i = 0; i < a.returns.length; i++) {
+    const x = a.returns[i];
+    const y = b.returns[i];
+    if (a.paired[i] && b.paired[i] && x != null && y != null) {
+      xs.push(x);
+      ys.push(y);
+    }
+  }
+  return pearsonCorr(xs, ys);
+}
+
 function pearsonCorr(a: number[], b: number[]): number {
-  const n = Math.min(a.length, b.length);
-  if (n < 2) return NaN;
-  let sa = 0;
-  let sb = 0;
-  for (let i = 0; i < n; i++) {
-    sa += a[i];
-    sb += b[i];
-  }
-  const ma = sa / n;
-  const mb = sb / n;
-  let cov = 0;
-  let va = 0;
-  let vb = 0;
-  for (let i = 0; i < n; i++) {
-    const da = a[i] - ma;
-    const db = b[i] - mb;
-    cov += da * db;
-    va += da * da;
-    vb += db * db;
-  }
-  const denom = Math.sqrt(va * vb);
-  return denom > 0 ? cov / denom : NaN;
+  // The correlation is computed by `@/lib/return-stats` (Phase 166.2 D-17). An
+  // undefined correlation (fewer than 2 points, or a leg whose only dispersion
+  // is float residue) reads NaN, as an all-zero leg always has here (D-07).
+  return pearson(a, b) ?? NaN;
 }
 

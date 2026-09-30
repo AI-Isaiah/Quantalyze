@@ -67,12 +67,13 @@ from services.deribit_ingest import (
     DeribitNativeAccountState,
     DeribitTransientReadError,
 )
-from services.deribit_txn import LedgerValuationError
+from services.deribit_txn import LedgerValuationError, OptionRowFieldMissingError
 from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
 from services.native_nav import InceptionReconciliationError, NativeLedger
 from services.nav_twr import NavReconstructionError
 from services.stitch_composite import (
     MTM_REASON_ANCHOR_RACE,
+    MTM_REASON_OPTION_ROW_FIELD,
     MTM_REASON_SERIES_UNCOMPUTABLE,
     MTM_REASON_SUMMARY_COVERAGE,
 )
@@ -525,6 +526,44 @@ async def test_non_inception_structural_mtm_failure_keeps_coverage_reason() -> N
     assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
         MTM_REASON_SUMMARY_COVERAGE
     ), "a non-inception structural failure must keep the coverage reason"
+
+
+@pytest.mark.asyncio
+async def test_missing_option_row_field_on_mtm_stamps_its_own_reason() -> None:
+    """SFH-04 (Phase 168 round-1 review): an option row lacking its commission
+    (the likeliest first failure of an `assignment` under mark_to_market, whose
+    carriage of that field the census left open) DEGRADES with its OWN reason
+    ``mtm_option_row_field_missing``, not the coverage stamp that would point a
+    reader at settlement-summary coverage. Cash still ships DONE. Neuter: drop
+    the OptionRowFieldMissingError branch in the worker's reason ternary → RED
+    (it falls back to MTM_REASON_SUMMARY_COVERAGE)."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=True)]
+    ledger_mock, calls = _recording_ledger(
+        reports,
+        side_effects=[
+            None,
+            OptionRowFieldMissingError(
+                "option Deribit row id=2 type='assignment' INSIDE coverage has "
+                "absent/null commission"
+            ),
+        ],
+    )
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    )):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert len(calls) == 3
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
+        MTM_REASON_OPTION_ROW_FIELD
+    )
+    assert MTM_REASON_OPTION_ROW_FIELD not in (
+        MTM_REASON_SUMMARY_COVERAGE, MTM_REASON_ANCHOR_RACE,
+    )
 
 
 def _find_prestamp(capture: dict) -> dict | None:

@@ -1,6 +1,11 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { captureToSentry } from "@/lib/sentry-capture";
+import { captureToSentry, shouldCaptureNow } from "@/lib/sentry-capture";
+import {
+  pricesToDailyReturns,
+  readBenchmarkPrices,
+  type BenchmarkReturnPoint,
+} from "@/lib/factsheet/benchmark-source";
 import {
   publicIpLimiter,
   checkLimit,
@@ -14,6 +19,14 @@ import {
  * Exposes the BTC benchmark **daily-returns** series to the scenario composer:
  * read `benchmark_prices` (symbol='BTC') server-side, sort ascending, convert
  * close_price to daily returns via pct-change, and return `[{date, value}]`.
+ *
+ * Phase 169.2 (SC3, D-08): the read goes through `readBenchmarkPrices`, the ONE
+ * paged reader of the table. The route used to issue a single unranged,
+ * ascending select; PostgREST caps that at `max_rows` (1000) with a 200 and a
+ * partial body, so once the table held more than 1000 BTC days this route
+ * answered the OLDEST 1000 and never the newest. The reader pages newest-first
+ * until an empty page. This route serves the DB series only: it does NOT merge
+ * the bundled fixture.
  *
  * Why this is PUBLIC-cacheable (the deliberate contrast with the allocator
  * no-store routes):
@@ -34,10 +47,24 @@ import {
  * header instead. `benchmark.py` upserts on a ~daily cadence and rejects cache
  * older than 48h, so a 1h s-maxage with SWR is safely fresh.
  *
- * Honesty on failure: a read error OR an empty/missing result degrades to
- * HTTP 200 with `[]` (threat T-24-05 / Pitfall 5) so the composer renders the
- * neutral "Benchmark comparison unavailable" empty state — never a 500/red
- * alert. The raw DB error is logged + captured server-side, never surfaced.
+ * Honesty on failure: an empty/missing series (0 or 1 stored closes) is HTTP
+ * 200 with `[]` and the normal public cache, because "no data" is a fact about
+ * the table. A READ ERROR is different (169.2 SFH MD-05): it answers 503 with
+ * `Cache-Control: no-store`, so one transient PostgREST error is never pinned
+ * at the CDN as a cached `200 []` for the whole s-maxage/SWR window, and a
+ * caller can tell "unavailable" (D-09) from "no data". Both callers
+ * (`ScenarioComposer`'s mount fetch and the scenario-share page's
+ * `fetchBtcDaily`) already treat any non-2xx as the neutral "Benchmark
+ * comparison unavailable" empty state, never a red alert. The raw DB error is
+ * logged + captured server-side, never surfaced (static body).
+ *
+ * Sentry volume (169.2 round-2 review WR-01, IN-03): this route is public and
+ * cache-bustable, and the 503 is no-store, so during an incident (or while a
+ * corrupt row sits in the table) every request reaches the function. The
+ * console line stays UNCONDITIONAL on every request; only the remote capture
+ * is gated by `shouldCaptureNow` (one per arm per instance per window), with a
+ * stable message and a bounded `extra`. Each capture is scheduled with
+ * `after()` so it survives the function freezing once the response is sent.
  *
  * Security: no query params are accepted; the symbol is hard-coded 'BTC'
  * (V5 input-validation — no user input reaches SQL; CONTEXT locks BTC-only).
@@ -48,7 +75,7 @@ import {
  * it now carries publicIpLimiter (10/min/IP) like the other public DB-touching
  * GETs (demo/match, portfolio-pdf). The CDN `s-maxage` only absorbs identical
  * URLs; an attacker can bust the cache with `?x=rand` (Vercel keys on the full
- * URL) and hit the unbounded SELECT on every request, so the per-IP limiter —
+ * URL) and hit the full paged read on every request, so the per-IP limiter —
  * not the cache — is the abuse defense. Cached hits never reach the function,
  * so the limiter does not throttle legitimate cached reads.
  */
@@ -57,15 +84,20 @@ import {
 // the Node-only paths the cookie store relies on.
 export const runtime = "nodejs";
 
-export interface BenchmarkReturnPoint {
-  date: string;
-  value: number;
-}
+export type { BenchmarkReturnPoint };
 
 // Shared market data, refreshed ~daily by benchmark.py. A short s-maxage with
 // stale-while-revalidate is appropriate — NOT private/no-store (the data is
 // identical for every caller and leaks nothing).
 const CACHE_CONTROL = "public, s-maxage=3600, stale-while-revalidate=86400";
+
+// A read error must not be cached anywhere (SFH MD-05): the next request has
+// to retry the read, not replay the failure.
+const ERROR_CACHE_CONTROL = "no-store";
+
+// How many of the newest dropped dates one capture carries. A bulk corruption
+// must not ship every date on every event.
+const DROPPED_EXTRA_CAP = 20;
 
 function emptyResponse(): NextResponse {
   return NextResponse.json([] as BenchmarkReturnPoint[], {
@@ -100,61 +132,70 @@ export async function GET(req?: Request): Promise<NextResponse> {
   const supabase = await createClient();
 
   // RLS `SELECT USING(true)` lets the anon SSR client read; it CANNOT write
-  // (writes are service_role-only). Select ONLY date + close_price so no other
-  // column can ever reach the response (`symbol` is the fixed filter, not data).
-  const { data, error } = await supabase
-    .from("benchmark_prices")
-    .select("date, close_price")
-    .eq("symbol", "BTC")
-    .order("date", { ascending: true });
+  // (writes are service_role-only). The reader selects ONLY date + close_price,
+  // so no other column can ever reach the response, coerces PostgREST's
+  // numeric-as-string closes, and leaves out a non-finite or non-positive close,
+  // reporting its date in `read.dropped`.
+  const read = await readBenchmarkPrices(supabase, "BTC");
 
-  if (error) {
-    // Degrade to the honest empty state — never a 500/red envelope. The raw
-    // Postgres error (column names / SQLSTATE / schema detail) is logged +
-    // captured server-side only.
-    console.error("[api/benchmark/btc] select error:", error);
-    captureToSentry(error, { tags: { route: "api/benchmark/btc" } });
-    return emptyResponse();
+  if (!read.ok) {
+    // Non-2xx and never cached (SFH MD-05). The raw Postgres error (column
+    // names / SQLSTATE / schema detail) is logged + captured server-side only.
+    // D-09: a read error is never replaced by the bundled fixture.
+    console.error("[api/benchmark/btc] select error:", read.error);
+    if (shouldCaptureNow("benchmark-btc:read-error")) {
+      after(() =>
+        captureToSentry(read.error, {
+          tags: { route: "api/benchmark/btc", stage: "read" },
+        }),
+      );
+    }
+    return NextResponse.json(
+      { error: "Benchmark temporarily unavailable" },
+      { status: 503, headers: { "Cache-Control": ERROR_CACHE_CONTROL } },
+    );
   }
 
-  const rows = (data ?? []) as Array<{ date: string; close_price: number }>;
-  if (rows.length < 2) {
+  if (read.dropped.length > 0) {
+    // A stored close that cannot price a return is corrupt data in shared
+    // market prices. Make it visible instead of letting it vanish.
+    // The message carries no count, so every event groups as one issue; the
+    // count and the NEWEST dropped dates (capped) ride in `extra`.
+    console.warn(
+      "[api/benchmark/btc] dropped unusable closes:",
+      read.dropped.length,
+    );
+    if (shouldCaptureNow("benchmark-btc:dropped-closes")) {
+      const count = read.dropped.length;
+      const newest = read.dropped.slice(-DROPPED_EXTRA_CAP);
+      after(() =>
+        captureToSentry(
+          new Error("benchmark_prices holds unusable BTC closes"),
+          {
+            tags: { route: "api/benchmark/btc", stage: "dropped-closes" },
+            level: "warning",
+            extra: { count, dropped: newest },
+          },
+        ),
+      );
+    }
+  }
+
+  const prices = read.prices;
+  if (prices.length < 2) {
     // 0 or 1 rows → no daily return can be derived (every return needs a prior
     // close). Honest empty series.
     return emptyResponse();
   }
 
-  // Daily returns via pct-change, mirroring benchmark.py `prices_to_returns`
-  // (`pct_change().dropna()`): the first row is dropped (no prior close), and
-  // each value = close / prevClose − 1, stamped at the current row's date.
-  const series: BenchmarkReturnPoint[] = [];
-  for (let i = 1; i < rows.length; i += 1) {
-    // PostgREST serializes Postgres `numeric`/`DECIMAL` as JSON STRINGS to
-    // preserve precision (even though database.types.ts:459 types close_price
-    // as `number`), so the driver may yield either a string or a number.
-    // Coerce BOTH ends with Number(...) before the finite/positive guards
-    // (mirrors benchmark.py `.astype(float)` and the asNumber DB-numeric
-    // contract in portfolio-analytics-adapter.ts). The existing `<= 0` /
-    // non-finite guards still neutralize the empty/null cases —
-    // Number("") === 0 and Number(null) === 0 are caught by `prevClose <= 0`.
-    const prevClose = Number(rows[i - 1].close_price);
-    const close = Number(rows[i].close_price);
-    // Guard a null/zero/negative/non-finite close on EITHER end: skip the point
-    // rather than emit Infinity/NaN or a finite-but-corrupt return (a non-positive
-    // `close` yields value <= -1, i.e. <= -100%/day, which would silently poison
-    // TE/IR/beta downstream). A non-finite return would corrupt them too.
-    if (
-      !Number.isFinite(prevClose) ||
-      prevClose <= 0 ||
-      !Number.isFinite(close) ||
-      close <= 0
-    ) {
-      continue;
-    }
-    const value = close / prevClose - 1;
-    if (!Number.isFinite(value)) continue;
-    series.push({ date: rows[i].date, value });
-  }
+  // Daily returns through the ONE shared rule, `pricesToDailyReturns`:
+  // pct-change as in benchmark.py `prices_to_returns`. A MISSING stored day is
+  // bridged (one return at the later stored date), so the consumers' compounded
+  // BTC overlay stays on BTC's real level. A DROPPED corrupt close is NOT
+  // bridged: passing `read.dropped` makes the pair spanning it yield no return
+  // (169.2 review WR-04 / MD-03). Known limit: a bridged multi-day move is
+  // stamped at the later date as one daily observation.
+  const series = pricesToDailyReturns(prices, read.dropped);
 
   return NextResponse.json(series, {
     status: 200,
