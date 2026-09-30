@@ -371,7 +371,8 @@ function BwRow({ scale, best, worst }: { scale: string; best: number; worst: num
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 
-function isoToMonthDay(iso: string): string {
+/** The factsheet's "Mon D, YYYY" date (UTC); "—" for an empty or unparseable input. */
+export function isoToMonthDay(iso: string): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";

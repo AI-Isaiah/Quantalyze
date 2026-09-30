@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
+import { buildFactsheetPayload, type BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
+import { BTC_DAILY } from "@/lib/factsheet/benchmarks";
+import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { FactsheetProvider, useActiveComparator } from "./factsheet-context";
 import { ComparatorPicker } from "./ComparatorPicker";
 
@@ -8,7 +10,7 @@ import { ComparatorPicker } from "./ComparatorPicker";
 // Clicking the active comparator chip clears it to "none"; clicking a
 // different chip selects it. Found by /qa on 2026-05-20.
 
-function makePayload() {
+function makePayload(opts?: BuildFactsheetOpts) {
   // 200 days of synthetic returns — long enough to clear every internal
   // length threshold (benchmark window, rolling window, etc).
   const dailyReturns = Array.from({ length: 200 }).map((_, i) => ({
@@ -27,6 +29,7 @@ function makePayload() {
       trustTier: null,
     },
     dailyReturns,
+    opts,
   );
   if (!payload) throw new Error("buildFactsheetPayload returned null in test");
   return payload;
@@ -37,9 +40,9 @@ function CurrentComparator() {
   return <span data-testid="active-comparator">{key}</span>;
 }
 
-function renderPicker() {
+function renderPicker(payload: FactsheetPayload = makePayload()) {
   return render(
-    <FactsheetProvider payload={makePayload()}>
+    <FactsheetProvider payload={payload}>
       <ComparatorPicker />
       <CurrentComparator />
     </FactsheetProvider>,
@@ -92,5 +95,77 @@ describe("ComparatorPicker", () => {
       "ariaPressed",
       "false",
     );
+  });
+});
+
+// Phase 169.5 (SC3, 169 D-09 / D-21 / D-52): the active comparator's coverage is
+// stated in words under the chips. The strategy axis of makePayload() ends on
+// 2024-08-04 (a Sunday). A comparator whose last close is earlier is dated, so a
+// reader never takes an em-dash window or a line that stops short for a flat
+// market; a failed BTC read says so instead of rendering a silent blank.
+describe("ComparatorPicker coverage caption", () => {
+  const CAPTION = /prices (through|unavailable)/;
+
+  it("dates BTC when its prices end before the strategy's last date", () => {
+    const cutoff = "2024-07-25";
+    renderPicker(
+      makePayload({
+        benchmarkPrices: {
+          prices: BTC_DAILY.filter(p => p.date <= cutoff),
+          through: cutoff,
+          dropped: [],
+        },
+      }),
+    );
+    expect(screen.getByText("BTC prices through Jul 25, 2024")).toBeDefined();
+  });
+
+  it("shows no caption when BTC covers the strategy's last date", () => {
+    const payload = makePayload();
+    expect(payload.comparators.btc.through).toBe("2024-08-04");
+    renderPicker(payload);
+    expect(screen.queryByText(CAPTION)).toBeNull();
+  });
+
+  it("says BTC prices are unavailable on the unavailable form (a failed read)", () => {
+    const payload = makePayload({ benchmarkPrices: { unavailable: true } });
+    expect(payload.comparators.btc.through).toBeNull();
+    expect(payload.comparators.btc.summary).toBeNull();
+    renderPicker(payload);
+    expect(screen.getByText("BTC prices unavailable")).toBeDefined();
+  });
+
+  it("shows no caption when `through` is absent (a hand-built block, D-21)", () => {
+    const cutoff = "2024-07-25";
+    const payload = makePayload({
+      benchmarkPrices: {
+        prices: BTC_DAILY.filter(p => p.date <= cutoff),
+        through: cutoff,
+        dropped: [],
+      },
+    });
+    // Same stale block, minus the field: absent means "no coverage information",
+    // never the unavailable sentence and never a guessed date.
+    const { through: _omit, ...handBuilt } = payload.comparators.btc;
+    void _omit;
+    renderPicker({ ...payload, comparators: { ...payload.comparators, btc: handBuilt } });
+    expect(screen.queryByText(CAPTION)).toBeNull();
+  });
+
+  it("dates SPX at its fixture's last close when SPX is active", () => {
+    const payload = makePayload();
+    // The SPX fixture's last close on or before Sunday 2024-08-04 is Friday 2024-08-02.
+    expect(payload.comparators.spx.through).toBe("2024-08-02");
+    renderPicker(payload);
+    expect(screen.queryByText(CAPTION)).toBeNull(); // BTC active and fully covered
+    fireEvent.click(screen.getByRole("button", { name: /SPX/ }));
+    expect(screen.getByText("SPX prices through Aug 2, 2024")).toBeDefined();
+  });
+
+  it("shows no caption when no comparator is active", () => {
+    renderPicker(makePayload({ benchmarkPrices: { unavailable: true } }));
+    fireEvent.click(screen.getByRole("button", { name: /BTC/ }));
+    expect(screen.getByTestId("active-comparator").textContent).toBe("none");
+    expect(screen.queryByText(CAPTION)).toBeNull();
   });
 });
