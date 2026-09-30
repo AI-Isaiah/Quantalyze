@@ -37,7 +37,10 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { buildFactsheetPayload, deriveIngestSource, hasBuildableSeries, MIN_FACTSHEET_SERIES_POINTS } from "./build-payload";
-import type { BuildFactsheetOpts } from "./build-payload";
+import type { BenchmarkPricesOpt, BuildFactsheetOpts } from "./build-payload";
+import { alignCoveredReturns } from "./align";
+import { mergeWithFixture, readBenchmarkPrices } from "./benchmark-source";
+import { BTC_DAILY } from "./benchmarks";
 import {
   CompositeSeriesReadError,
   readCompositeFactsheet,
@@ -46,7 +49,7 @@ import {
 } from "./composite-read-path";
 import { resolveDailyReturnSeries } from "./allocator-portfolio-payload";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
-import type { FactsheetPayload, IngestSource } from "./types";
+import type { DailyReturn, FactsheetPayload, IngestSource } from "./types";
 
 /**
  * The visibility predicate injected into `fetchAndBuildPayload`. Structurally
@@ -672,6 +675,117 @@ type ResolvedFactsheetInputs = Extract<
   { ok: true }
 >;
 
+/** Phase 169.5 (D-54) — the one stable message of a failed BTC read. */
+export const BENCHMARK_READ_FAILED_MESSAGE =
+  "[factsheet] benchmark_prices read failed; BTC comparator unavailable";
+
+const BENCHMARK_UNAVAILABLE: BenchmarkPricesOpt = { unavailable: true };
+
+function isoMinusOneDay(iso: string): string {
+  return new Date(Date.parse(`${iso}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * Phase 169.5 BENCHCOMPARE (SC3, D-09, D-52, D-54, D-64 with Decision (4) as
+ * amended 2026-09-30) — the ONE read of the BTC comparator's prices for a
+ * factsheet build, returning the `benchmarkPrices` build opt. Both surfaces that
+ * build a strategy factsheet call THIS function with the same inputs (the cash
+ * `dailyReturns` and the assembled `buildOpts`), so they cannot diverge.
+ *
+ * Bounds (Amendment A): `from` is the earliest date across every axis a
+ * comparator is aligned on (the cash series, `mtmSeries`, `smoothedSeries`)
+ * minus one day, `to` the latest; min / max over every entry, so an unsorted
+ * input cannot narrow them. With no date on any axis NO query is issued:
+ * `readBenchmarkPrices` drops its filters when a bound is unset and would page
+ * the whole table (T-169-21).
+ *
+ * The lower bound is load-bearing twice: it bounds the read (RESEARCH Pitfall
+ * 2), and its close is the prior close that day one's return is taken from on
+ * the earliest axis (D-64, 166.4 D-05 / D-07).
+ *
+ * The fixture merge (Amendment B, D-09): `mergeWithFixture` takes its first
+ * stored date from the rows it is handed, which under a bounded read is the
+ * window's first row, so a DB hole at the window's first day would be filled
+ * from the fixture, and a DB holding history but no row in the window would get
+ * the whole fixture back inside it (the stale bug itself). So one single-row
+ * probe learns the DB's TRUE first stored BTC date (no close filter: a corrupt
+ * stored row still counts as stored) and only fixture rows strictly before it
+ * are merged. The probe does not breach the ONE-paged-reader rule (169 D-08,
+ * 169.2 D-08): that rule stops PostgREST `max_rows` truncation of a price read,
+ * and a one-row date probe reads no price and cannot be truncated.
+ *
+ * A read answering `ok: false`, a probe error, or a throw is the unavailable
+ * marker, never the fixture; it is logged with one stable message and the
+ * error's code, and not captured to Sentry (D-54). The honest unavailable form
+ * may be cached for the TTL (D-52).
+ */
+export async function readFactsheetBenchmark(
+  client: ReturnType<typeof createAdminClient>,
+  dailyReturns: readonly DailyReturn[],
+  buildOpts: BuildFactsheetOpts | undefined,
+): Promise<BenchmarkPricesOpt> {
+  const axes: Array<readonly DailyReturn[]> = [
+    dailyReturns,
+    buildOpts?.mtmSeries?.dailyReturns ?? [],
+    buildOpts?.smoothedSeries?.dailyReturns ?? [],
+  ];
+  let min: string | null = null;
+  let max: string | null = null;
+  for (const axis of axes) {
+    for (const r of axis) {
+      if (!r || typeof r.date !== "string") continue;
+      if (min === null || r.date < min) min = r.date;
+      if (max === null || r.date > max) max = r.date;
+    }
+  }
+  const from = min === null ? undefined : isoMinusOneDay(min);
+  const to = max ?? undefined;
+  if (from === undefined || to === undefined) return BENCHMARK_UNAVAILABLE;
+
+  try {
+    const read = await readBenchmarkPrices(client, "BTC", { from, to });
+    if (!read.ok) return benchmarkReadFailed(read.error);
+    const probe = await client
+      .from("benchmark_prices")
+      .select("date")
+      .eq("symbol", "BTC")
+      .order("date", { ascending: true })
+      .limit(1);
+    if (probe.error) return benchmarkReadFailed(probe.error);
+    if (probe.data == null) {
+      return benchmarkReadFailed(new Error("benchmark_prices first-date probe returned no data and no error"));
+    }
+    const firstStored = (probe.data as Array<{ date?: unknown }>)[0]?.date;
+    const fixture =
+      typeof firstStored === "string" ? BTC_DAILY.filter((p) => p.date < firstStored) : BTC_DAILY;
+    const merged = mergeWithFixture({ prices: read.prices, dropped: read.dropped }, fixture);
+    // mergeWithFixture prepends every fixture row older than the first stored
+    // date (RESEARCH Pitfall 2, T-169-21): trim back to the read's bounds.
+    const prices = merged.prices.filter((p) => p.date >= from && p.date <= to);
+    const dropped = merged.dropped.filter((d) => d >= from && d <= to);
+    if (prices.length === 0) return BENCHMARK_UNAVAILABLE;
+    const anyCovered = axes.some((axis) => {
+      const dates = [...new Set(axis.filter((r) => r && typeof r.date === "string").map((r) => r.date))].sort();
+      return dates.length > 0 && alignCoveredReturns(prices, dropped, dates).returns.some((r) => r !== null);
+    });
+    if (!anyCovered) return BENCHMARK_UNAVAILABLE;
+    return { prices, through: prices[prices.length - 1].date, dropped };
+  } catch (err) {
+    return benchmarkReadFailed(err);
+  }
+}
+
+function benchmarkReadFailed(err: unknown): BenchmarkPricesOpt {
+  const code =
+    typeof err === "object" && err !== null && "code" in err
+      ? String((err as { code?: unknown }).code)
+      : err instanceof Error
+        ? err.name
+        : "unknown";
+  console.error(BENCHMARK_READ_FAILED_MESSAGE, { code });
+  return BENCHMARK_UNAVAILABLE;
+}
+
 /**
  * 167.2.1-REVIEW WR-04 — the build, past the resolve stage. Its declared
  * return type is `Promise<FactsheetPayload>`, never null: a `return null`
@@ -714,6 +828,13 @@ async function buildFromResolved(
       ...singleKeyOpts,
     };
   }
+
+  // Phase 169.5 (SC3, D-09): BTC from the database, one bounded read per build,
+  // AFTER buildOpts is assembled so the bound spans every comparator axis.
+  buildOpts = {
+    ...(buildOpts ?? {}),
+    benchmarkPrices: await readFactsheetBenchmark(supabase, dailyReturns, buildOpts),
+  };
 
   // FINDING-5 (b06-silentfailure): Never fall back to "now" for a missing
   // computed_at — that would make FreshnessChip show a green "fresh" badge
