@@ -376,3 +376,142 @@ describe("AllocatorExchangeManager — no balance repeats, no revoked balance (S
     expect(readOnlyLine("Live Binance")).toBe("binance · Read-only · Balance $1,000");
   });
 });
+
+/**
+ * Founder D-74 (2026-09-30), review round 1 WR-02 / SFH-04 — the balance is
+ * grouped by the 167.1.2 D-16(a) account identity (`accountIdentityTokens`),
+ * not by the `duplicate` marker alone. Before D-74 a composite_member pair and
+ * two unmarked keys on one venue account id each printed the account's balance
+ * on both rows, so one account read as twice its capital. Now one row carries
+ * it and the other rows say which. D-74 supersedes plan 03's "a live
+ * composite_member key keeps its balance".
+ */
+describe("AllocatorExchangeManager — one balance per account identity (D-74)", () => {
+  function readOnlyLine(label: string): string {
+    return within(keyRow(label)).getByText(/Read-only/).textContent ?? "";
+  }
+  function elsewhereNote(label: string): string | null {
+    return within(keyRow(label)).queryByTestId("balance-shown-elsewhere")?.textContent ?? null;
+  }
+
+  it("a composite_member pair shows the balance once, on the holder; the member names it", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-a", label: "Holder Binance", venue_account_id: "V-1", account_balance_usdt: 5_000 }),
+          makeKey({
+            id: "key-b",
+            label: "Member Binance",
+            account_balance_usdt: 5_000,
+            account_share_kind: "composite_member",
+            account_shared_with_api_key_id: "key-a",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
+    expect(readOnlyLine("Holder Binance")).toBe("binance · Read-only · Balance $5,000");
+    expect(elsewhereNote("Holder Binance")).toBeNull();
+    expect(readOnlyLine("Member Binance")).toBe("binance · Read-only");
+    expect(elsewhereNote("Member Binance")).toBe("Balance shown on Holder Binance");
+  });
+
+  it("two unmarked keys on one venue account id show the balance once, on the lowest id", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-b", label: "Second Binance", venue_account_id: "V-1", account_balance_usdt: 5_000 }),
+          makeKey({ id: "key-a", label: "First Binance", venue_account_id: "V-1", account_balance_usdt: 5_000 }),
+        ]}
+      />,
+    );
+    expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
+    expect(readOnlyLine("First Binance")).toBe("binance · Read-only · Balance $5,000");
+    expect(readOnlyLine("Second Binance")).toBe("binance · Read-only");
+    expect(elsewhereNote("Second Binance")).toBe("Balance shown on First Binance");
+  });
+
+  it("a working key carries the balance before a failing twin with a lower id", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-a", label: "First Binance", venue_account_id: "V-1", sync_status: "error", account_balance_usdt: 5_000 }),
+          makeKey({ id: "key-b", label: "Second Binance", venue_account_id: "V-1", account_balance_usdt: 5_000 }),
+        ]}
+      />,
+    );
+    expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
+    expect(readOnlyLine("Second Binance")).toBe("binance · Read-only · Balance $5,000");
+    expect(elsewhereNote("First Binance")).toBe("Balance shown on Second Binance");
+  });
+
+  it("a key on a different venue account keeps its own balance and gets no note", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-a", label: "First Binance", venue_account_id: "V-1", account_balance_usdt: 5_000 }),
+          makeKey({ id: "key-b", label: "Other Binance", venue_account_id: "V-2", account_balance_usdt: 3_000 }),
+          makeKey({ id: "key-c", label: "Unknown Binance", venue_account_id: null, account_balance_usdt: 2_000 }),
+        ]}
+      />,
+    );
+    expect(readOnlyLine("First Binance")).toBe("binance · Read-only · Balance $5,000");
+    expect(readOnlyLine("Other Binance")).toBe("binance · Read-only · Balance $3,000");
+    expect(readOnlyLine("Unknown Binance")).toBe("binance · Read-only · Balance $2,000");
+    expect(screen.queryAllByTestId("balance-shown-elsewhere")).toHaveLength(0);
+  });
+
+  it("a revoked key on a live key's account shows no balance and names the live row", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-a", label: "Revoked Binance", venue_account_id: "V-1", sync_status: "revoked", account_balance_usdt: 7_000 }),
+          makeKey({ id: "key-b", label: "Live Twin", venue_account_id: "V-1", account_balance_usdt: 5_000 }),
+        ]}
+      />,
+    );
+    expect(screen.queryByText(/\$7,000/)).toBeNull();
+    expect(readOnlyLine("Revoked Binance")).toBe("binance · Read-only");
+    expect(elsewhereNote("Revoked Binance")).toBe("Balance shown on Live Twin");
+    expect(readOnlyLine("Live Twin")).toBe("binance · Read-only · Balance $5,000");
+  });
+
+  it("an account whose only key is revoked shows no balance and no note", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[makeKey({ ...REVOKED, venue_account_id: "V-9", account_balance_usdt: 7_000 })]}
+      />,
+    );
+    expect(readOnlyLine("Revoked OKX")).toBe("okx · Read-only");
+    expect(elsewhereNote("Revoked OKX")).toBeNull();
+  });
+
+  it("a working duplicate keeps its share note and also names the balance row", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-a", label: "Holder Binance", account_balance_usdt: 5_000 }),
+          makeKey({
+            id: "key-b",
+            label: "Dup Binance",
+            account_balance_usdt: 5_000,
+            account_share_kind: "duplicate",
+            account_shared_with_api_key_id: "key-a",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
+    expect(within(keyRow("Dup Binance")).getByRole("note").textContent).toBe(
+      "This key reads the same exchange account as Binance — Holder Binance. Disconnect one of them.",
+    );
+    expect(elsewhereNote("Dup Binance")).toBe("Balance shown on Holder Binance");
+  });
+});
