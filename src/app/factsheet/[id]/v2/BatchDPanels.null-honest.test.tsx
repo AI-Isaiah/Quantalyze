@@ -105,9 +105,11 @@ describe("AllocatorSection: an unmeasurable blend is the em-dash with a dated ca
     const payload = buildFactsheetPayload(STRATEGY, rowsFrom("2025-03-03", 20));
     const { container } = mount(payload);
     const values = Array.from(container.querySelectorAll("tbody tr td:nth-child(2)")).map(td => td.textContent ?? "");
-    // Sleeve figures are measured; stress count is 0; mean, median, positive share are "—".
+    // Sleeve figures are measured. No window was examined, so the stress COUNT is
+    // "—" too (review round 2 WR-01): a "0" there states a measured zero directly
+    // above the caption saying nothing could be measured.
     expect(values[0]).toMatch(/^\d+\.\d%$/);
-    expect(values.slice(6)).toEqual(["0", "—", "—", "—"]);
+    expect(values.slice(6)).toEqual(["—", "—", "—", "—"]);
     const text = container.textContent ?? "";
     expect(text).toContain("No 21-day window with every leg priced, so no stress window could be measured.");
     expect(text).not.toContain("never drew");

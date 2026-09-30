@@ -15,6 +15,21 @@ import { beta as betaOf, dispersion, pearson, sharpe } from "@/lib/return-stats"
 export const MIN_PAIRED_OBSERVATIONS = 10;
 
 /**
+ * 169.4 review round 2 (SFH-R2 MEDIUM-2): the ONE sentence naming why the
+ * joint statistics are withheld below `MIN_PAIRED_OBSERVATIONS`. The
+ * Allocations alpha/beta widget ("this book") and the factsheet KPI strip and
+ * §IV ("this record") both print it, so one screen gives one cause.
+ */
+export function pairedFloorReason(
+  comparator: string,
+  paired: number,
+  noun: "book" | "record",
+  floor: number = MIN_PAIRED_OBSERVATIONS,
+): string {
+  return `Alpha and beta need at least ${floor} days paired with ${comparator}; this ${noun} has ${paired}.`;
+}
+
+/**
  * Port of `joint_metrics()` from `/tmp/gen_factsheet_v3.py`. Computes
  * strategy-vs-benchmark joint statistics on daily-return series of equal
  * length. Up/down capture is the ratio of cumulative strategy return to

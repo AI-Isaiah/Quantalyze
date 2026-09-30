@@ -88,11 +88,13 @@ export function buildComparatorBlock(
   const pairedIdx: number[] = [];
   for (let i = 0; i < aligned.paired.length; i++) if (aligned.paired[i]) pairedIdx.push(i);
   // 169.4 review SFH MEDIUM-4: no joint below the shared paired-observation
-  // floor (the alpha/beta widget gates on the same constant, D-69). A null
-  // joint is the factsheet's existing absence: the KPI strip drops its
-  // alpha/IR cells and §IV is not rendered.
+  // floor (the alpha/beta widget gates on the same constant, D-69). Round 2
+  // (SFH-R2 MEDIUM-2): the block says so in `jointWithheld`, so the KPI strip
+  // and §IV render "—" with the widget's reason instead of dropping silently.
+  const belowFloor = pairedIdx.length < MIN_PAIRED_OBSERVATIONS;
+  const jointWithheld = belowFloor ? { paired: pairedIdx.length, floor: MIN_PAIRED_OBSERVATIONS } : null;
   const joint =
-    pairedIdx.length >= MIN_PAIRED_OBSERVATIONS
+    !belowFloor
       ? jointMetrics(
           pairedIdx.map(i => stratReturns[i]),
           pairedIdx.map(i => benchReturns[i] as number),
@@ -138,6 +140,7 @@ export function buildComparatorBlock(
         }
       : null,
     joint,
+    jointWithheld,
     cumulative,
     cumVsBench,
     dailyReturns: benchReturns.slice(),
