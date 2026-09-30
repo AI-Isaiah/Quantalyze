@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.113.1.0] - 2026-09-30 — OGSHARPE: the OG share card shows the CAGR and Sharpe the factsheet and the lists show
+
+⭐ **What changed for whoever reads this next.** Phase 169.4.1 (OGSHARPE, split from Phase 169 by D-44) ships plan 01 (the card reads the persisted scalars) and plan 02 (the integration run), then one review round with fixes and a confirmation round. 14 commits: 4 code and test, 10 planning.
+- A strategy's OG share card, the image a link unfurls into, now shows the stored CAGR, Sharpe and max drawdown that the factsheet headline and every list read, instead of recomputing its own. The card's own display rules still apply on top: Sharpe and max drawdown need 30 observations, CAGR is hidden under 0.95 calendar years or on non-positive growth, and a non-finite value hides.
+- A row whose stored CAGR covers only the stretch after a chain break now shows CAGR as "—" on the card.
+- A failed card read is reported and is no longer cached for a day.
+
+⚠️ **A minor bump: behaviour visible to anyone who shares a link.** No migration, no API change.
+
+### Changed
+- **The card reads the persisted headline (plan 01, SC4).** `computeOgHeadline` in `src/lib/factsheet/og-metrics.ts` takes the row's persisted `cagr`, `sharpe` and `max_drawdown` for a rankable analytics row (the same `isRankableAnalyticsRow` test the lists use) and applies the card's display policy to them. A stored key that is present and null hides the figure; a key that is absent falls back to the computed value. A row that is not rankable keeps Phase 166.2's one shared `sharpe(..., {ddof: 0})`, the only Sharpe computation in the file. `src/app/api/og/factsheet/[id]/route.tsx` selects the three scalars and passes them through. The STALE-01 `isComputedAnalytics` gate is unchanged.
+- The entry gate (D-45) proved Phase 166.2 and Phase 169 on `origin/main` before any code commit.
+
+### Fixed
+- **A chain-broken row no longer puts an inflated CAGR on the card (review CR-01 = SFH-01).** The stored `cagr` is annualized over the stretch after the last chain break, while the card's 0.95-year gate measured the whole record, so a 2-year record with a short, positive post-break stretch could show a very large CAGR with no caveat. The route now reads `data_quality_flags`, and the card hides the stored CAGR when `twr_chain_broken` (or `insufficient_window`) is `true`. Sharpe and max drawdown are unchanged. Founder ruling 2026-09-30 (D-46): the card keeps the bare "—"; the factsheet keeps the figure with its "covers from" note, and that is the accepted SC4 difference. Composites inherit the flag, so the rule covers them too.
+- **A failed card read is reported and not cached long (review SFH-02; predates this phase, in the function it changed).** supabase-js does not throw on a query error, so the route never saw one: a PostgREST error rendered a card of dashes, cached for a day plus a week of stale-while-revalidate, with nothing logged. The route now checks `res.error`; a query error, a thrown read and a thrown compute each log with the strategy id, report to Sentry after the response (throttled per stage), and send the card `no-store`. A genuine not-found and a healthy card keep the long cache.
+
+### Tests
+- `og-metrics.test.ts`: the persisted branch, present-null versus absent keys, the display policy on stored values, the chain-break and `insufficient_window` hides with five negative controls (no flags, null, empty, both false, the string "true").
+- `route.test.tsx`: an argument-forwarding spy pins that the route passes the stored scalars (O1d) and the flags (O1e); F1 to F5 pin the failure paths and that not-found and healthy cards keep the long cache. `route.stale-analytics.test.tsx`: header comment corrected.
+- Test-first split: commit `3cebcaaf3` holds the new tests alone and fails on purpose; `d0ec8d07d` makes them pass. Every fix was neutered, seen RED and restored.
+
+### Notes
+- Planning: plan and integration SUMMARYs, the round-1 code and silent-failure reviews, the fix report, the round-2 confirmation reviews (reviewer and silent-failure), `169.4.1-SECURITY.md` (threats_open 0), `169.4.1-VERIFICATION.md` (human_needed: the post-deploy card re-check), and the D-46 ruling in CONTEXT and the ROADMAP.
+- **Known limits.**
+  - MR2-01 (round 2, MEDIUM, recorded, not fixed under the MEDIUM-only rule): the route does not check that the id is a UUID, so a malformed id from a crawler reaches the database as error 22P02, is reported to Sentry at error level and uses that stage's one capture slot per minute. The fix is one `isUuid` guard.
+  - Cards already unfurled keep their old image in social-network caches for up to a week, and the CDN holds a card for a day.
+  - The full-suite run fails only on the known `ci-anti-skip-gate.contract.test.ts` timeout under host load; the file passes 33/33 alone.
+
 ## [0.113.0.1] - 2026-09-30 — BASELINE: automated re-dump after the PROD apply of a953d5b5
 
 ### Changed
