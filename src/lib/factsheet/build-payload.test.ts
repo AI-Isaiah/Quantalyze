@@ -290,3 +290,31 @@ describe("167.2.1 D-04 — hasBuildableSeries is the builder's own point-count g
     });
   }
 });
+
+describe("169.5 CR-01 — stress windows take BTC null-honest (SC3), not through D-65's null-as-0", () => {
+  // The reviewer's measured scenario: the route answers `{ unavailable: true }` on any
+  // BTC read or probe error. The comparator block then says "BTC prices unavailable";
+  // the Stress Windows panel on the same page must not say BTC was flat (+0.00%,
+  // DD 0.00%) through the window. CASH_SERIES spans "Apr 2025 tariffs".
+  it("an unavailable BTC read gives null bench fields in every stress window", () => {
+    const payload = buildFactsheetPayload(SK_STRATEGY, CASH_SERIES, { benchmarkPrices: { unavailable: true } })!;
+    expect(payload.comparators.btc.summary).toBeNull();
+    const tariffs = payload.stressWindows.windows.find((w) => w.name === "Apr 2025 tariffs");
+    expect(tariffs).toBeDefined();
+    expect(tariffs!.benchReturn).toBeNull();
+    expect(tariffs!.benchMaxDD).toBeNull();
+    for (const w of payload.stressWindows.windows) {
+      expect(w.benchReturn).toBeNull();
+      expect(w.benchMaxDD).toBeNull();
+    }
+  });
+
+  it("control: with covered BTC the same window's bench fields are numbers", () => {
+    const payload = buildFactsheetPayload(SK_STRATEGY, CASH_SERIES)!;
+    const tariffs = payload.stressWindows.windows.find((w) => w.name === "Apr 2025 tariffs");
+    expect(tariffs).toBeDefined();
+    expect(typeof tariffs!.benchReturn).toBe("number");
+    expect(typeof tariffs!.benchMaxDD).toBe("number");
+    expect(tariffs!.benchReturn).not.toBe(0);
+  });
+});
