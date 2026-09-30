@@ -279,13 +279,15 @@ export default async function StrategyDetailPage({
   // `buildOpts` is assembled so its MTM / smoothed series widen the bound as on
   // the route (D-64(4) as amended). Called unconditionally: on the failure arms
   // every date axis is empty and it answers the unavailable marker WITHOUT a
-  // query. A read error or throw is the unavailable form, logged, never the
-  // fixture. Pinned against the route by the LOCKSTEP case in
+  // query. An error or throw from the two DB calls (the paged read and the
+  // first-date probe) is the unavailable form, logged with this strategy's id,
+  // never the fixture; a bug in the pure merge / align code throws to the error
+  // boundary (169.5 review SFH-M-01). Pinned against the route by the LOCKSTEP case in
   // `basis-context.benchmark-prices.test.tsx`; Phase 169.1 plan 169.1-01 moves
   // this page onto `fetchAndBuildPayload` and deletes that case.
   buildOpts = {
     ...(buildOpts ?? {}),
-    benchmarkPrices: await readFactsheetBenchmark(createAdminClient(), dailyReturns, buildOpts),
+    benchmarkPrices: await readFactsheetBenchmark(createAdminClient(), dailyReturns, buildOpts, strategy.id),
   };
 
   // RED-TEAM-H2: Never fall back to "now" for a missing computed_at — that
