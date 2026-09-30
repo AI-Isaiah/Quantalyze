@@ -329,9 +329,12 @@ export type StressWindow = {
   /** "full" when actualDays/expectedCalendarDays ≥ 0.85, else "partial". */
   coverage: "full" | "partial";
   stratReturn: number;
-  benchReturn: number;
+  /** Null when any comparator day inside the window is uncovered (Phase 169.5
+   *  CR-01, SC3: a gap is null, never 0) — the panel renders "—". */
+  benchReturn: number | null;
   stratMaxDD: number;
-  benchMaxDD: number;
+  /** Null under the same rule as `benchReturn`. */
+  benchMaxDD: number | null;
 };
 export type StressWindowPayload = {
   windows: StressWindow[];

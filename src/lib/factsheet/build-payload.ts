@@ -178,8 +178,9 @@ function unavailableAlignment(n: number): CoveredAlignment {
 
 /**
  * Phase 169.5 (D-65) — a comparator series for a `number[]` consumer that is NOT a
- * comparator block (stress windows, the api arm's allocator portfolios and event
- * signatures): a null enters as 0. The null-honest fix of those panels is owned by
+ * comparator block (the api arm's allocator portfolios and event signatures): a
+ * null enters as 0. Stress windows are NOT such a consumer (CR-01): they take the
+ * null-honest returns. The null-honest fix of those panels is owned by
  * Phase 169.4 ALLOCTRUTH; this boundary is a recorded decision, not an oversight.
  */
 function nullAsZero(a: CoveredAlignment): number[] {
@@ -446,8 +447,9 @@ export function deriveSeriesBundle(
     calmarByYear: calmarByYear(stratRet, dates),
     bootstrapCI: bootstrapCI(stratRet, 2000, 5, 42, periodsPerYear),
     styleDrift: computeStyleDrift(stratRet, dates),
-    // D-65: stress windows take a number[]; an uncovered BTC day enters as 0.
-    stressWindows: computeStressWindows(dates, stratRet, nullAsZero(btcAl), "BTC", markets),
+    // CR-01 (SC3): stress windows take BTC null-honest — a window with an uncovered
+    // BTC day gets null bench fields, never a compounded 0% day. Not under D-65.
+    stressWindows: computeStressWindows(dates, stratRet, btcAl.returns, "BTC", markets),
     strategyMetrics: bundleMetrics,
     correlations,
     correlationMatrix: { labels: correlationLabels, matrix: correlationMatrix },
