@@ -4717,6 +4717,40 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     }
   });
 
+  it("D-67 — a closes body with no close leaves the benchmark unavailable: the toggle is disabled (the old empty-series state)", async () => {
+    // Control first: the same flow with one real close ENABLES the toggle, so
+    // the disabled assertion below is not just the pre-fetch initial state.
+    const oneClose = { prices: [{ date: "2026-06-01", close: 100 }], dropped: [], through: "2026-06-01" };
+    for (const [body, disabled] of [
+      [oneClose, false],
+      [EMPTY_BTC_CLOSES, true],
+    ] as const) {
+      const fetchStub = vi.fn(async () => ({ ok: true, json: async () => body }));
+      vi.stubGlobal("fetch", fetchStub);
+      try {
+        const view = render(
+          <ScenarioComposer
+            payload={makePayload()}
+            allocatorId={ALLOCATOR_A}
+            allocatorMandate={null}
+          />,
+        );
+        await waitFor(() => expect(fetchStub).toHaveBeenCalledWith("/api/benchmark/btc/prices"));
+        await act(async () => {
+          await new Promise((r) => setTimeout(r, 0));
+        });
+        const toggle = within(view.container)
+          .getByText("BTC Benchmark")
+          .closest("label")!
+          .querySelector("input") as HTMLInputElement;
+        expect(toggle.disabled).toBe(disabled);
+        view.unmount();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    }
+  });
+
   it("SC11 / D-66 — the overlay is the close level after a DROPPED close and a missing day: no point on either, every later level close / first close", async () => {
     // 06-03 is a DROPPED (corrupt) close and 06-05 a plain missing day. The
     // level at 06-04 is 121/100 = 1.21 and at 06-06 133.1/100 = 1.331.

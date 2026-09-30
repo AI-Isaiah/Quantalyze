@@ -735,6 +735,17 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     expect(html).toContain("overlay:none");
   });
 
+  it("a closes body with no close renders the unavailable state, as the old empty series did", async () => {
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    stubFetch({ ok: true, body: { prices: [], dropped: [], through: null } });
+
+    const html = await renderPage("empty-closes");
+
+    expect(html).toContain("My Q3 Blend");
+    expect(html).toContain("benchmark:false");
+    expect(html).toContain("overlay:none");
+  });
+
   it("WR-03 — a non-2xx closes fetch renders the unavailable state, never a thrown page", async () => {
     rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
     stubFetch({

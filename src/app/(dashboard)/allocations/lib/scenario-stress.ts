@@ -134,11 +134,10 @@ export function computeScenarioStress(
   // factor feed, inside the overlap or not, makes it untrustworthy, so surface
   // null β ⇒ null impact ("—"). Checked on the raw closes (no second pairing:
   // computeScenarioBenchmark stays the sole pairing site). The closes route and
-  // `parseBtcCloses` already refuse a non-finite or non-positive close; this
-  // guard keeps the lib honest for a caller that bypasses them.
+  // `parseBtcCloses` already refuse a non-finite close; this guard keeps the
+  // lib honest for a caller that bypasses them.
   const btcIsFinite =
-    btcCloses !== null &&
-    btcCloses.prices.every((p) => Number.isFinite(p.close) && p.close > 0);
+    btcCloses !== null && btcCloses.prices.every((p) => Number.isFinite(p.close));
   const beta = btcIsFinite ? bench.beta : null;
   // null β (no BTC / degenerate / constant BTC / below n<2 overlap / non-finite factor)
   // ⇒ null impact ⇒ "—".
