@@ -679,6 +679,15 @@ type ResolvedFactsheetInputs = Extract<
 export const BENCHMARK_READ_FAILED_MESSAGE =
   "[factsheet] benchmark_prices read failed; BTC comparator unavailable";
 
+/**
+ * 169.5 review SFH-M-02 — the one stable message of a data-driven unavailable
+ * exit (the read succeeded but leaves nothing to compare). Its `reason` tells
+ * "no stored close in the window" (a stalled refresh, say) from "closes, but no
+ * covered interval"; both are distinct from the read-failure line above.
+ */
+export const BENCHMARK_UNAVAILABLE_MESSAGE =
+  "[factsheet] BTC comparator unavailable: the benchmark read left nothing to compare";
+
 const BENCHMARK_UNAVAILABLE: BenchmarkPricesOpt = { unavailable: true };
 
 function isoMinusOneDay(iso: string): string {
@@ -760,12 +769,22 @@ export async function readFactsheetBenchmark(
   // date (RESEARCH Pitfall 2, T-169-21): trim back to the read's bounds.
   const prices = merged.prices.filter((p) => p.date >= from && p.date <= to);
   const dropped = merged.dropped.filter((d) => d >= from && d <= to);
-  if (prices.length === 0) return BENCHMARK_UNAVAILABLE;
+  const unavailableData = (reason: "no_prices_in_window" | "no_covered_interval"): BenchmarkPricesOpt => {
+    console.warn(BENCHMARK_UNAVAILABLE_MESSAGE, {
+      reason,
+      ...ctx,
+      firstStored: typeof firstStored === "string" ? firstStored : null,
+      readCount: read.prices.length,
+      readThrough: read.through,
+    });
+    return BENCHMARK_UNAVAILABLE;
+  };
+  if (prices.length === 0) return unavailableData("no_prices_in_window");
   const anyCovered = axes.some((axis) => {
     const dates = [...new Set(axis.filter((r) => r && typeof r.date === "string").map((r) => r.date))].sort();
     return dates.length > 0 && alignCoveredReturns(prices, dropped, dates).returns.some((r) => r !== null);
   });
-  if (!anyCovered) return BENCHMARK_UNAVAILABLE;
+  if (!anyCovered) return unavailableData("no_covered_interval");
   return { prices, through: prices[prices.length - 1].date, dropped };
 }
 

@@ -99,6 +99,7 @@ import {
   fetchAndBuildPayload,
   readFactsheetBenchmark,
   BENCHMARK_READ_FAILED_MESSAGE,
+  BENCHMARK_UNAVAILABLE_MESSAGE,
 } from "./fetch-and-build-payload";
 import { buildFactsheetPayload } from "./build-payload";
 import { alignCoveredReturns } from "./align";
@@ -267,8 +268,20 @@ describe("169.5-01 SC3: the route reads BTC from the database", () => {
   it("D-64(4) Amendment B: a stale DB (history, but no row in the window) is the unavailable form, never the fixture", async () => {
     const cash = series(days("2024-01-02", "2024-01-11"));
     fake.bench.probeRows = [{ date: "2023-01-01" }];
-    const opt = await readFactsheetBenchmark(createAdminClient(), cash, undefined);
+    const opt = await readFactsheetBenchmark(createAdminClient(), cash, undefined, STRATEGY_ID);
     expect(opt).toEqual({ unavailable: true });
+    // SFH-M-02: this exit is logged with its own reason, and it is NOT the
+    // read-failure line (a stale DB and a read outage must be told apart).
+    expect(vi.mocked(console.warn)).toHaveBeenCalledWith(BENCHMARK_UNAVAILABLE_MESSAGE, {
+      reason: "no_prices_in_window",
+      id: STRATEGY_ID,
+      from: "2024-01-01",
+      to: "2024-01-11",
+      firstStored: "2023-01-01",
+      readCount: 0,
+      readThrough: null,
+    });
+    expect(vi.mocked(console.error)).not.toHaveBeenCalled();
   });
 
   it("every date axis empty: the unavailable marker, and NO benchmark_prices query at all", async () => {
@@ -280,8 +293,20 @@ describe("169.5-01 SC3: the route reads BTC from the database", () => {
   it("no DB rows and a fixture ending the day before the strategy: an empty covered span is the unavailable form", async () => {
     const last = BTC_DAILY[BTC_DAILY.length - 1].date;
     const cash = series(days(addDays(last, 1), addDays(last, 8)));
-    const opt = await readFactsheetBenchmark(createAdminClient(), cash, undefined);
+    const opt = await readFactsheetBenchmark(createAdminClient(), cash, undefined, STRATEGY_ID);
     expect(opt).toEqual({ unavailable: true });
+    // SFH-M-02: one fixture row survives the trim, so this reaches the SECOND
+    // exit (no covered interval), logged with a reason distinct from the first.
+    expect(vi.mocked(console.warn)).toHaveBeenCalledWith(BENCHMARK_UNAVAILABLE_MESSAGE, {
+      reason: "no_covered_interval",
+      id: STRATEGY_ID,
+      from: last,
+      to: addDays(last, 8),
+      firstStored: null,
+      readCount: 0,
+      readThrough: null,
+    });
+    expect(vi.mocked(console.error)).not.toHaveBeenCalled();
   });
 
   it("merged `dropped` dates inside the bound are carried; one outside it is not", async () => {
