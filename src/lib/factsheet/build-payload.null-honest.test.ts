@@ -65,7 +65,9 @@ const STRATEGY = {
 
 const total = (s: EventSignaturesPayload | null | undefined) => {
   if (!s) throw new Error("signatures must be present on the api arm");
-  return { h1: s.h1.winCount + s.h1.lossCount, h7: s.h7.winCount + s.h7.lossCount };
+  // CR-01: the BENCHMARK-view count. A BTC null drops benchmark traces only, so
+  // this is the population the D-70(1) drop moves; the equity view keeps its own.
+  return { h1: s.h1.benchWinCount + s.h1.benchLossCount, h7: s.h7.benchWinCount + s.h7.benchLossCount };
 };
 
 describe("169.4-05: the api arm's event signatures skip a missing BTC day (D-65, D-70(1))", () => {
@@ -107,6 +109,39 @@ describe("169.4-05: the api arm's event signatures skip a missing BTC day (D-65,
     );
     expect(payload.benchEventSignatures!.h1.winOfEquity).toEqual(honestBench.h1.winOfEquity);
     expect(payload.benchEventSignatures!.h1.winOfEquity).not.toEqual(zeroBench.h1.winOfEquity);
+  });
+});
+
+/**
+ * Phase 169.4 CR-01 (review round 1, + SFH MEDIUM-1): the BTC read failed
+ * (`readFactsheetBenchmark` answers `{ unavailable: true }`, cacheable for the
+ * whole TTL under D-52). `btcAligned` is all null. The payload must say "no BTC
+ * trajectory" (a null view) for every BTC-dependent view, and keep the strategy's
+ * own equity views with their own counts. Before the fix it carried 0 wins ·
+ * 0 losses beside populated equity views, and all-zero BTC "trajectories".
+ */
+describe("169.4 CR-01: BTC unavailable → the BTC views are null, the equity views keep their own count", () => {
+  it("eventSignatures: benchmark views null with 0 benchmark count; equity views populated with a non-zero count. benchEventSignatures: every view null", () => {
+    const rows = strategyRows();
+    const payload = buildFactsheetPayload(STRATEGY, rows, { benchmarkPrices: { unavailable: true } });
+    if (!payload || payload.ingestSource !== "api") throw new Error("fixture must build on the api arm");
+    const sigs = payload.eventSignatures!;
+    for (const set of [sigs.h1, sigs.h7]) {
+      expect(set.winOfBenchmark).toBeNull();
+      expect(set.lossOfBenchmark).toBeNull();
+      expect(set.benchWinCount + set.benchLossCount).toBe(0);
+      expect(set.winOfEquity).not.toBeNull();
+      expect(set.lossOfEquity).not.toBeNull();
+      expect(set.winCount).toBeGreaterThan(0);
+      expect(set.lossCount).toBeGreaterThan(0);
+    }
+    // Window-eligible h1 events are 14..65 (52), all non-zero: the equity view holds all 52.
+    expect(sigs.h1.winCount + sigs.h1.lossCount).toBe(52);
+    const bench = payload.benchEventSignatures!;
+    for (const set of [bench.h1, bench.h7]) {
+      expect([set.winOfBenchmark, set.lossOfBenchmark, set.winOfEquity, set.lossOfEquity]).toEqual([null, null, null, null]);
+      expect([set.winCount, set.lossCount, set.benchWinCount, set.benchLossCount]).toEqual([0, 0, 0, 0]);
+    }
   });
 });
 

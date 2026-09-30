@@ -54,14 +54,17 @@ export function SignaturesSection() {
           aggregations of per-event trajectories not carried in the payload, so their
           magnitudes cannot follow a client leverage what-if — they stay at base 1×. */}
       <BaseLeverageNote payload={payload} label="Event signatures shown at base 1× leverage" />
+      {/* CR-01 (Phase 169.4): no count in the horizon title. The benchmark and
+          equity views hold different populations once a benchmark null drops a
+          benchmark trace, so each panel names its own N (see SignatureHorizon). */}
       <SignatureHorizon
-        title={`Returns Signatures for 7 Days Horizon (${sigs.h7.winCount} wins · ${sigs.h7.lossCount} losses)`}
+        title="Returns Signatures for 7 Days Horizon"
         subtitle="mean + median + 25/75 + 5/95 percentile bands of benchmark or accumulated-capital trajectory around strategy events · ±14d window"
         set={sigs.h7}
         benchName={cmp.shortName}
       />
       <SignatureHorizon
-        title={`Returns Signatures for 1 Day Horizon (${sigs.h1.winCount} wins · ${sigs.h1.lossCount} losses)`}
+        title="Returns Signatures for 1 Day Horizon"
         subtitle="single-day win/loss events · same trajectory aggregations"
         set={sigs.h1}
         benchName={cmp.shortName}
@@ -98,28 +101,79 @@ function SignatureHorizon({
         <p className="text-micro text-text-muted">{subtitle}</p>
       </header>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
-        <SignaturePanel
+        <SignatureSlot
           title={`Win Event · of ${benchName}`}
           sig={set.winOfBenchmark}
+          n={set.benchWinCount}
+          emptyReason={`no win event has a complete ±14-day window of ${benchName} prices`}
           tone="positive"
         />
-        <SignaturePanel
+        <SignatureSlot
           title={`Loss Event · of ${benchName}`}
           sig={set.lossOfBenchmark}
+          n={set.benchLossCount}
+          emptyReason={`no loss event has a complete ±14-day window of ${benchName} prices`}
           tone="negative"
         />
-        <SignaturePanel
+        <SignatureSlot
           title="Win Event · of Accumulated Capital"
           sig={set.winOfEquity}
+          n={set.winCount}
+          emptyReason="no win event has a complete ±14-day window of returns"
           tone="positive"
         />
-        <SignaturePanel
+        <SignatureSlot
           title="Loss Event · of Accumulated Capital"
           sig={set.lossOfEquity}
+          n={set.lossCount}
+          emptyReason="no loss event has a complete ±14-day window of returns"
           tone="negative"
         />
       </div>
     </div>
+  );
+}
+
+/**
+ * CR-01 (Phase 169.4): one panel slot. A view with no trace is `null` and
+ * renders the em-dash state (DESIGN.md null rule), never a flat 0% chart; a
+ * populated view names its own event count in its title. The branch is here,
+ * above SignaturePanel, because SignaturePanel calls hooks.
+ */
+function SignatureSlot({
+  title,
+  sig,
+  n,
+  emptyReason,
+  tone,
+}: {
+  title: string;
+  sig: EventSignature | null;
+  n: number;
+  emptyReason: string;
+  tone: "positive" | "negative";
+}) {
+  if (sig === null) return <SignatureEmptyPanel title={title} reason={emptyReason} />;
+  return <SignaturePanel title={`${title} · ${n} ${n === 1 ? "event" : "events"}`} sig={sig} tone={tone} />;
+}
+
+/**
+ * The em-dash state for a signature view with no measurable trace (CR-01).
+ * Shared with CrossSignaturePanels so both surfaces say the same thing.
+ */
+export function SignatureEmptyPanel({ title, reason }: { title: string; reason: string }) {
+  return (
+    <figure className="flex flex-col gap-2" data-signature-empty="">
+      <header>
+        <p className="text-caption font-semibold text-text-primary">{title}</p>
+      </header>
+      <div className="flex flex-col gap-1 py-6">
+        <span className="font-metric text-text-muted" aria-hidden>
+          —
+        </span>
+        <p className="text-micro text-text-muted">Not measurable: {reason}.</p>
+      </div>
+    </figure>
   );
 }
 

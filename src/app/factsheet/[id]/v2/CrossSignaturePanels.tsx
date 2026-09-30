@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { usePayload, useActiveComparator } from "./factsheet-context";
 import { BaseLeverageNote } from "./basis-context";
+import { SignatureEmptyPanel } from "./SignaturePanels";
 import type { EventSignature, EventSignaturesSet } from "@/lib/factsheet/types";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
@@ -87,45 +88,106 @@ function CrossHorizon({
         <div className="mt-2 flex flex-wrap gap-3 text-micro">
           <span className="inline-flex items-center gap-1.5">
             <span aria-hidden className="inline-block w-3 h-0.5" style={{ background: "var(--color-accent)" }} />
-            <span className="text-text-2">
-              strategy events ({stratSet.winCount}W · {stratSet.lossCount}L)
-            </span>
+            {/* CR-01 (Phase 169.4): no count in the legend. Each view holds its
+                own population once a benchmark null drops a benchmark trace, so
+                one W · L pair per line describes no single panel; each panel
+                names its own N instead. */}
+            <span className="text-text-2">strategy events</span>
           </span>
           <span className="inline-flex items-center gap-1.5">
             <span aria-hidden className="inline-block w-3 h-0.5" style={{ background: "var(--color-text-muted)" }} />
-            <span className="text-text-2">
-              {benchName} events ({benchSet.winCount}W · {benchSet.lossCount}L)
-            </span>
+            <span className="text-text-2">{benchName} events</span>
           </span>
         </div>
       </header>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
-        <CrossPanel
+        <CrossSlot
           title={`Win Event · of ${benchName}`}
           stratMean={stratSet.winOfBenchmark}
+          stratN={stratSet.benchWinCount}
           benchMean={benchSet.winOfBenchmark}
+          benchN={benchSet.benchWinCount}
+          benchName={benchName}
+          view={`${benchName} prices`}
           tone="positive"
         />
-        <CrossPanel
+        <CrossSlot
           title={`Loss Event · of ${benchName}`}
           stratMean={stratSet.lossOfBenchmark}
+          stratN={stratSet.benchLossCount}
           benchMean={benchSet.lossOfBenchmark}
+          benchN={benchSet.benchLossCount}
+          benchName={benchName}
+          view={`${benchName} prices`}
           tone="negative"
         />
-        <CrossPanel
+        <CrossSlot
           title="Win Event · of Accumulated Capital"
           stratMean={stratSet.winOfEquity}
+          stratN={stratSet.winCount}
           benchMean={benchSet.winOfEquity}
+          benchN={benchSet.winCount}
+          benchName={benchName}
+          view="returns"
           tone="positive"
         />
-        <CrossPanel
+        <CrossSlot
           title="Loss Event · of Accumulated Capital"
           stratMean={stratSet.lossOfEquity}
+          stratN={stratSet.lossCount}
           benchMean={benchSet.lossOfEquity}
+          benchN={benchSet.lossCount}
+          benchName={benchName}
+          view="returns"
           tone="negative"
         />
       </div>
     </div>
+  );
+}
+
+/**
+ * CR-01 (Phase 169.4): one cross panel slot. The panel compares two mean lines,
+ * so it needs both: when either population has no trace (`null`), the panel
+ * renders the em-dash state naming the missing side, never a flat 0% line. A
+ * populated panel names both of its own event counts. The branch is here, above
+ * CrossPanel, because CrossPanel calls hooks.
+ */
+function CrossSlot({
+  title,
+  stratMean,
+  stratN,
+  benchMean,
+  benchN,
+  benchName,
+  view,
+  tone,
+}: {
+  title: string;
+  stratMean: EventSignature | null;
+  stratN: number;
+  benchMean: EventSignature | null;
+  benchN: number;
+  benchName: string;
+  view: string;
+  tone: "positive" | "negative";
+}) {
+  if (stratMean === null || benchMean === null) {
+    const who =
+      stratMean === null && benchMean === null
+        ? "no event"
+        : stratMean === null
+          ? "no strategy event"
+          : `no ${benchName} event`;
+    return <SignatureEmptyPanel title={title} reason={`${who} has a complete ±14-day window of ${view}`} />;
+  }
+  return (
+    <CrossPanel
+      title={`${title} · ${stratN} strategy / ${benchN} ${benchName} events`}
+      stratMean={stratMean}
+      benchMean={benchMean}
+      tone={tone}
+    />
   );
 }
 
