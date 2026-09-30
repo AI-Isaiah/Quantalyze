@@ -74,19 +74,35 @@ export default async function RecommendationsPage() {
 
   // Fetch mandate via the allocator's own user client (RLS lets each user
   // read their own allocator_preferences row).
-  const { data: preferences } = await supabase
+  const { data: preferences, error: preferencesError } = await supabase
     .from("allocator_preferences")
     .select("max_weight, preferred_strategy_types")
     .eq("user_id", user.id)
     .maybeSingle();
 
+  // Phase 169.3 CR-01: a failed read is NOT "no mandate". `data` is null on an
+  // error AND on a missing row; only `error` tells them apart. Before this, a
+  // transient PostgREST / RLS / grant fault told an allocator with a mandate
+  // that none was set, withheld their list, and logged nothing. Same breadcrumb
+  // shape as the attestation read above, but the page stays up: the mandate is
+  // UNKNOWN, so the page makes no claim about it either way.
+  if (preferencesError) {
+    console.error(
+      "[recommendations] allocator_preferences read failed:",
+      preferencesError.code,
+      preferencesError.message,
+    );
+  }
+
   // Phase 169.3 D-03: the same rule /allocations uses. It reads the fields the
   // match engine consumes; the free-text mandate_archetype is never read by it.
   // The select projects exactly the two columns deriveMandateIsSet reads, so the
   // narrowing cast to its full-row parameter type hides no field it touches.
-  const mandateSet = deriveMandateIsSet(
-    (preferences ?? null) as AllocatorOwnPreferences | null,
-  );
+  const mandateState: "set" | "unset" | "unknown" = preferencesError
+    ? "unknown"
+    : deriveMandateIsSet((preferences ?? null) as AllocatorOwnPreferences | null)
+      ? "set"
+      : "unset";
 
   // Fetch batch meta + top-3 candidates via SECURITY DEFINER RPCs
   // (migration 019). Each RPC enforces "caller is the allocator or admin"
@@ -257,9 +273,11 @@ export default async function RecommendationsPage() {
       <PageHeader
         title="Recommendations"
         description={
-          mandateSet
+          mandateState === "set"
             ? "Top 3 strategies that fit your mandate. Updated daily."
-            : "Strategies matched to your mandate, updated daily. No mandate is set yet."
+            : mandateState === "unset"
+              ? "Strategies matched to your mandate, updated daily. No mandate is set yet."
+              : "Strategies from the daily match engine."
         }
         breadcrumb={[{ label: "My Allocation", href: "/allocations" }, { label: "Recommendations" }]}
         meta={
@@ -281,8 +299,12 @@ export default async function RecommendationsPage() {
           Without a mandate the list is WITHHELD, not relabelled: the card
           copy (engine reasons, the fallback reason) speaks in mandate terms
           too, and the call to action already says a mandate is what shows
-          recommendations. */}
-      {!mandateSet ? (
+          recommendations.
+          CR-01: an UNKNOWN mandate (the read failed) is neither branch. It
+          shows a neutral notice and then whatever the batch holds; it never
+          withholds the list or says no mandate is set. */}
+      {mandateState === "unknown" && <MandateUnknownNotice />}
+      {mandateState === "unset" ? (
         <NoMandateState />
       ) : candidates.length > 0 ? (
         <ol className="space-y-4">
@@ -320,6 +342,20 @@ function NoMandateState() {
       >
         Set preferences →
       </Link>
+    </Card>
+  );
+}
+
+function MandateUnknownNotice() {
+  return (
+    <Card className="mb-4 text-center" role="status">
+      <h2 className="text-lg font-semibold text-text-primary">
+        We couldn&apos;t load your mandate
+      </h2>
+      <p className="mt-2 text-sm text-text-secondary max-w-md mx-auto">
+        Refresh the page to try again. Any recommendations below are from your
+        latest batch.
+      </p>
     </Card>
   );
 }
