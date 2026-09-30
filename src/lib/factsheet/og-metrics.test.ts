@@ -220,4 +220,41 @@ describe("computeOgHeadline — persisted scalars for a rankable row (169.4.1)",
     expect(got.cagr).toBe(computed.cagr);
     expect(got.maxDd).toBe(computed.maxDd);
   });
+
+  /**
+   * Review round 1 CR-01 / SFH-01: the stored CAGR on a chain-broken row is
+   * annualized over the suffix after the break only, while the card's 0.95-year
+   * gate measures the whole 400-day series. A 45-day +6% suffix stores about
+   * +60%; the card must not show it as if it covered the full record.
+   */
+  describe("a stored CAGR whose span the card cannot see is hidden (CR-01)", () => {
+    const CHAIN_BROKEN_STORED = { sharpe: 1.5, cagr: 0.6, max_drawdown: -0.1, computation_status: "complete" } as const;
+
+    it.each([
+      ["twr_chain_broken", { twr_chain_broken: true }],
+      ["insufficient_window", { insufficient_window: true }],
+    ])("%s: the stored CAGR is hidden, the stored Sharpe and max drawdown still show", (_name, flags) => {
+      const got = computeOgHeadline(alternating(400), "crypto", {
+        ...CHAIN_BROKEN_STORED,
+        data_quality_flags: flags,
+      });
+      expect(Number.isNaN(got.cagr)).toBe(true);
+      expect(got.sharpe).toBe(1.5);
+      expect(got.maxDd).toBe(-0.1);
+    });
+
+    it.each([
+      ["absent", undefined],
+      ["null", null],
+      ["empty", {}],
+      ["both false", { twr_chain_broken: false, insufficient_window: false }],
+      ["a truthy non-boolean", { twr_chain_broken: "true" }],
+    ])("negative control, flags %s: the stored CAGR still shows", (_name, flags) => {
+      const got = computeOgHeadline(alternating(400), "crypto", {
+        ...CHAIN_BROKEN_STORED,
+        data_quality_flags: flags,
+      });
+      expect(got.cagr).toBe(0.6);
+    });
+  });
 });

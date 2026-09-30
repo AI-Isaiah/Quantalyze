@@ -22,7 +22,8 @@ export const dynamic = "force-dynamic";
 /** The `strategy_analytics` embed shape this card reads (PostgREST returns an
  *  object for a to-one embed and an array for a to-many one — both handled).
  *  STALE-01 widened it by `computation_status` — see the gate at the compute.
- *  169.4.1 OGSHARPE widened it by the stored `cagr` / `sharpe` / `max_drawdown`. */
+ *  169.4.1 OGSHARPE widened it by the stored `cagr` / `sharpe` / `max_drawdown`,
+ *  and review round 1 (CR-01) by `data_quality_flags`. */
 type AnalyticsEmbed = {
   daily_returns?: unknown;
   returns_series?: unknown;
@@ -30,6 +31,7 @@ type AnalyticsEmbed = {
   cagr?: unknown;
   sharpe?: unknown;
   max_drawdown?: unknown;
+  data_quality_flags?: unknown;
 };
 
 export async function GET(
@@ -70,7 +72,11 @@ export async function GET(
           // factsheet headline and every list show instead of a recomputation.
           // They are already public on the discovery projection; nothing new
           // leaves the server.
-          "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status, cagr, sharpe, max_drawdown )",
+          // Review round 1 (CR-01): `data_quality_flags` joins the embed. On a
+          // chain-broken row the stored `cagr` covers only the suffix after the
+          // break, so computeOgHeadline hides it (see its docblock). Read-only;
+          // the flags never leave the server (this response is a PNG).
+          "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status, cagr, sharpe, max_drawdown, data_quality_flags )",
         )
         .eq("id", id),
     )
@@ -148,6 +154,7 @@ export async function GET(
         sharpe: analytics?.sharpe,
         max_drawdown: analytics?.max_drawdown,
         computation_status: computationStatus,
+        data_quality_flags: analytics?.data_quality_flags,
       }));
     }
   } catch (err) {

@@ -35,12 +35,29 @@ import { sharpe as sharpeRatio } from "@/lib/return-stats";
  * (undefined, a caller that did not project it) keeps the computed value. A
  * non-rankable row is never read (a failed run leaves the previous run's scalars
  * behind), and the shared `sharpe(...)` below stays the only Sharpe computation.
+ *
+ * Phase 169.4.1 review round 1 (CR-01 / SFH-01): the stored CAGR can cover a
+ * SHORTER span than the one the 0.95-year gate measures. The gate reads the
+ * card's resolved series, which covers the whole record. The analytics service
+ * annualizes the stored `cagr` over the suffix after the last interior TWR chain
+ * break only (`metrics.py`, `_last_interior_break_suffix`), and stores it however
+ * short that suffix is, flagging it through `data_quality_flags`. So when the row
+ * carries `twr_chain_broken: true` (or `insufficient_window: true`, a suffix under
+ * 90 days), the card HIDES the stored CAGR. The factsheet shows the same figure
+ * with a "headline covers from <date>" caveat; the card has no room for that
+ * caveat, so it hides the figure rather than show an unexplained short-window
+ * annualization. This is where the card deliberately differs from the factsheet
+ * (SC4). Sharpe and max drawdown are unaffected, and a computed CAGR (stored key
+ * absent) covers the full series, so the flags do not apply to it.
  */
 export type OgPersistedScalars = {
   sharpe?: unknown;
   cagr?: unknown;
   max_drawdown?: unknown;
   computation_status?: unknown;
+  /** `strategy_analytics.data_quality_flags` (JSONB); read the same way as
+   *  `composite-read-path.ts` does, `=== true` per flag. */
+  data_quality_flags?: unknown;
 };
 
 export function computeOgHeadline(
@@ -56,6 +73,14 @@ export function computeOgHeadline(
   const stored = isRankableAnalyticsRow({ computation_status: typeof status === "string" ? status : null })
     ? persisted
     : undefined;
+  // CR-01: the stored CAGR's own span may be a post-chain-break suffix the
+  // full-series gate below cannot see (docblock above). Hide rather than show it.
+  const dqf = stored?.data_quality_flags as
+    | { insufficient_window?: unknown; twr_chain_broken?: unknown }
+    | null
+    | undefined;
+  const storedCagrCoversSuffixOnly =
+    dqf?.twr_chain_broken === true || dqf?.insufficient_window === true;
 
   // Keep date+value together so the CAGR calendar span is derived from the SAME
   // finite-value rows that feed the risk metrics — a value-only filter would
@@ -101,7 +126,11 @@ export function computeOgHeadline(
     if (times.length >= 2 && cum > 0) {
       const years = calendarYears(Math.min(...times), Math.max(...times));
       if (years >= 0.95) {
-        cagr = stored?.cagr !== undefined ? storedFigure(stored.cagr) : Math.pow(cum, 1 / years) - 1;
+        if (stored?.cagr !== undefined) {
+          cagr = storedCagrCoversSuffixOnly ? NaN : storedFigure(stored.cagr);
+        } else {
+          cagr = Math.pow(cum, 1 / years) - 1;
+        }
       }
     }
   }

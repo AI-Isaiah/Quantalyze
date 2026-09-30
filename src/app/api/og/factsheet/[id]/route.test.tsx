@@ -336,6 +336,38 @@ describe("GET /api/og/factsheet/[id]", () => {
     expect(strings).toContain("-8.9%");
   });
 
+  it("O1e — review round 1 CR-01: a chain-broken row's stored CAGR is hidden on the card; Sharpe and Max DD still show", async () => {
+    // Same stored figures as O1d, plus the flag the analytics service stamps
+    // when the stored CAGR covers only the suffix after an interior TWR chain
+    // break. The 400-day series passes the 0.95-year gate, so only the flag can
+    // hide the figure.
+    STATE.strategyRow!.strategy_analytics = [
+      {
+        daily_returns: null,
+        returns_series: LONG_WEALTH_INDEX,
+        computation_status: "complete",
+        sharpe: 2.34,
+        cagr: 0.567,
+        max_drawdown: -0.089,
+        data_quality_flags: { twr_chain_broken: true },
+      },
+    ];
+    const { GET } = await import("./route");
+    await GET(makeRequest(), ctx(PUBLISHED_ID));
+
+    expect(STATE.observed.select).toMatch(/strategy_analytics \([^)]*\bdata_quality_flags\b/);
+    expect(headlineCalls).toHaveLength(1);
+    expect(headlineCalls[0].persisted).toMatchObject({
+      data_quality_flags: { twr_chain_broken: true },
+    });
+
+    const strings = latestCardStrings();
+    expect(strings).not.toContain("+56.7%");
+    expect(strings).toContain("2.34");
+    expect(strings).toContain("-8.9%");
+    expect(strings.filter(s => s === "—")).toHaveLength(1);
+  });
+
   it("O2 — a populated daily_returns still wins over returns_series (direct-first contract)", async () => {
     const csvSeries = [
       { date: "2026-01-02", value: 0.001 },
