@@ -175,7 +175,7 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
               window is null (the record is shorter), exactly as in Cumulative
               Return Metrics; a null bench value alone keeps the row. */}
           <Kpm>
-            <Row label="Month-to-date" value={pct(m.mtd, true)} bench={pct(b?.mtd, true)} />
+            <Row label={monthRowLabel(m.end)} value={pct(m.mtd, true)} bench={pct(b?.mtd, true)} />
             <Row label="Year-to-date" value={pct(m.ytd, true)} bench={pct(b?.ytd, true)} />
             <Row label="3 Month" value={pct(m.p3m, true)} bench={pct(b?.p3m, true)} />
             {m.p6m != null && <Row label="6 Month" value={pct(m.p6m, true)} bench={pct(b?.p6m, true)} />}
@@ -427,6 +427,22 @@ export function comparatorPartialYear(
   return comparatorPartialThrough(through, lastInYear, calendar) != null ? year : null;
 }
 
+/**
+ * Phase 170 (169-routed item (a), UI-SPEC AD-10) — the label of the month row in
+ * Returns and Cumulative Return Metrics. compute()'s `mtd` is the return of the
+ * record's LAST month, so it is "Month-to-date" only while that month is the
+ * current UTC calendar month. An ended record names it: `Final month (Jun 2024)`.
+ * Only the label branches on the clock; the value and 169-05's em-dash lock are
+ * unchanged. An empty or unparseable `end` keeps "Month-to-date".
+ */
+export function monthRowLabel(end: string, now: Date = new Date()): string {
+  if (!end) return "Month-to-date";
+  const d = new Date(end);
+  if (Number.isNaN(d.getTime())) return "Month-to-date";
+  if (d.getUTCFullYear() === now.getUTCFullYear() && d.getUTCMonth() === now.getUTCMonth()) return "Month-to-date";
+  return `Final month (${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()})`;
+}
+
 export function isoToMonthDay(iso: string): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -547,7 +563,7 @@ function CumulativeReturnsPanel() {
         </p>
       )}
       <Kpm>
-        <Row label="Month-to-date" value={pct(m.mtd, true)} bench="" />
+        <Row label={monthRowLabel(m.end)} value={pct(m.mtd, true)} bench="" />
         <Row label="3 Month" value={pct(m.p3m, true)} bench="" />
         {m.p6m != null && <Row label="6 Month" value={pct(m.p6m, true)} bench="" />}
         <Row label="Year-to-date" value={pct(m.ytd, true)} bench="" />
