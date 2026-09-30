@@ -191,7 +191,9 @@ function buildFactsheetPayloadCached(
     // Bumped v8→v9 (Phase 169.5 BENCHCOMPARE, 169 D-48 as amended by 169 D-62):
     // comparator blocks carry `through`, null windows past it and covered-day
     // summaries (169.5-01); the payload carries the bounded BTC prices, their
-    // `through` and `dropped` for the browser re-derive (169.5-02); comparator
+    // `through` and `dropped` for the browser re-derive, and comparator chart
+    // series (cumulative, cumVsBench, volMatched) are null past coverage with
+    // rolling statistics on the comparator's own basis (169.5-02); comparator
     // `dailyReturns` are null where uncovered (169.5-04). A stale v8 entry lacks
     // them, so during the 1 h TTL drain it would show +0.00% benchmark windows and
     // feed the MTM / leverage re-derive no prices; one bump covers Phase 169.5
