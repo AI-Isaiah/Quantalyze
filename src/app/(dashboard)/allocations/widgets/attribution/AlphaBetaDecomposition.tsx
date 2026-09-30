@@ -6,7 +6,7 @@ import { normalizeDailyReturns, compound } from "@/lib/portfolio-math-utils";
 import { dispersion } from "@/lib/return-stats";
 import { annualizationPeriods } from "@/lib/closed-sets";
 import { alignCoveredReturns, COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
-import { jointMetrics } from "@/lib/factsheet/joint";
+import { jointMetrics, MIN_PAIRED_OBSERVATIONS } from "@/lib/factsheet/joint";
 import { ALLOCATOR_PORTFOLIO_ASSET_CLASS } from "@/lib/factsheet/allocator-portfolio-payload";
 import {
   BarChart,
@@ -54,6 +54,7 @@ const BOOK_PERIODS_PER_YEAR = annualizationPeriods(ALLOCATOR_PORTFOLIO_ASSET_CLA
 export type BookAlphaBeta =
   | { kind: "not_ready" }
   | { kind: "btc_unavailable" }
+  | { kind: "below_floor"; pairedCount: number; floor: number }
   | { kind: "undefined_beta"; benchmarkFlat: boolean }
   | {
       kind: "ok";
@@ -77,6 +78,9 @@ export type BookAlphaBeta =
  *     only with a close at both endpoints (166.4 D-A), never bridged over a gap;
  *   - `jointMetrics` over the paired indices, on the book's basis.
  * No figure while the history is not ready, and none when BTC is unavailable.
+ * None either below `MIN_PAIRED_OBSERVATIONS` paired intervals (169.4 review
+ * SFH MEDIUM-4): the comparator block drops its joint under the same constant,
+ * so the widget and the Overview show one number or neither does.
  */
 export function computeBookAlphaBeta(data: AlphaBetaWidgetData): BookAlphaBeta {
   // D-02 fail-closed: anything other than an explicit "ready" is not ready.
@@ -99,7 +103,9 @@ export function computeBookAlphaBeta(data: AlphaBetaWidgetData): BookAlphaBeta {
       bench.push(b);
     }
   }
-  if (strat.length === 0) return { kind: "undefined_beta", benchmarkFlat: false };
+  if (strat.length < MIN_PAIRED_OBSERVATIONS) {
+    return { kind: "below_floor", pairedCount: strat.length, floor: MIN_PAIRED_OBSERVATIONS };
+  }
 
   const { alpha, beta } = jointMetrics(strat, bench, 0, BOOK_PERIODS_PER_YEAR);
   // Founder decision D7 (2026-09-26): a beta that does not exist (BTC has no
@@ -158,6 +164,29 @@ function AlphaBetaDecompositionInner({ data }: { data: AlphaBetaWidgetData } & B
     return (
       <div className="flex h-full items-center justify-center px-3 text-sm text-text-muted">
         BTC prices are unavailable, so alpha and beta cannot be measured.
+      </div>
+    );
+  }
+
+  if (result.kind === "below_floor") {
+    // SFH MEDIUM-4: "—" with no sign colour and no chart, and one muted line
+    // naming the paired count and the floor, so a thin basis is visible.
+    return (
+      <div className="flex h-full flex-col">
+        <div className="mb-3 flex items-baseline gap-2 px-3 pt-2">
+          <span className="text-xs font-semibold uppercase tracking-wider text-text-muted">
+            Alpha
+          </span>
+          <span
+            className="text-2xl font-metric tabular-nums font-bold text-text-primary"
+            data-testid="alpha-value"
+          >
+            —
+          </span>
+        </div>
+        <p className="px-3 text-xs text-text-muted">
+          {`Alpha and beta need at least ${result.floor} days paired with BTC; this book has ${result.pairedCount}.`}
+        </p>
       </div>
     );
   }

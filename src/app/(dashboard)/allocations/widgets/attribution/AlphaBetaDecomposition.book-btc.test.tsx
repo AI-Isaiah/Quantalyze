@@ -1,9 +1,12 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, within } from "@testing-library/react";
 
 import AlphaBetaDecomposition, { computeBookAlphaBeta, type AlphaBetaWidgetData } from "./AlphaBetaDecomposition";
 import { buildAllocatorPortfolioFactsheetPayload } from "@/lib/factsheet/allocator-portfolio-payload";
-import { jointMetrics } from "@/lib/factsheet/joint";
+import { jointMetrics, MIN_PAIRED_OBSERVATIONS } from "@/lib/factsheet/joint";
+import { FactsheetProvider } from "@/app/factsheet/[id]/v2/factsheet-context";
+import { FactsheetBody } from "@/app/factsheet/[id]/v2/FactsheetView";
+import { pctSigned } from "@/app/factsheet/[id]/v2/format";
 import type { DailyReturn } from "@/lib/factsheet/types";
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
@@ -165,5 +168,99 @@ describe("AlphaBetaDecomposition — the book against BTC (169.4-02, D-69)", () 
     );
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByText("annualized")).toBeTruthy();
+  });
+});
+
+/**
+ * 169.4 review SFH MEDIUM-4. The widget used to refuse a figure under 10
+ * observations; the 169.4 rewrite dropped that, so a 3-day book read e.g.
+ * "+812% annualized". D-69 makes this widget and the Overview show one number,
+ * so both gate on ONE constant, `MIN_PAIRED_OBSERVATIONS` in `joint.ts`: the
+ * widget in `computeBookAlphaBeta`, the Overview in `buildComparatorBlock`
+ * (a null joint, the factsheet's existing absence: no α/IR cells, no §IV).
+ * Below the floor neither shows a figure; at it both show the same one.
+ */
+describe("AlphaBetaDecomposition — the shared paired-observation floor (169.4 SFH MEDIUM-4, D-69)", () => {
+  const lsStore = new Map<string, string>();
+  beforeEach(() => {
+    lsStore.clear();
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => lsStore.get(k) ?? null,
+      setItem: (k: string, v: string) => void lsStore.set(k, v),
+      removeItem: (k: string) => void lsStore.delete(k),
+      clear: () => lsStore.clear(),
+      key: () => null,
+      length: 0,
+    });
+  });
+
+  // A book of the first n returns, with the BTC closes it needs (one before
+  // its first date through its last), so every interval is paired.
+  function book(n: number): AlphaBetaWidgetData {
+    return { ...readyData({ ...BTC, prices: CLOSES.slice(0, n + 1) }), equityDailyReturns: BOOK.slice(0, n) };
+  }
+  function overview(n: number) {
+    return buildAllocatorPortfolioFactsheetPayload([], {
+      allocatorId: "a-1",
+      dailyReturns: BOOK.slice(0, n),
+      btcBenchmarkPrices: { ...BTC, prices: CLOSES.slice(0, n + 1) },
+    })!;
+  }
+  // The Overview as the dashboard mounts it (AllocationDashboardV2).
+  function renderOverview(n: number) {
+    const payload = overview(n);
+    return render(
+      <FactsheetProvider payload={payload} persist={false}>
+        <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter />
+      </FactsheetProvider>,
+    );
+  }
+
+  it("the floor is 10 paired observations, the minimum the widget carried before 169.4", () => {
+    expect(MIN_PAIRED_OBSERVATIONS).toBe(10);
+  });
+
+  it("a 3-day book: the widget shows \"—\" and names its paired count; the Overview shows no alpha either", () => {
+    const widget = computeBookAlphaBeta(book(3));
+    expect(widget).toEqual({ kind: "below_floor", pairedCount: 3, floor: 10 });
+
+    const { unmount } = render(<AlphaBetaDecomposition data={book(3)} {...base} />);
+    expect(screen.getByTestId("alpha-value").textContent).toBe("—");
+    expect(
+      screen.getByText("Alpha and beta need at least 10 days paired with BTC; this book has 3."),
+    ).toBeTruthy();
+    expect(screen.queryByText("annualized")).toBeNull();
+    expect(screen.queryByText(/%$/)).toBeNull();
+    unmount();
+
+    expect(overview(3).comparators.btc.joint).toBeNull();
+    renderOverview(3);
+    expect(screen.queryByText("α vs BTC")).toBeNull();
+    expect(screen.queryByText("Alpha (ann)")).toBeNull();
+  });
+
+  it("one below the floor (9 paired): still no figure on either surface", () => {
+    expect(computeBookAlphaBeta(book(9)).kind).toBe("below_floor");
+    expect(overview(9).comparators.btc.joint).toBeNull();
+  });
+
+  it.each([10, 30])("%i paired: the widget and the Overview show the same alpha", (n) => {
+    const widget = computeBookAlphaBeta(book(n));
+    expect(widget.kind).toBe("ok");
+    if (widget.kind !== "ok") return;
+    expect(widget.pairedCount).toBe(n);
+    const joint = overview(n).comparators.btc.joint!;
+    expect(widget.alpha).toBe(joint.alpha);
+    expect(widget.beta).toBe(joint.beta);
+
+    // One number: the widget's callout and the Overview's α cell render it.
+    const sign = joint.alpha >= 0 ? "+" : "";
+    const { unmount } = render(<AlphaBetaDecomposition data={book(n)} {...base} />);
+    expect(screen.getByText(`${sign}${(joint.alpha * 100).toFixed(1)}%`)).toBeTruthy();
+    expect(screen.getByText("annualized")).toBeTruthy();
+    unmount();
+    renderOverview(n);
+    const cell = screen.getByText("α vs BTC").parentElement!;
+    expect(within(cell).getByText(pctSigned(joint.alpha, 1))).toBeTruthy();
   });
 });

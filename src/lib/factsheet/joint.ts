@@ -3,6 +3,18 @@ import { mean } from "@/lib/portfolio-math-utils";
 import { beta as betaOf, dispersion, pearson, sharpe } from "@/lib/return-stats";
 
 /**
+ * 169.4 review SFH MEDIUM-4: the fewest PAIRED strategy/benchmark
+ * observations the joint statistics (alpha, beta, correlation, IR, ...) are
+ * shown on. Below it an annualized alpha is noise dressed as a figure: a
+ * 3-day book pairs 2 or 3 intervals and reads e.g. "+812% annualized". The
+ * factsheet comparator block (`buildComparatorBlock`, so the allocator
+ * Overview and every factsheet) and the Allocations alpha/beta widget both
+ * gate on THIS constant, so under D-69 the two surfaces show one number or
+ * neither does. 10 is the minimum the widget carried before 169.4.
+ */
+export const MIN_PAIRED_OBSERVATIONS = 10;
+
+/**
  * Port of `joint_metrics()` from `/tmp/gen_factsheet_v3.py`. Computes
  * strategy-vs-benchmark joint statistics on daily-return series of equal
  * length. Up/down capture is the ratio of cumulative strategy return to
