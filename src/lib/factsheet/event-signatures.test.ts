@@ -87,3 +87,61 @@ describe("computeEventSignatures", () => {
     }
   });
 });
+
+/**
+ * Phase 169.4 ALLOCTRUTH plan 05 (169.5 D-65, 169.4 D-70(1)): a comparator null is a
+ * day with no data, never a 0% day. An event whose verdict reads a null is skipped;
+ * a trace whose window reads a null is dropped, like an edge event. The
+ * trace reads the 28 daily returns at indices eventIdx-13 .. eventIdx+14 (the
+ * point at -14 is the close ending day eventIdx-14, so that day's own return is
+ * not part of any trace).
+ */
+describe("computeEventSignatures: a comparator null is skipped, never read as 0 (D-65, D-70(1))", () => {
+  const N = 80;
+  const J = 40; // the one null
+  const nullAsZero = (a: ReadonlyArray<number | null>) => a.map((r) => r ?? 0);
+
+  it("strategy-driven: a null in the benchmark drops exactly the benchmark traces that read it; equity traces are unchanged", () => {
+    const strat = Array.from({ length: N }, (_, i) => (i % 2 === 0 ? 0.01 : -0.01));
+    const benchDense = Array.from({ length: N }, (_, i) => (i % 3 === 0 ? 0.004 : -0.002));
+    const bench: Array<number | null> = benchDense.map((r, i) => (i === J ? null : r));
+    const eq = cumEq(strat);
+    const honest = computeEventSignatures(strat, bench, eq);
+    const dense = computeEventSignatures(strat, benchDense, eq);
+    // Window-eligible events are 14..65 (52). Those reading index 40 are 26..53 (28).
+    expect(dense.h1.winCount + dense.h1.lossCount).toBe(52);
+    expect(honest.h1.winCount + honest.h1.lossCount).toBe(52 - 28);
+    // The verdict reads only the strategy, so the eligible population is unchanged ...
+    expect(honest.h1.eligibleWinCount).toBe(dense.h1.eligibleWinCount);
+    // ... and so are the equity traces (the strategy carries no null).
+    expect(honest.h1.winOfEquity).toEqual(dense.h1.winOfEquity);
+    expect(honest.h7.lossOfEquity).toEqual(dense.h7.lossOfEquity);
+    // The same series 0-filled keeps all 52: the null would have been a flat day.
+    const zeroFilled = computeEventSignatures(strat, nullAsZero(bench), eq);
+    expect(zeroFilled.h1.winCount + zeroFilled.h1.lossCount).toBe(52);
+  });
+
+  it("benchmark-driven: an event at a null, an h7 event whose trailing 7 hold a null, and an equity trace reading a null are all skipped", () => {
+    // Every day +1% except one null: every surviving equity trace is exactly
+    // 1.01^(t-14) - 1, so any trace built across a 0-filled day shows up as a
+    // spread between p05 and p95.
+    const ret: Array<number | null> = Array.from({ length: N }, (_, i) => (i === J ? null : 0.01));
+    const out = computeEventSignatures(ret, ret, cumEq(nullAsZero(ret)));
+
+    // h1: the event AT the null is skipped (79 eligible), and the traces reading it
+    // are dropped (52 - 28 = 24 benchmark traces).
+    expect(out.h1.eligibleWinCount).toBe(N - 1);
+    expect(out.h1.eligibleLossCount).toBe(0);
+    expect(out.h1.winCount).toBe(24);
+    // h7: indices 6..79 have a trailing window (74); those whose trailing 7 hold
+    // index 40 are 40..46 (7), skipped rather than read as a 0% day.
+    expect(out.h7.eligibleWinCount).toBe(74 - 7);
+    // Equity traces: none reads the null, so every one is the exact +1% path.
+    for (const s of [out.h1.winOfEquity, out.h7.winOfEquity]) {
+      for (let t = 0; t < 29; t++) {
+        expect(s.p05[t], `t=${t}`).toBeCloseTo(s.p95[t], 12);
+        expect(s.mean[t], `t=${t}`).toBeCloseTo(Math.pow(1.01, t - 14) - 1, 12);
+      }
+    }
+  });
+});
