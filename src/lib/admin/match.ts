@@ -1,6 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { castRow, castRows } from "@/lib/supabase/cast";
+import { castRow, castRowOrNull, castRows } from "@/lib/supabase/cast";
 
 /**
  * Shared payload builder for the per-allocator Match Queue.
@@ -164,8 +164,8 @@ export async function getAllocatorMatchPayload(
   if (!batchRow) {
     return {
       profile: castRow<Record<string, unknown>>(profile, "profile"),
-      preferences:
-        castRow<Record<string, unknown> | null>(preferences ?? null, "preferences"),
+      // A missing preferences row is legitimate (`.maybeSingle()`); the old throwing castRow made /admin/match/<id> 500 for every allocator without one.
+      preferences: castRowOrNull<Record<string, unknown>>(preferences),
       batch: null,
       candidates: [],
       excluded: [],
@@ -228,8 +228,7 @@ export async function getAllocatorMatchPayload(
 
   return {
     profile: castRow<Record<string, unknown>>(profile, "profile"),
-    preferences:
-      castRow<Record<string, unknown> | null>(preferences ?? null, "preferences"),
+    preferences: castRowOrNull<Record<string, unknown>>(preferences),
     batch: batchRow,
     candidates: enrichWithAnalytics(candidates),
     excluded: enrichWithAnalytics(excluded),
