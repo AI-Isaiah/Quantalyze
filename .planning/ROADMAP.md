@@ -4195,13 +4195,20 @@ Plans:
 
 ⭐ **ROUTED IN 2026-09-30 (from Phase 169.5 D-65; user-facing): the api arm's synthesized panels must be null-honest about a missing comparator day.** 169.5-01 feeds `blend` / `buildAllocatorMetrics` and `computeEventSignatures` the comparator's returns with a null entered as 0 (one named local per series, commented `D-65`), so `SignaturePanels`, `CrossSignaturePanels` and `BatchDPanels` count a missing BTC day as a 0% day (at index 0 when database BTC differs from the bundled file, and over the two intervals around a dropped close). The fix here: those consumers skip or break on a null, never read it as a 0% day, pinned by a case that turns red under the 0-fill. Source: `169.5-CONTEXT.md` D-65; 169.5-05 records the boundary in its release known limits and observes the three panels in its browser re-check.
 
-**Plans:** 3 plans in 2 waves, one PR (split 2026-09-26, D-37): W1 169.4-01 RISKTAB, 169.4-02 ALLOCBENCH; W2 169.4-03 integration run + post-deploy browser re-check. Decisions carried in `169.4-CONTEXT.md`; no migration.
+**Revised 2026-09-30 (planner, revision mode; `169.4-CONTEXT.md` D-66 to D-72):** the plan set now also covers SC11, SC12 and the 169.5 D-65 routing above, reusing 169.5's `alignCoveredReturns` / `COMPARATOR_CALENDARS` and `readFactsheetBenchmark` (no second pairing or read). SC11 is met by pairing rather than by changing `pricesToDailyReturns` (D-66); the Scenario surfaces read BTC closes from a new public route `/api/benchmark/btc/prices`, and the returns route is removed (D-67); one Scenario pairing function replaces the inner join (D-68); the Overview and the alpha/beta widget read BTC through `readFactsheetBenchmark` (D-69); the signature and allocator panels skip or break on a null, each blend on its legs' common calendar, and **multi_asset annualizes on 252, superseding #597 BLEND-02's 365 for that panel** (D-70); the factsheet cache key moves v9 -> v10 (D-71). The old 169.4-03 (integration + re-check) is now 169.4-07, and its browser re-check runs after Phase 170 lands (founder, 2026-09-30; D-72). Anchors re-resolved at `f1ca32b56`. Surfaced for routing: the portfolio compute's BTC date intersection in `analytics-service/routers/portfolio.py`, and plan 169.1-01's order-gate token (`readBenchmarkPrices` -> `readFactsheetBenchmark` in `queries.ts`). No migration.
+**Plans (pre-revision, kept as lineage):** 3 plans in 2 waves, one PR (split 2026-09-26, D-37): W1 169.4-01 RISKTAB, 169.4-02 ALLOCBENCH; W2 169.4-03 integration run + post-deploy browser re-check. Decisions carried in `169.4-CONTEXT.md`; no migration.
+
+**Plans:** 7 plans in 3 waves, one PR (revised 2026-09-30, D-72): W1 169.4-01 RISKTAB, 169.4-02 ALLOCBENCH, 169.4-03 SCENBTC source, 169.4-05 SIGNULL; W2 169.4-04 SCENBTC switch, 169.4-06 BLENDNULL; W3 169.4-07 integration run + post-deploy browser re-check (after Phase 170). Decisions in `169.4-CONTEXT.md`; no migration.
 
 Plans:
 
-- [ ] 169.4-01-PLAN.md — Allocations Risk tab on the book series (SC2) (was 169-08)
-- [ ] 169.4-02-PLAN.md — allocator BTC feed and alpha/beta vs BTC (SC2, SC3) (was 169-11)
-- [ ] 169.4-03-PLAN.md — integration run + post-deploy browser re-check (SC9; this phase's items from old 12, verbatim)
+- [ ] 169.4-01-PLAN.md — Allocations Risk tab on the book series, keys named by one label rule (SC2) (was 169-08)
+- [ ] 169.4-02-PLAN.md — allocator Overview BTC through `readFactsheetBenchmark`, alpha/beta vs BTC on the comparator's pairing (SC2, SC3, D-69) (was 169-11)
+- [ ] 169.4-03-PLAN.md — BTC closes route and the one Scenario pairing function, additive (SC11, SC12, D-66 to D-68)
+- [ ] 169.4-04-PLAN.md — Scenario tab and share page switch to closes and the pairing; returns route removed (SC11, SC12, D-67)
+- [ ] 169.4-05-PLAN.md — event signatures break on a comparator null (D-65, D-70)
+- [ ] 169.4-06-PLAN.md — allocator blends on the legs' common calendar, unavailable form, cache key v10 (D-65, D-70, D-71)
+- [ ] 169.4-07-PLAN.md — integration run + post-deploy browser re-check after Phase 170 (SC9; was 169.4-03)
 
 ### Phase 169.4.1: OGSHARPE — the OG share card's Sharpe reads the one shared sharpe() (166.2) (INSERTED)
 
