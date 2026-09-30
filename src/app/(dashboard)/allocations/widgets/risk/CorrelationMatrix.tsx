@@ -52,8 +52,20 @@ function textColorForCorr(v: number): string {
   return Math.abs(v) > 0.5 ? "#FFFFFF" : "#1A1A2E";
 }
 
-interface StrategyReturns {
+/**
+ * Phase 169.4 D-75: a matrix row/column. `id` is the strategy's (or connected
+ * key's) stable id and is the React key; `name` is the FULL display label, the
+ * visible text and the `title`. Names are never cut in code: the header and
+ * row-label cells truncate with CSS (`truncate` + `maxWidth`) and keep the full
+ * name as the title. A code-side cut collapsed two keys on one exchange
+ * ("Binance — Main" / "Binance — Hedge") into one name and one React key.
+ */
+interface Label {
+  id: string;
   name: string;
+}
+
+interface StrategyReturns extends Label {
   // M-0215: keep dates so pairwise correlation aligns same-day returns.
   // normalizeDailyReturns returns date-sorted points, so `dates` is sorted.
   dates: string[];
@@ -107,7 +119,7 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
             if (id && name) nameMap[id] = name;
           }
         }
-        const n = keys.map((k) => (nameMap[k] ?? k).slice(0, 10));
+        const n: Label[] = keys.map((k) => ({ id: k, name: nameMap[k] ?? k }));
         return { names: n, matrix: m };
       }
     }
@@ -115,29 +127,27 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
     // Compute from daily returns
     const strategies: StrategyReturns[] = [];
     if (data?.strategies && Array.isArray(data.strategies)) {
-      for (const s of data.strategies) {
+      for (const [idx, s] of data.strategies.entries()) {
         const dr = normalizeDailyReturns(
           s?.strategy?.strategy_analytics?.daily_returns,
         );
         if (dr.length > 0) {
-          const name = (
-            s?.alias ??
-            s?.strategy?.codename ??
-            s?.strategy?.name ??
-            "?"
-          ).slice(0, 10);
+          const name =
+            s?.alias ?? s?.strategy?.codename ?? s?.strategy?.name ?? "?";
+          // The row index backs a row with no id, so a key is never shared.
+          const id = s?.strategy_id ?? s?.strategy?.id ?? `row-${idx}`;
           const dates: string[] = [];
           const dateMap = new Map<string, number>();
           for (const d of dr as DailyPoint[]) {
             dates.push(d.date);
             dateMap.set(d.date, d.value);
           }
-          strategies.push({ name, dates, dateMap });
+          strategies.push({ id, name, dates, dateMap });
         }
       }
     }
 
-    if (strategies.length === 0) return { names: [] as string[], matrix: [] as (number | null)[][] };
+    if (strategies.length === 0) return { names: [] as Label[], matrix: [] as (number | null)[][] };
 
     const n = strategies.length;
     const m: (number | null)[][] = Array.from({ length: n }, (_, i) =>
@@ -150,7 +160,10 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
         return pearson(av, bv);
       }),
     );
-    return { names: strategies.map((s) => s.name), matrix: m };
+    return {
+      names: strategies.map((s): Label => ({ id: s.id, name: s.name })),
+      matrix: m,
+    };
   }, [data]);
 
   if (names.length === 0) {
@@ -173,25 +186,25 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
               <th className="p-1" />
               {names.map((n) => (
                 <th
-                  key={n}
+                  key={n.id}
                   className="truncate p-1 font-sans font-medium"
                   style={{ color: "#4A5568", maxWidth: 80 }}
-                  title={n}
+                  title={n.name}
                 >
-                  {n}
+                  {n.name}
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
             {matrix.map((row, i) => (
-              <tr key={names[i]}>
+              <tr key={names[i].id}>
                 <td
                   className="truncate p-1 text-right font-sans font-medium"
                   style={{ color: "#4A5568", maxWidth: 80 }}
-                  title={names[i]}
+                  title={names[i].name}
                 >
-                  {names[i]}
+                  {names[i].name}
                 </td>
                 {row.map((val, j) =>
                   val === null ? (
@@ -206,7 +219,7 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
                         borderRadius: 2,
                       }}
                       title="Insufficient data"
-                      aria-label={`${names[i]} and ${names[j]}: no data`}
+                      aria-label={`${names[i].name} and ${names[j].name}: no data`}
                     >
                       —
                     </td>
@@ -221,7 +234,7 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
                         minWidth: 40,
                         borderRadius: 2,
                       }}
-                      aria-label={`${names[i]} and ${names[j]}: ${val.toFixed(2)} correlation`}
+                      aria-label={`${names[i].name} and ${names[j].name}: ${val.toFixed(2)} correlation`}
                     >
                       {val.toFixed(2)}
                     </td>

@@ -3,6 +3,7 @@
 import React, { type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
+import { pairedFloorReason } from "@/lib/factsheet/joint";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 // Phase 163 / HONEST-08 — the SERIES ladder (3d/7d) is shared with the
 // discovery-list badge, which must judge the same fact about the same rows.
@@ -451,9 +452,11 @@ export function FactsheetBody({
             {/* FINDING-2 (b06-silentfailure): Gate signatures on ingestSource === "api"
                 in addition to hasComparator. Event signatures stitch the internal BTC
                 fixture alongside the strategy returns; for CSV strategies with too few
-                observations aggregate() fills empty trace populations with all-zero
+                observations aggregate() filled empty trace populations with all-zero
                 arrays — fabricating a flat zero band line indistinguishable from a
-                real observation at 0% delta. Suppress for CSV to prevent false panels. */}
+                real observation at 0% delta. Suppress for CSV to prevent false panels.
+                (Phase 169.4 CR-01: aggregate() now returns null for an empty population
+                and the panels render the em-dash state; the api-arm gate stands.) */}
             {hasComparator && payload.ingestSource === "api" && (
               <CollapsibleSection
                 id="factsheet-signatures"
@@ -1442,6 +1445,10 @@ function KpiStrip() {
     ? null
     : headlineCoverageCaveat(payload.dataQuality, basis, "Cum. Return, CAGR and Calmar");
   const j = view.comparators[cmpKey].joint;
+  // 169.4 review round 2 (SFH-R2 MEDIUM-2): below the paired floor the joint is
+  // withheld, not absent. The α/IR cells stay (9 cells) and read "—", and one
+  // muted line under the strip names the cause in the widget's words.
+  const jointWithheld = j ? null : (view.comparators[cmpKey].jointWithheld ?? null);
   const cn = cmp.shortName;
 
   // 9 cells when a comparator is active (mockup contract). When NONE, the
@@ -1465,7 +1472,7 @@ function KpiStrip() {
     { label: "Max DD", value: pct(m.max_dd, 1), tone: maxDdTone(m.max_dd) },
     { label: "Ann. Vol", value: pct(m.ann_vol, 1) },
   ];
-  if (j && cmpKey !== "none") {
+  if ((j || jointWithheld) && cmpKey !== "none") {
     // F5 (phase 103) + Phase 107 (LEV-BB): α / β / IR FOLLOW the active basis AND
     // leverage via the view's joint (above), matching §IV. At L≠1 the view re-derives
     // the joint on the levered strategy leg (β→L·β / α→L·α honestly, jointMetrics on
@@ -1482,17 +1489,20 @@ function KpiStrip() {
     const suppressRelative =
       (basis === "mark_to_market" && !mtmBundlePresent) ||
       (basis === "smoothed_mtm" && !smoothedBundlePresent);
+    const shown = suppressRelative ? null : j;
     items.push({
       label: `α vs ${cn}`,
-      value: suppressRelative ? "—" : pctSigned(j.alpha, 1),
-      tone: suppressRelative ? undefined : signTone(j.alpha),
+      value: shown ? pctSigned(shown.alpha, 1) : "—",
+      tone: shown ? signTone(shown.alpha) : undefined,
     });
     items.push({
       label: `IR vs ${cn}`,
-      value: suppressRelative ? "—" : num(j.info_ratio),
-      tone: suppressRelative ? undefined : signTone(j.info_ratio),
+      value: shown ? num(shown.info_ratio) : "—",
+      tone: shown ? signTone(shown.info_ratio) : undefined,
     });
   }
+  const jointFloorReason =
+    jointWithheld && cmpKey !== "none" ? pairedFloorReason(cn, jointWithheld.paired, "record", jointWithheld.floor) : null;
   // Phase 52-06 / TYPE-04 — the strip reflows on ITS OWN width via `@container`
   // (`@`-prefixed variants), NOT the viewport. The KPI strip sits in the
   // factsheet body whose effective width varies (full ~1440 measure on the route
@@ -1594,6 +1604,15 @@ function KpiStrip() {
           </div>
         ))}
       </div>
+      {jointFloorReason && (
+        <p
+          className="px-3 sm:px-4 py-2 text-micro font-mono"
+          data-testid="joint-floor-reason"
+          style={{ borderTop: "1px solid var(--color-border)", color: "var(--color-text-muted)" }}
+        >
+          {jointFloorReason}
+        </p>
+      )}
       {/* Short-track caveat: annualized CAGR/Sharpe/Sortino/Calmar/Ann.Vol
           are statistically unreliable with fewer than 252 observations (~1y).
           Surface the same warning here at the hero strip so mobile users who
