@@ -1,9 +1,9 @@
 "use client";
 
 import { useMemo } from "react";
-import { usePayload, useActiveComparator } from "./factsheet-context";
+import { usePayload } from "./factsheet-context";
 import { BaseLeverageNote } from "./basis-context";
-import { SignatureEmptyPanel } from "./SignaturePanels";
+import { SignatureEmptyPanel, SIG_BENCH, BTC_OUTAGE_REASON, btcPricesUnavailable } from "./SignaturePanels";
 import type { EventSignature, EventSignaturesSet } from "@/lib/factsheet/types";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
@@ -36,7 +36,8 @@ const TRACE_LEN = WINDOW * 2 + 1;
 
 export function CrossSignaturesSection() {
   const payload = usePayload();
-  const { block: cmp } = useActiveComparator();
+  // Review round 2 CR-01: both sets are BTC (see SIG_BENCH), never the active comparator.
+  const btcUnavailable = btcPricesUnavailable(payload);
   // B6 — eventSignatures / benchEventSignatures live only on the "api" arm;
   // narrowing ingestSource unlocks them (a csv read is a compile error). The
   // parent gates this on ingestSource === "api", so these are type-safety
@@ -51,17 +52,17 @@ export function CrossSignaturesSection() {
       <BaseLeverageNote payload={payload} label="Cross-signature trajectories shown at base 1× leverage" />
       <CrossHorizon
         title="Returns Cross Signatures for 7 Days Horizon"
-        subtitle={`mean trajectory comparison · ±14d window · each panel overlays strategy-indexed mean (accent) vs ${cmp.shortName}-indexed mean (muted)`}
+        subtitle={`mean trajectory comparison · ±14d window · each panel overlays strategy-indexed mean (accent) vs ${SIG_BENCH}-indexed mean (muted)`}
         stratSet={payload.eventSignatures.h7}
         benchSet={payload.benchEventSignatures.h7}
-        benchName={cmp.shortName}
+        btcUnavailable={btcUnavailable}
       />
       <CrossHorizon
         title="Returns Cross Signatures for 1 Day Horizon"
         subtitle="same overlay applied to single-day win/loss events"
         stratSet={payload.eventSignatures.h1}
         benchSet={payload.benchEventSignatures.h1}
-        benchName={cmp.shortName}
+        btcUnavailable={btcUnavailable}
       />
     </section>
   );
@@ -72,13 +73,13 @@ function CrossHorizon({
   subtitle,
   stratSet,
   benchSet,
-  benchName,
+  btcUnavailable,
 }: {
   title: string;
   subtitle: string;
   stratSet: EventSignaturesSet;
   benchSet: EventSignaturesSet;
-  benchName: string;
+  btcUnavailable: boolean;
 }) {
   return (
     <div className="flex flex-col gap-4">
@@ -96,29 +97,29 @@ function CrossHorizon({
           </span>
           <span className="inline-flex items-center gap-1.5">
             <span aria-hidden className="inline-block w-3 h-0.5" style={{ background: "var(--color-text-muted)" }} />
-            <span className="text-text-2">{benchName} events</span>
+            <span className="text-text-2">{SIG_BENCH} events</span>
           </span>
         </div>
       </header>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
         <CrossSlot
-          title={`Win Event · of ${benchName}`}
+          title={`Win Event · of ${SIG_BENCH}`}
           stratMean={stratSet.winOfBenchmark}
           stratN={stratSet.benchWinCount}
           benchMean={benchSet.winOfBenchmark}
           benchN={benchSet.benchWinCount}
-          benchName={benchName}
-          view={`${benchName} prices`}
+          btcUnavailable={btcUnavailable}
+          view={`${SIG_BENCH} prices`}
           tone="positive"
         />
         <CrossSlot
-          title={`Loss Event · of ${benchName}`}
+          title={`Loss Event · of ${SIG_BENCH}`}
           stratMean={stratSet.lossOfBenchmark}
           stratN={stratSet.benchLossCount}
           benchMean={benchSet.lossOfBenchmark}
           benchN={benchSet.benchLossCount}
-          benchName={benchName}
-          view={`${benchName} prices`}
+          btcUnavailable={btcUnavailable}
+          view={`${SIG_BENCH} prices`}
           tone="negative"
         />
         <CrossSlot
@@ -127,7 +128,7 @@ function CrossHorizon({
           stratN={stratSet.winCount}
           benchMean={benchSet.winOfEquity}
           benchN={benchSet.winCount}
-          benchName={benchName}
+          btcUnavailable={btcUnavailable}
           view="returns"
           tone="positive"
         />
@@ -137,7 +138,7 @@ function CrossHorizon({
           stratN={stratSet.lossCount}
           benchMean={benchSet.lossOfEquity}
           benchN={benchSet.lossCount}
-          benchName={benchName}
+          btcUnavailable={btcUnavailable}
           view="returns"
           tone="negative"
         />
@@ -159,7 +160,7 @@ function CrossSlot({
   stratN,
   benchMean,
   benchN,
-  benchName,
+  btcUnavailable,
   view,
   tone,
 }: {
@@ -168,22 +169,28 @@ function CrossSlot({
   stratN: number;
   benchMean: EventSignature | null;
   benchN: number;
-  benchName: string;
+  btcUnavailable: boolean;
   view: string;
   tone: "positive" | "negative";
 }) {
   if (stratMean === null || benchMean === null) {
+    // Review round 2 CR-01: during a BTC outage every BTC event and every BTC
+    // trace is gone, so the missing side is BTC's prices, not window completeness
+    // (the allocator panel names the same cause in the same words).
+    if (btcUnavailable && benchMean === null) {
+      return <SignatureEmptyPanel title={title} reason={BTC_OUTAGE_REASON} />;
+    }
     const who =
       stratMean === null && benchMean === null
         ? "no event"
         : stratMean === null
           ? "no strategy event"
-          : `no ${benchName} event`;
+          : `no ${SIG_BENCH} event`;
     return <SignatureEmptyPanel title={title} reason={`${who} has a complete ±14-day window of ${view}`} />;
   }
   return (
     <CrossPanel
-      title={`${title} · ${stratN} strategy / ${benchN} ${benchName} events`}
+      title={`${title} · ${stratN} strategy / ${benchN} ${SIG_BENCH} events`}
       stratMean={stratMean}
       benchMean={benchMean}
       tone={tone}
