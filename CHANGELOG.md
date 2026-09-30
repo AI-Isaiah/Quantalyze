@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.113.0.1] - 2026-09-30 — BASELINE: automated re-dump after the PROD apply of a953d5b5
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `36679743686`, after the PROD apply of merge `a953d5b5`: sha256 `92b7d216…` → `43302190…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20260929120000_commit_scenario_batch_fingerprint_reader_set.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-09-30` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.113.0.0 → 0.113.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=283 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `36679743686` succeeded, and this entry was composed by the `redump-pr` job. Run `36679743686` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.113.0.0] - 2026-09-30 — ACCOUNTTRUTH C4: a disconnected account's history stays in the book up to its end day, and Open Positions shows each key's own latest read
 
 ⭐ **What changed for whoever reads this next.** Phase 167.1.2 (ACCOUNTTRUTH) PR C4 ships plans 09 (the departed-account history, D-05 / D-09) and 15 (Open Positions per key, D-16), then three review rounds (round 1 fix topics K1, K2a, K2b; round 2 topics R2A, R2B, R2C; round 3 confirmation only). The branch carries 51 commits of C4 work.
