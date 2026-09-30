@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.115.0.0] - 2026-09-30 — ALLOCTRUTH: the Allocations Risk tab and alpha/beta read the book's own series and the live BTC feed, the Scenario pairs with BTC closes through one function, and missing prices are "—", never 0%
+
+⭐ **What changed for whoever reads this next.** Phase 169.4 (ALLOCTRUTH) ships plans 01 to 08 and three code-review rounds. This entry covers the branch's 59 non-merge commits after `origin/main` `f1ca32b56`: the replan and three plan-check revisions (5), plans 01 to 08 with two founder checkpoints (35), three review rounds with their fix groups and reports (17), and the verification and security records (2). Merges of `origin/main` and of the fix branches are not counted.
+- The Allocations Risk tab computes risk decomposition and correlation from the book's own daily returns over the same per-key set as the Scenario, and names each key in full.
+- The alpha/beta widget measures the book against the same database BTC the Overview uses, through the factsheet's comparator pairing, so both show one number.
+- The Scenario tab and scenario share pages read BTC closing prices from a new public route and pair through one function that follows the engine's pairing rule; the BTC overlay starts at 1.0 on the scenario's first day.
+- Event signatures and the factsheet's allocator portfolios treat a missing price day as missing: no panel reads a gap as a 0% day.
+
+⚠️ **A second-digit bump (0.114.1.0 → 0.115.0.0) because figures move.** Alpha and beta on the Allocations page, the Scenario's vs-BTC statistics, the allocator-portfolio panels (60/40, Multi-Asset Risk Parity, Crypto Book) and the event signatures can all show different numbers, and some now show "—" where they showed a 0. The factsheet cache key moves v9 → v10, so no stored payload of the old shape is served. No migration. The public route `/api/benchmark/btc` is removed; `/api/benchmark/btc/prices` replaces it.
+
+### Changed
+- **Risk tab reads the book (plan 01, D-75).** `RiskTabPanel` shares the Overview's rebuilding state and renders only when the history is ready. Risk decomposition and the correlation matrix run over the Scenario's per-key set and label keys through one helper, `apiKeyLabelById` (`src/lib/api-key-label.ts`), keyed by id.
+- **Alpha/beta against the Overview's BTC (plan 02, D-69, D-77).** Database BTC rides the dashboard payload into the Overview's factsheet build, and the widget pairs with the comparator block's pairing. The BTC reader moved to `src/lib/factsheet/benchmark-read.ts` and is re-exported from `fetch-and-build-payload.ts`.
+- **One Scenario pairing (plans 03, 04, D-66, D-67).** `GET /api/benchmark/btc/prices` serves stored BTC closes (limiter first, public, no-store with a 503 on a read error). `pairScenarioWithBtc` is the only pairing, used by the vs-BTC section and the Stress & VaR beta; the date-intersection join is deleted. Both the composer and the share page parse the body with `parseBtcCloses` and treat an empty body as unavailable.
+- **The old returns route is gone (plan 08, D-67).** `/api/benchmark/btc`, its test and its limiter and registry entries are deleted. The Scenario composer names keys through `apiKeyLabelById`.
+- **Allocator portfolios on the legs' common calendar (plan 06, D-70, D-71; amended in review).** A blend date is a strategy date where every leg has a stored close, so a US-market holiday is not a blend date and BTC's move across it is carried. Multi-Asset Risk Parity annualises on 252 (founder ruling, D-70(3)); 60/40 stays 252 and Crypto Book 365. A blend with too few priced days shows "—" and a dated "Prices through" caption; a failed BTC read is captioned as a BTC outage.
+- **One paired-observation floor (review, D-69 amended).** Alpha, beta and IR need at least 10 days paired with the comparator, on every factsheet and on the alpha/beta widget. Below it they show "—" with one reason sentence.
+
+### Fixed
+- **Event signatures skip a missing BTC day (plan 05).** A trace whose window touches a missing day is dropped instead of reading it as 0%.
+- **Signature panels no longer contradict themselves (review round 1 CR-01).** Each panel is counted by its own events; an empty panel shows "—" and "Not measurable" with its cause instead of "0 wins · 0 losses" over a flat 0% line.
+- **Signature panels always say BTC (review round 2 CR-01).** Both signature sections were labelled with the selected comparator (e.g. SPX) while plotting BTC; a BTC outage now reads "BTC prices are unavailable right now", matching the allocator panel.
+- **Stress windows report what was examined (review rounds 1 and 2).** Tail windows are no longer silently dropped; the panel states how many 21-day windows it scanned, and with none examined or no stress window the count and tail figures are "—", not +0.00% or 0.
+- **The Scenario BTC overlay starts at the scenario's first date (review round 1 WR-01).** It was based on the first close of the whole served series and could sit 3–4× above the portfolio line.
+- **Scenario share page logs every BTC fetch failure** (status, malformed body, timeout, throw), never the share token.
+
+### Tests
+- Every plan and fix records a neuter (the fix reverted, the test RED, restored) in its SUMMARY or fix report.
+- The build-payload snapshot moves only under `allocatorPortfolios`, the new `benchWinCount`/`benchLossCount`, and `jointWithheld: null`; each moved key is explained in `169.4-REVIEW-FIX-A.md`, `-B.md` and `-R2-Y.md`.
+- The full frontend suite passes at the release head (one known timeout flake, green alone); `tsc` and eslint are clean.
+
+### Notes
+- **Planning records.** The phase was replanned for SC11, SC12, 169.5's D-65 and the shared alignment, and passed plan-check after three rounds. Two founder checkpoints were taken during execution (D-75 full key labels, D-77 the reader's module). D-69 and D-70 carry dated amendments for the decisions the review fixes made. Verification `human_needed` 11/12 (the browser half of SC9); security `threats_open: 0`.
+
+### Known limits
+- **The paired-floor sentence can read "this record has 0" without naming why.** With SPX selected on a strategy starting after the SPX prices end (2026-05-08), the cause is SPX's data ending, not a short record; the picker shows that date elsewhere on the page. Recorded in D-69.
+- **Share-page BTC fetch failures are logged, not alerted.**
+- **svg-chart-parity goldens are measured only in CI.**
+- **The post-deploy browser re-check is not done.** It is deferred until Phase 170 lands (founder, 2026-09-30).
+
 ## [0.114.1.0] - 2026-09-30 — SMALLFIXES: /recommendations tells a set, unset and unreadable mandate apart and never recommends your own strategy, /profile Exchanges counts only live keys and shows each account's balance once, and credential fields refuse saved-login autofill and pasted whitespace
 
 ⭐ **What changed for whoever reads this next.** Phase 169.3 (SMALLFIXES) ships plans 02 to 06 here, with three code-review rounds. Plan 01 (`/admin` Compute Jobs) shipped on its own in v0.97.0.1 (#868), and its commits are not counted again. This entry covers the 18 phase commits of plans 02 to 04 counted in the first draft of this entry, the release commit `105826d4f`, and the 40 commits after it (38 non-merge, two merges of the round-1 fix branches): plan 05's integration record, three review rounds and their fixes, plan 06 (the verification gap closure) with its planning and two plan-check revisions, one ROADMAP routing, the security and verification records. Merges of `origin/main` into the branch are not counted.
