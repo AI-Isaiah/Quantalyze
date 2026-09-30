@@ -16,7 +16,8 @@ import { computeStyleDrift } from "./style-drift";
 import { computePeerPercentile } from "./peer-cohort";
 import { annualizationPeriods } from "@/lib/closed-sets";
 import { pearson } from "@/lib/return-stats";
-import { blend, buildAllocatorMetrics } from "./allocator";
+import { alignBlend, buildAllocatorMetrics, comparatorLeg } from "./allocator";
+import type { BlendLeg } from "./allocator";
 import { streakLengths, streakHistogram } from "./streak";
 import { calmarByYear } from "./calmar-by-year";
 import { bootstrapCI } from "./bootstrap";
@@ -783,6 +784,20 @@ function buildFromBuildableSeries(
     // non-problem. (Frequency only affects the standard ERROR of the estimate,
     // not its expectation; more obs → tighter, if anything shrink crypto LESS.)
     const peer = computePeerPercentile(strategyMetrics.sharpe, strategyMetrics.sortino, strategyMetrics.max_dd);
+    // Phase 169.4 (169.5 D-65; D-70(2)-(4)): each allocator portfolio blend is built
+    // on its legs' COMMON calendar through `alignBlend` (the one alignment, every leg
+    // and the book), so a missing leg day, a weekday leg's weekend and every day past
+    // a fixture's last close is skipped or unpaired, never read as a 0% day. Each
+    // blend annualizes on its own calendar's basis; a blend with fewer than 2 usable
+    // days carries null figures and its `through` date.
+    const btcLeg = (weight: number): BlendLeg =>
+      "unavailable" in benchmarkPrices
+        ? comparatorLeg("btc", weight, [], [])
+        : comparatorLeg("btc", weight, benchmarkPrices.prices, benchmarkPrices.dropped);
+    const portfolioFigures = (legs: BlendLeg[]) => {
+      const a = alignBlend(dates, stratRet, legs);
+      return { ...buildAllocatorMetrics(a.returns, a.book, a.periodsPerYear, a.paired), through: a.through };
+    };
     return {
       ...common,
       ingestSource: "api",
@@ -799,34 +814,29 @@ function buildFromBuildableSeries(
           key: "sixty_forty",
           name: "60/40 Stocks/Bonds",
           composition: "60% S&P 500 · 40% IEF (US 10y Treasury)",
-          // #597 part 2 (BLEND-02): pure-tradfi legs (SPX + IEF) → √252. Passes
-          // NO basis arg on purpose — the buildAllocatorMetrics default keeps this
-          // panel BYTE-IDENTICAL to the pre-#597 math (the locked 252 case).
-          ...buildAllocatorMetrics(blend([0.6, 0.4], [spxRet, iefRet]), stratRet),
+          // D-70(3): pure-tradfi legs (SPX + IEF), weekday calendar → 252.
+          ...portfolioFigures([comparatorLeg("spx", 0.6, SPX_DAILY, []), comparatorLeg("ief", 0.4, IEF_DAILY, [])]),
         },
         {
           key: "multi_asset",
           name: "Multi-Asset Risk Parity",
           composition: "25% S&P 500 · 25% Gold · 25% IEF · 25% BTC",
-          // #597 part 2 (BLEND-02): the BTC leg makes the joined series
-          // calendar-daily → √365 under the blend rule (via the closed-set
-          // registry, kept greppable rather than a bare 365 literal).
-          ...buildAllocatorMetrics(
-            blend([0.25, 0.25, 0.25, 0.25], [spxRet, gldRet, iefRet, btcRet]),
-            stratRet,
-            annualizationPeriods("crypto"),
-          ),
+          // D-70(3): 252, was 365 under #597 BLEND-02. Founder ruling 2026-09-30
+          // ("Allow 252 here"): a narrow exception to BLEND-02 for this panel only,
+          // because its points are weekdays once weekend gaps are no longer 0-filled.
+          ...portfolioFigures([
+            comparatorLeg("spx", 0.25, SPX_DAILY, []),
+            comparatorLeg("gld", 0.25, GLD_DAILY, []),
+            comparatorLeg("ief", 0.25, IEF_DAILY, []),
+            btcLeg(0.25),
+          ]),
         },
         {
           key: "crypto_book",
           name: "Diversified Crypto Book",
           composition: "70% BTC · 30% ETH",
-          // #597 part 2 (BLEND-02): BTC + ETH legs → √365 under the blend rule.
-          ...buildAllocatorMetrics(
-            blend([0.7, 0.3], [btcRet, ethRet]),
-            stratRet,
-            annualizationPeriods("crypto"),
-          ),
+          // D-70(3): BTC + ETH legs, 7-day calendar → 365 (unchanged).
+          ...portfolioFigures([btcLeg(0.7), comparatorLeg("eth", 0.3, ETH_DAILY, [])]),
         },
       ],
       eventSignatures: computeEventSignatures(stratRet, btcAligned, cashBundle.strategyEquity),

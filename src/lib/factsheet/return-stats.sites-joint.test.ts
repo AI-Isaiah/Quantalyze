@@ -414,7 +414,8 @@ describe("T20 buildAllocatorMetrics correlation on return-stats (D-07, D-17)", (
     expect(Number.isFinite(onZeroLeg.sleeve_pct)).toBe(true);
     // With the MultiMarket leg flat, blend vol at sleeve w is (1-w) * annVol.
     const annVol = buildAllocatorMetrics(BENCH, zeros(N)).ann_vol;
-    expect(onZeroLeg.blend_vol).toBeCloseTo((1 - onZeroLeg.sleeve_pct) * annVol, 12);
+    // Non-null: both legs are fully present (Phase 169.4 D-70(4) nulls only a blend with < 2 usable days).
+    expect(onZeroLeg.blend_vol).toBeCloseTo((1 - onZeroLeg.sleeve_pct!) * annVol!, 12);
   });
 
   // SFH-M4 / IN-04: every figure is over one window, so unequal legs are refused
@@ -455,7 +456,7 @@ describe("T20 buildAllocatorMetrics correlation on return-stats (D-07, D-17)", (
       let cov = 0;
       for (let i = 0; i < N; i++) cov += (BENCH[i] - a.m) * (STRAT[i] - b.m);
       cov /= N;
-      expect(sig12(got.corr)).toBe(sig12(cov / (a.sd * b.sd)));
+      expect(sig12(got.corr!)).toBe(sig12(cov / (a.sd * b.sd)));
       expect(got.ann_vol).toBe(a.sd * Math.sqrt(ppy));
     }
   });
