@@ -125,3 +125,72 @@ describe("CR-01: BTC present — every panel charts and names its own N", () => 
     );
   });
 });
+
+/**
+ * Phase 169.4 review round 2 CR-01 (+ SFH-R2 MEDIUM-1): both signature payloads
+ * are BTC by construction (`build-payload.ts` `computeEventSignatures(stratRet,
+ * btcAligned, …)` and `benchEventSignatures` from `btcAligned`). Before the fix
+ * the panels took their label from the ACTIVE comparator, so with SPX picked
+ * they read "Win Event · of SPX · 86 events" over BTC trajectories, and during a
+ * BTC outage the em-dash reason blamed "SPX prices". These tests pick SPX through
+ * `activeComparator` (the provider seeds the picker from it) and assert that no
+ * rendered string names SPX, and that an outage is named as an outage.
+ */
+describe("R2 CR-01: the signatures are BTC whatever comparator is active", () => {
+  const spxActive = (p: FactsheetPayload) => ({ ...p, activeComparator: "spx" as const });
+
+  it("SignaturesSection with SPX active labels its benchmark panels BTC and never names SPX", () => {
+    const payload = makePayload();
+    const { container } = renderWith(spxActive(payload), <SignaturesSection />);
+    expect(container.textContent ?? "").not.toContain("SPX");
+    const sigs = payload.eventSignatures!;
+    expect(figureTitles(container)).toContain(`Win Event · of BTC · ${sigs.h7.benchWinCount} events`);
+    expect(figureTitles(container)).toContain(`Loss Event · of BTC · ${sigs.h7.benchLossCount} events`);
+  });
+
+  it("CrossSignaturesSection with SPX active names BTC in its subtitle, legend and counts, never SPX", () => {
+    const payload = makePayload();
+    const { container } = renderWith(spxActive(payload), <CrossSignaturesSection />);
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("SPX");
+    expect(text).toContain("BTC-indexed mean");
+    expect(text).toContain("BTC events");
+    const s = payload.eventSignatures!.h1;
+    const b = payload.benchEventSignatures!.h1;
+    expect(figureTitles(container)).toContain(
+      `Win Event · of BTC · ${s.benchWinCount} strategy / ${b.benchWinCount} BTC events`,
+    );
+  });
+
+  it("BTC outage with SPX active: every empty signature panel names the BTC outage, not SPX and not window completeness", () => {
+    const payload = makePayload({ benchmarkPrices: { unavailable: true } });
+    const { container } = renderWith(spxActive(payload), <SignaturesSection />);
+    expect(container.textContent ?? "").not.toContain("SPX");
+    const empty = Array.from(container.querySelectorAll("figure[data-signature-empty]"));
+    expect(empty).toHaveLength(4);
+    for (const f of empty) {
+      expect(f.textContent).toContain("Not measurable: BTC prices are unavailable right now.");
+      expect(f.textContent).not.toContain("±14-day window");
+    }
+  });
+
+  it("BTC outage with SPX active: all eight cross panels name the BTC outage, not SPX and not window completeness", () => {
+    const payload = makePayload({ benchmarkPrices: { unavailable: true } });
+    const { container } = renderWith(spxActive(payload), <CrossSignaturesSection />);
+    expect(container.textContent ?? "").not.toContain("SPX");
+    const empty = Array.from(container.querySelectorAll("figure[data-signature-empty]"));
+    expect(empty).toHaveLength(8);
+    for (const f of empty) {
+      expect(f.textContent).toContain("Not measurable: BTC prices are unavailable right now.");
+      expect(f.textContent).not.toContain("±14-day window");
+    }
+  });
+
+  it("BTC outage with BTC active: the reason is the outage, the same cause the allocator panel names", () => {
+    const payload = makePayload({ benchmarkPrices: { unavailable: true } });
+    const { container } = renderWith(payload, <SignaturesSection />);
+    for (const f of Array.from(container.querySelectorAll("figure[data-signature-empty]"))) {
+      expect(f.textContent).toContain("Not measurable: BTC prices are unavailable right now.");
+    }
+  });
+});
