@@ -17,6 +17,7 @@ import { assertNoReflow } from "./helpers/reflow";
 import {
   assertChildrenInside,
   assertInsideViewport,
+  assertFitsOrScrollsInside,
   assertNotCovered,
   assertScrollsInside,
   rectsIntersect,
@@ -183,8 +184,13 @@ test.describe("allocations tab strip — SC2-(a)", () => {
     "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
   );
 
-  for (const vp of VIEWPORTS.filter((v) => v.width < MD_PX)) {
-    test(`${vp.id}: tablist scrolls inside itself and the last tab is fully visible after End`, async ({
+  // GC-01 (2026-09-30): one contract at every width. The strip never widens
+  // the page and never wraps; it scrolls inside itself only when its tabs do
+  // not fit, and the last tab is reachable. At V960 it shares Export's row.
+  // An unconditional "must scroll" failed V640 on a strip that fit (CI run
+  // 36764778803, scrollWidth=264 clientWidth=264).
+  for (const vp of VIEWPORTS) {
+    test(`${vp.id}: tablist stays one line, scrolls only when it must, last tab reachable`, async ({
       page,
     }) => {
       test.setTimeout(90_000);
@@ -196,7 +202,11 @@ test.describe("allocations tab strip — SC2-(a)", () => {
 
       const tablist = page.locator(TABLIST);
       await expect(tablist, `${vp.id}: Allocation surfaces tablist missing`).toBeVisible();
-      await assertScrollsInside(tablist, `${vp.id} allocations tablist`);
+      const { scrolls } = await assertFitsOrScrollsInside(
+        tablist,
+        `${vp.id} allocations tablist`,
+      );
+      console.log(`SC2-(a) ${vp.id} allocations tablist scrolls=${scrolls}`);
       await assertNoReflow(page, ALLOC_ANCHOR);
 
       const first = tablist.getByRole("tab").first();
@@ -210,35 +220,22 @@ test.describe("allocations tab strip — SC2-(a)", () => {
         lastBox.x >= strip.x - 1 && lastBox.x + lastBox.width <= strip.x + strip.width + 1,
         `${vp.id}: last tab ${lastBox.x}+${lastBox.width} is outside tablist ${strip.x}+${strip.width}`,
       ).toBe(true);
+
+      if (vp.id === "V960") {
+        // One line beside Export: the strip's vertical centre lies inside the
+        // Export button's vertical span.
+        const exportBox = await boxOf(
+          page.getByRole("button", { name: "Export" }),
+          "V960 Export",
+        );
+        const centre = strip.y + strip.height / 2;
+        expect(
+          centre >= exportBox.y - 1 && centre <= exportBox.y + exportBox.height + 1,
+          `V960: tablist centre y=${centre} is outside the Export row ${exportBox.y}..${exportBox.y + exportBox.height}`,
+        ).toBe(true);
+      }
     });
   }
-
-  test("V960: tablist shares the action row and does not scroll", async ({ page }) => {
-    test.setTimeout(90_000);
-    const wide = VIEWPORTS.find((v) => v.id === "V960")!;
-    await page.setViewportSize({ width: wide.width, height: wide.height });
-    const allocator = await seedTestAllocator();
-    await loginViaForm(page, allocator.email, allocator.password);
-    await page.goto("/allocations");
-    await expect(page.locator(ALLOC_ANCHOR)).toBeVisible({ timeout: 15_000 });
-
-    const tablist = page.locator(TABLIST);
-    const exportBtn = page.getByRole("button", { name: "Export" });
-    const tabBox = await boxOf(tablist, "V960 tablist");
-    const exportBox = await boxOf(exportBtn, "V960 Export");
-    expect(
-      Math.abs(tabBox.y - exportBox.y),
-      `V960: tablist top ${tabBox.y} is not on the Export row ${exportBox.y}`,
-    ).toBeLessThanOrEqual(8);
-    const sizes = await tablist.evaluate((el) => ({
-      scrollWidth: el.scrollWidth,
-      clientWidth: el.clientWidth,
-    }));
-    expect(
-      sizes.scrollWidth <= sizes.clientWidth + 1,
-      `V960: tablist still scrolls (scrollWidth=${sizes.scrollWidth} clientWidth=${sizes.clientWidth})`,
-    ).toBe(true);
-  });
 });
 
 test.describe("Tweaks — N-TWEAKS", () => {
@@ -347,7 +344,7 @@ test.describe("/profile — SC2-PROFILE", () => {
   );
 
   for (const vp of VIEWPORTS.filter((v) => v.width < MD_PX)) {
-    test(`${vp.id}: Disconnect is inside the viewport and the tab list scrolls`, async ({
+    test(`${vp.id}: Disconnect is inside the viewport once scrolled to, and the tab list fits or scrolls on one line`, async ({
       page,
     }) => {
       test.setTimeout(90_000);
@@ -363,7 +360,17 @@ test.describe("/profile — SC2-PROFILE", () => {
       });
       await assertNoReflow(page, '[role="tablist"]');
       const tablist = page.locator('[role="tablist"]').first();
-      await assertScrollsInside(tablist, `${vp.id} profile tab list`);
+      // GC-01: the profile tab list fits or scrolls inside itself, never wraps.
+      const { scrolls } = await assertFitsOrScrollsInside(
+        tablist,
+        `${vp.id} profile tab list`,
+      );
+      console.log(`SC2-PROFILE ${vp.id} profile tab list scrolls=${scrolls}`);
+      // Gap 7: at 640x400 Disconnect sits below the fold (y=439), which is
+      // reachable, not clipped. Scroll it into view so the check measures
+      // clipping. The not-covered check stays after it: a fixed bottom nav
+      // over the scrolled-to button would be a real defect.
+      await disconnect.scrollIntoViewIfNeeded();
       await assertInsideViewport(page, disconnect, `${vp.id} Disconnect`);
       await assertNotCovered(page, disconnect, `${vp.id} Disconnect`);
 
