@@ -40,6 +40,14 @@ Out of scope: page copy. Typos, raw ids, test text, and label wording belong to 
 - A page-level horizontal scroll or a clipped primary action fails the phase. A contained scroller does not.
 - A deletion the founder wants after seeing the screenshots is recorded as a follow-up. This phase does not delete a panel.
 
+### Gap closure — orchestrator decisions, 2026-09-30
+
+Taken after `170-VERIFICATION.md` returned `gaps_found` at `650448ee` (CI run `36764778803`). Recorded here and, as one dated line, in the ROADMAP `### Phase 170` section (deviation policy: both places). Gap plans 170-15 to 170-20 cite them by id.
+
+- **GC-01 (2026-09-30) — tab strip contract (verification gap 3).** A tab list never makes the page scroll sideways. It scrolls inside itself ONLY when its tabs do not fit, and the last tab is always reachable. It never wraps into a second line of tabs. At V960 the Allocations tab list stays on ONE line and shares the action row with Export. Tests assert exactly this: scrolling is required only when `scrollWidth > clientWidth`, never unconditionally at 640 px. The same contract applies to the `/profile` tab list. This resolves the UI-SPEC self-contradiction (its classes switched the strip to wrap at `sm` = 640 px while its assertions required scrolling at 640 px) toward the contract; the UI-SPEC Scrollable Tab Strip row and its Assertions line are marked superseded 2026-09-30. It restates, and does not change, the locked Narrow-width decision above ("It does not wrap, and it does not widen the page").
+- **GC-02 (2026-09-30) — `/strategies` row at V640 (verification gap 4).** The row stacks below `md` (not `sm`), so at V640 the name block is full width and keeps at least 160 px. From `md` up it is one row with the control group at its natural width. A smaller change is acceptable only if a measurement shows it meets 160 px at V640; none is available before landing, so `md` is the planned change. The UI-SPEC N-STRAT Row, Control group and Assertions lines are marked superseded 2026-09-30 ("one row" now applies from `md` up, i.e. V960).
+- **GC-03 (2026-09-30) — the 320 px streak-distribution golden (verification gap 8).** Re-bake the `streak-distribution-portrait-320` golden through the CI `bake_svg_goldens` dispatch, review it, and commit only the PNGs that changed. The portrait test is NOT moved to 390 px in this phase.
+
 ### Claude's Discretion
 Class-level implementation inside the locked UI-SPEC contracts: which utility carries a hairline, how a test pin is worded, and how a residual offender is classified when the census names its file.
 
