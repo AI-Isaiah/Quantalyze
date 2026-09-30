@@ -275,11 +275,13 @@ describe("SC8 · /recommendations — one mandate branch drives the header and t
 });
 
 describe("SC8 / D-03 · /recommendations decides 'mandate set' with the /allocations rule", () => {
+  // Archetype and NOTHING else. The ticket size is null because the engine
+  // reads it (D-66): a saved ticket size would make this a scored mandate.
   const ARCHETYPE_ONLY = {
     mandate_archetype: "systematic trend, low turnover",
     max_weight: null,
     preferred_strategy_types: [],
-    target_ticket_size_usd: 1,
+    target_ticket_size_usd: null,
   };
   const MAX_WEIGHT_ONLY = {
     mandate_archetype: null,
@@ -292,6 +294,16 @@ describe("SC8 / D-03 · /recommendations decides 'mandate set' with the /allocat
     max_weight: null,
     preferred_strategy_types: ["trend"],
     target_ticket_size_usd: 1,
+  };
+
+  // A real mandate outside D-03's two fields: MandateForm autosaves each field
+  // on its own, so an allocator can hold exactly this row.
+  const DRAWDOWN_ONLY = {
+    mandate_archetype: null,
+    max_weight: null,
+    preferred_strategy_types: [],
+    target_ticket_size_usd: null,
+    max_drawdown_tolerance: 0.15,
   };
 
   async function expectNotSet() {
@@ -327,17 +339,57 @@ describe("SC8 / D-03 · /recommendations decides 'mandate set' with the /allocat
     await expectNotSet();
   });
 
-  it("MP5: for every case the page agrees with deriveMandateIsSet, the rule /allocations reads", async () => {
-    for (const row of [null, ARCHETYPE_ONLY, MAX_WEIGHT_ONLY, TYPES_ONLY]) {
+  it("MP5: for every case the page's mandate WORDING agrees with deriveMandateIsSet, the rule /allocations reads", async () => {
+    // D-66 split the two questions: the header wording is D-03's rule, the
+    // withhold is a wider one. So this compares the header, not the CTA.
+    for (const row of [null, ARCHETYPE_ONLY, MAX_WEIGHT_ONLY, TYPES_ONLY, DRAWDOWN_ONLY]) {
       seeded.prefs = row;
       seeded.prefsSelect = [];
       const { unmount } = await renderPage();
-      const pageSaysSet = screen.queryByText(CTA) === null;
+      const pageSaysSet = screen.queryByText(MANDATE_FIT_HEADER) !== null;
       expect(pageSaysSet, `page and /allocations disagree for ${JSON.stringify(row)}`).toBe(
         deriveMandateIsSet(row as Parameters<typeof deriveMandateIsSet>[0]),
       );
       unmount();
     }
+  });
+});
+
+describe("D-66 · the list is withheld only when NO engine-read preference is saved", () => {
+  // WHY (founder ruling 2026-09-30, WR-01): the engine scored this allocator's
+  // batch against their saved drawdown tolerance. Withholding it behind "set
+  // your mandate" hid a list built from the mandate they did set. The D-03
+  // wording stays, so the header still says no mandate is set.
+  it("EP1: only a drawdown tolerance — the list renders under the D-03 'No mandate is set yet' header, no CTA", async () => {
+    seeded.prefs = {
+      mandate_archetype: null,
+      max_weight: null,
+      preferred_strategy_types: [],
+      target_ticket_size_usd: null,
+      max_drawdown_tolerance: 0.15,
+    };
+    const { container } = await renderPage();
+
+    for (const name of NAMES) {
+      expect(screen.getByText(name), `${name} withheld from a scored mandate`).toBeTruthy();
+    }
+    expect(screen.queryByText(CTA)).toBeNull();
+    expect(container.textContent ?? "").toMatch(/No mandate is set yet/);
+    expect(screen.queryByText(MANDATE_FIT_HEADER)).toBeNull();
+  });
+
+  it("EP2: only empty lists (no exclusions, no styles) is no engine preference — the list is withheld", async () => {
+    seeded.prefs = {
+      mandate_archetype: null,
+      max_weight: null,
+      preferred_strategy_types: [],
+      excluded_exchanges: [],
+      style_exclusions: [],
+      target_ticket_size_usd: null,
+    };
+    const { container } = await renderPage();
+    expect(screen.getByText(CTA)).toBeTruthy();
+    expect(container.querySelector("ol")).toBeNull();
   });
 });
 
