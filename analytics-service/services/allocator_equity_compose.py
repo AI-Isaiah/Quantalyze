@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import date, datetime, timezone
 from typing import Any, NamedTuple
 
@@ -43,6 +43,7 @@ from services.allocator_equity_derive import (
     DegradeReason,
     KeyEquity,
     LedgerScalars,
+    Seam,
     _is_trustworthy,
     allocator_equity_curve,
     blend_concurrent_returns,
@@ -63,6 +64,9 @@ _SKIPPED_NONPOSITIVE_DENOMINATOR = "skipped_nonpositive_denominator"
 # coverage with no return row AND no flow (a gap in its csv_daily_returns). The
 # key's level is carried with r = 0, as before; the flag says it happened.
 _MISSING_RETURN_INSIDE_COVERAGE = "missing_return_inside_coverage"
+# Benign (167.1.2 plan 09, D-05). A departed key's history is in the book up to
+# its end day. Its leaving is an exit, never a return and never a carried level.
+_DEPARTED_HISTORY_INCLUDED = "departed_history_included"
 
 
 class PortfolioReturns(NamedTuple):
@@ -109,6 +113,7 @@ def _current_equity_weights(
 def portfolio_returns(
     per_key_equity: Mapping[str, KeyEquity],
     per_key_returns: Mapping[str, pd.Series],
+    departed_keys: Collection[str] = (),
 ) -> PortfolioReturns:
     """D-06 book returns: ``r_t = Σ_k E_{k,t−1}·r_{k,t} / Σ_k E_{k,t−1}``.
 
@@ -125,7 +130,10 @@ def portfolio_returns(
     replay unions them), so a day inside the key's coverage with NO level has
     neither a return row nor a flow: a gap. The key's level is carried with
     r = 0 there, as for a flow-only day, and the key-day is counted so the
-    caller can report it. Pure: no I/O.
+    caller can report it. ``departed_keys`` (167.1.2 plan 09, D-05) are keys
+    whose history ended on the last day of their (already clipped) series: they
+    are treated as rotated out, so on the next day they leave both sums instead
+    of carrying their last level. Pure: no I/O.
     """
     level_by_key: dict[str, dict[str, float]] = {}
     equity_by_key: dict[str, pd.Series] = {}
@@ -153,7 +161,7 @@ def portfolio_returns(
     # Same seam rule as allocator_equity_curve with no explicit seams: only a
     # DISJOINT coverage handoff is a rotation. An overlapped key that ends early
     # is still held, so its level carries (r = 0). A rotated-out key does not.
-    rotated_out: set[str] = set()
+    rotated_out: set[str] = set(departed_keys)
     for seam in segment_coverage(equity_by_key).seams:
         rotated_out.update(seam.prev_keys)
 
@@ -223,6 +231,59 @@ def portfolio_returns(
     return PortfolioReturns(rows, skipped, nonfinite, missing)
 
 
+def _clip_through(series: pd.Series, end_day: str) -> pd.Series:
+    """The part of an ISO-day series on or before ``end_day`` (order kept)."""
+    return series[[str(day) <= end_day for day in series.index]]
+
+
+def _departure_seams(
+    equity_by_key: Mapping[str, pd.Series],
+    departed: Collection[str],
+    already_rotated: Collection[str],
+) -> list[Seam]:
+    """One exit seam per departed key the coverage does not already rotate out.
+
+    ``allocator_equity_curve`` (frozen) carries a key past its last day unless a
+    seam names it in ``prev_keys``. A departed key that still overlaps a counted
+    key gets no seam from ``segment_coverage`` (the covering sets share a key),
+    so its last level would carry. This seam is how the frozen core's own
+    rotated-out rule expresses the exit: 0 after its last day. ``next_keys`` are
+    the keys that cover the next union day, all anchored, so the MEDIUM-6
+    stray-key guard holds. A key whose last day is the book's last day has no
+    exit inside the window and gets no seam.
+
+    Curve only. The ledger's seam formula books a redeployment into
+    ``next_keys``, which an exit is not; the caller books the exit as an outflow
+    instead."""
+    union = sorted({str(d) for s in equity_by_key.values() for d in s.index})
+    seams: list[Seam] = []
+    for key in sorted(departed):
+        if key in already_rotated or key not in equity_by_key:
+            continue
+        last = max(str(d) for d in equity_by_key[key].index)
+        later = [day for day in union if day > last]
+        if not later:
+            continue
+        nxt = later[0]
+        next_keys = tuple(
+            sorted(
+                k
+                for k, s in equity_by_key.items()
+                if nxt in {str(d) for d in s.index}
+            )
+        )
+        seams.append(
+            Seam(
+                prev_last_day=last,
+                next_first_day=nxt,
+                gap_days=(date.fromisoformat(nxt) - date.fromisoformat(last)).days - 1,
+                prev_keys=(key,),
+                next_keys=next_keys,
+            )
+        )
+    return seams
+
+
 def compose_allocator_equity(
     returns_by_key: Mapping[str, pd.Series],
     flows_by_key: Mapping[str, list[ExternalFlow]],
@@ -231,6 +292,7 @@ def compose_allocator_equity(
     *,
     benign_flag_tokens: Sequence[str] | None = None,
     degrade_reasons: Sequence[DegradeReason] | None = None,
+    departed_end_by_key: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compose the allocator display-row payload from real per-key inputs.
 
@@ -250,7 +312,18 @@ def compose_allocator_equity(
     before composing (167.1.2 C2 round 2: a shared account's history that could
     not be stitched). They join the payload's reasons like the core's own, so a
     BLOCKING one makes the curve untrustworthy; ``benign_flag_tokens`` never
-    can."""
+    can.
+
+    ``departed_end_by_key`` (167.1.2 plan 09, D-05 / D-09) maps a departed key
+    to the last ISO day its history counts. The key is replayed on its FULL
+    series (its anchor is the level on its own last return day), then its
+    levels, returns and flows are clipped to days ``<= end``. After that day it
+    is rotated out: it contributes nothing to the $-curve (an exit seam, see
+    ``_departure_seams``) and leaves both sums of ``payload.returns``, so its
+    leaving is never a return and its level is never carried. The ledger books
+    the exit as an outflow of its last level on the next union day. A live key
+    is never in this map, so the frozen core's math for live keys is unchanged."""
+    departed_end = dict(departed_end_by_key or {})
     reasons: set[DegradeReason] = set(degrade_reasons or ())
     flag_tokens: set[str] = set()
     _null_reasons = null_anchor_reasons or {}
@@ -315,11 +388,10 @@ def compose_allocator_equity(
     anchored_returns = {k: returns_by_key[k] for k in anchored_keys}
     anchored_flows = {k: list(flows_by_key.get(k, [])) for k in anchored_keys}
 
-    # ── Carry-in #2/#3: segment ONCE (asserts the ISO-day index — carry-in #3 fails
-    # loud here on a DatetimeIndex). ``seg.seams`` is the single shared seam list. ──
-    seg = segment_coverage(anchored_returns)
-
-    # Per-key $-equity backward replay (also asserts the ISO index per key).
+    # Per-key $-equity backward replay (asserts the ISO index per key). A
+    # departed key is replayed on its FULL series first: its anchor is its level
+    # on its own last return day, so clipping before the replay would hang that
+    # anchor on the wrong day.
     per_key_equity = {
         k: replay_key_equity(anchored_returns[k], anchored_flows[k], anchors_by_key[k])
         for k in anchored_keys
@@ -327,6 +399,40 @@ def compose_allocator_equity(
     for ke in per_key_equity.values():
         reasons |= ke.degrade_reasons
         flag_tokens |= _bool_flag_tokens(ke.flags)
+
+    # D-05 / D-09: clip each departed key to its end day (levels, returns and
+    # flows). A key with no level on or before that day has no history to
+    # show; it leaves the compose (the job never sends one, see D-09's rule).
+    departed_present: list[str] = []
+    for k in sorted(departed_end):
+        departed_ke = per_key_equity.get(k)
+        if departed_ke is None or departed_ke.equity is None:
+            continue
+        end = departed_end[k]
+        clipped = _clip_through(departed_ke.equity, end)
+        if len(clipped) == 0:
+            logger.warning(
+                "compose: a departed key has no level on or before its end day; "
+                "it is left out of the compose"
+            )
+            del per_key_equity[k]
+            anchored_keys.remove(k)
+            del anchored_returns[k]
+            del anchored_flows[k]
+            continue
+        per_key_equity[k] = KeyEquity(
+            clipped,
+            departed_ke.reason,
+            dict(departed_ke.flags),
+            departed_ke.degrade_reasons,
+        )
+        anchored_returns[k] = _clip_through(anchored_returns[k], end)
+        anchored_flows[k] = [f for f in anchored_flows[k] if str(f[0]) <= end]
+        departed_present.append(k)
+
+    # ── Carry-in #2/#3: segment ONCE (asserts the ISO-day index — carry-in #3 fails
+    # loud here on a DatetimeIndex). ``seg.seams`` is the single shared seam list. ──
+    seg = segment_coverage(anchored_returns)
 
     # ── Carry-in #1/#4: feed the blend ONE Segment at a time. Within a dense coverage
     # segment every covering key has a row every day, so exclusive_fill_days == 0
@@ -348,10 +454,34 @@ def compose_allocator_equity(
 
     # ── Carry-in #2: the SAME seg.seams feeds both the ledger and the curve. The
     # returns arg is mandatory for scalars.computable == True. ──
-    ledger = build_allocator_ledger(
-        anchored_flows, seg.seams, per_key_equity, anchored_returns
+    # D-05: a departed key that still overlaps a counted key has no coverage
+    # seam, so the curve gets an EXIT seam for it (the frozen core's rotated-out
+    # rule: 0 after its last day). The ledger keeps seg.seams — every rotation
+    # it books is the same one the curve sees — and books each exit as what it
+    # is, the key's last level leaving the book on the next union day.
+    rotated_by_coverage = {k for seam in seg.seams for k in seam.prev_keys}
+    exit_seams = _departure_seams(
+        {k: ke.equity for k, ke in per_key_equity.items() if ke.equity is not None},
+        departed_present,
+        rotated_by_coverage,
     )
-    alloc = allocator_equity_curve(per_key_equity, seams=seg.seams)
+    ledger_flows = {k: list(v) for k, v in anchored_flows.items()}
+    for seam in exit_seams:
+        (key,) = seam.prev_keys
+        equity = per_key_equity[key].equity
+        assert equity is not None  # only anchored keys get an exit seam
+        ledger_flows[key].append(
+            ExternalFlow(
+                utc_day_iso=seam.next_first_day,
+                usd_signed=-float(equity[seam.prev_last_day]),
+            )
+        )
+    ledger = build_allocator_ledger(
+        ledger_flows, seg.seams, per_key_equity, anchored_returns
+    )
+    alloc = allocator_equity_curve(
+        per_key_equity, seams=list(seg.seams) + exit_seams
+    )
     reasons |= alloc.degrade_reasons
     flag_tokens |= _bool_flag_tokens(alloc.flags)
 
@@ -389,7 +519,11 @@ def compose_allocator_equity(
     # D-06: the book curve's own returns. Not _current_equity_weights (static D1
     # shares weight history by today's mix). ``version`` 2 is the contract the
     # reader accepts; a payload without it is still the pre-D-06 $-curve.
-    book_returns = portfolio_returns(per_key_equity, anchored_returns)
+    book_returns = portfolio_returns(
+        per_key_equity, anchored_returns, departed_keys=departed_present
+    )
+    if departed_present:
+        flag_tokens.add(_DEPARTED_HISTORY_INCLUDED)
     returns_rows = book_returns.rows
     skipped_days = book_returns.skipped_nonpositive_days
     if book_returns.nonfinite_days:
