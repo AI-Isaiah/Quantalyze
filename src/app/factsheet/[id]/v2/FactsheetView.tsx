@@ -806,8 +806,15 @@ function NotEnoughDataPanel({ title, body }: { title: string; body: string }) {
  */
 export function OwnerUnpublishedNotice({
   hasActiveShare = false,
+  children,
 }: {
   hasActiveShare?: boolean;
+  /**
+   * Phase 170 C1-F3 — a last row INSIDE the notice box. Only
+   * `OwnerUnpublishedPanel` passes it (its share controls); absent, nothing
+   * renders, so the full-factsheet mount is byte-identical.
+   */
+  children?: React.ReactNode;
 }) {
   return (
     <section
@@ -832,6 +839,7 @@ export function OwnerUnpublishedNotice({
           share link to let someone view it without publishing.
         </p>
       )}
+      {children}
     </section>
   );
 }
@@ -877,20 +885,24 @@ export function OwnerUnpublishedPanel({
 
   return (
     <div className="mb-6">
-      <OwnerUnpublishedNotice hasActiveShare={shareLive} />
-      <div className="-mt-4 mb-2 flex flex-wrap items-center gap-2">
-        <ShareLinkButton
-          strategyId={strategyId}
-          ownerShare={{ hasActiveShare: shareLive }}
-          onShareLiveChange={setShareLive}
-        />
-        {shareLive && (
-          <ShareRevokeControl
+      {/* Phase 170 C1-F3 — the controls are the notice's own last row, one
+          layer, instead of a separate row pulled up under the box by a
+          negative margin. */}
+      <OwnerUnpublishedNotice hasActiveShare={shareLive}>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <ShareLinkButton
             strategyId={strategyId}
+            ownerShare={{ hasActiveShare: shareLive }}
             onShareLiveChange={setShareLive}
           />
-        )}
-      </div>
+          {shareLive && (
+            <ShareRevokeControl
+              strategyId={strategyId}
+              onShareLiveChange={setShareLive}
+            />
+          )}
+        </div>
+      </OwnerUnpublishedNotice>
       {shareNote && (
         <p className="mt-2 text-fixed-12 text-text-muted">{shareNote}</p>
       )}
@@ -1923,7 +1935,7 @@ function ShareLinkButton({
           ? "Copy a public, link-only factsheet URL — recipients see the same page with no outbound navigation"
           : "Copy a private, revocable link to this unpublished factsheet — anyone holding it can view this page until you revoke the link"
       }
-      className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] disabled:opacity-60"
+      className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] disabled:opacity-60"
     >
       {shareButtonLabel(phase, mode, hasActiveShare)}
     </button>
@@ -1991,14 +2003,14 @@ function ShareRevokeControl({
           type="button"
           autoFocus
           onClick={() => void confirmRevoke()}
-          className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+          className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
         >
           Revoke
         </button>
         <button
           type="button"
           onClick={() => setConfirming(false)}
-          className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm text-text-2 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+          className="px-2.5 py-1 text-caption rounded-sm text-text-2 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
         >
           Keep link
         </button>
@@ -2015,7 +2027,7 @@ function ShareRevokeControl({
           setConfirming(true);
         }}
         title="Turn off the private share link — anyone holding it loses access immediately"
-        className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+        className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
       >
         Revoke link
       </button>
@@ -2181,7 +2193,7 @@ function ControlBar({
                 type="button"
                 onClick={resetLeverage}
                 aria-label="Reset leverage to 1×"
-                className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+                className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
               >
                 Reset 1×
               </button>
@@ -2273,10 +2285,23 @@ function ControlBar({
         type="button"
         onClick={resetView}
         title="Reset comparator + visible window to defaults (toggles, persisted layout stay)"
-        className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+        className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
       >
         Reset view
       </button>
+      {/* Phase 170 C1-F2 — Compare sits BEFORE the share controls, so the
+          private-link control is the last action ahead of ComparatorPicker. The
+          bar is `flex flex-wrap`, so it wraps and never overlaps content. */}
+      {!scenarioMode && !shareMode && (
+        <a
+          href={`/compare?ids=${payload.strategyId}`}
+          onClick={() => trackFactsheetEvent("factsheet_v2_compare_click", { strategy_id: payload.strategyId })}
+          title="Compare this strategy against another (multi-strategy overlay)"
+          className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
+        >
+          Compare strategies
+        </a>
+      )}
       {/* Phase 164 (SHARE-04) — a RECIPIENT must never see this control. It
           rebuilds the URL from `window.location` as `<origin><pathname>?share=1`,
           which on the token route would hand out a Copy-Link button that strips
@@ -2302,16 +2327,6 @@ function ControlBar({
           onShareLiveChange={onShareLiveChange}
         />
       )}
-      {!scenarioMode && !shareMode && (
-        <a
-          href={`/compare?ids=${payload.strategyId}`}
-          onClick={() => trackFactsheetEvent("factsheet_v2_compare_click", { strategy_id: payload.strategyId })}
-          title="Compare this strategy against another (multi-strategy overlay)"
-          className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
-        >
-          Compare strategies
-        </a>
-      )}
       <ComparatorPicker />
     </section>
   );
@@ -2328,7 +2343,7 @@ function DisplayMenu() {
   const activeCount = (darkMode ? 1 : 0) + (colorblind ? 1 : 0) + (regimes ? 1 : 0);
   return (
     <details className="relative">
-      <summary className="list-none cursor-pointer px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center gap-1">
+      <summary className="list-none cursor-pointer px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center gap-1">
         Display
         {activeCount > 0 && (
           <span
