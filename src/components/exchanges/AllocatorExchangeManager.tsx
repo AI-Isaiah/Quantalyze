@@ -213,10 +213,14 @@ function formatRelative(iso: string | null): string {
  * One rule picks the row that reads the account now, among the group's live
  * keys (`isLiveKey`, the departed predicate the count uses): a WORKING key
  * (`isWorkingHolder`, the D-18 rule the share note uses) before a
- * live-but-failing one, then an unmarked key (a holder) before a marked one,
- * then the lowest id. Working is the proxy for the freshest read: nothing on
- * the row dates the stored balance (`last_sync_at` is the trades cursor). A
- * group with no live key has no bearer, so none of its rows shows a balance.
+ * live-but-failing one, then a key holding a balance before one with none yet
+ * (review round 2 WR-02: a freshly connected key has no balance until its
+ * first sync, and must not hide its twin's), then an unmarked key (a holder)
+ * before a marked one, then the lowest id. Working is the proxy for the
+ * freshest read: nothing on the row dates the stored balance (`last_sync_at`
+ * is the trades cursor), so a failing key's stale number never beats a
+ * working key. A group with no live key has no bearer, so none of its rows
+ * shows a balance.
  *
  * Returns the bearer per group; `groupOf` maps a key to its group.
  */
@@ -234,8 +238,9 @@ function balanceBearers(
       k.account_share_kind === "composite_member") &&
     k.account_shared_with_api_key_id !== null &&
     k.account_shared_with_api_key_id !== k.id;
-  const rank = (k: ExchangeConnection): [number, number, string] => [
+  const rank = (k: ExchangeConnection): [number, number, number, string] => [
     isWorkingHolder(k) ? 0 : 1,
+    k.account_balance_usdt == null ? 1 : 0,
     isMarked(k) ? 1 : 0,
     k.id,
   ];
@@ -243,7 +248,8 @@ function balanceBearers(
     const [ra, rb] = [rank(a), rank(b)];
     if (ra[0] !== rb[0]) return ra[0] < rb[0];
     if (ra[1] !== rb[1]) return ra[1] < rb[1];
-    return ra[2] < rb[2];
+    if (ra[2] !== rb[2]) return ra[2] < rb[2];
+    return ra[3] < rb[3];
   };
   const bearerByGroup = new Map<string, ExchangeConnection>();
   for (const k of activeKeys) {

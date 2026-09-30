@@ -448,6 +448,50 @@ describe("AllocatorExchangeManager — one balance per account identity (D-74)",
     expect(elsewhereNote("First Binance")).toBe("Balance shown on Second Binance");
   });
 
+  // Review round 2 WR-02 / R2-SFH-02 (D-74 amendment, 2026-09-30): a freshly
+  // connected key is working and unmarked with no balance yet (the stamper-lag
+  // window). Picked on id alone it read "Balance —" while the row holding the
+  // number pointed at it, so the account showed its balance zero times.
+  it("a working key with a balance carries it before a lower-id working twin with none", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-a", label: "New Binance", venue_account_id: "V-1", sync_status: "idle", account_balance_usdt: null }),
+          makeKey({ id: "key-b", label: "Old Binance", venue_account_id: "V-1", account_balance_usdt: 5_000 }),
+        ]}
+      />,
+    );
+    expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
+    expect(readOnlyLine("Old Binance")).toBe("binance · Read-only · Balance $5,000");
+    expect(readOnlyLine("New Binance")).toBe("binance · Read-only");
+    expect(elsewhereNote("New Binance")).toBe("Balance shown on Old Binance");
+    expect(screen.queryByText(/Balance —/)).toBeNull();
+  });
+
+  it("a marked working key with a balance carries it before an unmarked working key with none", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-a", label: "New Binance", venue_account_id: "V-1", sync_status: "idle", account_balance_usdt: null }),
+          makeKey({ id: "key-b", label: "Gone Holder", venue_account_id: "V-1", disconnected_at: "2026-06-10T15:30:00Z" }),
+          makeKey({
+            id: "key-c",
+            label: "Dup Binance",
+            account_balance_usdt: 5_000,
+            account_share_kind: "duplicate",
+            account_shared_with_api_key_id: "key-b",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
+    expect(readOnlyLine("Dup Binance")).toBe("binance · Read-only · Balance $5,000");
+    expect(elsewhereNote("New Binance")).toBe("Balance shown on Dup Binance");
+    expect(screen.queryByText(/Balance —/)).toBeNull();
+  });
+
   it("a key on a different venue account keeps its own balance and gets no note", () => {
     render(
       <AllocatorExchangeManager
