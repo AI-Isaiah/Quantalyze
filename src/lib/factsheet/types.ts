@@ -275,23 +275,30 @@ export type OwnBookDeltaPayload = {
   book_n: number;
 };
 
-/** Single demo allocator portfolio with precomputed sleeve + tail metrics. */
+/**
+ * Single demo allocator portfolio with precomputed sleeve + tail metrics.
+ * Phase 169.4 D-70(4): every measured figure is null when the blend has fewer
+ * than 2 usable days on its legs' common calendar; the panel renders the em-dash
+ * with a dated "prices through" caption, never a number.
+ */
 export type AllocatorPortfolioPayload = {
   key: string;
   name: string;
   composition: string;
-  ann_vol: number;
-  cum_ret: number;
-  max_dd: number;
+  ann_vol: number | null;
+  cum_ret: number | null;
+  max_dd: number | null;
   /** NaN (null after a JSON round-trip) when the correlation is undefined (D7). */
-  corr: number;
-  sleeve_pct: number;
-  blend_vol: number;
+  corr: number | null;
+  sleeve_pct: number | null;
+  blend_vol: number | null;
   vol_target: number;
-  tail_count: number;
-  tail_mm_mean: number;
-  tail_mm_median: number;
-  tail_mm_pos: number;
+  tail_count: number | null;
+  tail_mm_mean: number | null;
+  tail_mm_median: number | null;
+  tail_mm_pos: number | null;
+  /** The last close every leg of the blend carries (D-70(4)); null when a leg has none. */
+  through: string | null;
 };
 
 /** One year of monthly compounded returns. byMonth has 12 slots (Jan..Dec); null = no obs. */
