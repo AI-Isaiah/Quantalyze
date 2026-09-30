@@ -1236,6 +1236,12 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                 fg: "#475569",
               };
               const shareNote = accountShareNote(key, keysById, "Disconnect");
+              // Phase 169.3 plan 03 (SC7): the balance is the ACCOUNT's, so it
+              // renders once. A key the share note names as reading another
+              // working key's account shows the note instead (167.1.2 D-11,
+              // D-18). A departed key shows none: nothing on the row dates its
+              // last good read (last_sync_at is the trades cursor).
+              const showBalance = shareNote === null && isLiveKey(key);
               return (
                 <div
                   key={key.id}
@@ -1254,8 +1260,10 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                       {key.label}
                     </p>
                     <p className="text-fixed-10 text-text-muted uppercase tracking-wider mt-0.5">
-                      {key.exchange} · Read-only · Balance{" "}
-                      {formatUsd(key.account_balance_usdt)}
+                      {key.exchange} · Read-only
+                      {showBalance
+                        ? ` · Balance ${formatUsd(key.account_balance_usdt)}`
+                        : null}
                     </p>
                     {key.exchange === "mt5" && (
                       <p className="text-xs text-text-secondary font-metric mt-0.5">
