@@ -44,6 +44,7 @@ import {
   departedAnchorOf,
   departedHistoryCard,
   isDepartedKey,
+  isLiveKey,
   type DepartedAnchor,
   type DepartedHistoryKey,
 } from "@/lib/departed-history";
@@ -1173,6 +1174,11 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   // tell a departed holder (no note) from a missing one.
   const keysById = new Map(keys.map((k) => [k.id, k]));
   const disconnectedKeys = keys.filter((k) => k.disconnected_at !== null);
+  // Phase 169.3 plan 03 (SC7): "N connected" counts LIVE keys only, by
+  // 167.1.2's one departed predicate (D-09). A revoked or inactive key that
+  // was never disconnected keeps its row above (its pill, its departed-history
+  // card, its Disconnect), but it reads no account, so it is not connected.
+  const connectedCount = activeKeys.filter(isLiveKey).length;
 
   // DOGFOOD-2: only assert an active allocation when holdings actually back it.
   // When keys are connected but allocator_holdings is empty, show an honest
@@ -1185,12 +1191,12 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   // neutral "connected" subtitle that asserts nothing about the book state.
   const connectedSubtitle =
     hasHoldings === true
-      ? `${activeKeys.length} connected · Active Allocation auto-synced`
+      ? `${connectedCount} connected · Active Allocation auto-synced`
       : hasHoldings === null
-        ? `${activeKeys.length} connected`
+        ? `${connectedCount} connected`
         : anySyncing
-          ? `${activeKeys.length} connected · first sync in progress`
-          : `${activeKeys.length} connected · no open positions yet`;
+          ? `${connectedCount} connected · first sync in progress`
+          : `${connectedCount} connected · no open positions yet`;
 
   return (
     <div className="mt-6 space-y-4">
