@@ -12,6 +12,8 @@ import { AccreditedInvestorGate } from "@/components/legal/AccreditedInvestorGat
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
+import { deriveMandateIsSet } from "@/lib/queries";
+import type { AllocatorOwnPreferences } from "@/lib/preferences";
 
 // Mirror /discovery/layout.tsx — the attestation gate must NEVER be cached.
 export const dynamic = "force-dynamic";
@@ -74,11 +76,17 @@ export default async function RecommendationsPage() {
   // read their own allocator_preferences row).
   const { data: preferences } = await supabase
     .from("allocator_preferences")
-    .select("mandate_archetype, target_ticket_size_usd")
+    .select("max_weight, preferred_strategy_types")
     .eq("user_id", user.id)
     .maybeSingle();
 
-  const mandateSet = Boolean(preferences?.mandate_archetype);
+  // Phase 169.3 D-03: the same rule /allocations uses. It reads the fields the
+  // match engine consumes; the free-text mandate_archetype is never read by it.
+  // The select projects exactly the two columns deriveMandateIsSet reads, so the
+  // narrowing cast to its full-row parameter type hides no field it touches.
+  const mandateSet = deriveMandateIsSet(
+    (preferences ?? null) as AllocatorOwnPreferences | null,
+  );
 
   // Fetch batch meta + top-3 candidates via SECURITY DEFINER RPCs
   // (migration 019). Each RPC enforces "caller is the allocator or admin"
