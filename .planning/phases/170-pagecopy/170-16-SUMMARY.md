@@ -127,6 +127,7 @@ every component rendered inside a subtree.
 | ScenarioCompareTable ("Scenario comparison") | none | n/a | none |
 | ScenarioComposer ("Strategies and weights") | 2 header-label overlays `absolute inset-0` (one per list header) | a `relative shrink-0` span inside the region | none. They were already inside the scroller |
 | ScenarioComposer (same) | sr-only `<label>`s `weight-${k.id}`, `leverage-${k.id}`, `weight-${a.id}`, `leverage-${a.id}` | before the fix, none (initial containing block) | **now clipped by the region. This is the intended fix** |
+| ScenarioComposer (same) | lowercase renderers called inside the rows. The subtree scan could not see these, so I scanned their definitions separately. `renderNotional` has the sr-only `{labelText} notional.` span and the sr-only cause note. `renderDollarInput` has the sr-only `AUM_UNSET_REMEDY` span and the sr-only `alloc-usd-${ref}` label. `renderTargetInput` has the sr-only `target-dd-${ref}` label. `renderModeToggle` and `renderSolveState` have no absolute or sr-only sites | before the fix, none (initial containing block) | **now clipped by the region, which is the intended fix.** The notional sr-only span is the `SPAN` in the fixture's `also=` list |
 | ScenarioComposer (same) | children TrustTierLabel, CoverageStateChip, YoursChip, Link | no absolute sites | none |
 | CorrelationMatrix ("Correlation matrix") | none | n/a | none |
 | AllocatorMatchQueue ("Match candidates", "Excluded strategies", "Decision history") | `thead sticky top-0 z-10` (sticky, not absolute); ScoreCell has none | n/a | none. Sticky keeps this region as its scroll container, and z-index auto on the region creates no stacking context |
@@ -147,6 +148,12 @@ positioned layer, in tree order. Absolute or fixed sites outside the regions in 
 files: only the StrategyTable cue, a later sibling that still paints on top. The other matches
 were `text-fixed-*` false positives. An app-wide search for z-auto dropdowns
 (`absolute … top-full` with no `z-`) found none.
+
+**`offsetParent` side effect, checked.** `relative` also makes the region the `offsetParent` of
+its non-positioned descendants. I grepped `offset(Top|Left|Parent)` over the 11 consumer files,
+`src/components/strategy`, `src/components/notes` and the allocations components, and found no
+reads. StrategyTable's cue uses `scrollWidth`/`clientWidth`, and the Tooltip uses
+`getBoundingClientRect`. Neither is affected.
 
 ## Post-land must-have (orchestrator, first e2e-seeded run after the gap plans land)
 
