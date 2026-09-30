@@ -16,7 +16,7 @@ import { deriveMandateIsSet } from "@/lib/queries";
 import type { AllocatorOwnPreferences } from "@/lib/preferences";
 
 /**
- * Phase 169.3 D-66 (founder ruling 2026-09-30, WR-01): the allocator_preferences
+ * Phase 169.3 D-73 (founder ruling 2026-09-30, WR-01): the allocator_preferences
  * fields the match engine reads when it scores a batch. Measured in
  * analytics-service/services/match_engine.py (eligibility, preference, capacity
  * and mandate fit) and routers/match.py (holding flags), against the
@@ -145,7 +145,7 @@ export default async function RecommendationsPage() {
     : deriveMandateIsSet(prefsRow as unknown as AllocatorOwnPreferences | null)
       ? "set"
       : "unset";
-  // Phase 169.3 D-66 (WR-01): the list is withheld only when the engine scored
+  // Phase 169.3 D-73 (WR-01): the list is withheld only when the engine scored
   // the batch on defaults alone, i.e. NO engine-read preference is saved. An
   // allocator with only a drawdown tolerance keeps the D-03 "No mandate is set
   // yet" wording and still sees the list their tolerance was scored against.
@@ -358,7 +358,7 @@ export default async function RecommendationsPage() {
           CR-01: an UNKNOWN mandate (the read failed) is neither branch. It
           shows a neutral notice and then whatever the batch holds; it never
           withholds the list or says no mandate is set.
-          D-66 (founder, 2026-09-30): the withhold reads a WIDER rule than the
+          D-73 (founder, 2026-09-30): the withhold reads a WIDER rule than the
           header. It fires only when no engine-read preference is saved, so an
           allocator whose saved mandate lives outside max_weight / strategy
           types sees the list under the D-03 "No mandate is set yet" header. */}

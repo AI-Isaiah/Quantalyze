@@ -276,7 +276,7 @@ describe("SC8 · /recommendations — one mandate branch drives the header and t
 
 describe("SC8 / D-03 · /recommendations decides 'mandate set' with the /allocations rule", () => {
   // Archetype and NOTHING else. The ticket size is null because the engine
-  // reads it (D-66): a saved ticket size would make this a scored mandate.
+  // reads it (D-73): a saved ticket size would make this a scored mandate.
   const ARCHETYPE_ONLY = {
     mandate_archetype: "systematic trend, low turnover",
     max_weight: null,
@@ -340,7 +340,7 @@ describe("SC8 / D-03 · /recommendations decides 'mandate set' with the /allocat
   });
 
   it("MP5: for every case the page's mandate WORDING agrees with deriveMandateIsSet, the rule /allocations reads", async () => {
-    // D-66 split the two questions: the header wording is D-03's rule, the
+    // D-73 split the two questions: the header wording is D-03's rule, the
     // withhold is a wider one. So this compares the header, not the CTA.
     for (const row of [null, ARCHETYPE_ONLY, MAX_WEIGHT_ONLY, TYPES_ONLY, DRAWDOWN_ONLY]) {
       seeded.prefs = row;
@@ -355,7 +355,7 @@ describe("SC8 / D-03 · /recommendations decides 'mandate set' with the /allocat
   });
 });
 
-describe("D-66 · the list is withheld only when NO engine-read preference is saved", () => {
+describe("D-73 · the list is withheld only when NO engine-read preference is saved", () => {
   // WHY (founder ruling 2026-09-30, WR-01): the engine scored this allocator's
   // batch against their saved drawdown tolerance. Withholding it behind "set
   // your mandate" hid a list built from the mandate they did set. The D-03
