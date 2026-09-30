@@ -10715,7 +10715,9 @@ describe("ScenarioComposer — Phase 147 SCEN-01 honest empty state (SC4)", () =
     });
 
     const chip = within(addedRow()).getByText("No data");
-    expect(chip.className).toContain("text-text-muted");
+    // Phase 170-10: the grey data-state chip reads as secondary text on the track
+    // (AA contrast; muted on bg-track was 4.34:1 at 11px).
+    expect(chip.className).toContain("text-text-secondary");
     expect(chip.className).toContain("bg-track");
     expect(appliedNegativeTokens(addedRow())).toEqual([]);
     // Non-vacuous: the scanner DOES see this row's classes (it finds the
