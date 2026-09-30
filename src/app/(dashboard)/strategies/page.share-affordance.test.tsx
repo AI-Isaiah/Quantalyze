@@ -275,11 +275,16 @@ describe("StrategiesPage — the share control is always present (SHARE-04)", ()
 });
 
 describe("StrategiesPage — N-STRAT row layout (170-05)", () => {
-  it("stacks below sm, wraps tags whole, and keeps the name link textContent equal to the name", async () => {
+  it("stacks below md, wraps tags whole, and keeps the name link textContent equal to the name", async () => {
     // WHY: at V390 the private-link control overlapped the name, and a
-    // hyphenated word broke at its hyphen. The row stacks below sm; each
-    // word and each tag stays whole. textContent must equal the name
-    // exactly — noteOf() matches a.textContent === strategyName (PC-5).
+    // hyphenated word broke at its hyphen. Each word and each tag stays
+    // whole. textContent must equal the name exactly — noteOf() matches
+    // a.textContent === strategyName (PC-5).
+    // GC-02 (2026-09-30): the stack breakpoint moved from sm to md ON
+    // PURPOSE. At V640 the sm row put the full-width control group beside
+    // the name and left the name block 142 px (CI run 36764778803); stacking
+    // until md keeps it full width (>= 160 px). So the row and the control
+    // group carry md: utilities, and none of the five may come back on sm:.
     state.strategies = [
       {
         ...row("s-layout", "draft"),
@@ -291,8 +296,11 @@ describe("StrategiesPage — N-STRAT row layout (170-05)", () => {
     const container = await renderPage();
     const rowEl = container.querySelector('[data-testid="strategy-row"]')!
       .firstElementChild as HTMLElement;
-    expect(rowEl.className).toContain("flex-col");
-    expect(rowEl.className).toContain("sm:flex-row");
+    const rowTokens = rowEl.className.split(/\s+/);
+    expect(rowTokens).toContain("flex-col");
+    for (const token of ["md:flex-row", "md:items-center", "md:justify-between"]) {
+      expect(rowTokens).toContain(token);
+    }
 
     const link = container.querySelector("a")!;
     expect(link.textContent).toBe("Alpha Long-Short Beta");
@@ -307,8 +315,23 @@ describe("StrategiesPage — N-STRAT row layout (170-05)", () => {
     }
 
     const group = rowEl.lastElementChild as HTMLElement;
-    expect(group.className).toContain("flex-wrap");
-    expect(group.className).toContain("sm:shrink-0");
+    const groupTokens = group.className.split(/\s+/);
+    expect(groupTokens).toContain("flex-wrap");
+    for (const token of ["md:ml-4", "md:shrink-0"]) {
+      expect(groupTokens).toContain(token);
+    }
+
+    // GC-02: none of the five layout utilities may sit on the sm: prefix.
+    const smLayout = [
+      "sm:flex-row",
+      "sm:items-center",
+      "sm:justify-between",
+      "sm:ml-4",
+      "sm:shrink-0",
+    ];
+    for (const token of [...rowTokens, ...groupTokens]) {
+      expect(smLayout).not.toContain(token);
+    }
   });
 });
 
