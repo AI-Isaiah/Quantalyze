@@ -1246,7 +1246,8 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   // 167.1.2's one departed predicate (D-09). A revoked or inactive key that
   // was never disconnected keeps its row above (its pill, its departed-history
   // card, its Disconnect), but it reads no account, so it is not connected.
-  const connectedCount = activeKeys.filter(isLiveKey).length;
+  const liveKeys = activeKeys.filter(isLiveKey);
+  const connectedCount = liveKeys.length;
   // WR-02 / SFH-04: one row per exchange account carries its balance.
   const balanceBearers = balanceBearingKeyIds(activeKeys);
 
@@ -1254,19 +1255,27 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   // When keys are connected but allocator_holdings is empty, show an honest
   // state instead — either the first sync is still in flight, or no positions
   // are open. anySyncing distinguishes those two cases.
-  const anySyncing = activeKeys.some((k) => k.sync_status === "syncing");
+  // Review round 1 WR-03 / SFH-03: read over LIVE keys, like the count, so an
+  // inactive key left in `syncing` cannot claim a first sync for the book.
+  const anySyncing = liveKeys.some((k) => k.sync_status === "syncing");
   // DOGFOOD-2 FIX 2 (fail-loud): hasHoldings === null means the holdings
   // head-count failed server-side. Do NOT fall through to "no open positions
   // yet" (an affirmative-negative the failed count cannot support) — show a
   // neutral "connected" subtitle that asserts nothing about the book state.
+  // WR-03 / SFH-03: with no live key (every remaining row revoked or
+  // inactive) nothing reads the account, so the line asserts nothing about
+  // syncing or positions; allocator_holdings outlives its keys, so a true
+  // hasHoldings there would read "auto-synced" over a frozen book.
   const connectedSubtitle =
-    hasHoldings === true
-      ? `${connectedCount} connected · Active Allocation auto-synced`
-      : hasHoldings === null
-        ? `${connectedCount} connected`
-        : anySyncing
-          ? `${connectedCount} connected · first sync in progress`
-          : `${connectedCount} connected · no open positions yet`;
+    connectedCount === 0
+      ? "0 connected"
+      : hasHoldings === true
+        ? `${connectedCount} connected · Active Allocation auto-synced`
+        : hasHoldings === null
+          ? `${connectedCount} connected`
+          : anySyncing
+            ? `${connectedCount} connected · first sync in progress`
+            : `${connectedCount} connected · no open positions yet`;
 
   return (
     <div className="mt-6 space-y-4">

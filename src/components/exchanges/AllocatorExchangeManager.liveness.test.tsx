@@ -154,13 +154,47 @@ describe("AllocatorExchangeManager — the connected count is live keys only (SC
     expect(screen.getByText("Gone Bybit")).toBeTruthy();
   });
 
+  // 169.3 review round 1 WR-03 / SFH-03: with no live key the header asserts
+  // nothing about the book. "no open positions yet", "auto-synced" and "first
+  // sync in progress" each describe a key that reads the account, and none does.
   it("a lone revoked key reads '0 connected' above its row, never the empty state", () => {
     render(
       <AllocatorExchangeManager hasHoldings={false} initialKeys={[REVOKED]} />,
     );
-    expect(subtitle()).toBe("0 connected · no open positions yet");
+    expect(subtitle()).toBe("0 connected");
     expect(screen.queryByText("No exchanges connected yet.")).toBeNull();
     expect(keyRow("Revoked OKX")).toBeTruthy();
+  });
+});
+
+describe("AllocatorExchangeManager — the header suffix reads live keys only (WR-03)", () => {
+  it("a lone revoked key with holdings still on file never reads 'auto-synced'", () => {
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[REVOKED]} />);
+    expect(subtitle()).toBe("0 connected");
+    expect(subtitle()).not.toMatch(/auto-synced/);
+  });
+
+  it("a lone inactive key left in syncing never reads 'first sync in progress'", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={false}
+        initialKeys={[makeKey({ id: "key-off", label: "Off Deribit", is_active: false, sync_status: "syncing" })]}
+      />,
+    );
+    expect(subtitle()).toBe("0 connected");
+  });
+
+  it("an inactive key in syncing does not make a live key's book read 'first sync in progress'", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={false}
+        initialKeys={[
+          LIVE,
+          makeKey({ id: "key-off", label: "Off Deribit", is_active: false, sync_status: "syncing" }),
+        ]}
+      />,
+    );
+    expect(subtitle()).toBe("1 connected · no open positions yet");
   });
 });
 
