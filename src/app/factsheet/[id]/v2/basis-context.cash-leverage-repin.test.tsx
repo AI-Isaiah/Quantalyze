@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
-import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
+import { deriveSeriesBundle, fixtureBenchmarkPrices } from "@/lib/factsheet/build-payload";
 import { BasisProvider, leverageEligibleFor, useBasis, useBasisSeriesView } from "./basis-context";
 import { LeverageProvider, useLeverage } from "./leverage-context";
 
@@ -55,7 +55,13 @@ const CASH_SCALARS = {
 /** What the levered client re-derive gives at L=2, with no persisted overlay. */
 const LEVERED_CLIENT = deriveSeriesBundle(
   STRAT.map((r, i) => ({ date: DATES[i], value: 2 * r })),
-  { periodsPerYear: 365, isArithmetic: false, markets: ["BTC"], strategyName: "Test Strategy" },
+  {
+    periodsPerYear: 365,
+    isArithmetic: false,
+    markets: ["BTC"],
+    strategyName: "Test Strategy",
+    benchmarkPrices: fixtureBenchmarkPrices([STRAT.map((r, i) => ({ date: DATES[i], value: r }))]),
+  },
 ).strategyMetrics;
 
 function makeCashPayload(o: { withPersistedCash?: boolean } = {}): FactsheetPayload {

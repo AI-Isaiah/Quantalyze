@@ -13,7 +13,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { useEffect } from "react";
 import { render } from "@testing-library/react";
-import { buildFactsheetPayload, deriveSeriesBundle } from "@/lib/factsheet/build-payload";
+import { buildFactsheetPayload, deriveSeriesBundle, fixtureBenchmarkPrices } from "@/lib/factsheet/build-payload";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 
 import { formatRecordLength } from "@/lib/factsheet/record-length";
@@ -280,6 +280,7 @@ describe("the record length follows the selected basis at every site (WR-03)", (
       isArithmetic: false,
       markets: [],
       strategyName: "Record Length Test",
+      benchmarkPrices: fixtureBenchmarkPrices([series(Array.from({ length: 180 }, (_, i) => 220 + i))]),
     });
     const payload = {
       ...cash,
