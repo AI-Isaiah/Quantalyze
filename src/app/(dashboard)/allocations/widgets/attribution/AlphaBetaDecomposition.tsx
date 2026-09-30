@@ -6,7 +6,7 @@ import { normalizeDailyReturns, compound } from "@/lib/portfolio-math-utils";
 import { dispersion } from "@/lib/return-stats";
 import { annualizationPeriods } from "@/lib/closed-sets";
 import { alignCoveredReturns, COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
-import { jointMetrics, MIN_PAIRED_OBSERVATIONS } from "@/lib/factsheet/joint";
+import { jointMetrics, MIN_PAIRED_OBSERVATIONS, pairedFloorReason } from "@/lib/factsheet/joint";
 import { ALLOCATOR_PORTFOLIO_ASSET_CLASS } from "@/lib/factsheet/allocator-portfolio-payload";
 import {
   BarChart,
@@ -185,7 +185,7 @@ function AlphaBetaDecompositionInner({ data }: { data: AlphaBetaWidgetData } & B
           </span>
         </div>
         <p className="px-3 text-xs text-text-muted">
-          {`Alpha and beta need at least ${result.floor} days paired with BTC; this book has ${result.pairedCount}.`}
+          {pairedFloorReason("BTC", result.pairedCount, "book", result.floor)}
         </p>
       </div>
     );

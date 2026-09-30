@@ -177,7 +177,8 @@ describe("AlphaBetaDecomposition — the book against BTC (169.4-02, D-69)", () 
  * "+812% annualized". D-69 makes this widget and the Overview show one number,
  * so both gate on ONE constant, `MIN_PAIRED_OBSERVATIONS` in `joint.ts`: the
  * widget in `computeBookAlphaBeta`, the Overview in `buildComparatorBlock`
- * (a null joint, the factsheet's existing absence: no α/IR cells, no §IV).
+ * (a null joint with `jointWithheld` set: the α/IR cells and §IV read "—" and
+ * name the paired count, review round 2 SFH-R2 MEDIUM-2).
  * Below the floor neither shows a figure; at it both show the same one.
  */
 describe("AlphaBetaDecomposition — the shared paired-observation floor (169.4 SFH MEDIUM-4, D-69)", () => {
@@ -234,14 +235,26 @@ describe("AlphaBetaDecomposition — the shared paired-observation floor (169.4 
     unmount();
 
     expect(overview(3).comparators.btc.joint).toBeNull();
+    expect(overview(3).comparators.btc.jointWithheld).toEqual({ paired: 3, floor: 10 });
+    // Review round 2 (SFH-R2 MEDIUM-2): the Overview no longer drops the α cell
+    // and §IV silently. Both stay, read "—" (still no figure, D-69) and give the
+    // widget's cause, with "record" for "book".
     renderOverview(3);
-    expect(screen.queryByText("α vs BTC")).toBeNull();
-    expect(screen.queryByText("Alpha (ann)")).toBeNull();
+    const cell = screen.getByText("α vs BTC").parentElement!;
+    expect(cell.querySelectorAll("p")[1].textContent).toBe("—");
+    const alphaRow = screen.getByText("Alpha (ann)").closest("tr")!;
+    expect(within(alphaRow).getAllByRole("cell")[1].textContent).toBe("—");
+    const reasons = screen.getAllByTestId("joint-floor-reason");
+    expect(reasons).toHaveLength(2);
+    for (const r of reasons) {
+      expect(r.textContent).toBe("Alpha and beta need at least 10 days paired with BTC; this record has 3.");
+    }
   });
 
   it("one below the floor (9 paired): still no figure on either surface", () => {
     expect(computeBookAlphaBeta(book(9)).kind).toBe("below_floor");
     expect(overview(9).comparators.btc.joint).toBeNull();
+    expect(overview(9).comparators.btc.jointWithheld).toEqual({ paired: 9, floor: 10 });
   });
 
   it.each([10, 30])("%i paired: the widget and the Overview show the same alpha", (n) => {
@@ -249,6 +262,7 @@ describe("AlphaBetaDecomposition — the shared paired-observation floor (169.4 
     expect(widget.kind).toBe("ok");
     if (widget.kind !== "ok") return;
     expect(widget.pairedCount).toBe(n);
+    expect(overview(n).comparators.btc.jointWithheld).toBeNull();
     const joint = overview(n).comparators.btc.joint!;
     expect(widget.alpha).toBe(joint.alpha);
     expect(widget.beta).toBe(joint.beta);
@@ -260,6 +274,7 @@ describe("AlphaBetaDecomposition — the shared paired-observation floor (169.4 
     expect(screen.getByText("annualized")).toBeTruthy();
     unmount();
     renderOverview(n);
+    expect(screen.queryByTestId("joint-floor-reason")).toBeNull();
     const cell = screen.getByText("α vs BTC").parentElement!;
     expect(within(cell).getByText(pctSigned(joint.alpha, 1))).toBeTruthy();
   });
