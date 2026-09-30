@@ -131,10 +131,14 @@ export type ComparatorBlock = {
     "cum_ret" | "cagr" | "ann_vol" | "sharpe" | "sortino" | "calmar" | "max_dd" | "longest_dd"
     | "mtd" | "ytd" | "p3m" | "p6m" | "p1y" | "win_rate" | "profit_factor"> | null;
   joint: JointMetrics | null;
-  /** Comparator's own cumulative equity (strategy line stays in payload.strategyEquity). */
-  cumulative: number[] | null;
-  /** Strategy ÷ comparator (rebased to 1.0 at start). Only series in the cumVsBench chart. */
-  cumVsBench: number[] | null;
+  /**
+   * Comparator's own cumulative equity (strategy line stays in payload.strategyEquity).
+   * Phase 169.5-02 (SC3, D-09): null at an index the comparator has no return for,
+   * so the chart breaks the line there.
+   */
+  cumulative: Array<number | null> | null;
+  /** Strategy ÷ comparator (rebased to 1.0 at start). Only series in the cumVsBench chart. Null where `cumulative` is. */
+  cumVsBench: Array<number | null> | null;
   /** Comparator's own daily returns aligned to strategy dates. */
   dailyReturns: number[] | null;
   /** Comparator's own rolling 6mo annualized vol. Nulls during warmup. */
@@ -143,8 +147,8 @@ export type ComparatorBlock = {
   rollingSharpe: Array<number | null> | null;
   /** Comparator's own rolling 6mo Sortino. Nulls during warmup. */
   rollingSortino: Array<number | null> | null;
-  /** Vol-matched bench equity: bench returns scaled to strategy's ann vol, then cumEq. */
-  volMatched: number[] | null;
+  /** Vol-matched bench equity: bench returns scaled to strategy's ann vol, then cumEq. Null where `cumulative` is. */
+  volMatched: Array<number | null> | null;
   /** Display label for the vol-matched series, e.g., "BTC × 0.10". */
   volMatchedLabel: string | null;
   /** Strategy ÷ bench rolling 90d β. Nulls during warmup. */

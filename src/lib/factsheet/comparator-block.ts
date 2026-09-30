@@ -23,6 +23,24 @@ import { rollingVol, rollingSharpe, rollingSortino, rollingBeta } from "./rollin
  * and the comparator's basis; it is not recomputed here). `jointMetrics` stays
  * on the strategy's `periodsPerYear` over the PAIRED indices (166.4 D-A). A
  * window (MTD, YTD, 3M, 6M, 1Y) ending after `through` is null, never +0.00%.
+ *
+ * Phase 169.5 plan 02 (SC3, D-09, D-21, D-59 as amended, D-60 fix, D-64): the
+ * CHART per-day arrays are null wherever the helper's return is null, so no chart
+ * draws a flat comparator line over dates it has no prices for:
+ *   - `cumulative` / `volMatched` compound the covered returns only and are null
+ *     at an uncovered index (the level resumes from its last value after a gap);
+ *     `cumVsBench` is null where `cumulative` is;
+ *   - `rollingVol` / `rollingSharpe` / `rollingSortino` are, at an index at or past
+ *     the warm-up whose own return is non-null, the `rolling.ts` statistic over the
+ *     NON-NULL returns of the same strategy-date window, on `benchPeriodsPerYear`;
+ *     null when the index is uncovered or the window holds fewer than 2 points;
+ *   - `rollingBeta` (a joint series, no annualization basis) is, at a PAIRED index
+ *     at or past the warm-up, `rolling.ts` `rollingBeta` over the window's PAIRED
+ *     indices only, both legs compacted over the same indices; null when the index
+ *     is unpaired or the window holds fewer than 2 paired points. On a dense, fully
+ *     paired series the compaction is a no-op.
+ * `dailyReturns` keeps its `number[]` type with an uncovered day entered as 0
+ * until 169.5-04 (D-21).
  */
 export function buildComparatorBlock(
   label: string,
@@ -70,12 +88,13 @@ export function buildComparatorBlock(
         )
       : null;
 
-  // The per-day arrays keep their type and today's arithmetic (an uncovered day
-  // enters them as 0) until 169.5-02 (chart arrays) and 169.5-04 (dailyReturns).
+  // D-21: `dailyReturns` keeps an uncovered day as 0 until 169.5-04.
   const filled = benchReturns.map(r => r ?? 0);
-  const cumulative = cumEq(filled);
+  const coveredEquity = cumEq(coveredReturns);
+  const cumulative = scatterCovered(benchReturns, coveredEquity);
   const cumVsBench = stratEquity.map((s, i) => {
     const b = cumulative[i];
+    if (b == null) return null;
     return b !== 0 ? s / b : 1;
   });
   // Vol-match: scale bench returns so its annualized vol equals strategy's,
@@ -83,7 +102,8 @@ export function buildComparatorBlock(
   // D-59: the scale inherits the comparator basis through benchSummary.ann_vol
   // (a switched input, no new ratio: D-36, the compute-once gate holds).
   const vmScale = benchSummary && benchSummary.ann_vol > 0 ? stratAnnVol / benchSummary.ann_vol : 1;
-  const volMatched = cumEq(filled.map(r => r * vmScale));
+  const scaledCovered = coveredReturns.map(r => r * vmScale);
+  const volMatched = scatterCovered(benchReturns, cumEq(scaledCovered));
   return {
     name: label,
     shortName: short,
@@ -110,14 +130,85 @@ export function buildComparatorBlock(
     cumulative,
     cumVsBench,
     dailyReturns: filled,
-    rollingVol: rollingVol(filled, rollWindowDays),
-    rollingSharpe: rollingSharpe(filled, rollWindowDays),
-    rollingSortino: rollingSortino(filled, rollWindowDays),
+    rollingVol: rollingOverCovered(benchReturns, rollWindowDays, w => rollingVol(w, w.length, benchPeriodsPerYear)),
+    rollingSharpe: rollingOverCovered(benchReturns, rollWindowDays, w => rollingSharpe(w, w.length, benchPeriodsPerYear)),
+    rollingSortino: rollingOverCovered(benchReturns, rollWindowDays, w => rollingSortino(w, w.length, benchPeriodsPerYear)),
     volMatched,
     volMatchedLabel: `${short} × ${vmScale.toFixed(2)}`,
-    rollingBeta: rollingBeta(stratReturns, filled, rollBetaWindowDays),
+    rollingBeta: rollingBetaOverPaired(stratReturns, aligned, rollBetaWindowDays),
     through: aligned.through,
   };
+}
+
+/**
+ * Phase 169.5-02 (SC3, D-09) — place the per-covered-index values `perCovered`
+ * (one per non-null entry of `returns`, in order) back on the full axis, null at
+ * every uncovered index.
+ */
+function scatterCovered(returns: ReadonlyArray<number | null>, perCovered: readonly number[]): Array<number | null> {
+  let j = 0;
+  return returns.map(r => (r == null ? null : perCovered[j++]));
+}
+
+/**
+ * Phase 169.5-02 (D-59 as amended) — a comparator rolling statistic over each
+ * window's NON-NULL returns only: at an index at or past the warm-up whose own
+ * return is non-null, `stat` (a `rolling.ts` helper called with the compacted
+ * slice's length as its window) over the non-null returns in the same
+ * strategy-date window, taking its last value; null when the index is uncovered or
+ * the window holds fewer than 2 points. A closed-market null never enters a window
+ * as a 0% day.
+ */
+function rollingOverCovered(
+  returns: ReadonlyArray<number | null>,
+  window: number,
+  stat: (w: number[]) => Array<number | null>,
+): Array<number | null> {
+  const out: Array<number | null> = new Array(returns.length).fill(null);
+  for (let i = window - 1; i < returns.length; i++) {
+    if (returns[i] == null) continue;
+    const w: number[] = [];
+    for (let k = i - window + 1; k <= i; k++) {
+      const r = returns[k];
+      if (r != null) w.push(r);
+    }
+    if (w.length < 2) continue;
+    out[i] = stat(w)[w.length - 1];
+  }
+  return out;
+}
+
+/**
+ * Phase 169.5-02 (D-60 fix, D-64) — rolling beta over PAIRED intervals only: at a
+ * paired index at or past the warm-up, `rolling.ts` `rollingBeta` over the
+ * window's paired indices (strategy and comparator compacted over the SAME
+ * indices), taking its last value; null when the index is unpaired or the window
+ * holds fewer than 2 paired points. A closed-market day, an unpaired
+ * Friday-to-Monday interval and an interval spanning a missing benchmark date
+ * (166.4 review WR-01) never enter a beta window.
+ */
+function rollingBetaOverPaired(
+  stratReturns: readonly number[],
+  aligned: CoveredAlignment,
+  window: number,
+): Array<number | null> {
+  const n = Math.min(stratReturns.length, aligned.returns.length);
+  const out: Array<number | null> = new Array(n).fill(null);
+  for (let i = window - 1; i < n; i++) {
+    if (!aligned.paired[i] || aligned.returns[i] == null) continue;
+    const ws: number[] = [];
+    const wb: number[] = [];
+    for (let k = i - window + 1; k <= i; k++) {
+      const b = aligned.returns[k];
+      if (aligned.paired[k] && b != null) {
+        ws.push(stratReturns[k]);
+        wb.push(b);
+      }
+    }
+    if (ws.length < 2) continue;
+    out[i] = rollingBeta(ws, wb, ws.length)[ws.length - 1];
+  }
+  return out;
 }
 
 /** A plain array is its own coverage: null uncovered, non-null covered and paired. */
