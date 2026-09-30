@@ -293,6 +293,7 @@ export type AllocatorPortfolioPayload = {
   sleeve_pct: number | null;
   blend_vol: number | null;
   vol_target: number;
+  /** Null when nothing was measured, including tail_windows 0 (review round 2 WR-01): never a measured 0. */
   tail_count: number | null;
   /** Review SFH HIGH-2: the 21-date windows examined (every value priced); tail_count is out of these. */
   tail_windows: number | null;

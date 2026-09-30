@@ -234,7 +234,8 @@ describe("buildAllocatorMetrics: each figure over its own index set (D-70(2))", 
     const gappy: Array<number | null> = Array.from({ length: 30 }, (_, i) => (i % 10 === 5 ? null : -0.01));
     const g = buildAllocatorMetrics(gappy, new Array(30).fill(0.001), 252);
     expect(g.tail_windows).toBe(0);
-    expect(g.tail_count).toBe(0);
+    // Review round 2 WR-01: zero windows examined is not a measured zero count.
+    expect(g.tail_count).toBeNull();
     expect(g.tail_mm_mean).toBeNull();
   });
 });

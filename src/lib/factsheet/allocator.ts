@@ -390,7 +390,9 @@ export function buildAllocatorMetrics(
     sleeve_pct: sleevePct,
     blend_vol: blendVol,
     vol_target: VOL_TARGET,
-    tail_count: tailMm.length,
+    // Review round 2 WR-01: a count over zero examined windows is an absence
+    // like the mean, never a measured "0". A 0 with windows examined is real.
+    tail_count: tailWindows > 0 ? tailMm.length : null,
     tail_windows: tailWindows,
     tail_mm_mean: tailMean,
     tail_mm_median: tailMedian,

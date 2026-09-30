@@ -374,7 +374,7 @@ export function AllocatorSection() {
               <KvRow k="Windows MM was positive" v={pctRound(p.tail_mm_pos)} accent />
             </tbody>
           </table>
-          {p.tail_count !== null && p.tail_windows !== null && (
+          {p.tail_windows !== null && (
             <p className="mt-2 text-micro italic text-text-muted">{tailCaption(p.tail_count, p.tail_windows, p.tail_mm_pos)}</p>
           )}
         </div>
@@ -389,8 +389,10 @@ export function AllocatorSection() {
  * them; with none examined it says so rather than asserting the portfolio never
  * drew ≥ 5%.
  */
-function tailCaption(count: number, windows: number, pos: number | null): string {
-  if (windows === 0) return "No 21-day window with every leg priced, so no stress window could be measured.";
+function tailCaption(count: number | null, windows: number, pos: number | null): string {
+  // Review round 2 WR-01: with no window examined the count is null (the table
+  // reads "—"), and this sentence is the only claim made.
+  if (windows === 0 || count === null) return "No 21-day window with every leg priced, so no stress window could be measured.";
   const examined = `${windows} 21-day window${windows === 1 ? "" : "s"} with every leg priced`;
   if (count === 0) return `The portfolio did not draw ≥ 5% in any of the ${examined}.`;
   return `${count} of the ${examined} ${count === 1 ? "was a stress window" : "were stress windows"}; MultiMarket was positive in ${pctRound(pos)} of them.`;
