@@ -141,11 +141,6 @@ const NO_INPUT = new Set([
   // NO_INPUT shape as the browse/returns siblings below. Deny routed through
   // rateLimitDenyJson (pinned by route.test.ts + the seam posture invariant).
   "admin/match/eval/route.ts",
-  // Public BTC benchmark GET — added to PUBLIC_ROUTES so the anonymous
-  // scenario-share recipient page can self-fetch the overlay. publicIpLimiter
-  // (10/min/IP), no request body (symbol hard-coded), limit-FIRST before the DB
-  // read. Same shape as demo/match below (public per-IP, no body).
-  "benchmark/btc/route.ts",
   // Phase 169.4 (D-67) — public BTC closes GET, reached by the anonymous
   // scenario-share recipient page. publicIpLimiter per IP, NO request body
   // and no query parameter (the symbol is fixed to 'BTC' in the route), and
