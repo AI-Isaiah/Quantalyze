@@ -789,4 +789,87 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     expect(html).toContain("benchmark:false");
     expect(html).toContain("overlay:none");
   });
+
+  it("169.4 review SFH MEDIUM-3 — each BTC fetch failure is logged with its discriminator and never the share token, and still renders unavailable", async () => {
+    // Four ways the closes fetch fails. Each used to return null with no
+    // trace, so an outage, a misconfigured APP_URL, a 429 and a contract drift
+    // were indistinguishable. Each must now log once, name its cause, and
+    // keep the page on the honest "unavailable" state.
+    const abortErr = new Error("The operation was aborted");
+    abortErr.name = "AbortError";
+    const cases: Array<{
+      token: string;
+      fetchImpl: () => Promise<unknown>;
+      message: RegExp;
+      detail?: Record<string, unknown>;
+    }> = [
+      {
+        token: "tok-status-429",
+        fetchImpl: async () => ({ ok: false, status: 429, json: async () => ({}) }),
+        message: /non-ok response/,
+        detail: { status: 429 },
+      },
+      {
+        token: "tok-old-shape",
+        fetchImpl: async () => ({ ok: true, status: 200, json: async () => [{ date: "2026-06-01", value: 0.01 }] }),
+        message: /unexpected body shape/,
+      },
+      {
+        token: "tok-timeout",
+        fetchImpl: async () => {
+          throw abortErr;
+        },
+        message: /timed out/,
+        detail: { timeoutMs: 2500 },
+      },
+      {
+        token: "tok-thrown",
+        fetchImpl: async () => {
+          throw new TypeError("fetch failed");
+        },
+        message: /fetch failed/,
+        detail: { error: "TypeError: fetch failed" },
+      },
+    ];
+
+    for (const c of cases) {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+        vi.stubGlobal("fetch", vi.fn(c.fetchImpl));
+
+        const html = await renderPage(c.token);
+
+        expect(html).toContain("benchmark:false");
+        const btcWarns = warn.mock.calls.filter((args) =>
+          String(args[0]).startsWith("[scenario-share] /api/benchmark/btc/prices"),
+        );
+        expect(btcWarns, c.token).toHaveLength(1);
+        expect(String(btcWarns[0][0])).toMatch(c.message);
+        if (c.detail) expect(btcWarns[0][1]).toEqual(c.detail);
+        // The share token is a bearer credential for the scenario: never logged.
+        expect(JSON.stringify(warn.mock.calls)).not.toContain(c.token);
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  });
+
+  it("SFH MEDIUM-3 control — a good closes body logs nothing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+      stubFetch({
+        ok: true,
+        body: { prices: [{ date: "2026-06-01", close: 100 }], dropped: [], through: "2026-06-01" },
+      });
+      const html = await renderPage("tok-good");
+      expect(html).toContain("benchmark:true");
+      expect(
+        warn.mock.calls.filter((a) => String(a[0]).startsWith("[scenario-share]")),
+      ).toHaveLength(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });

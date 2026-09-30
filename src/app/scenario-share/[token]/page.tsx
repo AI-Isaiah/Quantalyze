@@ -85,14 +85,38 @@ const PROJECTED_LABEL = "PROJECTED — hypothetical, not a live book";
 async function fetchBtcCloses(): Promise<BtcCloses | null> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), BENCHMARK_FETCH_TIMEOUT_MS);
+  // 169.4 review SFH MEDIUM-3: every failure branch is logged, as the
+  // composer's client twin does (F-08). Without it an outage, a wrong
+  // NEXT_PUBLIC_APP_URL, a 429 and a contract drift all read the same
+  // "unavailable" with nothing server-side to tell them apart. The lines carry
+  // the route path and a discriminator only, never the share token.
   try {
     const res = await fetch(`${APP_URL}/api/benchmark/btc/prices`, { signal: ctrl.signal });
-    if (!res.ok) return null;
-    const closes = parseBtcCloses((await res.json()) as unknown);
-    return closes !== null && closes.prices.length > 0 ? closes : null;
-  } catch {
-    // A timeout (AbortError), a thrown fetch, or a non-ok response all degrade
+    if (!res.ok) {
+      console.warn("[scenario-share] /api/benchmark/btc/prices non-ok response", {
+        status: res.status,
+      });
+      return null;
+    }
+    const body = (await res.json()) as unknown;
+    const closes = parseBtcCloses(body);
+    if (closes === null) {
+      console.warn("[scenario-share] /api/benchmark/btc/prices unexpected body shape");
+      return null;
+    }
+    return closes.prices.length > 0 ? closes : null;
+  } catch (err) {
+    // A timeout (AbortError), a thrown fetch or an unparsable body all degrade
     // to the honest benchmark-unavailable empty state — never a thrown page.
+    if (err instanceof Error && err.name === "AbortError") {
+      console.warn("[scenario-share] /api/benchmark/btc/prices timed out", {
+        timeoutMs: BENCHMARK_FETCH_TIMEOUT_MS,
+      });
+    } else {
+      console.warn("[scenario-share] /api/benchmark/btc/prices fetch failed", {
+        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
+    }
     return null;
   } finally {
     clearTimeout(timer);
