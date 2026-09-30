@@ -772,9 +772,16 @@ function buildFromBuildableSeries(
       "unavailable" in benchmarkPrices
         ? comparatorLeg("btc", weight, [], [])
         : comparatorLeg("btc", weight, benchmarkPrices.prices, benchmarkPrices.dropped);
-    const portfolioFigures = (legs: BlendLeg[]) => {
+    // Review SFH MEDIUM-2: a failed BTC read is named as the cause on the portfolios
+    // with a BTC leg, so the panel never blames the strategy's data ("too few days").
+    const btcUnavailable = "unavailable" in benchmarkPrices ? "BTC" : null;
+    const portfolioFigures = (legs: BlendLeg[], unavailableLeg: string | null = null) => {
       const a = alignBlend(dates, stratRet, legs);
-      return { ...buildAllocatorMetrics(a.returns, a.book, a.periodsPerYear, a.paired), through: a.through };
+      return {
+        ...buildAllocatorMetrics(a.returns, a.book, a.periodsPerYear, a.paired),
+        through: a.through,
+        unavailable_leg: unavailableLeg,
+      };
     };
     return {
       ...common,
@@ -807,14 +814,14 @@ function buildFromBuildableSeries(
             comparatorLeg("gld", 0.25, GLD_DAILY, []),
             comparatorLeg("ief", 0.25, IEF_DAILY, []),
             btcLeg(0.25),
-          ]),
+          ], btcUnavailable),
         },
         {
           key: "crypto_book",
           name: "Diversified Crypto Book",
           composition: "70% BTC · 30% ETH",
           // D-70(3): BTC + ETH legs, 7-day calendar → 365 (unchanged).
-          ...portfolioFigures([btcLeg(0.7), comparatorLeg("eth", 0.3, ETH_DAILY, [])]),
+          ...portfolioFigures([btcLeg(0.7), comparatorLeg("eth", 0.3, ETH_DAILY, [])], btcUnavailable),
         },
       ],
       eventSignatures: computeEventSignatures(stratRet, btcAligned, cashBundle.strategyEquity),

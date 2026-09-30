@@ -286,16 +286,20 @@ export function AllocatorSection() {
   // each rendered as the em-dash, never 0.
   const lastDate = payload.dates[payload.dates.length - 1];
   const unmeasured = p.cum_ret === null;
+  // Review SFH MEDIUM-2: a failed price read is named as the cause; "too few days"
+  // is kept for a genuine sparse overlap of priced legs.
   const pricesCaption =
-    p.through === null
-      ? "Prices unavailable for this portfolio — too few days with every leg priced to measure it."
-      : p.through !== lastDate
-        ? `Prices through ${isoToMonthDay(p.through)}${
-            unmeasured
-              ? " — too few days with every leg priced to measure this portfolio."
-              : "; figures cover the days every leg is priced."
-          }`
-        : null;
+    p.unavailable_leg != null
+      ? `${p.unavailable_leg} prices are unavailable right now, so this portfolio cannot be measured.`
+      : p.through === null
+        ? "Prices unavailable for this portfolio — too few days with every leg priced to measure it."
+        : p.through !== lastDate
+          ? `Prices through ${isoToMonthDay(p.through)}${
+              unmeasured
+                ? " — too few days with every leg priced to measure this portfolio."
+                : "; figures cover the days every leg is priced."
+            }`
+          : null;
 
   return (
     <section className="mt-12 border-t border-border pt-8">
@@ -370,17 +374,26 @@ export function AllocatorSection() {
               <KvRow k="Windows MM was positive" v={pctRound(p.tail_mm_pos)} accent />
             </tbody>
           </table>
-          {p.tail_count !== null && (
-            <p className="mt-2 text-micro italic text-text-muted">
-              {p.tail_count === 0
-                ? "No stress windows in the observed sample — portfolio never drew ≥ 5% in any 21-day window."
-                : `During the ${p.tail_count} stress windows, MultiMarket was positive ${pctRound(p.tail_mm_pos)} of the time.`}
-            </p>
+          {p.tail_count !== null && p.tail_windows !== null && (
+            <p className="mt-2 text-micro italic text-text-muted">{tailCaption(p.tail_count, p.tail_windows, p.tail_mm_pos)}</p>
           )}
         </div>
       </div>
     </section>
   );
+}
+
+/**
+ * Review SFH HIGH-2: the tail caption claims only what was measured. It names the
+ * windows examined (every leg priced) and says nothing about a window outside
+ * them; with none examined it says so rather than asserting the portfolio never
+ * drew ≥ 5%.
+ */
+function tailCaption(count: number, windows: number, pos: number | null): string {
+  if (windows === 0) return "No 21-day window with every leg priced, so no stress window could be measured.";
+  const examined = `${windows} 21-day window${windows === 1 ? "" : "s"} with every leg priced`;
+  if (count === 0) return `The portfolio did not draw ≥ 5% in any of the ${examined}.`;
+  return `${count} of the ${examined} ${count === 1 ? "was a stress window" : "were stress windows"}; MultiMarket was positive in ${pctRound(pos)} of them.`;
 }
 
 function DemoBadge({ children }: { children: React.ReactNode }) {

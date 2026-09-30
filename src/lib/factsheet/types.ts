@@ -294,11 +294,19 @@ export type AllocatorPortfolioPayload = {
   blend_vol: number | null;
   vol_target: number;
   tail_count: number | null;
+  /** Review SFH HIGH-2: the 21-date windows examined (every value priced); tail_count is out of these. */
+  tail_windows: number | null;
+  /** Null when tail_count is 0 (review WR-02): an empty set has no mean, median or share. */
   tail_mm_mean: number | null;
   tail_mm_median: number | null;
   tail_mm_pos: number | null;
   /** The last close every leg of the blend carries (D-70(4)); null when a leg has none. */
   through: string | null;
+  /**
+   * Review SFH MEDIUM-2: the leg whose price feed could not be read ("BTC" when
+   * the BTC read failed), so the caption names the outage; null otherwise.
+   */
+  unavailable_leg: string | null;
 };
 
 /** One year of monthly compounded returns. byMonth has 12 slots (Jan..Dec); null = no obs. */

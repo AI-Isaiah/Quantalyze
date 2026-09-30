@@ -164,23 +164,35 @@ describe("169.4-06: the api arm's allocator blends skip every missing leg day (D
     const payload = buildFactsheetPayload({ ...STRATEGY, id: "s-169-4-06" }, rows, { benchmarkPrices: opt });
     const got = portfolio(payload, "multi_asset");
 
-    // Honest: every leg on the weekday dates through the one alignment; a blend day
-    // counts only when all four legs are non-null.
+    // Honest: every leg aligned through the one alignment on the dates EVERY leg
+    // priced (review SFH HIGH-1), so a market holiday is not a blend date and the
+    // next common date carries each leg's move across it.
     const wk = A_DATES.filter((d) => weekdayOf(d) >= 1 && weekdayOf(d) <= 5);
-    const legs = [
-      alignCoveredReturns(SPX_DAILY, [], wk, COMPARATOR_CALENDARS.spx).returns,
-      alignCoveredReturns(GLD_DAILY, [], wk, COMPARATOR_CALENDARS.gld).returns,
-      alignCoveredReturns(IEF_DAILY, [], wk, COMPARATOR_CALENDARS.ief).returns,
-      alignCoveredReturns(btc, [], wk, COMPARATOR_CALENDARS.btc).returns,
-    ];
-    const covered: number[] = [];
-    wk.forEach((_, i) => {
-      if (legs.every((l) => l[i] !== null)) covered.push(legs.reduce((a, l) => a + 0.25 * (l[i] as number), 0));
-    });
+    const legPrices = [SPX_DAILY, GLD_DAILY, IEF_DAILY, btc];
+    const legCals = [COMPARATOR_CALENDARS.spx, COMPARATOR_CALENDARS.gld, COMPARATOR_CALENDARS.ief, COMPARATOR_CALENDARS.btc];
+    const closeSets = legPrices.map((ps) => new Set(ps.map((p) => p.date)));
+    const common = wk.filter((d) => closeSets.every((c) => c.has(d)));
+    // Good Friday 2026-04-03 is a weekday with no SPX close: it is not a blend date.
+    expect(wk).toContain("2026-04-03");
+    expect(common).not.toContain("2026-04-03");
+    const blendOn = (on: string[]) => {
+      const legs = legPrices.map((ps, j) => alignCoveredReturns(ps, [], on, legCals[j]).returns);
+      const out: number[] = [];
+      on.forEach((_, i) => {
+        if (legs.every((l) => l[i] !== null)) out.push(legs.reduce((a, l) => a + 0.25 * (l[i] as number), 0));
+      });
+      return out;
+    };
+    const covered = blendOn(common);
     // The fixtures end 2026-05-08: the covered days stop there, well short of wk.
     expect(covered.length).toBeGreaterThan(20);
     expect(covered.length).toBeLessThan(wk.length - 10);
+    expect(covered.length).toBe(common.length);
     const honestCum = covered.reduce((a, r) => a * (1 + r), 1) - 1;
+    // The pre-fix rule (weekday blend dates, the holiday a null) loses BTC's move
+    // into Good Friday: a different number, which the payload must not carry.
+    const holidayLostCum = blendOn(wk).reduce((a, r) => a * (1 + r), 1) - 1;
+    expect(Math.abs(honestCum - holidayLostCum)).toBeGreaterThan(1e-4);
 
     // The old path: every leg on the 7-day dates, a null entered as 0.
     const zero = (prices: DailyPrice[], cal: typeof COMPARATOR_CALENDARS.spx) =>
@@ -192,6 +204,7 @@ describe("169.4-06: the api arm's allocator blends skip every missing leg day (D
     expect(got.cum_ret).toBeCloseTo(honestCum, 12);
     expect(Math.abs(honestCum - zeroCum)).toBeGreaterThan(1e-4);
     expect(got.cum_ret).not.toBeCloseTo(zeroCum, 6);
+    expect(got.cum_ret).not.toBeCloseTo(holidayLostCum, 6);
     // D-70(3): 252 (founder ruling 2026-09-30), not BLEND-02's 365.
     expect(got.ann_vol).toBeCloseTo(popSd(covered) * Math.sqrt(252), 12);
     expect(got.through).toBe("2026-05-08");

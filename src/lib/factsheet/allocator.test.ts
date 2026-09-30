@@ -137,12 +137,37 @@ describe("alignBlend: the legs' common calendar (D-70(2), D-70(3))", () => {
     expect(sixtyForty.periodsPerYear).toBe(252);
   });
 
-  it("a leg past its last close makes those blend days null, and `through` is the last date every leg covers", () => {
+  it("a leg past its last close ends the blend dates there, and `through` is the last date every leg covers", () => {
+    // Review SFH HIGH-1: a blend date is a date every leg priced, so the days past
+    // SPX's last close are not blend dates (before the fix they were null ones).
     const short = SPX.filter(p => p.date <= "2026-01-08");
     const a = alignBlend(DATES, STRAT, [comparatorLeg("spx", 0.5, short, []), comparatorLeg("btc", 0.5, BTC, [])]);
-    expect(a.returns.map(r => r === null)).toEqual([false, false, false, false, false, true, true]);
+    expect(a.dates).toEqual(WEEKDAYS.filter(d => d <= "2026-01-08"));
+    expect(a.returns.every(r => r !== null)).toBe(true);
     expect(a.through).toBe("2026-01-08");
     expect(a.book.every(b => b !== null)).toBe(true);
+  });
+
+  it("a weekday market holiday is not a blend date: the next date carries BTC's move across it (review SFH HIGH-1)", () => {
+    // Mon 2026-01-05 is an SPX holiday: BTC has a close, SPX has none. BTC moves
+    // 101 -> 104 Fri-to-Mon, then 104 -> 107 Mon-to-Tue.
+    const holidaySpx = SPX.filter(p => p.date !== "2026-01-05");
+    const a = alignBlend(DATES, STRAT, [comparatorLeg("spx", 0.5, holidaySpx, []), comparatorLeg("btc", 0.5, BTC, [])]);
+    expect(a.dates).not.toContain("2026-01-05");
+    const tue = a.dates.indexOf("2026-01-06");
+    expect(a.dates[tue - 1]).toBe("2026-01-02");
+    // Tuesday reads both legs Friday-to-Tuesday: BTC's holiday move is carried, not lost.
+    expect(a.returns[tue]).toBeCloseTo(0.5 * (201 / 202 - 1) + 0.5 * (107 / 101 - 1), 14);
+    expect(a.book[tue]).toBeCloseTo((1 - 0.005) * (1 + 0.002) * (1 + 0.003) * (1 - 0.01) - 1, 12);
+    // No null left for the own-series figures to skip.
+    expect(a.returns.every(r => r !== null)).toBe(true);
+    // The known cost, pinned on purpose: SPX bridges ONE point over an interval its
+    // weekday calendar expects TWO in, so Tuesday is unpaired and the correlation and
+    // the sleeve scan skip it. The blend value itself is correct.
+    expect(a.paired[tue]).toBe(false);
+    // Crypto-only blends are unchanged: both legs price every day.
+    const crypto = alignBlend(DATES, STRAT, [comparatorLeg("btc", 0.7, BTC, []), comparatorLeg("eth", 0.3, BTC, [])]);
+    expect(crypto.dates).toEqual(DATES);
   });
 
   it("fewer than 2 usable days: every figure is null and `through` is still dated", () => {
@@ -151,7 +176,7 @@ describe("alignBlend: the legs' common calendar (D-70(2), D-70(3))", () => {
     expect(a.returns.filter(r => r !== null)).toHaveLength(1);
     expect(a.through).toBe("2026-01-02");
     const m = buildAllocatorMetrics(a.returns, a.book, a.periodsPerYear, a.paired);
-    for (const k of ["ann_vol", "cum_ret", "max_dd", "corr", "sleeve_pct", "blend_vol", "tail_count", "tail_mm_mean", "tail_mm_median", "tail_mm_pos"] as const) {
+    for (const k of ["ann_vol", "cum_ret", "max_dd", "corr", "sleeve_pct", "blend_vol", "tail_count", "tail_windows", "tail_mm_mean", "tail_mm_median", "tail_mm_pos"] as const) {
       expect(m[k], k).toBeNull();
     }
   });
@@ -191,7 +216,25 @@ describe("buildAllocatorMetrics: each figure over its own index set (D-70(2))", 
     const m = buildAllocatorMetrics(rets, mm, 252);
     // Windows end at 21..29; the five ending at 25..29 hold index 25.
     expect(m.tail_count).toBe(4);
+    // Review SFH HIGH-2: the examined count excludes the five dropped windows.
+    expect(m.tail_windows).toBe(4);
     expect(m.tail_mm_mean).toBeCloseTo(1.001 ** 21 - 1, 14);
     expect(m.tail_mm_pos).toBe(1);
+  });
+
+  it("no stress window: mean, median and positive share are null, never 0, and the examined count is kept (review WR-02, SFH HIGH-2)", () => {
+    // 30 days of +0.1%: every one of the 9 windows is examined, none draws 5%.
+    const calm = buildAllocatorMetrics(new Array(30).fill(0.001), new Array(30).fill(-0.002), 252);
+    expect(calm.tail_count).toBe(0);
+    expect(calm.tail_windows).toBe(9);
+    expect(calm.tail_mm_mean).toBeNull();
+    expect(calm.tail_mm_median).toBeNull();
+    expect(calm.tail_mm_pos).toBeNull();
+    // Every window holds a null: nothing examined, and nothing is claimed about it.
+    const gappy: Array<number | null> = Array.from({ length: 30 }, (_, i) => (i % 10 === 5 ? null : -0.01));
+    const g = buildAllocatorMetrics(gappy, new Array(30).fill(0.001), 252);
+    expect(g.tail_windows).toBe(0);
+    expect(g.tail_count).toBe(0);
+    expect(g.tail_mm_mean).toBeNull();
   });
 });
