@@ -16,9 +16,13 @@
  * card copy (engine reasons such as "Matches the X mandate", and the card's
  * fallback reason) from making a mandate claim on a no-mandate page.
  *
- * The mandate PREDICATE is not under test here: plan 169.3-04 replaces it
- * (D-03). These tests pin that the page is self-consistent around whichever
- * predicate it reads.
+ * The first block pins that the page is self-consistent around its mandate
+ * predicate. The MP block (plan 169.3-04, D-03) pins WHICH predicate: the page
+ * answers "is a mandate set" with `deriveMandateIsSet`, the rule /allocations
+ * uses, which reads `max_weight` and `preferred_strategy_types`, fields the
+ * match engine consumes. It used to read `mandate_archetype`, a free-text field
+ * the engine never reads, so one allocator could be told "set your mandate"
+ * here while /allocations treated the mandate as set, and the reverse.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
@@ -48,6 +52,7 @@ vi.mock("@/components/legal/AccreditedInvestorGate", () => ({
 
 const seeded = vi.hoisted(() => ({
   prefs: null as unknown,
+  prefsSelect: [] as string[],
   recs: [] as unknown[],
   batchMeta: [] as unknown[],
   statusRows: [] as unknown[],
@@ -68,6 +73,7 @@ vi.mock("@/lib/supabase/server", () => ({
       const chain: Record<string, unknown> = {};
       chain.select = (cols: string) => {
         if (table === "strategy_analytics") seeded.analyticsSelect.push(cols);
+        if (table === "allocator_preferences") seeded.prefsSelect.push(cols);
         return chain;
       };
       chain.eq = () => chain;
@@ -79,7 +85,7 @@ vi.mock("@/lib/supabase/server", () => ({
         Promise.resolve(
           table === "investor_attestations"
             ? { data: { attested_at: "2026-01-01T00:00:00Z" }, error: null }
-            : { data: seeded.prefs, error: null },
+            : { data: projectPrefs(seeded.prefs), error: null },
         );
       // Like PostgREST, a column comes back only if the select projected it:
       // a row's `series_end` is dropped unless the alias was selected, so a
@@ -106,7 +112,22 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
+/**
+ * Like PostgREST, the preferences row carries only the columns the page
+ * selected. Without this, a page that called the right predicate but never
+ * projected `max_weight` / `preferred_strategy_types` would still pass here
+ * and read `undefined` for both in production.
+ */
+function projectPrefs(row: unknown): unknown {
+  if (row === null || typeof row !== "object") return row;
+  const cols = (seeded.prefsSelect.at(-1) ?? "").split(",").map((c) => c.trim());
+  return Object.fromEntries(
+    Object.entries(row as Record<string, unknown>).filter(([k]) => cols.includes(k)),
+  );
+}
+
 import RecommendationsPage from "./page";
+import { deriveMandateIsSet } from "@/lib/queries";
 
 // --- Fixtures (synthetic ids and names only) ------------------------------
 
@@ -117,7 +138,14 @@ const IDS = [
 ] as const;
 const NAMES = ["Alpha Test", "Beta Test", "Gamma Test"] as const;
 
-const MANDATE = { mandate_archetype: "systematic", target_ticket_size_usd: 1 };
+// A mandate the engine can act on (D-03): max_weight set. No archetype, so the
+// fixture cannot pass on the old free-text predicate.
+const MANDATE = {
+  mandate_archetype: null,
+  max_weight: 0.2,
+  preferred_strategy_types: [],
+  target_ticket_size_usd: 1,
+};
 const BATCH = {
   batch_id: "51a10002-0000-4000-8000-0000000000b0",
   computed_at: "2026-09-25T00:00:00.000Z",
@@ -176,6 +204,7 @@ beforeEach(() => {
   seeded.statusError = null;
   seeded.analyticsSelect = [];
   seeded.analyticsIn = [];
+  seeded.prefsSelect = [];
 });
 
 describe("SC8 · /recommendations — one mandate branch drives the header and the list", () => {
@@ -229,6 +258,73 @@ describe("SC8 · /recommendations — one mandate branch drives the header and t
     expect(screen.queryByText("Your first batch is computing")).toBeNull();
     expect(screen.queryByText("No candidates match today")).toBeNull();
     expect(container.textContent ?? "").not.toMatch(/fit your mandate/i);
+  });
+});
+
+describe("SC8 / D-03 · /recommendations decides 'mandate set' with the /allocations rule", () => {
+  const ARCHETYPE_ONLY = {
+    mandate_archetype: "systematic trend, low turnover",
+    max_weight: null,
+    preferred_strategy_types: [],
+    target_ticket_size_usd: 1,
+  };
+  const MAX_WEIGHT_ONLY = {
+    mandate_archetype: null,
+    max_weight: 0.2,
+    preferred_strategy_types: [],
+    target_ticket_size_usd: 1,
+  };
+  const TYPES_ONLY = {
+    mandate_archetype: null,
+    max_weight: null,
+    preferred_strategy_types: ["trend"],
+    target_ticket_size_usd: 1,
+  };
+
+  async function expectNotSet() {
+    const { container } = await renderPage();
+    expect(screen.getByText(CTA)).toBeTruthy();
+    expect(container.textContent ?? "").not.toMatch(/fit your mandate/i);
+    expect(container.querySelector("ol")).toBeNull();
+  }
+  async function expectSet() {
+    await renderPage();
+    expect(screen.getByText(MANDATE_FIT_HEADER)).toBeTruthy();
+    expect(screen.queryByText(CTA)).toBeNull();
+    for (const name of NAMES) expect(screen.getByText(name)).toBeTruthy();
+  }
+
+  it("MP1: only a free-text archetype (the engine never reads it) is NOT a mandate: the CTA renders", async () => {
+    seeded.prefs = ARCHETYPE_ONLY;
+    await expectNotSet();
+  });
+
+  it("MP2: max_weight set with no archetype IS a mandate: the fit header and the list render", async () => {
+    seeded.prefs = MAX_WEIGHT_ONLY;
+    await expectSet();
+  });
+
+  it("MP3: a non-empty preferred-types list with no archetype IS a mandate", async () => {
+    seeded.prefs = TYPES_ONLY;
+    await expectSet();
+  });
+
+  it("MP4: no preferences row is NOT a mandate", async () => {
+    seeded.prefs = null;
+    await expectNotSet();
+  });
+
+  it("MP5: for every case the page agrees with deriveMandateIsSet, the rule /allocations reads", async () => {
+    for (const row of [null, ARCHETYPE_ONLY, MAX_WEIGHT_ONLY, TYPES_ONLY]) {
+      seeded.prefs = row;
+      seeded.prefsSelect = [];
+      const { unmount } = await renderPage();
+      const pageSaysSet = screen.queryByText(CTA) === null;
+      expect(pageSaysSet, `page and /allocations disagree for ${JSON.stringify(row)}`).toBe(
+        deriveMandateIsSet(row as Parameters<typeof deriveMandateIsSet>[0]),
+      );
+      unmount();
+    }
   });
 });
 
