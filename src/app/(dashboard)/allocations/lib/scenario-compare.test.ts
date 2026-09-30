@@ -972,7 +972,7 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
     // Reference: the SAME per-key engine set (raw equity weights, all selected)
     // at each basis. The helper's plain-draft per-key path reproduces exactly
     // this set + state (single eligible member, no toggle/weight overrides).
-    const set = buildPerKeyStrategyForBuilderSet({ "key-A": S }, { "key-A": 5000 });
+    const set = buildPerKeyStrategyForBuilderSet({ "key-A": S }, { "key-A": 5000 }, new Map());
     const refState = { ...set.state, window: win };
     const cache = buildDateMapCache(set.strategies);
     const ref365 = computeScenario(set.strategies, refState, cache, 365);
@@ -1211,5 +1211,51 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
     const { cagr: _c2, ...nullRest } = nullOff;
     // The excluded crypto leg's asset_class is irrelevant to the basis → identical.
     expect(cryptoRest).toEqual(nullRest);
+  });
+});
+
+// Phase 167.1.2 SC-4 caller walk: a saved book draft whose member keys all carry
+// 0 equity (the per-key weight) has no weight mass. The compare column must get
+// the engine's honest empty shape (em-dash cells), never a flat 0% blend.
+describe("computeMetricsForDraft — [167.1.2 SC-4] zero weight mass", () => {
+  it("a book draft whose member keys all have 0 equity → n 0, null metrics, empty curve (today: a flat 0% blend over every date)", () => {
+    const dates = buildDates("2024-01-02", 40);
+    const inputs = perKeyLiveInputs(
+      {
+        "key-A": altReturns(dates, 0.01, -0.008),
+        "key-B": altReturns(dates, 0.012, -0.009),
+      },
+      { "key-A": 0, "key-B": 0 },
+    );
+    const m = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A", "key-B"] }),
+      inputs,
+    );
+    expect(m.n).toBe(0);
+    expect(m.equity_curve).toEqual([]);
+    expect(m.twr).toBeNull();
+    expect(m.sharpe).toBeNull();
+    expect(m.max_drawdown).toBeNull();
+    expect(m.volatility).toBeNull();
+    expect(m.member_count).toBe(2);
+  });
+
+  it("the live-book column ({ liveBook: true }) over an all-zero-equity book is the same honest empty shape", () => {
+    const dates = buildDates("2024-01-02", 40);
+    const eligible = ["key-A", "key-B"];
+    const inputs = perKeyLiveInputs(
+      {
+        "key-A": altReturns(dates, 0.01, -0.008),
+        "key-B": altReturns(dates, 0.012, -0.009),
+      },
+      { "key-A": 0, "key-B": 0 },
+      eligible,
+    );
+    const m = computeMetricsForDraft(buildLiveBookDraft(true, eligible), inputs, {
+      liveBook: true,
+    });
+    expect(m.n).toBe(0);
+    expect(m.equity_curve).toEqual([]);
+    expect(m.twr).toBeNull();
   });
 });

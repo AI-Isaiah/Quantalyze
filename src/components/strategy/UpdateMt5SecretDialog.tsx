@@ -14,6 +14,7 @@ import {
 } from "@/lib/wizardErrors";
 import { newCorrelationId } from "@/lib/correlation-id-client";
 import { scrubSeamError } from "@/lib/seam-redaction";
+import { CREDENTIAL_SECRET_INPUT_PROPS } from "@/lib/credential-input";
 
 /**
  * 161-10 / WIZERR-07 — THE ROUTE THIS DIALOG WRITES THROUGH, named once.
@@ -47,6 +48,11 @@ const ROUTE: DashboardDialogRoute = "keys/[id]/rotate-secret";
  * the one PATCH call, is never logged, and is scrubbed on every close path
  * and whenever this dialog is re-pointed at a different key (the same
  * NEW-C29-03 idiom `ApiKeyForm.tsx` already uses for its own secret field).
+ * The input takes 169.3 D-76's masked-input attributes (`new-password` plus the
+ * password-manager ignore attributes) and deliberately does NOT normalize
+ * pasted whitespace: the rotate-secret route and the Python seam store the
+ * password exactly as sent and never trim it, so a client strip would change
+ * the stored password.
  */
 export interface UpdateMt5SecretDialogProps {
   open: boolean;
@@ -186,7 +192,7 @@ export function UpdateMt5SecretDialog({
           type={showSecret ? "text" : "password"}
           value={newSecret}
           onChange={(e) => setNewSecret(e.target.value)}
-          autoComplete="off"
+          {...CREDENTIAL_SECRET_INPUT_PROPS}
           className="min-h-[44px] w-full rounded-lg border border-border bg-surface px-3 py-2.5 pr-16 text-body text-text-primary placeholder:text-text-muted transition-colors focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
         />
         <button

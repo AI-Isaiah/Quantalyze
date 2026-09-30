@@ -4640,6 +4640,31 @@ describe("[154.1 / WIZCONT-02] VENUE_ALREADY_CONNECTED — the honest refusal", 
 });
 
 /**
+ * [167.1.2 / D-01] The two venue-identity refusals are VENUE-NEUTRAL.
+ *
+ * Until 167.1.2 only an MT5 login could reach them, so "login" and "broker
+ * account" were true. Now the validator stamps an OKX, Bybit, Binance or
+ * Deribit account id too, and a second key on one of those accounts reaches
+ * exactly these entries. Telling an OKX user to use "a different login on the
+ * same broker" sends them looking for a thing their exchange does not have.
+ */
+describe("[167.1.2 / D-01] the venue-identity refusals name no login and no broker account", () => {
+  it.each(["KEY_VENUE_ALREADY_CONNECTED", "VENUE_ALREADY_CONNECTED"] as const)(
+    "%s copy fits every venue that can reach it",
+    (code) => {
+      const copy = WIZARD_ERROR_COPY[code];
+      const haystack = [copy.title, copy.cause, ...copy.fix].join("   ");
+      expect(haystack, `${code} still speaks MT5-only language`).not.toMatch(
+        /login|broker account/i,
+      );
+      // The refusal still says what happened and what to do — neutrality is
+      // not deletion. An exchange account is what every one of these venues has.
+      expect(haystack.toLowerCase()).toContain("exchange account");
+    },
+  );
+});
+
+/**
  * [161-05 / WIZERR-03] KEY_ORPHANED — THE REFUSAL, AND THE ONE PROPERTY THAT
  * MAKES IT AN IMPROVEMENT RATHER THAN A RENAME.
  *
@@ -6207,5 +6232,49 @@ describe("[167-01 / D-05, D-07] KEY_SIGN_IN_FAILED — an ambiguous MT5 sign-in 
       blob,
       "must not assert a fault on our side of the store — KEY_MUST_BE_RECONNECTED's claim",
     ).not.toContain("fault on our side");
+  });
+});
+
+// 167.1.2 REVIEW WR-04 follow-up — KEY_ORPHANED's copy has to be true for every
+// path that can reach it now, not only for the one that existed when it was
+// written. It was authored when `create_wizard_strategy` was the only writer of
+// `api_keys.venue_account_id`, so "saved in an earlier session whose draft was
+// deleted" was the only way to collide with a stored key that no strategy uses.
+// That stopped holding when `keys/validate-and-encrypt` began stamping the
+// column (MT5 in 164.5.3-02, the ccxt venues in 167.1.2 plan 02) and the daily
+// poll began stamping keys connected before that (167.1.2 plan 04). A key
+// connected on another page (the manager key card, or the allocator Exchanges
+// page) that no strategy uses reaches this refusal too, and telling that owner
+// their draft was deleted names a history they do not have. (167.1.2
+// REVIEW-R2 CR-01: whether the poll has written holdings for that key is not
+// read and does not matter; composite membership is the only "held" signal.)
+describe("[167.1.2 / WR-04 follow-up] KEY_ORPHANED claims only what every path to it shares", () => {
+  const entry = WIZARD_ERROR_COPY.KEY_ORPHANED;
+
+  it("names what the reads measured: a stored key on this account that no strategy uses", () => {
+    expect(entry.title).toBe("This key is already stored, but no strategy uses it.");
+    expect(entry.cause).toBe(
+      "A key for this exchange account is already saved on your account, and no strategy is built on it. You may have saved it in an earlier setup whose draft was later deleted, or connected it on another page. Entering this account's credentials again cannot build a new strategy over the saved key, and the saved key does not clear on its own.",
+    );
+  });
+
+  // 167.1.2 REVIEW-R2 IN-02 — the cause used to say flatly that "a new strategy
+  // cannot be created over that key", while `fix[1]` offers "Finish setup",
+  // which builds exactly that strategy from the stored key. What cannot work is
+  // RE-ENTERING the credentials: this code is emitted only by the race arm,
+  // after a credential submit, and the same account is refused by the same
+  // index every time. The cause has to name that act, so the two lines agree.
+  it("says what cannot work (re-entering the credentials) without denying the Finish setup remedy it offers", () => {
+    expect(entry.cause).not.toMatch(/A new strategy cannot be created over that key/);
+    expect(entry.cause).toMatch(/credentials again cannot build/);
+    expect(entry.fix[1]).toMatch(/“Finish setup” on that row builds the strategy from the key already stored/);
+  });
+
+  it("never asserts the deleted-draft story as the only way here, nor that nothing at all uses the key", () => {
+    const copy = `${entry.title} ${entry.cause}`;
+    // The retired sentences: each is false for a key added outside the wizard.
+    expect(copy).not.toMatch(/whose draft was deleted, leaving/);
+    expect(copy).not.toMatch(/attached to nothing/);
+    expect(copy).not.toMatch(/nothing uses it/);
   });
 });

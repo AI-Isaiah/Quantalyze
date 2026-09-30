@@ -195,6 +195,13 @@ describe("getRealPortfolio — audit-2026-05-07 G8.A.9 (P42)", () => {
 describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.1 (P34)", () => {
   it("throws when a Step 1 raw Supabase query returns an error", async () => {
     // Step 1 wave: `allocator_holdings` is one of the parallel queries.
+    // Phase 167.1.2 plan 15 (D-16): the holdings read is per key (the owner's
+    // key ids first, then each key's rows), so the allocator needs a key for
+    // the read to reach the table. With no key there is nothing to read.
+    buildResult.byTable["api_keys"] = {
+      data: [{ id: "key-a", user_id: "user-1", exchange: "binance" }],
+      error: null,
+    };
     buildResult.byTable["allocator_holdings"] = {
       data: null,
       error: { message: "rls denied" },

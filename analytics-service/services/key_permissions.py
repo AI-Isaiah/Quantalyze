@@ -29,10 +29,12 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Mapping
 from typing import Any, Optional
 
 import ccxt.async_support as ccxt
 
+from services.account_identity import venue_account_id_from
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger("quantalyze.analytics")
@@ -49,7 +51,8 @@ logger = logging.getLogger("quantalyze.analytics")
 # copy as ``dict[str, object]`` — incompatible with a TypedDict return — so a
 # TypedDict would break the frozen sibling bodies. ``dict[str, object]``
 # carries the additive contract (bool keys + optional str scope_detail)
-# without touching them.
+# without touching them. Phase 167.1.2 (D-01) widened it the same way with an
+# optional ``account_id: str`` (see ``_with_account_id``).
 PermissionDict = dict[str, object]
 
 
@@ -110,6 +113,27 @@ def _cache_set(key: tuple[str, str], value: PermissionDict) -> None:
 def _cache_clear() -> None:
     """Test helper. Not exported into the public surface."""
     _perm_cache.clear()
+
+
+def _with_account_id(
+    perms: PermissionDict, venue: str, raw: object
+) -> PermissionDict:
+    """Phase 167.1.2 (D-01): add the venue account id, ADDITIVELY.
+
+    The id rides as an optional ``account_id: str`` key, the same additive
+    widening ``scope_detail`` used. It is set ONLY when the response carried a
+    non-blank id, so a detector result without one is byte-identical to the
+    pre-167.1.2 shape and the fail-CLOSED default never carries it.
+    ``validate_key_permissions`` reads it with ``.get``. The internal
+    permission-viewer endpoint copies named keys only, so it never leaves the
+    service from there. ⛔ Never log the value.
+    """
+    if not isinstance(raw, Mapping):
+        return perms
+    account_id = venue_account_id_from(venue, raw)
+    if account_id is not None:
+        perms["account_id"] = account_id
+    return perms
 
 
 # ---------------------------------------------------------------------------
@@ -176,12 +200,13 @@ async def detect_okx_permissions(exchange: ccxt.Exchange) -> PermissionDict:
 
     has_trade = "trade" in perm_str
     has_withdraw = "withdraw" in perm_str
-    return {
+    perms: PermissionDict = {
         "read": True,
         "trade": has_trade,
         "withdraw": has_withdraw,
         "probe_error": False,
     }
+    return _with_account_id(perms, "okx", config)
 
 
 async def detect_bybit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
@@ -233,12 +258,16 @@ async def detect_bybit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
         # AccountTransfer / SubMemberTransfer). Pre-fix the defense-in-
         # depth Wallet check produced false-positive WITHDRAW_SCOPE
         # rejections on live read-only testnet keys.
-        return {
-            "read": True,
-            "trade": False,
-            "withdraw": False,
-            "probe_error": False,
-        }
+        return _with_account_id(
+            {
+                "read": True,
+                "trade": False,
+                "withdraw": False,
+                "probe_error": False,
+            },
+            "bybit",
+            api_info,
+        )
 
     # readOnly="0" path: the permissions arrays ARE authoritative.
     has_withdraw = bool(permissions.get("Wallet"))
@@ -247,12 +276,17 @@ async def detect_bybit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
         or permissions.get("Spot")
         or permissions.get("Exchange")
     )
-    return {
-        "read": True,
-        "trade": has_trade,
-        "withdraw": has_withdraw,
-        "probe_error": False,
-    }
+    # Phase 167.1.2 (D-01): userID from this same response (never parentUid).
+    return _with_account_id(
+        {
+            "read": True,
+            "trade": has_trade,
+            "withdraw": has_withdraw,
+            "probe_error": False,
+        },
+        "bybit",
+        api_info,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -188,14 +188,19 @@ MIRRORED: dict[str, tuple[str, str]] = {
         "_serenity_index",
         "no prepare_returns kwarg; to_drawdown_series and cvar guess",
     ),
-    "r_squared": ("_r_squared", "benchmark leg runs _prepare_benchmark unconditionally"),
+    "r_squared": (
+        "_r_squared",
+        "benchmark leg runs _prepare_benchmark unconditionally; 166.4 D-A interval pair",
+    ),
     "greeks": (
         "_greeks_no_guess",
-        "benchmark leg runs _prepare_benchmark unconditionally; D-15 pairwise, None not 0.0",
+        "benchmark leg runs _prepare_benchmark unconditionally; D-15 pairwise, None not 0.0; "
+        "166.4 D-A interval pair",
     ),
     "rolling_greeks": (
         "_rolling_greeks",
-        "benchmark leg runs _prepare_benchmark unconditionally; D-17 windowed alpha intercept",
+        "benchmark leg runs _prepare_benchmark unconditionally; D-17 windowed alpha intercept; "
+        "166.4 D-A interval pair",
     ),
 }
 

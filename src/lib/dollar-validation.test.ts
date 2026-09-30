@@ -12,8 +12,16 @@
  * rather than silently changing what a money surface accepts or renders.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { describe, it, expect } from "vitest";
-import { isValidDollar, formatUsd } from "./dollar-validation";
+import {
+  isValidDollar,
+  formatUsd,
+  formatUsdPrice,
+  formatUsdSigned,
+  signAtCents,
+} from "./dollar-validation";
 
 // The AUM / capacity bound, typed in as a literal ORACLE — deliberately NOT
 // `MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD`. Asserting a constant against itself
@@ -84,5 +92,156 @@ describe("formatUsd — the ONE money formatter for the allocations surface", ()
 
   it("renders the em-dash for a null amount — never $0 (no-invented-data)", () => {
     expect(formatUsd(null)).toBe("—");
+  });
+
+  // 2026-09-29, Phase 169 review round 1 (IN-04 + SFH L-3). The private copy in
+  // HoldingDetail.tsx guarded non-finite input and this module did not, so
+  // routing it here must not turn a NaN allocation into "$NaN". And an amount
+  // that rounds to zero dollars reads "$0", never "-$0": the sign is the one of
+  // the ROUNDED value, the rule formatUsdSigned/signAtCents already follow.
+  it("renders the em-dash for a non-finite amount — never $NaN or $∞", () => {
+    expect(formatUsd(Number.NaN)).toBe("—");
+    expect(formatUsd(Number.POSITIVE_INFINITY)).toBe("—");
+    expect(formatUsd(Number.NEGATIVE_INFINITY)).toBe("—");
+  });
+
+  it("an amount that rounds to zero dollars carries no sign — never -$0", () => {
+    expect(formatUsd(-0)).toBe("$0");
+    expect(formatUsd(-0.4)).toBe("$0");
+    // Half away from zero, as toLocaleString rounds: -0.5 is a real -$1.
+    expect(formatUsd(-0.5)).toBe("-$1");
+  });
+});
+
+/**
+ * Phase 169 D-50 (founder UAT 2026-09-27) — /allocations Open Positions showed a
+ * $0.42 entry or mark price as "$0", a +$0.37 P&L as "+$0", and a tiny negative
+ * as a red "−$0". The whole-dollar `formatUsd` above is RIGHT for amounts (AUM,
+ * notional, allocations) and stays pinned unchanged; prices and P&L get their
+ * own formatters here. Every expectation is a typed literal.
+ */
+describe("[169 D-50] formatUsdPrice — a price keeps its real precision", () => {
+  it("a price under $1 shows 4 significant digits, never $0", () => {
+    expect(formatUsdPrice(0.4213)).toBe("$0.4213");
+    expect(formatUsdPrice(0.00009876)).toBe("$0.00009876");
+  });
+
+  it("a price of $1 or more shows 2 decimals", () => {
+    expect(formatUsdPrice(60000)).toBe("$60,000.00");
+    expect(formatUsdPrice(1)).toBe("$1.00");
+  });
+
+  it("a sub-dollar price that rounds to $1 at 4 significant digits reads as a $1-or-more price", () => {
+    // 0.99999 at 4 significant digits is "1.000"; the reader sees a $1 price,
+    // so it takes the $1-or-more form rather than a 3-decimal hybrid.
+    expect(formatUsdPrice(0.99999)).toBe("$1.00");
+  });
+
+  it("a zero price has no significant digits to show and reads $0.00", () => {
+    expect(formatUsdPrice(0)).toBe("$0.00");
+  });
+
+  // 2026-09-29, Phase 169 review round 1 SFH L-3 (measured by the reviewer): a
+  // mark derived as 0 / -qty is -0, which took the 2-decimal branch and
+  // printed "-$0.00". No signed zero, as with formatUsdSigned.
+  it("a negative-zero price reads $0.00, never -$0.00", () => {
+    expect(formatUsdPrice(-0)).toBe("$0.00");
+  });
+
+  it("null and non-finite render the em-dash", () => {
+    expect(formatUsdPrice(null)).toBe("—");
+    expect(formatUsdPrice(Number.NaN)).toBe("—");
+    expect(formatUsdPrice(Number.POSITIVE_INFINITY)).toBe("—");
+  });
+});
+
+describe("[169 D-50] formatUsdSigned — P&L at 2 decimals, sign from the ROUNDED value", () => {
+  it("a sub-dollar gain or loss keeps its cents and its sign (U+2212 minus)", () => {
+    expect(formatUsdSigned(0.37)).toBe("+$0.37");
+    expect(formatUsdSigned(-0.21)).toBe("−$0.21");
+  });
+
+  it("a tiny negative that rounds to zero carries no sign — never a red −$0", () => {
+    expect(formatUsdSigned(-0.0001)).toBe("$0.00");
+  });
+
+  it("a tiny positive, or zero, that rounds to zero carries no sign — never +$0", () => {
+    expect(formatUsdSigned(0.004)).toBe("$0.00");
+    expect(formatUsdSigned(0)).toBe("$0.00");
+  });
+
+  it("a whole-dollar amount gains cents and thousands separators", () => {
+    expect(formatUsdSigned(1300)).toBe("+$1,300.00");
+    expect(formatUsdSigned(-1234.6)).toBe("−$1,234.60");
+  });
+
+  it("null and non-finite render the em-dash", () => {
+    expect(formatUsdSigned(null)).toBe("—");
+    expect(formatUsdSigned(Number.NaN)).toBe("—");
+  });
+});
+
+describe("[169 D-50] signAtCents — the one rounding decision the text sign and the P&L colour read", () => {
+  it("reads the sign of the value rounded to cents", () => {
+    expect(signAtCents(0.37)).toBe("positive");
+    expect(signAtCents(-0.21)).toBe("negative");
+    expect(signAtCents(0.005)).toBe("positive");
+    expect(signAtCents(-0.0001)).toBe("zero");
+    expect(signAtCents(0.004)).toBe("zero");
+    expect(signAtCents(0)).toBe("zero");
+  });
+
+  it("has no sign for a missing value", () => {
+    expect(signAtCents(null)).toBeNull();
+    expect(signAtCents(Number.NaN)).toBeNull();
+  });
+});
+
+/**
+ * 2026-09-29, Phase 169 review round 1 IN-04. DESIGN.md's Currency row names
+ * this module as the one money formatter, but `HoldingDetail.tsx` and
+ * `AllocatorExchangeManager.tsx` kept private `formatUsd` copies: the first
+ * duplicated this body, the second rendered balances in a compact "$12.3k"
+ * form no other amount uses. A reader trusting "one module" would miss them.
+ *
+ * The factsheet is its own surface family and owns `src/app/factsheet/[id]/v2/
+ * format.ts` (DESIGN.md: "one formatter module per surface family"), so that
+ * subtree is out of this scan. Everything else must import `formatUsd`.
+ */
+describe("[169 IN-04] formatUsd single-source contract", () => {
+  const SRC_ROOT = path.resolve(__dirname, "..");
+  const MODULE = path.join(SRC_ROOT, "lib", "dollar-validation.ts");
+  const FACTSHEET_FAMILY = path.join(SRC_ROOT, "app", "factsheet") + path.sep;
+  const DECLARATION_RE =
+    /^\s*(?:export\s+)?(?:function\s+formatUsd\s*\(|const\s+formatUsd\s*[:=])/;
+
+  function* walk(dir: string): Generator<string> {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.name === ".next") continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) yield* walk(full);
+      else if (
+        entry.isFile() &&
+        /\.tsx?$/.test(entry.name) &&
+        !entry.name.endsWith(".d.ts")
+      ) {
+        yield full;
+      }
+    }
+  }
+
+  it("no source file outside the money module (and the factsheet's own family) declares a private formatUsd", () => {
+    const violations: string[] = [];
+    for (const file of walk(SRC_ROOT)) {
+      if (file === MODULE || file.startsWith(FACTSHEET_FAMILY)) continue;
+      fs.readFileSync(file, "utf8")
+        .split("\n")
+        .forEach((line, idx) => {
+          if (DECLARATION_RE.test(line)) {
+            violations.push(`src/${path.relative(SRC_ROOT, file)}:${idx + 1}`);
+          }
+        });
+    }
+    expect(violations).toEqual([]);
   });
 });

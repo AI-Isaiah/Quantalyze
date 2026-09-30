@@ -1183,6 +1183,12 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.6 P05 | ~9 min | 2 tasks | 2 modified |
 | Phase 164.6.5 P08 | ~40 min | 2 tasks | 11 modified |
 | Phase 166.1 P09 | ~20 min | 3 tasks | 5 modified |
+| Phase 164.9.3 P01 | 20 min | 2 tasks | 1 files |
+| Phase 164.9.3 P02 | 15 min | 2 tasks | 1 files |
+| Phase 164.9.3 P03 | 6 min | 2 tasks | 1 files |
+| Phase 164.9.3 P04 | 25 min | 2 tasks | 4 files |
+| Phase 164.9.3 P05 | 57 min | 2 tasks | 5 files |
+| Phase 164.9.3 P06 | 7 min | 2 tasks | 5 files |
 | Phase 170 P02 | 8 min | 3 tasks | 4 files |
 | Phase 170 P03 | 5 min | 3 tasks | 7 files |
 | Phase 170 P04 | 5 min | 2 tasks | 4 files |
@@ -1401,6 +1407,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.2 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
 - Phase 167.2.1 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
 - Phase 169.3 edited (--force): routed in: credential inputs strip pasted whitespace (passphrase excluded) (founder UAT 2026-09-27)
+- Phase 169.5 inserted after Phase 169: BENCHCOMPARE — the factsheet BTC comparator read through 169.2's reader, interval-paired, gap-null, payload-carried, rolling series on the comparator basis; split from Phase 169 by topic after plan-check round 3 (169 D-60, D-61) (URGENT)
 - Phase 166.4.1 inserted after Phase 166.4: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly (data integrity; evidence verified by the orchestrator 2026-09-27) (URGENT)
 - Phase 164.9.4 edited: routed in: a docs-only push to main runs the full corpus; the short path must cover a docs-only push too (founder 2026-09-27)
 - Phase 167.1.1 edited: routed in: three holdings readers still allocator-wide (R-15-1 scenario commit route, R-15-2 _load_holding_portfolio_context, R-15-3 getLatestExposureSnapshot) (from the 167.1.2 PR C executor, 2026-09-27)
@@ -1408,6 +1415,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.1.2.1 edited: edited fields: evidence, success_criteria (criterion 7, the fast-fail race, routed 2026-09-27 from the 167.1.2-12 round-3 silent-failure review)
 - Phase 166.4.1 edited: edited fields: evidence, success_criteria (criterion 6: benchmark_comparison must use the D-A interval-matched pairing; routed 2026-09-27 from the 166.4 BENCHALIGN research)
 - Phase 169.4 edited: edited fields: success_criteria (criterion 12: the allocations scenario benchmark's innerJoinByDate must use the D-A interval-matched pairing and the day-one rule; routed 2026-09-27 from the 166.4 BENCHALIGN research)
+- Phase 167.1.1 edited: routed in: D-13 /compare per-holding metrics need a flow-neutral per-holding source (from 167.1.2 PR C2, 2026-09-29)
+- Phase 167.1.2.1 edited: routed in: 8 C2 writer-side residuals from review rounds 1-3 (SFH-05 writer half, single failing key dilution, SFH-R3-02, SFH-R3-07, SFH-08, SFH-09, R2-CR-02 residual, R3-WR-02) (from 167.1.2 PR C2, 2026-09-29)
 
 ### Decisions
 
@@ -1765,6 +1774,12 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.1.1.1]: 164.1.1.1-01: No-floor-move LANE-ONLY exclusion — skip execution plus the three "$out"-derived checks only; the static accounting (sentinel declaration, roster-vs-count coherence, n_arms<=RAISE-sites) stays outside the branch and runs for every file including the excluded one, so SENTINEL_FLOOR (11) and ARMS_FLOOR (213) never move.
 - [Phase 164.1.1.1]: 164.1.1.1-01 MEASURED (re-confirms the pattern above, a fourth time): `state.add-decision` and `state.update-progress` both clobber the `progress:` block downward again this session (`completed_phases` 20→18, `total_plans` 201→203, `percent` 44→40, plus stray blank-line insertions at ~L252-255). Reverted both calls; kept only the decision text, applied by hand.
 - [Phase 164.1.1.1]: 164.1.1.1-01: the static-accounting contract-test scenario counts occurrences of "completion sentinel OK: ALL 7 ARMS EXECUTED" rather than bare presence/absence, because test_sync_status_curated_sentence_survives.sql independently declares the identical "ALL 7 ARMS EXECUTED" text and a presence check could not distinguish the excluded file's line from that other file's.
+- [Phase 164.9.3]: 164.9.3-01: CLAIMPAIR gate seeds a real parent row per partition id under the replica role; replica-only seeding fails at the claim with 23503 (same-transaction FK re-check) — Measured on the local-stack lane: W-INTRO red with 23503 on the strategy foreign key until parents were seeded
+- [Phase 164.9.3]: 164.9.3-02: the migration's verify anchors pin PLACEMENT as well as text (each pre-rank clause must match between the ranked CTE opening and the deduped opening; the 2-arg C39 port between deduped and the batch UPDATE), so a later edit moving the guard post-rank, the rejected option (a), refuses at apply
+- [Phase 164.9.3]: 164.9.3-03: the CLAIMPAIR gate's pg-lane SETUP list is the enqueue dedupe gate's list plus fixtures 29 and 36-fixture-compute-jobs-claim-token.sql, with the migration last; the template entries were kept because the lane run showed no need to drop any
+- [Phase 164.9.3]: 164.9.3-04: each CLAIMPAIR twin mutates ONE body and ONE partition (OR TRUE inserted before the pre-rank NOT EXISTS, body chosen by measured nth) and stands down only that body-by-partition anchor; the VAC-04 acks are derived locally from --diff-bodies against origin/main and were cross-checked read-only against the PR's VAC-04 PROD MATCH hashes
+- [Phase 164.9.3]: 164.9.3-05: the mutation runner and pg-lane run WITHOUT the shared lane lock (coordinator correction: the lock guards only the local-stack lane); both floors were pushed to measured+1 in ONE full run, whose two defects named each floor
+- [Phase 164.9.3]: 164.9.3-06: the release is a MINOR bump to 0.108.0.0 (the migration changes the PROD claim path and auto-applies on merge); SC3 stays OPEN as a ship precondition in 164.9.3-MIGRATION-REVIEW.md (three reviewers before merge)
 
 ### Decisions (execution-time, Phase 140.2)
 

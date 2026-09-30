@@ -18,7 +18,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
-import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
+import { deriveSeriesBundle, fixtureBenchmarkPrices } from "@/lib/factsheet/build-payload";
 import { FactsheetProvider } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
 import { BasisProvider, useBasis, mtmDisabledReasonCopy, smoothedDisabledReasonCopy, type Basis } from "./basis-context";
@@ -297,7 +297,13 @@ function fixtureSingleKeyMtmGated(): FactsheetPayload {
 const MTM_SERIES = makeReturnsSeries(60, 0.0009);
 const MTM_BUNDLE = deriveSeriesBundle(
   MTM_SERIES.map((p) => ({ date: p.date, value: p.value })),
-  { periodsPerYear: 365, isArithmetic: false, markets: [], strategyName: "Scenario" },
+  {
+    periodsPerYear: 365,
+    isArithmetic: false,
+    markets: [],
+    strategyName: "Scenario",
+    benchmarkPrices: fixtureBenchmarkPrices([MTM_SERIES]),
+  },
 );
 // (g) single-key options, MTM available AND leverageable (periodsPerYear present) WITH
 //     a resolved MTM series bundle. Phase 107 (LEV-BB): the leverage input now renders
@@ -441,10 +447,7 @@ function bundleFromScenario(p: FactsheetPayload) {
   return {
     dates: p.dates,
     strategyReturns: p.strategyReturns,
-    // Phase 103 Finding C sentinel: an equity curve whose endpoint/base ratio the
-    // calm cash series can never produce. periodReturn(3Y/5Y) = last/eq[0]-1 =
-    // 6.54/1 - 1 = +554.00%. If the 3Y/5Y rows revert to cash equity → gone → RED.
-    strategyEquity: p.strategyEquity.map((_, i, arr) => (i === arr.length - 1 ? 6.54 : 1)),
+    strategyEquity: p.strategyEquity,
     strategyDrawdowns: p.strategyDrawdowns,
     strategyRollingVol: p.strategyRollingVol,
     // Phase 103 Finding B sentinel: a constant rolling-Sharpe the calm cash series
@@ -468,7 +471,13 @@ function bundleFromScenario(p: FactsheetPayload) {
     // Phase 103 Finding A sentinel: an extended distribution scalar (skew = -7.77)
     // the calm cash series can never produce, plus a profit-factor feeding the
     // common-sense ratio. If ExtendedMetrics reverts to cash strategyMetrics → gone.
-    strategyMetrics: { ...p.strategyMetrics, skew: -7.77, profit_factor: 2 },
+    //
+    // Phase 103 Finding C sentinel, moved 2026-09-29 (Phase 169 D-02 / D-17): the
+    // 3 Year row reads compute()'s calendar p3y from the basis view's strategyMetrics,
+    // no longer an equity-curve look-back, so the sentinel moved from the equity curve
+    // to p3y = 5.54 (+554.00%). The 300-day cash series has no 3 Year window, so the
+    // row exists only under MTM. If the panel reverts to cash strategyMetrics → gone → RED.
+    strategyMetrics: { ...p.strategyMetrics, skew: -7.77, profit_factor: 2, p3y: 5.54 },
     streaks: p.streaks,
     // Sentinel year the cash series (all 2023) can never produce.
     calmarByYear: [{ year: "1999", ret: 0.42, max_dd: -0.1, calmar: 4.2, days: 250 }],
@@ -712,15 +721,15 @@ describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-throu
     expect(rollingSection().textContent).toContain("9.87");
   });
 
-  it("Finding C: the Cumulative-Returns 3Y/5Y rows follow the MTM equity curve", () => {
+  it("Finding C: the Cumulative-Returns 3Y/5Y rows follow the MTM basis (compute()'s calendar windows)", () => {
     const { getByText } = renderBody(fixtureSingleKeyMtmBundle());
     const cumSection = () =>
       getByText("Cumulative Return Metrics").closest("section") as HTMLElement;
-    // Cash: the sentinel 3Y/5Y return (+554.00%) is absent.
+    // Cash: the sentinel 3 Year return (+554.00%) is absent (a 300-day record has no 3 Year row).
     expect(cumSection().textContent).not.toContain("+554.00%");
     fireEvent.click(getByText("Mark-to-market"));
-    // MTM: 3Y/5Y recompute from the bundle's equity curve.
-    // Neuter (CumulativeReturnsPanel eq → payload.strategyEquity) → cash → RED.
+    // MTM: the 3 Year row reads the bundle's strategyMetrics.p3y.
+    // Neuter (CumulativeReturnsPanel m → payload.strategyMetrics) → cash → RED.
     expect(cumSection().textContent).toContain("+554.00%");
   });
 
@@ -889,7 +898,13 @@ const SMOOTHED = {
 const SMOOTHED_SERIES = makeReturnsSeries(70, 0.0007);
 const SMOOTHED_BUNDLE = deriveSeriesBundle(
   SMOOTHED_SERIES.map((p) => ({ date: p.date, value: p.value })),
-  { periodsPerYear: 365, isArithmetic: false, markets: [], strategyName: "Scenario" },
+  {
+    periodsPerYear: 365,
+    isArithmetic: false,
+    markets: [],
+    strategyName: "Scenario",
+    benchmarkPrices: fixtureBenchmarkPrices([SMOOTHED_SERIES]),
+  },
 );
 const SMOOTHED_SEGMENT_LABEL = "Smoothed mark-to-market";
 

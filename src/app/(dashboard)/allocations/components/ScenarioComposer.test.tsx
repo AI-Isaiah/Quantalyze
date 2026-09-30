@@ -51,7 +51,10 @@ import {
 // would dispatch a key event the source deliberately does not listen for and
 // would pass against a component with no keyboard support at all.
 import userEvent from "@testing-library/user-event";
-import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import type {
+  EquityHistoryRebuildReason,
+  MyAllocationDashboardPayload,
+} from "@/lib/queries";
 import { isoDayFromDate } from "@/lib/dateday";
 
 // --- next/navigation mock -------------------------------------------------
@@ -111,6 +114,15 @@ vi.mock("../widgets/performance/ScenarioFactsheetChart", () => ({
 vi.mock("./KpiStrip", () => ({
   KpiStrip: vi.fn(() => <div data-testid="kpi-strip-mock" />),
 }));
+
+// Phase 167.1.2 plan 11 (D-06): a pass-through spy, so a test can read the
+// own-book return series the Scenario "vs your book" delta is computed from.
+// The real function runs; only its arguments are recorded. The composer is
+// the module's only importer.
+vi.mock("@/lib/sample-basis-ratios", async (importOriginal) => {
+  const m = await importOriginal<typeof import("@/lib/sample-basis-ratios")>();
+  return { ...m, sampleBasisRatios: vi.fn(m.sampleBasisRatios) };
+});
 
 vi.mock("./StrategyBrowseDrawer", () => ({
   StrategyBrowseDrawer: vi.fn(
@@ -348,6 +360,7 @@ vi.mock("./WeightOptimizerSection", () => ({
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer } from "./ScenarioComposer";
+import { EquityHistoryRebuilding } from "./EquityHistoryRebuilding";
 // Real (un-mocked) — used to build a valid current-schema draft so the
 // onRegisterOpen handler decodes "ok" in the WR-02 regression test below.
 import {
@@ -512,6 +525,33 @@ const REF_BTC = "holding:binance:BTC:spot";
 const REF_ETH = "holding:binance:ETH:spot";
 const REF_SOL = "holding:binance:SOL:spot";
 
+// Phase 167.1.2 plan 07 (SC-5) — per-key units are NAMED by their key's label
+// (`<Exchange> — <nickname>`), so the heatmap / PCR / caveat tests that address
+// a leg by its displayed name give each REF a connected-key record with a
+// distinct nickname. Before plan 07 those surfaces printed `key <id>`.
+const REF_LABEL: Record<string, string> = {
+  [REF_BTC]: "Binance — Alpha",
+  [REF_ETH]: "Binance — Beta",
+  [REF_SOL]: "Binance — Gamma",
+};
+const REF_NICK: Record<string, string> = {
+  [REF_BTC]: "Alpha",
+  [REF_ETH]: "Beta",
+  [REF_SOL]: "Gamma",
+};
+/** Attach a labelled apiKeys record for every REF_* per-key unit in `p`. */
+function withRefLabels(
+  p: Partial<MyAllocationDashboardPayload>,
+): Partial<MyAllocationDashboardPayload> {
+  const ids = Object.keys(p.perKeyReturnsByApiKeyId ?? {});
+  return {
+    ...p,
+    apiKeys: ids
+      .filter((id) => id in REF_NICK)
+      .map((id) => ({ ...winApiKey(id), label: REF_NICK[id] })),
+  };
+}
+
 // Read-only-tokens model: live holdings are fixed context with NO per-holding
 // toggle / weight / leverage controls. Every interactive gesture (toggle,
 // reweight, lever, remove) now lives on the ADDED-STRATEGY rows. The browse
@@ -564,6 +604,8 @@ function makePayload(
     derivedCurveComputedAt: null,
     // Phase 167.1.2 / D-02: the producer emits "rebuilding" for every allocator.
     equityHistoryState: "rebuilding",
+    equityDailyReturns: [],
+    equityHistoryRebuildReason: null,
     minHistoryDepthMonths: 12,
     equityBaselineUnknown: false,
     activeVenues: ["Binance"],
@@ -4029,7 +4071,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // genuine presentational component fed by the composer's scenarioMetrics.
   // -------------------------------------------------------------------------
   it("CORR-01 — with ≥2 active de-aliased strategies (≥10 overlapping days) the composer renders the heatmap with de-aliased axis labels", () => {
-    const payload = makePayload(mockTwoStrategies());
+    const payload = makePayload(withRefLabels(mockTwoStrategies()));
     render(
       <ScenarioComposer
         payload={payload}
@@ -4040,13 +4082,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // The de-aliased strategy names (REF_BTC / REF_ETH = the holding scopeRefs,
     // which mkRealStrat sets as both id AND name) appear as heatmap axis labels.
     // Each name renders twice (column header + row header), so use getAllByText.
-    // ENGINE-01: per-key units render as `key {api_key_id}` (the id here is the
-    // scopeRef), so the heatmap axis labels carry that prefix.
+    // Phase 167.1.2 plan 07 (SC-5): per-key units render their key's LABEL
+    // (was `key {api_key_id}` under ENGINE-01), so the heatmap axis labels
+    // carry the label.
     expect(
-      screen.getAllByText(`key ${REF_BTC}`).length,
+      screen.getAllByText(REF_LABEL[REF_BTC]).length,
     ).toBeGreaterThanOrEqual(2);
     expect(
-      screen.getAllByText(`key ${REF_ETH}`).length,
+      screen.getAllByText(REF_LABEL[REF_ETH]).length,
     ).toBeGreaterThanOrEqual(2);
     // The heatmap figure is present (the real component's role="figure" wrapper).
     expect(
@@ -4190,7 +4233,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("CORR-05 — the PCR list renders one role=listitem per constituent, de-aliased, sorted descending", () => {
-    const payload = makePayload(mockThreeStrategies());
+    const payload = makePayload(withRefLabels(mockThreeStrategies()));
     render(
       <ScenarioComposer
         payload={payload}
@@ -4207,12 +4250,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       ?.querySelector('ul[role="list"]') as HTMLElement;
     expect(list).not.toBeNull();
     const items = within(list).getAllByRole("listitem");
-    // One row per active constituent (ENGINE-01: per-key units render as
-    // `key {api_key_id}`).
+    // One row per active constituent (Phase 167.1.2 plan 07: per-key units
+    // render their key's label, was `key {api_key_id}`).
     expect(items.length).toBe(3);
     for (const ref of [REF_BTC, REF_ETH, REF_SOL]) {
       expect(
-        within(list).getAllByText(`key ${ref}`).length,
+        within(list).getAllByText(REF_LABEL[ref]).length,
       ).toBeGreaterThanOrEqual(1);
     }
     // Descending sort: each row's signed % is ≥ the next row's %.
@@ -4248,7 +4291,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   }
 
   it("WR-02 — the PCR bar track is overflow-hidden and the >100% fill is clamped to 100%", () => {
-    const payload = makePayload(mockHedgeBlend());
+    const payload = makePayload(withRefLabels(mockHedgeBlend()));
     render(
       <ScenarioComposer
         payload={payload}
@@ -4262,7 +4305,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       ?.querySelector('ul[role="list"]') as HTMLElement;
     const items = within(list).getAllByRole("listitem");
     // BTC's signed PCR exceeds 100% (the hedge forces it past 1.0).
-    const btcRow = items.find((li) => (li.textContent ?? "").includes(REF_BTC))!;
+    const btcRow = items.find((li) =>
+      (li.textContent ?? "").includes(REF_LABEL[REF_BTC]),
+    )!;
     const btcPct = parseFloat(btcRow.textContent!.match(/(-?\d+\.\d)%/)![1]);
     expect(btcPct).toBeGreaterThan(100);
     // Every bar track clamps overflow so a >100% fill can never bleed out.
@@ -4278,7 +4323,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("WR-03 — a negative-PCR (hedge) leg renders a 'risk-reducing' affordance, not a broken empty bar", () => {
-    const payload = makePayload(mockHedgeBlend());
+    const payload = makePayload(withRefLabels(mockHedgeBlend()));
     render(
       <ScenarioComposer
         payload={payload}
@@ -4293,7 +4338,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // The hedge leg (ETH) carries a negative % AND the risk-reducing tag.
     const ethRow = within(list)
       .getAllByRole("listitem")
-      .find((li) => (li.textContent ?? "").includes(REF_ETH))!;
+      .find((li) => (li.textContent ?? "").includes(REF_LABEL[REF_ETH]))!;
     expect(ethRow.textContent).toMatch(/-\d+\.\d%/); // signed % preserved
     const tag = within(ethRow).getByTestId("pcr-risk-reducing-tag");
     expect(tag).toBeInTheDocument();
@@ -4346,7 +4391,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("CORR-06 — the heatmap axis labels follow the cluster order (correlated legs adjacent, outlier separated)", () => {
-    const payload = makePayload(mockThreeStrategies());
+    const payload = makePayload(withRefLabels(mockThreeStrategies()));
     render(
       <ScenarioComposer
         payload={payload}
@@ -4359,10 +4404,10 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const figure = screen.getByRole("figure", {
       name: /Pairwise correlation heatmap/i,
     });
-    // ENGINE-01: per-key units render as `key {api_key_id}`.
-    const kBtc = `key ${REF_BTC}`;
-    const kEth = `key ${REF_ETH}`;
-    const kSol = `key ${REF_SOL}`;
+    // Phase 167.1.2 plan 07: per-key units render their key's label.
+    const kBtc = REF_LABEL[REF_BTC];
+    const kEth = REF_LABEL[REF_ETH];
+    const kSol = REF_LABEL[REF_SOL];
     const order = Array.from(
       figure.querySelectorAll<HTMLElement>('[class*="text-center"]'),
     )
@@ -4509,7 +4554,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("IMPACT-01 — the coverage caveat names the live N overlapping days AND the shortest-history strategy name", () => {
-    const payload = makePayload(mockTwoStrategies());
+    const payload = makePayload(withRefLabels(mockTwoStrategies()));
     render(
       <ScenarioComposer
         payload={payload}
@@ -4531,8 +4576,59 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(text).toContain(`Historical realized · ${n} overlapping days · not a forecast`);
     // The shortest-history strategy name (REF_BTC/REF_ETH share window length
     // 12, so first-by-input-order REF_BTC wins the deterministic tiebreak).
-    // ENGINE-01: per-key units render as `key {api_key_id}`.
-    expect(text).toContain(`Shortest history: key ${REF_BTC}.`);
+    // Phase 167.1.2 plan 07: per-key units render their key's label.
+    expect(text).toContain(`Shortest history: ${REF_LABEL[REF_BTC]}.`);
+  });
+
+  // Phase 167.1.2 plan 07 (SC-5) — no raw api key id reaches a Scenario
+  // surface. Real per-key units carry UUID ids; before plan 07 the heatmap
+  // headers and the shortest-history caveat printed `key <uuid>`, because only
+  // the gantt resolved the label. The third key has no apiKeys record, so it
+  // exercises the "Connected key" fallback on the same surfaces.
+  it("SC-5 — the heatmap headers and the shortest-history caveat carry key labels, never a key UUID", () => {
+    const UUID_RE =
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+    const K_NICK = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    const K_TAIL = "1b2c3d4e-5f6a-4b7c-9d8e-0f1a2b3c4d5e";
+    const K_NONE = "2c3d4e5f-6a7b-4c8d-8e9f-1a2b3c4d5e6f";
+    const dates = Array.from({ length: 12 }, (_, i) =>
+      `2026-01-${String(i + 1).padStart(2, "0")}`,
+    );
+    const series = (vals: number[]) =>
+      dates.map((date, i) => ({ date, value: vals[i % vals.length] }));
+    const payload = makePayload({
+      ...perKeyBook([
+        { id: K_NICK, returns: series([0.02, -0.01, 0.03, -0.02, 0.01]) },
+        { id: K_TAIL, returns: series([-0.01, 0.005, -0.02]) },
+        { id: K_NONE, returns: series([0.004, -0.006, 0.012, -0.003]) },
+      ]),
+      apiKeys: [
+        { ...winApiKey(K_NICK), exchange: "okx", label: "Main" },
+        // No nickname → the masked tail (last 4 of the id), never the id.
+        { ...winApiKey(K_TAIL), exchange: "bybit", label: "" },
+      ],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={`${ALLOCATOR_A}-sc5-labels`}
+        allocatorMandate={null}
+      />,
+    );
+    const figure = screen.getByRole("figure", {
+      name: /Pairwise correlation heatmap/i,
+    });
+    const headers = figure.textContent ?? "";
+    expect(headers).not.toMatch(UUID_RE);
+    expect(headers).not.toMatch(/\bkey [0-9a-f]/i);
+    expect(headers).toContain("OKX — Main");
+    expect(headers).toContain("Bybit — ••••4d5e");
+    expect(headers).toContain("Connected key");
+    const caveat = screen.getByTestId("scenario-coverage-caveat");
+    const caveatText = caveat.textContent ?? "";
+    expect(caveatText).toContain("Shortest history:");
+    expect(caveatText).not.toMatch(UUID_RE);
+    expect(caveatText).not.toMatch(/\bkey [0-9a-f]/i);
   });
 
   // -------------------------------------------------------------------------
@@ -4867,6 +4963,7 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
     const built = buildPerKeyStrategyForBuilderSet(
       { "key-A": KEY_A_SERIES, "key-B": KEY_B_SERIES },
       equityByApiKeyId,
+      new Map(),
     );
     const selected: Record<string, boolean> = {};
     const weights: Record<string, number> = {};
@@ -16288,8 +16385,11 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
       expect(aumField().value).toBe("484444");
       const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
       expect(markers).toHaveLength(1);
+      // 169 review round 2 IN-R2-05 / SFH R2-5: a part whose every row is unavailable has
+      // no known amount (the 0 is the sum of nothing), so it names its count, never
+      // "$0". The "(… unavailable for N …)" count is unchanged.
       expect(markers[0].textContent).toBe(
-        "Includes $0 from keys needing attention (value unavailable for 1 holding) and $4,444 from keys with an unknown sync status.",
+        "Includes 1 holding from keys needing attention (value unavailable for 1 holding) and $4,444 from keys with an unknown sync status.",
       );
     } finally {
       errSpy.mockRestore();
@@ -16689,6 +16789,128 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
       "Excludes $0 from keys with an unknown sync status.",
     );
   });
+
+  // ── Phase 167.1.2 SC-4 — a trusted key with no return history ──────────────
+  //   trusted  (key-a, spot, contributing)                37,655  ← the field
+  //   trusted  (key-e, spot, eligible, NOT contributing)   12,345  ← excluded
+  // Before 167.1.2 key-e's dollars were in neither the total nor any excluded
+  // part, so the composer said nothing about them. That is where the founder's
+  // shared-account dollars sat. They are now named, and the field is unchanged.
+  const AT_KEY_NO_HISTORY = "aumtrust-key-e";
+  it("167.1.2 SC-4: a trusted key with no return history yet is named — 'Excludes $12,345 from connected keys with no return history yet.' — and the field is unchanged", () => {
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_NO_HISTORY,
+        status: null,
+        venue: "okx",
+        symbol: "AUMTRUST-E",
+        spotUsd: 12_345,
+        contributing: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    // Fixture self-proof: the key is allocator-eligible, trusted (null status)
+    // and NOT contributing, so only the new part can carry its dollars.
+    expect(payload.allocatorEligibleApiKeyIds).toContain(AT_KEY_NO_HISTORY);
+    expect(payload.contributingApiKeyIds).not.toContain(AT_KEY_NO_HISTORY);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_TRUSTED_USD));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $12,345 from connected keys with no return history yet.",
+    );
+  });
+
+  // Review C2 WR-03: a key that is not connected (not in the payload's
+  // eligible set) but whose status is not untrusted used to be named as one of
+  // the "connected keys with no return history yet". Its dollars get their own
+  // noun, and the field is unchanged.
+  it("review C2 WR-03: a key that is not connected is named 'Excludes $3,300 from keys that are not connected.', never as a connected key", () => {
+    const AT_KEY_GONE = "aumtrust-key-gone";
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_GONE,
+        status: "complete",
+        venue: "okx",
+        symbol: "AUMTRUST-GONE",
+        spotUsd: 3_300,
+        eligible: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    // Fixture self-proof: the key is in the key list with a trusted status,
+    // and in no eligible set.
+    expect(payload.apiKeys.map((k) => k.id)).toContain(AT_KEY_GONE);
+    expect(payload.eligibleApiKeyIds).not.toContain(AT_KEY_GONE);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_TRUSTED_USD));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $3,300 from keys that are not connected.",
+    );
+  });
+
+  it("167.1.2 SC-4: beside includes and excluded untrusted parts, the trusted exclusion is still named, never swallowed by the shared-noun form", () => {
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: "sign_in_failed",
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: AT_B_UNTRUSTED_USD,
+      },
+      {
+        id: AT_KEY_REVOKED,
+        status: "revoked",
+        venue: "kraken",
+        symbol: "AUMTRUST-D",
+        spotUsd: 8_000,
+        eligible: false,
+      },
+      {
+        id: AT_KEY_NO_HISTORY,
+        status: null,
+        venue: "bybit",
+        symbol: "AUMTRUST-E",
+        spotUsd: 5_000,
+        contributing: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Includes $12,345 from keys needing attention, and excludes $8,000 from keys needing attention and $5,000 from connected keys with no return history yet.",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -16715,6 +16937,13 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     { date: "2026-01-02", value: 101_000 },
     { date: "2026-01-03", value: 99_500 },
   ];
+  // Plan 11 (D-06): the payload's persisted returns for the same book. A
+  // "ready" payload always carries both (derivePhase07Fields sets them
+  // together), so the fixtures below do too.
+  const THREE_POINT_RETURNS = [
+    { date: "2026-01-02", value: 0.01 },
+    { date: "2026-01-03", value: -0.0148 },
+  ];
   type D02ChartProps = {
     equityDailyPoints: Array<{ date: string; value: number }>;
     scenarioOwnBookDelta?: { book_n?: number } | undefined;
@@ -16729,8 +16958,11 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
   });
 
   it("rebuilding: no own-book series reaches the chart, no own-book delta, and the disclosure renders once (and not in blank mode)", () => {
+    // Returns are present too, so an absent delta is the gate and not a
+    // missing input (plan 11 moved the delta onto them).
     const payload = makePayload({
       equityDailyPoints: THREE_POINT_CURVE,
+      equityDailyReturns: THREE_POINT_RETURNS,
       equityHistoryState: "rebuilding",
     });
     render(
@@ -16809,77 +17041,356 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(live.max_drawdown).toBe(payload.liveBaselineMetrics.maxDd);
   });
 
-  // Review round 1 (SFH-05): the disclosure explains an absence D-02 caused.
-  // A book with no snapshot yet (a first connect) has no own-book history to
-  // withhold, so the sentence would be false there. `snapshotCount` survives
-  // the withholding, so the composer can tell the two apart.
-  it("rebuilding + a live book with NO snapshot yet: no disclosure (nothing was withheld); with snapshots it renders", () => {
-    render(
-      <ScenarioComposer
-        payload={makePayload({ equityHistoryState: "rebuilding", snapshotCount: 0 })}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    // Book mode is live (the default fixture has holdings), so only the
-    // snapshot condition decides the absence.
-    expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
-    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  // Phase 167.1.2 D-15 (2026-09-27) supersedes IN-01 (2026-09-25): under
+  // 'rebuilding' the copy is chosen by state, never by count, because the
+  // warm-up line promises a timer the D-02 hold never honours.
+  // The two arms below replaced review round 1 SFH-05 (no disclosure for a
+  // book with no legacy snapshot) and review round 2 WR-02 (a derived curve
+  // alone turned it on, "neither source" kept it off). The Overview shows its
+  // rebuilding panel for every non-"ready" book, so the Scenario says the same
+  // thing about the same book: the disclosure follows the state alone. Do NOT
+  // restore a snapshot-count or curve-source condition on it.
+  const expectLiveBookKpis = (payload: MyAllocationDashboardPayload) => {
+    // D-03: the live-book KPIs come from the per-key blend, not the withheld
+    // curve, so they reach the KPI strip in every arm.
+    const live = vi.mocked(KpiStrip).mock.calls.at(-1)![0].liveMetrics as unknown as {
+      twr?: number | null;
+      sharpe?: number | null;
+    };
+    expect(live.twr).toBe(payload.liveBaselineMetrics.ytdTwr);
+    expect(live.sharpe).toBe(payload.liveBaselineMetrics.sharpe);
+  };
 
-    cleanup();
-    render(
-      <ScenarioComposer
-        payload={makePayload({ equityHistoryState: "rebuilding", snapshotCount: 3 })}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
-  });
+  // Review C3 IN-03: the D-15 arms use the producer's own shape for a
+  // non-ready book (`derivePhase07Fields` in src/lib/queries.ts): no curve,
+  // no returns, no raw snapshots, and a named reason. `makePayload`'s default
+  // 2-point curve is a shape the producer never sends under "rebuilding", and
+  // with it a gate that also required a curve would pass every arm while
+  // hiding the disclosure for every real book.
+  const producerRebuildingPayload = (
+    overrides: Partial<MyAllocationDashboardPayload> = {},
+  ) =>
+    makePayload({
+      equityHistoryState: "rebuilding",
+      equityHistoryRebuildReason: "awaiting_derivation",
+      equityDailyPoints: [],
+      equityDailyReturns: [],
+      equitySnapshots: [],
+      derivedCurveComputedAt: null,
+      ...overrides,
+    });
 
-  // Review round 2 (WR-02): the own-book series has TWO sources, the
-  // trustworthy derived curve and the legacy snapshots. `snapshotCount` counts
-  // only the legacy rows, so a book whose history is ALL derived (every legacy
-  // row terminus-flagged, or no legacy row at all) reports 0 snapshots while
-  // D-02 still withholds a real curve. Gating on the legacy count alone
-  // silenced the disclosure for exactly that book.
-  it("rebuilding + NO legacy snapshot but a trustworthy DERIVED curve: the disclosure renders (something was withheld)", () => {
-    render(
-      <ScenarioComposer
-        payload={makePayload({
-          equityHistoryState: "rebuilding",
-          snapshotCount: 0,
-          equityCurveSource: "derived",
-        })}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
-    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
+  it.each([
+    ["0 snapshots on the legacy source (SFH-05's book)", 0, "legacy"],
+    ["3 snapshots on the legacy source", 3, "legacy"],
+  ] as const)(
+    "rebuilding + %s: the disclosure renders exactly once, and the live-book KPIs stay (D-15)",
+    (_label, snapshotCount, equityCurveSource) => {
+      const payload = producerRebuildingPayload({
+        snapshotCount,
+        equityCurveSource,
+      });
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      // Book mode is live (the default fixture has holdings), so blank mode
+      // is not what decides the disclosure here.
+      expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+      const notes = screen.getAllByTestId("scenario-ownbook-rebuilding");
+      expect(notes).toHaveLength(1);
+      expect(notes[0].textContent).toBe(OWN_BOOK_REBUILDING_COPY);
+      expect(lastChart().scenarioOwnBookDelta).toBeUndefined();
+      expectLiveBookKpis(payload);
+    },
+  );
 
-    // Control: the same zero-snapshot book on the legacy source has nothing to
-    // withhold, so the case above is decided by the derived source alone.
-    cleanup();
-    render(
-      <ScenarioComposer
-        payload={makePayload({
-          equityHistoryState: "rebuilding",
-          snapshotCount: 0,
-          equityCurveSource: "legacy",
-        })}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
-  });
+  // Phase 167.1.2 D-15 (2026-09-27) supersedes IN-01 (2026-09-25): under
+  // 'rebuilding' the copy is chosen by state, never by count, because the
+  // warm-up line promises a timer the D-02 hold never honours.
+  // Review round 2 WR-02's two books, 0 legacy snapshots with and without a
+  // derived curve, now read the same: the disclosure renders for both. The
+  // "neither source" book used to be the control that kept it off.
+  // Producer-shaped (IN-03). The derived book is the one the producer stamps
+  // "derived" under "rebuilding": a trustworthy v2 curve exists but is held
+  // back (a key's account is still pending), so the payload carries the
+  // source and its compute time and still no curve points. The "neither
+  // source" book carries no curve at all.
+  it.each([
+    [
+      "a derived curve held back and 0 legacy snapshots",
+      "derived",
+      "2026-09-20T05:30:00Z",
+      "account_identity_pending",
+    ],
+    [
+      "neither source (0 legacy snapshots, no derived curve)",
+      "legacy",
+      null,
+      "awaiting_derivation",
+    ],
+  ] as const)(
+    "rebuilding + %s: the disclosure renders (D-15, state-driven)",
+    (_label, equityCurveSource, derivedCurveComputedAt, reason) => {
+      const payload = producerRebuildingPayload({
+        snapshotCount: 0,
+        equityCurveSource,
+        derivedCurveComputedAt,
+        equityHistoryRebuildReason: reason,
+      });
+      expect(payload.equityDailyPoints).toEqual([]);
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      expect(screen.getAllByTestId("scenario-ownbook-rebuilding")).toHaveLength(1);
+      expectLiveBookKpis(payload);
+    },
+  );
+
+  // D-15: blank mode has no own book to compare with, so the disclosure never
+  // renders there, whatever the state and whatever the history shape.
+  it.each([
+    ["rebuilding", "rebuilding", 0, "legacy"],
+    ["rebuilding", "rebuilding", 3, "derived"],
+    ["null", null, 0, "legacy"],
+    ["an unrecognised state", "partial", 3, "legacy"],
+    ["ready", "ready", 3, "derived"],
+  ] as const)(
+    // Review C3 SFH-C3-05 / IN-04: one placeholder per column, in row order
+    // (label, state, snapshotCount, source), so a red run names its case.
+    "blank mode + %s (equityHistoryState %s, %s snapshots, %s source): no disclosure",
+    (_label, state, snapshotCount, equityCurveSource) => {
+      // Review C3 IN-03: producer-shaped. Only "ready" carries a curve and its
+      // returns; every other state carries none, as `derivePhase07Fields`
+      // sends it.
+      const payload =
+        state === "ready"
+          ? makePayload({
+              equityHistoryState: "ready",
+              equityHistoryRebuildReason: null,
+              equityDailyPoints: THREE_POINT_CURVE,
+              equityDailyReturns: THREE_POINT_RETURNS,
+              snapshotCount,
+              equityCurveSource,
+            })
+          : producerRebuildingPayload({
+              equityHistoryState: state as never,
+              snapshotCount,
+              equityCurveSource,
+            });
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      fireEvent.click(screen.getByRole("radio", { name: /blank slate/i }));
+      expect(screen.getByRole("radio", { name: /blank slate/i })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+      expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+    },
+  );
+
+  // Review C3 SFH-C3-01: the Scenario sentence says WHY the comparison is
+  // withheld, and it must give the same kind of answer the Overview gives for
+  // the same payload. A failed read said "being rebuilt" here while the
+  // Overview said to reload, so the allocator waited on a rebuild that was not
+  // running. Four classes: a wait ("being rebuilt"), a read that failed
+  // (reload), a key the owner must fix (the Exchanges page), and a hold that
+  // no wait heals (review C3 round 2 WR-02 / SFH-C3R2-03).
+  //
+  // The class per reason is written out here, NOT read from the component's
+  // classifier, so a reason moved to the wrong class fails this arm instead of
+  // moving both surfaces together. The type check below forces a reason added
+  // to `EquityHistoryRebuildReason` into this table.
+  //
+  // Review C3 round 2 WR-02: a reason is a wait ("rebuilding") only when the
+  // Overview's own line for it names the daily run that retries it
+  // (account_identity_pending: "Each daily sync checks it again";
+  // awaiting_derivation: "recomputed ... once a day"). derivation_rejected
+  // ("did not pass its checks, so it is not shown") and
+  // shared_account_history_truncated ("we cannot join its history ... yet, so
+  // your history is not shown") name no such run, so they are "held_back".
+  const REASON_CLASSES = [
+    ["duplicate_account", "needs_action"],
+    ["key_not_syncing", "needs_action"],
+    ["shared_account_no_working_key", "needs_action"],
+    ["history_read_failed", "read_failed"],
+    ["awaiting_derivation", "rebuilding"],
+    ["account_identity_pending", "rebuilding"],
+    ["derivation_rejected", "held_back"],
+    ["shared_account_history_truncated", "held_back"],
+  ] as const satisfies ReadonlyArray<
+    readonly [
+      EquityHistoryRebuildReason,
+      "needs_action" | "read_failed" | "rebuilding" | "held_back",
+    ]
+  >;
+  type UnlistedReason = Exclude<
+    EquityHistoryRebuildReason,
+    (typeof REASON_CLASSES)[number][0]
+  >;
+  // Compile-time only: `true` is not assignable when a reason is unlisted.
+  const everyReasonListed: [UnlistedReason] extends [never] ? true : false = true;
+  void everyReasonListed;
+
+  const SCENARIO_LINE_BY_CLASS = {
+    rebuilding: OWN_BOOK_REBUILDING_COPY,
+    read_failed:
+      "We could not load your book's history just now, so the comparison with your current book is not shown; reload the page to try again.",
+    needs_action:
+      "Your book's own history is on hold until you update your keys on the Exchanges page, so the comparison with your current book is not shown.",
+    held_back:
+      "We are holding back your book's own history, so the comparison with your current book is not shown.",
+  } as const;
+  // Review C3 round 3 WR-01: the Overview heading per class, written out
+  // literally for the same reason as the class table above.
+  const OVERVIEW_HEADING_BY_CLASS = {
+    rebuilding: "Your equity history is being rebuilt",
+    read_failed: "Your equity history is being rebuilt",
+    needs_action: "Your equity history is being rebuilt",
+    held_back: "We are holding back your equity history",
+  } as const;
+  const EXCHANGES_HREF = "/profile?tab=exchanges";
+
+  it.each(REASON_CLASSES)(
+    "rebuilding reason %s: the Scenario gives the %s line, the same class the Overview panel gives (SFH-C3-01)",
+    (reason, reasonClass) => {
+      // The producer's shape for a non-ready book: no curve, no returns.
+      const payload = makePayload({
+        equityHistoryState: "rebuilding",
+        equityHistoryRebuildReason: reason,
+        equityDailyPoints: [],
+        equityDailyReturns: [],
+      });
+      render(
+        <>
+          <ScenarioComposer
+            payload={payload}
+            allocatorId={ALLOCATOR_A}
+            allocatorMandate={null}
+          />
+          <EquityHistoryRebuilding reason={payload.equityHistoryRebuildReason} />
+        </>,
+      );
+      const scenario = screen.getByTestId("scenario-ownbook-rebuilding");
+      const overview = screen.getByTestId("overview-equity-rebuilding");
+      expect(scenario.textContent).toBe(SCENARIO_LINE_BY_CLASS[reasonClass]);
+      // Neither surface promises "appear once" (D-15).
+      expect(scenario.textContent).not.toMatch(/appear once/);
+
+      const exchangesLink = (el: HTMLElement) =>
+        within(el)
+          .queryAllByRole("link")
+          .filter((a) => a.getAttribute("href") === EXCHANGES_HREF);
+      const saysReload = (el: HTMLElement) => /reload the page/i.test(el.textContent ?? "");
+
+      // The same class on both surfaces: a fix names the Exchanges page on
+      // both, a failed read says reload on both, a wait does neither on either.
+      const needsAction = reasonClass === "needs_action";
+      const readFailed = reasonClass === "read_failed";
+      expect(exchangesLink(scenario).length > 0).toBe(needsAction);
+      expect(exchangesLink(overview).length > 0).toBe(needsAction);
+      expect(saysReload(scenario)).toBe(readFailed);
+      expect(saysReload(overview)).toBe(readFailed);
+
+      // Review C3 round 2 WR-02: the Scenario says "being rebuilt" exactly
+      // when the Overview's own reason line names the daily run that retries
+      // it. The panel's body is the same for every reason, and no heading
+      // names a daily run, so the match comes from the reason line alone.
+      const rebuilding = reasonClass === "rebuilding";
+      expect(/being rebuilt/.test(scenario.textContent ?? "")).toBe(rebuilding);
+      expect(/\bdaily\b|once a day/i.test(overview.textContent ?? "")).toBe(rebuilding);
+
+      // Review C3 round 3 WR-01: the Overview heading follows the same class.
+      // For a held_back reason the heading and the Scenario both say the
+      // history is held back, and neither says "being rebuilt"; every other
+      // class keeps the "being rebuilt" heading.
+      const heading = within(overview).getByRole("heading", { level: 2 });
+      expect(heading.textContent).toBe(OVERVIEW_HEADING_BY_CLASS[reasonClass]);
+      const heldBack = reasonClass === "held_back";
+      expect(/holding back/.test(heading.textContent ?? "")).toBe(heldBack);
+      expect(/holding back/.test(scenario.textContent ?? "")).toBe(heldBack);
+      expect(/being rebuilt/.test(heading.textContent ?? "")).toBe(!heldBack);
+    },
+  );
+
+  // Fail-closed: no reason, or a reason this build does not know (a stale
+  // client, a reason added later, a prototype key), keeps the generic wait
+  // line rather than claiming a failed read or a key to fix.
+  it.each([
+    ["null", null],
+    ["missing", undefined],
+    ["a reason this build does not know", "some_later_reason"],
+    ["a prototype key", "constructor"],
+  ] as const)(
+    "rebuilding with reason %s: the Scenario keeps the generic rebuilding line (SFH-C3-01, fail-closed)",
+    (_label, reason) => {
+      const payload = makePayload({
+        equityHistoryState: "rebuilding",
+        equityHistoryRebuildReason: reason as never,
+        equityDailyPoints: [],
+        equityDailyReturns: [],
+      });
+      if (reason === undefined) {
+        delete (payload as Partial<MyAllocationDashboardPayload>).equityHistoryRebuildReason;
+        expect("equityHistoryRebuildReason" in payload).toBe(false);
+      }
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      expect(screen.getByTestId("scenario-ownbook-rebuilding").textContent).toBe(
+        OWN_BOOK_REBUILDING_COPY,
+      );
+    },
+  );
+
+  // Review C3 round 2 IN-01: the Overview panel fails closed through the same
+  // guard. An unknown reason or a prototype key used to reach
+  // `REASON_LINE[reason]` unguarded: an unknown string drew an empty line, and
+  // "constructor" handed React a function. It must render exactly what a book
+  // with no reason renders (the generic heading and body, no reason line).
+  it.each([
+    ["a reason this build does not know", "some_later_reason"],
+    ["a prototype key", "constructor"],
+  ] as const)(
+    "the Overview panel with reason %s renders the no-reason panel (IN-01, fail-closed)",
+    (_label, reason) => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { unmount } = render(<EquityHistoryRebuilding reason={null} />);
+        const generic = screen.getByTestId("overview-equity-rebuilding");
+        const genericText = generic.textContent;
+        const genericLines = generic.querySelectorAll("p").length;
+        unmount();
+
+        render(<EquityHistoryRebuilding reason={reason as never} />);
+        const panel = screen.getByTestId("overview-equity-rebuilding");
+        expect(panel.textContent).toBe(genericText);
+        expect(panel.querySelectorAll("p").length).toBe(genericLines);
+        expect(errorSpy).not.toHaveBeenCalled();
+      } finally {
+        errorSpy.mockRestore();
+      }
+    },
+  );
 
   // Review round 1 (WR-02): the `bookReturns.length < 2` guard in
   // `scenarioOwnBookDelta`. A 2-point book yields ONE return, and a Sharpe or
@@ -16890,6 +17401,7 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     const TWO_POINT_CURVE = THREE_POINT_CURVE.slice(0, 2);
     const payload = makePayload({
       equityDailyPoints: TWO_POINT_CURVE,
+      equityDailyReturns: THREE_POINT_RETURNS.slice(0, 1),
       equityHistoryState: "ready",
     });
     render(
@@ -16905,9 +17417,38 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
   });
 
+  // Review C2 SFH-11 (b). The producer emits only finite returns, so this is a
+  // guard on a broken contract. Before, a non-finite return was filtered out
+  // silently and the Sharpe and Sortino deltas were computed on fewer
+  // observations with nothing said. Now the own-book leg is absent (as for a
+  // book with no series) and the broken contract is logged.
+  it("ready + a non-finite persisted return: no own-book delta is built, and the broken contract is logged", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          equityDailyPoints: THREE_POINT_CURVE,
+          equityDailyReturns: [
+            { date: "2026-01-02", value: 0.01 },
+            { date: "2026-01-03", value: Number.NaN },
+            { date: "2026-01-04", value: -0.0148 },
+          ],
+          equityHistoryState: "ready",
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(lastChart().scenarioOwnBookDelta).toBeUndefined();
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain("non-finite own-book return");
+    errSpy.mockRestore();
+  });
+
   it("ready (regression guard): the own-book series and delta flow as before and no disclosure renders", () => {
     const payload = makePayload({
       equityDailyPoints: THREE_POINT_CURVE,
+      equityDailyReturns: THREE_POINT_RETURNS,
       equityHistoryState: "ready",
     });
     render(
@@ -16922,6 +17463,195 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(props.scenarioOwnBookDelta).toBeDefined();
     expect(props.scenarioOwnBookDelta?.book_n).toBe(2);
     expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  });
+
+  // Plan 11 (D-06). A deposit raises the book's dollar level without earning
+  // anything. The level ratio reads 201,000 / 101,000 - 1 = +99% that day and
+  // feeds it into the book's Sharpe, Sortino and max drawdown; the persisted
+  // flow-neutral return for that day is 0. The delta must be computed from the
+  // persisted returns, so the series handed to sampleBasisRatios is exactly
+  // them and never contains the deposit.
+  it("ready + a deposit day: the own-book delta is computed from the persisted returns, not the level ratios", () => {
+    const DEPOSIT_CURVE = [
+      { date: "2026-01-01", value: 100_000 },
+      { date: "2026-01-02", value: 101_000 },
+      { date: "2026-01-03", value: 201_000 },
+      { date: "2026-01-04", value: 202_005 },
+    ];
+    const FLOW_NEUTRAL_RETURNS = [
+      { date: "2026-01-02", value: 0.01 },
+      { date: "2026-01-03", value: 0 },
+      { date: "2026-01-04", value: 0.005 },
+    ];
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          equityDailyPoints: DEPOSIT_CURVE,
+          equityDailyReturns: FLOW_NEUTRAL_RETURNS,
+          equityHistoryState: "ready",
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const props = lastChart();
+    expect(props.scenarioOwnBookDelta?.book_n).toBe(3);
+    const seriesSeen = vi
+      .mocked(sampleBasisRatios)
+      .mock.calls.map((call) => call[0]);
+    expect(seriesSeen).toContainEqual([0.01, 0, 0.005]);
+    for (const series of seriesSeen) {
+      expect(series.some((r) => r > 0.5)).toBe(false);
+    }
+  });
+
+  it("ready: the live-book KPIs (liveBaselineMetrics) still reach the KPI strip (D-03)", () => {
+    const payload = makePayload({
+      equityDailyPoints: THREE_POINT_CURVE,
+      equityDailyReturns: THREE_POINT_RETURNS,
+      equityHistoryState: "ready",
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const kpiProps = vi.mocked(KpiStrip).mock.calls.at(-1)![0];
+    const live = kpiProps.liveMetrics as unknown as {
+      twr?: number | null;
+      sharpe?: number | null;
+      max_drawdown?: number | null;
+    };
+    expect(live.twr).toBe(payload.liveBaselineMetrics.ytdTwr);
+    expect(live.sharpe).toBe(payload.liveBaselineMetrics.sharpe);
+    expect(live.max_drawdown).toBe(payload.liveBaselineMetrics.maxDd);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 SC-4 — a book whose every contributing key has weight 0 shows
+// "no result", never a flat +0.00% line.
+//
+// The founder's book: the shared account's holdings were attributed to a key
+// that does not contribute, so every CONTRIBUTING key's equity (its per-key
+// weight) was 0, and the engine drew 100 days of +0.00%. The engine now returns
+// its honest empty shape on zero weight mass; this pins that the composer
+// passes that shape through (null KPIs, no chart series) instead of drawing it.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — 167.1.2 SC-4 zero weight mass renders no result", () => {
+  const ZM_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-06-${String(i + 1).padStart(2, "0")}`,
+  );
+  const ZM_SERIES_A = ZM_DATES.map((date, i) => ({
+    date,
+    value: [0.004, -0.001, 0.002, 0.0005][i % 4],
+  }));
+  const ZM_SERIES_B = ZM_DATES.map((date, i) => ({
+    date,
+    value: [-0.012, 0.021, -0.006, 0.017][i % 4],
+  }));
+  // Synthetic identifiers only — the repo and `.planning/` are public.
+  const ZM_KEY_A = "zeromass-key-a";
+  const ZM_KEY_B = "zeromass-key-b";
+
+  /** Two contributing keys, each with one spot holding worth `usd`. A spot
+   *  holding's equity IS its `value_usd`, so `usd = 0` is weight 0 per key. */
+  function zmBook(usdA: number, usdB: number): MyAllocationDashboardPayload {
+    const keys = [ZM_KEY_A, ZM_KEY_B];
+    return makePayload({
+      apiKeys: keys.map((id) => ({ ...winApiKey(id), sync_status: null })),
+      holdingsSummary: [
+        {
+          ...HOLDING_BTC,
+          venue: "binance",
+          symbol: "ZEROMASS-A",
+          holding_type: "spot" as const,
+          value_usd: usdA,
+          api_key_id: ZM_KEY_A,
+        },
+        {
+          ...HOLDING_BTC,
+          venue: "okx",
+          symbol: "ZEROMASS-B",
+          holding_type: "spot" as const,
+          value_usd: usdB,
+          api_key_id: ZM_KEY_B,
+        },
+      ],
+      perKeyReturnsByApiKeyId: {
+        [ZM_KEY_A]: ZM_SERIES_A,
+        [ZM_KEY_B]: ZM_SERIES_B,
+      },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: [...keys],
+      allocatorEligibleApiKeyIds: [...keys],
+      contributingApiKeyIds: [...keys],
+      bookEntryGateSatisfied: true,
+    });
+  }
+
+  type ZmMetrics = {
+    n: number;
+    twr: number | null;
+    sharpe: number | null;
+    equity_curve: Array<{ date: string; value: number }>;
+    member_count?: number;
+  };
+  const lastKpiScenario = (): ZmMetrics =>
+    vi.mocked(KpiStrip).mock.calls.at(-1)![0]
+      .scenarioMetrics as unknown as ZmMetrics;
+  const lastChartSeries = (): Array<{ date: string; value: number }> =>
+    (
+      vi.mocked(ScenarioFactsheetChart).mock.calls.at(-1)![0] as {
+        scenarioSeries: Array<{ date: string; value: number }>;
+      }
+    ).scenarioSeries;
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    cleanup();
+  });
+
+  function renderZm(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  it("control: the same book with real weight blends both keys into a curve (the fixture reaches the engine)", () => {
+    renderZm(zmBook(40_000, 10_000));
+    const sc = lastKpiScenario();
+    expect(sc.n).toBeGreaterThan(0);
+    expect(sc.twr).not.toBeNull();
+    expect(lastChartSeries().length).toBeGreaterThan(0);
+  });
+
+  it("every contributing key at weight 0 → the KPI strip gets null metrics and the chart gets NO scenario series (today: a flat +0.00% curve)", () => {
+    renderZm(zmBook(0, 0));
+    const sc = lastKpiScenario();
+    expect(sc.n).toBe(0);
+    expect(sc.twr).toBeNull();
+    expect(sc.sharpe).toBeNull();
+    expect(sc.equity_curve).toEqual([]);
+    // The members did exist: the composer's coverage cross-check reads them.
+    expect(sc.member_count).toBe(2);
+    // No flat line reaches the chart: an empty series, not 14 points at 1.0.
+    expect(lastChartSeries()).toEqual([]);
+    // No "+0.00%" anywhere on the surface (the fabricated figure).
+    expect(document.body.textContent ?? "").not.toContain("+0.00%");
+    // The blend header must not claim a mean over a window it does not have
+    // (before the BlendHeader branch it read "Mean of 2 strategies · –").
+    expect(screen.getByTestId("scenario-blend-header").textContent).toBe(
+      "No weight on the selected strategies — not a blend",
+    );
   });
 });
 

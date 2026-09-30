@@ -63,7 +63,14 @@
  * (sticky-footer right CTA) but routes the click to the callback prop.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import Link from "next/link";
 import {
   buildDateMapCache,
@@ -164,6 +171,11 @@ import {
   type SolveLeverageResult,
 } from "../lib/solve-leverage";
 import { KpiStrip } from "./KpiStrip";
+import {
+  equityHistoryRebuildClass,
+  ExchangesPageLink,
+  type EquityHistoryRebuildClass,
+} from "./EquityHistoryRebuilding";
 // `toWealth` stays (the scenario wealth series builder, imported from
 // ../widgets/performance/EquityChart); EquityChart +
 // DrawdownChart are no longer rendered here — Phase 38-03 swaps the composer's
@@ -197,6 +209,7 @@ import { StressVarSection } from "./StressVarSection";
 import { MonteCarloSection } from "./MonteCarloSection";
 import { WeightOptimizerSection } from "./WeightOptimizerSection";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import { dataSourceLabel } from "@/lib/api-key-label";
 import type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
 // ---------------------------------------------------------------------------
@@ -711,6 +724,15 @@ type AddedMetricsState = "pending" | "settled" | "unavailable";
  * dropped dollars whose key the key list does not carry (an unsupported
  * exchange), so they are named ("excludes $Z from keys with an unknown sync
  * status") instead of vanishing.
+ *
+ * Phase 167.1.2 SC-4: it also passes `excludedTrusted`, dropped dollars from a
+ * trusted key with no return series yet, which until then landed in no part
+ * at all ("excludes $X from connected keys with no return history yet").
+ *
+ * Review C2 WR-03: and `excludedNotConnected`, dropped dollars from a key that
+ * is not in the payload's eligible set (disconnected or inactive), which
+ * until then were called connected keys ("excludes $X from keys that are not
+ * connected").
  */
 function buildUntrustedAumClause(summary: LiveHoldingsSummary): string {
   return buildKeyTrustClause(
@@ -723,49 +745,9 @@ function buildUntrustedAumClause(summary: LiveHoldingsSummary): string {
     },
     summary.excludedUntrusted,
     summary.excludedUnknownStatus,
+    summary.excludedTrusted,
+    summary.excludedNotConnected,
   );
-}
-
-/**
- * DSRC-02 — exchange display-name lookup for the Data-sources row labels.
- *
- * Copied locally from the SyncBadge recipe (SyncBadge.tsx:21-35): a lower-cased
- * lookup with `?? exchange` fallback. The shared `EXCHANGE_DISPLAY`
- * (closed-sets.ts) carries identical values but is typed
- * `Record<SupportedExchange, string>` — a CLOSED key union — so it cannot be
- * indexed by the arbitrary `string` exchange code without a cast that defeats
- * its narrowing; the open-keyed `?? fallback` recipe stays local, matching the
- * existing local copies in SyncBadge + VerificationForm + AllocatorSyncStatus
- * rather than introducing a cast or a new shared module (surgical-change rule,
- * PATTERNS §"No Analog Found").
- */
-const EXCHANGE_LABELS: Record<string, string> = {
-  binance: "Binance",
-  okx: "OKX",
-  bybit: "Bybit",
-};
-
-/**
- * DSRC-02 — resolve a connected exchange api_key to its row label
- * `{Exchange} — {nickname}`, falling back to `{Exchange} — ••••{id.slice(-4)}`
- * when the key has no nickname. The masked tail never reveals the full id and
- * never any secret/ciphertext (T-37-03-01). Returns the structured parts so the
- * caller can render the masked tail in font-mono per UI-SPEC.
- */
-function dataSourceLabel(k: { exchange: string; label: string; id: string }): {
-  exchange: string;
-  /** nickname when present, else null (caller renders the masked tail). */
-  nickname: string | null;
-  /** masked id tail (last 4) — only meaningful when nickname is null. */
-  maskedTail: string;
-} {
-  const exchange = EXCHANGE_LABELS[k.exchange.toLowerCase()] ?? k.exchange;
-  const nick = k.label?.trim();
-  return {
-    exchange,
-    nickname: nick ? nick : null,
-    maskedTail: `••••${k.id.slice(-4)}`,
-  };
 }
 
 /** The canonical connection-failure copy — honest for a genuine network drop
@@ -899,6 +881,49 @@ function pruneLeverageToDraftRefs(
 // ScenarioComposer
 // ---------------------------------------------------------------------------
 
+/**
+ * Review C3 SFH-C3-01. The Scenario's one sentence about the withheld own-book
+ * comparison, keyed by the class the Overview's `equityHistoryRebuildClass`
+ * gives the same reason. A failed read says to reload, a key the owner must
+ * fix names the Exchanges page, and only a real wait says "being rebuilt".
+ * Review C3 round 2 WR-02: a hold that no wait heals (`held_back`) says the
+ * history is held back, the meaning of the Overview's "so it is not shown"
+ * lines, and names no wait. The Overview panel carries the per-reason detail.
+ * No sentence promises a date or a day count.
+ */
+const OWN_BOOK_REBUILDING_LINE: Record<EquityHistoryRebuildClass, ReactNode> = {
+  rebuilding: (
+    <>
+      Your book&apos;s own history is being rebuilt, so the comparison with
+      your current book is not shown.
+    </>
+  ),
+  read_failed: (
+    <>
+      We could not load your book&apos;s history just now, so the comparison
+      with your current book is not shown; reload the page to try again.
+    </>
+  ),
+  // "update your keys", not "fix a key": for duplicate_account the owner
+  // disconnects one of two working keys, and nothing is broken to fix.
+  needs_action: (
+    <>
+      Your book&apos;s own history is on hold until you update your keys on
+      the <ExchangesPageLink />, so the comparison with your current book is
+      not shown.
+    </>
+  ),
+  held_back: (
+    <>
+      We are holding back your book&apos;s own history, so the comparison with
+      your current book is not shown.
+    </>
+  ),
+};
+
+/** A stable empty own-book return series (a fresh `[]` would defeat the memo). */
+const NO_OWN_BOOK_RETURNS: MyAllocationDashboardPayload["equityDailyReturns"] = [];
+
 export function ScenarioComposer({
   payload,
   allocatorId,
@@ -919,14 +944,18 @@ export function ScenarioComposer({
     strategies,
     equityDailyPoints,
     snapshotCount,
-    // Phase 167.1.2 review round 2 (WR-02): names the derived source of the
-    // own-book series for the rebuilding disclosure below.
-    equityCurveSource,
     allKeysStale,
     minHistoryDepthMonths,
     activeVenues,
     // Phase 167.1.2 / D-02: read below as fail-closed, matching the Overview.
     equityHistoryState,
+    // Review C3 SFH-C3-01: why the history is withheld, classed by the
+    // Overview's own table so both surfaces give the same kind of answer.
+    equityHistoryRebuildReason = null,
+    // Phase 167.1.2 plan 11 (D-06): the book's persisted flow-neutral returns,
+    // the ONE source of the own-book delta below. A payload without the field
+    // reads as no returns.
+    equityDailyReturns = NO_OWN_BOOK_RETURNS,
   } = payload as MyAllocationDashboardPayload & {
     existingOutcomesByHoldingRef?: Record<string, unknown>;
   };
@@ -1026,9 +1055,10 @@ export function ScenarioComposer({
   // baseline, so blank mode just reproduces that already-handled state.
   //
   // Phase 167.1.2 / D-02 ("Hide it until correct"): the same switch withholds
-  // the own-book series while the equity history is rebuilt, which also leaves
-  // `scenarioOwnBookDelta` undefined (it needs >= 2 levels). The live-book KPIs
-  // (`liveBaselineMetrics`) are a separate field and stay (D-03).
+  // the own-book series and its returns while the equity history is rebuilt,
+  // which also leaves `scenarioOwnBookDelta` undefined (it needs >= 2 returns).
+  // The live-book KPIs (`liveBaselineMetrics`) are a separate field and stay
+  // (D-03).
   const isBlankMode = entryMode === "blank";
   // Fail-closed: ONLY an explicit "ready" may show the own-book series. A
   // missing field, null, "" or any later state all read as rebuilding.
@@ -1037,6 +1067,11 @@ export function ScenarioComposer({
     () => (isBlankMode || isOwnBookRebuilding ? [] : equityDailyPoints),
     [isBlankMode, isOwnBookRebuilding, equityDailyPoints],
   ) as typeof equityDailyPoints;
+  // The same switch gates the returns the own-book delta reads (plan 11).
+  const baselineEquityDailyReturns = useMemo(
+    () => (isBlankMode || isOwnBookRebuilding ? [] : equityDailyReturns),
+    [isBlankMode, isOwnBookRebuilding, equityDailyReturns],
+  );
 
   const scenario = useScenarioState({
     holdingsSummary: holdingsSummary as { symbol: string; venue: string; holding_type: string; value_usd: number }[],
@@ -2856,6 +2891,25 @@ export function ScenarioComposer({
     return out;
   }, [rawHoldingsSummary]);
 
+  // CF-05 — api_key_id → friendly exchange/account label, built from the SAME
+  // `payload.apiKeys` + `dataSourceLabel` idiom the per-key constituent rows
+  // render (`${Exchange} — ${nickname|••••tail}`). No second label formatter.
+  // Phase 167.1.2 plan 07 (SC-5): moved above `perKeyAdapterOutput` and passed
+  // to buildPerKeyStrategyForBuilderSet as its label map, so each per-key unit
+  // is NAMED by its label at the one place units are built. Every consumer that
+  // reads `s.name` (the CorrelationHeatmap headers via `strategyNames`, the
+  // shortest-history caveat via `coverageShortestName`, the gantt) inherits the
+  // label; before, only the gantt resolved it and the other two showed
+  // `key <api_key_id>`.
+  const apiKeyLabelById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const k of payload.apiKeys ?? []) {
+      const { exchange, nickname, maskedTail } = dataSourceLabel(k);
+      m.set(k.id, `${exchange} — ${nickname ?? maskedTail}`);
+    }
+    return m;
+  }, [payload.apiKeys]);
+
   // Per-key strategy set — wrapped in a useMemo on its inputs. One
   // StrategyForBuilder per api_key_id (id === api_key_id), RAW equity-share
   // weights, default selected=true.
@@ -2884,11 +2938,16 @@ export function ScenarioComposer({
     const eligibleOnly = Object.fromEntries(
       Object.entries(all).filter(([id]) => contributing.has(id)),
     );
-    return buildPerKeyStrategyForBuilderSet(eligibleOnly, equityByApiKeyId);
+    return buildPerKeyStrategyForBuilderSet(
+      eligibleOnly,
+      equityByApiKeyId,
+      apiKeyLabelById,
+    );
   }, [
     payload.perKeyReturnsByApiKeyId,
     payload.contributingApiKeyIds,
     equityByApiKeyId,
+    apiKeyLabelById,
   ]);
 
   // The per-key path is active only in book mode + the book gate satisfied. When
@@ -3617,24 +3676,10 @@ export function ScenarioComposer({
   // a prop and never runs the containment predicate locally, so the gantt bars
   // agree with the row chips and the divisor by construction. Spans come from the
   // shared `selectedSpanById` scan (Rule 2: computed once).
-  // CF-05 — api_key_id → friendly exchange/account label, built from the SAME
-  // `payload.apiKeys` + `dataSourceLabel` idiom the per-key constituent rows
-  // render (`${Exchange} — ${nickname|••••tail}`). A per-key (book-member)
-  // unit carries the PREFIXED `key <uuid>` as its `name` from
-  // buildPerKeyStrategyForBuilderSet (scenario-adapter.ts:146 — the unit's `id`
-  // is the bare api_key_id; its `name` is `key ${apiKeyId}`), so without this
-  // map the gantt would show that raw token. This is the ONE place the
-  // per-key row name is resolved before rows reach CoverageTimeline (which only
-  // renders `row.name` — it never derives labels). No second label formatter.
-  const apiKeyLabelById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const k of payload.apiKeys ?? []) {
-      const { exchange, nickname, maskedTail } = dataSourceLabel(k);
-      m.set(k.id, `${exchange} — ${nickname ?? maskedTail}`);
-    }
-    return m;
-  }, [payload.apiKeys]);
-
+  // CF-05 — the gantt rows resolve a per-key unit through `apiKeyLabelById`
+  // (declared above `perKeyAdapterOutput`). Since Phase 167.1.2 plan 07 the
+  // unit's own `name` already IS that label, so this lookup is redundant and
+  // harmless; it stays so a strategy row (no apiKeys entry) keeps `s.name`.
   const timelineRows = useMemo(
     () =>
       engineSet.strategies
@@ -3893,27 +3938,31 @@ export function ScenarioComposer({
   // PEER-05 (Phase 42) — the blend-vs-live-book signed delta on the sample basis
   // at the blend's periodsPerYear (like-for-like legs; #597 BLEND-01). The
   // own-book leg recomputes the live book's Sharpe/Sortino/maxDD via
-  // `sampleBasisRatios` on the OWN-BOOK DAILY RETURNS — derived here from
-  // `baselineEquityDailyPoints` (absolute-USD equity LEVELS: value[i]/value[i-1]
-  // − 1), NOT `liveBaselineMetrics` (a different/population basis). BLEND-01: the
-  // book leg is annualized at the SAME `blendBasis` the engine used for the blend
+  // `sampleBasisRatios` on the OWN-BOOK DAILY RETURNS — the payload's persisted
+  // flow-neutral returns (`baselineEquityDailyReturns`, Phase 167.1.2 plan 11,
+  // D-06). They used to be level ratios of the $-curve (value[i]/value[i-1] − 1),
+  // which read a deposit or a withdrawal as a return. NOT `liveBaselineMetrics`
+  // (a different/population basis). BLEND-01: the book leg is annualized at the
+  // SAME `blendBasis` the engine used for the blend
   // leg (`scenarioMetrics`), so the delta stays like-for-like in BASIS at 365 as
   // well as 252 — a crypto book's blend and own-book legs both ride √365. Each
   // delta = blend − book; null when a leg is null. `null` (→ undefined) when
   // there is no live book series (blank mode or a no-book allocator) so the panel
   // is silently absent. Keyed on the engine output + the own-book series + basis.
   const scenarioOwnBookDelta = useMemo<OwnBookDeltaPayload | undefined>(() => {
-    const levels = baselineEquityDailyPoints;
-    // Need ≥ 2 dated levels to derive at least one daily return. No book → absent.
-    if (!levels || levels.length < 2) return undefined;
-    const bookReturns: number[] = [];
-    for (let i = 1; i < levels.length; i++) {
-      const prev = levels[i - 1].value;
-      const cur = levels[i].value;
-      if (prev > 0 && Number.isFinite(prev) && Number.isFinite(cur)) {
-        bookReturns.push(cur / prev - 1);
-      }
+    // The producer only emits finite returns (extractTrustworthyDerivedSeries).
+    // Review C2 SFH-11 (b): if that contract ever breaks, the book leg is
+    // absent and the break is logged. Filtering the bad value out silently
+    // would compute the Sharpe and Sortino on fewer observations with nothing
+    // said. No book → absent.
+    const bookReturns = baselineEquityDailyReturns.map((point) => point.value);
+    if (!bookReturns.every((r) => Number.isFinite(r))) {
+      console.error(
+        "[ScenarioComposer] non-finite own-book return in equityDailyReturns; the own-book comparison is omitted",
+      );
+      return undefined;
     }
+    // One observation is not a Sharpe or Sortino worth showing.
     if (bookReturns.length < 2) return undefined;
     const book = sampleBasisRatios(bookReturns, blendBasis);
     // Blend ratios are the engine's already-rounded sample-basis output at the
@@ -3940,7 +3989,7 @@ export function ScenarioComposer({
       book_n: bookReturns.length,
     };
   }, [
-    baselineEquityDailyPoints,
+    baselineEquityDailyReturns,
     scenarioMetrics.n,
     scenarioMetrics.sharpe,
     scenarioMetrics.sortino,
@@ -4211,6 +4260,9 @@ export function ScenarioComposer({
         contributingApiKeyIds: payload.contributingApiKeyIds ?? [],
         managerSideApiKeyIds,
         statusByKeyId,
+        // Review C2 WR-03: the server-built eligible set, read raw (no
+        // `?? []`): an absent one means "cannot tell", not "none eligible".
+        eligibleApiKeyIds: payload.eligibleApiKeyIds,
       }),
     [
       scenario.draft.toggleByScopeRef,
@@ -4218,6 +4270,7 @@ export function ScenarioComposer({
       payload.contributingApiKeyIds,
       managerSideApiKeyIds,
       statusByKeyId,
+      payload.eligibleApiKeyIds,
     ],
   );
   const liveHoldingsSum = liveHoldingsSummary.total;
@@ -4744,7 +4797,8 @@ export function ScenarioComposer({
   // contribution can be <= 0 and still come from a key whose numbers are not
   // current (D-07). D-06 (b), 2026-09-24: the excluded part (D-20's `$Y`)
   // counts toward the gate too, so an exclusion is never silent. Review round
-  // 3 WR-01, 2026-09-24: so does the excluded unknown-status part.
+  // 3 WR-01, 2026-09-24: so does the excluded unknown-status part. Phase
+  // 167.1.2 SC-4: so does the excluded trusted (no return history) part.
   const fieldShowsLive =
     liveHoldingsSum > 0 &&
     (sanitizedManualAum === undefined || sanitizedManualAum === liveHoldingsSum);
@@ -4759,7 +4813,9 @@ export function ScenarioComposer({
     (liveHoldingsSummary.untrusted.count > 0 ||
       liveHoldingsSummary.unknownStatus.count > 0 ||
       liveHoldingsSummary.excludedUntrusted.count > 0 ||
-      liveHoldingsSummary.excludedUnknownStatus.count > 0) &&
+      liveHoldingsSummary.excludedUnknownStatus.count > 0 ||
+      liveHoldingsSummary.excludedTrusted.count > 0 ||
+      liveHoldingsSummary.excludedNotConnected.count > 0) &&
     (fieldShowsLive || overrideNoteShowsLive || fieldBlankHintShows);
   // Review WR-02 — the note that qualifies the field's value is its accessible
   // description, so a screen-reader user who tabs to PORTFOLIO AUM hears the
@@ -5531,24 +5587,26 @@ export function ScenarioComposer({
         {/* Phase 167.1.2 / D-02: the own-book comparison is withheld while the
             equity history is rebuilt; say so rather than leave a silent gap.
             Not in blank mode, where there is no own book to compare with.
-            Review round 1 (SFH-05): the producer sends [] for every allocator,
-            so the series cannot tell "withheld" from "none". Two fields are
-            computed before the history is withheld, and together they can.
-            The candidate series has TWO sources: the trustworthy derived curve,
-            which `equityCurveSource === "derived"` names, and the legacy
-            snapshots, which `snapshotCount > 0` names. With neither there is
-            no own-book history to withhold, and the sentence would explain an
-            absence D-02 did not cause. Review round 2 (WR-02): gating on the
-            legacy count alone hid the disclosure from a derived-only book. */}
-        {isOwnBookRebuilding &&
-          !isBlankMode &&
-          (snapshotCount > 0 || equityCurveSource === "derived") && (
+            Phase 167.1.2 / D-15 (supersedes IN-01): the Overview and the
+            Scenario gate on the same state. The earlier extra condition on the
+            history's size or source is removed, so in book mode a book with no
+            snapshot yet reads here as it does on the Overview's rebuilding
+            panel. Review C3 SFH-C3-04: that parity holds only in book mode. In
+            blank mode, chosen or forced (no live book, or no allocator key
+            with a per-key series yet, so `bookEntryGateSatisfied` is false),
+            no own-book line is drawn and there is no comparison to disclose.
+            That is D-15's blank-mode exception, and the Overview may still
+            show its rebuilding panel for the same book.
+            Review C3 SFH-C3-01: the sentence is picked by the class the
+            Overview gives the same reason (`equityHistoryRebuildClass`). */}
+        {isOwnBookRebuilding && !isBlankMode && (
           <p
             data-testid="scenario-ownbook-rebuilding"
             className="mt-2 text-fixed-11 text-text-muted"
           >
-            Your book&apos;s own history is being rebuilt, so the comparison
-            with your current book is not shown.
+            {OWN_BOOK_REBUILDING_LINE[
+              equityHistoryRebuildClass(equityHistoryRebuildReason)
+            ]}
           </p>
         )}
         {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted line

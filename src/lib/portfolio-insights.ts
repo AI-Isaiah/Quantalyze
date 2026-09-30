@@ -84,8 +84,12 @@ export function computeBiggestRisk(
   // Rule 2: concentration risk — top contributor's risk share dwarfs its capital share.
   // 166.1 D7: a row whose risk share does not exist (null) cannot be the
   // concentrated one; only rows with a share are compared.
+  // 169 review round 1 SFH M-5 (2026-09-29): nor can a row whose weight does
+  // not exist; a null weight read as 0 said "on 0% of capital".
   const risk = (analytics.risk_decomposition ?? []).flatMap((r) =>
-    r.marginal_risk_pct === null ? [] : [{ ...r, marginal_risk_pct: r.marginal_risk_pct }],
+    r.marginal_risk_pct === null || r.weight_pct === null
+      ? []
+      : [{ ...r, marginal_risk_pct: r.marginal_risk_pct, weight_pct: r.weight_pct }],
   );
   if (risk.length > 0) {
     const top = risk.reduce((max, r) =>
@@ -218,7 +222,13 @@ export function computeConcentrationCreep(
   const risk = analytics?.risk_decomposition;
   if (!risk || risk.length < 3) return null;
   const equalWeight = 100 / risk.length;
-  const top = risk.reduce((max, r) => (r.weight_pct > max.weight_pct ? r : max));
+  // 169 review round 1 SFH M-5 (2026-09-29): a row with no weight cannot be
+  // the top weight. The baseline still counts every strategy.
+  const weighted = risk.flatMap((r) =>
+    r.weight_pct === null ? [] : [{ ...r, weight_pct: r.weight_pct }],
+  );
+  if (weighted.length === 0) return null;
+  const top = weighted.reduce((max, r) => (r.weight_pct > max.weight_pct ? r : max));
   // Trip when the top weight exceeds equal-weight by 50% (e.g. 5 strategies
   // → equal-weight is 20%, trip at 30%).
   if (top.weight_pct < equalWeight * 1.5) return null;

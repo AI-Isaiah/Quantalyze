@@ -5,6 +5,8 @@ import { usePayload, useActiveComparator } from "./factsheet-context";
 import { useBasisSeriesView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
+import { comparatorPartialYear, isoToMonthDay } from "./MetricsColumn";
+import { COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
 
 /**
  * Three compact analytical panels sharing a common visual language:
@@ -38,6 +40,9 @@ export function EndOfYearBarsPanel() {
   const vcmp = view.comparators[cmpKey];
   const isMobile = useBreakpoint() === "mobile";
   const hasBench = cmpKey !== "none" && Array.isArray(vcmp.dailyReturns);
+  // Phase 169.5 (SFH-M-05, keeps D-54): the year whose comparator bar compounds
+  // part of the year only, dated in the subtitle beside the bars.
+  const partialYear = hasBench ? comparatorPartialYear(vcmp.through, view.dates, COMPARATOR_CALENDARS[cmpKey]) : null;
 
   // Strategy per-year compounded — already pre-aggregated in the basis bundle.
   const stratByYear = view.strategyMetrics.yearly;
@@ -48,7 +53,7 @@ export function EndOfYearBarsPanel() {
     if (!hasBench || !vcmp.dailyReturns) return out;
     for (let i = 0; i < view.dates.length; i++) {
       const r = vcmp.dailyReturns[i];
-      if (!Number.isFinite(r)) continue;
+      if (r == null || !Number.isFinite(r)) continue;
       const yr = view.dates[i].slice(0, 4);
       out[yr] = out[yr] == null ? r : (1 + out[yr]) * (1 + r) - 1;
     }
@@ -99,6 +104,9 @@ export function EndOfYearBarsPanel() {
         <p className="text-micro text-text-muted">
           compounded annual returns · scale ±{(maxAbs * 100).toFixed(0)}%
           {hasBench ? ` · strategy in accent, ${vcmp.shortName} in muted` : ""}
+          {partialYear != null && typeof vcmp.through === "string"
+            ? ` · ${vcmp.shortName} ${partialYear} through ${isoToMonthDay(vcmp.through)} only`
+            : ""}
         </p>
       </header>
       <ResponsiveChartFrame
@@ -344,7 +352,11 @@ export function CorrelationStripPanel() {
   // correlations now, so this view-read follows MTM with zero panel branching.
   const view = useBasisSeriesView(usePayload());
   const isMobile = useBreakpoint() === "mobile";
-  const rows = view.correlations.filter(r => Number.isFinite(r.rho));
+  // Phase 169.5 (SFH-M-04): a benchmark whose rho is not a number (BTC unavailable,
+  // or fewer than two paired intervals) keeps its row and reads "—" with no bar,
+  // as the correlation matrix shows the same cell. Filtering it out made the strip
+  // silently one row shorter than the matrix beside it.
+  const rows = view.correlations;
   if (rows.length === 0) return null;
   const VB_W = 880;
   // CHART-03 portrait: taller mobile rows; desktop ROW_H = today's literal (26).
@@ -404,7 +416,8 @@ export function CorrelationStripPanel() {
         {/* Each correlation as a centre-zero bar */}
         {rows.map((r, i) => {
           const cy = PAD.top + i * ROW_H + ROW_H / 2;
-          const halfW = (Math.abs(r.rho) / 1) * (plotW / 2);
+          const hasRho = Number.isFinite(r.rho);
+          const halfW = hasRho ? (Math.abs(r.rho) / 1) * (plotW / 2) : 0;
           const isPos = r.rho >= 0;
           const x = isPos ? zeroX : zeroX - halfW;
           const fill = Math.abs(r.rho) > 0.2 ? "var(--color-accent)" : "var(--color-text-muted)";
@@ -420,7 +433,7 @@ export function CorrelationStripPanel() {
               >
                 {r.name}
               </text>
-              <rect x={x} y={cy - 9} width={halfW} height={18} fill={fill} fillOpacity={0.85} />
+              {hasRho && <rect x={x} y={cy - 9} width={halfW} height={18} fill={fill} fillOpacity={0.85} />}
               <text
                 x={PAD.left + plotW + 6}
                 y={cy + 4}
@@ -436,7 +449,7 @@ export function CorrelationStripPanel() {
         })}
       </ResponsiveChartFrame>
       <p className="text-micro italic text-text-muted">
-        ρ measured against the strategy&apos;s observation dates with each benchmark forward-filled to the same calendar.
+        ρ measured over the strategy&apos;s own intervals, using only those each benchmark has every close for.
       </p>
     </figure>
   );

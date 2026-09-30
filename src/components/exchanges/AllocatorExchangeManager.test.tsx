@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, act, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, act, fireEvent, waitFor, within } from "@testing-library/react";
 import { AllocatorExchangeManager } from "./AllocatorExchangeManager";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 
@@ -101,6 +101,23 @@ vi.mock("@/lib/supabase/client", () => ({
               };
             },
           };
+        }
+        // Phase 167.1.2 plan 09 — the departed-history reads a departed key's
+        // card makes (first/last returns day, its key_inputs anchor). Answered
+        // empty here, and kept off the holdings probe below so they can never
+        // consume a holdingsCountMock value a delete test queued. The overview
+        // itself is tested in AllocatorExchangeManager.departed-history.test.tsx.
+        if (table === "csv_daily_returns") {
+          return {
+            eq: () => ({
+              order: () => ({
+                limit: () => Promise.resolve({ data: [], error: null }),
+              }),
+            }),
+          };
+        }
+        if (table === "allocator_equity_derived") {
+          return { in: () => Promise.resolve({ data: [], error: null }) };
         }
         // Phase 08 Plan 02 Task 1 — allocator_holdings count probe used by
         // openDeleteConfirm. Shape matches the call:
@@ -2567,6 +2584,261 @@ describe("AllocatorExchangeManager — round-2 review: state crossing sections",
     expect(
       screen.getByRole("button", { name: /Reconnect binance key/i }),
     ).not.toBeDisabled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 plan 04 (D-01, D-11) — the duplicate-account note and the
+// named reconnect refusal.
+//
+// Why: one exchange account behind two live keys is summed twice by every
+// consumer that adds keys together. The daily poll MARKS the second key
+// (`account_share_kind = 'duplicate'`) instead of acting on it, because the
+// founder's rule is "nothing is silently deleted". The card is the named
+// cleanup path: it must say which key already reads the account, next to the
+// Disconnect control the owner uses to fix it. And once ccxt keys carry an
+// account id, a Reconnect into an occupied account is refused by the database
+// (SQLSTATE 23505, plan 03's migration); that refusal must read as words, not
+// as a raw database error or a generic "try again" that can never succeed.
+// ---------------------------------------------------------------------------
+describe("AllocatorExchangeManager — duplicate-account note and reconnect refusal (167.1.2 plan 04)", () => {
+  const HOLDER = "key-binance-1";
+  const DUP = "key-binance-2";
+  const DUP_SENTENCE =
+    "This key reads the same exchange account as Binance — Primary Binance. Disconnect one of them.";
+  const RECONNECT_REFUSAL =
+    "This exchange account is already connected through another of your keys. Disconnect that key first, then reconnect this one.";
+
+  function holderKey(overrides: Partial<Record<string, unknown>> = {}) {
+    return makeKey({
+      id: HOLDER,
+      disconnected_at: null,
+      account_shared_with_api_key_id: null,
+      account_share_kind: null,
+      ...overrides,
+    });
+  }
+
+  function dupKey(overrides: Partial<Record<string, unknown>> = {}) {
+    return makeKey({
+      id: DUP,
+      label: "Second Binance",
+      disconnected_at: null,
+      account_shared_with_api_key_id: HOLDER,
+      account_share_kind: "duplicate",
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    rpcMock.mockReset();
+    holdingsCountMock.mockReset();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ ok: true, job_id: "j1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ) as unknown as typeof fetch,
+    );
+  });
+
+  it("names the holder on the duplicate's row, beside its Disconnect control", () => {
+    render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={[holderKey(), dupKey()]} />,
+    );
+    const note = screen.getByRole("note");
+    expect(note.textContent).toBe(DUP_SENTENCE);
+    // The note sits in the duplicate's own row, which carries the control the
+    // sentence asks the owner to use.
+    const row = note.closest("[data-testid='allocator-key-row']") as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(within(row).getByText("Second Binance")).toBeInTheDocument();
+    expect(
+      within(row).getByRole("button", { name: /Disconnect binance key/i }),
+    ).toBeInTheDocument();
+    // Only the marked key carries a note; the holder's row does not.
+    expect(screen.getAllByRole("note")).toHaveLength(1);
+    // Never an id: the holder is named by its own label.
+    expect(note.textContent).not.toContain(HOLDER);
+  });
+
+  it("shows nothing for a composite_member pair (D-04, a rotation inside a composite)", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[holderKey(), dupKey({ account_share_kind: "composite_member" })]}
+      />,
+    );
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  // The duplicate's own row. A holder in 'error' or 'sign_in_failed' renders a
+  // status line of its own, so the note is judged inside this row, by its text.
+  function dupRow(): HTMLElement {
+    const row = screen
+      .getByText("Second Binance")
+      .closest("[data-testid='allocator-key-row']") as HTMLElement | null;
+    expect(row).not.toBeNull();
+    return row as HTMLElement;
+  }
+
+  // D-18 (founder, 2026-09-27): a holder is WORKING only while it is active,
+  // connected, and its last sync is not revoked, sign_in_failed or error. A
+  // holder that is not working does not count the account, so the marked key
+  // counts on its own and must not be told to disconnect: telling the owner to
+  // drop the one key that still works would leave the account counted by nobody.
+  it.each([
+    ["disconnected", { disconnected_at: "2026-09-20T00:00:00Z" }],
+    ["revoked", { sync_status: "revoked" }],
+    ["sign_in_failed", { sync_status: "sign_in_failed" }],
+    ["error", { sync_status: "error" }],
+    ["inactive", { is_active: false }],
+  ])(
+    "shows nothing once the holder is %s (the reader rule: the marked key then counts on its own)",
+    (_name, holderOverrides) => {
+      render(
+        <AllocatorExchangeManager
+          hasHoldings={true}
+          initialKeys={[holderKey(holderOverrides), dupKey()]}
+        />,
+      );
+      // Neither the named sentence nor its 'another of your keys' fallback.
+      expect(within(dupRow()).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    ["idle", { sync_status: "idle" }],
+    ["complete", { sync_status: "complete" }],
+    ["never synced (NULL)", { sync_status: null }],
+  ])(
+    "names the holder while it is working, last sync %s",
+    (_name, holderOverrides) => {
+      render(
+        <AllocatorExchangeManager
+          hasHoldings={true}
+          initialKeys={[holderKey(holderOverrides), dupKey()]}
+        />,
+      );
+      expect(within(dupRow()).getByText(DUP_SENTENCE)).toBeInTheDocument();
+    },
+  );
+
+  // 167.1.2 REVIEW SF-L1: a holder this list does not carry cannot be judged
+  // working under D-18, and an unjudged holder is not grounds for asking the
+  // owner to disconnect a key. Unknown says nothing (this used to name
+  // "another of your keys").
+  it("shows nothing when the holder is not in the list", () => {
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[dupKey()]} />);
+    expect(within(dupRow()).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
+  });
+
+  // 167.1.2 REVIEW WR-02: an inactive row still renders in the active list, and
+  // a marked key that is itself not working (D-18 applied to the marked key)
+  // counts for nothing, so the note must not ask for a disconnect.
+  it("shows nothing on a marked key that is itself inactive", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[holderKey(), dupKey({ is_active: false })]}
+      />,
+    );
+    expect(within(dupRow()).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      "the named pre-check",
+      "KEY_VENUE_ALREADY_CONNECTED",
+    ],
+    [
+      "a raced index hit",
+      'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+    ],
+  ])(
+    "a Reconnect refused with 23505 (%s) shows the named refusal and keeps the row disconnected",
+    async (_name, message) => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: { code: "23505", message, hint: null },
+      });
+      render(
+        <AllocatorExchangeManager
+          hasHoldings={true}
+          initialKeys={[
+            holderKey({ disconnected_at: "2026-04-22T09:00:00Z", sync_status: "idle" }),
+          ]}
+        />,
+      );
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /Reconnect binance key/i }));
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("allocator-disconnected-helper").textContent).toBe(
+          RECONNECT_REFUSAL,
+        );
+      });
+      // Rolled back exactly as the existing error path does: the row is still
+      // in the Disconnected section, with its Reconnect button usable.
+      expect(screen.getByRole("heading", { name: /Disconnected/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Reconnect binance key/i })).not.toBeDisabled();
+      // The refusal is not followed by a sync request that could not succeed.
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+      // Never the raw database text.
+      expect(screen.queryByText(/duplicate key value/i)).not.toBeInTheDocument();
+      errSpy.mockRestore();
+    },
+  );
+
+  it("any other reconnect error keeps today's handling", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "permission denied", hint: null },
+    });
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[holderKey({ disconnected_at: "2026-04-22T09:00:00Z", sync_status: "idle" })]}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Reconnect binance key/i }));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("allocator-disconnected-helper").textContent).toBe(
+        "Reconnect failed — try again",
+      );
+    });
+    errSpy.mockRestore();
+  });
+});
+
+/**
+ * 2026-09-29, Phase 169 review round 1 IN-04. The key card's balance renders
+ * through the ONE money module (`formatUsd`, whole dollars), not a private
+ * compact copy that read "$12.3k". DESIGN.md's Currency row: amounts stay
+ * whole dollars, null and non-finite are the em-dash. Typed-literal oracles.
+ */
+describe("AllocatorExchangeManager — the key card's balance (169 IN-04)", () => {
+  it.each([
+    [12_345, "Balance $12,345"],
+    [2_500_000, "Balance $2,500,000"],
+    [null, "Balance —"],
+    [Number.NaN, "Balance —"],
+  ])("a balance of %s renders %s", (balance, expected) => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[makeKey({ account_balance_usdt: balance })]}
+      />,
+    );
+    const line = screen.getByText(/Read-only · Balance/);
+    expect(line.textContent).toContain(expected);
   });
 });
 

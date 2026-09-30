@@ -1,9 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   buildAllocatorPortfolioFactsheetPayload,
   equityCurveToDailyReturns,
   resolveDailyReturnSeries,
 } from "./allocator-portfolio-payload";
+import * as resolveSeries from "./resolve-series";
 import { buildFactsheetPayload } from "./build-payload";
 import type { DailyReturn } from "./types";
 
@@ -141,6 +142,54 @@ describe("buildAllocatorPortfolioFactsheetPayload", () => {
     // CAGR is the CALENDAR clock (days/365.25) — asset-class-INVARIANT.
     expect(alloc!.strategyMetrics.cagr).toBe(p252!.strategyMetrics.cagr);
     expect(p365!.strategyMetrics.cagr).toBe(p252!.strategyMetrics.cagr);
+  });
+
+  it("D-06: a supplied dailyReturns series is the Sharpe input and the $-curve is not converted", () => {
+    // The curve doubles on day 2 (a deposit, if read as a level ratio). The
+    // persisted returns are a small oscillation. Those two Sharpes differ, so
+    // a builder that ignored dailyReturns would fail this.
+    const base = Date.UTC(2025, 0, 1);
+    const day = (i: number) =>
+      new Date(base + i * 86_400_000).toISOString().slice(0, 10);
+    const curve = Array.from({ length: 40 }, (_, i) => ({
+      date: day(i),
+      value: i === 0 ? 100 : 200,
+    }));
+    const dailyReturns: DailyReturn[] = Array.from({ length: 39 }, (_, i) => ({
+      date: day(i + 1),
+      value: i % 2 === 0 ? 0.01 : -0.004,
+    }));
+    const spy = vi.spyOn(resolveSeries, "equityCurveToDailyReturns");
+    const fromReturns = buildAllocatorPortfolioFactsheetPayload(curve, {
+      allocatorId: "alloc-returns",
+      computedAt: "2025-02-10T00:00:00Z",
+      dailyReturns,
+    });
+    expect(spy).not.toHaveBeenCalled();
+    const ref = buildFactsheetPayload(
+      {
+        id: "portfolio:alloc-returns",
+        name: "My Portfolio",
+        types: ["allocator_portfolio"],
+        markets: [],
+        computedAt: "2025-02-10T00:00:00Z",
+        trustTier: null,
+        ingestSource: "api",
+        assetClass: "crypto",
+      },
+      dailyReturns,
+    );
+    expect(fromReturns).not.toBeNull();
+    expect(ref).not.toBeNull();
+    expect(fromReturns!.strategyMetrics.sharpe).toBe(ref!.strategyMetrics.sharpe);
+    const fromCurve = buildAllocatorPortfolioFactsheetPayload(curve, {
+      allocatorId: "alloc-returns",
+    });
+    expect(spy).toHaveBeenCalled();
+    expect(fromCurve!.strategyMetrics.sharpe).not.toBe(
+      fromReturns!.strategyMetrics.sharpe,
+    );
+    spy.mockRestore();
   });
 });
 

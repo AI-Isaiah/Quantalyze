@@ -3,7 +3,7 @@ import { render, fireEvent, act } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
-import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
+import { deriveSeriesBundle, fixtureBenchmarkPrices } from "@/lib/factsheet/build-payload";
 import {
   leverageApplies,
   leverageEligibleFor,
@@ -111,6 +111,7 @@ function buildSmall(): {
     isArithmetic: false,
     markets: p.markets,
     strategyName: p.strategyName,
+    benchmarkPrices: fixtureBenchmarkPrices([clipped]),
   });
   const payload = {
     ...p,
@@ -124,10 +125,12 @@ function buildSmall(): {
 }
 const SMALL = buildSmall();
 
+// Phase 167.1.2 plan 07: mounted WITHOUT scenarioMode — ControlBar hides the
+// leverage input in scenarioMode, and this is the real factsheet's control.
 function renderBody(payload: FactsheetPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+      <FactsheetBody payload={payload} hideAllocatorSection />
     </FactsheetProvider>,
   );
 }
