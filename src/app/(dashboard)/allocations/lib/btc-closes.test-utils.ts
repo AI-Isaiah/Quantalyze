@@ -21,27 +21,42 @@ import type { BtcCloses } from "./scenario-benchmark";
 
 type DatedReturn = { date: string; value: number };
 
-function dayBefore(isoDate: string): string {
+function shiftDays(isoDate: string, days: number): string {
   const d = new Date(`${isoDate}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() - 1);
+  d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
 }
 
 /**
  * Closes whose daily returns are `returns`, as the closes route serves them.
- * `dropped` is passed through as the route's list of corrupt close dates (the
- * caller also removes those dates from `returns` if it wants no close there).
+ *
+ * - `dropped` is passed through as the route's list of corrupt close dates (the
+ *   caller also removes those dates from the closes if it wants no close there).
+ * - `flatFillGaps` adds a close equal to the previous one on every calendar day
+ *   the returns skip. BTC then "did not move" on those days, so the compounded
+ *   move over a portfolio interval that spans them equals that interval's one
+ *   given return, and the one pairing pairs exactly the dates the old
+ *   date-intersection join paired, with the same values. It is for fixtures on
+ *   a non-contiguous synthetic calendar whose point is not the calendar (a
+ *   covariance built by construction, a two-N decoupling); without it every
+ *   interval that spans a skipped day is unpaired.
  */
 export function btcClosesFromReturns(
   returns: readonly DatedReturn[],
-  dropped: readonly string[] = [],
+  opts: { dropped?: readonly string[]; flatFillGaps?: boolean } = {},
 ): BtcCloses {
-  if (returns.length === 0) return { prices: [], dropped: [...dropped], through: null };
+  const dropped = [...(opts.dropped ?? [])];
+  if (returns.length === 0) return { prices: [], dropped, through: null };
   let close = 100;
-  const prices = [{ date: dayBefore(returns[0].date), close }];
+  const prices = [{ date: shiftDays(returns[0].date, -1), close }];
   for (const r of returns) {
+    if (opts.flatFillGaps) {
+      for (let d = shiftDays(prices[prices.length - 1].date, 1); d < r.date; d = shiftDays(d, 1)) {
+        prices.push({ date: d, close });
+      }
+    }
     close *= 1 + r.value;
     prices.push({ date: r.date, close });
   }
-  return { prices, dropped: [...dropped], through: prices[prices.length - 1].date };
+  return { prices, dropped, through: prices[prices.length - 1].date };
 }

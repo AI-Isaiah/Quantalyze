@@ -1,28 +1,38 @@
 import { describe, it, expect } from "vitest";
 import {
   computeScenarioBenchmark,
-  innerJoinByDate,
+  pairScenarioWithBtc,
   type ScenarioBenchmark,
 } from "./scenario-benchmark";
+import { btcClosesFromReturns } from "./btc-closes.test-utils";
 import { computeAlphaBeta } from "@/lib/portfolio-stats";
 
 /**
  * TDD pins for the scenario↔BTC benchmark engine (Plan 24-01, BENCH-01).
  *
- * `computeScenarioBenchmark(portfolioDaily, btcDaily)` inner-joins the two
- * dated daily-return series by date (INTERSECTION — never a positional zip,
- * never a zero-filled union), then assembles tracking error / information
- * ratio / alpha / beta / correlation over the aligned window with 252-day
+ * `computeScenarioBenchmark(portfolioDaily, btcCloses)` pairs the portfolio
+ * with the BTC closes through `pairScenarioWithBtc`, the one Scenario pairing
+ * function (Phase 169.4 D-68; its own rule cases live in
+ * `scenario-benchmark.pairing.test.ts`) — never a positional zip, never a
+ * zero-filled union — then assembles tracking error / information ratio /
+ * alpha / beta / correlation over the paired window with 252-day
  * annualization, reusing the golden-tested `computeAlphaBeta` +
  * `computeTrackingError` from `@/lib/portfolio-stats`.
+ *
+ * Phase 169.4 plan 169.4-04: the benchmark fixtures are written as daily
+ * returns and turned into closes with `btcClosesFromReturns` (base close the
+ * day before the first return). Every fixture here is on consecutive calendar
+ * days, so the pairing pairs exactly the dates the old join paired and every
+ * golden literal is unchanged; the recovered BTC returns carry ~1e-17 of float
+ * residue, far inside every `toBeCloseTo` precision below.
  *
  * The honesty invariants are encoded as assertions, not prose:
  *
  *   1. golden       — the four metrics match values hand-computed from the
  *                     CAPM / TE / IR definitions over a known overlapping pair.
- *   2. intersection — a date present in only ONE series is excluded; injecting
- *                     a wildly divergent value on a non-overlapping date does
- *                     NOT move any metric (a positional-zip / union impl FAILS).
+ *   2. pairing      — a date with no paired BTC move is excluded; injecting
+ *                     a wildly divergent value on an unpaired date does NOT
+ *                     move any metric (a positional-zip / union impl FAILS).
  *   3. null-safety  — a degenerate window (n<2), a constant benchmark
  *                     (var(b)=0), or te=0 (p≡b) yields `null` for the affected
  *                     field — never a fabricated 0 (the UI renders an em-dash).
@@ -62,94 +72,100 @@ describe("computeScenarioBenchmark — golden metrics", () => {
   const bench: DP[] = d.map((date, i) => ({ date, value: bVals[i] }));
 
   it("matches hand-computed beta (cov/var)", () => {
-    const r = computeScenarioBenchmark(port, bench);
+    const r = computeScenarioBenchmark(port, btcClosesFromReturns(bench));
     expect(r.beta).toBeCloseTo(1.5529411764705883, 10);
   });
 
   it("matches hand-computed alpha ((meanP − β·meanB)·252)", () => {
-    const r = computeScenarioBenchmark(port, bench);
+    const r = computeScenarioBenchmark(port, btcClosesFromReturns(bench));
     expect(r.alpha).toBeCloseTo(-0.17491764705882393, 10);
   });
 
   it("matches hand-computed tracking error (sampleStd(p−b)·√252)", () => {
-    const r = computeScenarioBenchmark(port, bench);
+    const r = computeScenarioBenchmark(port, btcClosesFromReturns(bench));
     expect(r.trackingError).toBeCloseTo(0.07216647421067487, 10);
   });
 
   it("matches hand-computed information ratio (mean(p−b)·252 / te)", () => {
-    const r = computeScenarioBenchmark(port, bench);
+    const r = computeScenarioBenchmark(port, btcClosesFromReturns(bench));
     expect(r.informationRatio).toBeCloseTo(4.6559015619790225, 8);
   });
 
   it("matches hand-computed sample correlation", () => {
-    const r = computeScenarioBenchmark(port, bench);
+    const r = computeScenarioBenchmark(port, btcClosesFromReturns(bench));
     expect(r.correlation).toBeCloseTo(0.9879951689059581, 8);
   });
 
-  it("reports the aligned count n", () => {
-    const r = computeScenarioBenchmark(port, bench);
+  it("reports the paired count n", () => {
+    const r = computeScenarioBenchmark(port, btcClosesFromReturns(bench));
     expect(r.n).toBe(6);
   });
 
   it("annualizes with 252 only (a √365 / 365 impl would NOT match the goldens)", () => {
     // The golden TE above was derived with sqrt(252). Were the lib to use
     // sqrt(365), te would be sqrt(365/252)≈1.204× larger and FAIL the golden.
-    const r = computeScenarioBenchmark(port, bench);
+    const r = computeScenarioBenchmark(port, btcClosesFromReturns(bench));
     expect(r.trackingError).not.toBeCloseTo(0.07216647421067487 * Math.sqrt(365 / 252), 4);
   });
 });
 
 // =========================================================================
-// 2. Intersection (inner-join), NOT a positional zip or zero-filled union
+// 2. The one pairing, NOT a positional zip or zero-filled union
 // =========================================================================
 
-describe("computeScenarioBenchmark — intersection alignment", () => {
-  // Portfolio spans d1..d8; benchmark covers only d3..d6 PLUS an extra d9
-  // that the portfolio never has. The overlap is exactly {d3,d4,d5,d6} → n=4.
+describe("computeScenarioBenchmark — pairing alignment", () => {
+  // Portfolio spans d1..d8; the BTC closes cover d2 (the base close) .. d6
+  // PLUS an extra close on d9 that the portfolio never has. d1 has no BTC
+  // return, d2 no BTC close on its previous date, d7/d8 no BTC close: the paired
+  // set is exactly {d3,d4,d5,d6} → n=4.
   const d = days(9); // d1..d9
   const portfolio: DP[] = [
-    { date: d[0], value: 999 }, // d1 — non-overlap (divergent poison)
-    { date: d[1], value: 0.001 }, // d2 — non-overlap
-    { date: d[2], value: 0.01 }, // d3 — overlap
-    { date: d[3], value: -0.005 }, // d4 — overlap
-    { date: d[4], value: 0.02 }, // d5 — overlap
-    { date: d[5], value: 0.0 }, // d6 — overlap
-    { date: d[6], value: 0.003 }, // d7 — non-overlap
-    { date: d[7], value: -0.002 }, // d8 — non-overlap
+    { date: d[0], value: 999 }, // d1 — unpaired (divergent poison)
+    { date: d[1], value: 0.001 }, // d2 — unpaired
+    { date: d[2], value: 0.01 }, // d3 — paired
+    { date: d[3], value: -0.005 }, // d4 — paired
+    { date: d[4], value: 0.02 }, // d5 — paired
+    { date: d[5], value: 0.0 }, // d6 — paired
+    { date: d[6], value: 0.003 }, // d7 — unpaired
+    { date: d[7], value: -0.002 }, // d8 — unpaired
   ];
-  const benchmark: DP[] = [
+  const paired = btcClosesFromReturns([
     { date: d[2], value: 0.008 }, // d3
     { date: d[3], value: -0.004 }, // d4
     { date: d[4], value: 0.012 }, // d5
     { date: d[5], value: 0.002 }, // d6
-    { date: d[8], value: -888 }, // d9 — non-overlap (divergent poison)
-  ];
+  ]);
+  // d9 — a divergent poison close outside the portfolio's range.
+  const withPoison = (close: number) => ({
+    ...paired,
+    prices: [...paired.prices, { date: d[8], close }],
+    through: d[8],
+  });
+  const benchmark = withPoison(88_800);
 
-  it("innerJoinByDate keeps ONLY shared dates (no zero-fill, no positional zip)", () => {
-    const { dates, p, b } = innerJoinByDate(portfolio, benchmark);
+  it("pairScenarioWithBtc keeps ONLY paired dates (no zero-fill, no positional zip)", () => {
+    const { dates, p, b } = pairScenarioWithBtc(portfolio, benchmark);
     expect(dates).toEqual([d[2], d[3], d[4], d[5]]);
     expect(p).toEqual([0.01, -0.005, 0.02, 0.0]);
-    expect(b).toEqual([0.008, -0.004, 0.012, 0.002]);
+    // b is recovered as close(k)/close(k-1) - 1, so it carries float residue.
+    [0.008, -0.004, 0.012, 0.002].forEach((v, i) => expect(b[i]).toBeCloseTo(v, 14));
   });
 
-  it("reports n === 4 (the aligned overlap), not the union/positional length", () => {
+  it("reports n === 4 (the paired overlap), not the union/positional length", () => {
     const r = computeScenarioBenchmark(portfolio, benchmark);
     expect(r.n).toBe(4);
   });
 
-  it("a divergent value on a NON-overlapping date does not move any metric (proves inner-join, not union/zip)", () => {
+  it("a divergent value on an UNPAIRED date does not move any metric (proves pairing, not union/zip)", () => {
     const baseline = computeScenarioBenchmark(portfolio, benchmark);
 
-    // Mutate the poison values on the non-overlapping dates to something even
-    // more extreme. A positional-zip or union/zero-fill impl would absorb these
-    // and shift the metrics. Inner-join ignores them entirely.
+    // Mutate the poison values on the unpaired dates to something even more
+    // extreme. A positional-zip or union/zero-fill impl would absorb these and
+    // shift the metrics. The pairing ignores them entirely.
     const portfolio2 = portfolio.map((x) =>
       x.date === d[0] ? { ...x, value: -50000 } : x,
     );
-    const benchmark2 = benchmark.map((x) =>
-      x.date === d[8] ? { ...x, value: 77777 } : x,
-    );
-    const mutated = computeScenarioBenchmark(portfolio2, benchmark2);
+    const mutated = computeScenarioBenchmark(portfolio2, withPoison(7_777_700));
 
     expect(mutated.n).toBe(4);
     expect(mutated.beta).toBeCloseTo(baseline.beta as number, 12);
@@ -158,6 +174,18 @@ describe("computeScenarioBenchmark — intersection alignment", () => {
     expect(mutated.informationRatio).toBeCloseTo(baseline.informationRatio as number, 12);
     expect(mutated.correlation).toBeCloseTo(baseline.correlation as number, 12);
   });
+
+  it("null closes (no benchmark) → n=0 and every metric null, never a fabricated 0", () => {
+    const r = computeScenarioBenchmark(portfolio, null);
+    expect(r).toEqual({
+      n: 0,
+      trackingError: null,
+      informationRatio: null,
+      alpha: null,
+      beta: null,
+      correlation: null,
+    });
+  });
 });
 
 // =========================================================================
@@ -165,9 +193,10 @@ describe("computeScenarioBenchmark — intersection alignment", () => {
 // =========================================================================
 
 describe("computeScenarioBenchmark — null degenerate paths (em-dash source)", () => {
-  it("n<2 aligned → every metric field is null (not 0)", () => {
+  it("n<2 paired → every metric field is null (not 0)", () => {
     const d = days(3);
-    // Only one shared date → aligned n=1.
+    // BTC closes on d1 (base), d2, d3 → only d2 is paired (d1 has no BTC
+    // return dated d1) → n=1.
     const port: DP[] = [
       { date: d[0], value: 0.01 },
       { date: d[1], value: 0.02 },
@@ -176,7 +205,7 @@ describe("computeScenarioBenchmark — null degenerate paths (em-dash source)", 
       { date: d[1], value: 0.008 },
       { date: d[2], value: 0.009 },
     ];
-    const r: ScenarioBenchmark = computeScenarioBenchmark(port, bench);
+    const r: ScenarioBenchmark = computeScenarioBenchmark(port, btcClosesFromReturns(bench));
     expect(r.n).toBe(1);
     expect(r.beta).toBeNull();
     expect(r.alpha).toBeNull();
@@ -199,7 +228,7 @@ describe("computeScenarioBenchmark — null degenerate paths (em-dash source)", 
       value: i % 2 === 0 ? 0.01 : -0.004,
     }));
     const bench: DP[] = d.map((date) => ({ date, value: 0.003 })); // constant → var=0
-    const r = computeScenarioBenchmark(port, bench);
+    const r = computeScenarioBenchmark(port, btcClosesFromReturns(bench));
     expect(r.n).toBe(6);
     expect(r.beta).toBeNull();
     expect(r.alpha).toBeNull();
@@ -222,7 +251,7 @@ describe("computeScenarioBenchmark — null degenerate paths (em-dash source)", 
     }));
     // port = bench + 0.003 every day → excess ≡ 0.003 (constant, nonzero).
     const port: DP[] = bench.map((x) => ({ ...x, value: x.value + 0.003 }));
-    const r = computeScenarioBenchmark(port, bench);
+    const r = computeScenarioBenchmark(port, btcClosesFromReturns(bench));
     expect(r.n).toBe(30);
     expect(r.informationRatio).toBeNull();
     // Sanity: this is NOT the te=0 (p≡b) case — there IS real excess, just
@@ -238,7 +267,7 @@ describe("computeScenarioBenchmark — null degenerate paths (em-dash source)", 
     }));
     const port: DP[] = series;
     const bench: DP[] = series.map((x) => ({ ...x })); // identical → p-b ≡ 0 → te=0
-    const r = computeScenarioBenchmark(port, bench);
+    const r = computeScenarioBenchmark(port, btcClosesFromReturns(bench));
     expect(r.trackingError).toBeCloseTo(0, 12);
     expect(r.informationRatio).toBeNull();
     // Beta against itself is 1, alpha ~0 (these are well-defined here).
@@ -248,7 +277,7 @@ describe("computeScenarioBenchmark — null degenerate paths (em-dash source)", 
   it("no overlap at all → n=0 and all metrics null", () => {
     const port: DP[] = [{ date: "2024-01-01", value: 0.01 }];
     const bench: DP[] = [{ date: "2024-02-01", value: 0.02 }];
-    const r = computeScenarioBenchmark(port, bench);
+    const r = computeScenarioBenchmark(port, btcClosesFromReturns(bench));
     expect(r.n).toBe(0);
     expect(r.beta).toBeNull();
     expect(r.alpha).toBeNull();
@@ -301,14 +330,14 @@ describe("computeScenarioBenchmark — periodsPerYear knob (#597 part 2)", () =>
   const bench: DP[] = d.map((date, i) => ({ date, value: bVals[i] }));
 
   it("default (no-arg) deep-equals explicit 252 — the ENTIRE result (byte-identity)", () => {
-    expect(computeScenarioBenchmark(port, bench)).toEqual(
-      computeScenarioBenchmark(port, bench, 252),
+    expect(computeScenarioBenchmark(port, btcClosesFromReturns(bench))).toEqual(
+      computeScenarioBenchmark(port, btcClosesFromReturns(bench), 252),
     );
   });
 
   it("at 365: tracking error scales by √(365/252)", () => {
-    const at252 = computeScenarioBenchmark(port, bench, 252);
-    const at365 = computeScenarioBenchmark(port, bench, 365);
+    const at252 = computeScenarioBenchmark(port, btcClosesFromReturns(bench), 252);
+    const at365 = computeScenarioBenchmark(port, btcClosesFromReturns(bench), 365);
     expect(at365.trackingError!).toBeCloseTo(
       at252.trackingError! * Math.sqrt(365 / 252),
       12,
@@ -316,8 +345,8 @@ describe("computeScenarioBenchmark — periodsPerYear knob (#597 part 2)", () =>
   });
 
   it("at 365: information ratio scales by √(365/252) (num ×365/252 over te ×√(365/252))", () => {
-    const at252 = computeScenarioBenchmark(port, bench, 252);
-    const at365 = computeScenarioBenchmark(port, bench, 365);
+    const at252 = computeScenarioBenchmark(port, btcClosesFromReturns(bench), 252);
+    const at365 = computeScenarioBenchmark(port, btcClosesFromReturns(bench), 365);
     expect(at365.informationRatio!).toBeCloseTo(
       at252.informationRatio! * Math.sqrt(365 / 252),
       12,
@@ -325,14 +354,14 @@ describe("computeScenarioBenchmark — periodsPerYear knob (#597 part 2)", () =>
   });
 
   it("at 365: alpha scales by exactly 365/252", () => {
-    const at252 = computeScenarioBenchmark(port, bench, 252);
-    const at365 = computeScenarioBenchmark(port, bench, 365);
+    const at252 = computeScenarioBenchmark(port, btcClosesFromReturns(bench), 252);
+    const at365 = computeScenarioBenchmark(port, btcClosesFromReturns(bench), 365);
     expect(at365.alpha!).toBeCloseTo(at252.alpha! * (365 / 252), 12);
   });
 
   it("at 365: beta and correlation are UNCHANGED (basis-invariant)", () => {
-    const at252 = computeScenarioBenchmark(port, bench, 252);
-    const at365 = computeScenarioBenchmark(port, bench, 365);
+    const at252 = computeScenarioBenchmark(port, btcClosesFromReturns(bench), 252);
+    const at365 = computeScenarioBenchmark(port, btcClosesFromReturns(bench), 365);
     expect(at365.beta).toBe(at252.beta);
     expect(at365.correlation).toBe(at252.correlation);
   });
@@ -344,7 +373,7 @@ describe("computeScenarioBenchmark — periodsPerYear knob (#597 part 2)", () =>
       value: i % 2 === 0 ? 0.01 : -0.004,
     }));
     const cBench: DP[] = cd.map((date) => ({ date, value: 0.003 })); // constant → var=0
-    const r365 = computeScenarioBenchmark(cPort, cBench, 365);
+    const r365 = computeScenarioBenchmark(cPort, btcClosesFromReturns(cBench), 365);
     expect(r365.beta).toBeNull();
     expect(r365.alpha).toBeNull();
     expect(r365.correlation).toBeNull();
@@ -357,7 +386,7 @@ describe("computeScenarioBenchmark — periodsPerYear knob (#597 part 2)", () =>
       value: i % 2 === 0 ? 0.01 : -0.006,
     }));
     const ePort: DP[] = eBench.map((x) => ({ ...x, value: x.value + 0.003 }));
-    const r365 = computeScenarioBenchmark(ePort, eBench, 365);
+    const r365 = computeScenarioBenchmark(ePort, btcClosesFromReturns(eBench), 365);
     expect(r365.informationRatio).toBeNull();
     expect(r365.trackingError).not.toBeNull();
   });
