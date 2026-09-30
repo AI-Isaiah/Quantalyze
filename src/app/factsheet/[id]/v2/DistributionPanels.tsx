@@ -5,6 +5,7 @@ import { usePayload, useActiveComparator } from "./factsheet-context";
 import { useBasisSeriesView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
+import { comparatorPartialYear, isoToMonthDay } from "./MetricsColumn";
 
 /**
  * Three compact analytical panels sharing a common visual language:
@@ -38,6 +39,9 @@ export function EndOfYearBarsPanel() {
   const vcmp = view.comparators[cmpKey];
   const isMobile = useBreakpoint() === "mobile";
   const hasBench = cmpKey !== "none" && Array.isArray(vcmp.dailyReturns);
+  // Phase 169.5 (SFH-M-05, keeps D-54): the year whose comparator bar compounds
+  // part of the year only, dated in the subtitle beside the bars.
+  const partialYear = hasBench ? comparatorPartialYear(vcmp.through, view.dates) : null;
 
   // Strategy per-year compounded — already pre-aggregated in the basis bundle.
   const stratByYear = view.strategyMetrics.yearly;
@@ -99,6 +103,9 @@ export function EndOfYearBarsPanel() {
         <p className="text-micro text-text-muted">
           compounded annual returns · scale ±{(maxAbs * 100).toFixed(0)}%
           {hasBench ? ` · strategy in accent, ${vcmp.shortName} in muted` : ""}
+          {partialYear != null && typeof vcmp.through === "string"
+            ? ` · ${vcmp.shortName} ${partialYear} through ${isoToMonthDay(vcmp.through)} only`
+            : ""}
         </p>
       </header>
       <ResponsiveChartFrame
