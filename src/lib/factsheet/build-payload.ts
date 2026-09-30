@@ -178,19 +178,6 @@ function unavailableAlignment(n: number): CoveredAlignment {
 }
 
 /**
- * Phase 169.5 (D-65) — a comparator series for a `number[]` consumer that is NOT a
- * comparator block (the api arm's allocator portfolios; the event signatures read
- * the null-honest returns since 169.4-05, D-70(1), and BTC's own equity for them is
- * compounded from this series only where no kept trace reads a filled day): a
- * null enters as 0. Stress windows are NOT such a consumer (CR-01): they take the
- * null-honest returns. The null-honest fix of those panels is owned by
- * Phase 169.4 ALLOCTRUTH; this boundary is a recorded decision, not an oversight.
- */
-function nullAsZero(a: CoveredAlignment): number[] {
-  return a.returns.map(r => r ?? 0);
-}
-
-/**
  * Derive FS-01 segment boundaries + FS-02 missing segments from a persisted
  * `data_quality_flags` object (Phase 86). Pure + defensive: tolerates absent /
  * malformed `per_key` / `gap_spans` by returning empty arrays (A1 — optional
@@ -597,10 +584,6 @@ function buildFromBuildableSeries(
   // this a no-op (overlayBasisScalars returns base unchanged).
   const strategyMetrics = overlayBasisScalars(computedMetrics, opts?.metricsByBasis?.cash_settlement);
 
-  // The api arm's allocator portfolios below take number[] series: D-65, a
-  // comparator null enters them as 0 through one named local per series; Phase
-  // 169.4 ALLOCTRUTH owns their null-honest fix (169.4-06). The event signatures
-  // read BTC with its nulls kept (169.4-05, D-70(1)).
   // Phase 169.5 (SC3, D-09, D-21): the ONE BTC input of this build. The route's
   // opt is carried verbatim (already bounded over every axis and trimmed); with no
   // opt, the bundled fixture bounded over the same axes. It feeds every alignment
@@ -617,11 +600,6 @@ function buildFromBuildableSeries(
   // (the unavailable alignment when BTC is unavailable), so a missing BTC day is a
   // skipped event or a dropped trace, never a 0% day.
   const btcAligned = (apiAl.btc ?? unavailableAlignment(dates.length)).returns;
-  const btcRet = nullAsZero(apiAl.btc ?? unavailableAlignment(dates.length));
-  const spxRet = nullAsZero(apiAl.spx);
-  const ethRet = nullAsZero(apiAl.eth);
-  const gldRet = nullAsZero(apiAl.gld);
-  const iefRet = nullAsZero(apiAl.ief);
 
   // Default to "csv" (conservative) when the caller doesn't specify — avoids
   // exposing non-derivable panels for strategies whose source isn't explicitly
@@ -840,10 +818,11 @@ function buildFromBuildableSeries(
         },
       ],
       eventSignatures: computeEventSignatures(stratRet, btcAligned, cashBundle.strategyEquity),
-      // BTC's own equity is compounded with its nulls entered as 0 (`btcRet`), but
-      // computeEventSignatures drops every trace whose window reads a BTC null, so
-      // no kept trace reads a filled day (D-70(1)).
-      benchEventSignatures: computeEventSignatures(btcAligned, btcAligned, cumEq(btcRet)),
+      // BTC's own equity carries its level flat across a BTC null. That level is
+      // never read: computeEventSignatures drops every trace whose window reads a
+      // BTC null (D-70(1)), and a kept trace's ratios multiply only non-null
+      // returns, so no figure reads a missing BTC day as 0%.
+      benchEventSignatures: computeEventSignatures(btcAligned, btcAligned, cumEq(btcAligned.map(r => r ?? 0))),
     };
   }
 
