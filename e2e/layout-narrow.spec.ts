@@ -442,6 +442,23 @@ test.describe("/strategies — N-STRAT", () => {
         `${vp.id}: name rect intersects the control group`,
       ).toBe(false);
 
+      // GC-02 (2026-09-30): the row stacks below md, so at V390 and V640 the
+      // control group starts below the name block; from md up (V960) it is
+      // one row, so the two boxes overlap vertically.
+      const nameBlock = nameLink.locator("xpath=..");
+      const block = await boxOf(nameBlock, `${vp.id} name block`);
+      if (vp.width < MD_PX) {
+        expect(
+          controlBox.y,
+          `${vp.id}: control group top ${controlBox.y} is not below the name block bottom ${block.y + block.height} (GC-02 stacked row)`,
+        ).toBeGreaterThanOrEqual(block.y + block.height - 1);
+      } else {
+        expect(
+          controlBox.y < block.y + block.height && controlBox.y + controlBox.height > block.y,
+          `${vp.id}: control group ${controlBox.y}+${controlBox.height} does not share a row with the name block ${block.y}+${block.height} (GC-02 one row)`,
+        ).toBe(true);
+      }
+
       if (vp.id === "V390") {
         const chips = row.locator("span", { hasText: /^(spot|trend following)$/ });
         expect(await chips.count(), "expected a tag chip on the seeded row").toBeGreaterThan(0);
@@ -456,8 +473,8 @@ test.describe("/strategies — N-STRAT", () => {
           ).toBeLessThanOrEqual(line + 1);
         }
       } else {
-        const nameBlock = nameLink.locator("xpath=..");
-        const block = await boxOf(nameBlock, `${vp.id} name block`);
+        // GC-02: the 160 px name-block floor holds at V640 (stacked, full
+        // width) and at V960 (one row).
         expect(block.width, `${vp.id}: name block narrower than 160px`).toBeGreaterThanOrEqual(160);
       }
     });
@@ -485,11 +502,10 @@ test.describe("/my-strategies — N-TABLE", () => {
         });
       }
       await loginViaForm(page, owner.email, owner.password);
-      // Href, not the shared "My Strategies" h1 (DEF-149-B).
+      // Not the shared "My Strategies" h1 (DEF-149-B).
       await page.goto("/my-strategies");
-      await expect(page.locator('a[href="/my-strategies"]').first()).toBeVisible({
-        timeout: 15_000,
-      });
+      // Anchor on the table itself: the href anchor resolved to the hidden
+      // desktop sidebar link below md (CI run 36764778803, gap 5).
       const table = page.locator("[data-strategy-table]");
       await expect(table, `${vp.id}: strategy table missing`).toBeVisible({ timeout: 15_000 });
 
