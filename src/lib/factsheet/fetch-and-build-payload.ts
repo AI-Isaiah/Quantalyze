@@ -679,6 +679,15 @@ type ResolvedFactsheetInputs = Extract<
 export const BENCHMARK_READ_FAILED_MESSAGE =
   "[factsheet] benchmark_prices read failed; BTC comparator unavailable";
 
+/**
+ * 169.5 review SFH-M-02 — the one stable message of a data-driven unavailable
+ * exit (the read succeeded but leaves nothing to compare). Its `reason` tells
+ * "no stored close in the window" (a stalled refresh, say) from "closes, but no
+ * covered interval"; both are distinct from the read-failure line above.
+ */
+export const BENCHMARK_UNAVAILABLE_MESSAGE =
+  "[factsheet] BTC comparator unavailable: the benchmark read left nothing to compare";
+
 const BENCHMARK_UNAVAILABLE: BenchmarkPricesOpt = { unavailable: true };
 
 function isoMinusOneDay(iso: string): string {
@@ -714,15 +723,22 @@ function isoMinusOneDay(iso: string): string {
  * 169.2 D-08): that rule stops PostgREST `max_rows` truncation of a price read,
  * and a one-row date probe reads no price and cannot be truncated.
  *
- * A read answering `ok: false`, a probe error, or a throw is the unavailable
- * marker, never the fixture; it is logged with one stable message and the
- * error's code, and not captured to Sentry (D-54). The honest unavailable form
- * may be cached for the TTL (D-52).
+ * A read answering `ok: false`, a probe error, or a throw from either DB call
+ * is the unavailable marker, never the fixture; it is logged with one stable
+ * message plus `{ id, from, to, code, message }`, and not captured to Sentry
+ * (D-54), so that line is the only trace. The honest unavailable form may be
+ * cached for the TTL (D-52). Only the two DB calls sit inside the `try`
+ * (169.5 review SFH-M-01): a throw from the pure merge / trim / align code is a
+ * code bug, not a read outage, so it propagates as a build error instead of
+ * rendering "BTC prices unavailable" and being logged as a DB failure.
+ *
+ * `strategyId` is for the log line only; it does not change what is read.
  */
 export async function readFactsheetBenchmark(
   client: ReturnType<typeof createAdminClient>,
   dailyReturns: readonly DailyReturn[],
   buildOpts: BuildFactsheetOpts | undefined,
+  strategyId: string | null = null,
 ): Promise<BenchmarkPricesOpt> {
   const axes: Array<readonly DailyReturn[]> = [
     dailyReturns,
@@ -741,49 +757,86 @@ export async function readFactsheetBenchmark(
   const from = min === null ? undefined : isoMinusOneDay(min);
   const to = max ?? undefined;
   if (from === undefined || to === undefined) return BENCHMARK_UNAVAILABLE;
+  const ctx: BenchmarkLogContext = { id: strategyId, from, to };
 
+  const db = await readBtcWithFirstStoredDate(client, ctx);
+  if (!db.ok) return BENCHMARK_UNAVAILABLE;
+  const { read, firstStored } = db;
+  const fixture =
+    typeof firstStored === "string" ? BTC_DAILY.filter((p) => p.date < firstStored) : BTC_DAILY;
+  const merged = mergeWithFixture({ prices: read.prices, dropped: read.dropped }, fixture);
+  // mergeWithFixture prepends every fixture row older than the first stored
+  // date (RESEARCH Pitfall 2, T-169-21): trim back to the read's bounds.
+  const prices = merged.prices.filter((p) => p.date >= from && p.date <= to);
+  const dropped = merged.dropped.filter((d) => d >= from && d <= to);
+  const unavailableData = (reason: "no_prices_in_window" | "no_covered_interval"): BenchmarkPricesOpt => {
+    console.warn(BENCHMARK_UNAVAILABLE_MESSAGE, {
+      reason,
+      ...ctx,
+      firstStored: typeof firstStored === "string" ? firstStored : null,
+      readCount: read.prices.length,
+      readThrough: read.through,
+    });
+    return BENCHMARK_UNAVAILABLE;
+  };
+  if (prices.length === 0) return unavailableData("no_prices_in_window");
+  const anyCovered = axes.some((axis) => {
+    const dates = [...new Set(axis.filter((r) => r && typeof r.date === "string").map((r) => r.date))].sort();
+    return dates.length > 0 && alignCoveredReturns(prices, dropped, dates).returns.some((r) => r !== null);
+  });
+  if (!anyCovered) return unavailableData("no_covered_interval");
+  return { prices, through: prices[prices.length - 1].date, dropped };
+}
+
+/** The context every benchmark log line carries (169.5 review SFH-M-01). */
+type BenchmarkLogContext = { id: string | null; from: string; to: string };
+
+/**
+ * The two DB calls of `readFactsheetBenchmark`, and ONLY those, under one
+ * `try` (169.5 review SFH-M-01). Any error or throw here is logged by
+ * `benchmarkReadFailed` and answered `ok: false`.
+ */
+async function readBtcWithFirstStoredDate(
+  client: ReturnType<typeof createAdminClient>,
+  ctx: BenchmarkLogContext,
+): Promise<
+  | { ok: true; read: Extract<Awaited<ReturnType<typeof readBenchmarkPrices>>, { ok: true }>; firstStored: unknown }
+  | { ok: false }
+> {
   try {
-    const read = await readBenchmarkPrices(client, "BTC", { from, to });
-    if (!read.ok) return benchmarkReadFailed(read.error);
+    const read = await readBenchmarkPrices(client, "BTC", { from: ctx.from, to: ctx.to });
+    if (!read.ok) return benchmarkReadFailed(read.error, ctx);
     const probe = await client
       .from("benchmark_prices")
       .select("date")
       .eq("symbol", "BTC")
       .order("date", { ascending: true })
       .limit(1);
-    if (probe.error) return benchmarkReadFailed(probe.error);
+    if (probe.error) return benchmarkReadFailed(probe.error, ctx);
     if (probe.data == null) {
-      return benchmarkReadFailed(new Error("benchmark_prices first-date probe returned no data and no error"));
+      return benchmarkReadFailed(new Error("benchmark_prices first-date probe returned no data and no error"), ctx);
     }
-    const firstStored = (probe.data as Array<{ date?: unknown }>)[0]?.date;
-    const fixture =
-      typeof firstStored === "string" ? BTC_DAILY.filter((p) => p.date < firstStored) : BTC_DAILY;
-    const merged = mergeWithFixture({ prices: read.prices, dropped: read.dropped }, fixture);
-    // mergeWithFixture prepends every fixture row older than the first stored
-    // date (RESEARCH Pitfall 2, T-169-21): trim back to the read's bounds.
-    const prices = merged.prices.filter((p) => p.date >= from && p.date <= to);
-    const dropped = merged.dropped.filter((d) => d >= from && d <= to);
-    if (prices.length === 0) return BENCHMARK_UNAVAILABLE;
-    const anyCovered = axes.some((axis) => {
-      const dates = [...new Set(axis.filter((r) => r && typeof r.date === "string").map((r) => r.date))].sort();
-      return dates.length > 0 && alignCoveredReturns(prices, dropped, dates).returns.some((r) => r !== null);
-    });
-    if (!anyCovered) return BENCHMARK_UNAVAILABLE;
-    return { prices, through: prices[prices.length - 1].date, dropped };
+    return { ok: true, read, firstStored: (probe.data as Array<{ date?: unknown }>)[0]?.date };
   } catch (err) {
-    return benchmarkReadFailed(err);
+    return benchmarkReadFailed(err, ctx);
   }
 }
 
-function benchmarkReadFailed(err: unknown): BenchmarkPricesOpt {
+function benchmarkReadFailed(err: unknown, ctx: BenchmarkLogContext): { ok: false } {
   const code =
     typeof err === "object" && err !== null && "code" in err
       ? String((err as { code?: unknown }).code)
       : err instanceof Error
         ? err.name
         : "unknown";
-  console.error(BENCHMARK_READ_FAILED_MESSAGE, { code });
-  return BENCHMARK_UNAVAILABLE;
+  // Error instances and PostgREST error objects both carry `message`; keep it,
+  // since it is what tells the page-cap, cursor and empty-answer guards apart.
+  const message =
+    typeof err === "object" && err !== null && "message" in err
+      ? String((err as { message?: unknown }).message)
+      : String(err);
+  console.error(BENCHMARK_READ_FAILED_MESSAGE, { ...ctx, code, message });
+  return { ok: false };
 }
 
 /**
@@ -833,7 +886,7 @@ async function buildFromResolved(
   // AFTER buildOpts is assembled so the bound spans every comparator axis.
   buildOpts = {
     ...(buildOpts ?? {}),
-    benchmarkPrices: await readFactsheetBenchmark(supabase, dailyReturns, buildOpts),
+    benchmarkPrices: await readFactsheetBenchmark(supabase, dailyReturns, buildOpts, id),
   };
 
   // FINDING-5 (b06-silentfailure): Never fall back to "now" for a missing
