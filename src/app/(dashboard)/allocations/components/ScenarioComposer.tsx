@@ -212,7 +212,10 @@ import {
 import { MonteCarloSection } from "./MonteCarloSection";
 import { WeightOptimizerSection } from "./WeightOptimizerSection";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
-import { dataSourceLabel } from "@/lib/api-key-label";
+import {
+  apiKeyLabelById as buildApiKeyLabelById,
+  dataSourceLabel,
+} from "@/lib/api-key-label";
 import type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
 // ---------------------------------------------------------------------------
@@ -2908,14 +2911,12 @@ export function ScenarioComposer({
   // shortest-history caveat via `coverageShortestName`, the gantt) inherits the
   // label; before, only the gantt resolved it and the other two showed
   // `key <api_key_id>`.
-  const apiKeyLabelById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const k of payload.apiKeys ?? []) {
-      const { exchange, nickname, maskedTail } = dataSourceLabel(k);
-      m.set(k.id, `${exchange} — ${nickname ?? maskedTail}`);
-    }
-    return m;
-  }, [payload.apiKeys]);
+  // Phase 169.4-08 (D-69): the map comes from the shared helper, so the Risk
+  // tab and this composer name a key by one rule.
+  const apiKeyLabelById = useMemo(
+    () => buildApiKeyLabelById(payload.apiKeys ?? []),
+    [payload.apiKeys],
+  );
 
   // Per-key strategy set — wrapped in a useMemo on its inputs. One
   // StrategyForBuilder per api_key_id (id === api_key_id), RAW equity-share
