@@ -97,6 +97,15 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // header. Pass undefined instead so the "vs" label disappears entirely
   // when there's nothing to compare against.
   const bn = cmpKey === "none" ? undefined : cmp.shortName;
+  // Phase 169.5 (SFH-M-05, keeps D-54): a comparator whose prices stop before the
+  // strategy's last date is measured over its covered days only, so its Main
+  // Metrics / Returns / Max Drawdown figures cover a shorter span than the
+  // strategy's beside them. The bench column header carries the date the
+  // comparator's figures run to, next to the numbers. Full coverage, an
+  // unavailable comparator (every figure already "—") and an absent `through`
+  // leave the header as it was.
+  const benchThrough = comparatorPartialThrough(jointCmp.through, view.dates[view.dates.length - 1]);
+  const bnDated = bn != null && benchThrough != null ? `${bn} to ${isoToMonthDay(benchThrough)}` : bn;
   // Phase 167.1.2 plan 07 (SC-5b) — observations per year for the Main Metrics
   // warning, read from the payload this rail already renders. Absent (a stale
   // cache) or not a positive finite number → undefined, and the warning hides.
@@ -127,7 +136,7 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
             <Row label="Years Observed" value={recordLength.years} bench="" />
           </Kpm>
         </Panel>
-        <Panel title="Main Metrics" benchHeader={bn}>
+        <Panel title="Main Metrics" benchHeader={bnDated}>
           {/* Phase 167.1.2 plan 07 (SC-5b): one year is the payload's own
               annualisation basis (365 crypto / the book's blend basis), not a
               fixed trading-day count. A payload with no basis shows no warning:
@@ -157,7 +166,7 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
             <Row label="Kurtosis" value={num(m.kurt)} bench="" />
           </Kpm>
         </Panel>
-        <Panel title="Returns" benchHeader={bn}>
+        <Panel title="Returns" benchHeader={bnDated}>
           {/* Phase 169 D-57: 6 Month / 1 Year are omitted when the STRATEGY's
               window is null (the record is shorter), exactly as in Cumulative
               Return Metrics; a null bench value alone keeps the row. */}
@@ -177,7 +186,9 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
       </EditorialSection>
 
       <EditorialSection label="II" name="Risk">
-        <Panel title="Max Drawdown">
+        {/* SFH-M-05: this panel carries no bench header at full coverage; it gains
+            the dated one only when the comparator's figures stop early. */}
+        <Panel title="Max Drawdown" benchHeader={benchThrough != null ? bnDated : undefined}>
           <Kpm>
             <Row label="Max Drawdown" value={pctNeg(m.max_dd)} bench={pctNeg(b?.max_dd)} accent />
             <Row label="Longest DD (days)" value={String(m.longest_dd)} bench={b ? String(b.longest_dd) : "—"} />
@@ -372,6 +383,37 @@ function BwRow({ scale, best, worst }: { scale: string; best: number; worst: num
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 
 /** The factsheet's "Mon D, YYYY" date (UTC); "—" for an empty or unparseable input. */
+/**
+ * Phase 169.5 (SFH-M-05) — the comparator's `through` when it is EARLIER than the
+ * strategy's last date (its figures then cover a shorter span), else null. Null
+ * for an unavailable comparator (`through: null`, every figure is already "—"),
+ * an absent `through` (a hand-built block, D-21) and full coverage. The comparison
+ * is the ISO-string one `buildComparatorBlock` uses for its `pastThrough` windows.
+ */
+export function comparatorPartialThrough(
+  through: string | null | undefined,
+  lastDate: string | undefined,
+): string | null {
+  if (typeof through !== "string" || lastDate === undefined) return null;
+  return through < lastDate ? through : null;
+}
+
+/**
+ * Phase 169.5 (SFH-M-05) — the calendar year whose comparator figure is compounded
+ * over part of the year only: the year of `through` when the strategy has a date
+ * after `through` in that same year. Null otherwise (a later year with no covered
+ * comparator day already reads "—").
+ */
+export function comparatorPartialYear(
+  through: string | null | undefined,
+  dates: readonly string[],
+): string | null {
+  const t = comparatorPartialThrough(through, dates[dates.length - 1]);
+  if (t == null) return null;
+  const year = t.slice(0, 4);
+  return dates.some(d => d > t && d.slice(0, 4) === year) ? year : null;
+}
+
 export function isoToMonthDay(iso: string): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -692,6 +734,8 @@ function EoyReturnsPanel() {
   }
   const hasBench = cmpKey !== "none";
   const years = Array.from(new Set([...Object.keys(stratYearly), ...Object.keys(benchYearly)])).sort();
+  // SFH-M-05 (keeps D-54): the year whose comparator cell covers part of it only.
+  const partialYear = hasBench ? comparatorPartialYear(cmp.through, view.dates) : null;
   if (years.length === 0) return null;
   return (
     <Panel title="EOY Returns" benchHeader={hasBench ? cmp.shortName : undefined}>
@@ -745,6 +789,11 @@ function EoyReturnsPanel() {
           })}
         </tbody>
       </table>
+      {partialYear != null && typeof cmp.through === "string" && (
+        <p className="mt-1 text-fixed-10 italic text-text-muted">
+          {cmp.shortName} {partialYear}: prices through {isoToMonthDay(cmp.through)} only.
+        </p>
+      )}
     </Panel>
   );
 }
