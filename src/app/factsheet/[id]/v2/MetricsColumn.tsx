@@ -685,7 +685,7 @@ function EoyReturnsPanel() {
   if (cmpKey !== "none" && Array.isArray(cmp.dailyReturns)) {
     for (let i = 0; i < view.dates.length; i++) {
       const r = cmp.dailyReturns[i];
-      if (!Number.isFinite(r)) continue;
+      if (r == null || !Number.isFinite(r)) continue;
       const yr = view.dates[i].slice(0, 4);
       benchYearly[yr] = benchYearly[yr] == null ? r : (1 + benchYearly[yr]) * (1 + r) - 1;
     }

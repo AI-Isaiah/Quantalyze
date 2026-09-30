@@ -48,7 +48,7 @@ export function EndOfYearBarsPanel() {
     if (!hasBench || !vcmp.dailyReturns) return out;
     for (let i = 0; i < view.dates.length; i++) {
       const r = vcmp.dailyReturns[i];
-      if (!Number.isFinite(r)) continue;
+      if (r == null || !Number.isFinite(r)) continue;
       const yr = view.dates[i].slice(0, 4);
       out[yr] = out[yr] == null ? r : (1 + out[yr]) * (1 + r) - 1;
     }

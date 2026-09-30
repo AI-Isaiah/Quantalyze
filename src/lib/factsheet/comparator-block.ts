@@ -39,8 +39,14 @@ import { rollingVol, rollingSharpe, rollingSortino, rollingBeta } from "./rollin
  *     indices only, both legs compacted over the same indices; null when the index
  *     is unpaired or the window holds fewer than 2 paired points. On a dense, fully
  *     paired series the compaction is a no-op.
- * `dailyReturns` keeps its `number[]` type with an uncovered day entered as 0
- * until 169.5-04 (D-21).
+ *
+ * Phase 169.5 plan 04 (SC3, D-09, D-21, D-64): `dailyReturns` is the helper's
+ * SERIES as it stands, null wherever it has no return (never 0), so the EoY table,
+ * the EoY bars and the histogram overlay never count an uncovered day as a 0%
+ * comparator day. It is the series, not the pairing: day one is the comparator's
+ * own return dated the first strategy date (null when there is none), and an
+ * interval unpaired only because a benchmark date is missing inside it keeps its
+ * series value.
  */
 export function buildComparatorBlock(
   label: string,
@@ -88,8 +94,6 @@ export function buildComparatorBlock(
         )
       : null;
 
-  // D-21: `dailyReturns` keeps an uncovered day as 0 until 169.5-04.
-  const filled = benchReturns.map(r => r ?? 0);
   const coveredEquity = cumEq(coveredReturns);
   const cumulative = scatterCovered(benchReturns, coveredEquity);
   const cumVsBench = stratEquity.map((s, i) => {
@@ -129,7 +133,7 @@ export function buildComparatorBlock(
     joint,
     cumulative,
     cumVsBench,
-    dailyReturns: filled,
+    dailyReturns: benchReturns.slice(),
     rollingVol: rollingOverCovered(benchReturns, rollWindowDays, w => rollingVol(w, w.length, benchPeriodsPerYear)),
     rollingSharpe: rollingOverCovered(benchReturns, rollWindowDays, w => rollingSharpe(w, w.length, benchPeriodsPerYear)),
     rollingSortino: rollingOverCovered(benchReturns, rollWindowDays, w => rollingSortino(w, w.length, benchPeriodsPerYear)),

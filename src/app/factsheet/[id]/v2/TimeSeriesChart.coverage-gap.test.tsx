@@ -114,14 +114,14 @@ describe("169.5-02 SC3 / D-09: per-day chart series are null where the helper ha
   // close dropped on D15: D15 has no close and D16's interval spans the dropped one.
   const perDayOpt = () => btcOpt(days("2024-12-31", 31), [A_DATES[15]]);
 
-  it("cumulative, cumVsBench, volMatched and the rolling series are null past `through` and across a dropped close; dailyReturns is unchanged", () => {
+  it("cumulative, cumVsBench, volMatched and the rolling series are null past `through` and across a dropped close; so is dailyReturns (169.5-04)", () => {
     const b = bundle(A_ROWS, 365, perDayOpt()).comparators.btc;
     const nullIdx = [15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39];
     for (const i of nullIdx) {
       expect(b.cumulative![i], `cumulative[${i}]`).toBeNull();
       expect(b.cumVsBench![i], `cumVsBench[${i}]`).toBeNull();
       expect(b.volMatched![i], `volMatched[${i}]`).toBeNull();
-      expect(b.dailyReturns![i], `dailyReturns[${i}] (169.5-04 owns it)`).toBe(0);
+      expect(b.dailyReturns![i], `dailyReturns[${i}] (169.5-04: null, never 0)`).toBeNull();
     }
     for (const i of [30, 35, 39]) {
       expect(b.rollingVol![i]).toBeNull();
@@ -137,6 +137,7 @@ describe("169.5-02 SC3 / D-09: per-day chart series are null where the helper ha
     expect(typeof b.rollingVol![29]).toBe("number");
     // The level resumes from its last value after the gap (no forward-filled 0% day).
     const r17 = b.dailyReturns![17];
+    if (r17 == null) throw new Error("dailyReturns[17] must carry the series value after the gap");
     expect(r17).not.toBe(0);
     expect(b.cumulative![17]).toBeCloseTo(b.cumulative![14]! * (1 + r17), 14);
     expect(b.through).toBe(A_DATES[29]);

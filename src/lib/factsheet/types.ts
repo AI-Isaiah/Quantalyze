@@ -139,8 +139,12 @@ export type ComparatorBlock = {
   cumulative: Array<number | null> | null;
   /** Strategy ÷ comparator (rebased to 1.0 at start). Only series in the cumVsBench chart. Null where `cumulative` is. */
   cumVsBench: Array<number | null> | null;
-  /** Comparator's own daily returns aligned to strategy dates. */
-  dailyReturns: number[] | null;
+  /**
+   * Comparator's own daily returns aligned to strategy dates.
+   * Phase 169.5-04 (SC3, D-09, D-21): null at an index the comparator has no
+   * return for, never 0, so no EoY figure or histogram overlay counts that day.
+   */
+  dailyReturns: Array<number | null> | null;
   /** Comparator's own rolling 6mo annualized vol. Nulls during warmup. */
   rollingVol: Array<number | null> | null;
   /** Comparator's own rolling 6mo Sharpe. Nulls during warmup. */
