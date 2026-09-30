@@ -378,6 +378,45 @@ describe("CR-01 · a failed preferences read is UNKNOWN, never 'no mandate'", ()
   });
 });
 
+describe("SFH-02 · a failed recommendations RPC renders a load error, never an affirmative empty state", () => {
+  // WHY: each empty state tells the allocator something they may act on.
+  // "None matched, try relaxing your filters" sends them to loosen a mandate
+  // that did match; "your first batch is computing" is false for anyone who
+  // has had batches. Neither may be said when the read itself failed.
+  const LOAD_ERROR = "Recommendations could not be loaded";
+
+  async function renderQuiet() {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      return await renderPage();
+    } finally {
+      errSpy.mockRestore();
+    }
+  }
+
+  it("RE1: recs RPC fails, batch meta succeeds — the load error, not 'No candidates match today'", async () => {
+    seeded.recsError = { code: "57014", message: "statement timeout" };
+    await renderQuiet();
+    expect(screen.queryByText("No candidates match today")).toBeNull();
+    expect(screen.getByText(LOAD_ERROR)).toBeTruthy();
+  });
+
+  it("RE2: both RPCs fail — the load error, not 'Your first batch is computing'", async () => {
+    seeded.recsError = { code: "57014", message: "statement timeout" };
+    seeded.batchMetaError = { code: "57014", message: "statement timeout" };
+    await renderQuiet();
+    expect(screen.queryByText("Your first batch is computing")).toBeNull();
+    expect(screen.getByText(LOAD_ERROR)).toBeTruthy();
+  });
+
+  it("RE3: batch meta fails but the recs RPC returned rows — the list still renders", async () => {
+    seeded.batchMetaError = { code: "57014", message: "statement timeout" };
+    await renderQuiet();
+    for (const name of NAMES) expect(screen.getByText(name)).toBeTruthy();
+    expect(screen.queryByText(LOAD_ERROR)).toBeNull();
+  });
+});
+
 describe("SC8 · /recommendations — every recommended record states where its track record ends", () => {
   it("AGE1: a series that ended 200 days ago renders the track-record-ended state, not a fresh sync", async () => {
     seeded.statusRows = [

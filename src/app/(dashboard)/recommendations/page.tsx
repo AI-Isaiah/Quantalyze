@@ -130,6 +130,13 @@ export default async function RecommendationsPage() {
     );
   }
 
+  // Phase 169.3 SFH-02: an RPC error is not an empty result. Without this, a
+  // failed recommendations read under a good batch said "none matched, try
+  // relaxing your filters", and both failing said "your first batch is
+  // computing" to an allocator who has had batches for months. With no
+  // candidates to show, either error makes the empty state unknowable.
+  const rpcFailed = Boolean(batchMetaResult.error || recsResult.error);
+
   const batch = batchMetaResult.data?.[0]
     ? {
         id: batchMetaResult.data[0].batch_id as string,
@@ -314,6 +321,8 @@ export default async function RecommendationsPage() {
             </li>
           ))}
         </ol>
+      ) : rpcFailed ? (
+        <RecommendationsLoadErrorState />
       ) : !batch ? (
         <NoBatchState />
       ) : (
@@ -355,6 +364,19 @@ function MandateUnknownNotice() {
       <p className="mt-2 text-sm text-text-secondary max-w-md mx-auto">
         Refresh the page to try again. Any recommendations below are from your
         latest batch.
+      </p>
+    </Card>
+  );
+}
+
+function RecommendationsLoadErrorState() {
+  return (
+    <Card className="p-8 text-center" role="status">
+      <h2 className="text-lg font-semibold text-text-primary">
+        Recommendations could not be loaded
+      </h2>
+      <p className="mt-2 text-sm text-text-secondary max-w-md mx-auto">
+        Refresh the page to try again.
       </p>
     </Card>
   );
