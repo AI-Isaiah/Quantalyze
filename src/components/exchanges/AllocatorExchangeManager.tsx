@@ -38,12 +38,13 @@ import { UpdateMt5SecretDialog } from "@/components/strategy/UpdateMt5SecretDial
 import { createClient } from "@/lib/supabase/client";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 import { computeRetryAtSeconds } from "@/lib/allocator-cooldowns";
-import { accountShareNote } from "@/lib/account-share-note";
+import { accountShareNote, isWorkingHolder } from "@/lib/account-share-note";
 import {
   accountIdentityTokens,
   departedAnchorOf,
   departedHistoryCard,
   isDepartedKey,
+  isLiveKey,
   type DepartedAnchor,
   type DepartedHistoryKey,
 } from "@/lib/departed-history";
@@ -194,6 +195,70 @@ function formatRelative(iso: string | null): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+/**
+ * Phase 169.3 review round 1 WR-02 / SFH-04, founder D-74 — which active row
+ * carries an exchange account's balance. The balance is the ACCOUNT's, so it
+ * renders on exactly one row per account.
+ *
+ * An account is the 167.1.2 D-16(a) / D-09 identity: `identity` is the
+ * component's own `accountIdentityTokens` map (a shared non-blank
+ * (exchange, venue account id), or a `duplicate` / `composite_member`
+ * marker, unioned), the grouping Open Positions uses. A key whose account is
+ * unknown is its own account. D-74 (2026-09-30) supersedes plan 03's "a live
+ * composite_member key keeps its balance": a composite_member pair and two
+ * unmarked keys on one venue account id now carry one balance too.
+ *
+ * One rule picks the row that reads the account now, among the group's live
+ * keys (`isLiveKey`, the departed predicate the count uses): a WORKING key
+ * (`isWorkingHolder`, the D-18 rule the share note uses) before a
+ * live-but-failing one, then a key holding a balance before one with none yet
+ * (review round 2 WR-02: a freshly connected key has no balance until its
+ * first sync, and must not hide its twin's), then an unmarked key (a holder)
+ * before a marked one, then the lowest id. Working is the proxy for the
+ * freshest read: nothing on the row dates the stored balance (`last_sync_at`
+ * is the trades cursor), so a failing key's stale number never beats a
+ * working key. A group with no live key has no bearer, so none of its rows
+ * shows a balance.
+ *
+ * Returns the bearer per group; `groupOf` maps a key to its group.
+ */
+function balanceBearers(
+  activeKeys: readonly ExchangeConnection[],
+  identity: ReadonlyMap<string, string | null>,
+): {
+  groupOf: (key: ExchangeConnection) => string;
+  bearerByGroup: Map<string, ExchangeConnection>;
+} {
+  const groupOf = (k: ExchangeConnection): string =>
+    identity.get(k.id) ?? `key:${k.id}`;
+  const isMarked = (k: ExchangeConnection): boolean =>
+    (k.account_share_kind === "duplicate" ||
+      k.account_share_kind === "composite_member") &&
+    k.account_shared_with_api_key_id !== null &&
+    k.account_shared_with_api_key_id !== k.id;
+  const rank = (k: ExchangeConnection): [number, number, number, string] => [
+    isWorkingHolder(k) ? 0 : 1,
+    k.account_balance_usdt == null ? 1 : 0,
+    isMarked(k) ? 1 : 0,
+    k.id,
+  ];
+  const before = (a: ExchangeConnection, b: ExchangeConnection): boolean => {
+    const [ra, rb] = [rank(a), rank(b)];
+    if (ra[0] !== rb[0]) return ra[0] < rb[0];
+    if (ra[1] !== rb[1]) return ra[1] < rb[1];
+    if (ra[2] !== rb[2]) return ra[2] < rb[2];
+    return ra[3] < rb[3];
+  };
+  const bearerByGroup = new Map<string, ExchangeConnection>();
+  for (const k of activeKeys) {
+    if (!isLiveKey(k)) continue;
+    const group = groupOf(k);
+    const current = bearerByGroup.get(group);
+    if (current === undefined || before(k, current)) bearerByGroup.set(group, k);
+  }
+  return { groupOf, bearerByGroup };
 }
 
 const SYNC_FAILED_HELPER =
@@ -1173,24 +1238,41 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   // tell a departed holder (no note) from a missing one.
   const keysById = new Map(keys.map((k) => [k.id, k]));
   const disconnectedKeys = keys.filter((k) => k.disconnected_at !== null);
+  // Phase 169.3 plan 03 (SC7): "N connected" counts LIVE keys only, by
+  // 167.1.2's one departed predicate (D-09). A revoked or inactive key that
+  // was never disconnected keeps its row above (its pill, its departed-history
+  // card, its Disconnect), but it reads no account, so it is not connected.
+  const liveKeys = activeKeys.filter(isLiveKey);
+  const connectedCount = liveKeys.length;
+  // WR-02 / SFH-04, founder D-74: one row per exchange account (the D-16(a)
+  // identity above) carries its balance.
+  const { groupOf, bearerByGroup } = balanceBearers(activeKeys, identity);
 
   // DOGFOOD-2: only assert an active allocation when holdings actually back it.
   // When keys are connected but allocator_holdings is empty, show an honest
   // state instead — either the first sync is still in flight, or no positions
   // are open. anySyncing distinguishes those two cases.
-  const anySyncing = activeKeys.some((k) => k.sync_status === "syncing");
+  // Review round 1 WR-03 / SFH-03: read over LIVE keys, like the count, so an
+  // inactive key left in `syncing` cannot claim a first sync for the book.
+  const anySyncing = liveKeys.some((k) => k.sync_status === "syncing");
   // DOGFOOD-2 FIX 2 (fail-loud): hasHoldings === null means the holdings
   // head-count failed server-side. Do NOT fall through to "no open positions
   // yet" (an affirmative-negative the failed count cannot support) — show a
   // neutral "connected" subtitle that asserts nothing about the book state.
+  // WR-03 / SFH-03: with no live key (every remaining row revoked or
+  // inactive) nothing reads the account, so the line asserts nothing about
+  // syncing or positions; allocator_holdings outlives its keys, so a true
+  // hasHoldings there would read "auto-synced" over a frozen book.
   const connectedSubtitle =
-    hasHoldings === true
-      ? `${activeKeys.length} connected · Active Allocation auto-synced`
-      : hasHoldings === null
-        ? `${activeKeys.length} connected`
-        : anySyncing
-          ? `${activeKeys.length} connected · first sync in progress`
-          : `${activeKeys.length} connected · no open positions yet`;
+    connectedCount === 0
+      ? "0 connected"
+      : hasHoldings === true
+        ? `${connectedCount} connected · Active Allocation auto-synced`
+        : hasHoldings === null
+          ? `${connectedCount} connected`
+          : anySyncing
+            ? `${connectedCount} connected · first sync in progress`
+            : `${connectedCount} connected · no open positions yet`;
 
   return (
     <div className="mt-6 space-y-4">
@@ -1230,6 +1312,17 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                 fg: "#475569",
               };
               const shareNote = accountShareNote(key, keysById, "Disconnect");
+              // Phase 169.3 plan 03 (SC7): the balance is the ACCOUNT's, so it
+              // renders once, on the row balanceBearers picks for the key's
+              // account (review round 1 WR-02, founder D-74: grouped by the
+              // D-16(a) account identity). Every other row of that account
+              // names the row that carries it. A departed key is never
+              // picked: nothing on the row dates its last good read
+              // (last_sync_at is the trades cursor).
+              const bearer = bearerByGroup.get(groupOf(key));
+              const showBalance = bearer?.id === key.id;
+              const balanceElsewhere =
+                bearer !== undefined && bearer.id !== key.id ? bearer : null;
               return (
                 <div
                   key={key.id}
@@ -1248,9 +1341,21 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                       {key.label}
                     </p>
                     <p className="text-fixed-10 text-text-muted uppercase tracking-wider mt-0.5">
-                      {key.exchange} · Read-only · Balance{" "}
-                      {formatUsd(key.account_balance_usdt)}
+                      {key.exchange} · Read-only
+                      {showBalance
+                        ? ` · Balance ${formatUsd(key.account_balance_usdt)}`
+                        : null}
                     </p>
+                    {/* Founder D-74: this account's balance is on another
+                        row; say which, in the muted caption tone. */}
+                    {balanceElsewhere ? (
+                      <p
+                        data-testid="balance-shown-elsewhere"
+                        className="text-xs text-text-muted mt-0.5"
+                      >
+                        Balance shown on {balanceElsewhere.label}
+                      </p>
+                    ) : null}
                     {key.exchange === "mt5" && (
                       <p className="text-xs text-text-secondary font-metric mt-0.5">
                         MT5 account {key.venue_account_id ?? "—"}

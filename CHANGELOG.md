@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.114.1.0] - 2026-09-30 — SMALLFIXES: /recommendations tells a set, unset and unreadable mandate apart and never recommends your own strategy, /profile Exchanges counts only live keys and shows each account's balance once, and credential fields refuse saved-login autofill and pasted whitespace
+
+⭐ **What changed for whoever reads this next.** Phase 169.3 (SMALLFIXES) ships plans 02 to 06 here, with three code-review rounds. Plan 01 (`/admin` Compute Jobs) shipped on its own in v0.97.0.1 (#868), and its commits are not counted again. This entry covers the 18 phase commits of plans 02 to 04 counted in the first draft of this entry, the release commit `105826d4f`, and the 40 commits after it (38 non-merge, two merges of the round-1 fix branches): plan 05's integration record, three review rounds and their fixes, plan 06 (the verification gap closure) with its planning and two plan-check revisions, one ROADMAP routing, the security and verification records. Merges of `origin/main` into the branch are not counted.
+- `/recommendations` decides "is a mandate set" with the same rule `/allocations` uses, and reads the answer as set, unset or unknown. A failed read is never shown as "no mandate".
+- Each recommended strategy shows where its track record ends, and the match engine no longer recommends an allocator a strategy they manage.
+- `/profile?tab=exchanges` counts only live keys as connected, and one exchange account's balance appears on exactly one row.
+- Every exchange-credential field on six surfaces opts out of saved-login autofill, and a pasted key or secret loses its leading and trailing whitespace, line breaks and zero-width characters.
+
+⚠️ **A third-digit bump (0.114.0.0 → 0.114.1.0) because these are page fixes.** No figure changes: no metric, no series and no stored number moves. There is no migration, no API shape change and no cache key change. What changes is which items a page shows and what a credential field accepts. The analytics service changes (`match_engine.py`), so Railway redeploys it.
+
+### Fixed
+- **No mandate-fit claim without a mandate (plan 02, SC8; review round 1 WR-01, founder D-73).** One mandate state drives both the `/recommendations` header and the section below it. Without a mandate the header reads "Strategies matched to your mandate, updated daily. No mandate is set yet." The list is withheld only when none of the eleven preferences the match engine reads is saved (D-73), so an allocator whose mandate lives outside the two fields `deriveMandateIsSet` reads still sees their matches. Pinned by `page.mandate-gate.test.tsx`.
+- **A failed read is a load error, not an empty state (review round 1 CR-01, SFH-02).** A failed `allocator_preferences` read makes the mandate state unknown: the page no longer says "No mandate is set yet" or hides the list on a read error. A failed recommendations RPC shows a load-error card instead of "computing" or "nothing matched".
+- **The first-batch card states the mandate only when it is set (review round 2 WR-01).** It said "Your mandate is set" for an unset or unknown mandate.
+- **Each recommended record states where its track record ends (plan 02, SC8).** The status read projects the one-date alias `series_end`, and each card renders `SyncBadge` from the gated `computed_at` and that date. A card whose analytics run is not rankable makes no age claim.
+- **No allocator is recommended their own strategy (plan 02, D-05).** `score_candidates` in `analytics-service/services/match_engine.py` excludes a candidate the allocator manages as a hard exclusion in both passes, reusing the `OWNED` reason with the provenance `authored`, so the SQL CHECK and the exclusion-reason census do not move. The E2 golden did not move.
+- **`/recommendations` and `/allocations` agree on whether a mandate is set (plan 04, D-03).** The page calls `deriveMandateIsSet` from `src/lib/queries.ts`, unchanged, instead of reading the free-text `mandate_archetype` the engine never reads.
+- **"N connected" counts live keys only, and the header asserts no sync when none is live (plan 03, SC7; review round 1 WR-03).** A revoked-only card no longer reads "0 connected · Active Allocation auto-synced".
+- **One exchange account's balance appears on exactly one row (plan 03, SC7; review rounds 1 and 2, founder D-74).** Keys are grouped by account identity, including composite members and two unmarked keys on one venue account id. The row that carries the balance is chosen by one rule: a working key first, then one with a balance, then an unmarked key, then the lowest id. Other rows in the group read "Balance shown on <label>". Round 2 fixed a case where the balance could show on no row.
+- **Credential fields refuse saved-login autofill and strip pasted whitespace (plan 06, closing verification truths 12 and 13, D-76).** The `/profile` Connect-exchange dialog, both connect-wizard steps, the strategy-edit Connect Exchange API Key modal, the MT5 Update password dialog and the landing-page verification form read one helper, `src/lib/credential-input.ts`. Masked inputs carry `autocomplete="new-password"`, key fields `off`, and every credential input the four password-manager ignore attributes. A pasted, dropped or autofilled key or secret loses leading and trailing whitespace, line breaks, U+200B and U+FEFF; typing, deleting, undo and redo return the value unchanged (review round 3 WR-01: undo could otherwise delete a typed interior space). The OKX passphrase and the MT5 password dialog are never stripped. Server trim rules are unchanged.
+
+### Tests
+- The recommendations page mock returns only the columns the page selects, as PostgREST does, so a page that calls the right rule but never projects its fields fails.
+- Plan 06 adds a credential-input test per surface plus the helper's own; 33 neuters are recorded red in `169.3-06-SUMMARY.md`, and the round-3 fix's undo and redo cases went red under the old rule.
+- Plan 05 ran the phase's integration gates: the full frontend suite, `tsc --noEmit` and the four match-engine pytest files. The re-verification ran the full suite again at the final head: one known timeout flake, green when run alone.
+
+### Notes
+- **Planning records.** Plans 03 and 04 first halted at their order gate on 2026-09-26 because 167.1.2 PR C was not yet on `origin/main`, and re-ran after it merged (#905). Three stale pre-split Phase 169 plan copies were removed. The round-1 founder ruling was renumbered D-66 → D-73 so decision ids do not repeat across 169.x phases. Plan 06 was revised twice at plan-check; the second revision widened it to the landing-page form.
+- **Routed, not fixed here.** An MT5 investor password is trimmed when first saved through the wizard but stored as typed when rotated. Recorded in D-76 and routed to Phase 164.6.6 TERMINALISOLATION.
+- **Verification** is `human_needed`, 13/13 truths verified; security `threats_open: 0`.
+
+### Known limits
+- **A revoked key stays in the active list but not in the count.** It keeps its row, pill and controls; a lone revoked key reads "0 connected" above its own row.
+- **A revoked key shows no balance, not a dated last-known balance.** The only date on the row, `last_sync_at`, is the trades cursor, so a dated line could carry a wrong date.
+- **A self-recommendation already in a stored batch stays until the next daily recompute.**
+- **A paste into a credential field that already holds text trims the whole field's edges,** so a typed edge space can go. The server trims edges anyway on every route that trims.
+- **Whether Chrome honours the autofill opt-out is inferred, not measured,** and on the OKX form a browser may offer to update a saved site password. Both are in the deferred browser check.
+- **The post-deploy browser re-check is not done.** It is deferred until Phase 170 lands (founder, 2026-09-30).
+
 ## [0.114.0.0] - 2026-09-30 — BENCHCOMPARE: a factsheet's BTC comparator is read from the database, measured only over the days it has prices for, and dated where it stops
 
 ⭐ **What changed for whoever reads this next.** Phase 169.5 (BENCHCOMPARE) ships plans 01 to 04, then two review rounds and their fixes. The branch carries 47 non-merge commits: 22 code and test commits (11 from the plans, 11 review fixes), 24 planning and review commits, and this release commit. It also carries four merges of round-1 fix branches and one merge of `origin/main`.
