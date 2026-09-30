@@ -2651,6 +2651,8 @@ the former 4 is renumbered 3 below, text unchanged.
 (dated 2026-09-25, from 164.6.5 plan 01) here. Both close only on the next live wedge captured before
 any restart or heal, which is 164.6.8's evidence, so both `**Owns**` lines now live under Phase
 164.6.8, carried verbatim. This phase owns neither.
+**⭐ ROUTED IN 2026-09-30 (from 169.3-06 planning; founder AskUserQuestion "164.6.6 TERMINALISOLATION"; data-integrity; 169.3 D-76):** an MT5 investor password is stored differently depending on the path that saved it. The connect wizard trims it (create-with-key → `validateKey` → `trimCredential` in `src/lib/analytics-client.ts`); the password-update dialog stores it exactly as typed (`src/app/api/keys/[id]/rotate-secret/route.ts` :221, :227, :312 → `analytics-service/routers/internal.py` :739, :762). A password with a leading or trailing space is therefore saved correctly on rotate but wrongly through the wizard, which then fails to log in. Success: an MT5 password is never trimmed on any path (wizard, rotate, validate), pinned by a test that fails under the old trim; API key and secret trimming for other venues is unchanged. 169.3-06 deliberately leaves both server paths alone and only stops the client from stripping the MT5 password.
+
 **Plans:** 0 plans
 
 ⛔ **SAME INCIDENT AS 164.6.5, DIFFERENT DEFECT.** 164.6.5 makes validation stop breaking the
@@ -4161,7 +4163,7 @@ Plans:
 
 *(Moved from Phase 169 on 2026-09-26, verbatim with their original numbers, D-37.)*
 
-**Plans:** 5 plans in 3 waves, one PR (split 2026-09-26, D-37): W1 169.3-01 ADMINJOBS, 169.3-02 RECS, 169.3-03 EXCHANGES; W2 169.3-04 MANDATERULE; W3 169.3-05 integration run + post-deploy browser re-check. Decisions carried in `169.3-CONTEXT.md`; no migration.
+**Plans:** 6 plans in 4 waves, one PR (split 2026-09-26, D-37; W4 added 2026-09-30 as gap closure): W1 169.3-01 ADMINJOBS, 169.3-02 RECS, 169.3-03 EXCHANGES; W2 169.3-04 MANDATERULE; W3 169.3-05 integration run + post-deploy browser re-check; W4 169.3-06 CREDINPUT (gap closure). Decisions carried in `169.3-CONTEXT.md`; no migration.
 
 Plans:
 
@@ -4170,10 +4172,15 @@ Plans:
 - [ ] 169.3-03-PLAN.md — Exchanges counts live keys only, no repeated balance (SC7) (was 169-09)
 - [ ] 169.3-04-PLAN.md — one mandate rule across recommendations and allocations (SC8) (was 169-10)
 - [ ] 169.3-05-PLAN.md — integration run + post-deploy browser re-check (SC9; this phase's items from old 05b's Task 4 and old 12, verbatim)
+- [ ] 169.3-06-PLAN.md — gap closure (added 2026-09-30, from `169.3-VERIFICATION.md` truths 12 and 13): the Connect-exchange dialog and both wizard connect steps opt their credential inputs out of saved-login autofill, and strip pasted whitespace (incl. U+200B/U+FEFF) from the api-key and api-secret inputs, OKX passphrase excluded, through one shared client helper (D-76; SC9). Widened 2026-09-30 (orchestrator decision, close the class across its whole surface): Task 4 also covers the `/strategies/[id]/edit` "Connect Exchange API Key" modal (`StrategyForm.tsx`, full rule) and the MT5 "Update password" dialog (`UpdateMt5SecretDialog.tsx`, autofill attributes only, no strip, because its rotate path never trims)
 
-**⭐ ROUTED IN 2026-09-27 (seen in the logged-in browser):** the `/profile` Exchanges "Connect exchange" dialog's API Key and API Secret inputs accept the browser's saved-login autofill. A saved site login was filled into both fields. Success: both fields opt out of autocomplete, so a password manager never fills a site login into a key field. No values are recorded here.
+**⭐ DECISION 2026-09-30 (founder ruling, 169.3 D-73, review WR-01):** `/recommendations` withholds its list only when NO engine-read allocator preference is saved (the field set is measured in D-73). D-03's `deriveMandateIsSet` still decides the mandate wording there and on `/allocations`, unchanged, so an allocator with only a drawdown tolerance sees their list under "No mandate is set yet".
 
-**⭐ ROUTED IN 2026-09-27 (founder, UAT):** pasting a Client ID or Client Secret copied from a spreadsheet cell leaves leading whitespace in the field (the founder saw two leading spaces via "show Client Secret"). The server already trims (`trimCredential` in `src/lib/analytics-client.ts`, used by validate and encrypt), so the stored value is correct, but the field shows something other than what is sent and invites a false "my key is wrong" conclusion. Success: the api-key and api-secret inputs in the wizard connect steps (`ConnectKeyStep`, `MultiKeyConnectStep`) and the profile Connect-exchange dialog (`src/components/exchanges/AllocatorExchangeManager.tsx`) strip leading/trailing whitespace, including line breaks and zero-width characters (U+200B, U+FEFF), on paste/change; the OKX passphrase is NOT trimmed (user-chosen, may carry significant whitespace, as `trimCredential`'s docblock records); a test that fails on the old behaviour.
+**⭐ DECISION 2026-09-30 (founder ruling, 169.3 D-74, review WR-02 / SFH-04):** on `/profile` Exchanges each exchange account's balance shows once, on one row, grouped by the 167.1.2 D-16(a) account identity (`accountIdentityTokens`), so a `composite_member` pair and two unmarked keys on one venue account id no longer show it twice. The other rows of that account show no balance and a muted "Balance shown on <key label>" line. Fix B's order picks the row (working before failing, the holder before a marked key, lowest id), and a revoked key never carries it. **This supersedes plan 03's recorded choice that "a live composite_member key keeps its balance".**
+
+**⭐ ROUTED IN 2026-09-27 (seen in the logged-in browser):** the `/profile` Exchanges "Connect exchange" dialog's API Key and API Secret inputs accept the browser's saved-login autofill. A saved site login was filled into both fields. Success: both fields opt out of autocomplete, so a password manager never fills a site login into a key field. No values are recorded here. **→ Planned 2026-09-30 as `169.3-06` (gap closure, D-76).**
+
+**⭐ ROUTED IN 2026-09-27 (founder, UAT):** pasting a Client ID or Client Secret copied from a spreadsheet cell leaves leading whitespace in the field (the founder saw two leading spaces via "show Client Secret"). The server already trims (`trimCredential` in `src/lib/analytics-client.ts`, used by validate and encrypt), so the stored value is correct, but the field shows something other than what is sent and invites a false "my key is wrong" conclusion. Success: the api-key and api-secret inputs in the wizard connect steps (`ConnectKeyStep`, `MultiKeyConnectStep`) and the profile Connect-exchange dialog (`src/components/exchanges/AllocatorExchangeManager.tsx`) strip leading/trailing whitespace, including line breaks and zero-width characters (U+200B, U+FEFF), on paste/change; the OKX passphrase is NOT trimmed (user-chosen, may carry significant whitespace, as `trimCredential`'s docblock records); a test that fails on the old behaviour. **→ Planned 2026-09-30 as `169.3-06` (gap closure, D-76).**
 
 ### Phase 169.4: ALLOCTRUTH — the Allocations Risk tab and alpha/beta read the book series and the live BTC feed (INSERTED)
 
