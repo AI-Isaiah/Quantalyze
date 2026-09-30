@@ -75,7 +75,6 @@ import Link from "next/link";
 import {
   buildDateMapCache,
   computeScenario,
-  computeStrategyCurve,
   type ComputedMetrics,
   type DailyPoint,
   type StrategyForBuilder,
@@ -205,6 +204,11 @@ import { ScenarioFooter } from "./ScenarioFooter";
 import { ScenarioFlaggedHoldingsList } from "../ScenarioFlaggedHoldingsList";
 import { ScenarioBenchmarkSection } from "./ScenarioBenchmarkSection";
 import { StressVarSection } from "./StressVarSection";
+import {
+  btcLevelsFromCloses,
+  parseBtcCloses,
+  type BtcCloses,
+} from "../lib/scenario-benchmark";
 import { MonteCarloSection } from "./MonteCarloSection";
 import { WeightOptimizerSection } from "./WeightOptimizerSection";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
@@ -1339,16 +1343,17 @@ export function ScenarioComposer({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savePending, setSavePending] = useState(false);
 
-  // BENCH-01 — the BTC benchmark daily-returns series, fetched once from the
-  // shared market-data route. `btcAvailable` is false until a non-empty series
-  // arrives; a failed/empty fetch leaves it false so the benchmark section
+  // BENCH-01 — the BTC benchmark CLOSES, fetched once from the shared
+  // market-data route `/api/benchmark/btc/prices` (Phase 169.4 D-67). `btc` is
+  // null until a body of the closes shape with at least one close arrives; a
+  // failed / empty / wrong-shape fetch leaves it null so the benchmark section
   // renders the honest "unavailable" empty state and the overlay is suppressed
   // (24-RESEARCH Pitfall 5: a transport failure degrades to the empty state,
-  // never a red alert). The series is RAW daily returns — the section consumes
-  // them for the metrics, and the chart overlay derives a cumulative-WEALTH
-  // curve from the SAME series (Pitfall 3).
-  const [btcDaily, setBtcDaily] = useState<DailyPoint[]>([]);
-  const [btcAvailable, setBtcAvailable] = useState(false);
+  // never a red alert). The two sections pair the closes with the portfolio
+  // through the one pairing function (D-68), and the chart overlay is the close
+  // LEVEL (`btcLevelsFromCloses`, D-66) from the SAME closes.
+  const [btc, setBtc] = useState<BtcCloses | null>(null);
+  const btcAvailable = btc !== null;
   // Overlay toggle, default ON per UI-SPEC §Component Inventory.
   const [showBenchmark, setShowBenchmark] = useState(true);
 
@@ -2189,41 +2194,45 @@ export function ScenarioComposer({
     onRegisterOpenBrowseRef.current?.(openBrowse);
   }, []);
 
-  // BENCH-01 — fetch the shared BTC daily-returns series once on mount. The
-  // route returns `[{date,value}]` (raw daily returns) and answers a no-store
-  // 503 on its own read errors (Phase 169.2), so any non-2xx / non-array / empty / thrown result
-  // leaves `btcAvailable=false` → the benchmark section shows the honest empty
-  // state and the overlay is hidden (never a red alert).
+  // BENCH-01 — fetch the shared BTC closes once on mount. The route returns
+  // `{ prices, dropped, through }` (Phase 169.4 D-67) and answers a no-store 503
+  // on its own read errors (Phase 169.2), so any non-2xx / wrong-shape / no-close
+  // / thrown result leaves `btc` null → the benchmark section shows the honest
+  // empty state and the overlay is hidden (never a red alert). `parseBtcCloses`
+  // is the shape guard: the OLD returns body (an array) is null, never misread.
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/benchmark/btc")
+    fetch("/api/benchmark/btc/prices")
       .then((r) => {
         if (!r.ok) {
           // F-08: a persistent non-2xx (500 / CDN / route-contract break) is
           // otherwise invisible — the honest-degrade state hides it. Log so a
           // regression is visible in production console rather than silently
-          // swallowed. Keep the degrade (return [] → btcAvailable=false).
+          // swallowed. Keep the degrade (null → btc stays null).
           console.warn(
-            "[ScenarioComposer] /api/benchmark/btc non-ok response",
+            "[ScenarioComposer] /api/benchmark/btc/prices non-ok response",
             { status: r.status },
           );
-          return [];
+          return null;
         }
         return r.json();
       })
       .then((d) => {
         if (cancelled) return;
-        const series = Array.isArray(d) ? (d as DailyPoint[]) : [];
-        setBtcDaily(series);
-        setBtcAvailable(series.length > 0);
+        const closes = parseBtcCloses(d);
+        if (d !== null && closes === null) {
+          // F-08: a 2xx body of another shape (a stale cached returns array, a
+          // contract break) degrades like a failed fetch; log it so it is seen.
+          console.warn("[ScenarioComposer] /api/benchmark/btc/prices unexpected body shape");
+        }
+        setBtc(closes !== null && closes.prices.length > 0 ? closes : null);
       })
       .catch((err) => {
         if (cancelled) return;
         // F-08: a thrown fetch (network / abort / JSON parse) is also logged
         // so the silent degrade is observable. State stays honest.
-        console.warn("[ScenarioComposer] /api/benchmark/btc fetch failed", err);
-        setBtcDaily([]);
-        setBtcAvailable(false);
+        console.warn("[ScenarioComposer] /api/benchmark/btc/prices fetch failed", err);
+        setBtc(null);
       });
     return () => {
       cancelled = true;
@@ -2231,17 +2240,16 @@ export function ScenarioComposer({
   }, []);
 
   // BENCH-01 — the chart overlay series. `EquityChart.benchmark` runs
-  // `anchorFromFirstPositive` (divide-by-first), so it expects a CUMULATIVE-
-  // WEALTH curve (~1.0 base), NOT raw daily returns — derive it via
-  // `computeStrategyCurve` from the same BTC daily returns the metrics use
-  // (24-RESEARCH Pitfall 3). Suppressed (undefined) when the toggle is off or
-  // the benchmark is unavailable, which hides the overlay.
+  // `anchorFromFirstPositive` (divide-by-first), so it expects a WEALTH-level
+  // curve (~1.0 base), NOT raw daily returns. Phase 169.4 D-66: it is the close
+  // LEVEL, `close / first close` at each stored close (`btcLevelsFromCloses`),
+  // never compounded returns, which would lose the move across a dropped close
+  // for good. Suppressed (undefined) when the toggle is off or the benchmark is
+  // unavailable, which hides the overlay.
   const btcWealth = useMemo(
     () =>
-      showBenchmark && btcAvailable
-        ? computeStrategyCurve(btcDaily)
-        : undefined,
-    [showBenchmark, btcAvailable, btcDaily],
+      showBenchmark && btc !== null ? btcLevelsFromCloses(btc.prices) : undefined,
+    [showBenchmark, btc],
   );
 
   // Validate the trimmed name against the SQL CHECK (1..120) mirrored in the
@@ -5545,7 +5553,7 @@ export function ScenarioComposer({
           (byte-identity preserved). */}
       <div className="relative mt-0">
         {/* BENCH-01 — the BTC overlay rides the synth payload's `benchmark`
-            (cumulative-WEALTH form via `btcWealth`). `btcWealth` is undefined
+            (the close-level form via `btcWealth`, D-66). `btcWealth` is undefined
             when the toggle is off or the benchmark is unavailable, which hides
             the overlay. */}
         <ScenarioFactsheetChart
@@ -5628,15 +5636,15 @@ export function ScenarioComposer({
 
       {/* BENCH-01 — "vs BTC" active-return section. Reads the active scenario's
           full daily portfolio returns (`scenarioMetrics.portfolio_daily_returns`
-          — OPTIONAL, so `?? []`) + the fetched BTC daily returns, inner-joins
-          by date, and renders TE/IR/alpha/beta over the intersection window OR
-          the honest "unavailable" empty state (below the 30-day floor, no
-          overlap, or a failed fetch via `btcAvailable=false`). */}
+          — OPTIONAL, so `?? []`) + the fetched BTC closes, pairs them through
+          the one pairing function (Phase 169.4 D-68), and renders
+          TE/IR/alpha/beta over the paired window OR the honest "unavailable"
+          empty state (below the 30-day floor, no overlap, or a failed fetch via
+          `btc` null). */}
       <Card className="mt-6">
         <ScenarioBenchmarkSection
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
-          btcDaily={btcDaily}
-          benchmarkAvailable={btcAvailable}
+          btc={btc}
           // BLEND-01 — TE/IR/alpha ride the same derived blend basis
           // (√periodsPerYear); the correlation/beta terms are basis-invariant.
           periodsPerYear={blendBasis}
@@ -5646,7 +5654,7 @@ export function ScenarioComposer({
       {/* STRESS-01 / STRESS-02 (Plan 26-02) — the "Stress & VaR" section on the
           own-book scenario surface. A sibling of the benchmark section above:
           props-only over the same already-leveraged portfolio_daily_returns + the
-          fetched BTC factor series, it lets the allocator pick a BTC shock preset
+          fetched BTC factor closes, it lets the allocator pick a BTC shock preset
           and read the β-propagated projected impact + historical VaR(95%)/CVaR with
           a mandatory inline disclosure, OR the honest empty state (degenerate
           scenario / BTC unavailable / below the Phase-22 sample floor). Own-book
@@ -5655,8 +5663,7 @@ export function ScenarioComposer({
       <Card className="mt-6">
         <StressVarSection
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
-          btcDaily={btcDaily}
-          btcAvailable={btcAvailable}
+          btc={btc}
           n={scenarioMetrics.n}
           strategyCount={engineSet.strategies.length}
         />
