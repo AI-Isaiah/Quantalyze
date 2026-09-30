@@ -18,7 +18,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
-import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
+import { deriveSeriesBundle, fixtureBenchmarkPrices } from "@/lib/factsheet/build-payload";
 import { FactsheetProvider } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
 import { BasisProvider, useBasis, mtmDisabledReasonCopy, smoothedDisabledReasonCopy, type Basis } from "./basis-context";
@@ -297,7 +297,13 @@ function fixtureSingleKeyMtmGated(): FactsheetPayload {
 const MTM_SERIES = makeReturnsSeries(60, 0.0009);
 const MTM_BUNDLE = deriveSeriesBundle(
   MTM_SERIES.map((p) => ({ date: p.date, value: p.value })),
-  { periodsPerYear: 365, isArithmetic: false, markets: [], strategyName: "Scenario" },
+  {
+    periodsPerYear: 365,
+    isArithmetic: false,
+    markets: [],
+    strategyName: "Scenario",
+    benchmarkPrices: fixtureBenchmarkPrices([MTM_SERIES]),
+  },
 );
 // (g) single-key options, MTM available AND leverageable (periodsPerYear present) WITH
 //     a resolved MTM series bundle. Phase 107 (LEV-BB): the leverage input now renders
@@ -892,7 +898,13 @@ const SMOOTHED = {
 const SMOOTHED_SERIES = makeReturnsSeries(70, 0.0007);
 const SMOOTHED_BUNDLE = deriveSeriesBundle(
   SMOOTHED_SERIES.map((p) => ({ date: p.date, value: p.value })),
-  { periodsPerYear: 365, isArithmetic: false, markets: [], strategyName: "Scenario" },
+  {
+    periodsPerYear: 365,
+    isArithmetic: false,
+    markets: [],
+    strategyName: "Scenario",
+    benchmarkPrices: fixtureBenchmarkPrices([SMOOTHED_SERIES]),
+  },
 );
 const SMOOTHED_SEGMENT_LABEL = "Smoothed mark-to-market";
 

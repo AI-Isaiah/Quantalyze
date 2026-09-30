@@ -1,4 +1,4 @@
-import type { CorrelationRow, DailyPrice, DailyReturn, FactsheetPayload, FactsheetCommon, BasisSeriesBundle, TrustTierKind, IngestSource } from "./types";
+import type { BenchmarkPricesOpt, CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, BasisSeriesBundle, TrustTierKind, IngestSource } from "./types";
 import { alignCoveredReturns } from "./align";
 import type { CoveredAlignment } from "./align";
 import { compute, cumEq, worstDrawdowns, arithmeticEquity, arithmeticUnderwater } from "./compute";
@@ -50,15 +50,13 @@ export function deriveIngestSource(dailyRaw: unknown): IngestSource {
 }
 
 /**
- * Phase 169.5 BENCHCOMPARE (SC3, D-09, D-54) — the BTC comparator's prices as the
- * factsheet route read them from `benchmark_prices` (169.2's reader, merged with
- * the bundled fixture strictly before the DB's first stored date and trimmed to
- * the build's bounds), or the unavailable marker when that read failed. Absent
- * (the allocator path until Phase 169.4) means the bundled `BTC_DAILY`.
+ * Phase 169.5 BENCHCOMPARE (SC3, D-09, D-54) — the BTC comparator's prices; the
+ * type lives in `./types` (the payload carries it, D-21) and is re-exported here
+ * for the build opt's callers. As a build opt, ABSENT (the allocator path until
+ * Phase 169.4) means the bundled BTC fixture, bounded by
+ * {@link fixtureBenchmarkPrices}.
  */
-export type BenchmarkPricesOpt =
-  | { prices: DailyPrice[]; through: string | null; dropped: string[] }
-  | { unavailable: true };
+export type { BenchmarkPricesOpt };
 
 /**
  * Phase 90 (D3/D6) — optional build opts, first added for composites and since
@@ -113,14 +111,15 @@ export type BuildFactsheetOpts = {
 };
 
 /**
- * Phase 169.5 (D-54) — the five comparators aligned on one date axis through the
- * ONE coverage-aware helper. BTC comes from the `benchmarkPrices` opt when present
- * (null when the opt is the unavailable marker), else `BTC_DAILY`; the four others
- * from their fixtures. A fixture has no `dropped` list.
+ * Phase 169.5 (D-54, D-09) — the five comparators aligned on one date axis through
+ * the ONE coverage-aware helper. BTC comes from `benchmarkPrices` (null when it is
+ * the unavailable marker); the four others from their fixtures. A fixture has no
+ * `dropped` list. BTC is an ARGUMENT here, never read from the bundled fixture, so
+ * the server build and the browser re-derive align it from the same closes.
  */
 function alignComparators(
   dates: string[],
-  benchmarkPrices: BenchmarkPricesOpt | undefined,
+  benchmarkPrices: BenchmarkPricesOpt,
 ): {
   btc: CoveredAlignment | null;
   spx: CoveredAlignment;
@@ -128,10 +127,10 @@ function alignComparators(
   gld: CoveredAlignment;
   ief: CoveredAlignment;
 } {
-  let btc: CoveredAlignment | null;
-  if (benchmarkPrices === undefined) btc = alignCoveredReturns(BTC_DAILY, [], dates);
-  else if ("unavailable" in benchmarkPrices) btc = null;
-  else btc = alignCoveredReturns(benchmarkPrices.prices, benchmarkPrices.dropped, dates);
+  const btc =
+    "unavailable" in benchmarkPrices
+      ? null
+      : alignCoveredReturns(benchmarkPrices.prices, benchmarkPrices.dropped, dates);
   return {
     btc,
     spx: alignCoveredReturns(SPX_DAILY, [], dates),
@@ -139,6 +138,37 @@ function alignComparators(
     gld: alignCoveredReturns(GLD_DAILY, [], dates),
     ief: alignCoveredReturns(IEF_DAILY, [], dates),
   };
+}
+
+function isoMinusOneDay(iso: string): string {
+  return new Date(Date.parse(`${iso}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * Phase 169.5 (SC3, D-09, D-64(4) Amendment A, RESEARCH Pitfall 2) — the
+ * bundled BTC fixture bounded as the route bounds its read: `[earliest date on any
+ * axis minus one day, latest date on any axis]`, min / max over every entry, with an
+ * empty `dropped` list and `through` its last carried close. The day before the
+ * earliest date carries the prior close day one's return is taken from (D-64).
+ * No close in the bound is the unavailable marker. Used only when a build is
+ * handed no `benchmarkPrices` opt, so the payload still carries the exact closes
+ * its BTC comparator was computed from.
+ */
+export function fixtureBenchmarkPrices(axes: ReadonlyArray<readonly DailyReturn[]>): BenchmarkPricesOpt {
+  let min: string | null = null;
+  let max: string | null = null;
+  for (const axis of axes) {
+    for (const r of axis) {
+      if (min === null || r.date < min) min = r.date;
+      if (max === null || r.date > max) max = r.date;
+    }
+  }
+  if (min === null || max === null) return { unavailable: true };
+  const from = isoMinusOneDay(min);
+  const to = max;
+  const prices = BTC_DAILY.filter(p => p.date >= from && p.date <= to);
+  if (prices.length === 0) return { unavailable: true };
+  return { prices, through: prices[prices.length - 1].date, dropped: [] };
 }
 
 /** The unavailable alignment: every return null, nothing paired. */
@@ -303,8 +333,12 @@ export function deriveSeriesBundle(
     strategyName: string;
     comparatorAnnVol?: number;
     missingSegments?: FactsheetCommon["missingSegments"];
-    /** Phase 169.5 — BTC from the database; absent → the bundled `BTC_DAILY`. */
-    benchmarkPrices?: BenchmarkPricesOpt;
+    /**
+     * Phase 169.5 (SC3, D-09) — the BTC prices this bundle aligns BTC from (the
+     * payload's own `benchmarkPrices`), or the unavailable marker. Required: the
+     * bundle never falls back to the bundled fixture on its own.
+     */
+    benchmarkPrices: BenchmarkPricesOpt;
   },
 ): BasisSeriesBundle {
   const { periodsPerYear, isArithmetic, markets, strategyName } = args;
@@ -557,7 +591,18 @@ function buildFromBuildableSeries(
   // signatures) take number[] series: D-65, a comparator null enters them as 0
   // through one named local per series; Phase 169.4 ALLOCTRUTH owns their
   // null-honest fix.
-  const apiAl = alignComparators(dates, opts?.benchmarkPrices);
+  // Phase 169.5 (SC3, D-09, D-21): the ONE BTC input of this build. The route's
+  // opt is carried verbatim (already bounded over every axis and trimmed); with no
+  // opt, the bundled fixture bounded over the same axes. It feeds every alignment
+  // below AND rides on the payload, so the browser re-derive uses the same closes.
+  const benchmarkPrices: BenchmarkPricesOpt =
+    opts?.benchmarkPrices ??
+    fixtureBenchmarkPrices([
+      clipped,
+      opts?.mtmSeries?.dailyReturns ?? [],
+      opts?.smoothedSeries?.dailyReturns ?? [],
+    ]);
+  const apiAl = alignComparators(dates, benchmarkPrices);
   const btcRet = nullAsZero(apiAl.btc ?? unavailableAlignment(dates.length));
   const spxRet = nullAsZero(apiAl.spx);
   const ethRet = nullAsZero(apiAl.eth);
@@ -583,7 +628,7 @@ function buildFromBuildableSeries(
     strategyName: strategy.name,
     comparatorAnnVol: strategyMetrics.ann_vol,
     missingSegments: opts?.missingSegments,
-    benchmarkPrices: opts?.benchmarkPrices,
+    benchmarkPrices,
   });
 
   // Phase 103 (MTM-04) — the MTM per-basis bundle, derived by the SAME function
@@ -606,7 +651,7 @@ function buildFromBuildableSeries(
           // comparatorAnnVol omitted → the MTM comparator uses the MTM series'
           // own computed vol (honest MTM; no persisted cash overlay applies).
           missingSegments: deriveSegmentMarkers({ gap_spans: opts.mtmSeries.gapSpans }).missingSegments,
-          benchmarkPrices: opts.benchmarkPrices,
+          benchmarkPrices,
         }),
       };
     }
@@ -629,7 +674,7 @@ function buildFromBuildableSeries(
           // comparatorAnnVol omitted → the smoothed comparator vol-matches the
           // smoothed series' own computed vol (honest; no persisted cash overlay).
           missingSegments: deriveSegmentMarkers({ gap_spans: opts.smoothedSeries.gapSpans }).missingSegments,
-          benchmarkPrices: opts.benchmarkPrices,
+          benchmarkPrices,
         }),
       };
     }
@@ -699,6 +744,9 @@ function buildFromBuildableSeries(
     // Phase 103 (MTM-04) — additive per-basis bundle; undefined (dropped from the
     // serialized blob) when no persisted MTM series feeds the build (SC-4).
     seriesByBasis,
+    // Phase 169.5 (SC3, D-09, D-21) — the BTC series every comparator above was
+    // computed from; the browser re-derive reads it instead of the fixture.
+    benchmarkPrices,
   };
 
   // No-invented-data contract (NEW-C20-01, RED-TEAM-M2/M3, B6): the synthesized

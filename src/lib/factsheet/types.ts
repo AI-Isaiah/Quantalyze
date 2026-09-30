@@ -14,6 +14,17 @@ export type DailyReturn = { date: string; value: number };
 export type DailyPrice = { date: string; close: number };
 
 /**
+ * Phase 169.5 BENCHCOMPARE (SC3, D-09, D-54) — the BTC comparator's prices as a
+ * factsheet build used them: read from `benchmark_prices` (169.2's reader, merged
+ * with the bundled fixture strictly before the DB's first stored date and trimmed
+ * to the build's bounds), or the bundled fixture bounded the same way when no read
+ * was made, or the unavailable marker when the read failed.
+ */
+export type BenchmarkPricesOpt =
+  | { prices: DailyPrice[]; through: string | null; dropped: string[] }
+  | { unavailable: true };
+
+/**
  * Result of `compute()` — full per-series metrics matching the Python `S` / `B` dicts.
  *
  * `eq` and `dd` are the heavy arrays (length n). The PAYLOAD shape that crosses the
@@ -705,6 +716,16 @@ export type FactsheetCommon = {
      */
     smoothed_mtm?: BasisSeriesBundle;
   };
+  /**
+   * Phase 169.5 (SC3, D-09, D-21, D-54) — the bounded BTC series this payload's
+   * comparators were computed from (or the unavailable marker), so the browser
+   * re-derive (`useBasisSeriesView`, leverage) aligns BTC from the same closes and
+   * the same `dropped` list as the server. OPTIONAL only so a hand-built payload
+   * (the 167.1.2 scenario adapter) compiles unedited; both builders always set
+   * it. Absent means "no coverage information", and the re-derive then treats BTC
+   * as unavailable, never as the bundled fixture.
+   */
+  benchmarkPrices?: BenchmarkPricesOpt;
 };
 
 /**
