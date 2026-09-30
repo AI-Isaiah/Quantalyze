@@ -379,19 +379,33 @@ export type EventSignature = {
   p95: number[];
 };
 
-/** Per-horizon bundle: win/loss event populations × {benchmark, equity} views. */
+/**
+ * Per-horizon bundle: win/loss event populations × {benchmark, equity} views.
+ *
+ * Phase 169.4 CR-01: each view is counted by its OWN traces. A benchmark null
+ * (D-65, D-70(1)) drops a benchmark trace but not the equity trace of the same
+ * event, so the two views can hold different populations; one shared count would
+ * describe neither. A view with no trace at all is `null` (no aggregate), never
+ * six all-zero series: a panel renders the em-dash state for it (DESIGN.md null
+ * rule), not a flat 0% trajectory.
+ */
 export type EventSignaturesSet = {
   horizonDays: number;
-  /** Events whose trace landed in the aggregation (i.e. had a full ±14d window). */
+  /** Equity-view traces aggregated (events with a full ±14d window on the event series). */
   winCount: number;
   lossCount: number;
+  /** Benchmark-view traces aggregated (events whose ±14d benchmark window has no null). */
+  benchWinCount: number;
+  benchLossCount: number;
   /** Total events that satisfied the win/loss predicate, including edge-dropped ones. */
   eligibleWinCount: number;
   eligibleLossCount: number;
-  winOfBenchmark: EventSignature;
-  lossOfBenchmark: EventSignature;
-  winOfEquity: EventSignature;
-  lossOfEquity: EventSignature;
+  /** Null when the view has no trace (`benchWinCount` / `benchLossCount` is 0). */
+  winOfBenchmark: EventSignature | null;
+  lossOfBenchmark: EventSignature | null;
+  /** Null when the view has no trace (`winCount` / `lossCount` is 0). */
+  winOfEquity: EventSignature | null;
+  lossOfEquity: EventSignature | null;
 };
 
 export type EventSignaturesPayload = {

@@ -451,9 +451,11 @@ export function FactsheetBody({
             {/* FINDING-2 (b06-silentfailure): Gate signatures on ingestSource === "api"
                 in addition to hasComparator. Event signatures stitch the internal BTC
                 fixture alongside the strategy returns; for CSV strategies with too few
-                observations aggregate() fills empty trace populations with all-zero
+                observations aggregate() filled empty trace populations with all-zero
                 arrays — fabricating a flat zero band line indistinguishable from a
-                real observation at 0% delta. Suppress for CSV to prevent false panels. */}
+                real observation at 0% delta. Suppress for CSV to prevent false panels.
+                (Phase 169.4 CR-01: aggregate() now returns null for an empty population
+                and the panels render the em-dash state; the api-arm gate stands.) */}
             {hasComparator && payload.ingestSource === "api" && (
               <CollapsibleSection
                 id="factsheet-signatures"

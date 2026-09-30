@@ -39,12 +39,16 @@ import type { EventSignature, EventSignaturesPayload, EventSignaturesSet } from 
 const WINDOW = 14;
 const TRACE_LEN = WINDOW * 2 + 1; // [-14..0..+14] = 29 points
 
-/** Aggregate signature for one event population × one target view. */
-function aggregate(traces: number[][]): EventSignature {
-  if (traces.length === 0) {
-    const empty = new Array<number>(TRACE_LEN).fill(0);
-    return { mean: empty, median: empty.slice(), p25: empty.slice(), p75: empty.slice(), p05: empty.slice(), p95: empty.slice() };
-  }
+/**
+ * Aggregate signature for one event population × one target view.
+ *
+ * An empty population is an absence (Phase 169.4 CR-01): `null`, never six
+ * all-zero series. Zeros would draw a flat 0% mean and zero-width bands, which
+ * reads as a real finding ("the benchmark does not move around these events")
+ * when it is only missing data, e.g. a BTC read that failed.
+ */
+function aggregate(traces: number[][]): EventSignature | null {
+  if (traces.length === 0) return null;
   const mean = new Array<number>(TRACE_LEN).fill(0);
   const median = new Array<number>(TRACE_LEN).fill(0);
   const p25 = new Array<number>(TRACE_LEN).fill(0);
@@ -164,10 +168,15 @@ function computeHorizon(
     if (eTrace) (verdict ? winEquity : lossEquity).push(eTrace);
   }
 
+  // CR-01: each view is counted by its own traces. A benchmark null drops the
+  // benchmark trace only, so counting the equity panels by benchmark traces
+  // (the pre-fix rule) printed "0 wins · 0 losses" above populated equity panels.
   return {
     horizonDays,
-    winCount: winBench.length,
-    lossCount: lossBench.length,
+    winCount: winEquity.length,
+    lossCount: lossEquity.length,
+    benchWinCount: winBench.length,
+    benchLossCount: lossBench.length,
     eligibleWinCount,
     eligibleLossCount,
     winOfBenchmark: aggregate(winBench),
