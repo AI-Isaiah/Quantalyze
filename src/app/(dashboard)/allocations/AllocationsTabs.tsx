@@ -658,20 +658,21 @@ export function AllocationsTabs(
     }
   };
 
-  // NAV-02 (Phase 45) — keep the active tab in view inside the <sm
-  // horizontally-scrollable strip. A keyboard arrow-nav or a programmatic tab
-  // change can leave the selected tab clipped off-screen; scroll it back into
-  // view on every activeTab change. We scroll the STRIP (the role="tablist"
-  // scroll container — the tab button's direct parent, pinned by the axe
-  // aria-required-children gate) on its horizontal axis ONLY, never the page.
+  // NAV-02 (Phase 45) — keep the active tab in view inside the horizontally-
+  // scrollable strip (a scroller at EVERY width since GC-01, 2026-09-30). A
+  // keyboard arrow-nav or a programmatic tab change can leave the selected
+  // tab clipped off-screen; scroll it back into view on every activeTab
+  // change. We scroll the STRIP (the role="tablist" scroll container — the
+  // tab button's direct parent, pinned by the axe aria-required-children gate) on its horizontal axis ONLY, never the page.
   // The earlier `el.scrollIntoView({ block: "nearest" })` also moved the
   // nearest VERTICAL scroll container, so switching tabs after scrolling down
   // yanked the page back up to the strip — defeating changeTab's deliberate
   // no-scroll URL write (history.replaceState). `computeTabStripScroll` returns null
-  // when the tab is already visible (and at >=sm where the strip wraps and never
-  // overflows), so this is a no-op except when a horizontal correction is
-  // actually needed. Honor prefers-reduced-motion: instant ("auto") for reduce,
-  // smooth otherwise — never animate a forced scroll for reduced-motion users
+  // when the tab is already visible (including whenever all tabs fit and the
+  // strip does not overflow), so this is a no-op except when a horizontal
+  // correction is actually needed — at any width, not just <sm (GC-01).
+  // Honor prefers-reduced-motion: instant ("auto") for reduce, smooth
+  // otherwise — never animate a forced scroll for reduced-motion users
   // (UI-SPEC States row). The `typeof ... === "function"` guards keep it safe in
   // environments without getBoundingClientRect / Element.scrollTo / matchMedia
   // (jsdom, older browsers) — the effect no-ops there instead of throwing.
@@ -800,18 +801,26 @@ export function AllocationsTabs(
             wrapper could not shrink below its content and the NAV-02
             scroller never engaged (tab bar 682px, #main-content overflow
             235px). max-w-full + flex-wrap lets the actions drop to their
-            own right-aligned row below sm; sm:flex-nowrap restores one row. */}
+            own right-aligned row below sm; from sm up sm:flex-nowrap keeps
+            the tablist and Export on ONE line, and the tablist (a shrinking
+            sm:basis-auto item) scrolls inside itself when its tabs do not
+            fit rather than wrapping (GC-01, 2026-09-30). */}
         <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1 sm:flex-nowrap">
-          {/* NAV-02 (Phase 45) — CSS-first horizontally-scrollable tab strip at
-              <sm so all six surfaces stay reachable on a phone (no tab dropped).
+          {/* NAV-02 (Phase 45) / GC-01 (2026-09-30) — CSS-first horizontally-
+              scrollable tab strip at EVERY width, so all six surfaces stay
+              reachable on a phone (no tab dropped) and the strip never wraps.
               JOURNEY-03 is preserved: this is the SAME element with the SAME
               role="tablist" and the SAME direct role="tab" children — no role is
               added to any wrapper and the tabs are NOT re-nested (re-nesting would
               re-introduce the critical axe aria-required-children violation the
               comment above warns about; the seeded composer-axe.spec.ts gate
               catches a regression). `flex-nowrap overflow-x-auto` keeps the tabs on
-              one scrollable line at <sm; `sm:flex-wrap sm:overflow-x-visible`
-              restores the original wrap-on-one-row layout at >=sm. The native
+              one line at every width: below sm the strip is its own full-width
+              row (basis-full); from sm up it is a shrinking item beside Export
+              (sm:basis-auto). It scrolls inside itself only when its tabs do
+              not fit, and it never wraps or switches to visible overflow — the
+              old `sm:flex-wrap sm:overflow-x-visible` pair did both (CI run
+              36764778803: no scroll at V640, a wrapped strip at V960). The native
               scrollbar is hidden ([scrollbar-width:none]) and iOS momentum-scrolls
               ([-webkit-overflow-scrolling:touch]); the cut-off tab peeking past the
               right edge IS the scroll affordance — no edge-fade overlay is
@@ -821,7 +830,7 @@ export function AllocationsTabs(
           <div
             role="tablist"
             aria-label="Allocation surfaces"
-            className="flex flex-nowrap items-center gap-1 min-w-0 basis-full overflow-x-auto snap-x [scrollbar-width:none] [-webkit-overflow-scrolling:touch] sm:basis-auto sm:flex-wrap sm:overflow-x-visible"
+            className="flex flex-nowrap items-center gap-1 min-w-0 basis-full overflow-x-auto snap-x [scrollbar-width:none] [-webkit-overflow-scrolling:touch] sm:basis-auto"
           >
           {VISIBLE_TAB_KEYS.map((key) => {
             const isActive = activeTab === key;
