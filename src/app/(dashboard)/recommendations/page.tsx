@@ -376,7 +376,7 @@ export default async function RecommendationsPage() {
       ) : rpcFailed ? (
         <RecommendationsLoadErrorState />
       ) : !batch ? (
-        <NoBatchState />
+        <NoBatchState mandateSet={mandateState === "set"} />
       ) : (
         <NoCandidatesState />
       )}
@@ -434,15 +434,18 @@ function RecommendationsLoadErrorState() {
   );
 }
 
-function NoBatchState() {
+// Review round 2 WR-01 / R2-SFH-01: D-73 and CR-01 let an unset or unknown
+// mandate reach this card, so it states the mandate only when it is `set`.
+function NoBatchState({ mandateSet }: { mandateSet: boolean }) {
   return (
     <Card className="p-8 text-center">
       <h2 className="text-lg font-semibold text-text-primary">
         Your first batch is computing
       </h2>
       <p className="mt-2 text-sm text-text-secondary max-w-md mx-auto">
-        Your mandate is set. The match engine recomputes recommendations once
-        a day — your first batch will appear here after the next run.
+        {mandateSet ? "Your mandate is set. " : null}The match engine
+        recomputes recommendations once a day — your first batch will appear
+        here after the next run.
       </p>
     </Card>
   );

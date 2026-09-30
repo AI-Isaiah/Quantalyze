@@ -256,6 +256,7 @@ describe("SC8 · /recommendations — one mandate branch drives the header and t
     const { container } = await renderPage();
 
     expect(screen.getByText("Your first batch is computing")).toBeTruthy();
+    expect(container.textContent ?? "").toMatch(/Your mandate is set/);
     expect(screen.queryByText(CTA)).toBeNull();
     expect(screen.queryByText("No candidates match today")).toBeNull();
     expect(container.querySelector("ol")).toBeNull();
@@ -378,6 +379,29 @@ describe("D-73 · the list is withheld only when NO engine-read preference is sa
     expect(screen.queryByText(MANDATE_FIT_HEADER)).toBeNull();
   });
 
+  it("EP3: only a drawdown tolerance + no batch — the first-batch card makes no 'mandate is set' claim under the 'No mandate is set yet' header", async () => {
+    // Review round 2 WR-01 / R2-SFH-01: D-73 opened the no-batch card to an
+    // UNSET mandate. Its hard-coded "Your mandate is set" then contradicted
+    // the header directly above it.
+    seeded.prefs = {
+      mandate_archetype: null,
+      max_weight: null,
+      preferred_strategy_types: [],
+      target_ticket_size_usd: null,
+      max_drawdown_tolerance: 0.15,
+    };
+    seeded.batchMeta = [];
+    seeded.recs = [];
+    const { container } = await renderPage();
+    const text = container.textContent ?? "";
+
+    expect(screen.getByText("Your first batch is computing")).toBeTruthy();
+    expect(text).toMatch(/No mandate is set yet/);
+    expect(text, "the card said the mandate is set under a header saying it is not").not.toMatch(
+      /Your mandate is set/,
+    );
+  });
+
   it("EP2: only empty lists (no exclusions, no styles) is no engine preference — the list is withheld", async () => {
     seeded.prefs = {
       mandate_archetype: null,
@@ -417,6 +441,27 @@ describe("CR-01 · a failed preferences read is UNKNOWN, never 'no mandate'", ()
         errSpy.mock.calls.some((c) => String(c[0]).includes("allocator_preferences read failed")),
         "the failed read left no breadcrumb",
       ).toBe(true);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("ER3: prefs read fails + no batch — the first-batch card makes no 'mandate is set' claim under the unknown notice", async () => {
+    // Review round 2 WR-01 / R2-SFH-01: the notice says the mandate could not
+    // be read, so the card beneath it must not assert that it is set.
+    seeded.prefsError = { code: "42501", message: "permission denied" };
+    seeded.batchMeta = [];
+    seeded.recs = [];
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { container } = await renderPage();
+      const text = container.textContent ?? "";
+
+      expect(screen.getByText("We couldn't load your mandate")).toBeTruthy();
+      expect(screen.getByText("Your first batch is computing")).toBeTruthy();
+      expect(text, "the card asserted a mandate the page could not read").not.toMatch(
+        /Your mandate is set/,
+      );
     } finally {
       errSpy.mockRestore();
     }
