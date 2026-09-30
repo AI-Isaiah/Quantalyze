@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
+import type React from "react";
 
 import { RiskTabPanel } from "./RiskTabPanel";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
@@ -7,6 +8,20 @@ import { computeVaR } from "@/lib/portfolio-stats";
 import { formatPercent } from "@/lib/utils";
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+// ResponsiveContainer measures 0×0 in jsdom and draws nothing; sized here so
+// the decomposition's bars are observable (HoldingsTabPanel.exposure idiom).
+vi.mock("recharts", async () => {
+  const actual = await vi.importActual<typeof import("recharts")>("recharts");
+  const { cloneElement } = await import("react");
+  return {
+    ...actual,
+    ResponsiveContainer: ({
+      children,
+    }: {
+      children: React.ReactElement<{ width?: number; height?: number }>;
+    }) => cloneElement(children, { width: 400, height: 300 }),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Phase 169.4-01 (SC2) — the Risk tab reads the same book the Overview reads.
@@ -98,5 +113,55 @@ describe("RiskTabPanel — the book series (SC2)", () => {
     render(<RiskTabPanel {...payload({ equityHistoryState: undefined })} />);
     expect(screen.getByTestId("overview-equity-rebuilding")).toBeInTheDocument();
     expect(document.querySelectorAll("[data-widget-id]")).toHaveLength(0);
+  });
+});
+
+describe("RiskTabPanel — decomposition and correlation over the Scenario's per-key set (SC2)", () => {
+  const keyA = "key-aaaa-1111";
+  const keyB = "key-bbbb-2222";
+  const perKey = (seed: number) =>
+    bookReturns.map((d, i) => ({ date: d.date, value: (((i * seed) % 11) - 5) / 1000 }));
+
+  function twoKeyBook() {
+    return payload({
+      // The legacy set carries a row the per-key widgets must NOT show.
+      strategies: [
+        {
+          strategy_id: "legacy-1",
+          alias: "Legacy",
+          current_weight: 1,
+          strategy: { id: "legacy-1", strategy_analytics: { daily_returns: bookReturns } },
+        },
+      ],
+      apiKeys: [
+        { id: keyA, exchange: "binance", label: "Main" },
+        { id: keyB, exchange: "binance", label: "Hedge" },
+      ],
+      perKeyReturnsByApiKeyId: { [keyA]: perKey(3), [keyB]: perKey(7) },
+      contributingApiKeyIds: [keyA, keyB],
+    });
+  }
+
+  it("the correlation matrix names the two keys the way the Scenario does, in full", async () => {
+    render(<RiskTabPanel {...twoKeyBook()} />);
+    const matrix = await screen.findByTestId("correlation-matrix");
+    const headers = [...matrix.querySelectorAll("thead th[title]")].map((th) =>
+      th.getAttribute("title"),
+    );
+    expect(headers).toEqual(["Binance — Main", "Binance — Hedge"]);
+    expect(within(matrix).queryByText("Legacy")).toBeNull();
+    expect(matrix.textContent).not.toContain(keyA);
+  });
+
+  it("the risk decomposition has one row per key", async () => {
+    render(<RiskTabPanel {...twoKeyBook()} />);
+    const decomposition = await screen.findByTestId("risk-decomposition");
+    expect(decomposition.querySelectorAll(".recharts-bar-rectangle")).toHaveLength(2);
+    const ticks = [
+      ...decomposition.querySelectorAll(".recharts-cartesian-axis-tick-value"),
+    ].map((t) => t.textContent);
+    expect(ticks).toContain("Binance — Main");
+    expect(ticks).toContain("Binance — Hedge");
+    expect(ticks).not.toContain("Legacy");
   });
 });
