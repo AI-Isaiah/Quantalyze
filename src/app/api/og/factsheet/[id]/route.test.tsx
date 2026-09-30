@@ -71,12 +71,15 @@ vi.mock("next/og", () => ({
   },
 }));
 
-/** (rows, assetClass, result) for every computeOgHeadline invocation. */
+/** (rows, assetClass, persisted, result) for every computeOgHeadline invocation.
+ *  169.4.1: the spy forwards EVERY argument, so the persisted-scalars argument
+ *  the route passes reaches the real implementation and is recorded here. */
 const headlineCalls = vi.hoisted(
   () =>
     [] as Array<{
       rows: ReadonlyArray<{ date: unknown; value: number }>;
       assetClass: string | null | undefined;
+      persisted: unknown;
       result: { sharpe: number; cagr: number; maxDd: number };
     }>,
 );
@@ -87,11 +90,11 @@ vi.mock("@/lib/factsheet/og-metrics", async (importOriginal) => {
   return {
     ...actual,
     computeOgHeadline: (
-      rows: ReadonlyArray<{ date: unknown; value: number }>,
-      assetClass: string | null | undefined,
+      ...args: Parameters<typeof actual.computeOgHeadline>
     ) => {
-      const result = actual.computeOgHeadline(rows, assetClass);
-      headlineCalls.push({ rows, assetClass, result });
+      const result = actual.computeOgHeadline(...args);
+      const [rows, assetClass, persisted] = args;
+      headlineCalls.push({ rows, assetClass, persisted, result });
       return result;
     },
   };
@@ -289,6 +292,48 @@ describe("GET /api/og/factsheet/[id]", () => {
     const strings = latestCardStrings();
     expect(strings).toContain("Helios Momentum");
     expect(strings.filter(s => s === "—")).toHaveLength(0);
+  });
+
+  it("O1d — 169.4.1 SC4: a complete row renders its PERSISTED Sharpe / CAGR / Max DD, the values every list shows", async () => {
+    // Distinctive stored values, chosen so the computation over LONG_WEALTH_INDEX
+    // cannot produce them: the card agrees with the lists only if the route
+    // projects the stored scalars AND passes them through.
+    STATE.strategyRow!.strategy_analytics = [
+      {
+        daily_returns: null,
+        returns_series: LONG_WEALTH_INDEX,
+        computation_status: "complete",
+        sharpe: 2.34,
+        cagr: 0.567,
+        max_drawdown: -0.089,
+      },
+    ];
+    const { GET } = await import("./route");
+    await GET(makeRequest(), ctx(PUBLISHED_ID));
+
+    expect(STATE.observed.select).toMatch(/strategy_analytics \([^)]*\bsharpe\b/);
+    expect(STATE.observed.select).toMatch(/strategy_analytics \([^)]*\bcagr\b/);
+    expect(STATE.observed.select).toMatch(/strategy_analytics \([^)]*\bmax_drawdown\b/);
+
+    expect(headlineCalls).toHaveLength(1);
+    expect(headlineCalls[0].persisted).toMatchObject({
+      sharpe: 2.34,
+      cagr: 0.567,
+      max_drawdown: -0.089,
+      computation_status: "complete",
+    });
+    // Anti-vacuity: the series alone computes to different figures.
+    const { computeOgHeadline: real } = await vi.importActual<
+      typeof import("@/lib/factsheet/og-metrics")
+    >("@/lib/factsheet/og-metrics");
+    const computed = real(headlineCalls[0].rows, "crypto");
+    expect(computed.sharpe.toFixed(2)).not.toBe("2.34");
+    expect(computed.cagr).not.toBeCloseTo(0.567, 3);
+
+    const strings = latestCardStrings();
+    expect(strings).toContain("2.34");
+    expect(strings).toContain("+56.7%");
+    expect(strings).toContain("-8.9%");
   });
 
   it("O2 — a populated daily_returns still wins over returns_series (direct-first contract)", async () => {

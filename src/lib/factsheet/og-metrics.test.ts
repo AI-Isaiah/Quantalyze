@@ -140,3 +140,84 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
     expect(Number.isFinite(r3.cagr)).toBe(true);
   });
 });
+
+/**
+ * Phase 169.4.1 OGSHARPE (SC4, D-10, D-25): the card reads the PERSISTED CAGR,
+ * Sharpe and max drawdown for a rankable row, so a shared card says what the
+ * factsheet headline and every list say. Before this, the card recomputed them
+ * from the raw series and could disagree with the stored values the lists rank
+ * on. The card keeps its OWN display policy over the stored value (Sharpe and
+ * max drawdown need 30 observations, CAGR a 0.95-calendar-year span with
+ * positive growth), a stored null hides, and a key the caller never projected
+ * (undefined) falls back to the computation. A non-rankable row (a failed or
+ * computing run still carries the previous run's scalars) is never read.
+ */
+describe("computeOgHeadline — persisted scalars for a rankable row (169.4.1)", () => {
+  const STORED = { sharpe: 1.5, cagr: 0.2, max_drawdown: -0.1 } as const;
+
+  it.each(["complete", "complete_with_warnings"])(
+    "a %s row over a 400-day series shows exactly the stored figures",
+    (status) => {
+      const rows = alternating(400);
+      const computed = computeOgHeadline(rows, "crypto");
+      // Anti-vacuity: the computation over this series is finite and differs
+      // from every stored value, so only the persisted arm can produce them.
+      expect(Number.isFinite(computed.sharpe)).toBe(true);
+      expect(Number.isFinite(computed.cagr)).toBe(true);
+      expect(computed.sharpe).not.toBe(STORED.sharpe);
+      expect(computed.cagr).not.toBe(STORED.cagr);
+      expect(computed.maxDd).not.toBe(STORED.max_drawdown);
+
+      const got = computeOgHeadline(rows, "crypto", { ...STORED, computation_status: status });
+      expect(got).toEqual({ sharpe: 1.5, cagr: 0.2, maxDd: -0.1 });
+    },
+  );
+
+  it("a 200-day series keeps the card's CAGR policy: CAGR hidden, the stored Sharpe shown", () => {
+    const got = computeOgHeadline(alternating(200), "crypto", { ...STORED, computation_status: "complete" });
+    expect(Number.isNaN(got.cagr)).toBe(true);
+    expect(got.sharpe).toBe(1.5);
+    expect(got.maxDd).toBe(-0.1);
+  });
+
+  it("a 20-observation series hides the stored Sharpe AND max drawdown (the 30-observation gate)", () => {
+    const got = computeOgHeadline(alternating(20), "crypto", { ...STORED, computation_status: "complete" });
+    expect(Number.isNaN(got.sharpe)).toBe(true);
+    expect(Number.isNaN(got.maxDd)).toBe(true);
+    expect(Number.isNaN(got.cagr)).toBe(true);
+  });
+
+  it.each(["failed", "computing", null, undefined])(
+    "a non-rankable row (status %s) never reads the stored scalars: the computed headline, unchanged",
+    (status) => {
+      const rows = alternating(400);
+      const got = computeOgHeadline(rows, "crypto", { ...STORED, computation_status: status });
+      expect(got).toEqual(computeOgHeadline(rows, "crypto"));
+      expect(got.sharpe).not.toBe(STORED.sharpe);
+    },
+  );
+
+  it("a stored null hides the figure (NaN), never the recomputed value", () => {
+    const rows = alternating(400);
+    const computed = computeOgHeadline(rows, "crypto");
+    expect(Number.isFinite(computed.sharpe) && Number.isFinite(computed.cagr) && Number.isFinite(computed.maxDd)).toBe(true);
+    const got = computeOgHeadline(rows, "crypto", {
+      sharpe: null,
+      cagr: null,
+      max_drawdown: null,
+      computation_status: "complete",
+    });
+    expect(Number.isNaN(got.sharpe)).toBe(true);
+    expect(Number.isNaN(got.cagr)).toBe(true);
+    expect(Number.isNaN(got.maxDd)).toBe(true);
+  });
+
+  it("an absent key (undefined, not projected) falls back to the computed value for that figure only", () => {
+    const rows = alternating(400);
+    const computed = computeOgHeadline(rows, "crypto");
+    const got = computeOgHeadline(rows, "crypto", { sharpe: 1.5, computation_status: "complete" });
+    expect(got.sharpe).toBe(1.5);
+    expect(got.cagr).toBe(computed.cagr);
+    expect(got.maxDd).toBe(computed.maxDd);
+  });
+});
