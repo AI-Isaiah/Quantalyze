@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { assertNoReflow } from "./helpers/reflow";
+import { assertFitsOrScrollsInside } from "./helpers/geometry";
 
 /**
  * Phase 44-04 / A11Y-02 — Reflow gate (WCAG 1.4.10) at the 390px floor.
@@ -185,3 +186,72 @@ function escapeeFixture(positionedScroller: boolean): string {
     "</ul></div>"
   );
 }
+
+/**
+ * Phase 170 GC-01 — server-free self-test of assertFitsOrScrollsInside. A tab
+ * strip may fit or scroll inside itself on one line; it may not wrap onto a
+ * second line or overflow without being a scroller. Each outcome is proven in
+ * Chromium against inline markup at 390 px. The strip is capped at
+ * max-width:100% so the eight-child case genuinely exceeds its box.
+ */
+function stripFixture(style: string, children: number, childWidth: number): string {
+  const kids = Array.from(
+    { length: children },
+    (_, i) =>
+      `<button style="flex:0 0 ${childWidth}px;width:${childWidth}px;height:32px">tab ${i}</button>`,
+  ).join("");
+  return FIXTURE_SHELL.replace(
+    "PLACEHOLDER",
+    `<div id="strip" role="tablist" style="max-width:100%;${style}">${kids}</div>`,
+  );
+}
+
+test.describe("geometry helper self-test (Phase 170 GC-01)", () => {
+  test.describe.configure({ timeout: 30_000 });
+
+  test("fits fixture: three short tabs on one line resolve with scrolls=false", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.setContent(
+      stripFixture("display:flex;flex-wrap:nowrap;overflow-x:auto", 3, 60),
+    );
+    const r = await assertFitsOrScrollsInside(page.locator("#strip"), "fits");
+    expect(r.scrolls).toBe(false);
+  });
+
+  test("scrolls fixture: eight 120px tabs in a nowrap auto scroller resolve with scrolls=true", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.setContent(
+      stripFixture("display:flex;flex-wrap:nowrap;overflow-x:auto", 8, 120),
+    );
+    const r = await assertFitsOrScrollsInside(page.locator("#strip"), "scrolls");
+    expect(r.scrolls).toBe(true);
+  });
+
+  test("wraps fixture: a flex-wrap strip whose tabs fall onto two lines rejects", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.setContent(stripFixture("display:flex;flex-wrap:wrap", 8, 120));
+    await expect(
+      assertFitsOrScrollsInside(page.locator("#strip"), "wraps"),
+    ).rejects.toThrow(/wraps onto more than one line/);
+  });
+
+  test("overflows fixture: a nowrap strip with visible overflow wider than its box rejects", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    // overflow-y stays visible too: either axis set to auto would make
+    // overflow-x compute to auto, and the strip would be a scroller.
+    await page.setContent(
+      stripFixture("display:flex;flex-wrap:nowrap;overflow:visible", 8, 120),
+    );
+    await expect(
+      assertFitsOrScrollsInside(page.locator("#strip"), "overflows"),
+    ).rejects.toThrow(/does not scroll inside itself/);
+  });
+});
