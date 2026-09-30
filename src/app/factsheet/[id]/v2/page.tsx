@@ -188,7 +188,16 @@ function buildFactsheetPayloadCached(
     // arithmetic curve for a single-key `simple` config, and an MTM / smoothed /
     // cash-series read outage that now throws instead of building a degraded
     // payload. They ride this one v8 bump; no second move was needed.
-    ["factsheet-v2-payload-v8", id, computedAt],
+    // Bumped v8→v9 (Phase 169.5 BENCHCOMPARE, 169 D-48 as amended by 169 D-62):
+    // comparator blocks carry `through`, null windows past it and covered-day
+    // summaries (169.5-01); the payload carries the bounded BTC prices, their
+    // `through` and `dropped` for the browser re-derive (169.5-02); comparator
+    // `dailyReturns` are null where uncovered (169.5-04). A stale v8 entry lacks
+    // them, so during the 1 h TTL drain it would show +0.00% benchmark windows and
+    // feed the MTM / leverage re-derive no prices; one bump covers Phase 169.5
+    // because its plans deploy in one PR. Phase 169's own payload changes are
+    // covered by its v7→v8 bump (169 D-62) and are not v9 content.
+    ["factsheet-v2-payload-v9", id, computedAt],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],

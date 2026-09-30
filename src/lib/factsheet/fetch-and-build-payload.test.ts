@@ -68,6 +68,16 @@ vi.mock("@/lib/supabase/admin", () => {
       // strategy_analytics_series and anything else: no row.
       return { data: null, error: null };
     };
+    if (table === "benchmark_prices") {
+      // Phase 169.5-01: the factsheet build reads BTC through 169.2's keyset
+      // reader and one first-stored-date probe. An empty successful page ends
+      // the reader's loop at once and answers the probe with no stored history,
+      // so every case here exercises the real read path.
+      b.gte = self;
+      b.lte = self;
+      b.lt = self;
+      b.then = (resolve: (v: unknown) => unknown) => resolve({ data: [], error: null });
+    }
     if (table === "csv_daily_returns") {
       // The composite read awaits the builder itself after `.limit(...)`, one
       // date-keyset page at a time (review round 1, CSV-READ-CAP): a page after
