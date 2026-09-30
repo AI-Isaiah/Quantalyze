@@ -82,9 +82,9 @@ export function comparatorLeg(
 
 /** A blend aligned on its legs' common calendar by {@link alignBlend}. */
 export type AlignedBlend = {
-  /** The blend dates: the strategy dates falling on a weekday every leg's calendar carries. */
+  /** The blend dates: the strategy dates on a weekday every leg's calendar carries AND every leg has a close dated (SFH HIGH-1). */
   dates: string[];
-  /** Per blend date: the weighted blend, null when any leg is null there. */
+  /** Per blend date: the weighted blend, null when any leg is null there (a dropped close inside the interval). */
   returns: Array<number | null>;
   /** Per blend date: true when every comparator leg is paired there. */
   paired: boolean[];
@@ -92,7 +92,7 @@ export type AlignedBlend = {
   book: Array<number | null>;
   /** The smaller of the comparator legs' `annualizationPeriods` (D-70(3)). */
   periodsPerYear: number;
-  /** The last close every comparator leg carries on or before the last blend date; null when one has none. */
+  /** The earliest of the legs' last closes on or before the last calendar-shared strategy date; null when a leg has none. */
   through: string | null;
 };
 
@@ -109,7 +109,9 @@ function isoDayBefore(iso: string): string {
 /**
  * Phase 169.4 D-70(2)-(3), applying 169.5 D-65: an allocator portfolio blend on
  * its legs' COMMON calendar. The blend dates are the strategy `dates` whose
- * weekday every leg's calendar carries. Every leg is aligned on them through the
+ * weekday every leg's calendar carries and on which every leg has a close (review
+ * SFH HIGH-1: a market holiday is not a blend date, so the next common date's
+ * interval carries every leg's move across it). Every leg is aligned on them through the
  * ONE alignment, `alignCoveredReturns` (no second pairing rule here), so a
  * Monday reads a weekday leg's Friday-to-Monday move and a 7-day leg's move over
  * the same interval. The book is aligned the same way from its own level series:
@@ -117,9 +119,11 @@ function isoDayBefore(iso: string): string {
  * date (the definition of a return series, not an invented close), on the 7-day
  * calendar with no dropped closes; only that call's series is read.
  *
- * A blend date is null when any leg is null there (past a leg's last close, a
- * missing close, a dropped close), and paired only when every comparator leg is
- * paired. The basis is the smallest `annualizationPeriods` over the comparator
+ * A blend date is null when any leg is null there (a dropped close inside its
+ * interval), and paired only when every comparator leg is paired: the date after a
+ * holiday is unpaired for a weekday leg (one bridged point where its calendar
+ * expects two), so the correlation and the sleeve scan skip it while the own-series
+ * figures keep it. Dates past a leg's last close are not blend dates at all. The basis is the smallest `annualizationPeriods` over the comparator
  * legs (D-70(3)): 60/40 252, crypto_book 365, and multi_asset 252 by the founder's
  * 2026-09-30 ruling ("Allow 252 here"), a narrow exception to #597 BLEND-02 for
  * this panel only, whose points are weekdays once weekend gaps are no longer
@@ -134,10 +138,23 @@ export function alignBlend(
   if (stratRet.length !== dates.length) throw new Error("alignBlend(): dates and stratRet must be the same length");
   const periodsPerYear = Math.min(...legs.map(l => annualizationPeriods(l.assetClass)));
 
-  const blendDates = dates.filter(d => {
+  // Review SFH HIGH-1: a blend date is a date EVERY leg priced, not merely a
+  // weekday every leg's calendar carries. A US-market holiday is a weekday with
+  // no SPX / GLD / IEF close; kept as a blend date it was null, and BTC's move
+  // into it (its Friday-to-Monday return, dated the holiday) was discarded with
+  // it, while Tuesday read BTC over Monday-to-Tuesday only. With the holiday
+  // absent, Tuesday's interval runs from the previous common date, so every leg,
+  // BTC included, carries its full close-to-close move across it. A dropped
+  // (corrupt) close is never a close, so its date is not a blend date either.
+  const closeSets = legs.map(l => {
+    const dropped = new Set(l.dropped);
+    return new Set(l.prices.map(p => p.date).filter(d => !dropped.has(d)));
+  });
+  const calendarDates = dates.filter(d => {
     const wd = weekdayOf(d);
     return legs.every(l => l.calendar[wd]);
   });
+  const blendDates = calendarDates.filter(d => closeSets.every(c => c.has(d)));
 
   const aligned = legs.map(l => alignCoveredReturns(l.prices, l.dropped, blendDates, l.calendar));
 
@@ -158,13 +175,25 @@ export function alignBlend(
   );
   const paired = blendDates.map((_, i) => aligned.every(a => a.paired[i]));
 
+  // `through` is each leg's last close on or before the last date its calendar
+  // shares with the blend, the minimum over the legs; null when a leg has none.
+  // It is read from the calendar dates, not the blend dates: a strategy dated
+  // wholly after a fixture's last close has no blend date, and its caption must
+  // still date the prices (D-70(4)) rather than call them unavailable.
   let through: string | null = null;
-  for (const a of aligned) {
-    if (a.through === null) {
-      through = null;
-      break;
+  const lastCalendarDate = calendarDates[calendarDates.length - 1];
+  if (lastCalendarDate !== undefined) {
+    for (const l of legs) {
+      let legThrough: string | null = null;
+      for (const p of l.prices) {
+        if (p.date <= lastCalendarDate && (legThrough === null || p.date > legThrough)) legThrough = p.date;
+      }
+      if (legThrough === null) {
+        through = null;
+        break;
+      }
+      if (through === null || legThrough < through) through = legThrough;
     }
-    if (through === null || a.through < through) through = a.through;
   }
 
   return { dates: blendDates, returns, paired, book, periodsPerYear, through };
