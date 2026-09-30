@@ -122,9 +122,17 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
     const segs: { start: number; end: number; bull: boolean }[] = [];
     let curStart = -1;
     let curBull: boolean | null = null;
+    // Phase 169.5 (SFH-M-06): the last index with a rolling Sharpe. The final
+    // segment ends there, never at the series end, so a comparator whose prices
+    // stop before the strategy's (null past `through`) leaves the tail unshaded
+    // instead of painting its last regime over dates it has no price for.
+    // Interior nulls (a weekday comparator's weekends, a dropped close) are still
+    // bridged: breaking there would shatter SPX shading into weekday islands.
+    let lastNonNull = -1;
     for (let i = 0; i < cmp.rollingSharpe.length; i++) {
       const v = cmp.rollingSharpe[i];
       if (v == null || !Number.isFinite(v)) continue;
+      lastNonNull = i;
       const bull = v > 0;
       if (curBull == null) {
         curStart = i;
@@ -136,7 +144,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
       }
     }
     if (curBull != null && curStart !== -1) {
-      segs.push({ start: curStart, end: cmp.rollingSharpe.length - 1, bull: curBull });
+      segs.push({ start: curStart, end: lastNonNull, bull: curBull });
     }
     return segs;
   }, [regimes, cmpKey, cmp.rollingSharpe]);
