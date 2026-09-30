@@ -38,7 +38,7 @@ import { UpdateMt5SecretDialog } from "@/components/strategy/UpdateMt5SecretDial
 import { createClient } from "@/lib/supabase/client";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 import { computeRetryAtSeconds } from "@/lib/allocator-cooldowns";
-import { accountShareNote } from "@/lib/account-share-note";
+import { accountShareNote, isWorkingHolder } from "@/lib/account-share-note";
 import {
   accountIdentityTokens,
   departedAnchorOf,
@@ -195,6 +195,74 @@ function formatRelative(iso: string | null): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+/**
+ * Phase 169.3 review round 1 WR-02 / SFH-04 — which active row carries an
+ * exchange account's balance. The balance is the ACCOUNT's, so it renders on
+ * exactly one row per account.
+ *
+ * An account here is a holder plus every active key marked `duplicate` against
+ * it (167.1.2 D-11), followed transitively. One rule picks the row that reads
+ * the account now, among the group's live keys (`isLiveKey`, the departed
+ * predicate the count uses): a WORKING key (`isWorkingHolder`, the D-18 rule
+ * the share note uses) before a live-but-failing one, then the holder before a
+ * marked key, then the lowest id. Working is the proxy for the freshest read:
+ * nothing on the row dates the stored balance (`last_sync_at` is the trades
+ * cursor). So a key that reads through a working holder never shows a
+ * balance, whatever its own state, and the row that carries the note is never
+ * the one chosen (the note needs both keys working, and then the holder wins).
+ *
+ * Deliberately NOT grouped (recorded residual, 169.3-REVIEW-FIX-B.md): a
+ * `composite_member` pair and two unmarked keys sharing a venue account id.
+ * Plan 03 kept a live composite_member's balance because hiding it needs
+ * wording the plan forbids; the same holds for an unmarked twin.
+ */
+function balanceBearingKeyIds(
+  activeKeys: readonly ExchangeConnection[],
+): Set<string> {
+  const byId = new Map(activeKeys.map((k) => [k.id, k]));
+  const holderOf = (k: ExchangeConnection): string | null => {
+    const holder = k.account_shared_with_api_key_id;
+    return k.account_share_kind === "duplicate" &&
+      holder !== null &&
+      holder !== k.id &&
+      byId.has(holder)
+      ? holder
+      : null;
+  };
+  // Follow the duplicate pointers to the group's root. A cycle (never written
+  // by the stamper) resolves to its lowest id, so every member agrees.
+  const rootOf = (k: ExchangeConnection): string => {
+    const seen = new Set<string>([k.id]);
+    let cur = k.id;
+    for (;;) {
+      const next = holderOf(byId.get(cur)!);
+      if (next === null) return cur;
+      if (seen.has(next)) return [...seen].sort()[0];
+      seen.add(next);
+      cur = next;
+    }
+  };
+  const best = new Map<string, ExchangeConnection>();
+  const rank = (k: ExchangeConnection): [number, number, string] => [
+    isWorkingHolder(k) ? 0 : 1,
+    holderOf(k) === null ? 0 : 1,
+    k.id,
+  ];
+  const before = (a: ExchangeConnection, b: ExchangeConnection): boolean => {
+    const [ra, rb] = [rank(a), rank(b)];
+    if (ra[0] !== rb[0]) return ra[0] < rb[0];
+    if (ra[1] !== rb[1]) return ra[1] < rb[1];
+    return ra[2] < rb[2];
+  };
+  for (const k of activeKeys) {
+    if (!isLiveKey(k)) continue;
+    const root = rootOf(k);
+    const current = best.get(root);
+    if (current === undefined || before(k, current)) best.set(root, k);
+  }
+  return new Set([...best.values()].map((k) => k.id));
 }
 
 const SYNC_FAILED_HELPER =
@@ -1179,6 +1247,8 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   // was never disconnected keeps its row above (its pill, its departed-history
   // card, its Disconnect), but it reads no account, so it is not connected.
   const connectedCount = activeKeys.filter(isLiveKey).length;
+  // WR-02 / SFH-04: one row per exchange account carries its balance.
+  const balanceBearers = balanceBearingKeyIds(activeKeys);
 
   // DOGFOOD-2: only assert an active allocation when holdings actually back it.
   // When keys are connected but allocator_holdings is empty, show an honest
@@ -1237,11 +1307,13 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
               };
               const shareNote = accountShareNote(key, keysById, "Disconnect");
               // Phase 169.3 plan 03 (SC7): the balance is the ACCOUNT's, so it
-              // renders once. A key the share note names as reading another
-              // working key's account shows the note instead (167.1.2 D-11,
-              // D-18). A departed key shows none: nothing on the row dates its
-              // last good read (last_sync_at is the trades cursor).
-              const showBalance = shareNote === null && isLiveKey(key);
+              // renders once, on the row balanceBearingKeyIds picks (review
+              // round 1 WR-02: one working-key rule for the note and the
+              // balance). A key the share note names as reading another
+              // working key's account is never picked (167.1.2 D-11, D-18). A
+              // departed key shows none: nothing on the row dates its last
+              // good read (last_sync_at is the trades cursor).
+              const showBalance = balanceBearers.has(key.id);
               return (
                 <div
                   key={key.id}

@@ -231,6 +231,101 @@ describe("AllocatorExchangeManager — no balance repeats, no revoked balance (S
     expect(within(keyRow("Dup One")).queryByRole("note")).toBeNull();
   });
 
+  // 169.3 review round 1 WR-02 / SFH-04: the balance and the note used two
+  // different "is this key working" tests. isLiveKey rejects only revoked, the
+  // note's D-18 rule also rejects sign_in_failed and error, so a failing key of
+  // a duplicate pair printed the account's balance beside its working partner.
+  // One rule now picks the row that reads the account: a working key first,
+  // the holder before a marked key, then the lowest id. Exactly one Balance.
+  it.each(["error", "sign_in_failed"])(
+    "a holder in %s and a working marked key show the balance once, on the working key",
+    (status) => {
+      render(
+        <AllocatorExchangeManager
+          hasHoldings={true}
+          initialKeys={[
+            makeKey({ id: "key-holder", label: "Holder Binance", sync_status: status, account_balance_usdt: 5_000 }),
+            shared("key-dup-1", "Dup One"),
+          ]}
+        />,
+      );
+      expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
+      expect(readOnlyLine("Dup One")).toBe("binance · Read-only · Balance $5,000");
+      expect(readOnlyLine("Holder Binance")).toBe("binance · Read-only");
+    },
+  );
+
+  it.each(["error", "sign_in_failed"])(
+    "a marked key in %s reads through its working holder and shows no balance",
+    (status) => {
+      render(
+        <AllocatorExchangeManager
+          hasHoldings={true}
+          initialKeys={[
+            HOLDER,
+            makeKey({
+              id: "key-dup-1",
+              label: "Dup One",
+              sync_status: status,
+              account_balance_usdt: 5_000,
+              account_share_kind: "duplicate",
+              account_shared_with_api_key_id: "key-holder",
+            }),
+          ]}
+        />,
+      );
+      expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
+      expect(readOnlyLine("Holder Binance")).toBe("binance · Read-only · Balance $5,000");
+      expect(readOnlyLine("Dup One")).toBe("binance · Read-only");
+    },
+  );
+
+  it("both keys of a pair failing still show the balance once, on the holder", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-holder", label: "Holder Binance", sync_status: "error", account_balance_usdt: 5_000 }),
+          makeKey({
+            id: "key-dup-1",
+            label: "Dup One",
+            sync_status: "error",
+            account_balance_usdt: 5_000,
+            account_share_kind: "duplicate",
+            account_shared_with_api_key_id: "key-holder",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
+    expect(readOnlyLine("Holder Binance")).toBe("binance · Read-only · Balance $5,000");
+  });
+
+  it("a failing holder with two working marked keys shows the balance once", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-holder", label: "Holder Binance", sync_status: "error", account_balance_usdt: 5_000 }),
+          shared("key-dup-2", "Dup Two"),
+          shared("key-dup-1", "Dup One"),
+        ]}
+      />,
+    );
+    expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
+    expect(readOnlyLine("Dup One")).toBe("binance · Read-only · Balance $5,000");
+  });
+
+  it("a lone key in error keeps its balance (only a pair is collapsed)", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[makeKey({ sync_status: "error" })]}
+      />,
+    );
+    expect(readOnlyLine("Live Binance")).toBe("binance · Read-only · Balance $1,000");
+  });
+
   it("a revoked key with a stored balance shows no balance", () => {
     render(
       <AllocatorExchangeManager
