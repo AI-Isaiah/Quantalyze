@@ -4209,6 +4209,7 @@ Plans:
 **Split, 2026-09-26 (founder decision, AskUserQuestion "Split OG-card to 169.5", option A; 169 D-44):** the OG-card task of plan 169-01 (old 169 plan 04 Task 4) and 169 D-43 moved here after Phase 169's plan-check round 3 found that 166.2 was not on `origin/main` and no gate held Phase 169's wave-1 code behind it. Registered through `/gsd-phase --insert 169.4`; gsd-tools numbered it 169.4.1 (not 169.5) and the number is kept. **Execution order:** after Phase 169 and after Phase 166.2 has merged; it is independent of 169.4 and 169.1.
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 166.2 (the shared `sharpe(` arm of `computeOgHeadline`), Phase 169 (the persisted-headline contract, 169-01 and 169 D-10). Both are proven on `origin/main` by plan 169.4.1-01's Task 1 gate before any code commit (D-44).
+**Founder ruling, 2026-09-30 (AskUserQuestion; 169.4.1 D-46):** a chain-broken row's OG card shows CAGR as "—" (review round 1 CR-01 = SFH-01, fix `134f353dd`), while the factsheet shows the post-break figure with a "covers from" note. That difference is the accepted one under SC4. Declined: showing the stored CAGR when the post-break stretch is itself at least 0.95 years, or with a "since <date>" label.
 
 ## Success Criteria
 
