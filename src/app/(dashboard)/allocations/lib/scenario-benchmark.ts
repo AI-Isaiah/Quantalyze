@@ -137,15 +137,33 @@ export function pairScenarioWithBtc(
 
 /**
  * Phase 169.4 ALLOCTRUTH (D-66): the Scenario BTC overlay as the close LEVEL,
- * `close / first close`, one point per stored close. A missing day or a
+ * `close / base close`, one point per stored close. A missing day or a
  * dropped (corrupt) date has no close and so no point. Compounding daily
  * returns instead would lose the move across a dropped close for good (the
  * returns rule refuses to bridge it), and every later level would be wrong.
+ *
+ * The base (169.4 review WR-01). With `fromDate` (the scenario portfolio's
+ * first date), the base is the LAST close dated on or before `fromDate`, and
+ * the curve starts there, so BTC reads 1.0 on the scenario's first day, the
+ * level the portfolio line starts at. The served series starts years earlier
+ * (the closes route prepends the bundled fixture from 2023-04-26), and neither
+ * chart re-bases a comparator to the portfolio's window, so a base at the
+ * series' first close drew BTC several times above a 1.0 portfolio. When no
+ * close is dated on or before `fromDate`, the base is the first close (the
+ * first on or after it): BTC starts where its data starts. Without `fromDate`
+ * (no portfolio date to anchor to) the base is the first close.
  */
-export function btcLevelsFromCloses(prices: readonly DailyPrice[]): DailyPoint[] {
-  if (prices.length === 0) return [];
-  const first = prices[0].close;
-  return prices.map((p) => ({ date: p.date, value: p.close / first }));
+export function btcLevelsFromCloses(
+  prices: readonly DailyPrice[],
+  fromDate?: string,
+): DailyPoint[] {
+  let i0 = 0;
+  if (fromDate !== undefined) {
+    for (let k = 0; k < prices.length && prices[k].date <= fromDate; k += 1) i0 = k;
+  }
+  const base = prices[i0]?.close;
+  if (base === undefined) return [];
+  return prices.slice(i0).map((p) => ({ date: p.date, value: p.close / base }));
 }
 
 export interface ScenarioBenchmark {

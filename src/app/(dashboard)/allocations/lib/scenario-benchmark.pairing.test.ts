@@ -227,3 +227,36 @@ describe("btcLevelsFromCloses (D-66): the overlay is the close level, not compou
     expect(btcLevelsFromCloses([])).toEqual([]);
   });
 });
+
+describe("btcLevelsFromCloses (169.4 review WR-01): the overlay is based at the scenario's first date", () => {
+  // The served series starts years before a scenario (the closes route puts
+  // the bundled fixture's 2023-04-26 close first). A base at the series' first
+  // close drew BTC at close(first scenario day) / 28000, about 3x, beside a
+  // portfolio line at 1.0. The base is the last close on or before the
+  // scenario's first date, and the curve starts there.
+  const served = closes({
+    "2023-04-26": 28_000,
+    "2025-12-30": 88_000,
+    "2026-01-05": 90_000,
+    "2026-01-06": 99_000,
+  });
+
+  it("reads 1.0 on the scenario's first date and has no point before it", () => {
+    const levels = btcLevelsFromCloses(served, "2026-01-05");
+    expect(levels[0]).toEqual({ date: "2026-01-05", value: 1 });
+    expect(levels.map((l) => l.date)).toEqual(["2026-01-05", "2026-01-06"]);
+    expect(levels[1].value).toBeCloseTo(1.1, 12);
+  });
+
+  it("bases on the last close BEFORE the first date when that date has no close", () => {
+    const levels = btcLevelsFromCloses(served, "2026-01-02");
+    expect(levels[0]).toEqual({ date: "2025-12-30", value: 1 });
+    expect(levels.find((l) => l.date === "2026-01-05")!.value).toBeCloseTo(90 / 88, 12);
+  });
+
+  it("falls back to the first close on or after the first date when no close precedes it", () => {
+    const levels = btcLevelsFromCloses(served, "2020-01-01");
+    expect(levels[0]).toEqual({ date: "2023-04-26", value: 1 });
+    expect(levels).toHaveLength(4);
+  });
+});

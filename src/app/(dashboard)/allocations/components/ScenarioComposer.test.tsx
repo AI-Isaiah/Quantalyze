@@ -4803,6 +4803,60 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     }
   });
 
+  it("169.4 review WR-01 — the overlay is based at the scenario's first date, not at the served series' first close years earlier", async () => {
+    // The closes route puts the bundled fixture's 2023-04-26 close first. A
+    // base there drew BTC at 90000 / 28000 ≈ 3.2 on the scenario's first day,
+    // beside a portfolio line at 1.0. The overlay must read 1.0 on that day
+    // and carry no point before it.
+    const dates = Array.from({ length: 12 }, (_, i) =>
+      new Date(Date.UTC(2026, 0, i + 1)).toISOString().slice(0, 10),
+    );
+    const payload = makePayload(
+      perKeyBook([
+        {
+          id: "wr01-overlay-key",
+          returns: dates.map((date, i) => ({ date, value: i % 2 === 0 ? 0.01 : -0.006 })),
+        },
+      ]),
+    );
+    const btcCloses = {
+      prices: [
+        { date: "2023-04-26", close: 28_000 },
+        ...dates.map((date, i) => ({ date, close: 90_000 + 1_000 * i })),
+      ],
+      dropped: [],
+      through: dates[dates.length - 1],
+    };
+    const fetchStub = vi.fn(async () => ({ ok: true, json: async () => btcCloses }));
+    vi.stubGlobal("fetch", fetchStub);
+
+    try {
+      render(
+        <ScenarioComposer payload={payload} allocatorId={ALLOCATOR_A} allocatorMandate={null} />,
+      );
+      await waitFor(() => {
+        const calls = vi.mocked(ScenarioFactsheetChart).mock.calls;
+        expect(
+          calls.some((c) => (c[0] as { benchmark?: unknown }).benchmark !== undefined),
+        ).toBe(true);
+      });
+      const calls = vi.mocked(ScenarioFactsheetChart).mock.calls;
+      const last = calls[calls.length - 1][0] as {
+        benchmark?: Array<{ date: string; value: number }>;
+        portfolioDaily?: Array<{ date: string; value: number }>;
+      };
+      const firstDate = last.portfolioDaily?.[0]?.date;
+      // Fail loud: the scenario must actually have returns to anchor to.
+      expect(firstDate).toBeDefined();
+      const benchmark = last.benchmark ?? [];
+      expect(benchmark[0]).toEqual({ date: firstDate, value: 1 });
+      expect(benchmark.some((p) => p.date < firstDate!)).toBe(false);
+      expect(benchmark).toEqual(btcLevelsFromCloses(btcCloses.prices, firstDate));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   // -------------------------------------------------------------------------
   // LAYOUT-02 (Phase 31 / Pitfall 5) — collapsing the composition controls
   // PRESERVES in-progress weight + leverage edits, and the projection behind

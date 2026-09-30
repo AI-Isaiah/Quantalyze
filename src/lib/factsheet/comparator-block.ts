@@ -1,7 +1,7 @@
 import type { ComparatorBlock } from "./types";
 import type { CoveredAlignment } from "./align";
 import { compute, cumEq } from "./compute";
-import { jointMetrics } from "./joint";
+import { jointMetrics, MIN_PAIRED_OBSERVATIONS } from "./joint";
 import { rollingVol, rollingSharpe, rollingSortino, rollingBeta } from "./rolling";
 
 /**
@@ -87,8 +87,12 @@ export function buildComparatorBlock(
 
   const pairedIdx: number[] = [];
   for (let i = 0; i < aligned.paired.length; i++) if (aligned.paired[i]) pairedIdx.push(i);
+  // 169.4 review SFH MEDIUM-4: no joint below the shared paired-observation
+  // floor (the alpha/beta widget gates on the same constant, D-69). A null
+  // joint is the factsheet's existing absence: the KPI strip drops its
+  // alpha/IR cells and §IV is not rendered.
   const joint =
-    pairedIdx.length > 0
+    pairedIdx.length >= MIN_PAIRED_OBSERVATIONS
       ? jointMetrics(
           pairedIdx.map(i => stratReturns[i]),
           pairedIdx.map(i => benchReturns[i] as number),
