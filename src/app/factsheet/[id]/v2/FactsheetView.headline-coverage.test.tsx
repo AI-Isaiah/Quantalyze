@@ -28,7 +28,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { useEffect } from "react";
 import { render } from "@testing-library/react";
-import { buildFactsheetPayload, deriveSeriesBundle } from "@/lib/factsheet/build-payload";
+import { buildFactsheetPayload, deriveSeriesBundle, fixtureBenchmarkPrices } from "@/lib/factsheet/build-payload";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 
 import { FactsheetProvider } from "./factsheet-context";
@@ -169,6 +169,7 @@ describe("the chain-break caveat in MetricsColumn (169 SFH H-1)", () => {
       isArithmetic: false,
       markets: [],
       strategyName: "Headline Coverage Test",
+      benchmarkPrices: fixtureBenchmarkPrices([dense(400).slice(200)]),
     });
     const payload = {
       ...cash,

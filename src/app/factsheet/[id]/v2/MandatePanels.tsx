@@ -50,7 +50,8 @@ export function StrategyThesisPanel() {
         {markets ? <> across {markets.toLowerCase()}.</> : <>.</>}{" "}
         Performance is computed from the strategy&apos;s daily-return series over the {observation} observation window
         ({recordLength.text}).
-        Comparator analytics are aligned to the same calendar with each benchmark forward-filled.
+        Each comparator&apos;s return is taken over the strategy&apos;s own intervals from the comparator&apos;s own closes,
+        and is not measured past its last close.
       </p>
       <p className="mt-2 text-fixed-10 italic text-text-muted">
         A full thesis (objective, edge, capacity, risk regime) is provided by the strategy author. The summary above
@@ -116,7 +117,7 @@ export function TermsPanel() {
         {/* Phase 169 D-12: the same record-length statement as the thesis above. */}
         <Term label="Sample size">{formatRecordLength({ n: m.n, years: m.years }).text}</Term>
         <Term label="Risk-free rate">0% (factsheet convention)</Term>
-        <Term label="Bench frequency">Daily close, forward-filled to strategy calendar</Term>
+        <Term label="Bench frequency">Daily close, over each strategy interval</Term>
         <Term label="Factsheet computed">{computed}</Term>
         <Term label="Currency basis">Returns reported in decimal · compounded</Term>
       </dl>

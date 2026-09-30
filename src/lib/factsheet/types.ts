@@ -14,6 +14,17 @@ export type DailyReturn = { date: string; value: number };
 export type DailyPrice = { date: string; close: number };
 
 /**
+ * Phase 169.5 BENCHCOMPARE (SC3, D-09, D-54) — the BTC comparator's prices as a
+ * factsheet build used them: read from `benchmark_prices` (169.2's reader, merged
+ * with the bundled fixture strictly before the DB's first stored date and trimmed
+ * to the build's bounds), or the bundled fixture bounded the same way when no read
+ * was made, or the unavailable marker when the read failed.
+ */
+export type BenchmarkPricesOpt =
+  | { prices: DailyPrice[]; through: string | null; dropped: string[] }
+  | { unavailable: true };
+
+/**
  * Result of `compute()` — full per-series metrics matching the Python `S` / `B` dicts.
  *
  * `eq` and `dd` are the heavy arrays (length n). The PAYLOAD shape that crosses the
@@ -120,24 +131,40 @@ export type ComparatorBlock = {
     "cum_ret" | "cagr" | "ann_vol" | "sharpe" | "sortino" | "calmar" | "max_dd" | "longest_dd"
     | "mtd" | "ytd" | "p3m" | "p6m" | "p1y" | "win_rate" | "profit_factor"> | null;
   joint: JointMetrics | null;
-  /** Comparator's own cumulative equity (strategy line stays in payload.strategyEquity). */
-  cumulative: number[] | null;
-  /** Strategy ÷ comparator (rebased to 1.0 at start). Only series in the cumVsBench chart. */
-  cumVsBench: number[] | null;
-  /** Comparator's own daily returns aligned to strategy dates. */
-  dailyReturns: number[] | null;
+  /**
+   * Comparator's own cumulative equity (strategy line stays in payload.strategyEquity).
+   * Phase 169.5-02 (SC3, D-09): null at an index the comparator has no return for,
+   * so the chart breaks the line there.
+   */
+  cumulative: Array<number | null> | null;
+  /** Strategy ÷ comparator (rebased to 1.0 at start). Only series in the cumVsBench chart. Null where `cumulative` is. */
+  cumVsBench: Array<number | null> | null;
+  /**
+   * Comparator's own daily returns aligned to strategy dates.
+   * Phase 169.5-04 (SC3, D-09, D-21): null at an index the comparator has no
+   * return for, never 0, so no EoY figure or histogram overlay counts that day.
+   */
+  dailyReturns: Array<number | null> | null;
   /** Comparator's own rolling 6mo annualized vol. Nulls during warmup. */
   rollingVol: Array<number | null> | null;
   /** Comparator's own rolling 6mo Sharpe. Nulls during warmup. */
   rollingSharpe: Array<number | null> | null;
   /** Comparator's own rolling 6mo Sortino. Nulls during warmup. */
   rollingSortino: Array<number | null> | null;
-  /** Vol-matched bench equity: bench returns scaled to strategy's ann vol, then cumEq. */
-  volMatched: number[] | null;
+  /** Vol-matched bench equity: bench returns scaled to strategy's ann vol, then cumEq. Null where `cumulative` is. */
+  volMatched: Array<number | null> | null;
   /** Display label for the vol-matched series, e.g., "BTC × 0.10". */
   volMatchedLabel: string | null;
   /** Strategy ÷ bench rolling 90d β. Nulls during warmup. */
   rollingBeta: Array<number | null> | null;
+  /**
+   * Phase 169.5 (SC3, D-09): the comparator's last real close on or before the
+   * strategy's last date; null in the unavailable form (with `summary` null).
+   * OPTIONAL only so a hand-built block (the 167.1.2 scenario adapter) compiles
+   * (169 D-21); `buildComparatorBlock` always sets it. Absent means "no coverage
+   * information", distinct from the unavailable form.
+   */
+  through?: string | null;
 };
 
 /** Counts at lengths 1..14+ of consecutive winning / losing day streaks. */
@@ -302,9 +329,12 @@ export type StressWindow = {
   /** "full" when actualDays/expectedCalendarDays ≥ 0.85, else "partial". */
   coverage: "full" | "partial";
   stratReturn: number;
-  benchReturn: number;
+  /** Null when any comparator day inside the window is uncovered (Phase 169.5
+   *  CR-01, SC3: a gap is null, never 0) — the panel renders "—". */
+  benchReturn: number | null;
   stratMaxDD: number;
-  benchMaxDD: number;
+  /** Null under the same rule as `benchReturn`. */
+  benchMaxDD: number | null;
 };
 export type StressWindowPayload = {
   windows: StressWindow[];
@@ -697,6 +727,16 @@ export type FactsheetCommon = {
      */
     smoothed_mtm?: BasisSeriesBundle;
   };
+  /**
+   * Phase 169.5 (SC3, D-09, D-21, D-54) — the bounded BTC series this payload's
+   * comparators were computed from (or the unavailable marker), so the browser
+   * re-derive (`useBasisSeriesView`, leverage) aligns BTC from the same closes and
+   * the same `dropped` list as the server. OPTIONAL only so a hand-built payload
+   * (the 167.1.2 scenario adapter) compiles unedited; both builders always set
+   * it. Absent means "no coverage information", and the re-derive then treats BTC
+   * as unavailable, never as the bundled fixture.
+   */
+  benchmarkPrices?: BenchmarkPricesOpt;
 };
 
 /**

@@ -320,6 +320,11 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
       // ann_vol would un-lever the comparator vol-match). missingSegments passed
       // through so the bundle spread does not clobber the base mask with undefined.
       missingSegments: base.missingSegments,
+      // Phase 169.5 (SC3, D-09, D-21): BTC is re-aligned from the SAME closes and
+      // `dropped` list the server used, carried on the payload. A payload without
+      // the field (hand-built) has no coverage information: BTC is the unavailable
+      // form, never the bundled fixture.
+      benchmarkPrices: base.benchmarkPrices ?? { unavailable: true },
     });
     // WR-02 (Phase 107 review): Sharpe and Sortino are LEVERAGE-INVARIANT at rf=0 —
     // r→L·r cancels in `mean·√P/sd` and `mean·P/ddDev` (compute.ts:41,45). At L=1 the
