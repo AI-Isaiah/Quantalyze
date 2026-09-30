@@ -176,7 +176,7 @@ describe("alignBlend: the legs' common calendar (D-70(2), D-70(3))", () => {
     expect(a.returns.filter(r => r !== null)).toHaveLength(1);
     expect(a.through).toBe("2026-01-02");
     const m = buildAllocatorMetrics(a.returns, a.book, a.periodsPerYear, a.paired);
-    for (const k of ["ann_vol", "cum_ret", "max_dd", "corr", "sleeve_pct", "blend_vol", "tail_count", "tail_mm_mean", "tail_mm_median", "tail_mm_pos"] as const) {
+    for (const k of ["ann_vol", "cum_ret", "max_dd", "corr", "sleeve_pct", "blend_vol", "tail_count", "tail_windows", "tail_mm_mean", "tail_mm_median", "tail_mm_pos"] as const) {
       expect(m[k], k).toBeNull();
     }
   });
@@ -216,7 +216,25 @@ describe("buildAllocatorMetrics: each figure over its own index set (D-70(2))", 
     const m = buildAllocatorMetrics(rets, mm, 252);
     // Windows end at 21..29; the five ending at 25..29 hold index 25.
     expect(m.tail_count).toBe(4);
+    // Review SFH HIGH-2: the examined count excludes the five dropped windows.
+    expect(m.tail_windows).toBe(4);
     expect(m.tail_mm_mean).toBeCloseTo(1.001 ** 21 - 1, 14);
     expect(m.tail_mm_pos).toBe(1);
+  });
+
+  it("no stress window: mean, median and positive share are null, never 0, and the examined count is kept (review WR-02, SFH HIGH-2)", () => {
+    // 30 days of +0.1%: every one of the 9 windows is examined, none draws 5%.
+    const calm = buildAllocatorMetrics(new Array(30).fill(0.001), new Array(30).fill(-0.002), 252);
+    expect(calm.tail_count).toBe(0);
+    expect(calm.tail_windows).toBe(9);
+    expect(calm.tail_mm_mean).toBeNull();
+    expect(calm.tail_mm_median).toBeNull();
+    expect(calm.tail_mm_pos).toBeNull();
+    // Every window holds a null: nothing examined, and nothing is claimed about it.
+    const gappy: Array<number | null> = Array.from({ length: 30 }, (_, i) => (i % 10 === 5 ? null : -0.01));
+    const g = buildAllocatorMetrics(gappy, new Array(30).fill(0.001), 252);
+    expect(g.tail_windows).toBe(0);
+    expect(g.tail_count).toBe(0);
+    expect(g.tail_mm_mean).toBeNull();
   });
 });

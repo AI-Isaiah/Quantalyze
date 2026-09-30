@@ -294,6 +294,9 @@ export type AllocatorPortfolioPayload = {
   blend_vol: number | null;
   vol_target: number;
   tail_count: number | null;
+  /** Review SFH HIGH-2: the 21-date windows examined (every value priced); tail_count is out of these. */
+  tail_windows: number | null;
+  /** Null when tail_count is 0 (review WR-02): an empty set has no mean, median or share. */
   tail_mm_mean: number | null;
   tail_mm_median: number | null;
   tail_mm_pos: number | null;

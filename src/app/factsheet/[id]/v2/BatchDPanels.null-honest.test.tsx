@@ -99,4 +99,18 @@ describe("AllocatorSection: an unmeasurable blend is the em-dash with a dated ca
     expect(values[0]).toMatch(/^\d+\.\d%$/);
     expect(container.textContent).not.toContain("Prices through");
   });
+
+  it("a measured 60/40 too short for a 21-day window: the tail figures are the em-dash and the caption claims no drawdown fact (review SFH HIGH-2, WR-02)", () => {
+    // Mon 2025-03-03, 20 days: 15 weekdays with every leg priced, no 21-date window.
+    const payload = buildFactsheetPayload(STRATEGY, rowsFrom("2025-03-03", 20));
+    const { container } = mount(payload);
+    const values = Array.from(container.querySelectorAll("tbody tr td:nth-child(2)")).map(td => td.textContent ?? "");
+    // Sleeve figures are measured; stress count is 0; mean, median, positive share are "—".
+    expect(values[0]).toMatch(/^\d+\.\d%$/);
+    expect(values.slice(6)).toEqual(["0", "—", "—", "—"]);
+    const text = container.textContent ?? "";
+    expect(text).toContain("No 21-day window with every leg priced, so no stress window could be measured.");
+    expect(text).not.toContain("never drew");
+    expect(text).not.toMatch(/\+0\.00%/);
+  });
 });

@@ -39,6 +39,13 @@ export type AllocatorMetrics = {
   blend_vol: number | null;
   vol_target: number;
   tail_count: number | null;
+  /**
+   * Review SFH HIGH-2 / WR-02: how many 21-date windows were examined (every
+   * value priced); tail_count is out of these, and a caption claims nothing about
+   * a window outside them.
+   */
+  tail_windows: number | null;
+  /** Null when no window reached the threshold: an empty set has no mean. */
   tail_mm_mean: number | null;
   tail_mm_median: number | null;
   tail_mm_pos: number | null;
@@ -239,6 +246,7 @@ function unmeasuredMetrics(): AllocatorMetrics {
     blend_vol: null,
     vol_target: VOL_TARGET,
     tail_count: null,
+    tail_windows: null,
     tail_mm_mean: null,
     tail_mm_median: null,
     tail_mm_pos: null,
@@ -336,8 +344,10 @@ export function buildAllocatorMetrics(
   }
 
   // Tail co-movement: rolling 21d windows where the portfolio drew ≥ 5%. A
-  // window containing a null on either leg is dropped (D-70(2)).
+  // window containing a null on either leg is dropped (D-70(2)) and not counted
+  // as examined (review SFH HIGH-2): `tail_windows` is the examined count.
   const tailMm: number[] = [];
+  let tailWindows = 0;
   for (let i = TAIL_WINDOW; i < n; i++) {
     let pRet = 1;
     let mmRet = 1;
@@ -353,11 +363,14 @@ export function buildAllocatorMetrics(
       mmRet *= 1 + m;
     }
     if (hasNull) continue;
+    tailWindows++;
     if (pRet - 1 <= DD_THRESHOLD) tailMm.push(mmRet - 1);
   }
-  let tailMean = 0;
-  let tailPos = 0;
-  let tailMedian = 0;
+  // Review WR-02: no stress window means no mean, median or positive share; each
+  // is null (the em-dash), never a fabricated 0.
+  let tailMean: number | null = null;
+  let tailPos: number | null = null;
+  let tailMedian: number | null = null;
   if (tailMm.length > 0) {
     tailMean = tailMm.reduce((a, x) => a + x, 0) / tailMm.length;
     const sorted = [...tailMm].sort((a, b) => a - b);
@@ -378,6 +391,7 @@ export function buildAllocatorMetrics(
     blend_vol: blendVol,
     vol_target: VOL_TARGET,
     tail_count: tailMm.length,
+    tail_windows: tailWindows,
     tail_mm_mean: tailMean,
     tail_mm_median: tailMedian,
     tail_mm_pos: tailPos,
