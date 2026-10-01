@@ -1,7 +1,7 @@
 import type { ComparatorBlock } from "./types";
 import type { CoveredAlignment } from "./align";
 import { compute, cumEq } from "./compute";
-import { jointMetrics } from "./joint";
+import { jointMetrics, MIN_PAIRED_OBSERVATIONS } from "./joint";
 import { rollingVol, rollingSharpe, rollingSortino, rollingBeta } from "./rolling";
 
 /**
@@ -87,8 +87,14 @@ export function buildComparatorBlock(
 
   const pairedIdx: number[] = [];
   for (let i = 0; i < aligned.paired.length; i++) if (aligned.paired[i]) pairedIdx.push(i);
+  // 169.4 review SFH MEDIUM-4: no joint below the shared paired-observation
+  // floor (the alpha/beta widget gates on the same constant, D-69). Round 2
+  // (SFH-R2 MEDIUM-2): the block says so in `jointWithheld`, so the KPI strip
+  // and §IV render "—" with the widget's reason instead of dropping silently.
+  const belowFloor = pairedIdx.length < MIN_PAIRED_OBSERVATIONS;
+  const jointWithheld = belowFloor ? { paired: pairedIdx.length, floor: MIN_PAIRED_OBSERVATIONS } : null;
   const joint =
-    pairedIdx.length > 0
+    !belowFloor
       ? jointMetrics(
           pairedIdx.map(i => stratReturns[i]),
           pairedIdx.map(i => benchReturns[i] as number),
@@ -134,6 +140,7 @@ export function buildComparatorBlock(
         }
       : null,
     joint,
+    jointWithheld,
     cumulative,
     cumVsBench,
     dailyReturns: benchReturns.slice(),

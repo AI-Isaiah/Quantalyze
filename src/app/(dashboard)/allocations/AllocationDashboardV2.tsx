@@ -74,6 +74,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     equityHistoryState,
     // D-06: the factsheet's return series. Empty while rebuilding.
     equityDailyReturns = [],
+    // Phase 169.4 plan 02 (SC3, D-69): the database BTC closes the Overview's
+    // BTC comparator is built from. Absent reads as null (the fixture path).
+    btcBenchmarkPrices = null,
     equityHistoryRebuildReason = null,
     // Review C2 round 2 IN-04: the keys a key_not_syncing reason is about.
     equityHistoryNotSyncingKeyIds = [],
@@ -118,11 +121,13 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             startDate: equityDailyPoints[0]?.date ?? null,
             aum: analytics?.total_aum ?? null,
             dailyReturns: equityDailyReturns,
+            btcBenchmarkPrices,
           }),
     [
       isRebuilding,
       equityDailyPoints,
       equityDailyReturns,
+      btcBenchmarkPrices,
       props.allocator_id,
       portfolio,
       analytics,

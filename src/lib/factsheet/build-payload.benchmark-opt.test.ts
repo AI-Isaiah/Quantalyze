@@ -216,7 +216,10 @@ describe("169.5-01 D-54 / D-64: interval pairing by the engine's rule", () => {
   });
 
   it("D-58 missing BTC day at k: k null, k+1 bridged in the series but unpaired, summary and joint exclude them", () => {
-    const dates = days("2026-03-01", "2026-03-10");
+    // 14 dates, 12 paired: at or above `MIN_PAIRED_OBSERVATIONS` (169.4 review
+    // SFH MEDIUM-4), so the block carries a joint for this case to check. The
+    // window was 10 dates (8 paired) before that floor existed.
+    const dates = days("2026-03-01", "2026-03-14");
     const k = dates.indexOf("2026-03-04");
     const prices = btc.filter((p) => p.date !== "2026-03-04");
     const a = alignCoveredReturns(prices, [], dates, CALENDAR_7D);

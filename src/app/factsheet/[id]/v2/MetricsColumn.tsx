@@ -5,6 +5,7 @@ import { ResponsiveTable } from "@/components/ResponsiveTable";
 import type { FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
 import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
+import { pairedFloorReason } from "@/lib/factsheet/joint";
 import { usePayload, useActiveComparator } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, type Basis } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel } from "./AnalyticalPanels";
@@ -260,11 +261,21 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         <TermsPanel />
       </EditorialSection>
 
-      {jointCmp.joint && (
+      {jointCmp.joint ? (
         <EditorialSection label="IV" name={`Benchmark — vs ${bn}`}>
           <BenchmarkMetricsBody joint={jointCmp.joint} />
         </EditorialSection>
-      )}
+      ) : jointCmp.jointWithheld && bn != null ? (
+        // 169.4 review round 2 (SFH-R2 MEDIUM-2): below the paired floor §IV
+        // stays, every joint figure reads "—" and one muted line names the
+        // cause in the Allocations widget's words. No figure is shown (D-69).
+        <EditorialSection label="IV" name={`Benchmark — vs ${bn}`}>
+          <BenchmarkMetricsBody
+            joint={null}
+            withheldReason={pairedFloorReason(bn, jointCmp.jointWithheld.paired, "record", jointCmp.jointWithheld.floor)}
+          />
+        </EditorialSection>
+      ) : null}
     </aside>
   );
 }
@@ -286,20 +297,28 @@ function EditorialSection({ label, name, children }: { label: string; name: stri
   );
 }
 
-function BenchmarkMetricsBody({ joint }: { joint: JointMetrics }) {
+function BenchmarkMetricsBody({ joint, withheldReason }: { joint: JointMetrics | null; withheldReason?: string }) {
+  // A null joint (withheld below the paired floor) reads "—" in every row,
+  // with no accent colour on the alpha dash.
+  const v = (f: (j: JointMetrics) => string) => (joint ? f(joint) : "—");
   return (
     <Panel title="Joint Metrics" hideHeaderRule>
       <Kpm>
-        <Row label="Alpha (ann)" value={pct(joint.alpha, true)} bench="" accent />
-        <Row label="Beta" value={num(joint.beta)} bench="" />
-        <Row label="Correlation" value={num(joint.corr)} bench="" />
-        <Row label="R²" value={num(joint.r2)} bench="" />
-        <Row label="Information Ratio" value={num(joint.info_ratio)} bench="" />
-        <Row label="Treynor" value={num(joint.treynor)} bench="" />
-        <Row label="Tracking Error" value={pct(joint.tracking_error)} bench="" />
-        <Row label="Up Capture" value={num(joint.up_capture)} bench="" />
-        <Row label="Down Capture" value={num(joint.down_capture)} bench="" />
+        <Row label="Alpha (ann)" value={v(j => pct(j.alpha, true))} bench="" accent={joint != null} />
+        <Row label="Beta" value={v(j => num(j.beta))} bench="" />
+        <Row label="Correlation" value={v(j => num(j.corr))} bench="" />
+        <Row label="R²" value={v(j => num(j.r2))} bench="" />
+        <Row label="Information Ratio" value={v(j => num(j.info_ratio))} bench="" />
+        <Row label="Treynor" value={v(j => num(j.treynor))} bench="" />
+        <Row label="Tracking Error" value={v(j => pct(j.tracking_error))} bench="" />
+        <Row label="Up Capture" value={v(j => num(j.up_capture))} bench="" />
+        <Row label="Down Capture" value={v(j => num(j.down_capture))} bench="" />
       </Kpm>
+      {withheldReason && (
+        <p className="mt-2 text-fixed-11 text-text-muted" data-testid="joint-floor-reason">
+          {withheldReason}
+        </p>
+      )}
     </Panel>
   );
 }

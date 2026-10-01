@@ -132,6 +132,16 @@ export type ComparatorBlock = {
     | "mtd" | "ytd" | "p3m" | "p6m" | "p1y" | "win_rate" | "profit_factor"> | null;
   joint: JointMetrics | null;
   /**
+   * 169.4 review round 2 (SFH-R2 MEDIUM-2): set when `joint` is null ONLY
+   * because the record pairs fewer than `MIN_PAIRED_OBSERVATIONS` intervals with
+   * this comparator (`paired` is that count). The KPI strip's alpha/IR cells and
+   * §IV then read "—" beside `pairedFloorReason`, never a silent drop. Null on a
+   * block whose joint was computed. `buildComparatorBlock` always sets it; the
+   * none, unavailable and hand-built (scenario) blocks leave it absent, since
+   * their null joint has another cause.
+   */
+  jointWithheld?: { paired: number; floor: number } | null;
+  /**
    * Comparator's own cumulative equity (strategy line stays in payload.strategyEquity).
    * Phase 169.5-02 (SC3, D-09): null at an index the comparator has no return for,
    * so the chart breaks the line there.
@@ -275,23 +285,39 @@ export type OwnBookDeltaPayload = {
   book_n: number;
 };
 
-/** Single demo allocator portfolio with precomputed sleeve + tail metrics. */
+/**
+ * Single demo allocator portfolio with precomputed sleeve + tail metrics.
+ * Phase 169.4 D-70(4): every measured figure is null when the blend has fewer
+ * than 2 usable days on its legs' common calendar; the panel renders the em-dash
+ * with a dated "prices through" caption, never a number.
+ */
 export type AllocatorPortfolioPayload = {
   key: string;
   name: string;
   composition: string;
-  ann_vol: number;
-  cum_ret: number;
-  max_dd: number;
+  ann_vol: number | null;
+  cum_ret: number | null;
+  max_dd: number | null;
   /** NaN (null after a JSON round-trip) when the correlation is undefined (D7). */
-  corr: number;
-  sleeve_pct: number;
-  blend_vol: number;
+  corr: number | null;
+  sleeve_pct: number | null;
+  blend_vol: number | null;
   vol_target: number;
-  tail_count: number;
-  tail_mm_mean: number;
-  tail_mm_median: number;
-  tail_mm_pos: number;
+  /** Null when nothing was measured, including tail_windows 0 (review round 2 WR-01): never a measured 0. */
+  tail_count: number | null;
+  /** Review SFH HIGH-2: the 21-date windows examined (every value priced); tail_count is out of these. */
+  tail_windows: number | null;
+  /** Null when tail_count is 0 (review WR-02): an empty set has no mean, median or share. */
+  tail_mm_mean: number | null;
+  tail_mm_median: number | null;
+  tail_mm_pos: number | null;
+  /** The last close every leg of the blend carries (D-70(4)); null when a leg has none. */
+  through: string | null;
+  /**
+   * Review SFH MEDIUM-2: the leg whose price feed could not be read ("BTC" when
+   * the BTC read failed), so the caption names the outage; null otherwise.
+   */
+  unavailable_leg: string | null;
 };
 
 /** One year of monthly compounded returns. byMonth has 12 slots (Jan..Dec); null = no obs. */
@@ -364,19 +390,33 @@ export type EventSignature = {
   p95: number[];
 };
 
-/** Per-horizon bundle: win/loss event populations × {benchmark, equity} views. */
+/**
+ * Per-horizon bundle: win/loss event populations × {benchmark, equity} views.
+ *
+ * Phase 169.4 CR-01: each view is counted by its OWN traces. A benchmark null
+ * (D-65, D-70(1)) drops a benchmark trace but not the equity trace of the same
+ * event, so the two views can hold different populations; one shared count would
+ * describe neither. A view with no trace at all is `null` (no aggregate), never
+ * six all-zero series: a panel renders the em-dash state for it (DESIGN.md null
+ * rule), not a flat 0% trajectory.
+ */
 export type EventSignaturesSet = {
   horizonDays: number;
-  /** Events whose trace landed in the aggregation (i.e. had a full ±14d window). */
+  /** Equity-view traces aggregated (events with a full ±14d window on the event series). */
   winCount: number;
   lossCount: number;
+  /** Benchmark-view traces aggregated (events whose ±14d benchmark window has no null). */
+  benchWinCount: number;
+  benchLossCount: number;
   /** Total events that satisfied the win/loss predicate, including edge-dropped ones. */
   eligibleWinCount: number;
   eligibleLossCount: number;
-  winOfBenchmark: EventSignature;
-  lossOfBenchmark: EventSignature;
-  winOfEquity: EventSignature;
-  lossOfEquity: EventSignature;
+  /** Null when the view has no trace (`benchWinCount` / `benchLossCount` is 0). */
+  winOfBenchmark: EventSignature | null;
+  lossOfBenchmark: EventSignature | null;
+  /** Null when the view has no trace (`winCount` / `lossCount` is 0). */
+  winOfEquity: EventSignature | null;
+  lossOfEquity: EventSignature | null;
 };
 
 export type EventSignaturesPayload = {

@@ -51,3 +51,23 @@ export function dataSourceLabel(k: { exchange: string; label: string; id: string
     maskedTail: `••••${k.id.slice(-4)}`,
   };
 }
+
+/**
+ * Phase 169.4-01 (SC2) — the ONE key-label rule: api_key_id → the key's
+ * display name `${Exchange} — ${nickname ?? ••••tail}`, built from
+ * `dataSourceLabel`. The Scenario composer names its per-key units this way
+ * (its local `apiKeyLabelById` memo, which 169.4-08 switches to this helper),
+ * and the Allocations Risk tab names its per-key correlation and decomposition
+ * rows this way, so one account carries one name on both tabs. A raw key id is
+ * never a value (T-169-26).
+ */
+export function apiKeyLabelById(
+  apiKeys: ReadonlyArray<{ id: string; exchange: string; label: string }>,
+): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const k of apiKeys) {
+    const { exchange, nickname, maskedTail } = dataSourceLabel(k);
+    m.set(k.id, `${exchange} — ${nickname ?? maskedTail}`);
+  }
+  return m;
+}
