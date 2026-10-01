@@ -69,6 +69,85 @@ export async function assertInsideViewport(
 }
 
 /**
+ * SFH-170-02: the element is not cut off by an ancestor that clips overflow.
+ * `boundingBox()` reports the element's own rect, so `assertInsideViewport`
+ * cannot see a button whose right half an `overflow-hidden` row hides, and
+ * `assertNotCovered` only probes the centre.
+ *
+ * Walks the containing-block chain the way reflow.ts does (an absolute box
+ * jumps to its offsetParent, so a clipping wrapper it escapes is skipped;
+ * a fixed box stops the walk). Each ancestor whose `overflow-x` or
+ * `overflow-y` is not `visible` clips on that axis at its padding box. A
+ * scroller counts: run this after scrolling the element into view, and a
+ * scroller that still cuts it means it does not fit. Fails when the visible
+ * part is smaller than the element by more than 1 px on either axis.
+ */
+export async function assertNotClippedByAncestors(
+  locator: Locator,
+  label: string,
+): Promise<void> {
+  const count = await locator.count();
+  if (count === 0) {
+    throw new Error(
+      `${label}: locator resolved to 0 elements — an empty page must not pass (W-02)`,
+    );
+  }
+  const clip = await locator.first().evaluate((el, slop) => {
+    const r = el.getBoundingClientRect();
+    let left = r.left;
+    let right = r.right;
+    let top = r.top;
+    let bottom = r.bottom;
+    let clipper = "";
+    let box: Element = el;
+    while (getComputedStyle(box).position !== "fixed") {
+      const next: Element | null =
+        getComputedStyle(box).position === "absolute"
+          ? (box as HTMLElement).offsetParent
+          : box.parentElement;
+      if (!next || next === document.documentElement) break;
+      const cs = getComputedStyle(next);
+      const a = next.getBoundingClientRect();
+      const before = `${left},${right},${top},${bottom}`;
+      if (cs.overflowX !== "visible") {
+        const padLeft = a.left + next.clientLeft;
+        left = Math.max(left, padLeft);
+        right = Math.min(right, padLeft + next.clientWidth);
+      }
+      if (cs.overflowY !== "visible") {
+        const padTop = a.top + next.clientTop;
+        top = Math.max(top, padTop);
+        bottom = Math.min(bottom, padTop + next.clientHeight);
+      }
+      if (!clipper && before !== `${left},${right},${top},${bottom}`) {
+        const cls =
+          typeof (next as HTMLElement).className === "string"
+            ? String((next as HTMLElement).className)
+                .split(" ")
+                .filter(Boolean)
+                .slice(0, 2)
+                .join(".")
+            : "";
+        clipper = `${next.tagName}${next.id ? `#${next.id}` : ""}${cls ? `.${cls}` : ""} (overflow ${cs.overflowX}/${cs.overflowY})`;
+      }
+      box = next;
+    }
+    const visibleW = Math.max(0, right - left);
+    const visibleH = Math.max(0, bottom - top);
+    return {
+      clipped: visibleW < r.width - slop || visibleH < r.height - slop,
+      clipper,
+      rect: { x: r.x, y: r.y, width: r.width, height: r.height },
+      visible: { x: left, y: top, width: visibleW, height: visibleH },
+    };
+  }, SLOP_PX);
+  expect(
+    clip.clipped,
+    `${label}: clipped by ancestor ${clip.clipper || "<none>"}; element rect ${fmt(clip.rect)}, visible part ${fmt(clip.visible)}`,
+  ).toBe(false);
+}
+
+/**
  * elementFromPoint at the element's centre returns the element itself or a
  * descendant. A covering sibling (sticky header, floating chip, bottom nav)
  * fails this. No in-repo precedent — PATTERNS "No Analog Found".
