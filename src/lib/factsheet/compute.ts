@@ -57,8 +57,9 @@ export function compute(
   // series, with its OWN mean and deviation; skew and kurt keep the all-returns
   // `m` / `s` above, and var95, cvar95, win_rate, profit_factor and every other
   // figure keep all returns, as the engine's do. On the calendar basis the basis
-  // series IS `rets`, so every figure is the one this function always returned.
-  // Plan 169.1-06 adds the calendar-density branch of the basis series (D-32).
+  // series IS `rets`, so every figure is the one this function always returned,
+  // except on a calendar-dense series (a composite), where it is the zero-filled
+  // calendar series the engine computes them over (D-32; see metricsBasisSeries).
   const basisReturns = metricsBasisSeries(rets, dates, conventions).returns;
   const basisN = basisReturns.length;
   const { mean: basisMean, sd: basisSd } = dispersion(basisReturns, 0);
@@ -66,17 +67,15 @@ export function compute(
   const cumRet = eq[n - 1] - 1;
   // Geometric: a calendar-span compound, on either day basis (the engine's is).
   // Arithmetic: the mean daily return times periodsPerYear, the engine's
-  // `mean(stat_returns) * periods_per_year`. Its day count is the basis series'
-  // on the active basis, the calendar days from the first to the last date
-  // inclusive on a calendar-dense series (a composite, zero-filled by the
-  // stitch), and the observations otherwise. An active basis with no non-zero
-  // day has no mean: NaN, as the engine's None.
+  // `mean(stat_returns) * periods_per_year`, over the basis series: the non-zero
+  // days on the active basis, the calendar days from the first to the last date
+  // inclusive on a calendar-dense series (a composite, zero-filled by the stitch;
+  // the filled 0.0 days add nothing to the sum, so this is the sum over the
+  // calendar-day count), and the observations otherwise. An active basis with no
+  // non-zero day has no mean: NaN, as the engine's None.
   let cagr: number;
   if (arithmetic) {
-    const active = conventions.dayBasis === "active";
-    const calendarDays = Math.round((endDate.getTime() - startDate.getTime()) / 86_400_000) + 1;
-    const cagrDays = !active && conventions.calendarDense ? calendarDays : basisN;
-    cagr = cagrDays > 0 ? (sumOf(basisReturns) / cagrDays) * periodsPerYear : NaN;
+    cagr = basisN > 0 ? (sumOf(basisReturns) / basisN) * periodsPerYear : NaN;
   } else {
     cagr = years > 0 && eq[n - 1] > 0 ? Math.pow(eq[n - 1], 1 / years) - 1 : 0;
   }
@@ -363,8 +362,9 @@ export function compute(
  *   - `dayBasis`: "active" runs the headline risk statistics over the non-zero
  *     days only (the engine's `stat_returns`); "calendar" over every day.
  *   - `calendarDense`: the series stands for every calendar day (a composite,
- *     zero-filled by the stitch), so a calendar-basis arithmetic CAGR divides by
- *     the calendar-day count, not by the observations.
+ *     zero-filled by the stitch), so on the calendar basis ann_vol, sharpe,
+ *     sortino and the arithmetic CAGR run over the zero-filled calendar series,
+ *     not over the observations (D-32; `metricsBasisSeries`).
  */
 export type ComputeConventions = {
   cumulativeMethod?: "geometric" | "arithmetic";
@@ -373,22 +373,47 @@ export type ComputeConventions = {
 };
 
 /**
- * Phase 169.1 (D-30, D-36) — the series the three headline risk statistics
- * (ann_vol, sharpe, sortino) run over, and where each day lands in it:
- * `positions[i]` is the index of `dates[i]` in `returns`, or null when the basis
- * excludes that day. Under the active day basis it is the non-zero finite
- * returns (the engine's `stat_returns`); otherwise it is `rets` itself with the
- * identity positions. Plan 169.1-06 adds the calendar-density branch (D-32).
- * `dates` is part of the signature for that branch.
+ * Phase 169.1 (D-30, D-32, D-36) — the ONE place the series the three headline
+ * risk statistics (ann_vol, sharpe, sortino) run over is chosen, and where each
+ * day lands in it: `positions[i]` is the index of `dates[i]` in `returns`, or
+ * null when the basis excludes that day. It mirrors `compute_all_metrics`'s
+ * `stat_returns` over the series the engine is handed:
+ *
+ *   - active day basis: the non-zero finite returns (the engine's
+ *     `stat_returns`); a zero or non-finite day is null. Density does not matter
+ *     here: a zero-filled 0.0 day would be excluded anyway.
+ *   - calendar basis with `calendarDense` (a composite): the zero-filled calendar
+ *     series from `dates[0]` to the last date inclusive, as
+ *     `gap_fill_daily_returns` (densify_policy "zero_fill" in
+ *     `run_stitch_composite_job`) hands it to the engine. Each present day keeps
+ *     its return, every absent calendar day is 0.0, and `positions[i]` is the day
+ *     offset of `dates[i]` from `dates[0]` (D-32). The dates must strictly
+ *     increase: the engine's index is sorted and unique, so anything else throws.
+ *   - otherwise: `rets` itself with the identity positions (byte-identical).
  */
 export function metricsBasisSeries(
   rets: number[],
   dates: string[],
   conventions: ComputeConventions = {},
 ): { returns: number[]; positions: Array<number | null> } {
-  void dates;
   if (conventions.dayBasis !== "active") {
-    return { returns: rets, positions: rets.map((_, i) => i) };
+    if (!conventions.calendarDense) {
+      return { returns: rets, positions: rets.map((_, i) => i) };
+    }
+    const returns: number[] = [];
+    const positions: Array<number | null> = [];
+    for (let i = 0; i < rets.length; i++) {
+      const offset = calendarDayOffset(dates[0], dates[i]);
+      if (!Number.isFinite(offset) || offset < returns.length) {
+        throw new Error(
+          `metricsBasisSeries(): a calendar-dense series needs strictly increasing dates (got ${dates[i]} at index ${i}, after ${dates[i - 1] ?? "the start"})`,
+        );
+      }
+      while (returns.length < offset) returns.push(0);
+      positions.push(returns.length);
+      returns.push(rets[i]);
+    }
+    return { returns, positions };
   }
   const returns: number[] = [];
   const positions: Array<number | null> = [];
@@ -401,6 +426,11 @@ export function metricsBasisSeries(
     }
   }
   return { returns, positions };
+}
+
+/** Whole UTC days from the ISO date `from` to the ISO date `to` (NaN on an unparseable date). */
+function calendarDayOffset(from: string, to: string): number {
+  return Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
 }
 
 function sumOf(xs: number[]): number {

@@ -319,7 +319,11 @@ describe("an active-day-basis strategy's selected range excludes the zero days t
 
 describe("a payload without conventions is unchanged (D-28)", () => {
   it("the same composite built WITHOUT conventions shows the geometric compute() of the slice in every windowed cell", async () => {
-    const payload = buildComposite({});
+    // GAPLESS (plan 169.1-06, D-32): on a gapped composite the engine's windowed
+    // Ann. Vol, Sharpe and Sortino are those of the zero-filled calendar series,
+    // pinned in basis-context.window-density.test.tsx; zero-filling a gapless
+    // series is the identity, so every cell here is compute() of the slice.
+    const payload = buildComposite({ gapped: false });
     const m = compute(
       payload.strategyReturns.slice(LO, HI + 1),
       payload.dates.slice(LO, HI + 1),
