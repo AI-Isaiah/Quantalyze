@@ -5,7 +5,7 @@
 This entry covers three dependency updates replayed onto `main` as one branch, so they cost one CI run instead of three. It supersedes Dependabot #897 and #898 and the manual replay #900 of Dependabot #643. No application code changes.
 
 ### Changed
-- **npm (#897):** minor and patch updates to 29 packages, among them `next` 16.3.6, `react` and `react-dom` 19.3.0, `@supabase/supabase-js` 2.117.1, `zod` 4.6.5, `recharts` 3.10.1 and `@playwright/test` 1.63.0.
+- **npm (#897):** minor and patch updates to 28 of its 29 packages, among them `next` 16.3.6, `react` and `react-dom` 19.3.0, `@supabase/supabase-js` 2.117.1, `zod` 4.6.5, `recharts` 3.10.1 and `@playwright/test` 1.63.0. `@upstash/ratelimit` stays at 2.0.8: 2.2.0's Lua scripts carry a `#!lua flags=allow-key-locking` shebang, which CI's pinned `redis:7-alpine` rejects (`ERR Unexpected flag in script shebang`). That failed `frontend-seam-redis` on this PR's first run. Whether production Upstash accepts the flag is unmeasured, and rate limiting is a security control, so the bump waits until it is.
 - **Python (#898):** minor and patch updates to 12 packages, among them `fastapi` 0.141.1, `pandas` 2.3.3, `numpy` 2.5.3, `ccxt` 4.5.84 and `pydantic` 2.13.5.
 - **GitHub Actions (#900, from #643):** all 44 `actions/checkout` pins move from v7.0.0 (`9c091bb2`) to v7.0.1 (`3d3c42e5`).
 
