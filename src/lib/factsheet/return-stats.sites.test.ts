@@ -112,16 +112,24 @@ describe("T13 compute: headline Sharpe, skew, kurtosis and ann_vol through retur
   });
 });
 
+// 166.2-04: "comparator-block.ts unedited" was true when this block was written.
+// ⛔ CORRECTED 2026-10-01 (169.1 review-fix E, SFH-R2 MEDIUM-1): comparator-block.ts
+// IS edited now. A comparator vol that is not finite and > 0 no longer falls back to
+// a scale of 1 ("B × 1.00", a factor never measured); the vol-matched series and its
+// label are both absent instead. What this block protects is unchanged: a constant
+// yield answers exactly as the all-zero series does, never with a ~1e13 scale. Only
+// the all-zero answer moved, from "scale 1" to "absent".
 describe("T18 comparator vol-match: fixed at its source (compute's ann_vol), comparator-block.ts unedited", () => {
   const stratEquity = cumEq(NOISY_A);
   const stratAnnVol = compute(NOISY_A, DATES, 0, 365).ann_vol;
   const block = (bench: number[]) =>
     buildComparatorBlock("Bench", "B", bench, NOISY_A, stratEquity, DATES, stratAnnVol, 30, 60, 365);
 
-  it("T18 all-zero benchmark: the vol-matched curve is the unscaled curve (scale 1)", () => {
+  it("T18 all-zero benchmark: no vol-matched curve and no label (nothing to match), comparator still drawn", () => {
     const b = block(ZEROS);
-    expect(b.volMatched).toEqual(b.cumulative);
-    expect(b.volMatchedLabel).toBe("B × 1.00");
+    expect(b.volMatched).toBeNull();
+    expect(b.volMatchedLabel).toBeNull();
+    expect(b.cumulative).not.toBeNull();
   });
 
   it("T18 constant-yield benchmark is vol-matched exactly as the all-zero benchmark is", () => {
@@ -129,8 +137,8 @@ describe("T18 comparator vol-match: fixed at its source (compute's ann_vol), com
     for (const id of YIELD_IDS) {
       const bench = navConstantYield(CONSTANT_YIELDS[id], N);
       const b = block(bench);
-      expect(b.volMatched, id).toEqual(cumEq(bench));
-      expect(b.volMatched, id).toEqual(b.cumulative);
+      expect(b.cumulative, id).toEqual(cumEq(bench));
+      expect(b.volMatched, id).toEqual(zero.volMatched);
       expect(b.volMatchedLabel, id).toBe(zero.volMatchedLabel);
     }
   });

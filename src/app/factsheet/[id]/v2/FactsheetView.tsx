@@ -651,6 +651,14 @@ function PerformanceCharts() {
     }
   }, [payload.rollingWindow, payload.rollingBetaWindow, payload.strategyId]);
 
+  const volMatchedAbsent = view.comparators[cmpKey]?.volMatched == null;
+  // The reason line below is shown only when the comparator HAS a summary, so it
+  // has covered returns and the match was skipped for want of a measurable vol.
+  // A comparator with no summary (prices unavailable, no covered day, or the
+  // composer's inert block) is hidden without it: the picker already names the
+  // unavailable case, and "no measurable volatility" would misstate the others.
+  const volMatchedNoVol =
+    cmpKey !== "none" && volMatchedAbsent && view.comparators[cmpKey]?.summary != null;
   const configs = React.useMemo(() => {
     return CHART_CONFIGS
       .filter(cfg => !(cmpKey === "none" && cfg.stratField === null && cfg.comparatorAsPrimary))
@@ -660,6 +668,13 @@ function PerformanceCharts() {
       // visually identical to the Equity Curve panel above it. Show it only
       // when there's an actual comparator to scale.
       .filter(cfg => !(cmpKey === "none" && cfg.key === "volMatched"))
+      // 169.1 review-fix E (SFH-R2 MEDIUM-1): the same panel, for the same
+      // reason, when a comparator IS selected but has nothing to match (the
+      // strategy or the comparator has no finite, non-zero vol on this basis):
+      // its volMatched is null and the panel would draw the strategy line alone.
+      // Read from the basis view, the block TimeSeriesChart draws, not the cash
+      // payload: the strategy-side null shows up on the MTM / smoothed bundles.
+      .filter(cfg => !(volMatchedAbsent && cfg.key === "volMatched"))
       .filter(cfg => !(cfg.key === "rollingBeta" && !beta.enough))
       .filter(cfg => !(ROLLING_CHART_KEYS.has(cfg.key) && !roll.enough))
       .map(cfg => {
@@ -673,7 +688,7 @@ function PerformanceCharts() {
         }
         return cfg;
       });
-  }, [cmpKey, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window]);
+  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window]);
 
   return (
     <>
@@ -741,6 +756,12 @@ function PerformanceCharts() {
         <NotEnoughDataPanel
           title="Rolling β — Not enough data"
           body="Strategy history is too short to compute even a 30-day rolling beta against the comparator. This panel will appear once the strategy has at least ~35 observations."
+        />
+      )}
+      {volMatchedNoVol && (
+        <NotEnoughDataPanel
+          title="Volatility Matched — Not available"
+          body="The strategy or the comparator has no measurable volatility on this basis, so there is no scale to match the comparator to. This panel will appear once both do."
         />
       )}
     </>

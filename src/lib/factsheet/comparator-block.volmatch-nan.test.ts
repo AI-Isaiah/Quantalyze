@@ -43,6 +43,24 @@ describe("vol-matched comparator with no finite strategy vol (169.1 review-fix D
     expect(b.volMatched).toHaveLength(dates.length);
   });
 
+  // 169.1 review-fix E (SFH-R2 MEDIUM-1): the comparator side follows the same
+  // rule. Before the fix, a comparator vol that failed `> 0` fell back to a scale
+  // of 1, so the chart drew the raw comparator under a legend reading
+  // "SPX × 1.00", a factor nobody measured.
+  const comparatorCases: Array<[string, Array<number | null>]> = [
+    ["a flat comparator (ann vol 0)", dates.map(() => 0)],
+    ["a comparator with one covered return (ann vol NaN)", dates.map((_, i) => (i === 39 ? 0.01 : null))],
+    ["a comparator with no covered return (no summary)", dates.map(() => null)],
+  ];
+  for (const [name, cmp] of comparatorCases) {
+    it(`${name} gives a null volMatched series and a null label, never "× 1.00"`, () => {
+      const b = buildComparatorBlock("S&P 500", "SPX", cmp, strat, cumEq(strat), dates, 0.2, 30, 60, 365, 252);
+      expect(b.volMatchedLabel ?? "").not.toMatch(/× 1\.00/);
+      expect(b.volMatchedLabel).toBeNull();
+      expect(b.volMatched).toBeNull();
+    });
+  }
+
   it("an active-basis bundle with one non-zero day and no comparatorAnnVol has no '× NaN' label", () => {
     const rows: DailyReturn[] = dates.map((date, i) => ({ date, value: strat[i] }));
     const bundle = deriveSeriesBundle(rows, {

@@ -118,8 +118,14 @@ export function buildComparatorBlock(
   // bundle with fewer than two non-zero days, MD-03) has nothing to match. The
   // series and the label are then null, as in the unavailable block: no "× NaN"
   // legend, no curve scaled by an invented factor.
-  const vmScale = benchSummary && benchSummary.ann_vol > 0 ? stratAnnVol / benchSummary.ann_vol : 1;
-  const vmAvailable = Number.isFinite(stratAnnVol);
+  // 169.1 review-fix E (SFH-R2 MEDIUM-1): the same rule on the comparator side.
+  // A missing summary, or a comparator vol that is not finite and > 0 (fewer
+  // than two covered returns, or a flat comparator), has nothing to match
+  // either. There is no `× 1.00` fallback: that factor was never measured.
+  const benchVol = benchSummary?.ann_vol;
+  const vmAvailable =
+    Number.isFinite(stratAnnVol) && benchVol != null && Number.isFinite(benchVol) && benchVol > 0;
+  const vmScale = vmAvailable ? stratAnnVol / (benchVol as number) : NaN;
   const volMatched = vmAvailable
     ? scatterCovered(benchReturns, cumEq(coveredReturns.map(r => r * vmScale)))
     : null;
