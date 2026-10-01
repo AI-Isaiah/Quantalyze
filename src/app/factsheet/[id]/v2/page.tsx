@@ -200,7 +200,8 @@ function buildFactsheetPayloadCached(
     // because its plans deploy in one PR. Phase 169's own payload changes are
     // covered by its v7→v8 bump (169 D-62) and are not v9 content.
     // Bumped v9→v10 (Phase 169.4 D-71): 169.4-05 and 169.4-06 changed the api-arm panels (null-honest signatures and allocator blends).
-    ["factsheet-v2-payload-v10", id, computedAt],
+    // Bumped v10→v11 (Phase 169.1 D-80): 169.1-03 to 169.1-07 changed the payload's conventions fields and the per-basis, bucket, rolling, bootstrap and stress values.
+    ["factsheet-v2-payload-v11", id, computedAt],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
