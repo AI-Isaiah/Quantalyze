@@ -12,10 +12,10 @@ last_activity_desc: Completed 170-10-PLAN.md
 state_head: 85c46849c7c9a2f9778feb5832c788b1db72c605
 progress:
   total_phases: 80
-  completed_phases: 41
+  completed_phases: 42
   total_plans: 370
   completed_plans: 357
-  percent: 51
+  percent: 52
 ---
 
 ## ⭐ STATE lineage
@@ -179,8 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — EXECUTING
-Plan: 8 of 14
+Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
+Plan: 20 of 20; VERIFICATION passed (post-deploy pass 2026-10-01; Holdings and FC-2 routed to 170.2)
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
 Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING

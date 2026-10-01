@@ -147,7 +147,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: human_needed
 - [ ] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified
 - [ ] **Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers** (INSERTED) — not yet verified (plan 01 shipped in #868)
-- [ ] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — not yet verified
+- [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
 - [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
 
 ### Phase 158: OPS-CI — A merge means a deploy
