@@ -40,6 +40,7 @@ const FULL_CASH = {
 type ConventionsAnswer =
   | { kind: "row"; conventions: unknown }
   | { kind: "no-row" }
+  | { kind: "raw"; data: unknown }
   | { kind: "error"; message: string }
   | { kind: "throw" };
 
@@ -68,6 +69,7 @@ function mockAdmin(answer: ConventionsAnswer) {
           if (answer.kind === "throw") throw new Error("synthetic chain throw");
           if (answer.kind === "error") return Promise.resolve({ data: null, error: { message: answer.message, code: "57014" } });
           if (answer.kind === "no-row") return Promise.resolve({ data: null, error: null });
+          if (answer.kind === "raw") return Promise.resolve({ data: answer.data, error: null });
           return Promise.resolve({ data: { conventions: answer.conventions }, error: null });
         },
       };
@@ -230,6 +232,44 @@ describe("a failed conventions read degrades to the config tier and never breaks
     expect(out).not.toBeNull();
     expect("conventionsReadFailure" in out!).toBe(false);
   });
+});
+
+describe("a malformed conventions echo is a failure, not an absent echo (169.1 review round 2, SFH MEDIUM-2)", () => {
+  // A row whose `conventions` is PRESENT but not a plain object is an
+  // engine-writer or migration defect (a double-encoded JSON string, an array
+  // from a backfill). It used to answer exactly like an older run with no echo:
+  // no log, no failure, so the config-tier build was cached with no signal.
+  const MALFORMED: { name: string; value: unknown; kind: string }[] = [
+    { name: "a JSON string (double-encoded)", value: '{"cumulative_method":"simple"}', kind: "a string" },
+    { name: "a number", value: 365, kind: "a number" },
+    { name: "an array", value: [{ cumulative_method: "simple" }], kind: "an array" },
+  ];
+  for (const m of MALFORMED) {
+    it(`MALFORMED ${m.name}: marked failed with code "malformed", logged, and the config decides`, async () => {
+      const { admin } = mockAdmin({ kind: "row", conventions: m.value });
+      const out = await read(admin, { returnsDenominatorConfig: { metrics_basis: "active_day" } });
+      expect(out).not.toBeNull();
+      expect(out!.buildOpts.dayBasis).toBe("active");
+      expect(out!.conventionsReadFailure).toEqual({ code: "malformed", message: `conventions is ${m.kind}` });
+      const hit = error.mock.calls.find((c) => String(c[0]).includes("conventions malformed"));
+      expect(hit, "a console.error naming the malformed echo").toBeDefined();
+      expect(JSON.stringify(hit)).toContain("s-conv");
+    });
+  }
+
+  const ABSENT: { name: string; data: unknown }[] = [
+    { name: "a row whose conventions is null", data: { conventions: null } },
+    { name: "a row with no conventions key", data: {} },
+  ];
+  for (const a of ABSENT) {
+    it(`CONTROL ${a.name}: an older run, a fact, so no failure marker and no log`, async () => {
+      const { admin } = mockAdmin({ kind: "raw", data: a.data });
+      const out = await read(admin);
+      expect(out).not.toBeNull();
+      expect("conventionsReadFailure" in out!).toBe(false);
+      expect(error.mock.calls).toHaveLength(0);
+    });
+  }
 });
 
 describe("the exported seams plan 169.1-04 reuses (D-83)", () => {

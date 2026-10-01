@@ -36,6 +36,8 @@ const fake = vi.hoisted(() => ({
   conventions: null as Record<string, unknown> | null,
   conventionsError: null as unknown,
   conventionsThrows: false,
+  /** When set, the conventions read answers this exact row (169.1 SFH MEDIUM-2). */
+  rawConventionsRow: undefined as unknown,
   /** Every select string a strategy_analytics_series read asked for. */
   analyticsSelects: [] as string[],
 }));
@@ -60,6 +62,7 @@ vi.mock("@/lib/supabase/admin", () => {
       if (table === "strategy_analytics_series" && selected === CONVENTIONS_SELECT) {
         if (fake.conventionsThrows) throw new Error("socket hang up");
         if (fake.conventionsError) return { data: null, error: fake.conventionsError };
+        if (fake.rawConventionsRow !== undefined) return { data: fake.rawConventionsRow, error: null };
         return { data: fake.conventions === null ? null : { conventions: fake.conventions }, error: null };
       }
       return { data: null, error: null };
@@ -166,6 +169,7 @@ beforeEach(() => {
   fake.conventions = null;
   fake.conventionsError = null;
   fake.conventionsThrows = false;
+  fake.rawConventionsRow = undefined;
   fake.analyticsSelects = [];
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -305,6 +309,40 @@ describe("169.1-04 D-30: a failed conventions read degrades to the config tier a
     fake.conventions = null;
     const absent = await fetchAndBuildPayloadWithReason(STRATEGY_ID, publicVisibility);
     expect("conventionsDegraded" in absent, "an absent row is a fact, not an outage").toBe(false);
+    expect(conventionsCaptures()).toHaveLength(0);
+  });
+});
+
+describe("169.1 SFH MEDIUM-2: a malformed conventions echo rides the failure path, an absent one does not", () => {
+  const MALFORMED: { name: string; value: unknown }[] = [
+    { name: "a JSON string", value: '{"cumulative_method":"geometric"}' },
+    { name: "a number", value: 365 },
+    { name: "an array", value: [] },
+  ];
+  for (const m of MALFORMED) {
+    it(`MALFORMED ${m.name}: degraded, captured once with code "malformed", and the config decides`, async () => {
+      seedStrategy({ cumulative_method: "simple" });
+      fake.rawConventionsRow = { conventions: m.value };
+      const built = await fetchAndBuildPayloadWithReason(STRATEGY_ID, publicVisibility);
+      expect(built.payload).not.toBeNull();
+      expect(built.reason).toBeNull();
+      expect(built.payload!.cumulativeMethod).toBe("arithmetic");
+      expect(built).toMatchObject({ conventionsDegraded: true });
+      expect(conventionsCaptures()).toHaveLength(1);
+      expect(conventionsCaptures()[0][1]).toMatchObject({
+        tags: { caller: "build", reason: "conventions_read_error", code: "malformed", read: "cash_settlement" },
+      });
+    });
+  }
+
+  it("CONTROL: a row whose conventions is null, or has no conventions key, is not degraded and captures nothing", async () => {
+    seedStrategy({ cumulative_method: "simple" });
+    fake.rawConventionsRow = { conventions: null };
+    const nullEcho = await fetchAndBuildPayloadWithReason(STRATEGY_ID, publicVisibility);
+    expect("conventionsDegraded" in nullEcho, "a null echo is an older run, not an outage").toBe(false);
+    fake.rawConventionsRow = {};
+    const noKey = await fetchAndBuildPayloadWithReason(STRATEGY_ID, publicVisibility);
+    expect("conventionsDegraded" in noKey, "a missing key is an older run, not an outage").toBe(false);
     expect(conventionsCaptures()).toHaveLength(0);
   });
 });
