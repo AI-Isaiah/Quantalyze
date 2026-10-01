@@ -227,3 +227,33 @@ describe("169.1-09 D-38 / D-84: the active-basis rolling Sharpe line is continuo
     expect(optedIn).toEqual(["rollingSharpe"]);
   });
 });
+
+describe("169.1-09 D-38 scoping: every chart that does not opt in still breaks its strategy line at a null", () => {
+  // Green on arrival, and must stay green: the bridge is absent unless a config opts
+  // in, so these lines draw exactly as before. The payload is the ACTIVE-basis shape,
+  // whose day 5 is an excluded (zero-return) day, so even a basis exclusion does not
+  // join any line but the rolling Sharpe's.
+  const others = CHART_CONFIGS.filter((c) => c.key !== "rollingSharpe" && c.kind !== "bars" && c.stratField);
+
+  it("covers every line chart with a strategy series", () => {
+    expect(others.map((c) => c.key)).toEqual([
+      "cumulative",
+      "volMatched",
+      "rollingVol",
+      "rollingSortino",
+      "worstDDs",
+      "underwaterAcc",
+    ]);
+  });
+
+  it.each(others.map((c) => [c.key, c] as const))("%s: an interior null on an excluded day gives TWO strategy segments", (_key, cfg) => {
+    const base = shapePayload({ dayBasis: "active", zeroAtInteriorNulls: true });
+    // Positive values, so the log-scale charts test the null break and not the log skip.
+    const series: Array<number | null> = base.dates.map((_, i) => (i === 5 ? null : 1 + 0.01 * i));
+    const p = { ...base, [cfg.stratField!]: series } as FactsheetPayload;
+    const stroke = cfg.stratField === "strategyDrawdowns" ? "--color-negative" : "--color-accent";
+    const d = renderPaths(p, cfg).byStroke(stroke);
+    expect(d, `${cfg.key} strategy path`).not.toBeNull();
+    expect(segments(d)).toBe(2);
+  });
+});
