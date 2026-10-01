@@ -58,7 +58,7 @@ import { SMOOTHED_MTM_UI_ENABLED } from "@/lib/closed-sets";
 import { ComparatorPicker } from "./ComparatorPicker";
 import { TimeSeriesChart } from "./TimeSeriesChart";
 import { HistogramChart } from "./HistogramChart";
-import { MetricsColumn, RangeEyebrow, headlineCoverageCaveat } from "./MetricsColumn";
+import { MetricsColumn, RangeEyebrow, headlineCoverageCaveat, windowCoverageCaveat } from "./MetricsColumn";
 import { AllocatorSection } from "./BatchDPanels";
 import { StreakDistributionPanel } from "./AnalyticalPanels";
 import { EndOfYearBarsPanel, QuantileBoxPlotPanel, CorrelationStripPanel, CorrelationsMatrixPanel } from "./DistributionPanels";
@@ -1457,13 +1457,19 @@ function KpiStrip() {
   const m = selected ? wv.strategyMetrics : leverageApplied ? view.strategyMetrics : basisM;
   // Phase 169 review round 1 (SFH H-1): on a chain-broken row the stored cash
   // headline covers only the record after its last break. Said beside it, only
-  // while the stored figures are the ones shown (cash basis, no what-if, no
-  // selected range; a chain-broken row has no what-if anyway,
-  // `leverageEligibleFor`; a window shows no stored figure, D-78).
-  // Round 2, IN-R2-02: named by the strip's own labels.
-  const coverageCaveat = leverageApplied || selected
-    ? null
-    : headlineCoverageCaveat(payload.dataQuality, basis, "Cum. Return, CAGR and Calmar");
+  // while the stored figures are the ones shown (cash basis, no what-if; a
+  // chain-broken row has no what-if anyway, `leverageEligibleFor`). Round 2,
+  // IN-R2-02: named by the strip's own labels.
+  // 169.1 review round 1 (SFH MEDIUM-2): a window shows no stored figure (D-78),
+  // but unlike the leverage arm it DOES compute on a chain-broken row, so a range
+  // starting before the last break compounds days the engine leaves out. It keeps a
+  // caveat that says so, naming the same three figures as the full-history caveat:
+  // the engine's Max DD already spans the whole record (`compute_all_metrics`).
+  const coverageCaveat = selected
+    ? windowCoverageCaveat(payload.dataQuality, basis, scope.start, "Cum. Return, CAGR and Calmar")
+    : leverageApplied
+      ? null
+      : headlineCoverageCaveat(payload.dataQuality, basis, "Cum. Return, CAGR and Calmar");
   const j = wv.comparators[cmpKey].joint;
   // 169.4 review round 2 (SFH-R2 MEDIUM-2): below the paired floor the joint is
   // withheld, not absent. The α/IR cells stay (9 cells) and read "—", and one
