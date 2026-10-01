@@ -4369,6 +4369,28 @@ Plans:
 (a) With no benchmark selected, the scenario Returns chart subtitle reads "vs None". Root cause: `src/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload.ts` builds the `none` comparator with `inertComparatorBlock("None", "None")`, and `subtitleFor` in `src/app/factsheet/[id]/v2/TimeSeriesChart.tsx` prints `vs ${cmpName}` whenever the chart config has a `comparatorField`. Success: with no benchmark chosen the subtitle is empty or says "no benchmark".
 (b) The scenario KPI tiles show an unlabelled delta line (e.g. "+0.00") under each value. Success: the delta says what it is compared against (e.g. "vs current book").
 
+### Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity (INSERTED)
+
+**Goal:** Three user-facing defects found in the post-170 browser pass are fixed: the Allocations Holdings tab never scrolls sideways, the daily BTC benchmark refresh still lands a day when Binance fails, and the /compare equity chart shows each strategy's real cumulative return.
+**Founder decision, 2026-10-01 (AskUserQuestion):** one inserted phase with three plans. Phases 169, 169.2 and 170 are closed, and nothing is added to them.
+**Evidence (measured 2026-10-01 on PROD, after the Phase 170 merge e3b4542da deployed):**
+(1) On `/allocations?tab=holdings` at 735 CSS px (desktop 200% zoom), `#main-content` scrollWidth is 885 against clientWidth 735. `HoldingsTabPanel.tsx`'s `<div data-tab-panel="holdings" className="grid gap-8">` has no column template, so its implicit track resolves to the min-content of its widest item (845 px). The Holdings and Open Positions tables (843 px) and the Exposure drill-down table (811 px) sit in `overflow-x-auto` scrollers. Those scrollers grow with their tables because their grid-item ancestors keep `min-width: auto`. The floor does not depend on the viewport, so every width below about 1000 CSS px overflows. CI missed it because the seeded book has no wide positions table.
+(2) The 2026-10-01 00:10 UTC Vercel cron `/api/cron/refresh-benchmark` answered 502 "no BTC series" (Sentry QUANTALYZE-1M, 1N and 1P). The newest stored BTC close is 2026-09-29; the 2026-09-30 run succeeded through 09-29. `fetch_btc_daily_prices` in `analytics-service/services/benchmark.py` falls back from Binance to CoinGecko `market_chart` with `days=1000`. The CoinGecko free tier refuses that (HTTP 401, error_code 10012, measured), while `days=365` answers 200. Any Binance failure therefore loses that day.
+(3) `/compare?ids=<one strategy>` draws an equity axis reading about 1e35%. `CompareEquityOverlay.tsx` compounds `strategy_analytics.returns_series` (`cum *= 1 + p.value`), but that column stores equity LEVELS. For the measured strategy it runs 0.99998 → 1.1454 over 112 days, with `cumulative_return` 0.1454, so 112 compounds of about 2 explode.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 170
+
+## Success Criteria
+
+1. At 390, 640 and 735 CSS px the Holdings tab's `#main-content` overflow is 0, and each wide table scrolls inside its own scroller. A seeded e2e case with a wide positions table fails on the old code.
+2. When Binance fails, the refresh still returns a current BTC series: the fallback stays within the free-tier window and merges with cached history, or uses another free source. A test fails on the old 1000-day request, and a missed day is backfilled by the next run.
+3. The /compare overlay's last point equals each strategy's stored cumulative return (+14.5% for the measured example). A test fails on the old compounding.
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 170.2 to break down)
+
 ### Phase 165: ACTIONSDEPS — the four GitHub Actions dependabot PRs land first, in the verified order
 
 **Goal**: The four GitHub Actions dependabot PRs (#643, #627, #626, #612) are RESOLVED — landed or deliberately closed — one at a time in the research-verified order with the full suite green between each, so CI's own behaviour is settled before any library bump is judged by it
