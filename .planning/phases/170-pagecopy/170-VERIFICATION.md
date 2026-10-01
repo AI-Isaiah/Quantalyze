@@ -1,8 +1,9 @@
 ---
 phase: 170-pagecopy
 verified: 2026-10-01T07:31:04Z
-status: human_needed
-score: 18/20 must-haves verified (1 present-behavior-unverified, 1 human-only post-deploy)
+status: passed
+score: 20/20 must-haves resolved (truth 20 by the 2026-10-01 post-deploy pass, with Holdings routed to 170.2; truth 1 by founder FC-1 "Ship as is")
+resolved_at: 2026-10-01
 verified_at_sha: a82496148b7decfdcd3db87c1150045144352c7e
 drift_subjects:
   - .github/workflows/ci.yml
@@ -94,7 +95,7 @@ human_verification:
 
 **Phase Goal:** Pages read as a finished product: no stacked look-alike panels, and the layout holds at 390 px (iPhone 12) and at desktop 200% zoom.
 **Verified:** 2026-10-01T07:31:04Z at code HEAD `a82496148b7decfdcd3db87c1150045144352c7e` (branch `feat/170-layout`; docs-only commits on top through `3112caa49`)
-**Status:** human_needed
+**Status:** passed (resolved 2026-10-01; see the note below)
 **Re-verification:** Yes, after gap-closure plans 170-15..170-20 and the round-1 review fix round (topics A-D)
 
 **Lineage.** 2026-09-30T20:25:35Z at `650448ee82caa7c81226abf5b3cefa5a82ba98b5`: `gaps_found`, 9/19, eight gaps, bound to CI run `36764778803` e2e-seeded job `110056506084` (16 failed). That verdict is superseded by this report and kept here as history.
@@ -222,3 +223,11 @@ No gaps. All eight gaps from the `650448ee` verdict are closed in code and green
 
 _Verified: 2026-10-01T07:31:04Z_
 _Verifier: Claude (gsd-verifier)_
+
+
+## ⭐ Resolution 2026-10-01 (plan 170-14; founder closed Phase 170 to additions)
+
+- **Truth 20, SC3 post-deploy pass:** run 2026-10-01 in the logged-in browser at 390 / 640 / 735 CSS px against `e3b4542da`. Every measured route has zero document overflow except `/allocations?tab=holdings` (150 px at 735), routed to **Phase 170.2 item 1**. V960 was unreachable on this screen; the composed scenario and signed-out legal pages were not measured. Recorded in `170-UAT.md`.
+- **Truth 1, SC1 visual read:** settled by the founder's FC-1 answer "Ship as is" (nothing deleted).
+- **FC-2:** "Factsheet masthead", routed to **Phase 170.2 item 4**.
+- Founder 2026-10-01: Phases 169, 169.2 and 170 are closed and nothing is added to them; defects found after landing go to Phase 170.2.

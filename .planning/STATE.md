@@ -12,10 +12,10 @@ last_activity_desc: Completed 170-10-PLAN.md
 state_head: 85c46849c7c9a2f9778feb5832c788b1db72c605
 progress:
   total_phases: 80
-  completed_phases: 41
+  completed_phases: 42
   total_plans: 370
   completed_plans: 357
-  percent: 51
+  percent: 52
 ---
 
 ## ⭐ STATE lineage
@@ -179,8 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — EXECUTING
-Plan: 8 of 14
+Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
+Plan: 20 of 20; VERIFICATION passed (post-deploy pass 2026-10-01; Holdings and FC-2 routed to 170.2)
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
 Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
@@ -1260,6 +1260,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ### Roadmap Evolution
 
+- Phase 166.3.1 NAVBREACH **inserted 2026-10-01 after Phase 166.3 (URGENT, hand-edited)**: the Deribit composite's `native_nav` inception reconciliation breach, which failed Phase 166.3's R5 recompute on PROD. Founder 2026-10-01: record R5 as a residual and route the breach to a named phase.
+- Phase 170.2 PROBEFIXES **inserted 2026-10-01 after Phase 170 (URGENT, hand-edited)**: three user-facing defects from the post-170 browser pass (Holdings sideways scroll, BTC refresh fallback, /compare equity overlay). Founder: one inserted phase with three plans; 169, 169.2 and 170 are closed and get nothing added. `phase.insert`'s ROADMAP blank-line collateral and its `state.json` rewrite were reverted from byte backups.
 - Phase 164.6.5 MT5VALIDATEWEDGE **per-criterion outcome recorded 2026-09-26 (plan 08, hand-edited)**: C3, C5, C6, C7 MET. C1 OPEN (D-03 path, `MT5-SWITCH-WEDGE-CAUSE-01`, Phase 164.6.6). C2 OPEN on its live half (`.planning/WINDOWS.md` entry 68, widened to name the first live `Mt5Client.session_snapshot` read beside the terminate step; founder, post-deploy). C4 OPEN on its calibration half: D-10 answered by scheduled prod-prober run 36134914962 (head `01dcf1cc`) onward; D-11 booked as `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01`, owned by Phase 164.6.6, trigger the next live `-10005` captured before the heal recycles it. Inherited criteria 7 and 8 OPEN (founder UAT). The phase is NOT transitioned to complete: verification is `gaps_found`. ⛔ Scope fence: the eviction is Phase 164.6.6; `[MT5-VERDICT-SINK-01]` stays deferred under its own owner.
 - Phase 164.6.5 MT5VALIDATEWEDGE **edited 2026-09-24 (hand-edited)**: inherited success criteria 7 and 8 were added, routed by founder decision 2026-09-24 (via AskUserQuestion). 7 comes from 161's live MT5 `undetermined` verdict and 8 from 164.5.3's end-to-end live MT5 credential update. Both source VERIFICATION files mark the item resolved-by-routing. The same day, 164.6-VERIFICATION.md was closed to `passed` (7/7 post-merge items, evidence by run id), and 164.4.2's Area E was measured FINAL at 5 runs: the change did not work and the slowdown holds. The founder's follow-up phase for that is NOT booked yet. The frontmatter census above was not recomputed.
 - Phase 164.5.3 inserted after Phase 164.5: MT5CREDS — MT5 account number on the key card + a credential-update path (URGENT)
