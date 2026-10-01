@@ -483,7 +483,13 @@ export function deriveSeriesBundle(
       maxLen: MAX_LEN,
     },
     calmarByYear: calmarByYear(stratRet, dates, isArithmetic ? "arithmetic" : "geometric"),
-    bootstrapCI: bootstrapCI(stratRet, 2000, 5, 42, periodsPerYear),
+    // Phase 169.1 (D-34, D-27): the resample is drawn from the series the
+    // headline's risk statistics run over (the one `basis` result above: the
+    // non-zero days under active, the zero-filled calendar series on a calendar
+    // composite, `stratRet` otherwise) and scored under the headline's method, so
+    // the point Sharpe, Sortino and Max DD equal the headline beside them. `n` is
+    // that series' length, the count the panel says the resamples are drawn from.
+    bootstrapCI: bootstrapCI(basis.returns, 2000, 5, 42, periodsPerYear, isArithmetic ? "arithmetic" : "geometric"),
     styleDrift: computeStyleDrift(stratRet, dates),
     // CR-01 (SC3): stress windows take BTC null-honest — a window with an uncovered
     // BTC day gets null bench fields, never a compounded 0% day. Not under D-65.
