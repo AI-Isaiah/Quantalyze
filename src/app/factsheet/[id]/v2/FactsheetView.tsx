@@ -652,6 +652,13 @@ function PerformanceCharts() {
   }, [payload.rollingWindow, payload.rollingBetaWindow, payload.strategyId]);
 
   const volMatchedAbsent = view.comparators[cmpKey]?.volMatched == null;
+  // The reason line below is shown only when the comparator HAS a summary, so it
+  // has covered returns and the match was skipped for want of a measurable vol.
+  // A comparator with no summary (prices unavailable, no covered day, or the
+  // composer's inert block) is hidden without it: the picker already names the
+  // unavailable case, and "no measurable volatility" would misstate the others.
+  const volMatchedNoVol =
+    cmpKey !== "none" && volMatchedAbsent && view.comparators[cmpKey]?.summary != null;
   const configs = React.useMemo(() => {
     return CHART_CONFIGS
       .filter(cfg => !(cmpKey === "none" && cfg.stratField === null && cfg.comparatorAsPrimary))
@@ -749,6 +756,12 @@ function PerformanceCharts() {
         <NotEnoughDataPanel
           title="Rolling β — Not enough data"
           body="Strategy history is too short to compute even a 30-day rolling beta against the comparator. This panel will appear once the strategy has at least ~35 observations."
+        />
+      )}
+      {volMatchedNoVol && (
+        <NotEnoughDataPanel
+          title="Volatility Matched — Not available"
+          body="The strategy or the comparator has no measurable volatility on this basis, so there is no scale to match the comparator to. This panel will appear once both do."
         />
       )}
     </>

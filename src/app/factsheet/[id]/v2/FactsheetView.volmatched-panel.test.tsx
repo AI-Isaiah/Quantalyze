@@ -13,6 +13,11 @@
  * match. It is the same degenerate panel the 2026-05-20 rule already filters for
  * `cmpKey === "none"`, for the same reason: it is the Equity Curve again.
  *
+ * Where the comparator has covered returns (a summary), a one-line reason panel
+ * takes its place, the same pattern as the "Rolling β — Not enough data" panel
+ * beside it. A comparator with no summary (prices unavailable, the composer's
+ * inert block) is hidden without it.
+ *
  * The filter reads the BASIS VIEW's block, the one TimeSeriesChart draws, not
  * the cash payload's. The strategy-side null shows up on the MTM and smoothed
  * bundles (an active-day basis with fewer than two non-zero days), so the third
@@ -49,6 +54,7 @@ beforeEach(() => {
 });
 
 const TITLE = "Cumulative Returns — Volatility Matched";
+const REASON_TITLE = "Volatility Matched — Not available";
 const DAY = 86_400_000;
 const START = Date.UTC(2024, 0, 1);
 
@@ -99,13 +105,35 @@ describe("the Volatility Matched panel hides when there is nothing to match (169
     expect(Array.isArray(payload.comparators[payload.activeComparator].volMatched)).toBe(true);
     const { queryByText } = renderBody(payload);
     expect(queryByText(TITLE)).not.toBeNull();
+    expect(queryByText(REASON_TITLE)).toBeNull();
   });
 
-  it("a selected comparator whose volMatched is null does not render the panel", () => {
+  it("a selected comparator whose volMatched is null does not render the panel, and says why", () => {
     const base = payload200();
     const payload = { ...base, comparators: withoutVolMatch(base) } as FactsheetPayload;
+    // The comparator has covered returns (a summary), so the reason applies.
+    expect(payload.comparators[payload.activeComparator].summary).not.toBeNull();
     const { queryByText } = renderBody(payload);
     expect(queryByText(TITLE)).toBeNull();
+    expect(queryByText(REASON_TITLE)).not.toBeNull();
+    expect(queryByText(/no measurable volatility on this basis/)).not.toBeNull();
+  });
+
+  it("a comparator with no summary (prices unavailable) hides the panel without the volatility reason", () => {
+    // The unavailable form: every series null and no summary. The picker names
+    // this case already, and "no measurable volatility" would misstate it.
+    const base = payload200();
+    const key = base.activeComparator;
+    const payload = {
+      ...base,
+      comparators: {
+        ...base.comparators,
+        [key]: { ...base.comparators[key], summary: null, volMatched: null, volMatchedLabel: null },
+      },
+    } as FactsheetPayload;
+    const { queryByText } = renderBody(payload);
+    expect(queryByText(TITLE)).toBeNull();
+    expect(queryByText(REASON_TITLE)).toBeNull();
   });
 
   it("the filter follows the basis view: a null volMatched on the MTM bundle only hides the panel on MTM", () => {
@@ -121,9 +149,11 @@ describe("the Volatility Matched panel hides when there is nothing to match (169
     const { container, queryByText } = renderBody(payload);
     // Cash: the cash block has a real match, so the panel is there.
     expect(queryByText(TITLE)).not.toBeNull();
+    expect(queryByText(REASON_TITLE)).toBeNull();
     const group = container.querySelector('[role="group"][aria-label="Metrics basis"]');
     expect(group, "the basis toggle").not.toBeNull();
     fireEvent.click(within(group as HTMLElement).getByText("Mark-to-market"));
     expect(queryByText(TITLE)).toBeNull();
+    expect(queryByText(REASON_TITLE)).not.toBeNull();
   });
 });
