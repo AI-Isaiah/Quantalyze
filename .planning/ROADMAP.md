@@ -135,7 +135,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
 - [ ] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
-- [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — planned (1 plan); HALTED 2026-09-27 at Task 3; resumes after Phase 166.4 ships
+- [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — complete with routed residuals 2026-10-01 (halted 2026-09-27, resumed after 166.4); verification pending
 - [ ] **Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds** (INSERTED) — not planned; inserted 2026-10-01 (founder); 166.3's R5 recompute waits on it
 - [ ] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
@@ -3661,6 +3661,9 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy
 - **R1 re-enters the set.** Its stored beta is the M1-era value, so it must be recomputed again after the fix is deployed.
 - **Resume condition.** Phase 166.3 may resume after Phase 166.4 merges and its worker is deployed.
 - **Ratified the same day.** The founder also ratified 166.4 D-04 (the both-endpoints rule applies when BTC is the sparser leg too), D-05 (the first strategy date pairs with BTC's same-day return) and D-07 (BTC's base close is the day before its first stored return) on 2026-09-27. Phase 169.5 BENCHCOMPARE adopts D-05's day-one rule before it executes.
+
+⭐ **RESUMED AND COMPLETED 2026-10-01, with routed residuals (see `166.3-01-SUMMARY.md`).** 14 benchmarked strategies: 9 recompute jobs done, 2 failed, 3 not enqueued because they were already computed on post-166.4 code (2 of them published, and both lack stored daily returns, so the job would have failed them). The failed composite is routed to Phase 166.3.1 NAVBREACH (founder D-R5); the trailing 1000-day BTC window that moved alpha/beta is Phase 170.2 item 5 (founder D-BENCH). No published row was recomputed.
+⚠️ **FOUNDER OVERRIDE (D-OVR, 2026-10-01, verbatim "can't you use CLI for that?"):** from R2 on, the orchestrator ran the PROD statements through `psql`, marker-guarded, instead of the founder. This overrides the "every PROD statement is a founder step" rule above for that run only; recorded in `166.3-CONTEXT.md` too.
 
 ### Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds (INSERTED)
 
