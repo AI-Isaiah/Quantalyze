@@ -1,4 +1,6 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { describe, it, expect } from "vitest";
 
@@ -794,6 +796,106 @@ describe("Critical regression guards", () => {
           /Verify build inlined real test-Supabase URL/,
           "e2e-seeded job lost the inline-URL verify step (retro-PR188-D4)",
         );
+      });
+
+      // 2026-10-01, Phase 164.9.4 review SFH-01: pin (d) above holds the step
+      // by NAME only, so its body was unprotected. Arms (ii) and (iii) are
+      // NEGATIVE ("fail if found"), and the old `if grep ...; then exit 1` shape
+      // read grep's exit status 2 (an error) as 1 (no match), passing on a scan
+      // that never completed. This EXECUTES the step body from ci.yml in a
+      // scratch tree. The read error is MANUFACTURED with a `grep` shim first on
+      // PATH that exits 2 for one arm's pattern, because a missing directory
+      // alone cannot tell the shapes apart: arm (i) already fails closed on it.
+      describe("e2e-seeded build guard fails LOUD on a grep error (SFH-01)", () => {
+        const STEP_RE =
+          /\n {6}- name: Verify build inlined real test-Supabase URL\n {8}run: \|\n((?: {10}[^\n]*\n|\n)+)/;
+        const LANE_URL = "http://127.0.0.1:54321";
+        const realGrep = spawnSync("sh", ["-c", "command -v grep"], { encoding: "utf8" }).stdout.trim();
+
+        function stepBody(): string {
+          const m = findOrFail(readText(".github/workflows/ci.yml"), STEP_RE, "ci.yml: the build-guard step's run: body not found");
+          return m
+            .split("\n")
+            .map((l) => l.slice(10))
+            .join("\n");
+        }
+
+        function run(opts: { files: Record<string, string>; shimPattern?: string }): {
+          code: number | null;
+          out: string;
+          shimFired: boolean;
+        } {
+          const dir = mkdtempSync(join(tmpdir(), "sfh01-"));
+          try {
+            for (const [rel, body] of Object.entries(opts.files)) {
+              mkdirSync(join(dir, rel, ".."), { recursive: true });
+              writeFileSync(join(dir, rel), body);
+            }
+            let PATH = process.env.PATH ?? "";
+            if (opts.shimPattern) {
+              const bin = join(dir, "shim-bin");
+              mkdirSync(bin);
+              // The shim records that it fired in a FILE, not on stderr: the old
+              // step shape sent grep's stderr to /dev/null, so a stderr marker
+              // would be invisible on exactly the shape this leg must catch.
+              writeFileSync(
+                join(bin, "grep"),
+                `#!/bin/sh\nfor a in "$@"; do case "$a" in *'${opts.shimPattern}'*) : > '${join(dir, "shim-fired")}'; echo "grep: simulated read error" >&2; exit 2;; esac; done\nexec ${realGrep} "$@"\n`,
+              );
+              chmodSync(join(bin, "grep"), 0o755);
+              PATH = `${bin}:${PATH}`;
+            }
+            writeFileSync(join(dir, "step.sh"), stepBody());
+            const res = spawnSync("bash", ["step.sh"], {
+              cwd: dir,
+              encoding: "utf8",
+              env: { ...process.env, PATH, NEXT_PUBLIC_SUPABASE_URL: LANE_URL },
+            });
+            return {
+              code: res.status,
+              out: `${res.stdout ?? ""}${res.stderr ?? ""}`,
+              shimFired: existsSync(join(dir, "shim-fired")),
+            };
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
+        }
+
+        const CLEAN = {
+          ".next/static/a.js": 'const u="http://127.0.0.1:54321";\n',
+          ".next/server/b.js": "module.exports={};\n",
+        };
+
+        it("CONTROL: a clean lane bundle passes the step (exit 0)", () => {
+          expect(realGrep, "CALIBRATION: no real grep found to shim around").not.toBe("");
+          const { code, out } = run({ files: CLEAN });
+          expect(code, out).toBe(0);
+          expect(out).toContain("Rebuild inlined the lane URL");
+        });
+
+        it("the positive arms still bite: an inlined placeholder URL fails (ii)", () => {
+          const { code, out } = run({
+            files: { ...CLEAN, ".next/server/c.js": 'x="https://placeholder.supabase.co"\n' },
+          });
+          expect(code, out).toBe(1);
+          expect(out).toContain("(ii) the rebuild inlined the placeholder Supabase URL");
+        });
+
+        it("a missing .next/server fails by NAME, before any arm runs", () => {
+          const { code, out } = run({ files: { ".next/static/a.js": CLEAN[".next/static/a.js"] } });
+          expect(code, out).toBe(1);
+          expect(out).toContain(".next/server is missing after the build");
+        });
+
+        it.each([
+          ["(ii)", "placeholder.supabase.co"],
+          ["(iii)", "supabase\\.co"],
+        ])("arm %s: a grep error (exit 2) fails the step instead of reading as 'no match'", (arm, pattern) => {
+          const { code, out, shimFired } = run({ files: CLEAN, shimPattern: pattern });
+          expect(shimFired, `CALIBRATION: the shim did not fire, so this leg measured nothing.\n${out}`).toBe(true);
+          expect(code, `the old shape exits 0 here: the error read as a clean scan.\n${out}`).toBe(1);
+          expect(out).toContain(`${arm} grep could not scan the build output (exit 2)`);
+        });
       });
     });
 
