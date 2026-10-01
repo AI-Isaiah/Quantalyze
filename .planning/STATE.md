@@ -12,10 +12,10 @@ last_activity_desc: Completed 170-10-PLAN.md
 state_head: 85c46849c7c9a2f9778feb5832c788b1db72c605
 progress:
   total_phases: 80
-  completed_phases: 42
+  completed_phases: 44
   total_plans: 370
   completed_plans: 357
-  percent: 52
+  percent: 55
 ---
 
 ## ⭐ STATE lineage
@@ -179,6 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
+Phase: 164.9.3 (CLAIMPAIR) — COMPLETE 2026-09-27 (verification passed; PR #890 merged, v0.109.0.0)
+Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
 Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
 Plan: 20 of 20; VERIFICATION passed (post-deploy pass 2026-10-01; Holdings and FC-2 routed to 170.2)
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
@@ -966,7 +968,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [█████░░░░░] 51%
+Progress: [█████░░░░░] 55%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
