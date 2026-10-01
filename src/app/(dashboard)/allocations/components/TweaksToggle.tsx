@@ -1,6 +1,7 @@
 "use client";
 
 import { useTweaks } from "../context/TweaksContext";
+import { TWEAKS_PANEL_ID } from "./Tweaks";
 
 /**
  * Phase 170 / AD-05 — inline Tweaks toggle.
@@ -27,6 +28,12 @@ export function TweaksToggle() {
       data-tweaks-toggle
       onClick={togglePanel}
       aria-pressed={panelOpen}
+      // Phase 170 review WR-01 — disclosure state for assistive tech. The
+      // panel is unmounted while closed, so aria-controls is set only while
+      // it exists (a dangling idref is an axe violation). aria-pressed stays:
+      // the aria-pressed: variants below carry the AD-05 pressed styling.
+      aria-expanded={panelOpen}
+      aria-controls={panelOpen ? TWEAKS_PANEL_ID : undefined}
       aria-label="Toggle tweaks panel"
       title="Tweaks · design variations"
       className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent pointer-coarse:min-h-[44px] aria-pressed:border-accent aria-pressed:text-accent aria-pressed:bg-accent/10"
