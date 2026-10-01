@@ -1,7 +1,7 @@
 import type { BenchmarkPricesOpt, CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, BasisSeriesBundle, TrustTierKind, IngestSource } from "./types";
 import { alignCoveredReturns, COMPARATOR_CALENDARS } from "./align";
 import type { CoveredAlignment } from "./align";
-import { compute, cumEq, worstDrawdowns } from "./compute";
+import { compute, cumEq, metricsBasisSeries, worstDrawdowns } from "./compute";
 import { overlayBasisScalars } from "./basis-metrics";
 import { rollingVol, rollingSharpe, rollingSortino, pickRollingWindow, ROLL_WINDOW_90D, ROLL_WINDOW_30D } from "./rolling";
 import { buildComparatorBlock, noneComparatorBlock, unavailableComparatorBlock } from "./comparator-block";
@@ -368,6 +368,24 @@ export function deriveSeriesBundle(
   const stratEquity = fullMetrics.eq;
   const stratDd = fullMetrics.dd;
 
+  // Phase 169.1 (D-33, D-39): the rolling statistics run over the days the
+  // engine runs them over. `compute_all_metrics` computes its rolling Sharpe on
+  // `_rolling_basis` (`stat_returns` under the active basis, else `returns`) and
+  // its rolling volatility and Sortino on `returns`, which for a composite is the
+  // zero-filled calendar series. `metricsBasisSeries` is the one helper that
+  // chooses that series (the same one compute() just used): the non-zero days
+  // under active, the zero-filled calendar series on a calendar composite, and
+  // `stratRet` itself with identity positions otherwise (byte-identical). Under
+  // active the volatility and Sortino stay on `stratRet`, the engine's `returns`
+  // there. Each result is mapped back through `positions` (null on an excluded
+  // day; a filled calendar day has no date and is dropped), so every array stays
+  // index-aligned with `dates` and plan 169.1-02's window restriction and
+  // `rollingStats`' "Now" hold unchanged. The window stays picked on
+  // `stratRet.length`; a basis series shorter than it is all null (D-33).
+  const basis = metricsBasisSeries(stratRet, dates, { dayBasis, calendarDense });
+  const onBasis = (rolled: Array<number | null>) => basis.positions.map((pos) => (pos === null ? null : rolled[pos]));
+  const activeBasis = dayBasis === "active";
+
   // Benchmark alignments on THIS bundle's own date axis (169.5 D-54: one
   // coverage-aware helper for all five; BTC from the database when the route
   // passed it).
@@ -429,9 +447,13 @@ export function deriveSeriesBundle(
     strategyReturns: stratRet,
     strategyEquity: stratEquity,
     strategyDrawdowns: stratDd,
-    strategyRollingVol: rollingVol(stratRet, rollWindow.window, periodsPerYear),
-    strategyRollingSharpe: rollingSharpe(stratRet, rollWindow.window, periodsPerYear),
-    strategyRollingSortino: rollingSortino(stratRet, rollWindow.window, periodsPerYear),
+    strategyRollingVol: activeBasis
+      ? rollingVol(stratRet, rollWindow.window, periodsPerYear)
+      : onBasis(rollingVol(basis.returns, rollWindow.window, periodsPerYear)),
+    strategyRollingSharpe: onBasis(rollingSharpe(basis.returns, rollWindow.window, periodsPerYear)),
+    strategyRollingSortino: activeBasis
+      ? rollingSortino(stratRet, rollWindow.window, periodsPerYear)
+      : onBasis(rollingSortino(basis.returns, rollWindow.window, periodsPerYear)),
     rollingWindow: rollWindow,
     rollingBetaWindow: rollBetaWindow,
     strategyWorst10: worstDrawdowns(stratDd, 10),
