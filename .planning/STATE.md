@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 170
-current_phase_name: LAYOUT — page layout reads clean and holds on every page
+current_phase: 164.9.3.2
+current_phase_name: DEFER40001
 status: executing
 stopped_at: Completed 170-10-PLAN.md
-last_updated: "2026-09-27T23:26:18.000Z"
+last_updated: "2026-10-01T18:29:41.766Z"
 last_activity: 2026-09-27
 last_activity_desc: Completed 170-10-PLAN.md
-state_head: 85c46849c7c9a2f9778feb5832c788b1db72c605
+state_head: 3f903ddd1543b4ae21bc240fec9727898f9e0c77
 progress:
   total_phases: 80
   completed_phases: 44
@@ -179,7 +179,7 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.9.3 (CLAIMPAIR) — COMPLETE 2026-09-27 (verification passed; PR #890 merged, v0.109.0.0)
+Phase: 164.9.3.2 (DEFER40001) — READY TO EXECUTE
 Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
 Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
 Plan: 20 of 20; VERIFICATION passed (post-deploy pass 2026-10-01; Holdings and FC-2 routed to 170.2)
@@ -498,7 +498,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 170
+Status: Ready to execute
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
