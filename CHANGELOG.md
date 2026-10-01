@@ -1,12 +1,11 @@
 # Changelog
 
-## [0.117.0.1] - 2026-10-01 — DEPS: the minor and patch dependency groups and the `actions/checkout` 7.0.1 pin, in one batch
+## [0.117.0.1] - 2026-10-01 — DEPS: the npm minor and patch group and the `actions/checkout` 7.0.1 pin, in one batch
 
-This entry covers three dependency updates replayed onto `main` as one branch, so they cost one CI run instead of three. It supersedes Dependabot #897 and #898 and the manual replay #900 of Dependabot #643. No application code changes.
+This entry covers two dependency updates replayed onto `main` as one branch, so they cost one CI run instead of two. It supersedes Dependabot #897 and the manual replay #900 of Dependabot #643. Dependabot #898 (Python) was tried in this batch and taken out again; see Notes. No application code changes.
 
 ### Changed
 - **npm (#897):** minor and patch updates to 28 of its 29 packages, among them `next` 16.3.6, `react` and `react-dom` 19.3.0, `@supabase/supabase-js` 2.117.1, `zod` 4.6.5, `recharts` 3.10.1 and `@playwright/test` 1.63.0. `@upstash/ratelimit` stays at 2.0.8: 2.2.0's Lua scripts carry a `#!lua flags=allow-key-locking` shebang, which CI's pinned `redis:7-alpine` rejects (`ERR Unexpected flag in script shebang`). That failed `frontend-seam-redis` on this PR's first run. Whether production Upstash accepts the flag is unmeasured, and rate limiting is a security control, so the bump waits until it is.
-- **Python (#898):** minor and patch updates to 12 packages, among them `fastapi` 0.141.1, `pandas` 2.3.3, `numpy` 2.5.3, `ccxt` 4.5.84 and `pydantic` 2.13.5.
 - **GitHub Actions (#900, from #643):** all 44 `actions/checkout` pins move from v7.0.0 (`9c091bb2`) to v7.0.1 (`3d3c42e5`).
 
 ### Fixed
@@ -16,6 +15,7 @@ This entry covers three dependency updates replayed onto `main` as one branch, s
 - The `@playwright/test` bump ships a newer Chromium, so the SVG chart goldens may need a re-bake on this branch.
 - Neither banned package (`react-native-international-phone-number`, `react-native-country-select`) is in the regenerated lockfile.
 - The major-version Dependabot PRs (#612, #614, #626, #627, #645, #646) are not part of this batch. Each is handled on its own.
+- **The Python group (#898) is out of this batch, and the reason is a drift already on `main`.** `main`'s `analytics-service/requirements.in` pins `pandas==2.2.3`, but its lock `requirements.txt` (the file that gets installed) pins `pandas==3.0.3`. Dependabot regenerated the lock from `.in`, which quietly downgraded pandas 3.0.3 → 2.3.3 and dropped `aiodns` and `pycares`. The `python` job then failed 11 byte-identity tests (`datetime64[us]` vs `[ns]` indexes), and the ACC-01 flowless-controls gate classified deribit, okx, bybit and binance accounts as `unexplained`. All three `analytics-service` requirement files are restored byte-for-byte to `main`. Reconciling `.in` with the lock comes before any further Python bump.
 
 ## [0.117.0.0] - 2026-10-01 — ZOOMKPIS: the factsheet's KPI strip and metrics rail follow the zoom window, in the strategy's own compounding method and day basis
 
