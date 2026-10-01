@@ -449,6 +449,11 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
  * variant is therefore the SAFE DEFAULT for the exported surface, not a live
  * anon path: any future anon caller gets the minimal projection unless it
  * explicitly opts into the wider discovery list.
+ *
+ * Phase 169.1 plan 01 (D-26): the wider discovery list is gone. The discovery
+ * page builds its factsheet through the shared `fetchAndBuildPayloadWithReason`,
+ * which reads the series itself, so the two cases that pinned that list's
+ * columns were deleted with it; the minimal projection is now the only one.
  */
 describe("getStrategyDetail — RANK-02 caller-scoped analytics projection", () => {
   const captureEmbed = async (run: () => Promise<unknown>) => {
@@ -458,7 +463,7 @@ describe("getStrategyDetail — RANK-02 caller-scoped analytics projection", () 
     return { cols, embed: /strategy_analytics \(([^)]*)\)/.exec(cols)?.[1] ?? "" };
   };
 
-  it("public variant (the default) excludes the three columns and keeps computation_status", async () => {
+  it("the detail projection excludes the three columns and keeps computation_status", async () => {
     const { cols, embed } = await captureEmbed(() => getStrategyDetail("strat_123"));
     expect(cols).not.toContain("strategy_analytics (*)");
     expect(embed).not.toBe("*");
@@ -469,28 +474,6 @@ describe("getStrategyDetail — RANK-02 caller-scoped analytics projection", () 
     expect(cols).not.toContain("data_quality_flags");
     // catches `metrics_json` AND `metrics_json_by_basis`, allows a `->` alias
     expect(embed).not.toMatch(/metrics_json(?!->)/);
-  });
-
-  it("discovery variant additionally projects every field the authed detail page reads", async () => {
-    const { cols, embed } = await captureEmbed(() =>
-      getStrategyDetail("strat_123", "crypto-sma", "discovery"),
-    );
-    expect(cols).not.toContain("strategy_analytics (*)");
-    // Enumerated from discovery/[slug]/[strategyId]/page.tsx at HEAD:
-    // daily_returns (:66) + returns_series (:69) feed resolveDailyReturnSeries;
-    // data_quality_flags (:85) drives the composite/single-key branch;
-    // metrics_json_by_basis + computation_status feed readSingleKeyBasisOpts;
-    // computed_at drives the FreshnessChip sentinel (:149).
-    for (const column of [
-      "computation_status",
-      "computed_at",
-      "data_quality_flags",
-      "daily_returns",
-      "returns_series",
-      "metrics_json_by_basis",
-    ]) {
-      expect(embed).toContain(column);
-    }
   });
 
   /**
@@ -515,16 +498,6 @@ describe("getStrategyDetail — RANK-02 caller-scoped analytics projection", () 
       embed.split(",").map((c) => c.trim()).sort();
     expect(members(detail.embed).length).toBeGreaterThan(0);
     expect(members(detail.embed)).toEqual(members(factsheet.embed));
-  });
-
-  it("the two variants differ — data_quality_flags is the authed-only column", async () => {
-    const pub = await captureEmbed(() => getStrategyDetail("strat_123"));
-    const disc = await captureEmbed(() =>
-      getStrategyDetail("strat_123", undefined, "discovery"),
-    );
-    expect(pub.embed).not.toContain("data_quality_flags");
-    expect(disc.embed).toContain("data_quality_flags");
-    expect(disc.embed).not.toBe(pub.embed);
   });
 });
 
