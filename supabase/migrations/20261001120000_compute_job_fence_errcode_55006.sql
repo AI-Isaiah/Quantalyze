@@ -55,6 +55,39 @@
 -- ══════════════════════════════════════════════════════════════════════════
 -- VAC-04 ACKNOWLEDGEMENT — the PROD bodies these CREATE OR REPLACEs overwrite
 -- ══════════════════════════════════════════════════════════════════════════
+-- The gate compares the COMMITTED SNAPSHOT (supabase/schema/functions/) against
+-- PROD's live body. On a function-changing migration PR the two necessarily
+-- disagree: `snapshot-drift` requires the snapshot to carry the body the
+-- MIGRATIONS produce (the new one), while VAC-04 requires it to match what PROD
+-- has TODAY (the old one). The pragma means "I read PROD's body and intend to
+-- overwrite it". This migration changes THREE functions, so it carries THREE
+-- pragmas, one per function; VAC-04 greps the changed files once per drifting
+-- function, each matched by its own hash.
+--
+-- MEASURED 2026-10-01 UTC, reproduced LOCALLY with the gate's own normalizer,
+-- aiming its `live` argument at origin/main's snapshot rather than at PROD
+-- (origin/main = c110555e23edf11638c4f205a09e191ec0457e5c), once per function:
+--
+--   git show origin/main:supabase/schema/functions/<fn>.sql > <scratch>
+--   node scripts/sql-body-normalize.mjs --diff-bodies \
+--     supabase/schema/functions/<fn>.sql <scratch>
+--
+-- ⭐ EACH ACKED HASH IS THE `live` COLUMN OF --diff-bodies FOR THAT FUNCTION'S
+-- DRIFT ROW, NOT `--hash` OF THE SNAPSHOT FILE (a whole-file digest no gate
+-- ever greps).
+--
+-- defer_compute_job (4 args), the DRIFT row's `live` column (2 differing lines):
+-- prod-body-ack: ea6803fc52fd5d43e262ccb13673f564c7bd970896ad6c066f3934e37ccdcdfc
+--
+-- ⚠️ EACH ACK IS OF origin/main, WHICH STANDS IN FOR PROD. It is EARNED only if
+-- VAC-04 on the PR reports that SAME hash for PROD for that function. If it
+-- reports a different one, PROD drifted OUT OF BAND and the correct action is
+-- to FOLD the difference into this migration and re-derive — never to edit a
+-- pragma to match a gate log. It is EARNED, not pasted.
+-- ⚠️ VAC-08 (repo-vs-TEST body pairing) goes RED on the PR by construction:
+-- one DRIFT row per function (defer_compute_job/4, mark_compute_job_done/2 and
+-- mark_compute_job_failed/4), whose TEST hash is the pre-change hash above,
+-- until apply-on-merge brings TEST forward.
 --
 -- Transaction style: NO explicit BEGIN/COMMIT — Supabase wraps each migration
 -- in an implicit transaction. SET LOCAL lock_timeout applies to that wrap. This
@@ -165,6 +198,9 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION defer_compute_job(UUID, INTEGER, TEXT, UUID) FROM PUBLIC, anon, authenticated;
+
+-- PD-02: re-issued from 20260529170000's COMMENT; only the errcode wording moved.
+COMMENT ON FUNCTION defer_compute_job(UUID, INTEGER, TEXT, UUID) IS 'Defers a running job back to pending for circuit-breaker cooldowns. Decrements attempts by 1 to cancel claim_compute_jobs increment so the defer does not burn a retry. NEW-C12-06 (CL10): p_claim_token fences the running-row read (back-compat NULL arm for the deploy window) and a token mismatch on a still-running row raises SQLSTATE 55006 (object_in_use), which PostgREST answers once; the deferred row has claim_token NULLed so it drops the stale fence token. Worker is sole caller (services/job_worker._check_circuit_breaker). See migrations 033 + 117.';
 
 -- --------------------------------------------------------------------------
 -- mark_compute_job_done
