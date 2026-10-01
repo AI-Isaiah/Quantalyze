@@ -8,11 +8,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { FactsheetPayload, ComputeSummary } from "@/lib/factsheet/types";
+import type { FactsheetPayload, ComputeSummary, ComparatorBlock } from "@/lib/factsheet/types";
 import { overlayBasisScalars, BASIS_KPI_MAP } from "@/lib/factsheet/basis-metrics";
 import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
 import { sanitizeLeverage } from "@/lib/leverage";
 import { LeverageContext } from "./leverage-context";
+import { useXRange } from "./factsheet-context";
 
 /**
  * Phase 90 (FS-03, CONTEXT D5/D7) — the NARROW, EPHEMERAL basis context.
@@ -201,6 +202,40 @@ export function useBasisMetrics(payload: FactsheetPayload): {
  */
 const leveredViewCache = new WeakMap<FactsheetPayload, Map<string, FactsheetPayload>>();
 
+/**
+ * Phase 169.1 (D-27) — the ONE argument builder for every client re-derive of the
+ * series bundle: the leverage arm below and the zoom-window arm (`windowView`).
+ * D-27 names it the anti-drift device: both arms re-derive with the same
+ * conventions, so a window and a leverage what-if cannot disagree on how a
+ * figure is computed. The caller guarantees `view.periodsPerYear` is present
+ * (the leverage arm through `leverageApplies`, the window arm through its
+ * no-annualization-basis withhold).
+ */
+function rederiveArgs(view: FactsheetPayload): Parameters<typeof deriveSeriesBundle>[1] {
+  return {
+    periodsPerYear: view.periodsPerYear!,
+    // Geometric is right for the leverage arm: an arithmetic payload (a composite,
+    // or since review round 1 a single-key `simple` config, SFH H-2) is
+    // leverage-ineligible, so it never reaches that re-derive. For the window arm
+    // this is the known limit D-27 records (an arithmetic composite's window is
+    // compounded geometrically); plan 169.1-03 carries the compounding method.
+    isArithmetic: false,
+    markets: view.markets,
+    strategyName: view.strategyName,
+    // comparatorAnnVol OMITTED — a re-derived bundle vol-matches its OWN vol
+    // (mirrors the MTM arm in build-payload.ts; passing the persisted cash ann_vol
+    // would un-lever the comparator vol-match, or mis-match a window).
+    // missingSegments passed through so the bundle spread does not clobber the base
+    // mask with undefined.
+    missingSegments: view.missingSegments,
+    // Phase 169.5 (SC3, D-09, D-21): BTC is re-aligned from the SAME closes and
+    // `dropped` list the server used, carried on the payload. A payload without
+    // the field (hand-built) has no coverage information: BTC is the unavailable
+    // form, never the bundled fixture.
+    benchmarkPrices: view.benchmarkPrices ?? { unavailable: true },
+  };
+}
+
 function readLeveredView(
   payload: FactsheetPayload,
   basis: Basis,
@@ -307,25 +342,9 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     // stays un-levered (deriveSeriesBundle re-aligns BTC/SPX/… internally) — that is
     // what makes β→L·β / α→L·α honest via jointMetrics(leveredStrat, unleveredBench).
     const levered = base.strategyReturns.map((r, i) => ({ date: base.dates[i], value: L * r }));
-    const lb = deriveSeriesBundle(levered, {
-      periodsPerYear: base.periodsPerYear!,
-      // Geometric is right here: an arithmetic payload (a composite, or since review
-      // round 1 a single-key `simple` config, SFH H-2) is leverage-ineligible, so it
-      // never reaches this re-derive.
-      isArithmetic: false,
-      markets: base.markets,
-      strategyName: base.strategyName,
-      // comparatorAnnVol OMITTED — the levered bundle vol-matches its OWN levered vol
-      // (mirrors the MTM arm at build-payload.ts:437-438; passing the persisted cash
-      // ann_vol would un-lever the comparator vol-match). missingSegments passed
-      // through so the bundle spread does not clobber the base mask with undefined.
-      missingSegments: base.missingSegments,
-      // Phase 169.5 (SC3, D-09, D-21): BTC is re-aligned from the SAME closes and
-      // `dropped` list the server used, carried on the payload. A payload without
-      // the field (hand-built) has no coverage information: BTC is the unavailable
-      // form, never the bundled fixture.
-      benchmarkPrices: base.benchmarkPrices ?? { unavailable: true },
-    });
+    // Phase 169.1 (D-27): the argument object comes from the ONE builder the window
+    // arm also calls, so the two re-derives cannot drift.
+    const lb = deriveSeriesBundle(levered, rederiveArgs(base));
     // WR-02 (Phase 107 review): Sharpe and Sortino are LEVERAGE-INVARIANT at rf=0 —
     // r→L·r cancels in `mean·√P/sd` and `mean·P/ddDev` (compute.ts:41,45). At L=1 the
     // MTM strip shows the PERSISTED dense-Python scalars (the F3 overlay that makes the
@@ -410,6 +429,217 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     writeLeveredView(payload, basis, L, view);
     return view;
   }, [basis, leverage, payload]);
+}
+
+/**
+ * Phase 169.1 (SC10, D-27) — the KPI strip and the metrics rail follow the zoom window.
+ *
+ * Founder, 2026-09-25: "when I look at a different time, it should adjust all KPIs".
+ * The MasterBrush and every chart already read the shared range (`useXRange`); the
+ * three pieces below let the strip and the rail describe that range too:
+ *   - `resolveRangeScope`: is the range the full history or a selection, and which
+ *     dates and count does it cover (one pure rule, so the label and the figures can
+ *     never disagree, T-169-43);
+ *   - `windowView`: the active view with the follow-list fields re-derived on the
+ *     slice through the SAME shared bundle (`deriveSeriesBundle` → compute() /
+ *     jointMetrics, via `rederiveArgs`), no new formula (D-25);
+ *   - `useWindowedView`: the hook every window-following consumer reads.
+ */
+
+/**
+ * D-27 (as amended 2026-09-26, W2) — the ONLY fields a window replaces. Each is
+ * read by a strip or rail figure that follows the window. Everything else
+ * (correlations, style drift, rolling arrays, heatmaps, peer and mandate panels)
+ * stays the active view's, by reference: a window never fabricates them.
+ */
+export const WINDOW_FOLLOW_FIELDS = [
+  "dates",
+  "strategyReturns",
+  "strategyEquity",
+  "strategyDrawdowns",
+  "strategyMetrics",
+  "strategyWorst10",
+  "quantiles",
+  "bootstrapCI",
+  "comparators",
+] as const satisfies ReadonlyArray<keyof FactsheetPayload>;
+
+/** Why a window shows no figures (D-27 "Short slices"; D-82 the fail-closed guard). */
+export type WindowWithheld = "short-slice" | "no-annualization-basis";
+
+/** The active view, re-derived over a window; `withheld` set when it shows no figure. */
+export type WindowedView = FactsheetPayload & { withheld?: WindowWithheld };
+
+/**
+ * The range a view's figures cover. `startIdx` / `endIdx` are the clamped indices
+ * into the ACTIVE view's axis (the rail's rolling summary restricts to them).
+ */
+export type RangeScope = {
+  kind: "full" | "selected";
+  start: string;
+  end: string;
+  n: number;
+  startIdx: number;
+  endIdx: number;
+};
+
+/**
+ * D-27 — the full-history rule. The range is the full history when it starts at
+ * index 0 and ends at or past the SHORTER of the cash axis end and the view's
+ * axis end. That covers the initial and reset range (`fullRange` is cash-sized)
+ * under every basis, an MTM axis longer or shorter than cash included. A full
+ * scope names the VIEW's first and last dates (W3, 2026-09-26): on an MTM axis
+ * longer than cash the reset range's end index is not the view's last day. A
+ * selected scope names the view's dates at the clamped indices, which bound a
+ * crafted `?range` again (T-169-44).
+ */
+export function resolveRangeScope(
+  xRange: readonly [number, number],
+  cashLen: number,
+  view: Pick<FactsheetPayload, "dates">,
+): RangeScope {
+  const viewLen = view.dates.length;
+  const last = Math.max(0, viewLen - 1);
+  const s = Math.min(Math.max(0, Math.floor(xRange[0])), last);
+  const e = Math.min(Math.max(s, Math.floor(xRange[1])), last);
+  const fullEnd = Math.min(cashLen, viewLen) - 1;
+  if (s === 0 && e >= fullEnd) {
+    return { kind: "full", start: view.dates[0] ?? "", end: view.dates[last] ?? "", n: viewLen, startIdx: 0, endIdx: last };
+  }
+  return { kind: "selected", start: view.dates[s], end: view.dates[e], n: e - s + 1, startIdx: s, endIdx: e };
+}
+
+/** The NaN-valued form of a bootstrap metric: no point, no interval, no histogram. */
+const EMPTY_BOOT = { point: NaN, lo: NaN, hi: NaN, hist: { lo: NaN, hi: NaN, bins: [] as number[] } };
+
+/**
+ * Plan-check round 1 W1 (2026-09-30) — the withheld form REPLACES every follow-list
+ * field, so no field keeps a full-history value under a "Selected range" eyebrow.
+ * dates / returns are the window's own (they need no annualization); every figure
+ * is NaN (the formatters render "—", the NaN-withhold device the leverage arm's M-1
+ * comment uses); the curves, Worst 10 and every comparator's summary, joint and
+ * paired-floor reason are empty. `strategyMetrics.start` / `end` are the window's
+ * dates exactly as compute() sets them on a slice, because the rail's Start Date
+ * and End Date rows read them off this object, and `n` is the window's count (the
+ * short-track caveat reads it).
+ */
+function withheldWindowView(
+  view: FactsheetPayload,
+  s: number,
+  e: number,
+  withheld: WindowWithheld,
+): WindowedView {
+  const dates = view.dates.slice(s, e + 1);
+  const n = dates.length;
+  const strategyMetrics = Object.fromEntries(
+    Object.entries(view.strategyMetrics).map(([k, v]) => [k, typeof v === "number" ? NaN : v === null ? null : v]),
+  ) as Record<string, unknown>;
+  strategyMetrics.n = n;
+  strategyMetrics.start = dates[0];
+  strategyMetrics.end = dates[n - 1];
+  strategyMetrics.yearly = {};
+  const quantiles = Object.fromEntries(Object.keys(view.quantiles).map((k) => [k, NaN])) as FactsheetPayload["quantiles"];
+  const bootstrapCI: FactsheetPayload["bootstrapCI"] = {
+    sharpe: { ...EMPTY_BOOT, hist: { ...EMPTY_BOOT.hist, bins: [] }, n_valid: 0 },
+    sortino: { ...EMPTY_BOOT, hist: { ...EMPTY_BOOT.hist, bins: [] }, n_valid: 0 },
+    max_dd: { ...EMPTY_BOOT, hist: { ...EMPTY_BOOT.hist, bins: [] } },
+    n_resamples: 0,
+    block_len: 0,
+    n,
+  };
+  const blank = (b: ComparatorBlock): ComparatorBlock => ({ ...b, summary: null, joint: null, jointWithheld: null });
+  const fields = {
+    dates,
+    strategyReturns: view.strategyReturns.slice(s, e + 1),
+    strategyEquity: [] as number[],
+    strategyDrawdowns: [] as number[],
+    strategyMetrics: strategyMetrics as FactsheetPayload["strategyMetrics"],
+    strategyWorst10: [] as FactsheetPayload["strategyWorst10"],
+    quantiles,
+    bootstrapCI,
+    comparators: {
+      btc: blank(view.comparators.btc),
+      spx: blank(view.comparators.spx),
+      none: blank(view.comparators.none),
+    },
+  };
+  // Narrow on the ingest discriminant before spreading (same reason as Layer 1).
+  return view.ingestSource === "api" ? { ...view, ...fields, withheld } : { ...view, ...fields, withheld };
+}
+
+/**
+ * D-27 — the active view over the window `[startIdx, endIdx]` (clamped). The slice
+ * is the ACTIVE view's own dates and returns (basis and leverage already applied by
+ * `useBasisSeriesView`), re-derived by `deriveSeriesBundle` through `rederiveArgs`.
+ * Only the follow-list fields come from the slice bundle, and its `strategyMetrics`
+ * is the bundle's own: no persisted overlay and no Sharpe / Sortino re-pin, which
+ * describe the WHOLE record (D-27 "No persisted value inside a window"). A
+ * comparator block whose summary and joint are both null in the base view (the
+ * Scenario's inert blocks, an unavailable BTC) stays the base block: a window never
+ * fills a block the full history holds unavailable (W2).
+ *
+ * Withholds (see `withheldWindowView`) below 2 observations, and when the view has
+ * no `periodsPerYear` (the leverage arm's fail-closed rule: never annualize on a
+ * guessed basis; D-82 keeps it for a hand-built or pre-bump cached payload).
+ */
+export function windowView(view: FactsheetPayload, startIdx: number, endIdx: number): WindowedView {
+  const last = Math.max(0, view.dates.length - 1);
+  const s = Math.min(Math.max(0, startIdx), last);
+  const e = Math.min(Math.max(s, endIdx), last);
+  if (e - s + 1 < 2) return withheldWindowView(view, s, e, "short-slice");
+  if (view.periodsPerYear == null) return withheldWindowView(view, s, e, "no-annualization-basis");
+  const slice = view.strategyReturns.slice(s, e + 1).map((value, i) => ({ date: view.dates[s + i], value }));
+  const wb = deriveSeriesBundle(slice, rederiveArgs(view));
+  const keepBase = (b: ComparatorBlock) => b.summary == null && b.joint == null;
+  const fields = {
+    dates: wb.dates,
+    strategyReturns: wb.strategyReturns,
+    strategyEquity: wb.strategyEquity,
+    strategyDrawdowns: wb.strategyDrawdowns,
+    strategyMetrics: wb.strategyMetrics,
+    strategyWorst10: wb.strategyWorst10,
+    quantiles: wb.quantiles,
+    bootstrapCI: wb.bootstrapCI,
+    comparators: {
+      btc: keepBase(view.comparators.btc) ? view.comparators.btc : wb.comparators.btc,
+      spx: keepBase(view.comparators.spx) ? view.comparators.spx : wb.comparators.spx,
+      none: keepBase(view.comparators.none) ? view.comparators.none : wb.comparators.none,
+    },
+  };
+  return view.ingestSource === "api" ? { ...view, ...fields } : { ...view, ...fields };
+}
+
+/**
+ * T-169-45 — one shared windowed view per base view. The strip and every rail panel
+ * read the same window, so the derive runs ONCE per window across consumers (the
+ * leverage arm's H-1 cache, narrowed to one entry: a pan replaces it).
+ */
+const windowedViewCache = new WeakMap<FactsheetPayload, { key: string; view: WindowedView }>();
+// Keyed on the PAYLOAD, with the basis and applied leverage in the entry key: under
+// a non-cash basis each `useBasisSeriesView` instance builds its own Layer-1 merge
+// object, so keying on the view object would derive once per consumer there.
+
+/**
+ * D-27 — the window-following view. At full history it returns the active view BY
+ * REFERENCE, so a reset shows exactly the stored values (the 169-01 overlay, D-10,
+ * and the leverage re-pin, D-25). The range is read through `useDeferredValue`, the
+ * same debounce the leverage read uses, so a brush drag never blocks on the derive.
+ */
+export function useWindowedView(payload: FactsheetPayload): { view: WindowedView; scope: RangeScope } {
+  const base = useBasisSeriesView(payload);
+  const basis = useContext(BasisContext)?.basis ?? "cash_settlement";
+  const appliedLeverage = useAppliedLeverage();
+  const range = useDeferredValue(useXRange().xRange);
+  return useMemo(() => {
+    const scope = resolveRangeScope(range, payload.dates.length, base);
+    if (scope.kind === "full") return { view: base, scope };
+    const key = `${basis}:${appliedLeverage}:${scope.startIdx}:${scope.endIdx}`;
+    const hit = windowedViewCache.get(payload);
+    if (hit?.key === key) return { view: hit.view, scope };
+    const view = windowView(base, scope.startIdx, scope.endIdx);
+    windowedViewCache.set(payload, { key, view });
+    return { view, scope };
+  }, [payload, base, basis, appliedLeverage, range]);
 }
 
 /**

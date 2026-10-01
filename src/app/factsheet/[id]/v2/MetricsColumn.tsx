@@ -7,7 +7,7 @@ import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
 import { pairedFloorReason } from "@/lib/factsheet/joint";
 import { usePayload, useActiveComparator } from "./factsheet-context";
-import { useBasisOrCash, useBasisSeriesView, type Basis } from "./basis-context";
+import { useBasisOrCash, useBasisSeriesView, type Basis, type RangeScope } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel } from "./AnalyticalPanels";
 import { StyleDriftPanel, PeerPercentilePanel, OwnBookDeltaPanel } from "./BatchDPanels";
 import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentMandatePanel } from "./MandatePanels";
@@ -469,6 +469,34 @@ export function monthRowLabel(end: string, now: Date = new Date()): string {
   if (monthsBehind <= 0) return "Month-to-date";
   const named = `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
   return monthsBehind === 1 ? `Last month (${named})` : `Final month (${named})`;
+}
+
+/**
+ * Phase 169.1 (SC10, D-27) — the data eyebrow naming the range the figures beside
+ * it cover: "Full history: <start> – <end>" or "Selected range: <start> – <end>".
+ * The KPI strip and the rail both render it from the same `RangeScope` their
+ * figures come from, so the label and the numbers cannot describe different spans
+ * (T-169-43). DESIGN.md data-eyebrow voice: Geist Mono, uppercase, the 0.18em
+ * tracking step, `text-micro`, muted; dates in the rail's own format.
+ */
+export function RangeEyebrow({
+  scope,
+  surface,
+  className = "",
+}: {
+  scope: RangeScope;
+  surface: "strip" | "rail";
+  className?: string;
+}) {
+  const head = scope.kind === "full" ? "Full history" : "Selected range";
+  return (
+    <p
+      data-testid={`range-eyebrow-${surface}`}
+      className={`font-mono text-micro uppercase tracking-[0.18em] text-text-muted ${className}`}
+    >
+      {`${head}: ${isoToMonthDay(scope.start)} – ${isoToMonthDay(scope.end)}`}
+    </p>
+  );
 }
 
 export function isoToMonthDay(iso: string): string {
