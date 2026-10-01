@@ -76,8 +76,14 @@
 -- DRIFT ROW, NOT `--hash` OF THE SNAPSHOT FILE (a whole-file digest no gate
 -- ever greps).
 --
--- defer_compute_job (4 args), the DRIFT row's `live` column (2 differing lines):
+-- defer_compute_job (4 args), the DRIFT row's `live` column (hunks column 2):
 -- prod-body-ack: ea6803fc52fd5d43e262ccb13673f564c7bd970896ad6c066f3934e37ccdcdfc
+--
+-- mark_compute_job_done (2 args), the DRIFT row's `live` column (hunks column 4):
+-- prod-body-ack: 2315eb47d0f99344679d04cdab6c1b0df6762864d23021907e81dfc687f183e7
+--
+-- mark_compute_job_failed (4 args), the DRIFT row's `live` column (hunks column 2):
+-- prod-body-ack: e40c6150ce7b53ecbf1aff6adaefafc2c2bb007de9961c29c487e7bd95adcaf1
 --
 -- ⚠️ EACH ACK IS OF origin/main, WHICH STANDS IN FOR PROD. It is EARNED only if
 -- VAC-04 on the PR reports that SAME hash for PROD for that function. If it
@@ -307,6 +313,11 @@ $$;
 
 REVOKE ALL ON FUNCTION mark_compute_job_done(UUID, UUID) FROM PUBLIC, anon, authenticated;
 
+-- PD-02: re-issued from 20260603120000's COMMENT; only the errcode wording
+-- moved. "THIS migration" below still names 20260603120000's own change, kept
+-- verbatim.
+COMMENT ON FUNCTION mark_compute_job_done(UUID, UUID) IS 'Terminal success transition. Migration 117 P97 fence + B5 strict-token gate (20260528183100): p_claim_token MUST be non-NULL (NULL raises 22023); mismatch raises SQLSTATE 55006 (object_in_use), which PostgREST answers once. THIS migration (G23-187-mig-01/03): re-applies the GIN-supported set-based `parent_job_ids @> ARRAY[p_job_id]` fan-in advance (the strict-token rewrite had reverted it to a `= ANY(...)` FOR-loop). Preserves the mig 099 Phase-18 atomic UI status bridge.';
+
 -- --------------------------------------------------------------------------
 -- mark_compute_job_failed
 -- --------------------------------------------------------------------------
@@ -410,6 +421,9 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION mark_compute_job_failed(UUID, TEXT, TEXT, UUID) FROM PUBLIC, anon, authenticated;
+
+-- PD-02: re-issued from 20260529180000's COMMENT; only the errcode wording moved.
+COMMENT ON FUNCTION mark_compute_job_failed(UUID, TEXT, TEXT, UUID) IS 'Terminal failure transition. Mig 117 / P97 fence + B5 strict-token follow-up: p_claim_token MUST be non-NULL (NULL raises 22023 invalid_parameter_value); mismatch raises SQLSTATE 55006 (object_in_use), which PostgREST answers once. Backoff schedule preserved verbatim from mig 109 P4. HOTFIX 20260529180000: writes error_kind (not the non-existent last_error_kind that mig 20260528183100 typo-introduced, which 42703-errored every failed mark).';
 
 -- --------------------------------------------------------------------------
 -- Self-verify: catalog reads and random-uuid probes only. Every body check runs
