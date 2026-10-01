@@ -473,6 +473,28 @@ describe("the active day basis moves ONLY ann_vol, sharpe, sortino and the arith
     const r = withConv(flat, isoDays(10), { cumulativeMethod: "arithmetic", dayBasis: "active" });
     expect(Number.isNaN(r.cagr)).toBe(true);
   });
+
+  // 169.1 review MD-03 / SFH MEDIUM-1: pandas `std()` of 0 or 1 active day is NaN,
+  // so the engine stores no volatility. A "0.0%" here would claim the range was
+  // measured and riskless, beside a "—" Sharpe and Sortino.
+  for (const [label, rets] of [
+    ["no non-zero day", [0, 0, 0, 0, 0]],
+    ["one non-zero day", [0, 0.01, 0, 0, 0]],
+  ] as const) {
+    it(`an active basis with ${label} has no ann_vol (NaN, the engine's None), never a measured 0`, () => {
+      for (const method of ["geometric", "arithmetic"] as const) {
+        const r = withConv([...rets], isoDays(5), { cumulativeMethod: method, dayBasis: "active" });
+        expect(Number.isNaN(r.ann_vol), `${method} ann_vol`).toBe(true);
+        expect(Number.isFinite(r.sharpe), `${method} sharpe`).toBe(false);
+      }
+    });
+  }
+
+  it("two non-zero days on the active basis still carry a volatility (the floor is 2, not more)", () => {
+    const r = withConv([0, 0.01, 0, -0.02, 0], isoDays(5), { dayBasis: "active" });
+    expect(Number.isFinite(r.ann_vol)).toBe(true);
+    expect(r.ann_vol).toBeGreaterThan(0);
+  });
 });
 
 describe("the arithmetic method rides the running-sum curves (D-28)", () => {

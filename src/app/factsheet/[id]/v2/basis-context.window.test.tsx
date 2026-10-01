@@ -269,6 +269,29 @@ function mountProbe(payload: FactsheetPayload, basisTo?: Basis) {
   );
 }
 
+describe("windowView — an active-basis range over an idle stretch has no volatility (169.1 review MD-03)", () => {
+  // The zoom clamp admits a 5-observation range. On the active basis a range over
+  // an idle stretch holds 0 or 1 non-zero day, and the engine stores no volatility
+  // for that (pandas std() of < 2 points is NaN). A "0.0%" there would sit beside
+  // the "—" Sharpe as a measured, riskless range.
+  function activeWithIdle(nonZeroInWindow: number): FactsheetPayload {
+    const base = build400();
+    const rets = base.strategyReturns.map((r, i) => (i >= 150 && i <= 154 ? 0 : r));
+    if (nonZeroInWindow === 1) rets[152] = 0.01;
+    return { ...base, strategyReturns: rets, dayBasis: "active" } as FactsheetPayload;
+  }
+
+  for (const k of [0, 1]) {
+    it(`a 5-day range with ${k} non-zero day renders Ann. Vol as an absence (NaN), not 0`, () => {
+      const w = windowView(activeWithIdle(k), 150, 154);
+      expect(w.withheld ?? null).toBeNull();
+      expect(w.strategyMetrics.n).toBe(5);
+      expect(Number.isNaN(w.strategyMetrics.ann_vol)).toBe(true);
+      expect(Number.isFinite(w.strategyMetrics.sharpe)).toBe(false);
+    });
+  }
+});
+
 describe("windowView — an unavailable comparator stays unavailable (W2)", () => {
   it("a BTC block that is unavailable at full history is the base block by reference under a window", () => {
     const n = 400;
