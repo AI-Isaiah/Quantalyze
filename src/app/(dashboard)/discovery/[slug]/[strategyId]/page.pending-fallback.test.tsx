@@ -14,6 +14,15 @@
  * The expected sentence is HAND-TYPED from 167.2-UI-SPEC.md § KCS-10 (KCS10-PUBLIC),
  * never imported: an import would make the oracle agree with whatever the
  * module says.
+ *
+ * Phase 169.1 plan 01 (D-26, D-81): the page now builds through the shared
+ * `fetchAndBuildPayloadWithReason`, which reads the strategy row itself with
+ * the service-role client. Every fake admin client below therefore also
+ * answers that `strategies` read (`withStrategiesRead`), with the same row the
+ * `getStrategyDetail` mock returns. The outage is captured by the shared
+ * resolve stage now, not by the page, so the Sentry assertions pin THAT
+ * capture's shape; what they pin is unchanged: exactly one event per outage,
+ * with the code and the read named.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -54,6 +63,43 @@ const READ_FAILED =
   "We could not load this strategy's factsheet right now. Reload this page to try again.";
 
 /** Every string rendered anywhere in an RSC element tree, concatenated. */
+/** The row the shared path's admin `strategies` read answers; set per case. */
+let adminStrategyRow: Record<string, unknown> | null = null;
+
+/** Set the `getStrategyDetail` answer AND the matching admin `strategies` row. */
+function seedDetail(strategy: Record<string, unknown>, analytics: unknown, disclosureTier: unknown) {
+  vi.mocked(getStrategyDetail).mockResolvedValue({ strategy, analytics, disclosureTier } as never);
+  adminStrategyRow = { ...strategy, status: "published", strategy_analytics: analytics };
+}
+
+/**
+ * Phase 169.1 plan 01: wrap a case's fake service-role client so it also
+ * answers the shared path's `strategies` read (the row seeded above) and its
+ * BTC read (an empty page: no stored history). Every other table is the
+ * case's own fake.
+ */
+function withStrategiesRead(inner: { from: (table: string) => unknown }) {
+  return {
+    from: (table: string) => {
+      if (table === "strategies") {
+        const chain = {
+          select: () => chain,
+          eq: () => chain,
+          maybeSingle: () => Promise.resolve({ data: adminStrategyRow, error: null }),
+        };
+        return chain;
+      }
+      if (table === "benchmark_prices") {
+        const chain: Record<string, unknown> = {};
+        for (const m of ["select", "eq", "gte", "lte", "lt", "gt", "order", "limit"]) chain[m] = () => chain;
+        chain.then = (resolve: (v: unknown) => unknown) => resolve({ data: [], error: null });
+        return chain;
+      }
+      return inner.from(table);
+    },
+  };
+}
+
 function textOf(node: unknown): string {
   if (node == null || typeof node === "boolean") return "";
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -67,8 +113,15 @@ beforeEach(() => {
   vi.mocked(createClient).mockResolvedValue({
     auth: { getUser: () => Promise.resolve({ data: { user: { id: "user-1" } } }) },
   } as never);
-  vi.mocked(getStrategyDetail).mockResolvedValue({
-    strategy: {
+  vi.mocked(createAdminClient).mockReturnValue(
+    withStrategiesRead({
+      from: (table: string) => {
+        throw new Error(`unexpected table ${table}`);
+      },
+    }) as never,
+  );
+  seedDetail(
+    {
       id: STRATEGY_ID,
       name: "Synthetic Strategy",
       codename: null,
@@ -89,9 +142,9 @@ beforeEach(() => {
       returns_denominator_config: null,
     },
     // No analytics row: the payload cannot build, so the fallback renders.
-    analytics: null,
-    disclosureTier: "exploratory",
-  } as never);
+    null,
+    "exploratory",
+  );
 });
 
 describe("discovery page — the fallback when the factsheet payload does not build (WR-01)", () => {
@@ -124,7 +177,10 @@ describe("discovery page — the fallback when the factsheet payload does not bu
  * captures to Sentry with the code as a tag, and says the load failed. A
  * composite whose headline is untrusted (the reader returns null, no throw) is
  * a fact about the row and keeps KCS-10 with no alert: the case below pins that
- * the new line and the capture fire on the outage branch only.
+ * the new line and the outage capture fire on the outage branch only.
+ *
+ * Since 169.1 D-81 the shared resolve stage, not the page, answers the throw
+ * (`read_error`) and captures it, once; the page maps the reason to the line.
  */
 describe("discovery page — a composite's csv_daily_returns read outage (169 D-41)", () => {
   const FULL_CASH = {
@@ -139,13 +195,13 @@ describe("discovery page — a composite's csv_daily_returns read outage (169 D-
 
   /** Re-seed the detail read as a published composite with a valid headline. */
   async function seedComposite() {
-    const base = (await vi.mocked(getStrategyDetail).getMockImplementation()?.(STRATEGY_ID, SLUG, "discovery")) as {
+    const base = (await vi.mocked(getStrategyDetail).getMockImplementation()?.(STRATEGY_ID, SLUG)) as {
       strategy: unknown;
       disclosureTier: unknown;
     };
-    vi.mocked(getStrategyDetail).mockResolvedValue({
-      strategy: base.strategy,
-      analytics: {
+    seedDetail(
+      base.strategy as Record<string, unknown>,
+      {
         computed_at: "2026-09-01T00:00:00Z",
         computation_status: "complete",
         daily_returns: null,
@@ -153,8 +209,8 @@ describe("discovery page — a composite's csv_daily_returns read outage (169 D-
         data_quality_flags: { composite: true },
         metrics_json_by_basis: { cash_settlement: FULL_CASH },
       },
-      disclosureTier: base.disclosureTier,
-    } as never);
+      base.disclosureTier,
+    );
   }
 
   /** The service-role client: the csv read answers with a failed read. */
@@ -165,7 +221,7 @@ describe("discovery page — a composite's csv_daily_returns read outage (169 D-
       order: () => chain,
       limit: () => Promise.resolve({ data: null, error: { message: "synthetic statement timeout", code: "57014" } }),
     };
-    return { from: () => chain };
+    return withStrategiesRead({ from: () => chain });
   }
 
   /**
@@ -184,7 +240,7 @@ describe("discovery page — a composite's csv_daily_returns read outage (169 D-
       { date: "2026-08-02", daily_return: -0.005 },
       { date: "2026-08-03", daily_return: 0.002 },
     ];
-    return {
+    return withStrategiesRead({
       from: () => {
         let after: string | null = null;
         const chain = {
@@ -200,7 +256,7 @@ describe("discovery page — a composite's csv_daily_returns read outage (169 D-
         };
         return chain;
       },
-    };
+    });
   }
 
   it("says the load failed, never KCS-10, and does not throw", async () => {
@@ -237,37 +293,38 @@ describe("discovery page — a composite's csv_daily_returns read outage (169 D-
       await StrategyDetailPage({
         params: Promise.resolve({ slug: SLUG, strategyId: STRATEGY_ID }),
       });
+      // Exactly once: the shared resolve stage captures a build's outage
+      // (`seriesReadError`), and the page adds no second event (169.1 D-81).
       expect(captureToSentry).toHaveBeenCalledTimes(1);
       const [captured, options] = vi.mocked(captureToSentry).mock.calls[0]!;
-      // The reader's own error is sent, so the PostgREST message rides as its
-      // `cause` (169-REVIEW-SFH L-2: an event carrying only the code says
-      // "(none)" for a network failure and nothing more).
       expect(captured).toBeInstanceOf(Error);
-      expect((captured as Error).name).toBe("CompositeSeriesReadError");
-      expect((captured as Error).cause).toBe("synthetic statement timeout");
-      expect(options.level).toBe("error");
+      expect((captured as Error).message).toBe("factsheet resolve: csv_daily_returns read failed (57014)");
       expect(options.tags).toEqual({
-        route: "discovery/strategy-detail",
-        stage: "composite-read",
+        stage: "factsheet-resolve",
+        caller: "build",
         reason: "read_error",
         code: "57014",
         strategy_id: STRATEGY_ID,
         read: "csv_daily_returns",
       });
+      // The PostgREST message rides on the event too (169-REVIEW-SFH L-2: an
+      // event carrying only the code says "(none)" for a network failure and
+      // nothing more).
+      expect(options.extra).toEqual({ errorMessage: "synthetic statement timeout" });
     } finally {
       errSpy.mockRestore();
       warnSpy.mockRestore();
     }
   });
 
-  it("an untrusted composite headline (no outage) keeps KCS-10 and raises no alert", async () => {
-    const base = (await vi.mocked(getStrategyDetail).getMockImplementation()?.(STRATEGY_ID, SLUG, "discovery")) as {
+  it("an untrusted composite headline (no outage) keeps KCS-10 and raises no outage alert", async () => {
+    const base = (await vi.mocked(getStrategyDetail).getMockImplementation()?.(STRATEGY_ID, SLUG)) as {
       strategy: unknown;
       disclosureTier: unknown;
     };
-    vi.mocked(getStrategyDetail).mockResolvedValue({
-      strategy: base.strategy,
-      analytics: {
+    seedDetail(
+      base.strategy as Record<string, unknown>,
+      {
         computed_at: "2026-09-01T00:00:00Z",
         computation_status: "complete",
         daily_returns: null,
@@ -276,8 +333,8 @@ describe("discovery page — a composite's csv_daily_returns read outage (169 D-
         // No cash_settlement headline: the reader returns null, it does not throw.
         metrics_json_by_basis: {},
       },
-      disclosureTier: base.disclosureTier,
-    } as never);
+      base.disclosureTier,
+    );
     vi.mocked(createAdminClient).mockReturnValue(csvRowsAdmin() as never);
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -288,7 +345,19 @@ describe("discovery page — a composite's csv_daily_returns read outage (169 D-
       const text = textOf(jsx);
       expect(text).toContain(KCS10_PUBLIC);
       expect(text).not.toContain(READ_FAILED);
-      expect(captureToSentry).not.toHaveBeenCalled();
+      // No outage event. The one event is the shared resolve stage's
+      // warning-level record of a composite that cannot build (167.2.1 SFH
+      // H-1), which every lane of the shared path raises for this row since
+      // 169.1 D-26 put this page on it; it is not a read_error alert.
+      expect(captureToSentry).toHaveBeenCalledTimes(1);
+      const [, options] = vi.mocked(captureToSentry).mock.calls[0]!;
+      expect(options.level).toBe("warning");
+      expect(options.tags).toEqual({
+        stage: "factsheet-resolve-composite",
+        caller: "build",
+        gate: "headline",
+        strategy_id: STRATEGY_ID,
+      });
     } finally {
       errSpy.mockRestore();
       warnSpy.mockRestore();
@@ -297,11 +366,13 @@ describe("discovery page — a composite's csv_daily_returns read outage (169 D-
 
   it("any other throw from the composite read still propagates", async () => {
     await seedComposite();
-    vi.mocked(createAdminClient).mockReturnValue({
-      from: () => {
-        throw new Error("synthetic unexpected failure");
-      },
-    } as never);
+    vi.mocked(createAdminClient).mockReturnValue(
+      withStrategiesRead({
+        from: () => {
+          throw new Error("synthetic unexpected failure");
+        },
+      }) as never,
+    );
     await expect(
       StrategyDetailPage({ params: Promise.resolve({ slug: SLUG, strategyId: STRATEGY_ID }) }),
     ).rejects.toThrow("synthetic unexpected failure");
@@ -315,7 +386,8 @@ describe("discovery page — a composite's csv_daily_returns read outage (169 D-
  * `CompositeSeriesReadError` on a failed MTM, smoothed MTM or stored cash
  * series read. Uncaught, that reached this page's error boundary: an options
  * strategy's detail page broke on one timeout, and no alert named the read.
- * It is now caught exactly as the composite arm catches it.
+ * It was then caught exactly as the composite arm caught it; since 169.1 D-81
+ * the shared resolve stage answers it `read_error` and captures it once.
  *
  * The same call now receives the strategy's `returns_denominator_config`
  * (SFH H-2 / M-2), so a `simple` single-key row draws the arithmetic curve its
@@ -330,20 +402,20 @@ describe("discovery page — the single-key arm's series reads and returns conve
   }));
 
   async function seedSingleKey(opts: { metricsJsonByBasis: unknown; config: unknown }) {
-    const base = (await vi.mocked(getStrategyDetail).getMockImplementation()?.(STRATEGY_ID, SLUG, "discovery")) as unknown as {
+    const base = (await vi.mocked(getStrategyDetail).getMockImplementation()?.(STRATEGY_ID, SLUG)) as unknown as {
       strategy: Record<string, unknown>;
       disclosureTier: unknown;
     };
-    vi.mocked(getStrategyDetail).mockResolvedValue({
-      strategy: { ...base.strategy, returns_denominator_config: opts.config },
-      analytics: {
+    seedDetail(
+      { ...base.strategy, returns_denominator_config: opts.config },
+      {
         computed_at: "2026-09-01T00:00:00Z",
         computation_status: "complete",
         daily_returns: DAILY,
         returns_series: null,
         data_quality_flags: {},
         metrics_json_by_basis: opts.metricsJsonByBasis,
-        // The seven persisted headline scalars the "discovery" projection
+        // The seven persisted headline scalars the shared path's admin embed
         // carries (Phase 169 SC4, D-10): a rankable row overlays them.
         cumulative_return: 0.0,
         volatility: 0.3,
@@ -353,13 +425,13 @@ describe("discovery page — the single-key arm's series reads and returns conve
         sortino: 0.2,
         calmar: 0.0,
       },
-      disclosureTier: base.disclosureTier,
-    } as never);
+      base.disclosureTier,
+    );
   }
 
   /** The service-role client: every `strategy_analytics_series` read fails. */
   function seriesOutageAdmin() {
-    return {
+    return withStrategiesRead({
       from: (table: string) => {
         if (table !== "strategy_analytics_series") throw new Error(`unexpected table ${table}`);
         const chain = {
@@ -370,7 +442,7 @@ describe("discovery page — the single-key arm's series reads and returns conve
         };
         return chain;
       },
-    };
+    });
   }
 
   /** The FactsheetView element's payload prop, or null when the fallback rendered. */
@@ -404,19 +476,19 @@ describe("discovery page — the single-key arm's series reads and returns conve
       expect(findPayload(jsx), "a payload was built without the MTM series it names").toBeNull();
       expect(text).toContain(READ_FAILED);
       expect(text).not.toContain(KCS10_PUBLIC);
+      // Once, by the shared resolve stage (169.1 D-81), with the read named.
       expect(captureToSentry).toHaveBeenCalledTimes(1);
       const [captured, options] = vi.mocked(captureToSentry).mock.calls[0]!;
-      expect((captured as Error).name).toBe("CompositeSeriesReadError");
-      expect((captured as Error).cause).toBe("synthetic statement timeout");
-      expect(options.level).toBe("error");
+      expect((captured as Error).message).toBe("factsheet resolve: mtm_daily_returns read failed (57014)");
       expect(options.tags).toEqual({
-        route: "discovery/strategy-detail",
-        stage: "single-key-read",
+        stage: "factsheet-resolve",
+        caller: "build",
         reason: "read_error",
         code: "57014",
         strategy_id: STRATEGY_ID,
         read: "mtm_daily_returns",
       });
+      expect(options.extra).toEqual({ errorMessage: "synthetic statement timeout" });
     } finally {
       errSpy.mockRestore();
       warnSpy.mockRestore();
@@ -428,11 +500,13 @@ describe("discovery page — the single-key arm's series reads and returns conve
       metricsJsonByBasis: { mark_to_market: { cumulative_return: 0.01 } },
       config: null,
     });
-    vi.mocked(createAdminClient).mockReturnValue({
-      from: () => {
-        throw new Error("synthetic unexpected failure");
-      },
-    } as never);
+    vi.mocked(createAdminClient).mockReturnValue(
+      withStrategiesRead({
+        from: () => {
+          throw new Error("synthetic unexpected failure");
+        },
+      }) as never,
+    );
     await expect(
       StrategyDetailPage({ params: Promise.resolve({ slug: SLUG, strategyId: STRATEGY_ID }) }),
     ).rejects.toThrow("synthetic unexpected failure");
@@ -441,6 +515,22 @@ describe("discovery page — the single-key arm's series reads and returns conve
 
   it("a `simple` returns_denominator_config draws the arithmetic curve and withholds the leverage what-if", async () => {
     await seedSingleKey({ metricsJsonByBasis: null, config: { cumulative_method: "simple" } });
+    // 169.1 SFH HIGH-1: a build reads the `cash_settlement` conventions echo,
+    // and a FAILED read is now captured. The default double throws on that
+    // table, so it answers here as a real empty read (no echo row, a fact), and
+    // the config tier decides without an outage in play.
+    vi.mocked(createAdminClient).mockReturnValue(
+      withStrategiesRead({
+        from: (table: string) => {
+          if (table !== "strategy_analytics_series") throw new Error(`unexpected table ${table}`);
+          const chain: Record<string, unknown> = {};
+          chain.select = () => chain;
+          chain.eq = () => chain;
+          chain.maybeSingle = () => Promise.resolve({ data: null, error: null });
+          return chain;
+        },
+      }) as never,
+    );
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const payload = findPayload(

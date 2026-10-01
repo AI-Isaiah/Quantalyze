@@ -7,8 +7,8 @@ import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
 import { pairedFloorReason } from "@/lib/factsheet/joint";
 import { usePayload, useActiveComparator } from "./factsheet-context";
-import { useBasisOrCash, useBasisSeriesView, type Basis } from "./basis-context";
-import { CalmarByYearPanel, BootstrapCIPanel } from "./AnalyticalPanels";
+import { useBasisOrCash, useBasisSeriesView, useWindowedView, type Basis, type RangeScope } from "./basis-context";
+import { CalmarByYearPanel, BootstrapCIPanel, FULL_HISTORY_NOTE, ScopeNote } from "./AnalyticalPanels";
 import { StyleDriftPanel, PeerPercentilePanel, OwnBookDeltaPanel } from "./BatchDPanels";
 import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentMandatePanel } from "./MandatePanels";
 
@@ -55,6 +55,42 @@ export function headlineCoverageCaveat(
 }
 
 /**
+ * Phase 169.1 review round 1 (SFH MEDIUM-2) — the chain-broken caveat for a
+ * SELECTED range, rendered in place of {@link headlineCoverageCaveat} while a
+ * range is selected (the strip in FactsheetView.tsx and Main Metrics here).
+ *
+ * A window's figures are re-derived on the slice (`windowView`), which compounds
+ * every return in it. The engine compounds only the record after the last break
+ * (`nav_twr._last_interior_break_suffix`), and `headlineCoversFrom` is that
+ * span's first day. So a range starting ON or AFTER that day compounds only days
+ * the engine also compounds: no caveat. A range starting before it compounds days
+ * the engine leaves out, and the page says so. The sentence holds whether or not
+ * the range also reaches past the date.
+ *
+ * The gates are those of {@link headlineCoverageCaveat}: cash basis, a
+ * chain-broken row, and `headlineCoversFrom` present. With `null` the break
+ * cannot be placed, so every range gets the caveat, without a date. It never
+ * invents one.
+ */
+export function windowCoverageCaveat(
+  dataQuality: FactsheetPayload["dataQuality"],
+  basis: Basis,
+  rangeStart: string,
+  subject: string,
+): string | null {
+  if (basis !== "cash_settlement") return null;
+  if (dataQuality?.twrChainBroken !== true) return null;
+  const from = dataQuality.headlineCoversFrom;
+  if (from === undefined) return null;
+  const date = from === null ? null : isoToMonthDay(from);
+  if (from === null || date === null || date === "—") {
+    return `The record has a break in the return chain at a date this view cannot name, so this range may span it. Its ${subject} compound across any break inside it.`;
+  }
+  if (rangeStart.slice(0, 10) >= from.slice(0, 10)) return null;
+  return `This range starts before ${date}, where the record resumes after its last break in the return chain. Its ${subject} compound returns from before that date, which the full-history figures leave out.`;
+}
+
+/**
  * Editorial right-column metrics. Four named sections — Performance, Risk,
  * Style, Benchmark — each introduced by a serif-italic eyebrow over a thick
  * hairline divider, then a stack of dense KPM tables.
@@ -81,7 +117,12 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // Byte-identical under cash (the view returns payload by reference) and MTM-derived
   // under mark_to_market. `cmp` (the cash comparator) is retained ONLY for the
   // basis-invariant shortName label `bn` below.
-  const view = useBasisSeriesView(payload);
+  // Phase 169.1 (SC10, D-27): the rail's window-dependent figures read the WINDOWED
+  // view, the same one the KPI strip reads. At full history it is the active view
+  // BY REFERENCE, so every figure below is unchanged there; inside a selected range
+  // it is that view re-derived on the slice (`useWindowedView`, basis-context.tsx).
+  const { view, scope } = useWindowedView(payload);
+  const selected = scope.kind === "selected";
   const jointCmp = view.comparators[cmpKey];
   // Phase 103 (MTM-04, root-cause flip) — §I Performance/Main-Metrics + §II
   // MaxDD/Best-Worst read the strategy scalars from the VIEW, so the whole rail
@@ -124,15 +165,21 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // calendar years compute() reports, at Years Observed and in the warning below.
   // Dividing the observation count by the basis read a sparse record short.
   const recordLength = formatRecordLength({ n: m.n, years: m.years });
-  const coverageCaveat = headlineCoverageCaveat(
-    payload.dataQuality,
-    useBasisOrCash(),
-    "Cumulative Return, CAGR and Calmar",
-  );
+  // The stored-headline caveat describes the STORED headline, which a selected range
+  // does not show (D-78). A selected range that starts before the last break gets
+  // its own caveat instead: its re-derived figures compound across days the engine
+  // leaves out (169.1 review round 1, SFH MEDIUM-2; the KPI strip's rule).
+  const railBasis = useBasisOrCash();
+  const railSubject = "Cumulative Return, CAGR and Calmar";
+  const coverageCaveat = selected
+    ? windowCoverageCaveat(payload.dataQuality, railBasis, scope.start, railSubject)
+    : headlineCoverageCaveat(payload.dataQuality, railBasis, railSubject);
 
   return (
     <aside className="flex flex-col gap-12">
       <StrategyThesisPanel />
+      {/* Phase 169.1 (D-27): the range the rail's figures cover, as on the strip. */}
+      <RangeEyebrow scope={scope} surface="rail" />
       <EditorialSection label="I" name="Performance">
         <Panel title="Compound Performance">
           <Kpm>
@@ -175,19 +222,32 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
           {/* Phase 169 D-57: 6 Month / 1 Year are omitted when the STRATEGY's
               window is null (the record is shorter), exactly as in Cumulative
               Return Metrics; a null bench value alone keeps the row. */}
+          {/* Phase 169.1 (D-27): the month, YTD, 3 Month, 6 Month and 1 Year rows end on
+              the RECORD's last date, not the window's, so while a range is selected
+              they are omitted, chosen by the compute() field each reads (never by
+              label: 170-13 labels the month row by the record's state, D-79). */}
+          {selected && (
+            <p className="mb-2 text-fixed-11 text-text-muted" data-testid="window-trailing-note">
+              The trailing and since-inception returns end on the record&apos;s last date, so they are hidden while a range is selected; resetting the range shows them.
+            </p>
+          )}
           <Kpm>
-            <Row label={monthRowLabel(m.end)} value={pct(m.mtd, true)} bench={pct(b?.mtd, true)} />
-            <Row label="Year-to-date" value={pct(m.ytd, true)} bench={pct(b?.ytd, true)} />
-            <Row label="3 Month" value={pct(m.p3m, true)} bench={pct(b?.p3m, true)} />
-            {m.p6m != null && <Row label="6 Month" value={pct(m.p6m, true)} bench={pct(b?.p6m, true)} />}
-            {m.p1y != null && <Row label="1 Year" value={pct(m.p1y, true)} bench={pct(b?.p1y, true)} />}
+            {!selected && (
+              <>
+                <Row windowKey="mtd" label={monthRowLabel(m.end)} value={pct(m.mtd, true)} bench={pct(b?.mtd, true)} />
+                <Row windowKey="ytd" label="Year-to-date" value={pct(m.ytd, true)} bench={pct(b?.ytd, true)} />
+                <Row windowKey="p3m" label="3 Month" value={pct(m.p3m, true)} bench={pct(b?.p3m, true)} />
+                {m.p6m != null && <Row windowKey="p6m" label="6 Month" value={pct(m.p6m, true)} bench={pct(b?.p6m, true)} />}
+                {m.p1y != null && <Row windowKey="p1y" label="1 Year" value={pct(m.p1y, true)} bench={pct(b?.p1y, true)} />}
+              </>
+            )}
             <Row label="Win Rate (days)" value={pct(m.win_rate)} bench={pct(b?.win_rate)} />
             <Row label="Profit Factor" value={num(m.profit_factor)} bench={num(b?.profit_factor)} />
           </Kpm>
         </Panel>
-        <EoyReturnsPanel />
-        <RollingMetricsPanel />
-        <CumulativeReturnsPanel />
+        <EoyReturnsPanel scopeNote={selected ? FULL_HISTORY_NOTE : undefined} />
+        <RollingMetricsPanel scope={scope} />
+        {!selected && <CumulativeReturnsPanel />}
       </EditorialSection>
 
       <EditorialSection label="II" name="Risk">
@@ -196,7 +256,7 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         <Panel title="Max Drawdown" benchHeader={benchThrough != null ? bnDated : undefined}>
           <Kpm>
             <Row label="Max Drawdown" value={pctNeg(m.max_dd)} bench={pctNeg(b?.max_dd)} accent />
-            <Row label="Longest DD (days)" value={String(m.longest_dd)} bench={b ? String(b.longest_dd) : "—"} />
+            <Row label="Longest DD (days)" value={count(m.longest_dd)} bench={count(b?.longest_dd)} />
             <Row label="VaR 95%" value={pct(m.var95, true)} bench="" />
             <Row label="CVaR 95%" value={pct(m.cvar95, true)} bench="" />
             <Row label="Avg Win" value={pct(m.avg_win, true)} bench="" />
@@ -227,7 +287,7 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         <ExtendedMetricsPanel />
       </EditorialSection>
 
-      <EditorialSection label="III" name="Style">
+      <EditorialSection label="III" name="Style" scopeNote={selected ? FULL_HISTORY_NOTE : undefined}>
         <StyleDriftPanel />
         {/* PeerPercentile renders for api strategies (demo/synthesized cohort)
             OR — Phase 42 (PEER-01, ADR-0025) — for the scenario BLEND, which
@@ -272,7 +332,13 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         <EditorialSection label="IV" name={`Benchmark — vs ${bn}`}>
           <BenchmarkMetricsBody
             joint={null}
-            withheldReason={pairedFloorReason(bn, jointCmp.jointWithheld.paired, "record", jointCmp.jointWithheld.floor)}
+            withheldReason={pairedFloorReason(
+              bn,
+              jointCmp.jointWithheld.paired,
+              // D-85: inside a window the count is the slice's, named as the range's.
+              selected ? "range" : "record",
+              jointCmp.jointWithheld.floor,
+            )}
           />
         </EditorialSection>
       ) : null}
@@ -281,7 +347,17 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
 }
 
 /** Editorial section: roman-numeral eyebrow over an Instrument Serif name + thick rule. */
-function EditorialSection({ label, name, children }: { label: string; name: string; children: ReactNode }) {
+function EditorialSection({
+  label,
+  name,
+  children,
+  scopeNote,
+}: {
+  label: string;
+  name: string;
+  children: ReactNode;
+  scopeNote?: string;
+}) {
   return (
     <section className="flex flex-col gap-6">
       <header className="border-b-[2px] border-text pb-2">
@@ -290,6 +366,7 @@ function EditorialSection({ label, name, children }: { label: string; name: stri
             §{label}
           </span>
           <h2 className="font-serif italic text-fixed-22 leading-tight text-text-primary">{name}</h2>
+          {scopeNote && <ScopeNote text={scopeNote} />}
         </div>
       </header>
       {children}
@@ -328,12 +405,20 @@ function Panel({
   children,
   benchHeader,
   hideHeaderRule,
+  scopeNote,
 }: {
   title: string;
   children: ReactNode;
   benchHeader?: string;
   hideHeaderRule?: boolean;
+  /** Phase 169.1 (D-27): "Full history" on a full-history panel while a range is selected. */
+  scopeNote?: string;
 }) {
+  const heading = (
+    <h3 className="text-fixed-12 font-semibold uppercase tracking-[0.18em] text-text-primary">
+      {title}
+    </h3>
+  );
   return (
     <section>
       <header
@@ -342,9 +427,14 @@ function Panel({
           (hideHeaderRule ? "" : "border-b border-border pb-1")
         }
       >
-        <h3 className="text-fixed-12 font-semibold uppercase tracking-[0.18em] text-text-primary">
-          {title}
-        </h3>
+        {scopeNote ? (
+          <div className="flex items-baseline gap-2">
+            {heading}
+            <ScopeNote text={scopeNote} />
+          </div>
+        ) : (
+          heading
+        )}
         {benchHeader != null && benchHeader !== "" && (
           <span className="text-fixed-9 font-mono uppercase tracking-[0.18em] text-text-muted">
             vs {benchHeader}
@@ -364,9 +454,22 @@ function Kpm({ children }: { children: ReactNode }) {
   );
 }
 
-function Row({ label, value, bench, accent }: { label: string; value: string; bench: string; accent?: boolean }) {
+function Row({
+  label,
+  value,
+  bench,
+  accent,
+  windowKey,
+}: {
+  label: string;
+  value: string;
+  bench: string;
+  accent?: boolean;
+  /** Phase 169.1 (D-27): the compute() field of a record-anchored return row. */
+  windowKey?: "mtd" | "ytd" | "p3m" | "p6m" | "p1y";
+}) {
   return (
-    <tr className="border-b border-border/30 last:border-0">
+    <tr className="border-b border-border/30 last:border-0" data-window-key={windowKey}>
       <td className="py-1.5 pr-2 text-text-2">{label}</td>
       <td
         className={
@@ -471,6 +574,34 @@ export function monthRowLabel(end: string, now: Date = new Date()): string {
   return monthsBehind === 1 ? `Last month (${named})` : `Final month (${named})`;
 }
 
+/**
+ * Phase 169.1 (SC10, D-27) — the data eyebrow naming the range the figures beside
+ * it cover: "Full history: <start> – <end>" or "Selected range: <start> – <end>".
+ * The KPI strip and the rail both render it from the same `RangeScope` their
+ * figures come from, so the label and the numbers cannot describe different spans
+ * (T-169-43). DESIGN.md data-eyebrow voice: Geist Mono, uppercase, the 0.18em
+ * tracking step, `text-micro`, muted; dates in the rail's own format.
+ */
+export function RangeEyebrow({
+  scope,
+  surface,
+  className = "",
+}: {
+  scope: RangeScope;
+  surface: "strip" | "rail";
+  className?: string;
+}) {
+  const head = scope.kind === "full" ? "Full history" : "Selected range";
+  return (
+    <p
+      data-testid={`range-eyebrow-${surface}`}
+      className={`font-mono text-micro uppercase tracking-[0.18em] text-text-muted ${className}`}
+    >
+      {`${head}: ${isoToMonthDay(scope.start)} – ${isoToMonthDay(scope.end)}`}
+    </p>
+  );
+}
+
 export function isoToMonthDay(iso: string): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -500,12 +631,18 @@ function num(v: number | null | undefined): string {
   return v.toFixed(2);
 }
 
+/** A day count; "—" when absent or withheld (a withheld window's NaN, D-27 W1). */
+function count(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return String(v);
+}
+
 /**
  * Rolling 6-month metrics summarised across the entire warm-window history:
  * current value (the latest window, "—" when it has none), min, max, average. Lets a reader judge
  * how stable each rolling stat has been over the strategy's life.
  */
-function RollingMetricsPanel() {
+function RollingMetricsPanel({ scope }: { scope: RangeScope }) {
   // Phase 103 (MTM-04 follow-through, Finding B): read the rolling arrays from the
   // basis view — the paired rolling CHARTS already render `view.strategyRolling*`
   // (MTM under the toggle), and the bundle carries the MTM arrays, so the summary
@@ -513,9 +650,15 @@ function RollingMetricsPanel() {
   // The window label rides `view.rollingWindow` so the table's label describes its
   // own (basis-selected) arrays.
   const view = useBasisSeriesView(usePayload());
-  const v = rollingStats(view.strategyRollingVol);
-  const sh = rollingStats(view.strategyRollingSharpe);
-  const so = rollingStats(view.strategyRollingSortino);
+  // Phase 169.1 (D-27): while a range is selected the table summarises the SAME
+  // full-history rolling arrays restricted to the window's indices, so it states
+  // exactly the values the rolling charts draw in that window ("Now" is the value
+  // at the window's last index).
+  const within = (arr: Array<number | null>) =>
+    scope.kind === "selected" ? arr.slice(scope.startIdx, scope.endIdx + 1) : arr;
+  const v = rollingStats(within(view.strategyRollingVol));
+  const sh = rollingStats(within(view.strategyRollingSharpe));
+  const so = rollingStats(within(view.strategyRollingSortino));
   return (
     <Panel title={`Rolling Metrics (${view.rollingWindow?.label ?? "6mo"})`}>
       <table className="w-full text-fixed-12">
@@ -616,7 +759,9 @@ function ExtendedMetricsPanel() {
   // factor/pain/ulcer/…) are pure functions of the daily series, so they all follow
   // the active basis — `view.strategyMetrics` is now the bundle's series-recomputed
   // scalar cache under MTM (the seven persisted HEADLINE scalars stay KpiStrip-owned).
-  const view = useBasisSeriesView(usePayload());
+  // Phase 169.1 (D-27): the windowed view, so the quantile rows and the extended
+  // scalars describe the selected range (the active view by reference at full history).
+  const { view } = useWindowedView(usePayload());
   const m = view.strategyMetrics;
   const q = view.quantiles;
   // Tail Ratio is LABELLED "P95/|P5|", so it must equal exactly that ratio of the
@@ -693,7 +838,9 @@ function WorstDrawdownsTablePanel() {
   // coherent with the Worst-DDs chart bands. Its indices are into the ACTIVE date
   // axis, so BOTH strategyWorst10 AND dates must come from the view (an MTM index
   // mapped onto the cash calendar would mislabel peak/trough/recovery dates).
-  const view = useBasisSeriesView(usePayload());
+  // Phase 169.1 (D-27): the windowed view, whose Worst 10 indices are into its own
+  // (window) dates, so only drawdowns inside the range are listed.
+  const { view } = useWindowedView(usePayload());
   const rows = view.strategyWorst10;
   if (rows.length === 0) return null;
   return (
@@ -769,7 +916,7 @@ function ymd(iso: string | undefined): string {
  * Comparator-reactive — picker swap re-renders the right two columns.
  * Falls back to a strategy-only single column when comparator = NONE.
  */
-function EoyReturnsPanel() {
+function EoyReturnsPanel({ scopeNote }: { scopeNote?: string }) {
   // Phase 103 (MTM-04, root-cause flip): the EOY table follows the active basis to
   // match the rest of the rail (and the EOY bar chart in DistributionPanels). Both
   // the strategy per-year (`view.strategyMetrics.yearly`) and the comparator daily
@@ -795,7 +942,7 @@ function EoyReturnsPanel() {
   const partialYear = hasBench ? comparatorPartialYear(cmp.through, view.dates, COMPARATOR_CALENDARS[cmpKey]) : null;
   if (years.length === 0) return null;
   return (
-    <Panel title="EOY Returns" benchHeader={hasBench ? cmp.shortName : undefined}>
+    <Panel title="EOY Returns" benchHeader={hasBench ? cmp.shortName : undefined} scopeNote={scopeNote}>
       <table className="w-full text-fixed-11">
         <thead>
           <tr className="border-b border-border/60">
