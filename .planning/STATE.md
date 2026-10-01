@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.9.3
-current_phase_name: CLAIMPAIR
+current_phase: 170
+current_phase_name: LAYOUT — page layout reads clean and holds on every page
 status: executing
-stopped_at: Completed 164.9.3-06-PLAN.md
-last_updated: "2026-09-27T15:08:00.000Z"
+stopped_at: Completed 170-10-PLAN.md
+last_updated: "2026-09-27T23:26:18.000Z"
 last_activity: 2026-09-27
-last_activity_desc: Phase 164.9.3 execution started
-state_head: dd42818862a2c2c9ba81cf3d0b1da5bb0fcff35d
+last_activity_desc: Completed 170-10-PLAN.md
+state_head: 85c46849c7c9a2f9778feb5832c788b1db72c605
 progress:
-  total_phases: 73
+  total_phases: 80
   completed_phases: 41
-  total_plans: 353
-  completed_plans: 347
-  percent: 56
+  total_plans: 370
+  completed_plans: 357
+  percent: 51
 ---
 
 ## ⭐ STATE lineage
@@ -179,14 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.9.3 (CLAIMPAIR) — EXECUTING
-Plan: 6 of 6 (01 done: the CLAIMPAIR gate, pre-fix census 14 arms RED with 23505, W-INTRO GREEN; 02 done: the pre-rank exclusion migration, all 15 arms GREEN on the replayed local-stack lane; 03 done: D-09 lane proof, corpus 78 of 78 on the replayed local-stack lane, the gate green on the pg-lane from its own SETUP list; 04 done: all 15 arms bite on the pg-lane through layered twins, runner biting 15; snapshots regenerated; three VAC-04 acks earned; 05 done: FILES_FLOOR 52 -> 53 and ARMS_FLOOR 491 -> 506 from one full run, coverage 53/80, separated in both directions, every census pin moved to its measured value; 06 done: origin/main merged again with the migration still sorting last, TODOS [164.9.3-CLAIM-PAIR-23505] closed, CHANGELOG [0.108.0.0] with VERSION/package.json at 0.108.0.0, SC3 record opened with three PENDING reviewer rows)
-Phase: 169.2 (BENCHFRESH) — EXECUTING
-Plan: 1 of 3
-Phase: 166.4 (BENCHALIGN) — EXECUTING
-Plan: 1 of 4
-Phase: 166.4 (BENCHALIGN) — PLANNED 2026-09-27 (4 plans, 4 waves; on branch feat/166.4-benchalign)
-Plan: 0 of 4
+Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — EXECUTING
+Plan: 8 of 14
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
 Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
@@ -502,7 +496,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 164.9.3
+Status: Executing Phase 170
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -518,7 +512,7 @@ Status: Executing Phase 164.9.3
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-27 — Phase 164.9.3 execution started
+Last activity: 2026-09-27 — Completed 170-10-PLAN.md
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -972,7 +966,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [██████░░░░] 56%
+Progress: [█████░░░░░] 51%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1195,8 +1189,74 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.9.3 P04 | 25 min | 2 tasks | 4 files |
 | Phase 164.9.3 P05 | 57 min | 2 tasks | 5 files |
 | Phase 164.9.3 P06 | 7 min | 2 tasks | 5 files |
+| Phase 170 P02 | 8 min | 3 tasks | 4 files |
+| Phase 170 P03 | 5 min | 3 tasks | 7 files |
+| Phase 170 P04 | 5 min | 2 tasks | 4 files |
+| Phase 170 P05 | 12 min | 2 tasks | 6 files |
+| Phase 170 P06 | 18 min | 2 tasks | 8 files |
+| Phase 170 P07 | 12 min | 3 tasks | 8 files |
+| Phase 170 P08 | 9 min | 2 tasks | 4 files |
+| Phase 170 P09 | 18 min | 3 tasks | 6 files |
+| Phase 170 P10 | 13 min | 2 tasks | 9 files |
 
 ## Accumulated Context
+
+### Phase 170 decisions (plan 02)
+
+- Contract-first geometry spec stays RED at HEAD; assertions are not weakened to pass today.
+- N-STRAT name and tag update goes through getAdmin() via setSeededStrategyNameAndTags.
+- N-MATCH has no match-batch seed; the V960 positive control is the header action bar.
+
+### Phase 170 decisions (plan 03)
+
+- Active-tab scroll stays horizontal-only through computeTabStripScroll; scrollIntoView with block nearest is not reintroduced.
+- Pressed Tweaks tint is aria-pressed:bg-accent/10, the nearest existing accent utility. No new colour.
+
+### Phase 170 decisions (plan 04)
+
+- Empty state prints once in the change-count chip; the summary slot renders only when hasDiffs.
+- Summary items wrap between items: each value-label pair is whitespace-nowrap and the joiner sits outside that span.
+- ResponsiveTable keeps its default hint; list wording is a later copy question.
+
+### Phase 170 decisions (plan 05)
+
+- NowrapWords root is a display:contents div, not a span, so the word spans are the only spans and the name stays in the link's inline flow.
+- Literal space text nodes stay between those spans; dropping them makes noteOf() miss every multi-word name.
+- ShareableLink size defaults to md. Only /strategies passes sm. The discovery detail page is not edited.
+
+### Phase 170 decisions (plan 06)
+
+- Below md, readOnly is forceReadOnly or not isMd. JSX still keys off forceReadOnly so desktop does not flash hidden; CSS hidden md:* hides the write controls.
+- Button omits its base inline-flex when the caller passes a bare hidden class. Tailwind v4 emits inline-flex after hidden, so the base class would keep the control visible.
+- A display name with no email reads "by {name} · Computed {recency}". Unknown is only when both name and email are absent.
+
+### Phase 170 decisions (plan 07)
+
+- The session read stays in the async child. The layout function stays synchronous. JSX is outside the try, because the error-boundaries lint rejects JSX built in try/catch. A failed read still renders Sign in / Sign up.
+- DEFAULT_AUTHENTICATED_ROUTE has one definition. Other copies of the same path were left in place.
+- The one-item note renders when one item resolved, including a single holding. The sentence is the Copywriting Contract literal.
+
+### Phase 170 decisions (plan 08)
+
+- The inset focus ring is on the underline trigger only. The segmented arm keeps the HEAD class strings.
+- The active underline tab is scrolled with computeTabStripScroll from offsetLeft, offsetWidth, scrollLeft and clientWidth. The element scroll-into-view API is not used.
+- A disconnected key row has Reconnect, not Disconnect. That row's action group wraps the buttons it actually renders.
+
+### Phase 170 decisions (plan 09)
+
+- KpiPanel variant defaults to cards. Only the scenario composer passes panel.
+- Panel hairlines are right and top borders, cleared on the last column and the first row with container nth-child, so two columns and four columns do not double the outer edge.
+- The eyebrow is "Scenario blend" in every state. No comparison wording was added.
+- composer-blend-detail stays closed. The composer axe spec opens it before the card checks.
+- SC1-LAYERS stays open. Plan 170-12 also declares it, and REQUIREMENTS.md has no checkbox for it.
+
+### Phase 170 decisions (plan 10)
+
+- The table wrapper carries isolate. The sticky th z-20 and z-30 classes were not changed.
+- The filter bar is top-12 md:top-0 so it sits under the 48 px mobile top bar. The drawer header's bare top-0 was left alone.
+- Strategy names use NowrapWords from plan 170-05. The tag row is flex flex-wrap gap-1 and each tag badge is whitespace-nowrap.
+- The four grey chip sites use text-text-secondary on bg-track. globals.css was not edited.
+- SC2-NOSCROLL stays open. Plans 170-11 and 170-13 also declare it. (k), (l) and CHIP have no later plan and no REQUIREMENTS.md checkbox.
 
 ### Roadmap Evolution
 
@@ -2424,8 +2484,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-27T15:08:00.000Z
-**Stopped At:** Completed 164.9.3-06-PLAN.md
+**Last Date:** 2026-09-27T22:52:00.000Z
+**Stopped At:** Completed 170-08-PLAN.md
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z

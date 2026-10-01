@@ -809,8 +809,15 @@ function NotEnoughDataPanel({ title, body }: { title: string; body: string }) {
  */
 export function OwnerUnpublishedNotice({
   hasActiveShare = false,
+  children,
 }: {
   hasActiveShare?: boolean;
+  /**
+   * Phase 170 C1-F3 — a last row INSIDE the notice box. Only
+   * `OwnerUnpublishedPanel` passes it (its share controls); absent, nothing
+   * renders, so the full-factsheet mount is byte-identical.
+   */
+  children?: React.ReactNode;
 }) {
   return (
     <section
@@ -835,6 +842,7 @@ export function OwnerUnpublishedNotice({
           share link to let someone view it without publishing.
         </p>
       )}
+      {children}
     </section>
   );
 }
@@ -880,20 +888,24 @@ export function OwnerUnpublishedPanel({
 
   return (
     <div className="mb-6">
-      <OwnerUnpublishedNotice hasActiveShare={shareLive} />
-      <div className="-mt-4 mb-2 flex flex-wrap items-center gap-2">
-        <ShareLinkButton
-          strategyId={strategyId}
-          ownerShare={{ hasActiveShare: shareLive }}
-          onShareLiveChange={setShareLive}
-        />
-        {shareLive && (
-          <ShareRevokeControl
+      {/* Phase 170 C1-F3 — the controls are the notice's own last row, one
+          layer, instead of a separate row pulled up under the box by a
+          negative margin. */}
+      <OwnerUnpublishedNotice hasActiveShare={shareLive}>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <ShareLinkButton
             strategyId={strategyId}
+            ownerShare={{ hasActiveShare: shareLive }}
             onShareLiveChange={setShareLive}
           />
-        )}
-      </div>
+          {shareLive && (
+            <ShareRevokeControl
+              strategyId={strategyId}
+              onShareLiveChange={setShareLive}
+            />
+          )}
+        </div>
+      </OwnerUnpublishedNotice>
       {shareNote && (
         <p className="mt-2 text-fixed-12 text-text-muted">{shareNote}</p>
       )}
@@ -1509,8 +1521,13 @@ function KpiStrip() {
   // vs the narrower composer mount), so a container query keeps it from thinking
   // it is at desktop width when it isn't. The 9-cell strip steps up to its full
   // column count only when the CONTAINER is wide (`@5xl`, ≈64rem — the old `lg:`
-  // ~1024px breakpoint as a container width); 7 cells likewise. `grid-cols-3` is
-  // the container-narrow fallback (3 rows of 3). Inline-size containment ONLY —
+  // ~1024px breakpoint as a container width); 7 cells likewise. Below that the
+  // ladder is `grid-cols-2`, then `@md:grid-cols-3` from a 28rem container.
+  // Phase 170 (j), 2026-09-30: three columns at 390 px and in the ~326 px
+  // composer mount broke values mid-number and ellipsised labels ("SOR…",
+  // "CAL…", "MAX…"), so the narrowest rung is two columns. Every cell keeps its
+  // own right + top hairline, so an odd last cell in the 2-column layout needs
+  // no filler. Inline-size containment ONLY —
   // the size-containment variant collapses the strip's block size to 0
   // (Pitfall 1), so the bare `@container` host is deliberate. The host is the
   // enclosing `<section>` (an ANCESTOR of the grid), not the grid itself — an
@@ -1563,7 +1580,7 @@ function KpiStrip() {
           border: "1px solid var(--color-border)",
         }}
       >
-      <div className={`grid grid-cols-3 ${containerCols} @5xl:divide-y-0`} style={{ }}>
+      <div className={`grid grid-cols-2 @md:grid-cols-3 ${containerCols} @5xl:divide-y-0`} style={{ }}>
         {items.map(it => (
           <div
             key={it.label}
@@ -1571,6 +1588,7 @@ function KpiStrip() {
             style={{ borderRight: "1px solid var(--color-border)", borderTop: "1px solid var(--color-border)" }}
           >
             <p
+              data-testid="factsheet-kpi-label"
               className="text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis"
               style={{ color: "var(--color-text-muted)" }}
             >
@@ -1589,6 +1607,7 @@ function KpiStrip() {
                 normal values. The LABEL <p> above KEEPS its pinned bounded-label
                 clip (short labels only). */}
             <p
+              data-testid="factsheet-kpi-value"
               className="mt-1.5 sm:mt-2 font-mono tabular-nums text-h2 leading-tight break-words"
               style={{
                 color:
@@ -1935,7 +1954,7 @@ function ShareLinkButton({
           ? "Copy a public, link-only factsheet URL — recipients see the same page with no outbound navigation"
           : "Copy a private, revocable link to this unpublished factsheet — anyone holding it can view this page until you revoke the link"
       }
-      className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] disabled:opacity-60"
+      className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] disabled:opacity-60"
     >
       {shareButtonLabel(phase, mode, hasActiveShare)}
     </button>
@@ -2003,14 +2022,14 @@ function ShareRevokeControl({
           type="button"
           autoFocus
           onClick={() => void confirmRevoke()}
-          className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+          className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
         >
           Revoke
         </button>
         <button
           type="button"
           onClick={() => setConfirming(false)}
-          className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm text-text-2 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+          className="px-2.5 py-1 text-caption rounded-sm text-text-2 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
         >
           Keep link
         </button>
@@ -2027,7 +2046,7 @@ function ShareRevokeControl({
           setConfirming(true);
         }}
         title="Turn off the private share link — anyone holding it loses access immediately"
-        className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+        className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
       >
         Revoke link
       </button>
@@ -2193,7 +2212,7 @@ function ControlBar({
                 type="button"
                 onClick={resetLeverage}
                 aria-label="Reset leverage to 1×"
-                className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+                className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
               >
                 Reset 1×
               </button>
@@ -2285,10 +2304,23 @@ function ControlBar({
         type="button"
         onClick={resetView}
         title="Reset comparator + visible window to defaults (toggles, persisted layout stay)"
-        className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+        className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
       >
         Reset view
       </button>
+      {/* Phase 170 C1-F2 — Compare sits BEFORE the share controls, so the
+          private-link control is the last action ahead of ComparatorPicker. The
+          bar is `flex flex-wrap`, so it wraps and never overlaps content. */}
+      {!scenarioMode && !shareMode && (
+        <a
+          href={`/compare?ids=${payload.strategyId}`}
+          onClick={() => trackFactsheetEvent("factsheet_v2_compare_click", { strategy_id: payload.strategyId })}
+          title="Compare this strategy against another (multi-strategy overlay)"
+          className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
+        >
+          Compare strategies
+        </a>
+      )}
       {/* Phase 164 (SHARE-04) — a RECIPIENT must never see this control. It
           rebuilds the URL from `window.location` as `<origin><pathname>?share=1`,
           which on the token route would hand out a Copy-Link button that strips
@@ -2314,16 +2346,6 @@ function ControlBar({
           onShareLiveChange={onShareLiveChange}
         />
       )}
-      {!scenarioMode && !shareMode && (
-        <a
-          href={`/compare?ids=${payload.strategyId}`}
-          onClick={() => trackFactsheetEvent("factsheet_v2_compare_click", { strategy_id: payload.strategyId })}
-          title="Compare this strategy against another (multi-strategy overlay)"
-          className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
-        >
-          Compare strategies
-        </a>
-      )}
       <ComparatorPicker />
     </section>
   );
@@ -2340,7 +2362,7 @@ function DisplayMenu() {
   const activeCount = (darkMode ? 1 : 0) + (colorblind ? 1 : 0) + (regimes ? 1 : 0);
   return (
     <details className="relative">
-      <summary className="list-none cursor-pointer px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center gap-1">
+      <summary className="list-none cursor-pointer px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center gap-1">
         Display
         {activeCount > 0 && (
           <span

@@ -195,9 +195,10 @@ describe("StrategyTable visibility — SC-1c: the owner arm renders non-publishe
       />,
     );
 
-    expect(screen.getByText(NAME_PRIVATE)).toBeInTheDocument();
-    expect(screen.getByText(NAME_DRAFT)).toBeInTheDocument();
-    expect(screen.getByText(NAME_PUBLISHED)).toBeInTheDocument();
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(screen.getByRole("link", { name: NAME_PRIVATE })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: NAME_DRAFT })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: NAME_PUBLISHED })).toBeInTheDocument();
   });
 
   it("the DEFAULT recipe (no visibility prop) still drops every non-published row", () => {
@@ -211,9 +212,10 @@ describe("StrategyTable visibility — SC-1c: the owner arm renders non-publishe
     // This is the invariant /discovery/[slug] and /browse/[slug] have relied on
     // since 2eef614a. It is green BEFORE and AFTER the implementation — the
     // default must not widen anything.
-    expect(screen.queryByText(NAME_PRIVATE)).toBeNull();
-    expect(screen.queryByText(NAME_DRAFT)).toBeNull();
-    expect(screen.getByText(NAME_PUBLISHED)).toBeInTheDocument();
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(screen.queryByRole("link", { name: NAME_PRIVATE })).toBeNull();
+    expect(screen.queryByRole("link", { name: NAME_DRAFT })).toBeNull();
+    expect(screen.getByRole("link", { name: NAME_PUBLISHED })).toBeInTheDocument();
   });
 
   it("the owner arm hands the memo a COPY — the caller's array is never re-ordered", () => {
@@ -431,7 +433,8 @@ describe("StrategyTable visibility — Phase 150: the ownership tag is OWNER-ONL
 
     // The row itself must still render — otherwise this assertion is vacuous
     // for the wrong reason (a dropped row also has no tag).
-    expect(screen.getByText(NAME_PUBLISHED)).toBeInTheDocument();
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(screen.getByRole("link", { name: NAME_PUBLISHED })).toBeInTheDocument();
     expect(screen.queryByText(OWN_CAPITAL_LABEL)).toBeNull();
     expect(screen.queryByText(TEAM_REVIEW_LABEL)).toBeNull();
   });
@@ -484,7 +487,8 @@ describe("StrategyTable visibility — Phase 150: the ownership tag is OWNER-ONL
       />,
     );
 
-    expect(screen.getByText(NAME_PUBLISHED)).toBeInTheDocument();
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(screen.getByRole("link", { name: NAME_PUBLISHED })).toBeInTheDocument();
     expect(screen.queryByText(OWN_CAPITAL_LABEL)).toBeNull();
     expect(screen.queryByText(TEAM_REVIEW_LABEL)).toBeNull();
   });

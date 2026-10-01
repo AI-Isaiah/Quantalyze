@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { LegalFooter } from "@/components/legal/LegalFooter";
+import { MarketingHeaderActions } from "@/components/marketing/MarketingHeaderActions";
 
 /**
  * Shared shell for the `(marketing)` route group — landing (`/`), `/legal/*`,
@@ -15,8 +16,12 @@ import { LegalFooter } from "@/components/legal/LegalFooter";
  * single `<h1>`, and metadata export so SEO + the single-landmark discipline
  * (the JOURNEY-03 axe class) are preserved by construction. Server component:
  * no "use client" boundary that could defer the page `<h1>`/metadata or shift
- * hydration. The landing page's authed `redirect("/discovery/…")` stays IN the
- * page, not here.
+ * hydration. The session is read by the async child `<MarketingHeaderActions>`,
+ * not by this function. That child calls `createClient`, which reads cookies,
+ * so `/security`, `/legal/*` and `/demo` render dynamically
+ * (cookies.md: a request-time cookie read in a layout or page opts the route
+ * into dynamic rendering). No cache directive is added here. The landing
+ * page's authed redirect stays IN the page, not here.
  *
  * Nested layouts under the group supply their OWN distinct chrome on top of
  * this one: `/legal` adds its tab-nav, `/demo` adds its sticky DemoBanner.
@@ -37,18 +42,7 @@ export default function MarketingLayout({
             Quantalyze
           </Link>
           <div className="flex items-center gap-2">
-            <Link
-              href="/login"
-              className="inline-flex min-h-[44px] items-center rounded-md px-3 py-2 text-sm font-medium text-text-secondary transition-colors hover:bg-page hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-            >
-              Sign in
-            </Link>
-            <Link
-              href="/signup"
-              className="inline-flex min-h-[44px] items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-            >
-              Sign up
-            </Link>
+            <MarketingHeaderActions />
           </div>
         </div>
       </header>

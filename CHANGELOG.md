@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.116.0.0] - 2026-10-01 — LAYOUT: pages hold at 390 px and desktop 200% zoom, with tab strips that scroll inside themselves, stacked rows, one Scenario blend-window panel and a factsheet that reads as one voice
+
+⭐ **What changed for whoever reads this next.** Phase 170 (LAYOUT) ships plans 01 to 13, gap-closure plans 15 to 20, one round of code review and silent-failure review with four fix topics, and a round-2 confirmation review. This entry covers the branch's 125 non-merge commits after `origin/main` `76bec2022`: research, UI contract, pattern map, plan and plan-check before execution (8); plans 01 to 13 (72); the first verification (`gaps_found`, 9/19) and the gap-closure plan with two plan-check rounds (5); gap plans 15 to 20 (17); the round-1 code review and silent-failure review (2); the four fix topics with their reports and the ROADMAP amendment (14); the CR-01 draft-row e2e case and its record (2); the round-2 confirmation reviews (2); the security and re-verification records (2); and one ROADMAP tick for Phases 159 and 164.1.1 (1). The 12 merge commits are not counted.
+- The supported floor is now 390 px (iPhone 12) and desktop 200% zoom, not 320 px. Every reflow check measures `#main-content` as well as the document, at 390, 640 and 960 CSS px.
+- Tab strips (Allocations, the profile, every underline `Tabs`) stay one line and scroll inside themselves; they never wrap and never widen the page.
+- Rows that used to crush their names (My Strategies, the strategy table, profile key cards, the Scenario footer and member rows) stack or wrap below `md`, and names and tags break only between words.
+- The Scenario tab's blend header, window, timeline and KPI strip are one "Blend window" panel; the factsheet's ControlBar actions read in DM Sans, and its KPI strip follows a 2 / 3 / full container ladder.
+
+⚠️ **A second-digit bump (0.115.0.0 → 0.116.0.0) because layouts move on many pages.** `/allocations`, `/strategies`, `/admin`, `/admin/match`, `/compare`, `/profile`, the published factsheet and the signed-in marketing pages (`/security`, legal) all render differently. No figure changes and no migration. The admin strategies embed now selects the owner's email.
+
+### Added
+- **Signed-in marketing masthead (plan 07).** `/security` and the legal pages show "Go to app" to a signed-in visitor, through a new `MarketingHeaderActions`. The default authenticated route moves to a data-only module, `src/lib/routing/default-route.ts`, read by the proxy, the landing page and the masthead.
+- **`NowrapWords` (plan 05).** A component that keeps each word of a name or tag whole, so a line breaks only between words. Used by `/strategies` and the strategy table.
+- **Shared tab-strip scroll math (plan 03).** `src/lib/tab-strip-scroll.ts` scrolls the selected tab into view; the Allocations tablist and the underline `Tabs` both use it.
+- **"Final month" / "Last month" month row (plan 13, AD-10, amended in review WR-03).** The factsheet's month row in Returns and Cumulative Return Metrics reads `Month-to-date` only while the record's last month is the current UTC month, `Last month (MMM YYYY)` one month behind, and `Final month (MMM YYYY)` from two months behind. The value is unchanged. Recorded in the DESIGN.md Decisions Log.
+
+### Changed
+- **Reflow floor 320 → 390 px (plan 01).** `assertNoReflow` fails when `#main-content` overflows by more than 1 px even if the document does not. The authed sweep runs at V390, V640 and V960, and every remaining 320 px reflow caller moves to 390.
+- **Allocations header (plan 03).** The header wraps, and the tablist scrolls inside its own strip. Tweaks sits inline between Export and + Allocation, and its panel is class-positioned above the mobile nav. **Gap plan 17 (GC-01)** then removed the `sm:` wrap, so the tablist stays one scrolling line at every width.
+- **Scenario footer and member rows (plan 04).** The commit bar wraps inside one opaque box above the mobile nav and prints "No changes yet" once. Member rows scroll inside a labelled region instead of widening the page.
+- **My Strategies row (plan 05, gap plan 17 GC-02, review CR-01).** The row stacks below `md` (it was `sm`), and from `md` up the name block keeps a 160 px floor so the name never paints over the controls. The private-link control is a small bordered secondary peer.
+- **`/admin/match` below 768 px is read-only in fact (plan 06).** Write handlers are no-ops below `md` and the write controls are hidden. `Button` drops its base `inline-flex` when the caller passes `hidden`, because Tailwind v4 emits `.inline-flex` after `.hidden` and the control stayed visible.
+- **Admin Strategy Review owner line (plan 06).** The owner reads name and email, email only, or "Unknown", and the intro count uses the Intro Made filter's words.
+- **`/compare` copy (plan 07).** The empty state names the factsheet's real "Compare strategies" control instead of checkboxes that do not exist, and a one-strategy comparison says a second cannot be added from this page yet.
+- **Underline tab strips and profile key rows (plan 08).** The underline `Tabs` list scrolls on its own axis (segmented tabs are byte-identical), and profile key-card actions wrap so Disconnect sits on its own line below `sm`.
+- **Scenario blend-window panel (plan 09).** The blend header, window, timeline and the four-cell KPI strip are one square panel (eyebrow "Scenario blend"). The repeat distribution and rolling cards sit in one closed section, opened by the axe spec.
+- **Strategy table and grey chips (plan 10).** The sticky header sits in its own stacking context, names and tags stay whole, and the grey data-state chips move to secondary text on track (6.87 : 1, was 4.34 : 1). Recorded in the DESIGN.md Decisions Log.
+- **Factsheet KPI ladder (plan 11).** Two columns below a 28 rem container, three up to 64 rem, then the full row.
+- **Factsheet ControlBar voice (plan 12).** Display, Reset view, Reset 1×, the share and revoke controls and Compare strategies move to the DM Sans sentence-case button voice; SectionNav keeps the mono eyebrow. The share controls sit inside the owner notice. Recorded in the DESIGN.md Decisions Log.
+
+### Fixed
+- **A missing allocator preferences row no longer 500s `/admin/match/<id>` (gap plan 19).** The payload builder reads the row with `castRowOrNull`.
+- **The ResponsiveTable scroll region contains its sr-only labels (gap plan 16).** Without `relative`, the labels' containing block was the page and they widened the composed Scenario document.
+- **Tweaks keyboard path (review WR-01).** Opening moves focus into the panel; Escape or × returns it to the toggle. The toggle carries `aria-expanded` and `aria-controls` while the panel exists.
+- **Long hyphenated strategy names (review WR-02).** `NowrapWords` takes `breakOverlong`, so a name longer than its block breaks inside the `/strategies` name block instead of overflowing it.
+- **Admin queue reads show their errors (review SFH-3).** A failed queue query on `/admin` logs the query name and renders the admin error state instead of "All caught up".
+- **The masthead session read (review SFH-4).** It rethrows framework errors with `unstable_rethrow` and logs a real failure, then falls back to the signed-out links. Plan 07 had already moved the masthead JSX outside the session `try`.
+- **Preferences panel below 768 px (review SFH-5).** With the panel open and the viewport narrowed below 768 px, Save is disabled with a visible read-only notice and the submit is refused; a refused recompute shows a status notice instead of being dropped silently.
+- **Seed helper (plan 02).** The layout spec sets the strategy name through the guarded seed helper, which asserts a non-production URL before any write.
+
+### Tests
+- **Seeded narrow-layout geometry (plan 02).** A new `e2e/layout-narrow.spec.ts` covers every criterion-2 item at V390, V640 and V960 and is wired into the `e2e-seeded` list in `ci.yml`. It was written against the fixed UI, so open defects stayed RED until their plans landed.
+- **Geometry helpers.** `e2e/helpers/geometry.ts` adds `assertFitsOrScrollsInside` (the GC-01 tab-strip contract, gap plan 18) with four server-free Chromium fixtures. The reflow offender walk follows the containing-block chain (gap plan 15) and names an absolutely positioned escapee. The helper measures ancestor `overflow-hidden` clipping and is used on the profile Disconnect check (review SFH-2).
+- **N-TABLE and N-STRAT (gap plan 18, review WR-04).** N-TABLE anchors on the strategy table and asserts a sticky cell reached each Sort select before probing it; N-STRAT asserts the GC-02 row shape; SC2-PROFILE scrolls Disconnect into view first.
+- **CR-01 draft-row case.** A seeded DRAFT row (the widest control group) at V768 and V800 asserts a name block of at least 160 px, no overlap of the name or its block with the controls, and that the row shows Submit for Review. The seed helper takes an optional status.
+- **Goldens (gap plan 20, GC-03).** Four 320 px portrait svg-chart-parity goldens are re-baked for a 1 px sub-pixel shift.
+- Every plan and fix records a RED-at-HEAD or neuter run in its SUMMARY or fix report. New vitest files pin the masthead, `NowrapWords`, `ShareableLink`, `KpiPanel`, the admin page's query errors, the month row and chip contrast (`tests/a11y/chip-contrast.test.ts`).
+
+### Notes
+- **Planning and review records.** The phase was researched, given a UI design contract and a pattern map, planned in 14 waves and plan-checked before execution; the census line is printed from Node. Plans 11 and 12 carry a pipe-free Phase 169 gate. Plans 11 and 13 record SHA-bound verdicts that items (b), (c) and (e) have no factsheet-owned offender at their SHA, so they got no layout edit, and gap plan 16 records an audit of the composer's row renderers and `offsetParent` reads. The first verification found eight gaps at `650448ee8`; the gap-closure plans passed plan-check after two rounds. Four fix topics answered the round-1 reviews: A (`/strategies` row, CR-01 and WR-02), B (e2e geometry, WR-04 and SFH-2), C (Tweaks focus WR-01 and month label WR-03), and D (admin queue errors SFH-3, masthead SFH-4, preferences panel SFH-5); the ROADMAP records the GC-02 and month-label amendments. Round 2 confirmed all ten round-1 findings fixed.
+- **Verification `human_needed`, 18/20,** bound to CI run `36829190398` (`e2e-seeded`: 200 passed, 11 skipped, 1 flaky, 0 failed). Security `SECURED`, `threats_open: 0`.
+- **ROADMAP housekeeping.** Phases 159 and 164.1.1 have their plan counts ticked complete.
+
+### Known limits
+- **Recorded, not fixed (round 2, MEDIUM, founder rule).** (1) The admin dashboard throws on any one queue error, so a persistently failing query blanks all four queues, including the only approval surface. (2) During an auth outage the marketing masthead still shows "Sign in" with no log line, because `getUser()` returns network and 5xx failures instead of throwing, so they take the unlogged anonymous path.
+- **Plan 170-14, the post-deploy browser pass, is not done.** Every SC3 route at 390 × 844 and desktop 200% zoom in the logged-in browser, bound to the deploy SHA, runs after this deploys. So does SC1's visual judgment of whether the factsheet and Allocations panels still read as stacked layers.
+- **Two founder decisions are pending after deploy.** FC-1: the Scenario-tab layer-deletion options (b) to (e), shown on 390 px and 200% zoom screenshots. FC-2: which site carries the venue label on CSV-ingested strategies.
+- **The `e2e-seeded` evidence is per-run.** The job uses the dot reporter and uploads no Playwright report, so per-row binding rests on the job's totals and on the rows that log their own marker.
+
 ## [0.115.0.0] - 2026-09-30 — ALLOCTRUTH: the Allocations Risk tab and alpha/beta read the book's own series and the live BTC feed, the Scenario pairs with BTC closes through one function, and missing prices are "—", never 0%
 
 ⭐ **What changed for whoever reads this next.** Phase 169.4 (ALLOCTRUTH) ships plans 01 to 08 and three code-review rounds. This entry covers the branch's 59 non-merge commits after `origin/main` `f1ca32b56`: the replan and three plan-check revisions (5), plans 01 to 08 with two founder checkpoints (35), three review rounds with their fix groups and reports (17), and the verification and security records (2). Merges of `origin/main` and of the fix branches are not counted.

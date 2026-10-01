@@ -167,7 +167,8 @@ describe("Cumulative Return Metrics: 3 Year / 5 Year rows exist only when the re
     expect(labels).not.toContain("3 Year");
     expect(labels).not.toContain("5 Year");
     expect(rowValue(panel, "Since Inception")).toBe(pctSigned(payload.strategyMetrics.cum_ret));
-    const kept = ["Month-to-date", "3 Month", "Year-to-date", "Since Inception", "CAGR"];
+    // Phase 170 AD-10: dense(166) ends 2024-06-14, an ended record, so its month row names that month.
+    const kept = ["Final month (Jun 2024)", "3 Month", "Year-to-date", "Since Inception", "CAGR"];
     expect(labels.filter((l) => kept.includes(l))).toEqual(kept);
   });
 

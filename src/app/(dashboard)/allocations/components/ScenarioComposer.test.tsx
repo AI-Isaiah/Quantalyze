@@ -5677,6 +5677,43 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
         screen.queryByRole("group", { name: "Data sources" }),
       ).not.toBeInTheDocument();
     });
+
+    // Phase 170 (2026-09-27, N-SCN item (d)): the fixed-anatomy member rows
+    // scroll inside one labelled focusable region instead of widening the page.
+    // RED at HEAD — the ul has no ResponsiveTable ancestor.
+    it("wraps the constituent list in a focusable region named Strategies and weights", () => {
+      renderPerKey(makePerKeyPayload());
+      const list = screen.getByTestId("scenario-constituent-list");
+      const region = screen.getByRole("region", {
+        name: /^Strategies and weights/,
+      });
+      expect(region).toContainElement(list);
+      expect(region.tabIndex).toBe(0);
+      expect(list.className).toContain("min-w-max");
+      expect(list.className).toContain("grid");
+      expect(list.className).toContain("gap-2");
+    });
+
+    it("keeps both column-header strips inside the same list as the rows", () => {
+      renderPerKey(
+        makePerKeyPayload({
+          strategies: [bookStratWithProvenance("hdr-added", "Hdr Added", {})],
+        }),
+      );
+      addStrategy({
+        id: "hdr-added",
+        name: "Hdr Added",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      });
+      const list = screen.getByTestId("scenario-constituent-list");
+      expect(list).toContainElement(
+        screen.getByTestId("scenario-perkey-header"),
+      );
+      expect(list).toContainElement(
+        screen.getByTestId("scenario-added-header"),
+      );
+    });
   });
 
   describe("provenance badge", () => {
@@ -10835,7 +10872,9 @@ describe("ScenarioComposer — Phase 147 SCEN-01 honest empty state (SC4)", () =
     });
 
     const chip = within(addedRow()).getByText("No data");
-    expect(chip.className).toContain("text-text-muted");
+    // Phase 170-10: the grey data-state chip reads as secondary text on the track
+    // (AA contrast; muted on bg-track was 4.34:1 at 11px).
+    expect(chip.className).toContain("text-text-secondary");
     expect(chip.className).toContain("bg-track");
     expect(appliedNegativeTokens(addedRow())).toEqual([]);
     // Non-vacuous: the scanner DOES see this row's classes (it finds the
@@ -17772,5 +17811,187 @@ describe("ScenarioComposer — 167.1.2 SC-4 zero weight mass renders no result",
     expect(screen.getByTestId("scenario-blend-header").textContent).toBe(
       "No weight on the selected strategies — not a blend",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 170 / SC1-LAYERS (C1-A2, 2026-09-28) — the scenario KPI strip stops
+// being a second free-standing KPI layer. It is the last row of one square
+// Blend-window data panel under a non-comparative "Scenario blend" eyebrow.
+// KpiStrip is mocked in this file, so the case pins the shell and the
+// variant passthrough; cell values, pills and sub-lines stay in KpiStrip's
+// own suites (which this phase does not edit).
+// ---------------------------------------------------------------------------
+
+function classTokens(className: string): string[] {
+  return className.split(/\s+/).filter(Boolean);
+}
+
+/** The square Blend-window panel: border + surface, no radius. */
+function blendWindowPanel(from: HTMLElement): HTMLElement {
+  let el: HTMLElement | null = from;
+  while (el) {
+    const tokens = classTokens(el.className || "");
+    if (
+      tokens.includes("border") &&
+      tokens.includes("border-border") &&
+      tokens.includes("bg-surface") &&
+      !tokens.some((token) => token.startsWith("rounded"))
+    ) {
+      return el;
+    }
+    el = el.parentElement;
+  }
+  throw new Error("blend window panel not found");
+}
+
+describe("ScenarioComposer — Phase 170 SC1-LAYERS blend window (C1-A2)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    cleanup();
+  });
+
+  it("the scenario KPI strip sits in one square panel under a non-comparative Scenario blend eyebrow", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const eyebrow = screen.getByText("Scenario blend");
+    const kpi = screen.getByTestId("kpi-strip-mock");
+    // The eyebrow is immediately above the KPI group, not a sibling section.
+    expect(eyebrow.nextElementSibling).toBe(kpi);
+    expect(eyebrow.className).toContain("text-micro");
+    expect(eyebrow.className).toContain("font-mono");
+    expect(eyebrow.className).toContain("uppercase");
+    expect(eyebrow.className).toContain("tracking-[0.18em]");
+    expect(eyebrow.className).toContain("text-text-muted");
+    // Frozen 170.1 COPY item (b): the eyebrow does not say what deltas compare
+    // against. The row's only words are the label itself.
+    expect(eyebrow.textContent).toBe("Scenario blend");
+    expect(eyebrow.parentElement?.textContent?.trim()).toBe("Scenario blend");
+    const panel = blendWindowPanel(kpi);
+    expect(panel).toContainElement(eyebrow);
+    expect(classTokens(panel.className).some((token) => token.startsWith("rounded"))).toBe(
+      false,
+    );
+    const props = vi.mocked(KpiStrip).mock.calls.at(-1)?.[0];
+    expect(props?.mode).toBe("scenario");
+    expect(props?.variant).toBe("panel");
+  });
+
+  it("C1-A1: with a coverage window the header, control and timeline are hairline rows of the blend panel, ahead of the KPI row", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload(unequalSpanBook())}
+        allocatorId={`${ALLOCATOR_A}-p170-rows`}
+        allocatorMandate={null}
+      />,
+    );
+    const panel = screen.getByTestId("scenario-blend-window");
+    const rows = Array.from(panel.children);
+    expect(rows).toHaveLength(4);
+    const header = screen.getByTestId("scenario-blend-header");
+    const windowRow = screen.getByTestId("scenario-coverage-window");
+    const timeline = document.getElementById("scenario-coverage-timeline");
+    expect(timeline).not.toBeNull();
+    expect(rows[0]).toBe(header.parentElement);
+    expect(rows[1]).toBe(windowRow);
+    expect(rows[2]).toBe(timeline!.parentElement);
+    expect(rows[3]).toContainElement(screen.getByText("Scenario blend"));
+
+    // Row 1 is padding only. Rows 2–4 carry the interior hairline.
+    expect(classTokens(rows[0].className)).toEqual(
+      expect.arrayContaining(["px-4", "py-3"]),
+    );
+    expect(classTokens(rows[0].className)).not.toContain("border-t");
+    for (const row of rows.slice(1)) {
+      const tokens = classTokens(row.className);
+      expect(tokens).toContain("border-t");
+      expect(tokens).toContain("border-border");
+    }
+    // 2026-09-28 Phase 170 C1-A1 — the window control is a panel row, not its
+    // own rounded box. The class it replaced was
+    // `mt-6 flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface px-4 py-3`.
+    // RT-5 still focuses this same element (tabIndex -1, same testid).
+    const windowTokens = classTokens(windowRow.className);
+    expect(windowTokens).not.toContain("rounded-md");
+    expect(windowTokens.some((token) => token.startsWith("rounded"))).toBe(false);
+    expect(windowTokens).not.toContain("border");
+    expect(windowTokens).not.toContain("bg-surface");
+    expect(windowTokens).not.toContain("mt-6");
+    expect(windowTokens).toEqual(
+      expect.arrayContaining([
+        "flex",
+        "flex-wrap",
+        "items-center",
+        "gap-3",
+        "px-4",
+        "py-3",
+      ]),
+    );
+    expect(windowRow).toHaveAttribute("tabindex", "-1");
+  });
+
+  it("C1-A1: with no window bounds the blend panel is the KPI row alone and that row has no leading hairline", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={`${ALLOCATOR_A}-p170-nowindow`}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.queryByTestId("scenario-coverage-window")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("scenario-blend-header")).not.toBeInTheDocument();
+    expect(document.getElementById("scenario-coverage-timeline")).toBeNull();
+    const panel = screen.getByTestId("scenario-blend-window");
+    const rows = Array.from(panel.children);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toContainElement(screen.getByText("Scenario blend"));
+    expect(classTokens(rows[0].className)).not.toContain("border-t");
+  });
+
+  it("C1-A3: the distribution and rolling cards sit in one closed section, and their headings are h3", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={`${ALLOCATOR_A}-p170-blend-detail`}
+        allocatorMandate={null}
+      />,
+    );
+    const details = document.getElementById(
+      "composer-blend-detail",
+    ) as HTMLDetailsElement | null;
+    expect(details).not.toBeNull();
+    expect(details!.tagName).toBe("DETAILS");
+    // Closed by default. CollapsibleSection keeps children mounted, so both
+    // data-panels are in the DOM while the section is shut.
+    expect(details!.open).toBe(false);
+    expect(details!.querySelector("summary")?.textContent).toContain(
+      "Blend distribution and rolling windows",
+    );
+    const dist = details!.querySelector(
+      '[data-panel="blend-returns-distribution"]',
+    );
+    const roll = details!.querySelector('[data-panel="blend-rolling"]');
+    expect(dist).not.toBeNull();
+    expect(roll).not.toBeNull();
+    // 2026-09-28 Phase 170 C1-A3 — these two headings drop from h2 to h3 under
+    // the section title. Size and weight classes stay `text-base font-semibold`.
+    // The pre-existing getByText pins in the Phase 30 block still match the
+    // words; they never pinned the heading level.
+    const distHeading = dist!.querySelector("h3");
+    const rollHeading = roll!.querySelector("h3");
+    expect(distHeading?.textContent).toBe("Returns distribution");
+    expect(rollHeading?.textContent).toBe("Rolling metrics");
+    expect(distHeading?.className).toContain("text-base");
+    expect(distHeading?.className).toContain("font-semibold");
+    expect(rollHeading?.className).toContain("text-base");
+    expect(rollHeading?.className).toContain("font-semibold");
+    expect(dist!.querySelector("h2")).toBeNull();
+    expect(roll!.querySelector("h2")).toBeNull();
   });
 });

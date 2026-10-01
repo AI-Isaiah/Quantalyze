@@ -60,7 +60,16 @@ export function ResponsiveTable({
       // region — the browser default outline paints outside the box and is
       // clipped by ancestor overflow-hidden panels (WCAG 2.4.7). Central fix
       // for every ResponsiveTable consumer (MetricsColumn, StressWindowsPanel …).
+      //
+      // Phase 170 gap 1: `relative` makes this region the containing block of
+      // its absolutely positioned descendants, notably `sr-only` labels. Without
+      // it their containing block was the page, so they escaped this scroller
+      // and widened the document (the composer's "Strategies and weights" list).
+      // With no offset or z-index, `relative` neither moves the box nor creates
+      // a stacking context, and `position: sticky` headers inside keep this
+      // region as their scroll container, as before.
       className={[
+        "relative",
         "overflow-x-auto",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent",
         className,
