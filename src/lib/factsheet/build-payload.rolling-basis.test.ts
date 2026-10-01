@@ -146,6 +146,42 @@ describe("a gapped calendar composite's rolling volatility and Sortino run over 
   });
 });
 
+describe("an ACTIVE-day-basis gapped composite's rolling volatility and Sortino still run over the zero-filled series (169.1 review MD-02)", () => {
+  // The engine rolls vol and Sortino on `returns`, which for a composite is the
+  // gap-filled calendar series under EVERY day basis; the day basis moves only
+  // `_rolling_basis`, the rolling Sharpe. Before MD-02 the active arm rolled vol
+  // and Sortino over the present days, so this composite's rolling charts and
+  // the Rolling Metrics table disagreed with the engine at full history.
+  it("at the last date each equals the rolling function over the zero-filled twin and differs from its present-days value; the rolling Sharpe stays on the active days", () => {
+    const p = build(gappedRows(), { dataQuality: { composite: true }, dayBasis: "active" } as Partial<BuildFactsheetOpts>);
+    expect(p.dayBasis).toBe("active");
+    const w = p.rollingWindow.window;
+    const ppy = p.periodsPerYear!;
+    const z = zeroFill(p);
+    const lastOff = z.rets.length - 1;
+    const lastIdx = p.dates.length - 1;
+
+    for (const [name, fn, got] of [
+      ["rollingVol", rollingVol, p.strategyRollingVol],
+      ["rollingSortino", rollingSortino, p.strategyRollingSortino],
+    ] as const) {
+      expect(got.length, name).toBe(p.dates.length);
+      const engine = fn(z.rets, w, ppy)[lastOff] as number;
+      const presentDays = fn(p.strategyReturns, w, ppy)[lastIdx] as number;
+      expect(Number.isFinite(engine) && Number.isFinite(presentDays), name).toBe(true);
+      expect(relClose(engine, presentDays, 1e-6), `${name}: the fixture must tell the two apart`).toBe(false);
+      expect(relClose(got[lastIdx] as number, engine), `${name}: ${got[lastIdx]} vs ${engine}`).toBe(true);
+    }
+
+    // The day basis still moves the rolling Sharpe: the active days (here every
+    // present day is non-zero), never the zero-filled series.
+    const active = p.strategyReturns.filter((r) => r !== 0);
+    expect(active.length).toBe(p.strategyReturns.length);
+    const wantSharpe = rollingSharpe(active, w, ppy)[active.length - 1] as number;
+    expect(relClose(p.strategyRollingSharpe[lastIdx] as number, wantSharpe)).toBe(true);
+  });
+});
+
 describe("where the engine's `returns` is every given day, the rolling statistics are unchanged (D-36, D-39)", () => {
   const same = (p: FactsheetPayload, which: ("vol" | "sharpe" | "sortino")[]) => {
     const w = p.rollingWindow.window;

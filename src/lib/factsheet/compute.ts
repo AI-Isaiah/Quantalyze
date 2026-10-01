@@ -79,7 +79,13 @@ export function compute(
   } else {
     cagr = years > 0 && eq[n - 1] > 0 ? Math.pow(eq[n - 1], 1 / years) - 1 : 0;
   }
-  const annVol = basisSd * Math.sqrt(periodsPerYear);
+  // A basis series of 0 or 1 return carries no deviation: the engine's
+  // `stat_returns.std()` of it is NaN, stored as None (metrics.py `_safe_float`).
+  // `dispersion` reports sd 0 there, which would render a measured-looking "0.0%"
+  // beside a "—" Sharpe. Reachable on the active basis, where a window over an
+  // idle stretch holds fewer than two non-zero days (169.1 review MD-03). On the
+  // calendar basis basisN = n >= 2 on every rendered path, so nothing moves there.
+  const annVol = basisN >= 2 ? basisSd * Math.sqrt(periodsPerYear) : NaN;
   // The Sharpe is the shared one. A null (no dispersion, or a non-finite
   // return) stays an absence: NaN, which every factsheet formatter renders as
   // "—", as the OG card and the tearsheet do for the same series (founder
