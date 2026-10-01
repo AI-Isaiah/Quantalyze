@@ -44,6 +44,7 @@ import {
   readCompositeFactsheet,
   singleKeyDataQuality,
   readSingleKeyBasisOpts,
+  readCashConventions,
 } from "./composite-read-path";
 import { resolveDailyReturnSeries } from "./allocator-portfolio-payload";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
@@ -510,9 +511,10 @@ async function resolveFactsheetInputs(
   // stage the build has no null exit (167.2.1-REVIEW WR-04), so an outage there
   // could only have been a throw that no lane answers, or the old degrade the
   // public cache stored for the run. A clean row with no by-basis object reads
-  // nothing (the shared cheap predicates), so the hot non-options path, the
-  // probe included, stays roundtrip-free; a chain-broken row reads its stored
-  // cash series once (SFH H-1).
+  // no basis series (the shared cheap predicates), so the hot non-options path
+  // stays free of series roundtrips; a chain-broken row reads its stored cash
+  // series once (SFH H-1). Since Phase 169.1 (D-83) a BUILD also reads the
+  // conventions echo once (below); a probe reads nothing here.
   //
   // MTM-01 (Phase 102): a single-key OPTIONS strategy also persists its MTM
   // basis (`metrics_json_by_basis.mark_to_market`) + an honest degrade reason.
@@ -543,6 +545,14 @@ async function resolveFactsheetInputs(
   // scalar objects).
   let singleKeyOpts: Awaited<ReturnType<typeof readSingleKeyBasisOpts>> | undefined;
   if (!isComposite) {
+    // Phase 169.1 (D-83 (a), D-30): a BUILD reads the conventions the analytics
+    // service froze into the cash_settlement series row, so the curve and the day
+    // basis follow what the stored headline was computed under, even when the live
+    // config was edited after the run. A probe decides buildability, which does not
+    // depend on the method, so /strategies probes issue no extra query; it resolves
+    // from the config tier. The read never throws: a failure logs and degrades to
+    // the config tier. Same service-role handle, behind the same visibility gate.
+    const cashConventions = caller === "build" ? await readCashConventions(supabase, id) : null;
     try {
       singleKeyOpts = await readSingleKeyBasisOpts(
         () => supabase,
@@ -551,12 +561,12 @@ async function resolveFactsheetInputs(
         analytics?.metrics_json_by_basis,
         analytics?.computation_status,
         analytics,
-        // SFH H-2 (review round 1): the stored headline was computed under this
-        // config, so the curve is drawn on the same cumulative method.
+        // SFH H-2 (review round 1): the config is the LAST tier of the method and
+        // day basis, after the frozen echo (D-83).
         strategy.returns_denominator_config,
         // A probe never captures (167.2.1-REVIEW-R2 WR-01); a build captures a
         // persisted-headline defect once.
-        { captureDefects: caller === "build" },
+        { captureDefects: caller === "build", cashConventions },
       );
     } catch (err) {
       if (!(err instanceof CompositeSeriesReadError)) throw err;
