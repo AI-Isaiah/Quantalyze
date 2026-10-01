@@ -196,6 +196,10 @@ describe("a failed conventions read degrades to the config tier and never breaks
     const hit = error.mock.calls.find((c) => JSON.stringify(c).includes("synthetic conventions outage"));
     expect(hit, "a console.error carrying the read's message").toBeDefined();
     expect(JSON.stringify(hit)).toContain("s-conv");
+    // SFH HIGH-1 (169.1 review round 1): the failure is RETURNED beside
+    // buildOpts, so the resolve stage can capture it and keep the build out of
+    // the public cache. A console.error alone never reaches Sentry here.
+    expect(built!.conventionsReadFailure).toEqual({ code: "57014", message: "synthetic conventions outage" });
   });
 
   it("a THROWING query chain logs an error and degrades the same way", async () => {
@@ -204,9 +208,10 @@ describe("a failed conventions read degrades to the config tier and never breaks
     expect(out).not.toBeNull();
     expect(out!.buildOpts.dayBasis).toBe("active");
     expect(error.mock.calls.some((c) => JSON.stringify(c).includes("synthetic chain throw"))).toBe(true);
+    expect(out!.conventionsReadFailure).toEqual({ code: "threw", message: "synthetic chain throw" });
   });
 
-  it("a client that does not answer the conventions query at all (from() returns undefined) still builds", async () => {
+  it("a client that does not answer the conventions query at all (from() returns undefined) still builds, and is marked failed", async () => {
     const csvOnly = mockAdmin({ kind: "no-row" }).admin as unknown as { from: (t: string) => unknown };
     const admin = {
       from: (t: string) => (t === "strategy_analytics_series" ? undefined : csvOnly.from(t)),
@@ -215,6 +220,15 @@ describe("a failed conventions read degrades to the config tier and never breaks
     expect(out).not.toBeNull();
     expect(out!.buildOpts.cumulativeMethod).toBe("geometric");
     expect(out!.buildOpts.dayBasis).toBe("calendar");
+    // SFH HIGH-1 named this one: it used to build SILENTLY on the config tier.
+    expect(out!.conventionsReadFailure?.code).toBe("threw");
+  });
+
+  it("CONTROL: an absent conventions row is a fact, not a failure, and carries no failure marker", async () => {
+    const { admin } = mockAdmin({ kind: "no-row" });
+    const out = await read(admin);
+    expect(out).not.toBeNull();
+    expect("conventionsReadFailure" in out!).toBe(false);
   });
 });
 
