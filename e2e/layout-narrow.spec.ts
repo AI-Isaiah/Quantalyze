@@ -485,6 +485,89 @@ test.describe("/strategies — N-STRAT", () => {
   }
 });
 
+// CR-01 (170 review): a DRAFT row's control group is the widest one (about
+// 400 px on one line). With the 260 px sidebar the row at 768-840 px is
+// narrower than that, and before the fix the name block got 0 px and the
+// name painted over the controls. V960 above is the only md+ width the
+// published case covers, so the draft row gets its own widths here.
+const DRAFT_ROW_VIEWPORTS: { id: string; width: number; height: number }[] = [
+  { id: "V768", width: 768, height: 1024 },
+  { id: "V800", width: 800, height: 600 },
+];
+
+test.describe("/strategies — N-STRAT draft row (CR-01)", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+
+  test.afterAll(async () => {
+    if (HAS_SEED_ENV) {
+      await cleanupStrategiesByNamePrefix(NAME_PREFIX);
+    }
+  });
+
+  for (const vp of DRAFT_ROW_VIEWPORTS) {
+    test(`${vp.id}: draft row keeps a 160px name block clear of the control group, controls inside the group`, async ({
+      page,
+    }) => {
+      test.setTimeout(90_000);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      const manager = await seedTestAllocator({ role: "manager" });
+      const seededName = `${NAME_PREFIX} Draft Long-Short Sleeve`;
+      const draft = await seedWizardDraft({
+        ownerUserId: manager.userId,
+        namePrefix: NAME_PREFIX + " ",
+      });
+      // Off the wizard source so the list shows it, but still a draft.
+      await setSeededStrategyNameAndTags({
+        strategyId: draft.strategyId,
+        name: seededName,
+        strategyTypes: ["spot", "trend following"],
+        status: "draft",
+      });
+
+      await loginViaForm(page, manager.email, manager.password);
+      await page.goto("/strategies");
+      const row = page.locator('[data-testid="strategy-row"]').filter({ hasText: seededName });
+      await expect(row, `${vp.id}: seeded draft row missing`).toBeVisible({
+        timeout: 15_000,
+      });
+      // The row must carry the draft controls, or a silently published row
+      // would pass here on the narrower published control group.
+      await expect(
+        row.getByRole("button", { name: "Submit for Review" }),
+        `${vp.id}: seeded row does not show the draft controls`,
+      ).toBeVisible();
+      await assertNoReflow(page, '[data-testid="strategy-row"]');
+
+      const nameLink = row.getByRole("link", { name: seededName, exact: true });
+      await expect(nameLink).toHaveText(seededName);
+      const nameBlock = nameLink.locator("xpath=..");
+      const controls = nameLink.locator("xpath=../following-sibling::div[1]");
+      const block = await boxOf(nameBlock, `${vp.id} name block`);
+      const nameBox = await boxOf(nameLink, `${vp.id} strategy name`);
+      const controlBox = await boxOf(controls, `${vp.id} control group`);
+
+      expect(block.width, `${vp.id}: name block narrower than 160px`).toBeGreaterThanOrEqual(160);
+      expect(
+        rectsIntersect(block, controlBox),
+        `${vp.id}: name block intersects the control group`,
+      ).toBe(false);
+      // A 0 px block intersects nothing, so the block check alone is blind to
+      // CR-01. The defect was the name painting PAST that block onto the
+      // controls: check the name's own box, and that it stays in its block.
+      expect(
+        rectsIntersect(nameBox, controlBox),
+        `${vp.id}: name rect intersects the control group`,
+      ).toBe(false);
+      await assertChildrenInside(page, nameBlock, `${vp.id} name block`);
+      // A shrinkable group must wrap its items, never let one spill out.
+      await assertChildrenInside(page, controls, `${vp.id} control group`);
+    });
+  }
+});
+
 test.describe("/my-strategies — N-TABLE", () => {
   test.skip(
     !HAS_SEED_ENV,

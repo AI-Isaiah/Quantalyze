@@ -353,6 +353,8 @@ export async function setSeededStrategyNameAndTags(opts: {
   strategyId: string;
   name: string;
   strategyTypes: string[];
+  /** Default "published". "draft" keeps the draft controls on the card. */
+  status?: "published" | "draft";
 }): Promise<void> {
   const admin = getAdmin();
   const { error } = await admin
@@ -360,9 +362,10 @@ export async function setSeededStrategyNameAndTags(opts: {
     .update({
       name: opts.name,
       strategy_types: opts.strategyTypes,
-      // The strategies page hides wizard drafts. Publishing THIS row is
-      // what makes the card render.
-      status: "published",
+      // The strategies page hides only source='wizard' drafts. Moving THIS
+      // row off the wizard source is what makes the card render, published
+      // or draft.
+      status: opts.status ?? "published",
       source: "admin_import",
     })
     .eq("id", opts.strategyId);
