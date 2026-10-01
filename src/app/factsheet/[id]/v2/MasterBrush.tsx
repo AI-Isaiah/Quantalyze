@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { usePayload, useXRange } from "./factsheet-context";
-import { useBasisSeriesView } from "./basis-context";
+import { useBasisSeriesView, useRangeGesture } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 
@@ -56,6 +56,12 @@ export function MasterBrush() {
   // is UNFROZEN in phase-52-frozen-spine-guards.test.ts.
   const payload = useBasisSeriesView(usePayload());
   const { xRange, setXRange, resetXRange } = useXRange();
+  // 169.1 review MD-01: a drag holds the KPI strip and the rail on the range it
+  // started on, so they derive once on release, not once per pointer move. Every
+  // way a drag stops ends the hold (pointer up / cancel / lost capture route to
+  // onPointerUp; the effect below covers an unmount mid-drag).
+  const { begin: beginGesture, end: endGesture } = useRangeGesture();
+  useEffect(() => endGesture, [endGesture]);
   const isMobile = useBreakpoint() === "mobile";
   // Desktop arms = today's literals (VB_H 60, year-tick fontSize 9). Mobile:
   // taller viewBox + bigger labels. PLOT_H derives from the selected VB_H.
@@ -130,6 +136,8 @@ export function MasterBrush() {
       const rect = svg.getBoundingClientRect();
       const vbX = clientToVbX(e.clientX, rect);
       e.currentTarget.setPointerCapture(e.pointerId);
+      // Before any setXRange below, so the hold is the range the strip shows now.
+      beginGesture(xRange);
       // Hit-test handles first, then window body, then plot background.
       if (Math.abs(vbX - winLeftPx) <= HANDLE_HIT_W) {
         dragRef.current = { mode: "left", startVbX: vbX, startRange: xRange };
@@ -150,7 +158,7 @@ export function MasterBrush() {
       }
       setIsDragging(true);
     },
-    [winLeftPx, winRightPx, xRange, xs, xe, n, setXRange, xToIdx],
+    [winLeftPx, winRightPx, xRange, xs, xe, n, setXRange, xToIdx, beginGesture],
   );
 
   const onPointerMove = useCallback(
@@ -200,8 +208,9 @@ export function MasterBrush() {
       try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
       dragRef.current = null;
       setIsDragging(false);
+      endGesture();
     }
-  }, []);
+  }, [endGesture]);
 
   const onDoubleClick = useCallback(() => {
     resetXRange();

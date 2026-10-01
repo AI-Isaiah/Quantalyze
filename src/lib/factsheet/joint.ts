@@ -19,14 +19,20 @@ export const MIN_PAIRED_OBSERVATIONS = 10;
  * joint statistics are withheld below `MIN_PAIRED_OBSERVATIONS`. The
  * Allocations alpha/beta widget ("this book") and the factsheet KPI strip and
  * §IV ("this record") both print it, so one screen gives one cause.
+ *
+ * Phase 169.1 (D-85): inside a selected zoom range the strip and §IV print the
+ * WINDOW's paired count, so they pass "range", which reads "the selected range
+ * has <paired>." The record noun there would put the slice's count beside "this
+ * record", which has many more paired days.
  */
 export function pairedFloorReason(
   comparator: string,
   paired: number,
-  noun: "book" | "record",
+  noun: "book" | "record" | "range",
   floor: number = MIN_PAIRED_OBSERVATIONS,
 ): string {
-  return `Alpha and beta need at least ${floor} days paired with ${comparator}; this ${noun} has ${paired}.`;
+  const subject = noun === "range" ? "the selected range" : `this ${noun}`;
+  return `Alpha and beta need at least ${floor} days paired with ${comparator}; ${subject} has ${paired}.`;
 }
 
 /**

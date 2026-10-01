@@ -30,6 +30,8 @@ const fake = vi.hoisted(() => ({
   csvRows: [] as { date: string; daily_return: number }[],
   csvError: null as unknown,
   tablesSeen: [] as string[],
+  /** Phase 169.1 (D-30): every select string a strategy_analytics_series read asked for. */
+  analyticsSelects: [] as string[],
   orFilters: [] as string[],
   /** 167.2.1-REVIEW-SFH-R2 N-3: every AbortSignal a query was given. */
   signals: [] as AbortSignal[],
@@ -41,7 +43,10 @@ vi.mock("@/lib/supabase/admin", () => {
   function builder(table: string) {
     const b: Record<string, unknown> = {};
     const self = () => b;
-    b.select = self;
+    b.select = (s?: string) => {
+      if (table === "strategy_analytics_series") fake.analyticsSelects.push(String(s));
+      return b;
+    };
     b.eq = self;
     b.order = self;
     b.limit = self;
@@ -376,6 +381,7 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
 
       seed(f.row, f.csv ?? [], f.error ?? null, f.csvError ?? null);
       fake.tablesSeen = [];
+      fake.analyticsSelects = [];
       fake.orFilters = [];
       const buildsBefore = vi.mocked(buildFactsheetPayload).mock.calls.length;
       const probe = await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
@@ -396,7 +402,12 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
       // gated MTM / smoothed reads live in the resolve stage since review round
       // 1, WR-05, and run only for a row that carries one).
       expect(vi.mocked(buildFactsheetPayload).mock.calls.length).toBe(buildsBefore);
-      expect(fake.tablesSeen).not.toContain("strategy_analytics_series");
+      // Phase 169.1 (D-30, D-83 (a) scope, accepted): a composite row's resolve
+      // reads the cash_settlement CONVENTIONS echo, one read per composite, which
+      // is not a basis series. Every other strategy_analytics_series read is still
+      // refused, and a single-key row reads none at all.
+      expect(fake.analyticsSelects.filter((sel) => sel !== "conventions:payload->conventions")).toEqual([]);
+      if (!f.name.startsWith("composite")) expect(fake.tablesSeen).not.toContain("strategy_analytics_series");
       // The visibility predicate is REQUIRED and reached the probe's query.
       expect(fake.orFilters.some((flt) => flt.includes(OWNER_ID))).toBe(true);
     });

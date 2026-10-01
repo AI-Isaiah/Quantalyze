@@ -1432,7 +1432,10 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
   });
 
   // ── [MUT-W02] by EXECUTION (WR-03) ────────────────────────────────────
-  describe("EXECUTION ORACLE — the result loop is RUN, so a skip tolerance is observed in ANY spelling", () => {
+  // Every case below EXECUTES the real result loop in bash, once per guard combination,
+  // so the file's 20 s budget for subprocess cases applies to the whole block; at the
+  // 5 s default three of them timed out under load (169.1 CI shard 1, db5d559b0).
+  describe("EXECUTION ORACLE — the result loop is RUN, so a skip tolerance is observed in ANY spelling", { timeout: 20_000 }, () => {
     // ⛔ EVERY call site in this block takes the SCRIPT slice — the one that
     // starts at `fail=0` and therefore carries the step's prologue. One helper
     // is used throughout precisely so "which extractor did this call use?"
