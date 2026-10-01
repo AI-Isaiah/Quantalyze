@@ -41,7 +41,7 @@ export type CoverageState =
 
 const CHIP: Record<CoverageState, { label: string; cls: string }> = {
   "in-blend": { label: "In blend", cls: "text-accent bg-accent/10" },
-  "manually-excluded": { label: "Excluded", cls: "text-text-muted bg-track" },
+  "manually-excluded": { label: "Excluded", cls: "text-text-secondary bg-track" },
   "auto-excluded": {
     label: "Outside window",
     cls: "text-warning bg-warning-bg border border-warning-border",
@@ -50,7 +50,7 @@ const CHIP: Record<CoverageState, { label: string; cls: string }> = {
     label: "Syncing",
     cls: "text-warning bg-warning-bg border border-warning-border",
   },
-  "no-series": { label: "No data", cls: "text-text-muted bg-track" },
+  "no-series": { label: "No data", cls: "text-text-secondary bg-track" },
 };
 
 // Badge ladder base (Badge.tsx:53, tightened to the 58-UI-SPEC chip tier):

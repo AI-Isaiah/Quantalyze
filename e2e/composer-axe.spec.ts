@@ -43,6 +43,13 @@
  * The single analyze() over the whole composed <main> is preserved (no second
  * axe call) — it already scans the newly-mounted DOM; the additive work is the
  * anti-false-green anchors only.
+ *
+ * Phase 170 / C1-A3 (2026-09-28, PC-3): the Returns-distribution and
+ * Rolling-metrics cards now live inside a closed-by-default
+ * <details id="composer-blend-detail"> ("Blend distribution and rolling
+ * windows"). Closed content stays in the DOM but is not visible, so Scan 2
+ * opens that section before the data-panel toBeVisible() checks and before
+ * analyze(). Otherwise axe would miss both bodies (T-170-26).
  */
 import { test, expect } from "@playwright/test";
 import { buildAxe } from "./helpers/axe";
@@ -163,6 +170,16 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
     await expect(
       page.locator("h2", { hasText: "Portfolio" }).first(),
     ).toBeVisible({ timeout: 10_000 });
+
+    // Phase 170 / C1-A3 (2026-09-28, PC-3) — open the closed blend-detail
+    // section before the visibility checks. A closed <details> keeps both
+    // cards in the DOM but toBeVisible() fails, and analyze() would not scan
+    // the hidden bodies. Click the summary by its title, then require open.
+    const blendDetail = page.locator("#composer-blend-detail");
+    await blendDetail
+      .locator("summary", { hasText: "Blend distribution and rolling windows" })
+      .click();
+    await expect(blendDetail).toHaveJSProperty("open", true);
 
     // BOTH Phase-30 graph cards must be mounted on the composed surface before
     // scanning — adapt the strategy-v2-axe scroll-each-card-ready idiom. We gate

@@ -619,7 +619,8 @@ function healthyRow(): Row {
  */
 describe("HONEST-08 — the production row, through StrategyTable and StrategyGrid", () => {
   function tableRowFor(container: HTMLElement, name: string): HTMLElement {
-    const cell = within(container).getByText(name);
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    const cell = within(container).getByRole("link", { name });
     const row = cell.closest("tr");
     expect(row).toBeTruthy();
     return row as HTMLElement;

@@ -472,3 +472,74 @@ describe("ComparePage — a failed load is surfaced, not reported as 'not availa
     expect(screen.getByText("Strategy Beta")).toBeInTheDocument();
   });
 });
+
+/**
+ * N-CMP (Phase 170, 2026-09-27). No prior assertion pinned the old empty-state
+ * sentence. These cases pin the copy that replaced it: no ids name the
+ * factsheet control, one resolved item states the limit, two do not.
+ */
+const EMPTY_COMPARE =
+  'Open a strategy\'s factsheet and choose "Compare strategies" to start a comparison. Adding strategies to a comparison from this page is not available yet.';
+const ONE_COMPARE =
+  "One strategy selected. Adding a second strategy from this page is not available yet.";
+
+describe("ComparePage — zero, one and many ids (N-CMP)", () => {
+  beforeEach(() => {
+    mockStrategyData = [];
+    mockSnapshotData = [];
+    mockStrategyError = null;
+    mockSnapshotError = null;
+  });
+
+  it("with no ids, keeps Compare Strategies and names the factsheet control", async () => {
+    const ComparePage = await getComparePage();
+    const Page = await ComparePage({ searchParams: Promise.resolve({}) });
+    render(Page as React.ReactElement);
+    expect(
+      screen.getByRole("heading", { name: "Compare Strategies" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(EMPTY_COMPARE)).toBeInTheDocument();
+    expect(screen.queryByText(/checkboxes/i)).toBeNull();
+  });
+
+  it("with one resolvable id, shows the one-strategy note in text-caption text-text-muted", async () => {
+    mockStrategyData = [
+      makeSampleStrategy(
+        "11111111-2222-4333-8444-555555555555",
+        "Strategy Alpha",
+      ),
+    ];
+    const ComparePage = await getComparePage();
+    const Page = await ComparePage({
+      searchParams: Promise.resolve({
+        ids: "11111111-2222-4333-8444-555555555555",
+      }),
+    });
+    render(Page as React.ReactElement);
+    const note = screen.getByText(ONE_COMPARE);
+    expect(note.className).toContain("text-caption");
+    expect(note.className).toContain("text-text-muted");
+  });
+
+  it("with two resolvable ids, does not show the one-strategy note", async () => {
+    mockStrategyData = [
+      makeSampleStrategy(
+        "11111111-2222-4333-8444-555555555555",
+        "Strategy Alpha",
+      ),
+      makeSampleStrategy(
+        "22222222-3333-4444-8555-666666666666",
+        "Strategy Beta",
+      ),
+    ];
+    const ComparePage = await getComparePage();
+    const Page = await ComparePage({
+      searchParams: Promise.resolve({
+        ids: "11111111-2222-4333-8444-555555555555,22222222-3333-4444-8555-666666666666",
+      }),
+    });
+    render(Page as React.ReactElement);
+    expect(screen.queryByText(ONE_COMPARE)).toBeNull();
+    expect(screen.queryByText(/not available yet/i)).toBeNull();
+  });
+});

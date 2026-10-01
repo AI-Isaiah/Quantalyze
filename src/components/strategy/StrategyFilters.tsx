@@ -306,7 +306,7 @@ export function StrategyFilters({
 
   return (
     <>
-      <div className="sticky top-0 z-10 flex flex-wrap items-center gap-3 bg-page pb-4">
+      <div className="sticky top-12 md:top-0 z-10 flex flex-wrap items-center gap-3 bg-page pb-4">
         {/* Search */}
         <input
           type="text"

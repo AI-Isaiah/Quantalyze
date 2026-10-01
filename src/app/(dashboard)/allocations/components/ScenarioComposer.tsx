@@ -192,6 +192,7 @@ import type { CoverageState } from "./CoverageStateChip";
 // the browse drawer's own rows render this same leaf, and two hand-rolled
 // chips for one claim drift.
 import { YoursChip } from "./YoursChip";
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import type { ProvenanceTier } from "@/lib/design-tokens/trust-tier";
 import { deriveProvenance } from "../lib/provenance";
@@ -5372,6 +5373,16 @@ export function ScenarioComposer({
         />
       )}
 
+      {/* Phase 170 / SC1-LAYERS (C1-A1 + C1-A2, 2026-09-28) — one square
+          Blend-window data panel. Row 1 header, row 2 window control, row 3
+          timeline, row 4 the scenario KPI strip. Rows 1–3 still mount only
+          when windowBounds is set; with no bounds the panel is row 4 alone
+          and that row has no leading hairline. The eyebrow is the same
+          non-comparative label in every state (frozen 170.1 COPY item (b)). */}
+      <div
+        className="mt-6 border border-border bg-surface"
+        data-testid="scenario-blend-window"
+      >
       {/* Phase 58 (COVERAGE-03) — the honest blend header is the PRIMARY visual
           anchor of this surface (58-UI-SPEC §Interaction): it states the engine's
           member_count · effective window ABOVE the coverage-window control, so
@@ -5381,7 +5392,7 @@ export function ScenarioComposer({
           cross-check reconciles the same axis). Mounts alongside the window
           control (a selected set to describe). */}
       {windowBounds && (
-        <div className="mt-6">
+        <div className="px-4 py-3">
           <BlendHeader metrics={scenarioMetrics} unionSpan={fullRangeWindow} />
         </div>
       )}
@@ -5392,13 +5403,14 @@ export function ScenarioComposer({
           control sits above its graph). Only mounts when the selected set has a
           span to window (windowBounds !== null). A distinct axis from the
           rolling-metrics window / factsheet brush-zoom / startDates (POLISH-01).
-          Presets + DESIGN.md styling land in the Task-2 pass. */}
+          Phase 170 C1-A1 — its own rounded box is gone; it is a hairline row
+          of the Blend-window panel. ref / tabIndex / testid stay (RT-5). */}
       {windowBounds && (
         <div
           // RT-5 — the Include-click focus target (see pendingWindowFocusRef).
           ref={coverageWindowControlRef}
           tabIndex={-1}
-          className="mt-6 flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface px-4 py-3"
+          className="flex flex-wrap items-center gap-3 border-t border-border px-4 py-3"
           data-testid="scenario-coverage-window"
         >
           <span className="text-fixed-11 font-medium uppercase tracking-wide text-text-muted">
@@ -5490,7 +5502,7 @@ export function ScenarioComposer({
           the row chips by construction. Only mounts when there is a windowed set
           to plot. */}
       {windowBounds && (
-        <div className="mt-6">
+        <div className="border-t border-border px-4 py-3">
           <CoverageTimeline
             rows={timelineRows}
             unionWindow={fullRangeWindow}
@@ -5499,9 +5511,14 @@ export function ScenarioComposer({
         </div>
       )}
 
-      <div className="mt-6">
+      {/* Row 4 — the hairline is absent when rows 1–3 did not render. */}
+      <div className={windowBounds ? "border-t border-border" : undefined}>
+        <p className="text-micro font-mono uppercase tracking-[0.18em] text-text-muted px-4 pt-3">
+          Scenario blend
+        </p>
         <KpiStrip
           mode="scenario"
+          variant="panel"
           scenarioMetrics={scenarioMetrics}
           liveMetrics={liveMetricsForKpi}
           metrics={liveMetricsForKpi}
@@ -5511,6 +5528,7 @@ export function ScenarioComposer({
           minHistoryDepthMonths={minHistoryDepthMonths}
           activeVenues={activeVenues}
         />
+      </div>
       </div>
 
       {/* CONSTIT-01 (Pitfall 5) — all-constituents-excluded honest empty,
@@ -5934,11 +5952,21 @@ export function ScenarioComposer({
           column / allocator-portfolio payload builder / percentile-rank badge,
           no api-ingest literal (LOCKED honesty invariant — a what-if has no
           verified track record to peer-rank). */}
+      {/* Phase 170 / SC1-LAYERS (C1-A3, 2026-09-28) — the two repeat cards
+          are one closed section. Bodies, disclosures, the 10-point floor, the
+          3M/6M/12M control and both data-panel attributes are unchanged. The
+          card headings are h3 under the section title; size and weight stay. */}
+      <CollapsibleSection
+        id="composer-blend-detail"
+        title="Blend distribution and rolling windows"
+        defaultOpen={false}
+        storageKey="composer-collapse:blend-detail"
+      >
       <Card className="mt-6" data-panel="blend-returns-distribution" aria-label="Returns distribution">
         <div className="mb-3">
-          <h2 className="text-base font-semibold text-text-primary">
+          <h3 className="text-base font-semibold text-text-primary">
             Returns distribution
-          </h2>
+          </h3>
         </div>
         {blendPanels.histogramSeries.length === 0 ? (
           // WR-02 — gate on the ADAPTER's actual degenerate verdict, not a
@@ -5986,9 +6014,9 @@ export function ScenarioComposer({
           never role="alert". */}
       <Card className="mt-6" data-panel="blend-rolling" aria-label="Rolling metrics">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-base font-semibold text-text-primary">
+          <h3 className="text-base font-semibold text-text-primary">
             Rolling metrics
-          </h2>
+          </h3>
           <SegmentedControl
             ariaLabel="Rolling window"
             activeId={String(rollingWindow)}
@@ -6041,6 +6069,7 @@ export function ScenarioComposer({
           </div>
         )}
       </Card>
+      </CollapsibleSection>
 
       {flaggedHoldings.length > 0 && (
         <div className="mt-8 rounded-lg border border-border bg-surface p-4">
@@ -7283,7 +7312,8 @@ function CompositionList({
           here double-labels the same content. No top margin on the card either:
           the list is the sole child inside the collapsible's <details> body, so
           spacing comes from the summary's border + mb-4, not a sibling-era mt-8. */}
-      <ul className="grid gap-2" data-testid="scenario-constituent-list">
+      <ResponsiveTable label="Strategies and weights">
+      <ul className="grid gap-2 min-w-max" data-testid="scenario-constituent-list">
         {/* CONSTIT-01/02/03 — per-key exchange sources as uniform constituent
             rows, interleaved ABOVE the added strategies in the ONE list. Same row
             anatomy as an added row: an include/exclude toggle (the shared
@@ -8048,6 +8078,7 @@ function CompositionList({
           );
         })}
       </ul>
+      </ResponsiveTable>
       {/* WEIGHTS-00 honesty caveat (A1 locked) — leverage scales return, vol and
           max drawdown but the risk-adjusted ratios and correlation are
           leverage-INVARIANT (no borrow cost modeled). Mirrors the

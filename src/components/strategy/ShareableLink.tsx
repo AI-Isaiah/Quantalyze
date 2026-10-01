@@ -103,9 +103,16 @@ interface ShareableLinkProps {
    */
   published: boolean;
   variant?: "primary" | "secondary";
+  /** Default `md` keeps the discovery detail page byte-identical. `/strategies` passes `sm`. */
+  size?: "sm" | "md";
 }
 
-export function ShareableLink({ strategyId, published, variant = "secondary" }: ShareableLinkProps) {
+export function ShareableLink({
+  strategyId,
+  published,
+  variant = "secondary",
+  size = "md",
+}: ShareableLinkProps) {
   const [copied, setCopied] = useState(false);
 
   const [copyFailed, setCopyFailed] = useState(false);
@@ -174,43 +181,50 @@ export function ShareableLink({ strategyId, published, variant = "secondary" }: 
     }
   }, [strategyId, published]);
 
+  // sm matches StrategyActions in the same row. sm has no min-height, so a
+  // coarse pointer still gets 44px. md omits the extra class so its output
+  // stays byte-identical.
+  const iconClass = size === "sm" ? "h-3.5 w-3.5 mr-1.5" : "h-4 w-4 mr-1.5";
+
   return (
     <Button
       variant={variant === "primary" ? "primary" : "secondary"}
+      size={size}
+      className={size === "sm" ? "pointer-coarse:min-h-[44px]" : undefined}
       onClick={handleCopy}
       disabled={minting}
     >
       {copied ? (
         <>
-          <svg className="h-4 w-4 mr-1.5 text-positive" viewBox="0 0 16 16" fill="currentColor">
+          <svg className={`${iconClass} text-positive`} viewBox="0 0 16 16" fill="currentColor">
             <path fillRule="evenodd" d="M8 15A7 7 0 108 1a7 7 0 000 14zm3.28-8.72a.75.75 0 00-1.06-1.06L7 8.44 5.78 7.22a.75.75 0 00-1.06 1.06l1.75 1.75a.75.75 0 001.06 0l3.75-3.75z" clipRule="evenodd" />
           </svg>
           Link copied!
         </>
       ) : copyFailed ? (
         <>
-          <svg className="h-4 w-4 mr-1.5 text-negative" viewBox="0 0 16 16" fill="currentColor">
+          <svg className={`${iconClass} text-negative`} viewBox="0 0 16 16" fill="currentColor">
             <path fillRule="evenodd" d="M8 15A7 7 0 108 1a7 7 0 000 14zm0-10a.75.75 0 01.75.75v3a.75.75 0 01-1.5 0v-3A.75.75 0 018 5zm0 6.5a.75.75 0 100-1.5.75.75 0 000 1.5z" clipRule="evenodd" />
           </svg>
           Copy failed — copy the URL manually
         </>
       ) : mintFailed ? (
         <>
-          <svg className="h-4 w-4 mr-1.5 text-negative" viewBox="0 0 16 16" fill="currentColor">
+          <svg className={`${iconClass} text-negative`} viewBox="0 0 16 16" fill="currentColor">
             <path fillRule="evenodd" d="M8 15A7 7 0 108 1a7 7 0 000 14zm0-10a.75.75 0 01.75.75v3a.75.75 0 01-1.5 0v-3A.75.75 0 018 5zm0 6.5a.75.75 0 100-1.5.75.75 0 000 1.5z" clipRule="evenodd" />
           </svg>
           Couldn&apos;t create the link — try again
         </>
       ) : minting ? (
         <>
-          <svg className="h-4 w-4 mr-1.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <svg className={iconClass} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M6.5 9.5l3-3M8.25 4.75L9.5 3.5a2.12 2.12 0 013 3L11.25 7.75M7.75 11.25L6.5 12.5a2.12 2.12 0 01-3-3l1.25-1.25" />
           </svg>
           Creating link…
         </>
       ) : (
         <>
-          <svg className="h-4 w-4 mr-1.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <svg className={iconClass} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M6.5 9.5l3-3M8.25 4.75L9.5 3.5a2.12 2.12 0 013 3L11.25 7.75M7.75 11.25L6.5 12.5a2.12 2.12 0 01-3-3l1.25-1.25" />
           </svg>
           {/* An unpublished strategy has no public factsheet to "share", so the
