@@ -395,3 +395,162 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
     `);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Appended below the frozen block (Phase 169.1 plan 03, Task 3). The imports
+// sit here, not at the top, so the frozen block's lines stay untouched; ES
+// imports are hoisted, so their position does not matter.
+// ---------------------------------------------------------------------------
+import { arithmeticUnderwater, metricsBasisSeries, type ComputeConventions } from "./compute";
+import { BASIS_KPI_MAP } from "./basis-metrics";
+
+const sumOf = (xs: number[]) => xs.reduce((a, x) => a + x, 0);
+const DAY_MS = 86_400_000;
+const calendarDaysInclusive = (dates: string[]) =>
+  Math.round((Date.parse(dates[dates.length - 1]) - Date.parse(dates[0])) / DAY_MS) + 1;
+const withConv = (rets: number[], dates: string[], c: ComputeConventions) => compute(rets, dates, 0, P, c);
+
+/** The zero-days fixture's non-zero returns and their dates. */
+const ACTIVE_RETS = ZERO_RETS.filter((r) => r !== 0);
+const ACTIVE_DATES = ZERO_DATES.filter((_, i) => ZERO_RETS[i] !== 0);
+
+describe("metricsBasisSeries: the series the headline risk statistics run over (D-30, D-36)", () => {
+  it("under the active basis: exactly the non-zero finite returns, with null positions on the zero days", () => {
+    const b = metricsBasisSeries(ZERO_RETS, ZERO_DATES, { dayBasis: "active" });
+    expect(b.returns).toEqual(ACTIVE_RETS);
+    expect(b.returns.length).toBe(24);
+    ZERO_RETS.forEach((r, i) => {
+      const pos = b.positions[i];
+      if (r === 0) expect(pos, `day ${i}`).toBeNull();
+      else expect(b.returns[pos as number], `day ${i}`).toBe(r);
+    });
+  });
+
+  it("with no conventions (and on the calendar basis): rets itself, identity positions", () => {
+    for (const c of [undefined, { dayBasis: "calendar" } as const]) {
+      const b = metricsBasisSeries(ZERO_RETS, ZERO_DATES, c);
+      expect(b.returns).toBe(ZERO_RETS);
+      expect(b.positions).toEqual(ZERO_RETS.map((_, i) => i));
+    }
+  });
+});
+
+describe("the active day basis moves ONLY ann_vol, sharpe, sortino and the arithmetic CAGR (D-30, D-36 W2)", () => {
+  const plain = compute(ZERO_RETS, ZERO_DATES, 0, P);
+  const activeOnly = compute(ACTIVE_RETS, ACTIVE_DATES, 0, P);
+
+  for (const method of ["geometric", "arithmetic"] as const) {
+    it(`${method}: skew, kurt, var95, cvar95, win_rate and profit_factor keep all returns, zero days included`, () => {
+      const r = withConv(ZERO_RETS, ZERO_DATES, { cumulativeMethod: method, dayBasis: "active" });
+      for (const k of ["skew", "kurt", "var95", "cvar95", "win_rate", "profit_factor"] as const) {
+        expect(r[k], k).toBe(plain[k]);
+      }
+    });
+
+    it(`${method}: ann_vol, sharpe and sortino equal compute() of the non-zero returns alone`, () => {
+      const r = withConv(ZERO_RETS, ZERO_DATES, { cumulativeMethod: method, dayBasis: "active" });
+      expect(r.ann_vol).toBe(activeOnly.ann_vol);
+      expect(r.sharpe).toBe(activeOnly.sharpe);
+      expect(r.sortino).toBeCloseTo(activeOnly.sortino, 12);
+      // and they are not the calendar figures (the zero days really dilute them here)
+      expect(r.ann_vol).not.toBe(plain.ann_vol);
+      expect(r.sharpe).not.toBe(plain.sharpe);
+    });
+  }
+
+  it("arithmetic: the CAGR is the mean of the non-zero returns times periodsPerYear", () => {
+    const r = withConv(ZERO_RETS, ZERO_DATES, { cumulativeMethod: "arithmetic", dayBasis: "active" });
+    expect(r.cagr).toBeCloseTo((sumOf(ACTIVE_RETS) / ACTIVE_RETS.length) * P, 12);
+  });
+
+  it("geometric: the day basis does not move the CAGR (the engine's is a calendar-span compound)", () => {
+    const r = withConv(ZERO_RETS, ZERO_DATES, { dayBasis: "active" });
+    expect(r.cagr).toBe(plain.cagr);
+  });
+
+  it("an active basis with no non-zero day has no arithmetic CAGR (NaN, the engine's None), never a measured 0", () => {
+    const flat = Array.from({ length: 10 }, () => 0);
+    const r = withConv(flat, isoDays(10), { cumulativeMethod: "arithmetic", dayBasis: "active" });
+    expect(Number.isNaN(r.cagr)).toBe(true);
+  });
+});
+
+describe("the arithmetic method rides the running-sum curves (D-28)", () => {
+  const r = withConv(TREND_RETS, TREND_DATES, { cumulativeMethod: "arithmetic" });
+
+  it("cum_ret is the sum of the returns and the arithmetic equity's rise", () => {
+    expect(r.cum_ret).toBeCloseTo(sumOf(TREND_RETS), 14);
+    expect(r.cum_ret).toBe(r.eq[r.eq.length - 1] - 1);
+  });
+
+  it("dd is arithmeticUnderwater(rets); max_dd is its minimum; calmar is cagr / |max_dd|", () => {
+    expect(r.dd).toEqual(arithmeticUnderwater(TREND_RETS));
+    expect(r.max_dd).toBe(Math.min(...r.dd));
+    expect(r.calmar).toBe(r.cagr / Math.abs(r.max_dd));
+    // the geometric drawdown is a different number on this fixture
+    expect(r.max_dd).not.toBe(compute(TREND_RETS, TREND_DATES, 0, P).max_dd);
+  });
+
+  it("longest_dd and recovery_factor follow the arithmetic dd", () => {
+    let longest = 0;
+    let run = 0;
+    for (const v of r.dd) {
+      run = v < 0 ? run + 1 : 0;
+      longest = Math.max(longest, run);
+    }
+    expect(r.longest_dd).toBe(longest);
+    expect(r.recovery_factor).toBe(r.cum_ret / Math.abs(r.max_dd));
+  });
+});
+
+describe("the arithmetic calendar-basis CAGR divides by the right day count (D-30)", () => {
+  it("calendarDense: the sum over the CALENDAR-day count times P", () => {
+    const r = withConv(GAP_RETS, GAP_DATES, { cumulativeMethod: "arithmetic", calendarDense: true });
+    const days = calendarDaysInclusive(GAP_DATES);
+    expect(days).toBe(36);
+    expect(r.cagr).toBeCloseTo((sumOf(GAP_RETS) / days) * P, 12);
+  });
+
+  it("calendarDense: a sparse series equals its twin with every missing day filled with 0.0 (gap-day invariance)", () => {
+    const dense = isoDays(calendarDaysInclusive(GAP_DATES));
+    const byDate = new Map(GAP_DATES.map((d, i) => [d, GAP_RETS[i]]));
+    const denseRets = dense.map((d) => byDate.get(d) ?? 0);
+    const c = { cumulativeMethod: "arithmetic", calendarDense: true } as const;
+    const sparse = withConv(GAP_RETS, GAP_DATES, c);
+    const twin = withConv(denseRets, dense, c);
+    expect(sparse.cagr).toBeCloseTo(twin.cagr, 14);
+    expect(sparse.cum_ret).toBeCloseTo(twin.cum_ret, 14);
+    expect(sparse.max_dd).toBeCloseTo(twin.max_dd, 14);
+  });
+
+  it("not calendarDense (a single-key series): the sum over the OBSERVATION count times P", () => {
+    const r = withConv(GAP_RETS, GAP_DATES, { cumulativeMethod: "arithmetic" });
+    expect(r.cagr).toBeCloseTo((sumOf(GAP_RETS) / GAP_RETS.length) * P, 12);
+  });
+});
+
+describe("every strip key either arm changes is overlaid on a composite's full-history strip (T-169-47)", () => {
+  const MAP = new Set(BASIS_KPI_MAP.map((e) => e.tsKey));
+  // The drawdown-derived extended metrics move with the arithmetic drawdown by
+  // design (D-28, stated consequence); they are rail figures, not strip keys.
+  const DRAWDOWN_DERIVED = new Set(["longest_dd", "recovery_factor", "pain_index", "ulcer_index"]);
+  const changed = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+    Object.keys(a)
+      .filter((k) => k !== "eq" && k !== "dd")
+      .filter((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]))
+      .sort();
+
+  it("the active basis changes exactly ann_vol, sharpe and sortino, all in BASIS_KPI_MAP", () => {
+    const base = compute(ZERO_RETS, ZERO_DATES, 0, P);
+    const keys = changed(withConv(ZERO_RETS, ZERO_DATES, { dayBasis: "active" }), base);
+    expect(keys).toEqual(["ann_vol", "sharpe", "sortino"]);
+    for (const k of keys) expect(MAP.has(k), k).toBe(true);
+  });
+
+  it("the arithmetic arm changes cum_ret, cagr, max_dd and calmar (all in BASIS_KPI_MAP) and otherwise only drawdown-derived rail figures", () => {
+    const base = compute(TREND_RETS, TREND_DATES, 0, P);
+    const keys = changed(withConv(TREND_RETS, TREND_DATES, { cumulativeMethod: "arithmetic" }), base);
+    expect(keys.filter((k) => MAP.has(k))).toEqual(["cagr", "calmar", "cum_ret", "max_dd"]);
+    for (const k of keys.filter((k) => !MAP.has(k))) expect(DRAWDOWN_DERIVED.has(k), k).toBe(true);
+  });
+});
