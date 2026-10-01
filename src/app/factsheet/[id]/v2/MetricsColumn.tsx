@@ -55,6 +55,42 @@ export function headlineCoverageCaveat(
 }
 
 /**
+ * Phase 169.1 review round 1 (SFH MEDIUM-2) — the chain-broken caveat for a
+ * SELECTED range, rendered in place of {@link headlineCoverageCaveat} while a
+ * range is selected (the strip in FactsheetView.tsx and Main Metrics here).
+ *
+ * A window's figures are re-derived on the slice (`windowView`), which compounds
+ * every return in it. The engine compounds only the record after the last break
+ * (`nav_twr._last_interior_break_suffix`), and `headlineCoversFrom` is that
+ * span's first day. So a range starting ON or AFTER that day compounds only days
+ * the engine also compounds: no caveat. A range starting before it compounds days
+ * the engine leaves out, and the page says so. The sentence holds whether or not
+ * the range also reaches past the date.
+ *
+ * The gates are those of {@link headlineCoverageCaveat}: cash basis, a
+ * chain-broken row, and `headlineCoversFrom` present. With `null` the break
+ * cannot be placed, so every range gets the caveat, without a date. It never
+ * invents one.
+ */
+export function windowCoverageCaveat(
+  dataQuality: FactsheetPayload["dataQuality"],
+  basis: Basis,
+  rangeStart: string,
+  subject: string,
+): string | null {
+  if (basis !== "cash_settlement") return null;
+  if (dataQuality?.twrChainBroken !== true) return null;
+  const from = dataQuality.headlineCoversFrom;
+  if (from === undefined) return null;
+  const date = from === null ? null : isoToMonthDay(from);
+  if (from === null || date === null || date === "—") {
+    return `The record has a break in the return chain at a date this view cannot name, so this range may span it. Its ${subject} are compounded across any break inside it.`;
+  }
+  if (rangeStart.slice(0, 10) >= from.slice(0, 10)) return null;
+  return `This range starts before ${date}, where the record resumes after its last break in the return chain. Its ${subject} compound returns from before that date, which the full-history figures leave out.`;
+}
+
+/**
  * Editorial right-column metrics. Four named sections — Performance, Risk,
  * Style, Benchmark — each introduced by a serif-italic eyebrow over a thick
  * hairline divider, then a stack of dense KPM tables.
@@ -129,14 +165,15 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // calendar years compute() reports, at Years Observed and in the warning below.
   // Dividing the observation count by the basis read a sparse record short.
   const recordLength = formatRecordLength({ n: m.n, years: m.years });
-  // The caveat describes the STORED headline, which a selected range does not show
-  // (D-78, the KPI strip's rule).
-  const storedCaveat = headlineCoverageCaveat(
-    payload.dataQuality,
-    useBasisOrCash(),
-    "Cumulative Return, CAGR and Calmar",
-  );
-  const coverageCaveat = selected ? null : storedCaveat;
+  // The stored-headline caveat describes the STORED headline, which a selected range
+  // does not show (D-78). A selected range that starts before the last break gets
+  // its own caveat instead: its re-derived figures compound across days the engine
+  // leaves out (169.1 review round 1, SFH MEDIUM-2; the KPI strip's rule).
+  const railBasis = useBasisOrCash();
+  const railSubject = "Cumulative Return, CAGR and Calmar";
+  const coverageCaveat = selected
+    ? windowCoverageCaveat(payload.dataQuality, railBasis, scope.start, railSubject)
+    : headlineCoverageCaveat(payload.dataQuality, railBasis, railSubject);
 
   return (
     <aside className="flex flex-col gap-12">
