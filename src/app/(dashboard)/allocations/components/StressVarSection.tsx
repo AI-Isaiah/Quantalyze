@@ -15,6 +15,7 @@ import {
   VAR_CONFIDENCE_LABEL,
 } from "../lib/scenario-stress";
 import type { DailyPoint } from "@/lib/scenario";
+import type { BtcCloses } from "../lib/scenario-benchmark";
 
 /**
  * Plan 26-02 (STRESS-01 + STRESS-02) — the user-visible "Stress & VaR" section,
@@ -45,7 +46,7 @@ import type { DailyPoint } from "@/lib/scenario";
  *     NEVER a re-declared literal 60.
  *   - The disclosure is single-sourced via `methodologyLine`. The VaR/CVaR
  *     caption names the scenario N (`varN`); the β-shock caption names the BTC
- *     inner-join N (`betaN`). When the two Ns differ, TWO captions render — each
+ *     paired N (`betaN`). When the two Ns differ, TWO captions render — each
  *     number names its own true N (the two-N trap).
  */
 
@@ -74,13 +75,13 @@ const DEFAULT_SHOCK_ID = "-0.30";
 interface StressVarSectionProps {
   /** The active scenario's already-leveraged daily portfolio returns (raw). */
   portfolioDaily: DailyPoint[];
-  /** BTC factor daily-returns series (the shock factor) fetched by the composer. */
-  btcDaily: DailyPoint[];
   /**
-   * False when the BTC fetch failed or returned empty — the section degrades to
-   * the honest BTC-unavailable empty state, never an error.
+   * BTC factor closes (the shock factor) the composer reads from
+   * `/api/benchmark/btc/prices` (Phase 169.4 D-67). Null when the fetch failed,
+   * returned no closes or a body of another shape — the section degrades to the
+   * honest BTC-unavailable empty state, never an error.
    */
-  btcAvailable: boolean;
+  btc: BtcCloses | null;
   /** The scenario N (the VaR-window overlap) — `scenarioMetrics.n`. */
   n: number;
   /**
@@ -123,8 +124,7 @@ function MetricRow({
 
 export function StressVarSection({
   portfolioDaily,
-  btcDaily,
-  btcAvailable,
+  btc,
   n,
   strategyCount,
 }: StressVarSectionProps) {
@@ -136,8 +136,8 @@ export function StressVarSection({
   // on the active shock (and the inputs); the lib is pure so this is cheap.
   const result = useMemo(
     () =>
-      computeScenarioStress(portfolioDaily, btcDaily, { shock: Number(shockId) }),
-    [portfolioDaily, btcDaily, shockId],
+      computeScenarioStress(portfolioDaily, btc, { shock: Number(shockId) }),
+    [portfolioDaily, btc, shockId],
   );
 
   // ── Empty-state routing (FIXED order — #509; the body names the TRUE cause) ──
@@ -150,8 +150,8 @@ export function StressVarSection({
       />
     );
   }
-  // 2. BTC unavailable (mirrors benchmarkAvailable=false).
-  if (!btcAvailable) {
+  // 2. BTC unavailable (no closes — the benchmark section's btc-null case).
+  if (btc === null) {
     return (
       <EmptyStateCard
         heading={BTC_UNAVAILABLE_HEADING}
@@ -174,13 +174,13 @@ export function StressVarSection({
   }
 
   // ── ok ── SegmentedControl + headline impact + VaR/CVaR rows + disclosure(s).
-  // The VaR window N (scenario) and the β-shock window N (BTC inner-join) can
+  // The VaR window N (scenario) and the β-shock window N (BTC paired overlap) can
   // differ; each number names its own true N (the two-N trap). Render two
   // captions when they differ, a single VaR/CVaR caption otherwise.
   const twoNs = result.varN !== result.betaN;
   // The β-propagated impact must clear its OWN sample floor (betaN), not merely
   // ride on varN's. VaR/CVaR gate on varN above; the β·shock impact is a SECOND
-  // estimate over a SECOND, potentially-shorter window (the BTC inner-join), so
+  // estimate over a SECOND, potentially-shorter window (the BTC paired overlap), so
   // the two-N principle applies to the FLOOR, not just the caption. A confident
   // β·shock percentage fit on 2 ≤ betaN < floor overlapping days is exactly the
   // under-sampled false precision the floor exists to prevent — even when varN
@@ -192,7 +192,7 @@ export function StressVarSection({
     result.betaN,
     SAMPLE_FLOOR_OVERLAPPING_DAYS,
   );
-  // The β-shock impact is suppressed to "—" whenever the BTC inner-join is
+  // The β-shock impact is suppressed to "—" whenever the BTC paired overlap is
   // degenerate (constant BTC) or too short (betaN < 2 ⇒ benchmark returns null)
   // OR below its own sample floor (2 ≤ betaN < floor). The β/shock methodology
   // caption must NOT affirm a methodology + N for a value that did not, in fact,
@@ -238,7 +238,7 @@ export function StressVarSection({
       <p className="mt-2 text-micro text-text-muted">
         {methodologyLine(result.varN)} {VAR_CONFIDENCE_LABEL} confidence.
       </p>
-      {/* β-shock disclosure — names the BTC inner-join N (betaN) + the shock
+      {/* β-shock disclosure — names the BTC paired N (betaN) + the shock
           assumptions. Rendered only when the impact value is actually SHOWN
           (#509: a "—" impact never carries an affirmative β methodology claim).
           When shown, it is its OWN caption only if the two Ns differ, so each

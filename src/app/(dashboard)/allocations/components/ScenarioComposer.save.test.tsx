@@ -290,7 +290,7 @@ function openRow(row: SavedScenarioRow) {
   });
 }
 
-// BENCH-01 — the composer now fires a benign GET /api/benchmark/btc on mount.
+// BENCH-01 — the composer now fires a benign GET /api/benchmark/btc/prices on mount.
 // These tests assert the SAVE/UPDATE request specifically, so filter the global
 // fetch mock to the scenario-save endpoint (the benchmark fetch is unrelated
 // transport and must not pollute the save-request assertions).
@@ -303,15 +303,19 @@ function saveCalls(
   ) as Array<[string, RequestInit | undefined]>;
 }
 
-// A fetch mock that answers the benchmark series with an empty array (so
-// btcAvailable stays false — irrelevant to the save flow) and routes every
-// other URL to `saveResponse`.
+// A fetch mock that answers the BTC closes route with an empty closes body (so
+// the composer has no benchmark — irrelevant to the save flow; Phase 169.4 D-67)
+// and routes every other URL to `saveResponse`.
 function makeFetchMock(
   saveResponse: () => { ok: boolean; status: number; json: () => Promise<unknown> },
 ): ReturnType<typeof vi.fn> {
   return vi.fn(async (url: string) => {
-    if (String(url).startsWith("/api/benchmark/btc")) {
-      return { ok: true, status: 200, json: async () => [] };
+    if (String(url).startsWith("/api/benchmark/btc/prices")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ prices: [], dropped: [], through: null }),
+      };
     }
     return saveResponse();
   });

@@ -218,10 +218,13 @@ const EXPECTED_SEAM_FILES: readonly string[] = [
   "src/lib/process-key-client.ts",
   "src/lib/ratelimit.ts",
   "src/lib/resilient-fetch.ts",
-  // The 15 seam routes, in the sorted order the walk produces.
+  // The 16 seam routes, in the sorted order the walk produces.
   "src/app/api/admin/match/eval/route.ts",
   "src/app/api/admin/match/recompute/route.ts",
   "src/app/api/bridge/route.ts",
+  // Phase 169.2 / D-08 — the daily BTC benchmark refresh cron joined the seam
+  // (it calls refreshBenchmark through analytics-client).
+  "src/app/api/cron/refresh-benchmark/route.ts",
   "src/app/api/keys/[id]/permissions/route.ts",
   // Phase 164.5.3 / D-04 — the credential-rotation route joined the seam.
   "src/app/api/keys/[id]/rotate-secret/route.ts",

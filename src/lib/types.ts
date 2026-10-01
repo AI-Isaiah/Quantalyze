@@ -1227,7 +1227,20 @@ export interface ApiKey {
   // passed", never "what the venue confirmed" — see the column's own
   // COMMENT. Rendered on both key cards for exchange === "mt5" only.
   venue_account_id: string | null;
+  // Migration 20260925120000 (Phase 167.1.2 D-11). The live key of the same
+  // owner that already holds the exchange account this key reads, and why.
+  // Both-or-neither in the database. Written only by the service-role
+  // identity stamper. Read through accountShareNote, which applies the column
+  // COMMENT's reader rule (the holder must still be working).
+  account_shared_with_api_key_id: string | null;
+  account_share_kind: ApiKeyAccountShareKind | null;
+  // Same migration (D-05 / D-09). The owner's include/exclude choice for a
+  // departed key's history; NULL = the default rule.
+  history_inclusion: "include" | "exclude" | null;
 }
+
+/** Phase 167.1.2 D-11 / D-04 — the closed set of `api_keys.account_share_kind`. */
+export type ApiKeyAccountShareKind = "duplicate" | "composite_member";
 
 /**
  * audit-2026-05-07 M-0583: trust-boundary parser for `api_keys` rows.
@@ -1262,6 +1275,9 @@ export const ApiKeyRowSchema = z
     last_429_at: _isoTimestampNullable,
     disconnected_at: _isoTimestampNullable,
     venue_account_id: z.string().nullable(),
+    account_shared_with_api_key_id: z.string().nullable(),
+    account_share_kind: z.enum(["duplicate", "composite_member"]).nullable(),
+    history_inclusion: z.enum(["include", "exclude"]).nullable(),
   })
   .strict() satisfies z.ZodType<ApiKey>;
 
@@ -1458,12 +1474,30 @@ export interface RiskDecompositionRow {
   /**
    * null = the portfolio carries no risk, so no share of it exists to
    * apportion (166.1 D7, founder 2026-09-26; round-1 SFH MEDIUM-2). Never 0.
+   *
+   * Unit: percent (a 28% share is 28, not 0.28), as the producer
+   * `compute_risk_decomposition` / `routers/portfolio.py` sends it; the adapter
+   * passes it through unchanged (2026-09-27, 169 D-49). `formatPercent` takes a
+   * fraction, so a display converts once (`RiskAttribution`).
+   *
+   * Signed (169 review round 1 IN-05, 2026-09-29): the shares sum to 100, but
+   * one is negative for a strategy that offsets the book's risk, and the
+   * others then exceed 100. It is not bounded to 0 to 100.
    */
   marginal_risk_pct: number | null;
   standalone_vol: number;
   /** null for the same reason as `marginal_risk_pct`. */
   component_var: number | null;
-  weight_pct: number;
+  /**
+   * Unit: percent, 0 to 100 (a 40% weight is 40), from `routers/portfolio.py`,
+   * same as `marginal_risk_pct` (2026-09-27, 169 D-49).
+   *
+   * null = the producer sent no weight (`_safe_float` persists None for a
+   * non-finite one). Never 0: a 0 read as "no capital" and marked every row
+   * with a risk share "Overweight risk" (2026-09-29, 169 review round 1 SFH
+   * M-5; the same rule 166.1 D7 applies to `marginal_risk_pct`).
+   */
+  weight_pct: number | null;
 }
 
 export interface BenchmarkComparison {

@@ -1307,3 +1307,136 @@ describe("computeScenario — CAGR calendar clock (Plan 84-06, [73-02] precedent
   });
 });
 
+
+// =========================================================================
+// Phase 167.1.2 SC-4 — zero weight mass is "no result", never a flat +0.00%
+// =========================================================================
+//
+// WHY: on the founder's book every contributing key got weight 0 (the shared
+// account's holdings were attributed to a key that does not contribute), and
+// the engine turned that into 100 days of +0.00%. `normWeight` returns 0 when
+// the mass is not positive and the day loop's `activeWeightSum > 0 ? … : 0`
+// then writes 0 every day: a confident flat line out of no data. A blend with
+// no weight has no answer, so it must return the SAME honest empty shape the
+// zero-member window returns, only with the real member set named.
+
+describe("computeScenario — [167.1.2 SC-4] zero weight mass returns the honest empty shape", () => {
+  function expectHonestEmpty(
+    metrics: ReturnType<typeof computeScenario>,
+    memberIds: string[],
+  ) {
+    // No series, no figure: a flat 0% curve is exactly the fabrication pinned.
+    expect(metrics.n).toBe(0);
+    expect(metrics.equity_curve).toEqual([]);
+    expect(metrics.portfolio_daily_returns).toEqual([]);
+    expect(metrics.twr).toBeNull();
+    expect(metrics.cagr).toBeNull();
+    expect(metrics.volatility).toBeNull();
+    expect(metrics.sharpe).toBeNull();
+    expect(metrics.sortino).toBeNull();
+    expect(metrics.max_drawdown).toBeNull();
+    expect(metrics.max_dd_days).toBeNull();
+    expect(metrics.correlation_matrix).toBeNull();
+    expect(metrics.avg_pairwise_correlation).toBeNull();
+    expect(metrics.effective_start).toBeNull();
+    expect(metrics.effective_end).toBeNull();
+    // Unlike the zero-member return, the members DID exist: the consumers'
+    // coverage cross-check reads `member_ids`, so the real set is named.
+    expect(metrics.member_count).toBe(memberIds.length);
+    expect(metrics.member_ids).toEqual(memberIds);
+  }
+
+  it("members present with every weight 0 → n 0, empty curve, null metrics (today: a flat +0.00% curve over every date)", () => {
+    const dates = buildDates("2024-01-02", 30);
+    const strategies = [
+      constantReturnStrategy("a", dates, 0.002),
+      constantReturnStrategy("b", dates, -0.001),
+    ];
+    const state = defaultState(strategies);
+    state.weights = { a: 0, b: 0 };
+    const metrics = computeScenario(
+      strategies,
+      state,
+      buildDateMapCache(strategies),
+    );
+    expectHonestEmpty(metrics, ["a", "b"]);
+  });
+
+  it("NaN weights are no mass either → the same honest empty shape, never a NaN curve", () => {
+    const dates = buildDates("2024-01-02", 30);
+    const strategies = [
+      constantReturnStrategy("a", dates, 0.002),
+      constantReturnStrategy("b", dates, 0.001),
+    ];
+    const state = defaultState(strategies);
+    state.weights = { a: Number.NaN, b: Number.NaN };
+    const metrics = computeScenario(
+      strategies,
+      state,
+      buildDateMapCache(strategies),
+    );
+    expectHonestEmpty(metrics, ["a", "b"]);
+  });
+
+  it("an absent weight map is no mass → the honest empty shape", () => {
+    const dates = buildDates("2024-01-02", 30);
+    const strategies = [constantReturnStrategy("a", dates, 0.002)];
+    const state = defaultState(strategies);
+    state.weights = {};
+    const metrics = computeScenario(
+      strategies,
+      state,
+      buildDateMapCache(strategies),
+    );
+    expectHonestEmpty(metrics, ["a"]);
+  });
+
+  it("the present-window path: covering members with zero mass → the honest empty shape naming the members", () => {
+    const dates = buildDates("2024-01-02", 60);
+    const strategies = [
+      constantReturnStrategy("a", dates, 0.002),
+      constantReturnStrategy("b", dates, 0.001),
+    ];
+    const state: ScenarioState = {
+      ...defaultState(strategies),
+      weights: { a: 0, b: 0 },
+      window: { start: dates[5], end: dates[55] },
+    };
+    const metrics = computeScenario(
+      strategies,
+      state,
+      buildDateMapCache(strategies),
+    );
+    expectHonestEmpty(metrics, ["a", "b"]);
+  });
+
+  it("[regression guard] one positive weight beside a zero one still blends that member alone, unchanged", () => {
+    const dates = buildDates("2024-01-02", 30);
+    const strategies = [
+      constantReturnStrategy("a", dates, 0.002),
+      constantReturnStrategy("b", dates, 0.01),
+    ];
+    const state = defaultState(strategies);
+    state.weights = { a: 1, b: 0 };
+    const metrics = computeScenario(
+      strategies,
+      state,
+      buildDateMapCache(strategies),
+    );
+    expect(metrics.n).toBe(30);
+    expect(metrics.member_count).toBe(2);
+    // b has no weight, so the blend is a alone: (1.002)^30 − 1, not b's 1%.
+    expect(metrics.twr).toBeCloseTo(Math.pow(1.002, 30) - 1, 4);
+    expect(metrics.equity_curve.length).toBeGreaterThan(0);
+  });
+
+  it("computeCompositeCurve (a computeScenario caller) returns [] for all-zero weights, never a flat 1.0 wealth line", () => {
+    const dates = buildDates("2024-01-02", 30);
+    const strategies = [
+      constantReturnStrategy("a", dates, 0.002),
+      constantReturnStrategy("b", dates, 0.001),
+    ];
+    const curve = computeCompositeCurve(strategies, { a: 0, b: 0 }, dates[0]);
+    expect(curve).toEqual([]);
+  });
+});

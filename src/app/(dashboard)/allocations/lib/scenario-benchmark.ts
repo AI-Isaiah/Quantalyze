@@ -1,27 +1,24 @@
 /**
- * Scenario ↔ BTC benchmark active-return engine (Plan 24-01, BENCH-01).
+ * Scenario ↔ BTC benchmark active-return engine (Plan 24-01, BENCH-01; pairing
+ * rewritten by Phase 169.4 ALLOCTRUTH, SC12 / D-68).
  *
- * Two pure-TS primitives:
+ * The pairing rule (D-68). The Scenario pairs its portfolio daily returns with
+ * BTC through ONE function, `pairScenarioWithBtc`, over the BTC CLOSES that
+ * `/api/benchmark/btc/prices` serves (D-67). It is the engine's rule (Phase
+ * 166.4 D-A with D-05) applied through 169.5's `alignCoveredReturns` on BTC's
+ * own 7-day calendar, the same helper and calendar the factsheet comparator
+ * block uses: day one pairs with BTC's return dated that day, each later
+ * portfolio interval pairs with BTC's compounded move over the same interval,
+ * and an interval with a BTC close missing or dropped inside it is unpaired
+ * (so a BTC return that bridges a missing stored day is never paired as one
+ * day's move, SC11 / D-66). The benchmark is never zero-filled or interpolated:
+ * an unpaired date is an absence, not a 0% return. The earlier date-
+ * intersection join is gone; the portfolio compute in `analytics-service`
+ * still pairs by intersection and is surfaced for routing in 169.4-CONTEXT.md.
  *
- *   - `innerJoinByDate(port, bench)` aligns two dated daily-return series by
- *     INTERSECTION (inner-join) — only dates present in BOTH survive, with NO
- *     zero-fill and NO interpolation. This is the load-bearing honesty step:
- *     as of Phase 57 the scenario tab passes an explicit coverage window, so
- *     `computeScenario` blends over it (a strategy is a member iff its data
- *     span ⊇ the window, with a constant member-count divisor — v1.5 ADR-001)
- *     and the portfolio series this consumer receives is ALREADY the member-
- *     intersection window, no longer a union tail padded with 0. (Own-book
- *     callers that pass no `state.window` stay on the legacy union path.) The
- *     inner-join here stays load-bearing regardless (it intersects that
- *     portfolio series with BTC, ∩ against the smaller of the two), and the
- *     benchmark must still NOT be zero-filled — a non-overlapping day is an
- *     absence, not a 0% return. Mirrors
- *     `analytics-service/routers/portfolio.py:915-916`
- *     (`reindex(...).dropna()`).
- *
- *   - `computeScenarioBenchmark(portfolioDaily, btcDaily, periodsPerYear = 252)`
- *     inner-joins the two series, then assembles tracking error / information
- *     ratio / alpha / beta / correlation over the aligned window, annualizing
+ *   - `computeScenarioBenchmark(portfolioDaily, btcCloses, periodsPerYear = 252)`
+ *     pairs the two series, then assembles tracking error / information
+ *     ratio / alpha / beta / correlation over the paired window, annualizing
  *     the RISK metrics on `periodsPerYear` (252 traditional default, byte-
  *     identical to pre-#597; 365 for a crypto-legged blend, #597 part 2),
  *     REUSING the golden-tested `computeAlphaBeta` + `computeTrackingError`
@@ -47,12 +44,130 @@
  *     blend (#597 part 2). beta and correlation are basis-invariant ratios.
  */
 
+import { alignCoveredReturns, COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
+import type { BenchmarkPricesOpt, DailyPrice } from "@/lib/factsheet/types";
 import { computeAlphaBeta, computeTrackingError } from "@/lib/portfolio-stats";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { pearson, sharpe } from "@/lib/return-stats";
 
+/** BTC closes as `/api/benchmark/btc/prices` serves them: the available arm of `BenchmarkPricesOpt`. */
+export type BtcCloses = Extract<BenchmarkPricesOpt, { prices: DailyPrice[] }>;
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function isStrictlyAscendingIsoDates(dates: readonly unknown[]): dates is string[] {
+  for (let i = 0; i < dates.length; i += 1) {
+    const d = dates[i];
+    if (typeof d !== "string" || !ISO_DATE.test(d)) return false;
+    if (i > 0 && !((dates[i - 1] as string) < d)) return false;
+  }
+  return true;
+}
+
+/**
+ * Phase 169.4 ALLOCTRUTH (D-67): the shape guard for the body of
+ * `/api/benchmark/btc/prices`. Returns the closes when the body is exactly
+ * `{ prices, dropped, through }` with every close finite and positive, the
+ * price dates and the dropped dates each strictly ascending ISO dates, and
+ * `through` a string or null; null for anything else. The old returns body
+ * (an array of `{ date, value }`) is null, so a consumer that reads a stale
+ * body shows "unavailable", never a partial or misread series.
+ */
+export function parseBtcCloses(body: unknown): BtcCloses | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+  const { prices, dropped, through } = body as Record<string, unknown>;
+  if (!Array.isArray(prices) || !Array.isArray(dropped)) return null;
+  if (!(through === null || typeof through === "string")) return null;
+  const out: DailyPrice[] = [];
+  for (const p of prices) {
+    if (typeof p !== "object" || p === null) return null;
+    const { date, close } = p as Record<string, unknown>;
+    if (typeof date !== "string" || typeof close !== "number") return null;
+    if (!Number.isFinite(close) || close <= 0) return null;
+    out.push({ date, close });
+  }
+  if (!isStrictlyAscendingIsoDates(out.map((p) => p.date))) return null;
+  if (!isStrictlyAscendingIsoDates(dropped)) return null;
+  return { prices: out, dropped: [...dropped], through };
+}
+
+/**
+ * Phase 169.4 ALLOCTRUTH (SC12, D-68): the ONE pairing of a Scenario portfolio
+ * with BTC. It calls 169.5's `alignCoveredReturns` on BTC's own 7-day calendar
+ * (`COMPARATOR_CALENDARS.btc`) and keeps exactly the indices where `paired[i]`
+ * is true and the value is non-null, the filter the factsheet comparator block
+ * uses. The rule is the engine's, owned by Phase 166.4 BENCHALIGN (founder
+ * decision D-A, with D-05) and applied in TypeScript by Phase 169.5 D-64:
+ *   - day one pairs with BTC's own return dated the portfolio's first date;
+ *   - index k >= 1 pairs with BTC's move over the portfolio's own interval
+ *     (date k-1, date k], compounded, only when BTC has a close dated both
+ *     endpoints (so a Friday-to-Monday portfolio interval pairs with BTC's
+ *     Friday-to-Monday move, not its one-day Sunday-to-Monday move);
+ *   - an interval with a BTC date missing inside it is unpaired (166.4 review
+ *     WR-01, 169.5 D-64(2)), so a BTC return that bridges a missing stored day
+ *     is never paired as one day's move (SC11, D-66).
+ *
+ * `portfolioDaily` must be strictly ascending by date (the order
+ * `alignCoveredReturns` assumes). Returns `{ dates, p, b }`, positionally
+ * aligned, ready for `computeAlphaBeta` / `computeTrackingError`.
+ */
+export function pairScenarioWithBtc(
+  portfolioDaily: readonly DailyPoint[],
+  btcCloses: Pick<BtcCloses, "prices" | "dropped">,
+): { dates: string[]; p: number[]; b: number[] } {
+  const portfolioDates = portfolioDaily.map((d) => d.date);
+  const aligned = alignCoveredReturns(
+    btcCloses.prices,
+    btcCloses.dropped,
+    portfolioDates,
+    COMPARATOR_CALENDARS.btc,
+  );
+  const dates: string[] = [];
+  const p: number[] = [];
+  const b: number[] = [];
+  for (let i = 0; i < portfolioDaily.length; i += 1) {
+    const bv = aligned.returns[i];
+    if (!aligned.paired[i] || bv === null) continue;
+    dates.push(portfolioDates[i]);
+    p.push(portfolioDaily[i].value);
+    b.push(bv);
+  }
+  return { dates, p, b };
+}
+
+/**
+ * Phase 169.4 ALLOCTRUTH (D-66): the Scenario BTC overlay as the close LEVEL,
+ * `close / base close`, one point per stored close. A missing day or a
+ * dropped (corrupt) date has no close and so no point. Compounding daily
+ * returns instead would lose the move across a dropped close for good (the
+ * returns rule refuses to bridge it), and every later level would be wrong.
+ *
+ * The base (169.4 review WR-01). With `fromDate` (the scenario portfolio's
+ * first date), the base is the LAST close dated on or before `fromDate`, and
+ * the curve starts there, so BTC reads 1.0 on the scenario's first day, the
+ * level the portfolio line starts at. The served series starts years earlier
+ * (the closes route prepends the bundled fixture from 2023-04-26), and neither
+ * chart re-bases a comparator to the portfolio's window, so a base at the
+ * series' first close drew BTC several times above a 1.0 portfolio. When no
+ * close is dated on or before `fromDate`, the base is the first close (the
+ * first on or after it): BTC starts where its data starts. Without `fromDate`
+ * (no portfolio date to anchor to) the base is the first close.
+ */
+export function btcLevelsFromCloses(
+  prices: readonly DailyPrice[],
+  fromDate?: string,
+): DailyPoint[] {
+  let i0 = 0;
+  if (fromDate !== undefined) {
+    for (let k = 0; k < prices.length && prices[k].date <= fromDate; k += 1) i0 = k;
+  }
+  const base = prices[i0]?.close;
+  if (base === undefined) return [];
+  return prices.slice(i0).map((p) => ({ date: p.date, value: p.close / base }));
+}
+
 export interface ScenarioBenchmark {
-  /** Aligned (intersection) overlap count — the {N} the UI heading reports. */
+  /** Paired overlap count (`pairScenarioWithBtc`) — the {N} the UI heading reports. */
   n: number;
   /** Annualized std of (p−b). `null` for n<2. */
   trackingError: number | null;
@@ -66,31 +181,6 @@ export interface ScenarioBenchmark {
   correlation: number | null;
 }
 
-/**
- * Inner-join two dated daily-return series by date (INTERSECTION only).
- * Iterates `port` in order, keeping a date only when `bench` also has it.
- * NO zero-fill, NO interpolation. The two returned arrays are positionally
- * aligned (`p[i]` and `b[i]` share `dates[i]`) so they can be fed straight
- * into the positional `computeAlphaBeta` / `computeTrackingError` helpers.
- */
-export function innerJoinByDate(
-  port: DailyPoint[],
-  bench: DailyPoint[],
-): { dates: string[]; p: number[]; b: number[] } {
-  const bMap = new Map(bench.map((d) => [d.date, d.value]));
-  const dates: string[] = [];
-  const p: number[] = [];
-  const b: number[] = [];
-  for (const d of port) {
-    const bv = bMap.get(d.date);
-    if (bv === undefined) continue; // intersection only — no zero-fill
-    dates.push(d.date);
-    p.push(d.value);
-    b.push(bv);
-  }
-  return { dates, p, b };
-}
-
 const NULL_RESULT = (n: number): ScenarioBenchmark => ({
   n,
   trackingError: null,
@@ -101,18 +191,20 @@ const NULL_RESULT = (n: number): ScenarioBenchmark => ({
 });
 
 /**
- * Assemble the four active-return metrics + correlation over the
- * date-intersection of the scenario daily returns and the BTC daily returns.
+ * Assemble the four active-return metrics + correlation over the pairs
+ * `pairScenarioWithBtc` gives for the scenario daily returns and the BTC closes
+ * (D-68). `btcCloses` null (no benchmark) answers n = 0 and every field null.
  *
  * Each field is null-safe, so this can run unconditionally; the caller gates
  * RENDER on `evaluateSampleFloor(n, 30)` before showing the numbers.
  */
 export function computeScenarioBenchmark(
-  portfolioDaily: DailyPoint[],
-  btcDaily: DailyPoint[],
+  portfolioDaily: readonly DailyPoint[],
+  btcCloses: Pick<BtcCloses, "prices" | "dropped"> | null,
   periodsPerYear = 252,
 ): ScenarioBenchmark {
-  const { p, b } = innerJoinByDate(portfolioDaily, btcDaily);
+  if (btcCloses === null) return NULL_RESULT(0);
+  const { p, b } = pairScenarioWithBtc(portfolioDaily, btcCloses);
   const n = p.length;
   if (n < 2) return NULL_RESULT(n);
 

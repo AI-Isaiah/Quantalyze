@@ -3,6 +3,7 @@ import { render, screen, within, fireEvent } from "@testing-library/react";
 import { StressVarSection } from "./StressVarSection";
 import { SAMPLE_FLOOR_OVERLAPPING_DAYS } from "@/lib/sample-floor";
 import { VAR_CONFIDENCE_LABEL } from "../lib/scenario-stress";
+import { btcClosesFromReturns } from "../lib/btc-closes.test-utils";
 
 /**
  * Plan 26-02 Task 2 — the state-matrix + honesty pins for the StressVarSection.
@@ -25,9 +26,22 @@ import { VAR_CONFIDENCE_LABEL } from "../lib/scenario-stress";
  *   - The floor gate flips at the imported SAMPLE_FLOOR_OVERLAPPING_DAYS SoT, not
  *     a hard-coded 60 (no literal 60 anywhere in this test either).
  *   - Every empty state is honest absence: no role="alert", no red class.
+ *
+ * Phase 169.4 plan 169.4-04 (D-66, D-67, D-68): the section takes `btc`, the BTC
+ * CLOSES (or null when unavailable), and pairs through the one Scenario pairing
+ * function. The BTC fixtures stay written as daily returns on weekdays and go
+ * through `closes` below, which flat-fills the weekends, so each fixture pairs
+ * the same dates with the same values it did under the old join and no literal
+ * moved (without the fill every Monday after day one would be unpaired, and the
+ * two-N and floor cases would count the calendar instead of their own N).
  */
 
 type DailyPoint = { date: string; value: number };
+
+/** The BTC closes whose daily returns are `r` (see the header note). */
+function closes(r: DailyPoint[]) {
+  return btcClosesFromReturns(r, { flatFillGaps: true });
+}
 
 /** N sequential business-day ISO dates from startDate (skips weekends). */
 function buildDates(startDate: string, n: number): string[] {
@@ -76,8 +90,7 @@ describe("StressVarSection", () => {
     const { container } = render(
       <StressVarSection
         portfolioDaily={portfolioDaily}
-        btcDaily={btcDaily}
-        btcAvailable={true}
+        btc={closes(btcDaily)}
         n={OK_N}
         strategyCount={3}
       />,
@@ -131,8 +144,7 @@ describe("StressVarSection", () => {
     render(
       <StressVarSection
         portfolioDaily={portfolioDaily}
-        btcDaily={btcDaily}
-        btcAvailable={true}
+        btc={closes(btcDaily)}
         n={OK_N}
         strategyCount={3}
       />,
@@ -163,8 +175,7 @@ describe("StressVarSection", () => {
     const { container } = render(
       <StressVarSection
         portfolioDaily={[]}
-        btcDaily={btcDaily}
-        btcAvailable={true}
+        btc={closes(btcDaily)}
         n={0}
         strategyCount={3}
       />,
@@ -181,14 +192,13 @@ describe("StressVarSection", () => {
     expect(container.querySelector(".text-negative")).toBeNull();
   });
 
-  it("BTC-unavailable empty (btcAvailable=false) names the BTC cause, never the scenario cause (#509)", () => {
+  it("BTC-unavailable empty (btc null) names the BTC cause, never the scenario cause (#509)", () => {
     const dates = buildDates("2024-01-01", OK_N);
     const portfolioDaily = series(dates);
     const { container } = render(
       <StressVarSection
         portfolioDaily={portfolioDaily}
-        btcDaily={[]}
-        btcAvailable={false}
+        btc={null}
         n={OK_N}
         strategyCount={3}
       />,
@@ -213,8 +223,7 @@ describe("StressVarSection", () => {
     render(
       <StressVarSection
         portfolioDaily={portfolioDaily}
-        btcDaily={btcDaily}
-        btcAvailable={true}
+        btc={closes(btcDaily)}
         n={SAMPLE_FLOOR_OVERLAPPING_DAYS - 1}
         strategyCount={3}
       />,
@@ -238,8 +247,7 @@ describe("StressVarSection", () => {
     render(
       <StressVarSection
         portfolioDaily={portfolioDaily}
-        btcDaily={btcDaily}
-        btcAvailable={true}
+        btc={closes(btcDaily)}
         n={OK_N}
         strategyCount={3}
       />,
@@ -270,8 +278,7 @@ describe("StressVarSection", () => {
     const { container } = render(
       <StressVarSection
         portfolioDaily={portfolioDaily}
-        btcDaily={btcDaily}
-        btcAvailable={true}
+        btc={closes(btcDaily)}
         n={OK_N}
         strategyCount={3}
       />,
@@ -302,7 +309,7 @@ describe("StressVarSection", () => {
   it("β-impact gates on its OWN sample floor (betaN): varN >= floor renders VaR/CVaR but 2 <= betaN < floor suppresses the impact to '—' + the short-overlap note", () => {
     // The honesty invariant the two-N FLOOR (not just the caption) enforces:
     // ~80 fully-finite scenario days (varN >= floor → the ok path renders and
-    // VaR/CVaR carry real values), but a BTC series that inner-joins to only ~5
+    // VaR/CVaR carry real values), but a BTC series that pairs with only ~5
     // overlapping dates (2 <= betaN < floor). computeScenarioBenchmark returns a
     // FINITE β over those 5 days (it only nulls for n<2 / degeneracy), so the
     // projected impact would be a confident β·shock percentage fit on 5 days —
@@ -324,8 +331,7 @@ describe("StressVarSection", () => {
     const { container } = render(
       <StressVarSection
         portfolioDaily={portfolioDaily}
-        btcDaily={btcDaily}
-        btcAvailable={true}
+        btc={closes(btcDaily)}
         n={OK_N + 16}
         strategyCount={3}
       />,
@@ -371,8 +377,7 @@ describe("StressVarSection", () => {
     const { container } = render(
       <StressVarSection
         portfolioDaily={portfolioDaily}
-        btcDaily={btcDaily}
-        btcAvailable={true}
+        btc={closes(btcDaily)}
         n={OK_N}
         strategyCount={3}
       />,
@@ -399,8 +404,7 @@ describe("StressVarSection", () => {
     render(
       <StressVarSection
         portfolioDaily={portfolioDaily}
-        btcDaily={btcDaily}
-        btcAvailable={true}
+        btc={closes(btcDaily)}
         n={OK_N}
         strategyCount={3}
       />,
@@ -423,7 +427,7 @@ describe("StressVarSection", () => {
     // betaN=OK_N-2. The VaR caption names varN; the β caption names betaN.
     const portDates = buildDates("2024-01-01", OK_N);
     const portfolioDaily = series(portDates, (i) => (i % 2 === 0 ? 0.012 : -0.006));
-    // BTC drops the last 2 dates (so the inner-join is OK_N-2) and is otherwise
+    // BTC drops the last 2 dates (so the paired overlap is OK_N-2) and is otherwise
     // a non-degenerate factor.
     const btcDaily = series(
       portDates.slice(0, OK_N - 2),
@@ -433,8 +437,7 @@ describe("StressVarSection", () => {
     const { container } = render(
       <StressVarSection
         portfolioDaily={portfolioDaily}
-        btcDaily={btcDaily}
-        btcAvailable={true}
+        btc={closes(btcDaily)}
         n={OK_N}
         strategyCount={3}
       />,
@@ -444,7 +447,7 @@ describe("StressVarSection", () => {
     expect(container.textContent).toContain(
       `Historical realized · ${OK_N} overlapping days · not a forecast.`,
     );
-    // The β-shock caption names the BTC inner-join N (betaN), distinct from varN.
+    // The β-shock caption names the BTC paired N (betaN), distinct from varN.
     expect(container.textContent).toContain(
       `Historical realized · ${OK_N - 2} overlapping days · not a forecast.`,
     );
@@ -455,8 +458,7 @@ describe("StressVarSection", () => {
     const a = render(
       <StressVarSection
         portfolioDaily={[]}
-        btcDaily={series(buildDates("2024-01-01", OK_N))}
-        btcAvailable={true}
+        btc={closes(series(buildDates("2024-01-01", OK_N)))}
         n={0}
         strategyCount={3}
       />,
@@ -472,8 +474,7 @@ describe("StressVarSection", () => {
     const b = render(
       <StressVarSection
         portfolioDaily={series(dates)}
-        btcDaily={series(dates, (i) => (i % 3 === 0 ? 0.02 : -0.01))}
-        btcAvailable={true}
+        btc={closes(series(dates, (i) => (i % 3 === 0 ? 0.02 : -0.01)))}
         n={SAMPLE_FLOOR_OVERLAPPING_DAYS - 1}
         strategyCount={3}
       />,
@@ -490,8 +491,7 @@ describe("StressVarSection", () => {
     const btcDaily = series(dates, (i) => (i % 3 === 0 ? 0.02 : -0.01));
     const commonProps = {
       portfolioDaily,
-      btcDaily,
-      btcAvailable: true,
+      btc: closes(btcDaily),
       strategyCount: 3,
     } as const;
 

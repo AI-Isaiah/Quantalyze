@@ -5,6 +5,7 @@ import {
   PortfolioAnalyticsResponseSchema,
   PortfolioOptimizerResponseSchema,
   RecomputeMatchResponseSchema,
+  BenchmarkRefreshResponseSchema,
   BridgeResponseSchema,
   OptimizeWeightsResponseSchema,
   type OptimizeWeightsResponse,
@@ -1064,6 +1065,37 @@ export async function evalMatch(
     method: "GET",
     tenantId: tenant.userId,
   });
+}
+
+/**
+ * Phase 169.2 / plan 02 (SC3, D-08) — refresh the cached BTC benchmark.
+ *
+ * The ONE TypeScript caller of the service's `POST /api/benchmark-refresh`,
+ * reached only from the daily cron route `src/app/api/cron/refresh-benchmark`.
+ * The service does the work through its existing fetcher; there is no second
+ * fetcher in TypeScript. It throws on any non-2xx (a failed or stale refresh is
+ * a 500 there), so the route can answer non-2xx and Vercel Cron alarms.
+ *
+ * THE TENANT IS A FIXED SERVER LITERAL. `analyticsRequest` requires a
+ * server-derived `tenantId`, and this call has no user: it is a scheduled job.
+ * No non-user convention exists in this file, so the literal below names the
+ * one caller. It is dot-free (the claim mint refuses a dot), it comes from OUR
+ * source and never from the wire, and it must NOT be `"public"`, which is the
+ * anonymous teaser's bucket. The endpoint carries no Python limiter today, so
+ * the claim is inert and forward-compatible, like the ones the tenantClaim
+ * block describes.
+ */
+export async function refreshBenchmark() {
+  const data = await analyticsRequest(
+    "/api/benchmark-refresh",
+    {},
+    { budgetKey: "benchmark-refresh", tenantId: "cron-refresh-benchmark" },
+  );
+  return parseResponse(
+    BenchmarkRefreshResponseSchema,
+    data,
+    "/api/benchmark-refresh",
+  );
 }
 
 // @internal — exposed for Phase 16 / OBSERV-01 unit tests only. Public

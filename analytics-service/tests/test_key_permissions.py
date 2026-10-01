@@ -172,6 +172,37 @@ class TestOkxParser:
             "probe_error": True,
         }
 
+    # Phase 167.1.2 (D-01): the account id rides on the SAME account/config
+    # response the permission probe already fetched (no new request). It is
+    # what the connect routes stamp into api_keys.venue_account_id so the
+    # venue-identity index can refuse a second key on one OKX account.
+    @pytest.mark.asyncio
+    async def test_carries_the_account_uid_from_the_same_response(self):
+        ex = AsyncMock()
+        ex.id = "okx"
+        ex.private_get_account_config = AsyncMock(return_value={
+            "data": [{"perm": "read_only", "uid": "100000001", "mainUid": "100000000"}],
+        })
+        result = await detect_okx_permissions(ex)
+        assert result == {
+            "read": True,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+            "account_id": "100000001",
+        }
+        assert ex.private_get_account_config.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_blank_uid_adds_no_account_id_key(self):
+        ex = AsyncMock()
+        ex.id = "okx"
+        ex.private_get_account_config = AsyncMock(return_value={
+            "data": [{"perm": "read_only", "uid": "  "}],
+        })
+        result = await detect_okx_permissions(ex)
+        assert "account_id" not in result
+
 
 class TestBybitParser:
     @pytest.mark.asyncio
@@ -236,6 +267,46 @@ class TestBybitParser:
             "withdraw": True,
             "probe_error": True,
         }
+
+    # Phase 167.1.2 (D-01): the account id rides on the SAME query-api response
+    # the permission probe already fetched. userID, never parentUid: a
+    # sub-account has its own userID and parentUid is its master's.
+    @pytest.mark.asyncio
+    async def test_carries_user_id_from_the_same_response(self):
+        ex = AsyncMock()
+        ex.id = "bybit"
+        ex.private_get_v5_user_query_api = AsyncMock(return_value={
+            "result": {"readOnly": "1", "permissions": {}, "userID": 100000001, "parentUid": "100000000"},
+        })
+        result = await detect_bybit_permissions(ex)
+        assert result == {
+            "read": True,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+            "account_id": "100000001",
+        }
+        assert ex.private_get_v5_user_query_api.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_carries_user_id_on_the_permissions_arrays_path_too(self):
+        ex = AsyncMock()
+        ex.id = "bybit"
+        ex.private_get_v5_user_query_api = AsyncMock(return_value={
+            "result": {"readOnly": "0", "permissions": {}, "userID": "100000001"},
+        })
+        result = await detect_bybit_permissions(ex)
+        assert result["account_id"] == "100000001"
+
+    @pytest.mark.asyncio
+    async def test_parent_uid_alone_adds_no_account_id(self):
+        ex = AsyncMock()
+        ex.id = "bybit"
+        ex.private_get_v5_user_query_api = AsyncMock(return_value={
+            "result": {"readOnly": "1", "permissions": {}, "parentUid": "100000000"},
+        })
+        result = await detect_bybit_permissions(ex)
+        assert "account_id" not in result
 
     @pytest.mark.asyncio
     async def test_read_only_flag_supersedes_permissions_array(self):

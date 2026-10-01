@@ -122,6 +122,10 @@
  * refuse the repo (a bare `tsc --noEmit` TS2322) until this docblock and the
  * `RouteBudgetKey` list below were both edited, which is the mechanism
  * exercised, not merely described.
+ * The sixteenth, `benchmark-refresh` (Phase 169.2 / D-08), is an ANALYTICS
+ * wrapper key (`refreshBenchmark`), not a route budget: it carries a NO verdict
+ * in `RETRY_AUDIT_NO_ANALYTICS` and joins the analytics-key literal in the test,
+ * not `RouteBudgetKey`.
  */
 
 import type { FlowType } from "./process-key-client";
@@ -521,8 +525,9 @@ export const RETRY_SAFE_ANALYTICS: Readonly<
 
 /**
  * Analytics-seam wrapper functions that are NOT retry-safe — evidence-only NO
- * verdicts. Exactly SIX entries; together with the four YES entries they cover
- * all ten analytics wrappers (the exhaustiveness pin).
+ * verdicts. Exactly SEVEN entries; together with the four YES entries they cover
+ * all eleven analytics wrappers (the exhaustiveness pin). The seventh is
+ * `benchmark-refresh` (Phase 169.2, D-08).
  */
 export const RETRY_AUDIT_NO_ANALYTICS: Readonly<
   Partial<Record<SeamBudgetKey, string>>
@@ -568,4 +573,8 @@ export const RETRY_AUDIT_NO_ANALYTICS: Readonly<
   "match-eval":
     "evalMatch — read-only admin sweep, likely safe but low value; default " +
     "no-retry (RESEARCH discretion).",
+  "benchmark-refresh":
+    "refreshBenchmark — non-retried BY DESIGN (Phase 169.2, D-08): the only " +
+    "caller is the daily cron, a failed refresh answers non-2xx so Vercel Cron " +
+    "alarms, and tomorrow's scheduled run is the retry.",
 } as const satisfies Partial<Record<SeamBudgetKey, string>>);

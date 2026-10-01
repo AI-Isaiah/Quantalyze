@@ -211,6 +211,7 @@ describe("ENGINE-05 runtime id-format — no surviving builder emits a 'holding:
     const perKey = buildPerKeyStrategyForBuilderSet(
       { "key-A": RETURNS, "key-B": RETURNS },
       { "key-A": 70, "key-B": 30 },
+      new Map(),
     );
     expect(perKey.strategies.length).toBe(2);
     assertNoHoldingEngineUnitId(perKey, "buildPerKeyStrategyForBuilderSet");
@@ -226,6 +227,7 @@ describe("ENGINE-05 runtime id-format — no surviving builder emits a 'holding:
     const perKey = buildPerKeyStrategyForBuilderSet(
       { "key-A": RETURNS, "key-B": RETURNS },
       { "key-A": 70, "key-B": 30 },
+      new Map(),
     );
     const merged = mergeAddedIntoPerKeySet(perKey, ADDED, ADDED_RETURNS, ADDED_META);
     // Non-vacuity: the blend actually carries units to inspect (2 keys + 2 added).

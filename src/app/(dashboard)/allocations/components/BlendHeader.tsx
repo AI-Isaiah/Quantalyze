@@ -13,6 +13,9 @@ import type { CoverageWindow } from "@/lib/scenario-window";
  *
  * Honest degrade order (LOCKED, 58-UI-SPEC §Copywriting Contract — verbatim):
  *   N === 0 → "No strategies span the selected window"
+ *   N >= 1 with no effective window (Phase 167.1.2 SC-4, the engine's
+ *           zero-weight-mass empty shape) → "No weight on the selected
+ *           strategies — not a blend"
  *   N === 1 → "1 strategy — not a blend"
  *   else    → "Mean of {N} strategies · {effStart}–{effEnd}"
  *             (+ " · window truncated from full range" when the effective window
@@ -55,6 +58,11 @@ export function BlendHeader({ metrics, unionSpan }: BlendHeaderProps) {
     >
       {n === 0 ? (
         "No strategies span the selected window"
+      ) : effStart == null || effEnd == null ? (
+        // Phase 167.1.2 SC-4: members exist but the engine returned no window,
+        // which on this path is its zero-weight-mass empty shape. Saying
+        // "Mean of N strategies · –" would claim a blend that does not exist.
+        "No weight on the selected strategies — not a blend"
       ) : n === 1 ? (
         // N=1 degrade note is the quieter regular tier (58-UI-SPEC §Typography);
         // rendered as one text node so the verbatim copy stays a single string.

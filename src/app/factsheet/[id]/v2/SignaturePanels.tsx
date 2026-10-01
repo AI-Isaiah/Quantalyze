@@ -1,9 +1,9 @@
 "use client";
 
 import { useMemo } from "react";
-import { usePayload, useActiveComparator } from "./factsheet-context";
+import { usePayload } from "./factsheet-context";
 import { BaseLeverageNote } from "./basis-context";
-import type { EventSignature, EventSignaturesSet } from "@/lib/factsheet/types";
+import type { EventSignature, EventSignaturesSet, FactsheetPayload } from "@/lib/factsheet/types";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 
@@ -39,9 +39,30 @@ const PLOT_W = VB_W - PAD.left - PAD.right;
 const WINDOW = 14;
 const TRACE_LEN = WINDOW * 2 + 1;
 
+/**
+ * Phase 169.4 review round 2 CR-01: the benchmark of BOTH signature sections is
+ * BTC by construction (`build-payload.ts` builds `eventSignatures` and
+ * `benchEventSignatures` from `btcAligned` only), so every label says BTC,
+ * whatever comparator the picker has active. Reading the active comparator's
+ * name printed "of SPX" over BTC trajectories.
+ */
+export const SIG_BENCH = "BTC";
+
+/**
+ * The em-dash reason for a BTC view during a BTC outage. The predicate is the
+ * one the allocator portfolios use (`build-payload.ts`, `btcUnavailable`), and the
+ * wording is the allocator panel's, so one outage reads as one cause on the
+ * page. An absent `benchmarkPrices` means "no coverage information" and is read
+ * as unavailable, as the browser re-derive reads it (`types.ts`).
+ */
+export const BTC_OUTAGE_REASON = "BTC prices are unavailable right now";
+
+export function btcPricesUnavailable(payload: FactsheetPayload): boolean {
+  return payload.benchmarkPrices === undefined || "unavailable" in payload.benchmarkPrices;
+}
+
 export function SignaturesSection() {
   const payload = usePayload();
-  const { block: cmp } = useActiveComparator();
   // B6 — eventSignatures lives only on the "api" arm; narrowing ingestSource
   // unlocks it (a csv read is a compile error). The parent gates this on
   // ingestSource === "api", so this is type-safety, not a runtime branch. (RED-TEAM-M3)
@@ -54,17 +75,20 @@ export function SignaturesSection() {
           aggregations of per-event trajectories not carried in the payload, so their
           magnitudes cannot follow a client leverage what-if — they stay at base 1×. */}
       <BaseLeverageNote payload={payload} label="Event signatures shown at base 1× leverage" />
+      {/* CR-01 (Phase 169.4): no count in the horizon title. The benchmark and
+          equity views hold different populations once a benchmark null drops a
+          benchmark trace, so each panel names its own N (see SignatureHorizon). */}
       <SignatureHorizon
-        title={`Returns Signatures for 7 Days Horizon (${sigs.h7.winCount} wins · ${sigs.h7.lossCount} losses)`}
+        title="Returns Signatures for 7 Days Horizon"
         subtitle="mean + median + 25/75 + 5/95 percentile bands of benchmark or accumulated-capital trajectory around strategy events · ±14d window"
         set={sigs.h7}
-        benchName={cmp.shortName}
+        btcUnavailable={btcPricesUnavailable(payload)}
       />
       <SignatureHorizon
-        title={`Returns Signatures for 1 Day Horizon (${sigs.h1.winCount} wins · ${sigs.h1.lossCount} losses)`}
+        title="Returns Signatures for 1 Day Horizon"
         subtitle="single-day win/loss events · same trajectory aggregations"
         set={sigs.h1}
-        benchName={cmp.shortName}
+        btcUnavailable={btcPricesUnavailable(payload)}
       />
     </section>
   );
@@ -74,12 +98,12 @@ function SignatureHorizon({
   title,
   subtitle,
   set,
-  benchName,
+  btcUnavailable,
 }: {
   title: string;
   subtitle: string;
   set: EventSignaturesSet;
-  benchName: string;
+  btcUnavailable: boolean;
 }) {
   return (
     <div className="flex flex-col gap-4">
@@ -98,28 +122,79 @@ function SignatureHorizon({
         <p className="text-micro text-text-muted">{subtitle}</p>
       </header>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
-        <SignaturePanel
-          title={`Win Event · of ${benchName}`}
+        <SignatureSlot
+          title={`Win Event · of ${SIG_BENCH}`}
           sig={set.winOfBenchmark}
+          n={set.benchWinCount}
+          emptyReason={btcUnavailable ? BTC_OUTAGE_REASON : `no win event has a complete ±14-day window of ${SIG_BENCH} prices`}
           tone="positive"
         />
-        <SignaturePanel
-          title={`Loss Event · of ${benchName}`}
+        <SignatureSlot
+          title={`Loss Event · of ${SIG_BENCH}`}
           sig={set.lossOfBenchmark}
+          n={set.benchLossCount}
+          emptyReason={btcUnavailable ? BTC_OUTAGE_REASON : `no loss event has a complete ±14-day window of ${SIG_BENCH} prices`}
           tone="negative"
         />
-        <SignaturePanel
+        <SignatureSlot
           title="Win Event · of Accumulated Capital"
           sig={set.winOfEquity}
+          n={set.winCount}
+          emptyReason="no win event has a complete ±14-day window of returns"
           tone="positive"
         />
-        <SignaturePanel
+        <SignatureSlot
           title="Loss Event · of Accumulated Capital"
           sig={set.lossOfEquity}
+          n={set.lossCount}
+          emptyReason="no loss event has a complete ±14-day window of returns"
           tone="negative"
         />
       </div>
     </div>
+  );
+}
+
+/**
+ * CR-01 (Phase 169.4): one panel slot. A view with no trace is `null` and
+ * renders the em-dash state (DESIGN.md null rule), never a flat 0% chart; a
+ * populated view names its own event count in its title. The branch is here,
+ * above SignaturePanel, because SignaturePanel calls hooks.
+ */
+function SignatureSlot({
+  title,
+  sig,
+  n,
+  emptyReason,
+  tone,
+}: {
+  title: string;
+  sig: EventSignature | null;
+  n: number;
+  emptyReason: string;
+  tone: "positive" | "negative";
+}) {
+  if (sig === null) return <SignatureEmptyPanel title={title} reason={emptyReason} />;
+  return <SignaturePanel title={`${title} · ${n} ${n === 1 ? "event" : "events"}`} sig={sig} tone={tone} />;
+}
+
+/**
+ * The em-dash state for a signature view with no measurable trace (CR-01).
+ * Shared with CrossSignaturePanels so both surfaces say the same thing.
+ */
+export function SignatureEmptyPanel({ title, reason }: { title: string; reason: string }) {
+  return (
+    <figure className="flex flex-col gap-2" data-signature-empty="">
+      <header>
+        <p className="text-caption font-semibold text-text-primary">{title}</p>
+      </header>
+      <div className="flex flex-col gap-1 py-6">
+        <span className="font-metric text-text-muted" aria-hidden>
+          —
+        </span>
+        <p className="text-micro text-text-muted">Not measurable: {reason}.</p>
+      </div>
+    </figure>
   );
 }
 

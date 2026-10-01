@@ -201,6 +201,8 @@ const STUB_PROPS: MyAllocationDashboardPayload & {
   equityCurveSource: "legacy",
   // Phase 167.1.2 / D-02: the producer emits "rebuilding" for every allocator.
   equityHistoryState: "rebuilding",
+  equityDailyReturns: [],
+  equityHistoryRebuildReason: null,
   derivedCurveComputedAt: null,
   minHistoryDepthMonths: null,
   equityBaselineUnknown: false,
@@ -252,7 +254,7 @@ describe("AllocationsTabs — H-0058 scenario draft survives tab-switch (real co
   beforeEach(() => {
     // This suite mounts the REAL composer inside the REAL ScenarioTabContent,
     // and both fetch on mount: `GET /api/allocator/scenario/saved` (the saved
-    // list), `/api/benchmark/btc` (the overlay series), and — once a strategy
+    // list), `/api/benchmark/btc/prices` (the BTC closes), and — once a strategy
     // is added — `/api/strategies/<id>/returns`. None of that is the contract
     // under test, so pin ONE mock that answers each with an empty 200, the
     // same idiom as AllocationsTabs.scenario-composer.test.tsx.
@@ -272,10 +274,16 @@ describe("AllocationsTabs — H-0058 scenario draft survives tab-switch (real co
         // ARRAY as a retryable failure (WR-01 in ScenarioComposer), so answer
         // it in its own shape rather than with a bare `[]`. The added legs in
         // this suite carry no history, which is what the composer's
-        // empty-series path already expects.
-        const body = String(input).includes("/returns")
+        // empty-series path already expects. The BTC closes route answers
+        // an empty closes body in its own shape (Phase 169.4 D-67), which the
+        // composer reads as "no benchmark", the state the old empty returns
+        // array gave.
+        const url = String(input);
+        const body = url.includes("/returns")
           ? { daily_returns: [] }
-          : [];
+          : url.startsWith("/api/benchmark/btc/prices")
+            ? { prices: [], dropped: [], through: null }
+            : [];
         return { ok: true, json: async () => body } as Response;
       }),
     );

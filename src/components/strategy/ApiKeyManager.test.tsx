@@ -3313,6 +3313,34 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       expect(within(confirmDialog()).getByRole("button", { name: "Delete" })).toBeEnabled();
     });
 
+    it("C4-SFH-09-HISTORY: the confirm warns that deleting removes this account's history, in amber, on its own line apart from the composite warning", async () => {
+      // 167.1.2 C4 review SFH-C4-09. This Delete is a hard `api_keys` DELETE,
+      // and csv_daily_returns_api_key_id_fkey is ON DELETE CASCADE, so the
+      // key's per-key daily returns (the allocator's history for this account)
+      // go with it. Plan 09 put this sentence on AllocatorExchangeManager's
+      // delete confirm only. This card has no Disconnect (167.1.2 REVIEW
+      // WR-01), so the allocator copy's "Disconnect instead to keep it." is
+      // not repeated here: it would point at a control this card lacks.
+      const HISTORY_ORACLE = "Deleting also removes this account's history.";
+      routeFetch();
+      const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
+      await renderRows([keyA]);
+      await act(async () => {
+        fireEvent.click(cardButton("key-a", "Delete"));
+      });
+      expect(confirmDialog()).toHaveAttribute("open");
+      const warning = within(confirmDialog()).getByTestId("delete-history-warning");
+      expect(warning).toHaveTextContent(HISTORY_ORACLE);
+      expect(warning).not.toHaveTextContent(/Disconnect/);
+      // DESIGN.md: a recoverable-by-choice consequence is amber, never red.
+      expect(warning.className).toContain("text-warning");
+      expect(warning.className).not.toContain("text-negative");
+      // It informs the choice and never blocks it.
+      expect(within(confirmDialog()).getByRole("button", { name: "Delete" })).toBeEnabled();
+      // Its own line, independent of the composite warning (absent here).
+      expect(within(confirmDialog()).queryByTestId("delete-composite-warning")).not.toBeInTheDocument();
+    });
+
     it("R2-WR02-UNNAMED: a membership whose composite cannot be read is still listed, never dropped", async () => {
       // 167.2.1 D-01 (lineage): answered by the route now; oracle unchanged.
       routeFetch({ memberships: membershipsAnswer({ memberships: [membership(null)] }) });
@@ -4726,4 +4754,171 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
       expect(screen.queryByText(SHAPE_UNKNOWN_ORACLE)).not.toBeInTheDocument();
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 plan 04 (D-01, D-11) — the manager's key card names a key that
+// reads the same exchange account as another of the owner's live keys, beside
+// the Delete control that already exists, through the SAME accountShareNote
+// the allocator card uses. A composite_member pair (D-04) is legitimate and
+// shows nothing. Without the note the marker the daily poll writes is
+// invisible on this surface, and the owner has no named way to clean it up.
+// ---------------------------------------------------------------------------
+describe("ApiKeyManager — duplicate-account note (167.1.2 plan 04)", () => {
+  function row(overrides: Record<string, unknown>) {
+    return {
+      id: "key-okx-holder",
+      user_id: "user-a",
+      exchange: "okx",
+      label: "Main OKX",
+      is_active: true,
+      sync_status: "complete",
+      last_sync_at: "2026-09-20T11:58:00Z",
+      account_balance_usdt: 1000,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+      venue_account_id: null,
+      account_shared_with_api_key_id: null,
+      account_share_kind: null,
+      history_inclusion: null,
+      ...overrides,
+    };
+  }
+
+  it("renders the duplicate sentence on the marked key's card, beside its Delete control", async () => {
+    selectResultMock.mockReturnValue({
+      data: [
+        row({}),
+        row({
+          id: "key-okx-dup",
+          label: "Second OKX",
+          account_shared_with_api_key_id: "key-okx-holder",
+          account_share_kind: "duplicate",
+        }),
+      ],
+      error: null,
+    });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    const card = await screen.findByTestId("api-key-card-key-okx-dup");
+    const note = within(card).getByRole("note");
+    expect(note.textContent).toBe(
+      "This key reads the same exchange account as OKX — Main OKX. Delete one of them.",
+    );
+    // 167.1.2 REVIEW WR-01: the sentence's verb is a control THIS card has.
+    // The manager card offers Delete and no Disconnect, so a note asking the
+    // owner to "Disconnect" pointed at a button that does not exist here.
+    expect(within(card).getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: /Disconnect/ })).not.toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("api-key-card-key-okx-holder")).queryByRole("note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders nothing for a composite_member pair", async () => {
+    selectResultMock.mockReturnValue({
+      data: [
+        row({}),
+        row({
+          id: "key-okx-dup",
+          label: "Second OKX",
+          account_shared_with_api_key_id: "key-okx-holder",
+          account_share_kind: "composite_member",
+        }),
+      ],
+      error: null,
+    });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    await screen.findByTestId("api-key-card-key-okx-dup");
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  // D-18 (founder, 2026-09-27): the holder is WORKING only while it is active,
+  // connected, and its last sync is not revoked, sign_in_failed or error. A
+  // holder that is not working does not count the account, so the marked key
+  // counts on its own and its card must not ask the owner to disconnect one of
+  // them. Judged inside the duplicate's own card, by the sentence text, because
+  // a failing holder renders a status line of its own.
+  const OKX_DUP_SENTENCE =
+    "This key reads the same exchange account as OKX — Main OKX. Delete one of them.";
+
+  async function renderPair(holderOverrides: Record<string, unknown>) {
+    selectResultMock.mockReturnValue({
+      data: [
+        row(holderOverrides),
+        row({
+          id: "key-okx-dup",
+          label: "Second OKX",
+          account_shared_with_api_key_id: "key-okx-holder",
+          account_share_kind: "duplicate",
+        }),
+      ],
+      error: null,
+    });
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+    return screen.findByTestId("api-key-card-key-okx-dup");
+  }
+
+  it.each([
+    ["disconnected", { disconnected_at: "2026-09-20T00:00:00Z" }],
+    ["revoked", { sync_status: "revoked" }],
+    ["sign_in_failed", { sync_status: "sign_in_failed" }],
+    ["error", { sync_status: "error" }],
+    ["inactive", { is_active: false }],
+  ])("renders nothing on the duplicate's card when the holder is %s", async (_name, holderOverrides) => {
+    const card = await renderPair(holderOverrides);
+    // Neither the named sentence nor its 'another of your keys' fallback.
+    expect(within(card).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["idle", { sync_status: "idle" }],
+    ["complete", { sync_status: "complete" }],
+    ["never synced (NULL)", { sync_status: null }],
+  ])("names the holder on the duplicate's card while it is working, last sync %s", async (_name, holderOverrides) => {
+    const card = await renderPair(holderOverrides);
+    expect(within(card).getByText(OKX_DUP_SENTENCE)).toBeInTheDocument();
+  });
+
+  // 167.1.2 REVIEW WR-02: this card lists EVERY key the read returns, the
+  // disconnected ones included. A marked key the owner has already
+  // disconnected (the remedy the note asks for) is never polled again, so its
+  // marker never clears; the note must not keep asking for a remedy already
+  // applied. Same for a marked key that is inactive or failing (D-18 applied
+  // to the marked key itself).
+  it.each([
+    ["disconnected", { disconnected_at: "2026-09-21T00:00:00Z" }],
+    ["inactive", { is_active: false }],
+    ["revoked", { sync_status: "revoked" }],
+  ])("renders nothing on a marked key that is itself %s", async (_name, dupOverrides) => {
+    selectResultMock.mockReturnValue({
+      data: [
+        row({}),
+        row({
+          id: "key-okx-dup",
+          label: "Second OKX",
+          account_shared_with_api_key_id: "key-okx-holder",
+          account_share_kind: "duplicate",
+          ...dupOverrides,
+        }),
+      ],
+      error: null,
+    });
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+    const card = await screen.findByTestId("api-key-card-key-okx-dup");
+    expect(within(card).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
+  });
 });

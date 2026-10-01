@@ -3,6 +3,7 @@
 import { useState, useMemo, useCallback, useEffect, useId, useRef } from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
+import { NowrapWords } from "@/components/ui/NowrapWords";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { withViewTransition } from "@/lib/view-transition";
 import { Sparkline } from "@/components/charts/Sparkline";
@@ -819,7 +820,7 @@ export function StrategyTable({
           <div
             data-strategy-table=""
             data-density={density === "compact" ? "tight" : undefined}
-            className="relative border border-border bg-surface"
+            className="relative isolate border border-border bg-surface"
           >
             {/* Density control \u2014 table-SCOPED (drives the data-density on this
                 root only, never <body>, so it cannot flip the allocator
@@ -1094,7 +1095,7 @@ export function StrategyTable({
                               href={`/factsheet/${s.id}`}
                               className="font-medium text-text-primary hover:text-accent transition-colors"
                             >
-                              {s.name}
+                              <NowrapWords text={s.name} />
                             </Link>
                             {s.api_key_id && (
                               <span title="Verified via exchange API" className="text-accent">
@@ -1140,9 +1141,9 @@ export function StrategyTable({
                             )}
                           </div>
                           <div className="flex items-center gap-2 mt-1">
-                            <div className="flex gap-1">
+                            <div className="flex flex-wrap gap-1">
                               {s.strategy_types.map((t) => (
-                                <Badge key={t} label={t} />
+                                <Badge key={t} label={t} className="whitespace-nowrap" />
                               ))}
                             </div>
                             {/* W-B — an uncomputed row must never claim
@@ -1213,7 +1214,7 @@ export function StrategyTable({
                                   Syncing
                                 </span>
                               ) : (
-                                <span className={`${DATA_STATE_CHIP} text-text-muted bg-track`}>
+                                <span className={`${DATA_STATE_CHIP} text-text-secondary bg-track`}>
                                   No data
                                 </span>
                               ))}
@@ -1377,7 +1378,7 @@ export function StrategyTable({
                             </span>
                           </div>
                           <div className="flex items-center gap-2 mt-1">
-                            <span className={`${DATA_STATE_CHIP} text-text-muted bg-track`}>
+                            <span className={`${DATA_STATE_CHIP} text-text-secondary bg-track`}>
                               No strategy yet
                             </span>
                           </div>

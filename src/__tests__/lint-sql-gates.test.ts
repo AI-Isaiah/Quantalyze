@@ -1127,7 +1127,13 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // the UNION of the two lines above. Each side added one file over the common
     // base of 77, so BOTH joined the corpus: 77 + 1 + 1 = 79.
     // MEASURED: `node scripts/lint-sql-gates.mjs` printed `scanned 79 file(s)` on the merged tree.
-    expect(res.out).toMatch(/scanned 79 file/);
+    // MOVED 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05), 79 -> 80:
+    // supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql joined the corpus.
+    // MEASURED: `node scripts/lint-sql-gates.mjs` printed `scanned 80 file(s); 0 finding(s)`.
+    // MOVED 2026-09-29 (Phase 167.1.2 PR C2, review fix B, WR-04), 80 -> 81: plan 12's
+    // supabase/tests/test_refresh_fanout_zero_snapshot_bootstrap.sql joined the corpus.
+    // MEASURED: `node scripts/lint-sql-gates.mjs` printed `scanned 81 file(s); 0 finding(s)`.
+    expect(res.out).toMatch(/scanned 81 file/);
     expect(res.status, res.out).toBe(0);
   });
 
@@ -1868,7 +1874,14 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
         readFileSync(ciPath, "utf8"),
         "the workflow on disk no longer carries the unmutated always-on assignment — the mutation escaped into the working tree, which this harness is built specifically never to do",
       ).toContain(TARGET);
-    });
+      // ⚠️ TIMEOUT RAISED from vitest's 5000 ms default, MEASURED 2026-09-29
+      // (Phase 167.1.2 PR C2 review fix B, WR-04), the same class as the arm
+      // above. This arm also spawns bash over the result loop. It took 1992 ms
+      // with this file run alone, and timed out at 5057 ms in an unsharded
+      // `npx vitest run src/__tests__` at load average ~4. A load-dependent
+      // timeout, not a regression. CI shards, which keeps it under the default.
+      // ⛔ This raises HEADROOM only. Not one assertion is relaxed.
+    }, 20000);
   });
 
   it("leaves the corpus untouched — a linter that could edit gate files is a liability", () => {

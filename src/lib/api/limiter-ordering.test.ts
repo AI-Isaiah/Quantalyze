@@ -141,11 +141,12 @@ const NO_INPUT = new Set([
   // NO_INPUT shape as the browse/returns siblings below. Deny routed through
   // rateLimitDenyJson (pinned by route.test.ts + the seam posture invariant).
   "admin/match/eval/route.ts",
-  // Public BTC benchmark GET — added to PUBLIC_ROUTES so the anonymous
-  // scenario-share recipient page can self-fetch the overlay. publicIpLimiter
-  // (10/min/IP), no request body (symbol hard-coded), limit-FIRST before the DB
-  // read. Same shape as demo/match below (public per-IP, no body).
-  "benchmark/btc/route.ts",
+  // Phase 169.4 (D-67) — public BTC closes GET, reached by the anonymous
+  // scenario-share recipient page. publicIpLimiter per IP, NO request body
+  // and no query parameter (the symbol is fixed to 'BTC' in the route), and
+  // the limit is taken FIRST, before the benchmark_prices read, so the
+  // "burn-a-token-on-bad-body" bug cannot occur.
+  "benchmark/btc/prices/route.ts",
   "demo/match/[allocator_id]/route.ts",
   "factsheet/[id]/pdf/route.ts",
   "me/audit-log/export/route.ts",
@@ -181,6 +182,13 @@ const NO_INPUT = new Set([
   // BEFORE checkLimit, so a malformed id never burns a token. Same NO_INPUT
   // shape as the returns/sync-progress/share siblings above.
   "keys/[id]/memberships/route.ts",
+  // Phase 169.2 / D-20 — the daily BTC benchmark refresh cron. CRON_SECRET
+  // Bearer gate, then adminActionLimiter under one fixed identifier
+  // (`benchmark-refresh:cron`), and NO request body: the handler reads only
+  // the Authorization header, so the burn-a-token-on-bad-body bug cannot occur.
+  // Deny routed through rateLimitDenyJson (pinned by its route.test.ts and the
+  // seam posture invariant).
+  "cron/refresh-benchmark/route.ts",
 ]);
 
 // limit-FIRST is intentional here (public/unauth scraper defense).

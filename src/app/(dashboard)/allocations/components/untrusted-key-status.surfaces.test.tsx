@@ -294,6 +294,7 @@ describe("[D-16] OpenPositionsTable — the derivative surface answers the predi
  * turns this block RED instead of moving the oracle with it.
  */
 describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
+  // 2026-09-27, Phase 169 D-50: P&L renders at 2 decimals and a zero-rounded amount carries no sign.
   function footerTotal(container: HTMLElement): string {
     const tfoot = container.querySelector("tfoot")!;
     const totalRow = tfoot.querySelectorAll("tr")[0];
@@ -315,9 +316,9 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
       />,
     );
     // D-03: the untrusted row is still counted — disclose, never subtract.
-    expect(footerTotal(container)).toBe("+$1,300");
+    expect(footerTotal(container)).toBe("+$1,300.00");
     expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
-      "Includes +$300 from keys needing attention.",
+      "Includes +$300.00 from keys needing attention.",
     );
   });
 
@@ -331,7 +332,7 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
       );
       expect(
         screen.getByTestId("open-positions-untrusted-note").textContent,
-      ).toBe("Includes +$1,500 from keys needing attention.");
+      ).toBe("Includes +$1,500.00 from keys needing attention.");
     },
   );
 
@@ -348,7 +349,7 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
       screen.queryByTestId("open-positions-untrusted-note"),
     ).not.toBeInTheDocument();
     expect(container.querySelector("tfoot")!.querySelectorAll("tr")).toHaveLength(1);
-    expect(footerTotal(container)).toBe("+$1,300");
+    expect(footerTotal(container)).toBe("+$1,300.00");
   });
 
   it("mixed table: the total is trusted + untrusted, the qualifier is the untrusted part only", () => {
@@ -371,10 +372,10 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
       />,
     );
     // 2,000 + 500 + 700 - 100 = 3,100 (hand-summed; D-03 keeps the untrusted rows in).
-    expect(footerTotal(container)).toBe("+$3,100");
+    expect(footerTotal(container)).toBe("+$3,100.00");
     // 700 - 100 = 600: only the two untrusted rows, across both statuses.
     expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
-      "Includes +$600 from keys needing attention.",
+      "Includes +$600.00 from keys needing attention.",
     );
   });
 
@@ -390,9 +391,9 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
       />,
     );
     // The first character after "Includes " is U+2212 MINUS SIGN, not a
-    // hyphen-minus: it is formatPnl's sign, the same one the total uses.
+    // hyphen-minus: it is the signed formatter's sign, the same one the total uses.
     expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
-      "Includes −$1,235 from keys needing attention.",
+      "Includes −$1,234.60 from keys needing attention.",
     );
   });
 
@@ -407,8 +408,11 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
         ]}
       />,
     );
+    // 169 review round 2 IN-R2-05 / SFH R2-5: a part whose every row is unavailable has
+    // no known amount (the 0 is the sum of nothing), so it names its count, never
+    // "$0". The "(… unavailable for N …)" count is unchanged.
     expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
-      "Includes +$0 from keys needing attention (P&L unavailable for 1 position).",
+      "Includes 1 position from keys needing attention (P&L unavailable for 1 position).",
     );
   });
 
@@ -436,10 +440,16 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
       />,
     );
     // D-03: the total is unchanged — the unknown rows still sum as 0.
-    expect(footerTotal(container)).toBe("+$300");
+    expect(footerTotal(container)).toBe("+$300.00");
     expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
-      "Includes +$300 from keys needing attention (P&L unavailable for 2 positions).",
+      "Includes +$300.00 from keys needing attention (P&L unavailable for 2 positions).",
     );
+    // 2026-09-29, Phase 169 review round 1 SFH M-4: the TRUSTED null row is in
+    // no key-trust part, so the total itself says it is partial, counting
+    // every row with no P&L (3 of 4, whatever its key's status).
+    expect(
+      screen.getByTestId("open-positions-pnl-unavailable-note").textContent,
+    ).toBe("Partial total: P&L unavailable for 3 of 4 positions.");
   });
 
   it("review WR-03: a known zero untrusted P&L is a real zero and carries no unavailable note", () => {
@@ -454,7 +464,7 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
       />,
     );
     expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
-      "Includes +$0 from keys needing attention.",
+      "Includes $0.00 from keys needing attention.",
     );
   });
 
@@ -488,6 +498,7 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
  * constants under test.
  */
 describe("[167.1 R2 WR-05] a holding whose key is missing from the key list", () => {
+  // 2026-09-27, Phase 169 D-50: P&L renders at 2 decimals and a zero-rounded amount carries no sign.
   it("LegacyHoldingsTable: the row carries its own muted marker, is not struck through and is not hidden by the untrusted filter", () => {
     const { container } = render(
       <HoldingsTable
@@ -537,9 +548,9 @@ describe("[167.1 R2 WR-05] a holding whose key is missing from the key list", ()
     expect(container.querySelector(".line-through")).toBeNull();
     // D-03: the total keeps the row.
     const cells = container.querySelector("tfoot")!.querySelectorAll("tr")[0].querySelectorAll("td");
-    expect(cells[cells.length - 1].textContent).toBe("+$1,050");
+    expect(cells[cells.length - 1].textContent).toBe("+$1,050.00");
     expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
-      "Includes +$50 from keys with an unknown sync status.",
+      "Includes +$50.00 from keys with an unknown sync status.",
     );
   });
 
@@ -558,8 +569,11 @@ describe("[167.1 R2 WR-05] a holding whose key is missing from the key list", ()
         ]}
       />,
     );
+    // 169 review round 2 IN-R2-05 / SFH R2-5: a part whose every row is unavailable has
+    // no known amount (the 0 is the sum of nothing), so it names its count, never
+    // "$0". The "(… unavailable for N …)" count is unchanged.
     expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
-      "Includes +$300 from keys needing attention and +$0 from keys with an unknown sync status (P&L unavailable for 1 position).",
+      "Includes +$300.00 from keys needing attention and 1 position from keys with an unknown sync status (P&L unavailable for 1 position).",
     );
   });
 

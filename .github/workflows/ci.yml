@@ -6414,6 +6414,7 @@ jobs:
               e2e/admin-compute-jobs-axe.spec.ts \
               e2e/mobile-drawer-keyboard.spec.ts \
               e2e/reflow-sweep-authed.spec.ts \
+              e2e/layout-narrow.spec.ts \
               e2e/svg-chart-parity.spec.ts \
               e2e/target-size.spec.ts \
               e2e/no-clip-sweep.spec.ts \
@@ -6423,6 +6424,10 @@ jobs:
               e2e/my-strategies.spec.ts \
               --timeout 60000
           fi
+          # Phase 170 T0 / FLOW-01 (2026-09-27): e2e/layout-narrow.spec.ts is
+          # in this seeded list (place 1). Its HAS_SEED_ENV skip is place 2.
+          # It proves criterion-2 geometry at V390/V640/V960 and is RED at
+          # HEAD until the fix plans land. Do not drop it to green the job.
           # Phase 47-05 / FLOW-01 (place 1 of 2): the fresh
           # e2e/svg-chart-parity.spec.ts (desktop goldens + 320px portrait)
           # is added here so it runs SEEDED. The dead

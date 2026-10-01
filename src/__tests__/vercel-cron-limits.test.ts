@@ -267,7 +267,7 @@ describe("vercel.json crons cover every production cron handler (H-1155)", () =>
     expect(orphans).toEqual([]);
   });
 
-  it("expected set is exactly the eight production crons (pins the inventory)", () => {
+  it("expected set is exactly the nine production crons (pins the inventory)", () => {
     // Pins the current production cron inventory so adding/removing a handler
     // is a deliberate, test-visible change. If this list and the disk walk
     // ever disagree, the walk above is the source of truth and this literal is
@@ -280,6 +280,9 @@ describe("vercel.json crons cover every production cron handler (H-1155)", () =>
         "/api/cron/flag-monitor",
         "/api/cron/founder-lp-report",
         "/api/cron/reconcile-strategies",
+        // Phase 169.2 / D-08 — the daily BTC benchmark refresh (eight -> nine,
+        // measured from the disk walk; MAX_CRONS_ALLOWED stays 10).
+        "/api/cron/refresh-benchmark",
         "/api/cron/sync-funding",
         "/api/cron/warm-analytics",
       ].sort(),

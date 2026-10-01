@@ -232,7 +232,7 @@ import { connectAbortDeadlineMsFor } from "./wizard/validate-budget";
  * existed and was already CI-wired in two files. What was missing was one set
  * comparison nobody had written.
  *
- * ⚠️ AND THE LENGTH FENCE ABOVE IT STAYS. `expect(ROUTE_ENTRIES.length).toBe(15)`
+ * ⚠️ AND THE LENGTH FENCE ABOVE IT STAYS. `expect(ROUTE_ENTRIES.length).toBe(16)`
  * is NOT made redundant by the equality and deleting it "to avoid duplication"
  * would remove the thing that catches an emptied table — the state in which the
  * equality would compare two empties and agree. `resilient-fetch.wiring.test.ts`
@@ -414,7 +414,7 @@ const STATE_SPENDS_REQUEST_BUDGET: Record<string, boolean> = {
 const BREAKER_STATES = ["closed", "open", "failing"] as const;
 
 /**
- * The 15 route rows, with their FULL `budgets` arrays, typed HERE as literals.
+ * The 16 route rows, with their FULL `budgets` arrays, typed HERE as literals.
  *
  * Following `tests/lib/process-key-onboard-contract-parity.test.ts`'s
  * `EXPECTED_VERDICTS` convention: never derived from the table it guards, and
@@ -529,6 +529,12 @@ const EXPECTED_ROUTE_BUDGETS: Record<
   "src/app/api/keys/[id]/rotate-secret/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [{ key: "keys-rotate-secret", calls: 1 }],
+  },
+  // Phase 169.2 / D-08, D-20 — the daily BTC benchmark refresh cron. One
+  // `benchmark-refresh` leg; a 120 s ceiling, not the 300 s default.
+  "src/app/api/cron/refresh-benchmark/route.ts": {
+    expectedMaxDurationS: 120,
+    budgets: [{ key: "benchmark-refresh", calls: 1 }],
   },
 };
 
@@ -798,7 +804,7 @@ function readMaxDurationFromDisk(routePath: string): number {
 }
 
 describe("SEAM-02 — seam budget invariant (SC-4)", () => {
-  it("scans every route declared in SEAM_ROUTE_BUDGETS (15 routes)", () => {
+  it("scans every route declared in SEAM_ROUTE_BUDGETS (16 routes)", () => {
     // Guards against the table being silently emptied, which would make every
     // it.each below vacuous — zero cases is a passing suite.
     // 15 → 14 at Phase 145: strategies/csv-finalize left the seam (direct
@@ -806,7 +812,8 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
     // the EXPECTED twin in the same commit).
     // 14 → 15 at Phase 164.5.3: keys/[id]/rotate-secret joined the seam
     // (D-04's credential-rotation route).
-    expect(ROUTE_ENTRIES.length).toBe(15);
+    // 15 → 16 at Phase 169: cron/refresh-benchmark joined the seam, D-20.
+    expect(ROUTE_ENTRIES.length).toBe(16);
   });
 
   it("SC-4d / D-10 — every route row's CONTENTS match the hand-typed map", () => {
@@ -1440,7 +1447,7 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
       // ⚠️ THE FENCE GOES BESIDE THE EQUALITY, NEVER INSTEAD OF IT. A walk that
       // matched nothing and a table that had been emptied would agree with each
       // other perfectly — two empty sets are equal — and this file would report
-      // that the seam is fully described while describing nothing. The `.toBe(15)`
+      // that the seam is fully described while describing nothing. The `.toBe(16)`
       // fence above catches the emptied TABLE; this one catches the blind WALK.
       // Neither implies the other.
       //
@@ -1458,9 +1465,9 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
     it("the DERIVED seam route set EQUALS Object.keys(SEAM_ROUTE_BUDGETS)", () => {
       // ⭐ THE ONE ASSERTION THE MIDDLE TIER WAS MISSING. Everything else in
       // this file iterates ROUTE_ENTRIES, so a route that reaches the seam
-      // without a row is invisible to all of it at once; and `.toBe(15)` pins a
+      // without a row is invisible to all of it at once; and `.toBe(16)` pins a
       // COUNT against a literal with NO DISK TERM AT ALL, so a route added to
-      // the table with the literal bumped from 15 to 16 passes.
+      // the table with the literal bumped from 16 to 17 passes.
       //
       // ZERO SLACK AND NO ALLOW-LIST, because the two sets are set-identical
       // today (measured 15 == 15, both difference directions empty). An

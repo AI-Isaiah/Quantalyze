@@ -63,6 +63,11 @@ const INTRO: IntroRequestRow = {
   },
 };
 
+// Extra `email` is assignable to today's `{ display_name }` row and required
+// once the embed selects it. A fresh literal inside STRAT would trip the
+// excess-property check before that type lands.
+const quantBob = { display_name: "Quant Bob", email: "owner-bob@example.test" };
+
 const STRAT: PendingStrategyRow = {
   id: "st-2",
   name: "Beta Strat",
@@ -71,7 +76,7 @@ const STRAT: PendingStrategyRow = {
   strategy_types: ["Long-Only"],
   created_at: "2025-01-02T00:00:00Z",
   user_id: "u-1",
-  profiles: { display_name: "Quant Bob" },
+  profiles: quantBob,
   strategy_analytics: [
     {
       cagr: 0.2,
@@ -87,7 +92,7 @@ const ALLOC: PendingProfileRow = {
   id: "al-2",
   display_name: "Carol Allocator",
   company: "Carol Co",
-  email: "carol@example.com",
+  email: "carol@example.test",
   role: "allocator",
   allocator_status: "pending",
   created_at: "2025-01-03T00:00:00Z",
@@ -97,7 +102,7 @@ const MGR: PendingManagerRow = {
   id: "mg-1",
   display_name: "Dave Manager",
   company: "Dave Co",
-  email: "dave@example.com",
+  email: "dave@example.test",
   role: "manager",
   manager_status: "pending",
   created_at: "2025-01-04T00:00:00Z",
@@ -180,7 +185,7 @@ describe("AdminTabs — typed-row render paths (H-0353)", () => {
     await user.click(screen.getByRole("tab", { name: /Allocators/ }));
     expect(screen.getByText("Carol Allocator")).toBeTruthy();
     expect(screen.getByText(/Carol Co/)).toBeTruthy();
-    expect(screen.getByText(/carol@example\.com/)).toBeTruthy();
+    expect(screen.getByText(/carol@example\.test/)).toBeTruthy();
   });
 
   it("Managers tab renders display_name and email", async () => {
@@ -188,7 +193,7 @@ describe("AdminTabs — typed-row render paths (H-0353)", () => {
     renderTabs();
     await user.click(screen.getByRole("tab", { name: /Managers/ }));
     expect(screen.getByText("Dave Manager")).toBeTruthy();
-    expect(screen.getByText(/dave@example\.com/)).toBeTruthy();
+    expect(screen.getByText(/dave@example\.test/)).toBeTruthy();
   });
 });
 
@@ -216,5 +221,88 @@ describe("AdminTabs — Strategy Review reject surfaces the server error (M-0378
     expect(await screen.findByText("Review note is required.")).toBeTruthy();
     expect(screen.queryByText("Rejection failed.")).toBeNull();
     fetchMock.mockRestore();
+  });
+});
+
+/**
+ * R169-(c) / R169-(d) (170-06, AD-08). Two owners who share a display name
+ * must read differently, by email, with no short id. The count uses the
+ * same word as the Intro Made filter.
+ */
+describe("AdminTabs — owner line and intro-made count (170-06)", () => {
+  function row(
+    id: string,
+    name: string,
+    profiles: PendingStrategyRow["profiles"] | { display_name: string; email: string },
+  ): PendingStrategyRow {
+    return {
+      ...STRAT,
+      id,
+      name,
+      user_id: `${id}-user-not-rendered`,
+      profiles: profiles as PendingStrategyRow["profiles"],
+    };
+  }
+
+  it("disambiguates two owners who share a display name by email, and says Computed", async () => {
+    const user = userEvent.setup();
+    const ownerA = { display_name: "Shared Owner", email: "owner-a@example.test" };
+    const ownerB = { display_name: "Shared Owner", email: "owner-b@example.test" };
+    const emailOnly = { display_name: "", email: "owner-only@example.test" };
+    render(
+      <AdminTabs
+        introRequests={[]}
+        pendingStrategies={[
+          row("st-a", "Strat A", ownerA),
+          row("st-b", "Strat B", ownerB),
+          row("st-c", "Strat C", emailOnly),
+          row("st-d", "Strat D", null),
+        ]}
+        pendingAllocators={[]}
+        pendingManagers={[]}
+      />,
+    );
+    await user.click(screen.getByRole("tab", { name: /Strategy Review/ }));
+
+    const lineA = screen.getByText("owner-a@example.test").closest("p");
+    const lineB = screen.getByText("owner-b@example.test").closest("p");
+    expect(lineA?.textContent).toMatch(/^by Shared Owner · owner-a@example\.test · Computed /);
+    expect(lineB?.textContent).toMatch(/^by Shared Owner · owner-b@example\.test · Computed /);
+    expect(lineA?.textContent).not.toBe(lineB?.textContent);
+
+    const emailSpan = screen.getByText("owner-a@example.test");
+    expect(emailSpan.tagName).toBe("SPAN");
+    expect(emailSpan.className.split(/\s+/)).toContain("text-text-muted");
+    expect(emailSpan.className.split(/\s+/)).toContain("[overflow-wrap:anywhere]");
+
+    const emailOnlyLine = screen.getByText("owner-only@example.test").closest("p");
+    expect(emailOnlyLine?.textContent).toMatch(/^by owner-only@example\.test · Computed /);
+    expect(emailOnlyLine?.textContent).not.toMatch(/Unknown/);
+
+    const unknown = screen.getByText(/^by Unknown/);
+    expect(unknown.textContent).toMatch(/^by Unknown · Computed /);
+    expect(unknown.textContent).not.toMatch(/@/);
+
+    for (const line of [lineA, lineB, emailOnlyLine, unknown]) {
+      expect(line?.textContent).not.toMatch(/Synced/);
+      expect(line?.textContent).not.toMatch(/\b[0-9a-f]{8}\b/i);
+    }
+  });
+
+  it("counts intro_made rows as intro made, not in progress", () => {
+    const made: IntroRequestRow = { ...INTRO, id: "ir-made", status: "intro_made" };
+    render(
+      <AdminTabs
+        introRequests={[INTRO, made]}
+        pendingStrategies={[]}
+        pendingAllocators={[]}
+        pendingManagers={[]}
+      />,
+    );
+    const count = screen.getByText("1 intro made");
+    expect(count.className).toContain("text-accent");
+    expect(count.className).toContain("font-medium");
+    expect(screen.queryByText(/in progress/)).toBeNull();
+    expect(screen.getByText("1 pending")).toBeTruthy();
   });
 });

@@ -106,6 +106,50 @@ function withConfiguredSupabaseOrigin(csp: string): string {
   );
 }
 
+
+/**
+ * Refuse a Vercel Production build whose `NEXT_PUBLIC_APP_URL` is not a
+ * canonical public origin. Every absolute link the app mints (share links,
+ * emails, PDFs, alert acks) prefers this variable, so a wrong value becomes a
+ * dead or wrong-host link already sent to someone. Measured 2026-09-27: the
+ * Production value pointed at the vercel.app alias, so factsheet share links
+ * minted from the canonical host came back on the alias.
+ *
+ * Only `vercelEnv === "production"` is checked: preview builds legitimately
+ * live on vercel.app hosts, and local/dev builds on localhost. This refuses;
+ * it never substitutes a host.
+ */
+export function assertCanonicalAppUrl(
+  appUrl: string | undefined,
+  vercelEnv: string | undefined,
+): void {
+  if (vercelEnv !== "production") return;
+  const expected =
+    "an https origin on the canonical domain (not a *.vercel.app host, not localhost)";
+  let url: URL;
+  try {
+    url = new URL(appUrl ?? "");
+  } catch {
+    throw new Error(
+      `NEXT_PUBLIC_APP_URL is unset or not a URL on a VERCEL_ENV=production build; expected ${expected}.`,
+    );
+  }
+  const host = url.hostname;
+  if (
+    url.protocol !== "https:" ||
+    host === "vercel.app" ||
+    host.endsWith(".vercel.app") ||
+    host === "localhost" ||
+    host === "127.0.0.1"
+  ) {
+    throw new Error(
+      `NEXT_PUBLIC_APP_URL (${url.origin}) is not the canonical origin on a VERCEL_ENV=production build; expected ${expected}.`,
+    );
+  }
+}
+
+assertCanonicalAppUrl(process.env.NEXT_PUBLIC_APP_URL, process.env.VERCEL_ENV);
+
 const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     "/api/demo/portfolio-pdf/\\[id\\]": CHROMIUM_BIN,

@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
+import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
 // audit-2026-05-07 C-0144 + C-0150: `isAdmin(email)` is no longer used by
 // the proxy gate (see admin-route block below). Page-level `isAdminUser` is
 // the authoritative check.
@@ -22,7 +23,6 @@ const PUBLIC_ROUTES = ["/login", "/signup", "/forgot-password", "/reset-password
 // was inaccurate. getSession() is cookie-only (no network), so listing it here
 // keeps the probe independent of any auth backend.
 const ADMIN_ROUTES = ["/admin", "/api/admin"];
-const DEFAULT_AUTHENTICATED_ROUTE = "/discovery/crypto-sma";
 
 export async function proxy(request: NextRequest) {
   // Vercel Cron orchestrator + manual ops POSTs to /api/cron/* arrive without

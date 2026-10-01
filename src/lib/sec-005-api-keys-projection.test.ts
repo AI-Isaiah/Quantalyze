@@ -33,7 +33,7 @@
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, lstatSync, realpathSync } from "fs";
 import { join, resolve } from "path";
-import { API_KEY_USER_COLUMNS } from "./constants";
+import { API_KEY_USER_COLUMNS, API_KEY_USER_COLUMNS_ARR } from "./constants";
 
 const SRC_ROOT = resolve(__dirname, "..");
 
@@ -128,6 +128,21 @@ describe("SEC-005: api_keys column projection", () => {
     expect(API_KEY_USER_COLUMNS).toContain("exchange");
     expect(API_KEY_USER_COLUMNS).toContain("label");
     expect(API_KEY_USER_COLUMNS).toContain("is_active");
+  });
+
+  // Phase 167.1.2 plan 04 (D-11, D-05). Migration 20260925120000 GRANTs SELECT
+  // on the three account-identity columns to authenticated. The key list
+  // projects API_KEY_USER_COLUMNS, and both key cards read the duplicate marker
+  // from that projection (accountShareNote), so a column missing here means the
+  // card can never show a duplicate: the list reads undefined and says nothing.
+  it("projects the account-share marker and the departed-history flag", () => {
+    const cols = API_KEY_USER_COLUMNS.split(", ");
+    expect(cols).toContain("account_shared_with_api_key_id");
+    expect(cols).toContain("account_share_kind");
+    expect(cols).toContain("history_inclusion");
+    // The literal type restates the projection by hand; keep it equal to the
+    // tuple so the type cannot drift from what is actually selected.
+    expect(API_KEY_USER_COLUMNS).toBe(API_KEY_USER_COLUMNS_ARR.join(", "));
   });
 
   it("no source file uses .from(\"api_keys\").select(\"*\") or api_keys(*) embed", () => {

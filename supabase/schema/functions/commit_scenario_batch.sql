@@ -2,9 +2,9 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260601120000_commit_scenario_batch_fingerprint_precondition.sql
+-- source migration: 20260929120000_commit_scenario_batch_fingerprint_reader_set.sql
 -- --------------------------------------------------------------------------
--- STEP 2: install the 5-arg body (20260515210400 body + STEP 2b precondition)
+-- STEP 1: re-install the 5-arg body with the reader-set recompute in (3b)
 -- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.commit_scenario_batch(
   p_allocator_id uuid,
@@ -150,11 +150,46 @@ BEGIN
   -- (position cron refreshed a snapshot, another tab/device edited) → the
   -- frozen diffs would write outcomes against a stale shape (lost-update).
   --
+  -- Phase 167.1.2 review C4 SFH-R2-01: "current holdings" is the set the
+  -- client fingerprinted, which is `holdingsSummary` as
+  -- fetchLatestHoldingsPerKey (src/lib/latest-holdings-per-key.ts) reads it.
+  -- The server used to take the newest row per triple over EVERY date, so a
+  -- position closed on an earlier day stayed in its set and was missing from
+  -- the client's, and every book-mode commit of such an allocator returned
+  -- portfolio_fingerprint_stale, which no refresh cleared. The CTE below is
+  -- that reader's rule, step for step:
+  --   1. the owner's keys, departed ones included;
+  --   2. per key, its latest asof, and its newest audit event
+  --      'allocator.holdings.sync_completed' with final_status 'complete'
+  --      (newest by created_at DESC, NULLs first, as PostgREST orders). That
+  --      event is evidence only when row_count is a non-negative whole number
+  --      and asof is a YYYY-MM-DD string (cleanPollDay). When its day is
+  --      STRICTLY after the key's latest rows, the key's reading is that day
+  --      with no rows (SFH-C4-02); otherwise it is the latest asof with rows;
+  --   3. keys grouped by exchange account (accountIdentityTokens, the D-09
+  --      identity: a shared non-blank venue_account_id on one exchange, or an
+  --      account_shared_with_api_key_id marker of a shared kind, joined
+  --      transitively). A key with neither is its own account. Only the keys
+  --      whose reading is the account's newest, and have rows on it,
+  --      contribute (SFH-C4-01);
+  --   4. the contributing keys' rows at their reading day, one token per
+  --      (venue, symbol, holding_type).
+  -- Days are compared as 'YYYY-MM-DD' text under COLLATE "C", as the reader
+  -- compares strings. They are never cast to date, so a malformed day in an
+  -- audit event can never raise here. Everything is scoped to p_allocator_id,
+  -- which (1) proved equals auth.uid().
+  --
+  -- ⚠️ TWIN. This is the third copy of the rule (TypeScript reader, this, and
+  -- the grain rule in plan 10's Python helper). A change to
+  -- latest-holdings-per-key.ts or to accountIdentityTokens that is not made
+  -- here re-opens SFH-R2-01. The gate is
+  -- supabase/tests/test_commit_scenario_batch_fingerprint_precondition.sql
+  -- tests 10-14.
+  --
   -- The token format MIRRORS computeHoldingsFingerprint (scenario-state.ts):
-  -- symbol-first "symbol:venue:holding_type", latest-asof-per-(venue,symbol,
-  -- holding_type) to match the client dedup, and NO value_usd filter (the
-  -- client fingerprint includes value_usd<=0 latest rows; the ownership
-  -- probe's value_usd>0 is WRONG here). We do NOT reproduce the client's JS
+  -- symbol-first "symbol:venue:holding_type", and NO value_usd filter (the
+  -- client fingerprint includes value_usd<=0 rows; the ownership probe's
+  -- value_usd>0 is WRONG here). We do NOT reproduce the client's JS
   -- localeCompare sort (no Postgres collation is byte-identical to it):
   -- instead we compare the order-invariant token SET, sorting BOTH sides with
   -- the SAME COLLATE "C" so equality is set equality, collation-independent.
@@ -162,12 +197,136 @@ BEGIN
   -- here, so a network retry of an already-committed batch is not re-checked
   -- against now-changed holdings).
   IF p_portfolio_fingerprint IS NOT NULL THEN
-    SELECT COALESCE(array_agg(tok ORDER BY tok COLLATE "C"), ARRAY[]::text[])
+    WITH RECURSIVE
+    owner_keys AS (
+      SELECT k.id,
+             lower(btrim(k.exchange)) AS exchange_norm,
+             NULLIF(btrim(k.venue_account_id), '') AS venue_norm,
+             k.account_share_kind,
+             k.account_shared_with_api_key_id
+        FROM api_keys k
+       WHERE k.user_id = p_allocator_id
+    ),
+    account_edges AS (
+      -- one exchange account id on one exchange
+      SELECT a.id AS a, b.id AS b
+        FROM owner_keys a
+        JOIN owner_keys b
+          ON b.exchange_norm = a.exchange_norm
+         AND b.venue_norm    = a.venue_norm
+         AND b.id           <> a.id
+      UNION
+      -- a shared-account marker naming another key of this owner, both ways
+      SELECT m.id, m.account_shared_with_api_key_id
+        FROM owner_keys m
+       WHERE m.account_share_kind IN ('duplicate', 'composite_member')
+         AND m.account_shared_with_api_key_id <> m.id
+         AND m.account_shared_with_api_key_id IN (SELECT id FROM owner_keys)
+      UNION
+      SELECT m.account_shared_with_api_key_id, m.id
+        FROM owner_keys m
+       WHERE m.account_share_kind IN ('duplicate', 'composite_member')
+         AND m.account_shared_with_api_key_id <> m.id
+         AND m.account_shared_with_api_key_id IN (SELECT id FROM owner_keys)
+    ),
+    known_account AS (
+      SELECT id FROM owner_keys WHERE venue_norm IS NOT NULL
+      UNION
+      SELECT a FROM account_edges
+    ),
+    reach (root, node) AS (
+      SELECT id, id FROM known_account
+      UNION
+      SELECT r.root, e.b
+        FROM reach r
+        JOIN account_edges e ON e.a = r.node
+    ),
+    key_account AS (
+      SELECT k.id,
+             COALESCE(
+               (SELECT 'account:' || min(r.root::text COLLATE "C")
+                  FROM reach r
+                 WHERE r.node = k.id),
+               'key:' || k.id::text
+             ) AS account
+        FROM owner_keys k
+    ),
+    key_evidence AS (
+      SELECT k.id,
+             (SELECT max(h.asof)
+                FROM allocator_holdings h
+               WHERE h.allocator_id = p_allocator_id
+                 AND h.api_key_id   = k.id) AS latest_asof,
+             (SELECT al.metadata
+                FROM audit_log al
+               WHERE al.user_id     = p_allocator_id
+                 AND al.action      = 'allocator.holdings.sync_completed'
+                 AND al.entity_type = 'api_key'
+                 AND al.entity_id   = k.id
+                 AND al.metadata->>'final_status' = 'complete'
+               ORDER BY al.created_at DESC
+               LIMIT 1) AS poll_meta
+        FROM owner_keys k
+    ),
+    key_poll AS (
+      SELECT e.id,
+             e.latest_asof,
+             to_char(e.latest_asof, 'YYYY-MM-DD') AS latest_day,
+             -- cleanPollDay. CASE arms run in order, so the numeric cast only
+             -- ever sees a JSON number.
+             CASE
+               WHEN e.poll_meta IS NULL THEN NULL
+               WHEN jsonb_typeof(e.poll_meta) <> 'object' THEN NULL
+               WHEN jsonb_typeof(e.poll_meta->'row_count') IS DISTINCT FROM 'number' THEN NULL
+               WHEN (e.poll_meta->>'row_count')::numeric < 0 THEN NULL
+               WHEN (e.poll_meta->>'row_count')::numeric
+                    <> trunc((e.poll_meta->>'row_count')::numeric) THEN NULL
+               WHEN jsonb_typeof(e.poll_meta->'asof') IS DISTINCT FROM 'string' THEN NULL
+               WHEN (e.poll_meta->>'asof') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN NULL
+               ELSE e.poll_meta->>'asof'
+             END AS poll_day
+        FROM key_evidence e
+    ),
+    key_reading AS (
+      SELECT p.id,
+             p.latest_asof,
+             (p.poll_day IS NOT NULL
+              AND (p.latest_day IS NULL
+                   OR p.poll_day COLLATE "C" > p.latest_day COLLATE "C")) AS polled_after_rows
+        FROM key_poll p
+    ),
+    key_day AS (
+      SELECT r.id,
+             r.latest_asof,
+             NOT r.polled_after_rows AS has_rows,
+             CASE WHEN r.polled_after_rows THEN p.poll_day ELSE p.latest_day END AS day
+        FROM key_reading r
+        JOIN key_poll p ON p.id = r.id
+    ),
+    account_newest AS (
+      SELECT a.account, max(d.day COLLATE "C") AS day
+        FROM key_day d
+        JOIN key_account a ON a.id = d.id
+       WHERE d.day IS NOT NULL
+       GROUP BY a.account
+    ),
+    contributing AS (
+      SELECT d.id, d.latest_asof
+        FROM key_day d
+        JOIN key_account a    ON a.id = d.id
+        JOIN account_newest n ON n.account = a.account
+                             AND n.day COLLATE "C" = d.day COLLATE "C"
+       WHERE d.has_rows
+    )
+    SELECT COALESCE(array_agg(latest.tok ORDER BY latest.tok COLLATE "C"), ARRAY[]::text[])
       INTO v_server_fp_tokens
       FROM (
         SELECT DISTINCT ON (ah.venue, ah.symbol, ah.holding_type)
                ah.symbol || ':' || ah.venue || ':' || ah.holding_type AS tok
           FROM allocator_holdings ah
+          JOIN contributing c
+            ON c.id = ah.api_key_id
+           AND ah.asof = c.latest_asof
          WHERE ah.allocator_id = p_allocator_id
          ORDER BY ah.venue, ah.symbol, ah.holding_type, ah.asof DESC
       ) latest;
