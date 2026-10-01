@@ -4599,9 +4599,10 @@ class TestCircuitBreakerSingleDbClock:
     @pytest.mark.asyncio
     async def test_defer_serialization_failure_yields_deferred_not_failed(self):
         """NEW-C12-06 caller-side integration contract: when defer_compute_job
-        RAISES a claim-token serialization_failure (this worker was preempted —
+        RAISES the claim-token fence (SQLSTATE 55006 since Phase 164.9.3.2;
+        this worker was preempted —
         watchdog reclaim + another worker re-claimed under a fresh token), the
-        breaker must YIELD the job as DEFERRED, NOT let the 40001 propagate to
+        breaker must YIELD the job as DEFERRED, NOT let the fence propagate to
         dispatch's catch-all where it'd be classified error_kind='unknown',
         retried, and carry this worker's stale token into mark_compute_job_failed.
         Owning the preemption signal here is what keeps corruption-safety from
@@ -4622,11 +4623,11 @@ class TestCircuitBreakerSingleDbClock:
             if name == "api_key_cooldown_remaining":
                 builder.execute.return_value = MagicMock(data=120)  # cooldown active → will defer
             elif name == "defer_compute_job":
-                # The fence fired: this worker lost ownership (40001).
+                # The fence fired: this worker lost ownership (55006).
                 builder.execute.side_effect = _FakeAPIError(
                     "defer_compute_job: job X preempted by watchdog reclaim "
                     "(caller token=t1, current token=t2)",
-                    "40001",
+                    "55006",
                 )
             else:
                 builder.execute.return_value = MagicMock(data=None)
@@ -4641,12 +4642,50 @@ class TestCircuitBreakerSingleDbClock:
         result = await _check_circuit_breaker(supabase, job, key_row)
 
         assert result is not None and result.outcome == DispatchOutcome.DEFERRED, (
-            "a preempted defer (serialization_failure) must yield DEFERRED, not "
-            "propagate a 40001 that dispatch would classify 'unknown' and retry"
+            "a preempted defer (SQLSTATE 55006) must yield DEFERRED, not "
+            "propagate a fence error that dispatch would classify 'unknown' and retry"
         )
         assert any(n == "defer_compute_job" for n, _ in rpc_calls), (
             "it must have ATTEMPTED the defer (and been fenced) — not silently skipped"
         )
+
+    # Phase 164.9.3.2: _defer_lost_ownership reads SQLSTATE 55006 (the fence's
+    # new errcode; PostgREST 14 re-ran a 40001 without bound) and keeps both
+    # message literals as the deploy-window fallback.
+    class _CodedError(Exception):
+        def __init__(self, message: str, code: str) -> None:
+            super().__init__(message)
+            self.code = code
+
+    def test_defer_lost_ownership_code_55006_alone_classifies(self):
+        """The code alone identifies the fence: defer_compute_job raises 55006
+        nowhere else, so a message without either literal still yields."""
+        from services.job_worker import _defer_lost_ownership
+
+        exc = self._CodedError("object in use", "55006")
+        assert _defer_lost_ownership(exc) is True
+
+    def test_defer_lost_ownership_old_code_40001_with_literal_classifies(self):
+        """Deploy window: this worker meets a body that still raises 40001
+        (migration not yet applied). The literal fallback must yield."""
+        from services.job_worker import _defer_lost_ownership
+
+        exc = self._CodedError(
+            "defer_compute_job: job X preempted by watchdog reclaim "
+            "(caller token=t1, current token=t2)",
+            "40001",
+        )
+        assert _defer_lost_ownership(exc) is True
+
+    def test_defer_lost_ownership_bare_40001_does_not_classify(self):
+        """A bare 40001 without either literal is an unrelated serialization
+        conflict, not lost ownership. Yielding it as DEFERRED would bury it."""
+        from services.job_worker import _defer_lost_ownership
+
+        exc = self._CodedError(
+            "could not serialize access due to concurrent update", "40001"
+        )
+        assert _defer_lost_ownership(exc) is False
 
     @pytest.mark.asyncio
     async def test_genuine_defer_failure_propagates(self):
