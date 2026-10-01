@@ -136,6 +136,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
 - [ ] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — planned (1 plan); HALTED 2026-09-27 at Task 3; resumes after Phase 166.4 ships
+- [ ] **Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds** (INSERTED) — not planned; inserted 2026-10-01 (founder); 166.3's R5 recompute waits on it
 - [ ] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [ ] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed
@@ -3660,6 +3661,30 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy
 - **R1 re-enters the set.** Its stored beta is the M1-era value, so it must be recomputed again after the fix is deployed.
 - **Resume condition.** Phase 166.3 may resume after Phase 166.4 merges and its worker is deployed.
 - **Ratified the same day.** The founder also ratified 166.4 D-04 (the both-endpoints rule applies when BTC is the sparser leg too), D-05 (the first strategy date pairs with BTC's same-day return) and D-07 (BTC's base close is the day before its first stored return) on 2026-09-27. Phase 169.5 BENCHCOMPARE adopts D-05's day-one rule before it executes.
+
+### Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds (INSERTED)
+
+**Goal:** The private three-key Deribit composite (Phase 166.3's R5) recomputes through the normal `stitch_composite` job path, because the root cause of its `native_nav` inception reconciliation breach is found and fixed on the real member ledger, without weakening the gate.
+**Requirements**: success criteria below
+**Depends on:** nothing. Phase 166.3's R5 recompute waits on this phase. **Priority:** data integrity.
+**Plans:** 0 plans
+
+**Evidence (orchestrator, measured on PROD read-only, 2026-10-01; counts and error classes only):**
+- Phase 166.3 enqueued `stitch_composite` for the composite at 2026-10-01 11:38 UTC. It ended `failed_final` after one attempt, error class `run_stitch_composite_job: member ledger unrecoverable — native_nav inception reconciliation breached venue=deribit currencies=[BTC]`.
+- The same class failed it on 2026-08-25 (the job the Phase 168 and 161.1 notes cite). The composite has 3 member keys, all `deribit`.
+- Phase 168's CONTEXT fences this out as "a separate defect with its own owner", and `TODOS.md` item 0.2 records the same. No phase owned it until this one.
+- Side effects of the failed job: `computation_status` moved `complete_with_warnings` → `failed`, and `computed_at` was re-stamped to 2026-10-01 while `metrics_json` stayed on pre-fix values. `metrics_json_by_basis` is intact and the strategy is still private, so no public page is wrong.
+
+⭐ **ROUTED IN 2026-10-01 (founder, AskUserQuestion "Residual, route the breach").** Phase 166.3 records R5 as an unpublished failed-recompute residual, and the breach is routed here.
+
+## Success Criteria
+1. The root cause of the inception breach is identified on the real member ledger, and a test that fails on today's code reproduces it.
+2. The fix never weakens the reconciliation gate: no widened tolerance and no forged inception row.
+3. The composite's `stitch_composite` recompute on PROD succeeds through the normal job path, with its before/after recorded counts-only.
+4. A failed stitch no longer re-stamps `computed_at` as if the row were current, or that is recorded as a separate defect with an owner.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 166.3.1 to break down)
 
 ### Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric (INSERTED)
 
