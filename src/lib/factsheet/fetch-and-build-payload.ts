@@ -430,9 +430,10 @@ async function resolveFactsheetInputs(
   const isComposite = dqf?.composite === true;
   let compositeBuildOpts: BuildFactsheetOpts | undefined;
   if (isComposite) {
-    // H-2: the composite read-path is shared with the discovery detail page via
-    // `readCompositeFactsheet` so the two surfaces can't diverge (the "one path"
-    // lesson). It REUSES the in-scope service-role admin `supabase` handle
+    // H-2: the composite read-path is the ONE shared `readCompositeFactsheet`;
+    // since Phase 169.1 plan 01 the discovery detail page reaches it through
+    // this stage rather than calling it itself (the "one path" lesson). It
+    // REUSES the in-scope service-role admin `supabase` handle
     // already created above under the SAME injected `visibility` predicate
     // boundary — NO new client, NO broader privilege; the outer request-scoped
     // RLS signature probe + notFound() remains the unchanged auth gate. The
@@ -533,9 +534,10 @@ async function resolveFactsheetInputs(
   // MTM-04 (Phase 103) + SMTM-01 (Phase 133, review WR-01): the persisted
   // `mtm_daily_returns` / `smoothed_mtm_daily_returns` series reads (so charts
   // follow the toggle) and the gate/scalar/series threading are assembled by
-  // the ONE shared owner `readSingleKeyBasisOpts` — the SAME assembly the
-  // discovery detail page calls, so the two surfaces cannot diverge (WR-01 was
-  // exactly a per-page inline copy drifting). The reads ride the SAME
+  // the ONE shared owner `readSingleKeyBasisOpts`. Since Phase 169.1 plan 01
+  // the discovery detail page builds through this stage, so no surface keeps a
+  // copy of this assembly (WR-01 was exactly a per-page inline copy
+  // drifting). The reads ride the SAME
   // service-role admin `supabase` handle (deny-all RLS on
   // strategy_analytics_series — no visibility widening, same gate as the
   // scalar objects).
@@ -704,8 +706,8 @@ async function buildFromResolved(
   // Ingest source classifies daily_returns (CSV path) vs returns_series-only
   // (live API path). The empty-array-is-csv invariant (FINDING-1) + the
   // no-invented-data rationale (NEW-C20-01) live in deriveIngestSource — the
-  // single source of truth shared with the discovery page and pinned by
-  // audit-c20's RED-TEAM-H1.
+  // single source of truth (the discovery page reaches it through this build
+  // since Phase 169.1 plan 01) and pinned by audit-c20's RED-TEAM-H1.
   const ingestSource: IngestSource = deriveIngestSource(dailyRaw);
 
   let buildOpts: BuildFactsheetOpts | undefined = resolved.compositeBuildOpts;
@@ -715,8 +717,9 @@ async function buildFromResolved(
     // was assigned ONLY on the composite arm, so `payload.dataQuality` stayed
     // undefined and the FactsheetView :876 caveat never rendered single-key
     // despite the server truth. Thread it through the ONE shared owner
-    // (`singleKeyDataQuality`) so this route and the discovery detail page can't
-    // diverge on the DQ opt (the composite "one path" lesson).
+    // (`singleKeyDataQuality`); the discovery detail page builds through this
+    // same function since Phase 169.1 plan 01, so no surface can diverge on
+    // the DQ opt (the composite "one path" lesson).
     //
     // The basis story (MTM / smoothed gates, scalars and series, and since
     // Phase 169 the persisted cash headline) was assembled by
