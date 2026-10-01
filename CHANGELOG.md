@@ -17,6 +17,44 @@ This entry covers three dependency updates replayed onto `main` as one branch, s
 - Neither banned package (`react-native-international-phone-number`, `react-native-country-select`) is in the regenerated lockfile.
 - The major-version Dependabot PRs (#612, #614, #626, #627, #645, #646) are not part of this batch. Each is handled on its own.
 
+## [0.117.0.0] - 2026-10-01 — ZOOMKPIS: the factsheet's KPI strip and metrics rail follow the zoom window, in the strategy's own compounding method and day basis
+
+⭐ **What changed for whoever reads this next.** Phase 169.1 (ZOOMKPIS) ships plans 01 to 07 and 09, plan 08's integration run (its post-deploy browser re-check is pending by design), one round of code review and silent-failure review with four fix topics, a round-2 confirmation review that came back clean, and a round-2 silent-failure review whose two findings were fixed in a third round.
+- Selecting a range on the factsheet chart now moves the KPI strip and the metrics rail to that range, through one windowed view. A figure the range cannot support reads "—" with its reason. Nothing is fabricated.
+- Inside a window, figures use the strategy's stored compounding method and day basis, the same ones the engine used for the headline. A composite reads them from its conventions echo, and a single-key strategy reads its frozen echo before the live config.
+- The discovery detail page builds its factsheet through the same `fetchAndBuildPayloadWithReason` path as the owner and share pages.
+
+⚠️ **A second-digit bump (0.116.0.0 → 0.117.0.0) because the factsheet's numbers move on a selection,** and some full-history figures change for arithmetic and gapped-composite strategies: calendar windows, heatmap years and Calmar-by-year now sum an arithmetic year, and rolling Sharpe, vol and Sortino follow the engine's day basis.
+
+### Added
+- **The KPI strip and metrics rail follow the zoom window (plan 02).** One windowed view feeds both. A "Selected range" eyebrow names the range, and rows anchored to the whole record step aside while a range is selected.
+- **Conventions-aware windows (plans 03, 04).** The composite read path resolves the compounding method and day basis from where they are stored. A single-key strategy's curve follows its frozen conventions echo over the live config.
+- **A chain-break caveat inside a range (review topic C).** A selected range that starts before the last return-chain break carries its own caveat on the strip and the rail, naming the figures that compound across it (Cum. Return, CAGR, Calmar; not Max DD, which the engine measures over the whole record).
+
+### Changed
+- **Discovery detail page on the shared builder (plan 01).** It calls `fetchAndBuildPayloadWithReason`; a source guard replaces the old LOCKSTEP case, and the discovery-only projection is removed.
+- **Arithmetic years are sums (plan 05).** An arithmetic series' calendar windows, buckets, Monthly Returns heatmap and Calmar by Year sum the year, as the engine does.
+- **Rolling metrics follow the engine (plans 06, 09; review MD-02).** The rolling Sharpe runs on the headline's day basis and joins the days the active basis excludes. A composite's rolling vol and Sortino run over the zero-filled calendar series under every day basis. Every other line chart still breaks its strategy line at a null.
+- **Bootstrap and stress windows agree with the headline (plan 07).** The bootstrap CI's point figures equal the headline beside them, and the stress windows follow the headline's cumulative method. The public factsheet cache key moves from v10 to v11 once (D-80).
+- **One derive per gesture (review MD-01, topic D).** A brush drag, chart pan, x-axis pull or wheel burst holds the strip and rail on the starting range and derives once on release (a wheel settles after 150 ms). The charts still follow the gesture live.
+
+### Fixed
+- **A failed or malformed conventions read is no longer silent (review HIGH-1, round-3 MEDIUM-2).** It reaches Sentry once per build, never per probe, and that build is kept out of the public `unstable_cache`. Public viewers still get the factsheet, uncached, on the config fallback (D-30). A conventions value that is present but not an object counts as a failure; a null or absent one is still an older run.
+- **Ann. Vol reads "—" below two non-zero days (review MD-03).** An active-basis range with fewer than two non-zero days has no volatility, matching the engine's None, instead of "0.0%".
+- **The vol-matched comparator never scales by an unmeasured number (topic D, round-3 MEDIUM-1).** When either side's volatility is not measurable, the series and its legend are null. There is no "× NaN" and no "× 1.00". The "Volatility Matched" panel is then hidden, with a one-line "Not available" reason when the comparator has data (D-86, accepted as a deviation from D-27 because the panel only repeated the Equity Curve).
+
+### Tests
+- Each fix carries a test that fails on the old code. Every fixer neutered its fix, saw red and restored it with `cp` and `cmp`.
+- The anti-skip CI gate's three subprocess cases get the file's 90 s timeout, and the lint-sql-gates execution-oracle block gets its 20 s budget.
+- Two SVG chart goldens are re-baked for the changed strip and brush: `quantile-box-plot-desktop` and `master-brush-ultrawide-2560`.
+- Four more SVG chart goldens are re-baked: `correlations-matrix-desktop`, `histogram-desktop`, `full-page-desktop` and `full-page-ultrawide-2560`. The new full-history range label makes the page 25 px taller, which made these four fail on size. The correlation numbers they now show are Phase 169.5's paired-interval values (D-54, D-58), which the goldens had kept since 169.5 merged. Playwright's bake rewrites only failing snapshots, and those values stayed inside the 2% tolerance.
+- The frozen `compute()` snapshot is re-baked under Node 22, the version `.nvmrc` and CI pin. It had been baked under Node 25, where `skew` differs by one ULP in two fixtures. `compute()` from before the change gives the same values under Node 22, so the freeze still holds.
+
+### Notes
+- Verification: 14/14 must-haves in code at `551c119fc`. The post-deploy browser re-check at 390 px and desktop 200% zoom is pending. Security: 36/37 threats closed and 0 blocking; the open one is that same post-deploy check.
+- Dated planning corrections: D-39 (a composite's rolling vol and Sortino use the zero-filled series under every basis) and D-78 (the leverage arm never had a chain-break caveat rule) were both disproved by the review round. Their originals are kept as lineage.
+- Planning-only commits on the branch: the plan-check rounds, code reviews and fix reports, verification and security reports, and the D-86 decision.
+
 ## [0.116.0.0] - 2026-10-01 — LAYOUT: pages hold at 390 px and desktop 200% zoom, with tab strips that scroll inside themselves, stacked rows, one Scenario blend-window panel and a factsheet that reads as one voice
 
 ⭐ **What changed for whoever reads this next.** Phase 170 (LAYOUT) ships plans 01 to 13, gap-closure plans 15 to 20, one round of code review and silent-failure review with four fix topics, and a round-2 confirmation review. This entry covers the branch's 125 non-merge commits after `origin/main` `76bec2022`: research, UI contract, pattern map, plan and plan-check before execution (8); plans 01 to 13 (72); the first verification (`gaps_found`, 9/19) and the gap-closure plan with two plan-check rounds (5); gap plans 15 to 20 (17); the round-1 code review and silent-failure review (2); the four fix topics with their reports and the ROADMAP amendment (14); the CR-01 draft-row e2e case and its record (2); the round-2 confirmation reviews (2); the security and re-verification records (2); and one ROADMAP tick for Phases 159 and 164.1.1 (1). The 12 merge commits are not counted.

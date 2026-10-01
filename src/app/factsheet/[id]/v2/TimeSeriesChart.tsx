@@ -3,7 +3,7 @@
 import { memo, useDeferredValue, useMemo, useRef, useState, useCallback, useEffect } from "react";
 import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { usePayload, useXRange, useActiveComparator, useRegimes } from "./factsheet-context";
-import { useBasisSeriesView } from "./basis-context";
+import { useBasisSeriesView, useRangeGesture } from "./basis-context";
 import { resolveSeries, type ChartConfig, type ChartValueFormat, type ResolvedSeries } from "./chart-configs";
 import { trackFactsheetEvent } from "./factsheet-analytics";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
@@ -11,6 +11,11 @@ import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 const VB_W = 880;
 const PAD = { top: 20, right: 30, bottom: 24, left: 50 };
 const MIN_VISIBLE = 5;
+/**
+ * 169.1 review MD-01 (review-fix D): a wheel zoom has no gesture end, so the
+ * windowed-view hold it takes is released once the wheel has been idle this long.
+ */
+export const WHEEL_SETTLE_MS = 150;
 
 /** Binary search: exact ordinal index of `target` in ascending ISO-date
  *  `dates`, or -1 if absent. ISO YYYY-MM-DD strings sort lexicographically =
@@ -106,6 +111,39 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
   // around the cursor's index anchor. Drag UP compresses the span (zoom in);
   // drag DOWN expands it (zoom out). Symmetric to the Y-gutter pull.
   const xDragRef = useRef<{ startY: number; startRange: readonly [number, number]; anchor: number } | null>(null);
+
+  // 169.1 review MD-01 (review-fix D): a pan, an x-pull or a wheel burst holds the
+  // KPI strip and the rail on the range it started on, so they derive once when it
+  // ends instead of once per event (~292 ms per derive at 3000 observations). The
+  // chart itself keeps following the live xRange. `holdingRef` records that THIS
+  // chart took the hold: the hold is shared, so a chart that never took it must
+  // not release another component's hold when it unmounts.
+  const { begin: beginGesture, end: endGesture } = useRangeGesture();
+  const holdingRef = useRef(false);
+  const wheelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const holdRange = useCallback(
+    (startRange: readonly [number, number]) => {
+      // A drag that starts inside a wheel burst takes over that burst's hold.
+      if (wheelTimerRef.current != null) {
+        clearTimeout(wheelTimerRef.current);
+        wheelTimerRef.current = null;
+      }
+      if (holdingRef.current) return;
+      holdingRef.current = true;
+      beginGesture(startRange);
+    },
+    [beginGesture],
+  );
+  const releaseRange = useCallback(() => {
+    if (wheelTimerRef.current != null) {
+      clearTimeout(wheelTimerRef.current);
+      wheelTimerRef.current = null;
+    }
+    if (!holdingRef.current) return;
+    holdingRef.current = false;
+    endGesture();
+  }, [endGesture]);
+  useEffect(() => releaseRange, [releaseRange]);
 
   // Rebase-on-zoom requires xStart so resolveSeries can divide by series[xStart].
   const series = useMemo<ResolvedSeries[]>(
@@ -506,6 +544,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
         // X-axis gutter: anchor the data index under the cursor (clamped to
         // plot bounds) and stretch the visible range around it on vertical drag.
         const ratio = Math.max(0, Math.min(1, (vbX - PAD.left) / plotW));
+        holdRange(xRange);
         xDragRef.current = {
           startY: e.clientY,
           startRange: xRange,
@@ -522,10 +561,11 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
           anchor: useLog ? v : v, // domain is already in log/linear space
         };
       } else {
+        holdRange(xRange);
         panRef.current = { startX: e.clientX, startRange: xRange };
       }
     },
-    [xRange, yDomain, plotH, plotW, scale, config.scalable, height, xStart, xSpan],
+    [xRange, yDomain, plotH, plotW, scale, config.scalable, height, xStart, xSpan, holdRange],
   );
 
   const onPointerUp = useCallback((e: ReactPointerEvent<SVGSVGElement>) => {
@@ -534,6 +574,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
       panRef.current = null;
       yDragRef.current = null;
       xDragRef.current = null;
+      releaseRange();
     }
     // Tap-to-pin: a touch gesture that never moved beyond TAP_SLOP and lasted
     // < 350ms is a tap, not a drag. Pin the crosshair at the tap point so the
@@ -562,7 +603,16 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
       setCrossIdx(idx);
       setPinned(true);
     }
-  }, [pixelToIdx, n, pinned, crossIdx]);
+  }, [pixelToIdx, n, pinned, crossIdx, releaseRange]);
+
+  // A drag whose capture is lost without a pointer up (the browser took the
+  // pointer) stops there too, and releases its hold.
+  const onLostPointerCapture = useCallback(() => {
+    panRef.current = null;
+    yDragRef.current = null;
+    xDragRef.current = null;
+    releaseRange();
+  }, [releaseRange]);
 
   const onWheel = useCallback(
     (e: ReactWheelEvent<SVGSVGElement>) => {
@@ -585,9 +635,18 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
       }
       if (s < 0) s = 0;
       if (eN > n - 1) eN = n - 1;
+      // Hold on the range the burst started on; a later tick of the same burst
+      // keeps that hold and only pushes the settle back.
+      holdRange(xRange);
       setXRange([s, eN]);
+      // Inside a drag the drag's pointer up releases the hold, not the wheel.
+      if (panRef.current || xDragRef.current) return;
+      wheelTimerRef.current = setTimeout(() => {
+        wheelTimerRef.current = null;
+        releaseRange();
+      }, WHEEL_SETTLE_MS);
     },
-    [pixelToIdx, xStart, xEnd, n, setXRange],
+    [pixelToIdx, xStart, xEnd, n, setXRange, xRange, holdRange, releaseRange],
   );
 
   const onDoubleClick = useCallback(() => {
@@ -771,6 +830,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
         onPointerDown={onPointerDown}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
+        onLostPointerCapture={onLostPointerCapture}
         onWheel={onWheel}
         onDoubleClick={onDoubleClick}
         onKeyDown={onKeyDown}
@@ -989,7 +1049,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
             : series.map((s, idx) => {
                 if (muted.has(idx)) return null;
                 const useLog = config.scalable && scale === "log";
-                const d = buildPath(s.values, X, Y, useLog);
+                const d = buildPath(s.values, X, Y, useLog, s.bridgeAt);
                 if (s.fill && config.baseline != null) {
                   const baselineY = Y(config.baseline);
                   const filled = closePathToBaseline(d, X, baselineY, xStart, xEnd, s.values);
@@ -1331,18 +1391,35 @@ function ariaLabel(cfg: ChartConfig, strategyName: string, cmpName: string, hasC
   return `${cfg.title}: ${strategyName}${hasCmp ? ` vs ${cmpName}` : ""}`;
 }
 
+/**
+ * `bridgeAt` (Phase 169.1, D-38 as narrowed by D-84) is an optional per-index
+ * mask, absent by default (every null breaks the line, as before). Where it is
+ * true, a null or non-finite value drawn AFTER a finite point does not break the
+ * subpath: the next finite value continues it with `L`. Only `resolveSeries` sets
+ * it, on the strategy series of a config that opts in (the rolling Sharpe), and
+ * only at the days the active day basis excluded. That is why it is never set on
+ * a comparator line (Phase 169.5 plan 02 relies on that line breaking past
+ * `through`), and why a no-dispersion null (founder D7: no Sharpe exists for that
+ * window) is not bridged: its mask entry is false. The leading warm-up stays a gap
+ * (nothing is drawn before the first finite value), trailing nulls draw nothing,
+ * and a non-positive value under log scale still breaks the line.
+ */
 function buildPath(
   values: ReadonlyArray<number | null>,
   X: (i: number) => number,
   Y: (v: number) => number,
   useLog: boolean,
+  bridgeAt?: ReadonlyArray<boolean>,
 ): string {
   const parts: string[] = [];
   let prevValid = false;
   for (let i = 0; i < values.length; i++) {
     const v = values[i];
-    const skip = v == null || !Number.isFinite(v) || (useLog && v <= 0);
-    if (skip) {
+    if (v == null || !Number.isFinite(v)) {
+      if (!bridgeAt?.[i]) prevValid = false;
+      continue;
+    }
+    if (useLog && v <= 0) {
       prevValid = false;
       continue;
     }

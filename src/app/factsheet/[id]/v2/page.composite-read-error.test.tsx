@@ -136,9 +136,37 @@ type CsvAnswer = { rows: typeof CSV_ROWS } | { error: { message: string; code?: 
  */
 function mockAdmin(
   csv: CsvAnswer,
-  opts: { row?: unknown; series?: { payload: unknown } | { error: { message: string; code?: string } } } = {},
+  opts: {
+    row?: unknown;
+    series?: { payload: unknown } | { error: { message: string; code?: string } };
+    /** The `cash_settlement` conventions read (169.1 SFH HIGH-1): an echo, or a failed read. */
+    conventions?: { echo: Record<string, unknown> } | { error: { message: string; code?: string } };
+  } = {},
 ): SupabaseClient {
   const from = (table: string) => {
+    if (table === "strategy_analytics_series" && opts.conventions) {
+      // Dispatched by the select string, so only the conventions read
+      // (`payload->conventions`) answers this; any other series read is an
+      // empty SUCCESSFUL read and can never be what turns a case red.
+      const conventions = opts.conventions;
+      let select = "";
+      const chain = {
+        select: (s: string) => {
+          select = s;
+          return chain;
+        },
+        eq: () => chain,
+        maybeSingle: () => {
+          if (!select.includes("conventions")) return Promise.resolve({ data: null, error: null });
+          return Promise.resolve(
+            "error" in conventions
+              ? { data: null, error: conventions.error }
+              : { data: { conventions: conventions.echo }, error: null },
+          );
+        },
+      };
+      return chain;
+    }
     if (table === "strategies") {
       const chain = {
         select: () => chain,
@@ -351,6 +379,71 @@ describe("169 WR-05 — a single-key MTM series read outage is not cached for it
       expect(payload, "the MTM outage was cached for the run").not.toBeNull();
       expect(payload!.seriesByBasis?.mark_to_market, "the recovered build lacks its MTM bundle").toBeDefined();
       expect(strategyReads, "both requests reached the resolve stage").toBe(2);
+    } finally {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+/**
+ * Phase 169.1 review round 1, SFH HIGH-1 — the conventions read is the one
+ * read that DEGRADES instead of throwing (D-30: a blip must not blank a
+ * factsheet), so on an outage the build resolves its method and day basis from
+ * the live config, which is the tier the frozen echo exists to override. Before
+ * the fix that build was stored by the public cache for the analytics run and
+ * nothing reached Sentry. Now it renders (uncached), is captured once, and the
+ * next request on the same `computed_at` builds on the echo.
+ *
+ * The config says `simple` / `active_day` and the echo says `geometric` /
+ * `calendar`, so the two tiers give different payloads: an arithmetic,
+ * active-day payload is the config tier; a payload with neither key is the echo.
+ */
+describe("169.1 SFH HIGH-1 — a failed conventions read renders on the config tier, is captured, and is not cached", () => {
+  const DRIFTED_ROW = {
+    ...COMPOSITE_ROW,
+    returns_denominator_config: { cumulative_method: "simple", metrics_basis: "active_day" },
+  };
+  const ECHO = { cumulative_method: "geometric", day_basis: "calendar" };
+
+  it("CONVENTIONS-READ-ERROR-NOT-CACHED: request 1 renders the config-tier build, stores nothing and captures once; request 2 builds on the echo", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const degraded = await request(
+        { rows: CSV_ROWS },
+        { row: DRIFTED_ROW, conventions: { error: { message: "synthetic statement timeout", code: "57014" } } },
+      );
+      const first = findPayload(degraded);
+      // D-30 kept: the factsheet is not blanked by the blip.
+      expect(first, "a conventions blip blanked the factsheet (D-30)").not.toBeNull();
+      expect(first!.cumulativeMethod).toBe("arithmetic");
+      expect(first!.dayBasis).toBe("active");
+      // The config-tier build was NOT stored for the run.
+      expect(cacheStore.size, "the config-tier build was stored as the run's answer").toBe(0);
+      // Captured once, by the resolve stage, naming the read and its code.
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toMatchObject({
+        tags: {
+          stage: "factsheet-resolve",
+          caller: "build",
+          reason: "conventions_read_error",
+          code: "57014",
+          strategy_id: STRATEGY_ID,
+          read: "cash_settlement",
+        },
+        extra: { errorMessage: "synthetic statement timeout" },
+      });
+
+      // Same run, the read recovers: the echo decides, and THIS build is cached.
+      const recovered = await request({ rows: CSV_ROWS }, { row: DRIFTED_ROW, conventions: { echo: ECHO } });
+      const second = findPayload(recovered);
+      expect(second, "the recovered build is missing").not.toBeNull();
+      expect(second!.cumulativeMethod, "the config-tier build was replayed from the cache").toBeUndefined();
+      expect(second!.dayBasis).toBeUndefined();
+      expect(cacheStore.size, "a clean build is cached as before").toBe(1);
+      expect(strategyReads, "both requests reached the resolve stage").toBe(2);
+      expect(vi.mocked(captureToSentry), "a clean build captured").toHaveBeenCalledTimes(1);
     } finally {
       errSpy.mockRestore();
       warnSpy.mockRestore();

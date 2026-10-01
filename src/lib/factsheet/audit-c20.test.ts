@@ -745,7 +745,10 @@ describe("Phase 90 composite → csv arm", () => {
     const dataQuality = { composite: true };
     const payload = buildWithOpts(
       makeStrategy({ ingestSource: "csv" }),
-      makeReturns(),
+      // 31 days, so every date is a real ISO day: a composite is calendar-dense,
+      // and its zero-filled basis series (plan 169.1-06, D-32) refuses the
+      // unparseable "2024-01-32".."2024-01-40" the 40-day default produces.
+      makeReturns(31),
       { cumulativeMethod: "arithmetic", segmentBoundaries, dataQuality },
     )!;
     const f = payload as unknown as Record<string, unknown>;

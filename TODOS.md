@@ -1466,7 +1466,7 @@ true for 146 and half of 142–145, and **false for 141**.
       ✅ **Destination: Phase 169.4 ALLOCTRUTH**, whose plans read BTC through `readBenchmarkPrices`
       and `mergeWithFixture`. **Closed when:** consumers build the overlay from closes (or levels)
       and the metrics from exactly-one-day returns, with a test for each across a missing day.
-- [ ] **`[169-SCENARIO-WINDOW-ANNUALIZATION]` A selected range on the `/allocations` Scenario tab
+- [x] **`[169-SCENARIO-WINDOW-ANNUALIZATION]` A selected range on the `/allocations` Scenario tab
       shows the withheld form, because the Scenario payload carries no `periodsPerYear`
       (booked 2026-09-26, Phase 169 D-29).**
       Phase 169 plan 14 makes the KPI strip and the rail follow the zoom window on every
@@ -1485,6 +1485,12 @@ true for 146 and half of 142–145, and **false for 141**.
       `FactsheetBody` under a sub-range and asserts figures (not the em-dash) that equal
       `compute()` of the slice; and 167.1.2 records whether the leverage control should appear on
       the Scenario tab.
+      ✅ **CLOSED 2026-10-01 by Phase 169.1 ZOOMKPIS (plan 169.1-02, D-82).** The Scenario payload has
+      carried `periodsPerYear` since Phase 167.1.2 plan 07, and the leverage control is hidden in
+      `scenarioMode` (`FactsheetView.tsx`, `!scenarioMode && leverageEligible`). The gate test is
+      `FactsheetView.window-kpis.test.tsx` > "the Scenario mount shows window figures equal to
+      compute() of its slice, keeps its inert comparator blocks, renders no leverage control, and
+      resets exactly (D-82, W2)", commit `c78baf846`.
 
 - [ ] **`[169-PORTFOLIO-ANALYTICS-COLUMNS]` The portfolio analytics compute behind `/portfolios/[id]`
       may never refresh (booked 2026-09-27, Phase 169 D-53; inferred from source, NOT measured).**
@@ -3714,7 +3720,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       script that takes a shared-TEST lock.
       **Owner:** Phase 164.9 TESTISOLATION.
 
-- [ ] **`[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` the discovery detail page assembles the
+- [x] **`[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` the discovery detail page assembles the
       factsheet builder a second time, beside `fetchAndBuildPayload` (booked 2026-09-25, Phase
       167.2.1 D-03; routed to Phase 169 PAGETRUTH)** — `src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx` calls the
       builder's steps itself: `resolveDailyReturnSeries`, `readCompositeFactsheet`,
@@ -3735,6 +3741,9 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       **Routing:** Phase 169 PAGETRUTH, which owns factsheet KPI sourcing (its SC4). The ROADMAP
       carries the matching dated note under `### Phase 169`, "Routed in, 2026-09-25 (Phase 167.2.1
       D-03)", written at planning time.
+      **Closed 2026-10-01 by Phase 169.1 plan 169.1-01 (commit `509b0d68c`):** the page builds
+      through `fetchAndBuildPayloadWithReason(strategy.id, withPublishedOnly)` and makes none of
+      the four calls itself; `page.one-path.test.tsx` and the phase-147 source guard pin it.
 
 - [ ] **`[167.2.1-CLIENT-SENTRY-NOOP]` every `captureToSentry` call in browser code is a silent
       no-op, because there is no client `Sentry.init` (booked 2026-09-26, Phase 167.2.1

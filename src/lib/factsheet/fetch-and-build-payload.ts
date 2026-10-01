@@ -44,6 +44,7 @@ import {
   readCompositeFactsheet,
   singleKeyDataQuality,
   readSingleKeyBasisOpts,
+  readCashConventions,
 } from "./composite-read-path";
 import { resolveDailyReturnSeries } from "./allocator-portfolio-payload";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
@@ -429,10 +430,15 @@ async function resolveFactsheetInputs(
     | undefined;
   const isComposite = dqf?.composite === true;
   let compositeBuildOpts: BuildFactsheetOpts | undefined;
+  // SFH HIGH-1 (169.1 review round 1): a failed `cash_settlement` conventions
+  // read, on either arm. The build still runs on the config tier (D-30); this
+  // is carried to the success exit, captured there and marked degraded.
+  let conventionsReadFailure: { code: string; message: string } | undefined;
   if (isComposite) {
-    // H-2: the composite read-path is shared with the discovery detail page via
-    // `readCompositeFactsheet` so the two surfaces can't diverge (the "one path"
-    // lesson). It REUSES the in-scope service-role admin `supabase` handle
+    // H-2: the composite read-path is the ONE shared `readCompositeFactsheet`;
+    // since Phase 169.1 plan 01 the discovery detail page reaches it through
+    // this stage rather than calling it itself (the "one path" lesson). It
+    // REUSES the in-scope service-role admin `supabase` handle
     // already created above under the SAME injected `visibility` predicate
     // boundary — NO new client, NO broader privilege; the outer request-scoped
     // RLS signature probe + notFound() remains the unchanged auth gate. The
@@ -458,6 +464,7 @@ async function resolveFactsheetInputs(
     if (!composite) return compositeUnbuildable(id, caller, "headline");
     dailyReturns = composite.dailyReturns;
     compositeBuildOpts = composite.buildOpts;
+    conventionsReadFailure = composite.conventionsReadFailure;
   }
   // Warn when both daily_returns (CSV indicator) and returns_series (API
   // indicator) are populated — ambiguous provenance may mis-classify an
@@ -509,9 +516,10 @@ async function resolveFactsheetInputs(
   // stage the build has no null exit (167.2.1-REVIEW WR-04), so an outage there
   // could only have been a throw that no lane answers, or the old degrade the
   // public cache stored for the run. A clean row with no by-basis object reads
-  // nothing (the shared cheap predicates), so the hot non-options path, the
-  // probe included, stays roundtrip-free; a chain-broken row reads its stored
-  // cash series once (SFH H-1).
+  // no basis series (the shared cheap predicates), so the hot non-options path
+  // stays free of series roundtrips; a chain-broken row reads its stored cash
+  // series once (SFH H-1). Since Phase 169.1 (D-83) a BUILD also reads the
+  // conventions echo once (below); a probe reads nothing here.
   //
   // MTM-01 (Phase 102): a single-key OPTIONS strategy also persists its MTM
   // basis (`metrics_json_by_basis.mark_to_market`) + an honest degrade reason.
@@ -533,14 +541,26 @@ async function resolveFactsheetInputs(
   // MTM-04 (Phase 103) + SMTM-01 (Phase 133, review WR-01): the persisted
   // `mtm_daily_returns` / `smoothed_mtm_daily_returns` series reads (so charts
   // follow the toggle) and the gate/scalar/series threading are assembled by
-  // the ONE shared owner `readSingleKeyBasisOpts` — the SAME assembly the
-  // discovery detail page calls, so the two surfaces cannot diverge (WR-01 was
-  // exactly a per-page inline copy drifting). The reads ride the SAME
+  // the ONE shared owner `readSingleKeyBasisOpts`. Since Phase 169.1 plan 01
+  // the discovery detail page builds through this stage, so no surface keeps a
+  // copy of this assembly (WR-01 was exactly a per-page inline copy
+  // drifting). The reads ride the SAME
   // service-role admin `supabase` handle (deny-all RLS on
   // strategy_analytics_series — no visibility widening, same gate as the
   // scalar objects).
   let singleKeyOpts: Awaited<ReturnType<typeof readSingleKeyBasisOpts>> | undefined;
   if (!isComposite) {
+    // Phase 169.1 (D-83 (a), D-30): a BUILD reads the conventions the analytics
+    // service froze into the cash_settlement series row, so the curve and the day
+    // basis follow what the stored headline was computed under, even when the live
+    // config was edited after the run. A probe decides buildability, which does not
+    // depend on the method, so /strategies probes issue no extra query; it resolves
+    // from the config tier. The read never throws: a failure logs and degrades to
+    // the config tier, and (SFH HIGH-1) is carried to the success exit below.
+    // Same service-role handle, behind the same visibility gate.
+    const cashRead = caller === "build" ? await readCashConventions(supabase, id) : null;
+    if (cashRead?.failed) conventionsReadFailure = { code: cashRead.code, message: cashRead.message };
+    const cashConventions = cashRead?.conventions ?? null;
     try {
       singleKeyOpts = await readSingleKeyBasisOpts(
         () => supabase,
@@ -549,17 +569,45 @@ async function resolveFactsheetInputs(
         analytics?.metrics_json_by_basis,
         analytics?.computation_status,
         analytics,
-        // SFH H-2 (review round 1): the stored headline was computed under this
-        // config, so the curve is drawn on the same cumulative method.
+        // SFH H-2 (review round 1): the config is the LAST tier of the method and
+        // day basis, after the frozen echo (D-83).
         strategy.returns_denominator_config,
         // A probe never captures (167.2.1-REVIEW-R2 WR-01); a build captures a
         // persisted-headline defect once.
-        { captureDefects: caller === "build" },
+        { captureDefects: caller === "build", cashConventions },
       );
     } catch (err) {
       if (!(err instanceof CompositeSeriesReadError)) throw err;
       return seriesReadError(id, caller, err);
     }
+  }
+
+  // SFH HIGH-1 (169.1 review round 1): the build goes on, on the config tier
+  // (D-30: a blip must not blank a factsheet), but that tier is exactly the one
+  // the frozen echo exists to override, so this build can draw its curve, grid,
+  // stress windows and window KPIs on a method or day basis the stored headline
+  // was not computed under. It is captured HERE, at the success exit, so a
+  // build that fails later in this stage (a sibling series read) sends its own
+  // `read_error` event and not a second one for a payload that never ships.
+  // `console.*` does not reach Sentry in this repo. Build only (WR-01): a
+  // probe's answer does not depend on the method. The build result carries
+  // `conventionsDegraded`, and the public cached callback in `v2/page.tsx`
+  // refuses to store it.
+  const conventionsDegraded = conventionsReadFailure !== undefined;
+  if (conventionsReadFailure && caller === "build") {
+    const { code, message } = conventionsReadFailure;
+    captureToSentry(new Error(`factsheet resolve: cash_settlement conventions read failed (${code})`), {
+      tags: {
+        stage: "factsheet-resolve",
+        caller,
+        reason: "conventions_read_error",
+        code,
+        strategy_id: id,
+        read: "cash_settlement",
+      },
+      // `captureToSentry` scrubs `extra` string values.
+      extra: { errorMessage: message },
+    });
   }
 
   return {
@@ -572,6 +620,7 @@ async function resolveFactsheetInputs(
     dailyReturns,
     compositeBuildOpts,
     singleKeyOpts,
+    conventionsDegraded,
   };
 }
 
@@ -596,7 +645,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v10", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v11", id,
  * computedAt], a `null` computedAt included. 167.2.1-REVIEW-R2 IN-01: the key
  * moves more often than "once per successful run". The status bridge
  * `sync_strategy_analytics_status` (latest definition: migration
@@ -630,7 +679,18 @@ export async function fetchAndBuildPayload(
  * carries no reason; no payload carries the resolve stage's reason.
  */
 export type FactsheetBuildResult =
-  | { payload: FactsheetPayload; reason: null }
+  | {
+      payload: FactsheetPayload;
+      reason: null;
+      /**
+       * SFH HIGH-1 (169.1 review round 1): present (and `true`) only when the
+       * `cash_settlement` conventions read FAILED and the payload was built on
+       * the config tier (D-30). The payload is real and renders, but it is not
+       * stored by the public cache. Absent on a clean build, so a clean result
+       * is unchanged.
+       */
+      conventionsDegraded?: true;
+    }
   | { payload: null; reason: NotBuildableReason };
 
 /**
@@ -664,7 +724,10 @@ async function resolveAndBuild(
   const supabase = createAdminClient();
   const resolved = await resolveFactsheetInputs(supabase, id, visibility, "build");
   if (!resolved.ok) return { payload: null, reason: resolved.reason };
-  return { payload: await buildFromResolved(supabase, id, resolved), reason: null };
+  const payload = await buildFromResolved(supabase, id, resolved);
+  return resolved.conventionsDegraded
+    ? { payload, reason: null, conventionsDegraded: true }
+    : { payload, reason: null };
 }
 
 /** A resolve that succeeded: the inputs the build runs on. */
@@ -704,8 +767,8 @@ async function buildFromResolved(
   // Ingest source classifies daily_returns (CSV path) vs returns_series-only
   // (live API path). The empty-array-is-csv invariant (FINDING-1) + the
   // no-invented-data rationale (NEW-C20-01) live in deriveIngestSource — the
-  // single source of truth shared with the discovery page and pinned by
-  // audit-c20's RED-TEAM-H1.
+  // single source of truth (the discovery page reaches it through this build
+  // since Phase 169.1 plan 01) and pinned by audit-c20's RED-TEAM-H1.
   const ingestSource: IngestSource = deriveIngestSource(dailyRaw);
 
   let buildOpts: BuildFactsheetOpts | undefined = resolved.compositeBuildOpts;
@@ -715,8 +778,9 @@ async function buildFromResolved(
     // was assigned ONLY on the composite arm, so `payload.dataQuality` stayed
     // undefined and the FactsheetView :876 caveat never rendered single-key
     // despite the server truth. Thread it through the ONE shared owner
-    // (`singleKeyDataQuality`) so this route and the discovery detail page can't
-    // diverge on the DQ opt (the composite "one path" lesson).
+    // (`singleKeyDataQuality`); the discovery detail page builds through this
+    // same function since Phase 169.1 plan 01, so no surface can diverge on
+    // the DQ opt (the composite "one path" lesson).
     //
     // The basis story (MTM / smoothed gates, scalars and series, and since
     // Phase 169 the persisted cash headline) was assembled by
