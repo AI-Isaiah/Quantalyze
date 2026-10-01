@@ -192,7 +192,7 @@ Plans:
   4. The two money-math defects are closed on the strategy-analytics path: an all-non-negative return series with a >100% day is never re-read as prices (no sign-flipped Sharpe), and a blend leg with unknown `asset_class` is treated as crypto for RISK (a sole crypto leg no longer inflates Sharpe via √252).
   5. Two concurrent same-session resubmits cannot both take the FILL arm (compare-and-set on `category_id IS NULL`); the classification-conflict 409's own remedy can mint a fresh session (the re-mint fingerprint accounts for classification, or the exclusion is documented at the fingerprint); and `withPublishedOrOwner` validates the uid's shape before interpolating it into the PostgREST `.or()` filter.
 
-**Plans**: 7 plans
+**Plans**: 7/7 plans complete
 
 Plans:
 **Wave 1**
@@ -1274,7 +1274,7 @@ Plans:
 
 **Requirements**: TODOS entry `[PROBER-CADENCE-UNDELIVERED-01]` — this phase is its named owner.
 **Depends on:** Phase 164.1 (the prober it observes), Phase 164.7 (the settled Vault-backed `cron.job` mechanism any new PROD cron row must consume rather than invent a second answer to)
-**Plans:** 4/6 plans executed — ⭐ **2026-09-30 (closure note, founder decision):** 6/6. Plan 06 ran on PROD on 2026-09-18 (PR #819 `b8e375283`), and its SUMMARY was written retrospectively on 2026-09-30.
+**Plans:** 6/6 plans complete — ⭐ **2026-09-30 (closure note, founder decision):** 6/6. Plan 06 ran on PROD on 2026-09-18 (PR #819 `b8e375283`), and its SUMMARY was written retrospectively on 2026-09-30.
 
 ⛔ **Criterion 4 is ALREADY MET** by commit `126517a8`, which corrected the workflow header at its own
 site. Plan 03 pins it with a calibrated test and does NOT re-edit it — re-deriving the figures would
@@ -4291,11 +4291,34 @@ Plans:
    *Evidence, measured 2026-09-27 on PROD `/allocations?tab=scenario` at a 367 CSS px viewport (narrower than the 390 px floor), named offenders to fix under this criterion:* (a) the page overflows horizontally by 235 px: the allocations tab bar (`<div className="ml-auto flex items-center gap-1">` in `src/app/(dashboard)/allocations/AllocationsTabs.tsx`) is 682 px wide and neither scrolls in its own strip nor wraps; (b) the Stress / Streaks / Metrics sub-tabs overflow; (c) a chart container (class `flex-1 relative pointer-coarse:min-h-[44px]`, in `src/app/factsheet/[id]/v2/HeatmapPanels.tsx`) is 770 px wide and does not shrink; (d) the scenario member rows (weight / mode / leverage / notional) are fixed at 573 px; (e) the drawdown table (~389 px) and one other table (~378 px) overflow. *Second instance of (a)'s root cause, measured the same day on PROD `/profile?tab=exchanges` at narrow width:* the tab row (Exchanges / Security / Organizations / Account) runs past the viewport, and each key card's "Disconnect" button sits about 420 px from the left edge, past 390 px; both are clipped, not scrollable, so they cannot be reached.
 3. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom in the logged-in browser after deploy, by the orchestrator, and shows no horizontal page scroll and no clipped primary action *(was "at 320 px and 200% zoom"; edited 2026-09-27, founder decision above)*.
 
-**Plans:** 0 plans
+**Plans:** 20 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 170 to break down)
+- [x] 170-01: main-aware reflow helper and the three supported viewports (wave 1)
+- [x] 170-02: seeded narrow-layout spec, wired into CI (wave 1)
+- [x] 170-03: allocations tab strip and the Tweaks control (wave 2)
+- [x] 170-04: scenario footer and constituent rows (wave 2)
+- [x] 170-05: strategies row, private link, whole-word names (wave 2)
+- [x] 170-06: admin match read-only below md, owner line, intro count (wave 2)
+- [x] 170-07: signed-in marketing header and the compare pointer (wave 2)
+- [x] 170-08: shared tab strip on profile and admin (wave 3)
+- [x] 170-09: blend-window panel; the scenario strip stops stacking (wave 3)
+- [x] 170-10: strategy table sticky header, tags, and chip contrast (wave 3)
+- [ ] 170-11: factsheet KPI ladder, after 169 is on main (wave 4)
+- [ ] 170-12: factsheet ControlBar voice and private-link placement (wave 4)
+- [ ] 170-13: residual factsheet offenders and the final-month label (wave 5)
+- [ ] 170-14: post-deploy browser pass at 390 px and 200% zoom (wave 6)
+- [ ] 170-15: gap closure: the reflow walker follows the containing block and names an escaping element (gap wave 1)
+- [ ] 170-16: gap closure: the ResponsiveTable scroller contains its absolutely positioned content; composed scenario stops overflowing (gap wave 2)
+- [ ] 170-17: gap closure: the tab strip stays one scrolling line; the /strategies row stacks below md (gap wave 1)
+- [ ] 170-18: gap closure: layout-narrow spec asserts the fits-or-scrolls contract and fixes the N-TABLE and profile test defects (gap wave 1)
+- [ ] 170-19: gap closure: /admin/match renders an allocator with no preferences row (gap wave 1)
+- [ ] 170-20: gap closure: re-bake the 320 px streak-distribution golden (gap wave 3)
+
+**Gap-closure decisions, 2026-09-30 (orchestrator, after `170-VERIFICATION.md` gaps_found at `650448ee`; recorded in `170-CONTEXT.md` as GC-01..GC-03):** GC-01 a tab list never makes the page scroll sideways, scrolls inside itself only when its tabs do not fit, keeps its last tab reachable, and at V960 the Allocations tab list is one line on the Export row (the UI-SPEC tab-strip row and assertion are superseded); GC-02 the `/strategies` row stacks below `md`, not `sm`, so the name block keeps at least 160 px at V640 (UI-SPEC N-STRAT superseded); GC-03 the 320 px streak-distribution golden is re-baked through the `bake_svg_goldens` dispatch, not moved to 390 px.
+
+**Review-fix amendments, 2026-10-01 (orchestrator, round-1 code review; recorded in `170-CONTEXT.md`):** (a) **GC-02 amended (CR-01):** from `md` up the /strategies row keeps one line, but the name block has a 160 px floor and the control group may wrap its own items, because with the 260 px sidebar a draft row's controls measured 401 px and left the name 0 px wide at 768 and 800 px (desktop 200% zoom). (b) **The month-row label rule (WR-03) changed:** the record's last month in the current UTC month reads `Month-to-date`, one calendar month back `Last month (MMM YYYY)`, two or more back `Final month (MMM YYYY)`; the earlier rule labelled every live record "Final month" on the 1st of the month. DESIGN.md AD-10 carries the same amendment.
 
 **⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy 320px check of 167.2.1, measured in the logged-in browser):** on /strategies at 320px the "Get private link" button overlaps the strategy name in the row header and cuts it to two letters. At 640px (200% zoom) the row is clean. Success: at 320px the name, the button, the status pill and the date never overlap, and the name is readable or ellipsised.
 Same pass, same width: on /allocations the floating "Tweaks" button overlaps the bottom navigation's "Strategies" and "Profile" labels. Success: no floating control covers the bottom navigation at 320px. Evidence: `.planning/uat/2026-09-26-browser-pass.md`.
@@ -4499,7 +4522,7 @@ kept verbatim.
 | 169.4 ALLOCTRUTH | 3 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 169, 169.5, 169.2 and 167.1.2 PR C | - |
 | 169.4.1 OGSHARPE | 2 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 166.2 and 169 | - |
 | 169.5 BENCHCOMPARE (split from 169 2026-09-27) | 5 plans on `feat/169-pagetruth`, not on main | Queued — data integrity; after 169, before 169.4 and 169.1 | - |
-| 170. LAYOUT | 0/? | Queued — feature | - |
+| 170. LAYOUT | 5/14 | In Progress | - |
 | 170.1 COPY | 0/? | Queued — feature, after 170 | - |
 
 ### Requirement Coverage (v1.20)

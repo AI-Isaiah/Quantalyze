@@ -12,7 +12,7 @@ import type { CoverageState } from "./CoverageStateChip";
  *
  * LOCKED state → label → token mapping (58-UI-SPEC §Color, verbatim labels):
  *   in-blend           → "In blend"       (text-accent bg-accent/10)
- *   manually-excluded  → "Excluded"       (text-text-muted bg-track)
+ *   manually-excluded  → "Excluded"       (text-text-secondary bg-track)
  *   auto-excluded      → "Outside window" (text-warning bg-warning-bg border-warning-border)
  *
  * The text label always carries the meaning (color is never the sole signal —
@@ -33,7 +33,9 @@ describe("CoverageStateChip (COVERAGE-02)", () => {
     render(<CoverageStateChip state="manually-excluded" />);
     const chip = screen.getByText("Excluded");
     expect(chip).toBeInTheDocument();
-    expect(chip.className).toContain("text-text-muted");
+    // 2026-09-28 Phase 170: 164.9.4 axe color-contrast. text-text-muted on
+    // bg-track was 4.34:1; text-text-secondary is 6.87:1. Tone stays neutral.
+    expect(chip.className).toContain("text-text-secondary");
     expect(chip.className).toContain("bg-track");
   });
 
@@ -64,7 +66,9 @@ describe("CoverageStateChip (COVERAGE-02)", () => {
     render(<CoverageStateChip state="no-series" />);
     const chip = screen.getByText("No data");
     expect(chip).toBeInTheDocument();
-    expect(chip.className).toContain("text-text-muted");
+    // 2026-09-28 Phase 170: 164.9.4 axe color-contrast. text-text-muted on
+    // bg-track was 4.34:1; text-text-secondary is 6.87:1. Tone stays neutral.
+    expect(chip.className).toContain("text-text-secondary");
     expect(chip.className).toContain("bg-track");
     // Absence is a neutral steady-state fact, not a failure. DESIGN.md:
     // "Red = permanent/negative only… never for absence, never for a zero."

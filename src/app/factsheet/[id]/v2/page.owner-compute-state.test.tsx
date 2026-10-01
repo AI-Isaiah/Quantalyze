@@ -935,8 +935,18 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
       <OwnerUnpublishedPanel strategyId={STRATEGY_ID} />,
     );
     const panel = panelOf(container);
-    expect(panel.children).toHaveLength(2);
-    expect(panel.lastElementChild!.tagName).toBe("DIV");
+    // Phase 170 C1-F3 (2026-09-27, plan 170-12): the share controls moved INSIDE
+    // the notice box, so without shareNote the panel holds only the notice
+    // (was 2 children: the notice plus a controls DIV hung below it). The
+    // controls must be inside the note, not a sibling of it.
+    expect(panel.children).toHaveLength(1);
+    expect(panel.lastElementChild!.tagName).toBe("SECTION");
+    const note = container.querySelector('[role="note"]') as HTMLElement;
+    const shareBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      /share link/i.test(b.textContent ?? ""),
+    );
+    expect(shareBtn, "the panel must render its share control").toBeDefined();
+    expect(note.contains(shareBtn!)).toBe(true);
     expect(panel.querySelector("p.mt-2")).toBeNull();
     for (const note of [MINT_A, MINT_B, MINT_UNREADABLE]) {
       expect(container.textContent).not.toContain(note);

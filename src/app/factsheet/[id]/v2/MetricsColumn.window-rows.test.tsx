@@ -12,7 +12,8 @@
  * the row rather than printing a figure or an em-dash under the period's label,
  * and that the two panels agree, so the page never shows a row one panel hides.
  *
- * What still renders an em-dash, deliberately: Month-to-date, 3 Month and
+ * What still renders an em-dash, deliberately: the month row (Month-to-date, or
+ * Final month on an ended record, Phase 170 AD-10), 3 Month and
  * Year-to-date (YTD is a calendar window, D-11), and a BENCH value that is null
  * on a row whose strategy window exists (a comparator gap never removes a row).
  */
@@ -132,7 +133,8 @@ describe("factsheet mount: 6 Month / 1 Year rows exist only when the record cove
     expect(labels).not.toContain("6 Month");
     expect(labels).not.toContain("1 Year");
     // The kept rows are present, in their order.
-    const kept = ["Month-to-date", "3 Month", "Year-to-date", "Since Inception", "CAGR"];
+    // Phase 170 AD-10: SHORT ends 2024-06-08, an ended record, so its month row names that month.
+    const kept = ["Final month (Jun 2024)", "3 Month", "Year-to-date", "Since Inception", "CAGR"];
     expect(labels.filter((l) => kept.includes(l))).toEqual(kept);
   });
 
@@ -140,7 +142,8 @@ describe("factsheet mount: 6 Month / 1 Year rows exist only when the record cove
     const labels = rowLabels(section(renderColumn(factsheetPayload(SHORT())).container, RETURNS));
     expect(labels).not.toContain("6 Month");
     expect(labels).not.toContain("1 Year");
-    const kept = ["Month-to-date", "Year-to-date", "3 Month", "Win Rate (days)", "Profit Factor"];
+    // Phase 170 AD-10: SHORT ends 2024-06-08, an ended record, so its month row names that month.
+    const kept = ["Final month (Jun 2024)", "Year-to-date", "3 Month", "Win Rate (days)", "Profit Factor"];
     expect(labels.filter((l) => kept.includes(l))).toEqual(kept);
   });
 
