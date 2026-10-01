@@ -191,6 +191,66 @@ file. The existing N-STRAT e2e seeds a **published** row through `setSeededStrat
 - **Status of this fix:** it is measured by the harness above. It is not yet guarded by a committed
   layout test. The vitest pins guard only the classes.
 
+## Follow-up 2026-10-01: the draft-row e2e case now exists
+
+The routed item above is closed by `ad22cb755` (branch `feat/170-fix-e`). It adds the describe
+`/strategies — N-STRAT draft row (CR-01)` to `e2e/layout-narrow.spec.ts` at V768 (768x1024) and
+V800 (800x600). The case seeds a **draft** row for a fresh manager: `seedWizardDraft` first, then
+`setSeededStrategyNameAndTags` with the new optional `status: "draft"`. That helper still moves the
+row to `source='admin_import'`, because the list hides only `source='wizard'` drafts. The case
+asserts:
+
+- **Draft controls shown.** The row shows `Submit for Review`, so a row that seeded as published
+  cannot pass on the narrower published group.
+- **Name floor.** The name block is at least 160 px wide.
+- **No overlap.** Neither the name block nor the name link's own box intersects the control group.
+- **Containment.** The name stays inside its block, and no control spills outside the group
+  (`assertChildrenInside`, twice).
+
+It uses the spec's `HAS_SEED_ENV` skip message and per-worker `NAME_PREFIX`, and an `afterAll`
+cleanup of that prefix.
+
+**Why the name-box check is there.** A 0 px name block intersects nothing. In the harness run below,
+`rectsIntersect(nameBlock, controls)` stayed `false` on the pre-fix row while the name painted over
+the controls. The block check alone could not fail for CR-01.
+
+**How its ability to fail was shown. This was not a live run of the spec.** The spec needs the
+seed env and a server on shared TEST. This fixer cannot read the local env files (the secret-read
+guard), so the spec was **not** run red or green against the real app. Instead, a scratchpad
+harness ran the case's assertion lines verbatim, as `expect.soft`, in Playwright Chromium. It was
+not committed and no new helper was added. The setup matched the harness described above:
+
+- **Components.** The real row components rendered through `renderToStaticMarkup`, with class
+  strings read from a given `page.tsx`.
+- **CSS.** The project's `globals.css`, compiled with `@tailwindcss/postcss`.
+- **Font.** DM Sans loaded, confirmed in `document.fonts`.
+- **Chrome.** A copy of the `DashboardChrome` main column (260 px sidebar).
+
+The harness ran three states of the page:
+
+| page state | V768 | V800 |
+|---|---|---|
+| `orig`: `8bcdc4b71^` (pre-CR-01 and pre-WR-02) | RED: name rect intersects the group (`true`); block 0 px; link `{x:317,w:86.2}` outside block `{w:0}` | RED: same three; block 2.9 px |
+| `before`: the worktree's `page.tsx` with only the two CR-01 class strings reverted | RED: block 0 px; text `"0"` outside block `{w:0}` | RED: block 2.9 px; same containment failure |
+| `after`: committed `page.tsx` | GREEN: block 160 px, group 206 px wide, wrapped | GREEN: block 160 px, group 238 px |
+
+For the `before` state, the neuter edited the worktree's `page.tsx` from a `cp` byte backup. The
+backup was restored with `cp` and confirmed with `cmp` (`RESTORED_IDENTICAL`). `git checkout --` was
+not used.
+
+What this does **not** show: that the seeded flow (login, seed and the `/strategies` query) reaches
+the row in CI. The first `e2e-seeded` run with this commit is that proof.
+
+Gates, run in the isolated worktree `quantalyze-170-fe` (its `node_modules` is a symlink to the main
+checkout's):
+
+- `npx tsc --noEmit -p tsconfig.json`: exit 0.
+- `npx eslint e2e/layout-narrow.spec.ts e2e/helpers/seed-test-project.ts`: exit 0.
+- `CI=1 npx playwright test e2e/reflow.spec.ts -g "self-test"`: 12 passed.
+- `CI=1 npx playwright test e2e/layout-narrow.spec.ts --list`: 30 tests, including both new
+  `N-STRAT draft row (CR-01)` cases.
+- Without the seed env, both new cases **skip**. They do not pass.
+
 ---
 
 _Fixed: 2026-10-01_
