@@ -114,9 +114,15 @@ export function buildComparatorBlock(
   // then compound. Lets users compare both curves on a single chart fairly.
   // D-59: the scale inherits the comparator basis through benchSummary.ann_vol
   // (a switched input, no new ratio: D-36, the compute-once gate holds).
+  // 169.1 review-fix D: a strategy vol that is not finite (an active-day basis
+  // bundle with fewer than two non-zero days, MD-03) has nothing to match. The
+  // series and the label are then null, as in the unavailable block: no "× NaN"
+  // legend, no curve scaled by an invented factor.
   const vmScale = benchSummary && benchSummary.ann_vol > 0 ? stratAnnVol / benchSummary.ann_vol : 1;
-  const scaledCovered = coveredReturns.map(r => r * vmScale);
-  const volMatched = scatterCovered(benchReturns, cumEq(scaledCovered));
+  const vmAvailable = Number.isFinite(stratAnnVol);
+  const volMatched = vmAvailable
+    ? scatterCovered(benchReturns, cumEq(coveredReturns.map(r => r * vmScale)))
+    : null;
   return {
     name: label,
     shortName: short,
@@ -148,7 +154,7 @@ export function buildComparatorBlock(
     rollingSharpe: rollingOverCovered(benchReturns, rollWindowDays, w => rollingSharpe(w, w.length, benchPeriodsPerYear)),
     rollingSortino: rollingOverCovered(benchReturns, rollWindowDays, w => rollingSortino(w, w.length, benchPeriodsPerYear)),
     volMatched,
-    volMatchedLabel: `${short} × ${vmScale.toFixed(2)}`,
+    volMatchedLabel: vmAvailable ? `${short} × ${vmScale.toFixed(2)}` : null,
     rollingBeta: rollingBetaOverPaired(stratReturns, aligned, rollBetaWindowDays),
     through: aligned.through,
   };
