@@ -1300,8 +1300,9 @@ export async function getFactsheetDetail(strategyId: string): Promise<{
  * literal, with the mirroring enforced by nothing — two independently-editable
  * strings both claiming to be "the anon-safe analytics column set". Drift is
  * asymmetric and security-relevant: widening the copy ships an extra column
- * under `getStrategyDetail`'s `public` DEFAULT, which is precisely the door
- * the caller-scoped split exists to keep shut. Binding the name to the
+ * under `getStrategyDetail`'s only projection (the discovery-only wider list
+ * was removed in Phase 169.1 plan 01), which is precisely the door an
+ * explicit projection exists to keep shut. Binding the name to the
  * original makes the mirror true by construction. The separate name is kept
  * because the two lists are separate DECISIONS that merely coincide today —
  * if the anon detail surface ever needs a column the factsheet does not (or
@@ -1429,14 +1430,13 @@ export async function getStrategyDetail(
   const manager = await loadManagerIdentity(strategyWithTier, disclosureTier);
 
   // STALE-01 — /discovery/[slug]/[strategyId] is AUTHED but CROSS-TENANT: every
-  // allocator reads other managers' published rows through it, and it builds
-  // the SAME `FactsheetView` the public factsheet does, off `daily_returns` /
-  // `returns_series` / `metrics_json_by_basis` on this row. Shaping nulls those
-  // series, `buildFactsheetPayload` returns null on an empty one, and the page
-  // falls to the still-computing placeholder it ALREADY renders for a strategy
-  // with no ingested series — the existing state, reached by one more input,
-  // never a new one. `shapeRowAnalytics` is the same call the ranked list and
-  // the two public detail fetchers make.
+  // allocator reads other managers' published rows through it. Since Phase
+  // 169.1 plan 01 that page builds its `FactsheetView` through the shared
+  // `fetchAndBuildPayloadWithReason`, whose own G1 gate refuses a failed run,
+  // and reads only the header, tier and gates from this row. Shaping still
+  // withholds a not-computed row's figures here, so nothing this function
+  // returns can show a failed run's numbers. `shapeRowAnalytics` is the same
+  // call the ranked list and the two public detail fetchers make.
   //
   // The `?? EMPTY_ANALYTICS` fallback below is UNCHANGED and still the
   // absent-row arm; only a PRESENT-but-not-computed row is substituted.
