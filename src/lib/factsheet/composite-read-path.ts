@@ -893,14 +893,24 @@ export async function readCashConventions(
       });
       return { conventions: null, failed: true, code: error.code || "none", message: error.message };
     }
+    // Phase 169.1 review round 2 (SFH MEDIUM-2): an absent or null echo is an
+    // older run, a fact, so the config tier decides with no signal. An echo that
+    // is PRESENT but not a plain object (a double-encoded JSON string, a number,
+    // an array) is an engine-writer or migration defect. Answering it as "no
+    // echo" would cache a config-tier build with no signal at all, which is the
+    // outcome HIGH-1 exists to prevent, so it answers `failed: true` with code
+    // `"malformed"` and rides the same capture-and-cache-bypass path.
     const conventions = (data as { conventions?: unknown } | null)?.conventions;
-    return {
-      conventions:
-        conventions !== null && typeof conventions === "object" && !Array.isArray(conventions)
-          ? (conventions as Record<string, unknown>)
-          : null,
-      failed: false,
-    };
+    if (conventions === undefined || conventions === null) return { conventions: null, failed: false };
+    if (typeof conventions !== "object" || Array.isArray(conventions)) {
+      const message = `conventions is ${Array.isArray(conventions) ? "an array" : `a ${typeof conventions}`}`;
+      console.error("[factsheet] cash_settlement conventions malformed; resolving from the config", {
+        strategyId,
+        message,
+      });
+      return { conventions: null, failed: true, code: "malformed", message };
+    }
+    return { conventions: conventions as Record<string, unknown>, failed: false };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.error("[factsheet] cash_settlement conventions read threw; resolving from the config", {
