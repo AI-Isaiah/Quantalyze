@@ -30,6 +30,8 @@
 - Each fix carries a test that fails on the old code. Every fixer neutered its fix, saw red and restored it with `cp` and `cmp`.
 - The anti-skip CI gate's three subprocess cases get the file's 90 s timeout, and the lint-sql-gates execution-oracle block gets its 20 s budget.
 - Two SVG chart goldens are re-baked for the changed strip and brush: `quantile-box-plot-desktop` and `master-brush-ultrawide-2560`.
+- Four more SVG chart goldens are re-baked: `correlations-matrix-desktop`, `histogram-desktop`, `full-page-desktop` and `full-page-ultrawide-2560`. The new full-history range label makes the page 25 px taller, which made these four fail on size. The correlation numbers they now show are Phase 169.5's paired-interval values (D-54, D-58), which the goldens had kept since 169.5 merged. Playwright's bake rewrites only failing snapshots, and those values stayed inside the 2% tolerance.
+- The frozen `compute()` snapshot is re-baked under Node 22, the version `.nvmrc` and CI pin. It had been baked under Node 25, where `skew` differs by one ULP in two fixtures. `compute()` from before the change gives the same values under Node 22, so the freeze still holds.
 
 ### Notes
 - Verification: 14/14 must-haves in code at `551c119fc`. The post-deploy browser re-check at 390 px and desktop 200% zoom is pending. Security: 36/37 threats closed and 0 blocking; the open one is that same post-deploy check.
