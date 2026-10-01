@@ -509,28 +509,54 @@ test.describe("/my-strategies — N-TABLE", () => {
       const table = page.locator("[data-strategy-table]");
       await expect(table, `${vp.id}: strategy table missing`).toBeVisible({ timeout: 15_000 });
 
-      const header = table.locator("thead").first();
-      const filter = page.locator(".sticky").filter({ has: page.getByLabel("Sort by") }).first();
-      await page.locator("#main-content").evaluate((el) => {
-        el.scrollTop = el.scrollHeight;
-      });
-      // Scroll until the sticky header has passed the filter bar, or the
-      // scroller is exhausted. Either way the Sort selects are then checked.
-      await page.locator("#main-content").evaluate((main) => {
-        const headerEl = document.querySelector("[data-strategy-table] thead");
-        const filterEl = document.querySelector('[aria-label="Sort by"]')?.closest(".sticky");
-        if (!headerEl || !filterEl) return;
-        const filterBottom = filterEl.getBoundingClientRect().bottom;
-        for (let i = 0; i < 40; i++) {
-          const top = headerEl.getBoundingClientRect().top;
-          if (top <= filterBottom) return;
-          main.scrollTop += 80;
-        }
-      });
-      void header;
-      void filter;
-
+      // WR-04 / SFH-170-01: probe each select only once a z-indexed sticky
+      // table cell sits under its centre. That cell (the z-20/z-30 header
+      // row, or the z-10 sticky name column) is what paints over the z-10
+      // filter bar when the table root loses `isolate`. A select probed on
+      // a resting page proves nothing, so an unreached state throws.
       for (const label of ["Sort by", "Sort direction"]) {
+        const reached = await page.locator("#main-content").evaluate(
+          (main, selectLabel) => {
+            const tableEl = document.querySelector("[data-strategy-table]");
+            const selectEl = document.querySelector(`[aria-label="${selectLabel}"]`);
+            const filterEl = selectEl?.closest(".sticky") ?? null;
+            if (!tableEl || !selectEl || !filterEl) {
+              return `missing table=${!!tableEl} select=${!!selectEl} filter=${!!filterEl}`;
+            }
+            const stickyCellUnder = () => {
+              const r = selectEl.getBoundingClientRect();
+              return document
+                .elementsFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+                .some((e) => {
+                  if (!tableEl.contains(e)) return false;
+                  const cs = getComputedStyle(e);
+                  return cs.position === "sticky" && cs.zIndex !== "auto";
+                });
+            };
+            // 8 px steps: the header row is ~40 px tall and an 80 px step
+            // can jump straight over it.
+            main.scrollTop = 0;
+            for (;;) {
+              if (stickyCellUnder()) return "reached";
+              const before = main.scrollTop;
+              main.scrollTop = before + 8;
+              if (main.scrollTop <= before) break;
+            }
+            const r = selectEl.getBoundingClientRect();
+            const thead = tableEl.querySelector("thead")?.getBoundingClientRect();
+            return (
+              `not-reached scrollTop=${main.scrollTop} max=${main.scrollHeight - main.clientHeight}` +
+              ` filterBottom=${filterEl.getBoundingClientRect().bottom.toFixed(1)}` +
+              ` selectCentreY=${(r.top + r.height / 2).toFixed(1)}` +
+              ` theadTop=${thead ? thead.top.toFixed(1) : "<none>"}`
+            );
+          },
+          label,
+        );
+        expect(
+          reached,
+          `${vp.id}: N-TABLE precondition not reached for ${label} — no z-indexed sticky table cell ever sat under its centre`,
+        ).toBe("reached");
         const select = page.getByLabel(label);
         await expect(select, `${vp.id}: ${label} missing`).toBeVisible();
         await assertNotCovered(page, select, `${vp.id} ${label}`);
