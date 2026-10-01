@@ -242,6 +242,99 @@ def test_owned_strategy_excluded_with_reason():
     assert all(c["strategy_id"] != "owned1" for c in result["candidates"])
 
 
+def _with_manager(cand: dict[str, Any], manager_id: str | None) -> dict[str, Any]:
+    """`routers/match.py` projects `manager_id` from the strategy's owner."""
+    out = dict(cand)
+    if manager_id is not None:
+        out["manager_id"] = manager_id
+    return out
+
+
+def test_authored_strategy_excluded_as_owned_for_its_author():
+    """Phase 169.3 / D-05: a strategy the allocator AUTHORED is a hard OWNED
+    exclusion even when it is not in their portfolio.
+
+    WHY: `owned_set` was built from portfolio holdings only, so an allocator
+    who also manages a strategy was recommended their own strategy back. The
+    provenance says `authored`, so the audit row can tell it from a holding.
+    """
+    candidates = [
+        _make_candidate("s1"),
+        _with_manager(_make_candidate("mine"), "a1"),
+        _make_candidate("s3"),
+    ]
+    result = score_candidates(
+        allocator_id="a1",
+        preferences={},
+        portfolio_strategies=[],
+        portfolio_returns={},
+        portfolio_weights={},
+        candidate_strategies=candidates,
+        candidate_returns={},
+    )
+    assert any(
+        e["strategy_id"] == "mine"
+        and e["exclusion_reason"] == "owned"
+        and e["exclusion_provenance"] == "authored"
+        for e in result["excluded"]
+    ), result["excluded"]
+    assert all(c["strategy_id"] != "mine" for c in result["candidates"])
+
+
+def test_authored_exclusion_survives_relaxation():
+    """The relaxation pass re-runs only the HARD rules; authored must be one."""
+    candidates = [
+        _make_candidate(f"s{i}", sharpe=0.1, track_record_days=10)
+        for i in range(20)
+    ]
+    candidates.append(_with_manager(_make_candidate("mine"), "a1"))
+    result = score_candidates(
+        allocator_id="a1",
+        preferences={"min_sharpe": 2.0, "min_track_record_days": 1000},
+        portfolio_strategies=[],
+        portfolio_returns={},
+        portfolio_weights={},
+        candidate_strategies=candidates,
+        candidate_returns={},
+    )
+    assert result["filter_relaxed"] is True
+    assert all(c["strategy_id"] != "mine" for c in result["candidates"])
+
+
+def test_strategy_authored_by_another_manager_is_unaffected():
+    candidates = [
+        _make_candidate("s1"),
+        _with_manager(_make_candidate("theirs"), "b2"),
+    ]
+    result = score_candidates(
+        allocator_id="a1",
+        preferences={},
+        portfolio_strategies=[],
+        portfolio_returns={},
+        portfolio_weights={},
+        candidate_strategies=candidates,
+        candidate_returns={},
+    )
+    assert any(c["strategy_id"] == "theirs" for c in result["candidates"])
+    assert all(e["strategy_id"] != "theirs" for e in result["excluded"])
+
+
+def test_candidate_without_manager_id_is_unaffected():
+    candidates = [_make_candidate("s1"), _make_candidate("anon")]
+    assert "manager_id" not in candidates[1]
+    result = score_candidates(
+        allocator_id="a1",
+        preferences={},
+        portfolio_strategies=[],
+        portfolio_returns={},
+        portfolio_weights={},
+        candidate_strategies=candidates,
+        candidate_returns={},
+    )
+    assert any(c["strategy_id"] == "anon" for c in result["candidates"])
+    assert all(e["strategy_id"] != "anon" for e in result["excluded"])
+
+
 def test_thumbs_down_strategy_excluded_with_reason():
     candidates = [_make_candidate("s1"), _make_candidate("s2")]
     result = score_candidates(

@@ -2156,12 +2156,21 @@ describe("[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeySt
    * it is a different key of the caller's or when the read faulted. So the arm
    * gains one emitter site and one member, and `DRAFT_ALREADY_EXISTS` stays
    * because both this arm and the credential arm's fallthrough still emit it.
+   *
+   * 5 → 6 (167.1.2 REVIEW WR-04): `KEY_VENUE_ALREADY_CONNECTED` joins on the
+   * same terms. The venue-identity race arm answers it when the colliding live
+   * key has no strategy row but a composite uses it, where `KEY_ORPHANED`'s
+   * "no strategy uses it" is false. (167.1.2 REVIEW-R2 CR-01 narrowed the
+   * trigger to composite membership only; the emitter, and so the count,
+   * stayed.) One new site, one new member,
+   * and its roster row lands in ConnectKeyStep in the same commit.
    */
   const EXPECTED_409_CODES = [
     "DRAFT_ALREADY_EXISTS",
     "DRAFT_SESSION_COLLISION",
     "KEY_ORPHANED",
     "KEY_REUSE_UNAVAILABLE",
+    "KEY_VENUE_ALREADY_CONNECTED",
     "VENUE_ALREADY_CONNECTED",
   ] as const;
 
@@ -2185,7 +2194,9 @@ describe("[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeySt
       // comment-stripped source after the use-existing-key arm landed.
       // 4 → 5 at 164.2-04 (criterion 5), re-measured the same way after the
       // 23505 branch split into two emitters.
-    ).toBeGreaterThanOrEqual(5);
+      // 5 → 6 at 167.1.2 REVIEW WR-04, re-measured the same way after the
+      // venue-identity race arm gained its KEY_VENUE_ALREADY_CONNECTED emitter.
+    ).toBeGreaterThanOrEqual(6);
   });
 
   it("the 409 vocabulary is the hand-typed set — no more, no less", () => {

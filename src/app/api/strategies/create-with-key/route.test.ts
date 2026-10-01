@@ -198,6 +198,30 @@ const venueOwnerLookupMock = vi.fn(async () => ({ data: null, error: null }) as 
 });
 
 /**
+ * 167.1.2 REVIEW WR-04 — the one OTHER holder of a live key, read only when
+ * both `strategies` reads came back empty (the would-be orphan). A key linked
+ * to a composite through `strategy_keys` has no `strategies.api_key_id` row and
+ * is NOT an orphan; KEY_ORPHANED ("no strategy uses it") is false for it.
+ *
+ * ⛔ 167.1.2 REVIEW-R2 CR-01 — there is no `allocator_holdings` mock any more,
+ * because the route no longer reads that table: the daily poll writes it for
+ * every live key, so a row there does not tell an orphan from a held key. The
+ * read-set pin in the race-arm describe holds that line.
+ *
+ * ⚠️ Routed by TABLE in `makeSelectBuilder`. Before this branch every unknown
+ * table fell to `draftLookupMock`, so a new read would have been answered with
+ * the session fence's canned row. It DEFAULTS TO NOTHING, which keeps every
+ * pre-existing orphan pin on its orphan.
+ */
+type HolderReadResult = {
+  data: { api_key_id: string } | null;
+  error: { code?: string; message?: string } | null;
+};
+const keyMembershipLookupMock = vi.fn(
+  async (): Promise<HolderReadResult> => ({ data: null, error: null }),
+);
+
+/**
  * 164.2-04 / criterion 5 — the reuse arm's POST-23505 read of the draft it
  * actually collided with.
  *
@@ -387,6 +411,7 @@ function makeSelectBuilder(
     order: () => node,
     limit: () => node,
     maybeSingle: () => {
+      if (table === "strategy_keys") return keyMembershipLookupMock();
       if (table === "api_keys") {
         // ⭐ 162-05 — `api_keys` IS NOW READ BY TWO DIFFERENT QUESTIONS, and the
         // `id` filter is what tells them apart. The venue-identity fence asks
@@ -1573,6 +1598,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     venueKeyLookupMock.mockReset();
     venueStrategyLookupMock.mockReset();
     venueOwnerLookupMock.mockReset();
+    keyMembershipLookupMock.mockReset();
     assetClassUpdateMock.mockClear();
 
     // No draft for THIS session — the token-less re-entry the fence must catch.
@@ -1581,6 +1607,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     venueKeyLookupMock.mockResolvedValue({ data: null, error: null });
     venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
     venueOwnerLookupMock.mockResolvedValue({ data: null, error: null });
+    keyMembershipLookupMock.mockResolvedValue({ data: null, error: null });
 
     validateKeyMock.mockResolvedValue({
       valid: true,
@@ -1802,8 +1829,9 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
   });
 
   it("NON-MT5 venues leave the arm INERT: no api_keys read, no p_venue_account_id on the wire", async () => {
-    // The ccxt adapter's ValidationResult carries no account-identity field, so
-    // there is nothing to stamp and the whole arm must be a no-op for them.
+    // A ccxt validation that carried no `venue_account_id` has nothing to
+    // stamp, so the whole arm must be a no-op for it. (167.1.2: a ccxt
+    // validation that DOES carry one is pinned in the [167.1.2 / D-01] block.)
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
 
@@ -2306,7 +2334,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       // Byte-wise, and `code` FIRST: `toEqual` on parsed JSON does not compare
       // key order, and the key order is what the invariant scanner reads.
       expect(await res.text()).toBe(
-        '{"code":"KEY_ORPHANED","error":"This key is already stored, but nothing uses it."}',
+        '{"code":"KEY_ORPHANED","error":"This key is already stored, but no strategy uses it."}',
       );
       expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     });
@@ -2392,6 +2420,252 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
 
       expect(validateKeyMock).toHaveBeenCalled();
       expect(rpcMock).toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * 167.1.2 (D-01) — a ccxt venue now has an identity too, read by the
+   * validator from THIS credential and returned as `venue_account_id`. It is
+   * what lets the venue-identity index refuse a second live key on one
+   * exchange account in the wizard, the same way the MT5 login does. No new
+   * code: the collision resolves through the existing race arm, and each of
+   * its three outcomes is pinned here for a ccxt venue. "100000001" is a
+   * synthetic OKX uid; it must appear in no response body.
+   */
+  describe("[167.1.2 / D-01] a ccxt (okx) key stamps its account id, and a collision resolves through the race arm", () => {
+    const OKX_UID = "100000001";
+    const OKX_RECONNECT_BODY = { ...VALID_BODY, wizard_session_id: OTHER_SESSION_ID };
+
+    beforeEach(() => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      validateKeyMock.mockResolvedValue({
+        valid: true,
+        read_only: true,
+        venue_account_id: OKX_UID,
+      });
+    });
+
+    function collideOnVenueIdentity() {
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+          details: `Key (user_id, exchange, venue_account_id)=(x, okx, ${OKX_UID}) already exists.`,
+        },
+      });
+    }
+
+    it("threads the validator's id into the RPC as p_venue_account_id", async () => {
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      const [, rpcArgs] = rpcMock.mock.calls[0];
+      expect((rpcArgs as Record<string, unknown>).p_venue_account_id).toBe(OKX_UID);
+      // The ccxt id is only known AFTER validation, so there is no pre-RPC
+      // fence read for it: the index is the refusal, the race arm the answer.
+      expect(venueKeyLookupMock).not.toHaveBeenCalled();
+      expect(await res.text()).not.toContain(OKX_UID);
+    });
+
+    it("an own DRAFT on the same account → 200 deduped with the EXISTING ids", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      venueStrategyLookupMock.mockResolvedValue({ data: { id: EXISTING_STRATEGY_ID }, error: null });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({
+        ok: true,
+        strategy_id: EXISTING_STRATEGY_ID,
+        api_key_id: EXISTING_KEY_ID,
+        deduped: true,
+      });
+      expect(text).not.toContain(OKX_UID);
+      // The re-read is keyed on the ccxt venue and the validator's id.
+      const keyRead = capturedSelects.find((c) => c.table === "api_keys");
+      expect(keyRead?.filters).toMatchObject({ exchange: "okx", venue_account_id: OKX_UID });
+    });
+
+    it("a CONNECTED strategy on the same account → 409 VENUE_ALREADY_CONNECTED", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: "Existing Strategy" },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("VENUE_ALREADY_CONNECTED");
+      expect(text).not.toContain(OKX_UID);
+    });
+
+    it("an ORPHANED key on the same account → 409 KEY_ORPHANED", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("KEY_ORPHANED");
+      expect(text).not.toContain(OKX_UID);
+    });
+
+    /**
+     * 167.1.2 REVIEW-R2 CR-01 — NO POLL-WRITTEN TABLE MAY TURN AN ORPHAN INTO
+     * `held`. Round 1 read `allocator_holdings` here and answered `held` on any
+     * row. That table is written by the daily allocator poll, which polls EVERY
+     * live key of the user (no role filter, no strategy filter) and stamps
+     * `allocator_id` with the key's owner. So a true orphan (a manager-card key,
+     * or one left behind by a failed draft delete) read as `held` from its first
+     * poll on, and lost the one refusal that names the "Finish setup" remedy.
+     *
+     * The pin is on the READ SET, not only the code: a live key with no
+     * `strategies` row and no `strategy_keys` row answers KEY_ORPHANED, and the
+     * orphan path reads nothing but `api_keys`, `strategies` and
+     * `strategy_keys`. A future read of any other table on this path has to
+     * change this allowlist, which is the moment to ask whether that table
+     * measures "the key is used" or only "a job ran".
+     */
+    it("a live key with no strategy and no composite membership answers KEY_ORPHANED, and no poll-written table is read", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      expect(JSON.parse(await res.text()).code).toBe("KEY_ORPHANED");
+      const tablesRead = [...new Set(capturedSelects.map((c) => c.table))].sort();
+      expect(tablesRead).toEqual(["api_keys", "strategies", "strategy_keys"]);
+    });
+
+    /**
+     * 167.1.2 REVIEW WR-04 — a live key with no `strategies` row is not
+     * necessarily an orphan. Before this PR only MT5 reached this arm; now
+     * every ccxt venue does, and a manager whose own composite member already
+     * reads the account would have been told KEY_ORPHANED, which is false,
+     * and pointed at a "Finish setup" path built for orphans. Such a key
+     * answers the venue-neutral KEY_VENUE_ALREADY_CONNECTED instead, whose copy
+     * is true for it: another connected key of yours already reads this
+     * account, and the new key was not saved (the INSERT was refused and
+     * rolled back). Composite membership is the only such signal (REVIEW-R2
+     * CR-01, pinned by the read-set case above).
+     */
+    it("a COMPOSITE-MEMBER key on the same account (strategy_keys) → 409 KEY_VENUE_ALREADY_CONNECTED, not KEY_ORPHANED", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      keyMembershipLookupMock.mockResolvedValue({
+        data: { api_key_id: EXISTING_KEY_ID },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("KEY_VENUE_ALREADY_CONNECTED");
+      expect(text).not.toContain(OKX_UID);
+      expect(text).not.toContain(EXISTING_KEY_ID);
+      // The membership read is the caller's own, through RLS, keyed on the
+      // colliding key and the session uid.
+      const membershipRead = capturedSelects.find((c) => c.table === "strategy_keys");
+      expect(membershipRead?.client).toBe("user-scoped");
+      expect(membershipRead?.filters).toMatchObject({
+        owner_id: MOCK_USER.id,
+        api_key_id: EXISTING_KEY_ID,
+      });
+    });
+
+    // NEGATIVE CONTROLS (Rule 12): a membership read that FAULTED has observed
+    // nothing, so it establishes neither "a composite holds it" nor "nothing
+    // does". Neither refusal that asserts one of those may fire.
+    //
+    // 167.1.2 REVIEW-R2 IN-01 / SF2-L2 — AND WHAT IT DOES ANSWER IS PINNED, as
+    // is the log line. `unresolved` falls through to the byte-identical
+    // DRAFT_ALREADY_EXISTS 409, the accepted 154.1 posture for a dark read,
+    // recorded rather than fixed. Asserting only what the answer is NOT let a
+    // future 500, or any other code, pass unnoticed; and a fault that answers
+    // the fall-through without its `console.error` is a dark read nobody sees.
+    // Moving either is now a deliberate edit to this case.
+    it("a faulted strategy_keys read falls through to DRAFT_ALREADY_EXISTS and logs the fault", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      keyMembershipLookupMock.mockResolvedValue({
+        data: null,
+        error: { code: "PGRST301", message: "holder read failed" },
+      });
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const code = JSON.parse(await res.text()).code;
+      expect(code).toBe("DRAFT_ALREADY_EXISTS");
+      // The route also logs "RPC error" on this request, so find the line by
+      // its label rather than by call index.
+      const faultLine = consoleErr.mock.calls.find(
+        (call) =>
+          call[0] ===
+          "[strategies/create-with-key] venue-identity strategy_keys resolve failed:",
+      );
+      expect(faultLine, "the faulted strategy_keys read was not logged").toBeDefined();
+      expect(faultLine?.[2]).toBe("PGRST301");
+      expect(JSON.stringify(consoleErr.mock.calls)).not.toContain(OKX_UID);
+    });
+
+    it("the RPC error line is scrubbed of the uid Postgres echoes in its DETAIL", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const POST = await importPost();
+      await POST(makeReq(OKX_RECONNECT_BODY));
+
+      const logged = JSON.stringify(consoleErr.mock.calls);
+      expect(logged).toContain("RPC error");
+      expect(logged).not.toContain(OKX_UID);
+    });
+
+    it("a ccxt validation WITHOUT an id omits p_venue_account_id and the create still succeeds", async () => {
+      validateKeyMock.mockResolvedValue({ valid: true, read_only: true });
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      const [, rpcArgs] = rpcMock.mock.calls[0];
+      expect(rpcArgs as Record<string, unknown>).not.toHaveProperty("p_venue_account_id");
+    });
+
+    // 167.1.2 REVIEW IN-05: the terminal catch wraps encryptKey, which runs
+    // AFTER the validator's id is known. Every other sink in the route scrubs
+    // venueAccountId; a throw that echoes it must not carry it into the log.
+    it("the outer catch's log line is scrubbed of the account id a thrown error echoes", async () => {
+      encryptKeyMock.mockRejectedValueOnce(
+        new Error(`encrypt failed for account ${OKX_UID} on okx`),
+      );
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const POST = await importPost();
+      await POST(makeReq(OKX_RECONNECT_BODY));
+
+      const logged = JSON.stringify(consoleErr.mock.calls);
+      expect(logged).toContain("caught exception");
+      expect(logged).not.toContain(OKX_UID);
     });
   });
 });

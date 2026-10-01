@@ -47,9 +47,30 @@ export interface KpiPanelProps {
   cells: KpiPanelCell[];
   /** Accessible group label. Defaults to KpiStrip's "Portfolio KPIs". */
   ariaLabel?: string;
+  /**
+   * Phase 170 / SC1-LAYERS (C1-A2). "cards" (default) is the free-standing
+   * rounded strip — byte-identical for PortfolioKpiPanel and the live
+   * KpiStrip. "panel" is the square hairline row nested as the last row of
+   * the Blend-window data panel. Only the shell changes.
+   */
+  variant?: "cards" | "panel";
 }
 
-export function KpiPanel({ cells, ariaLabel = "Portfolio KPIs" }: KpiPanelProps) {
+/**
+ * Interior hairlines for the panel variant (DESIGN.md data panel: square,
+ * flat, hairline-divided). Right and top rules, suppressed on the last column
+ * and the first row. Column count is 2 below `@lg` and 4 at `@lg`, so the
+ * suppressors are container-scoped and do not fight each other.
+ */
+const PANEL_CELL =
+  "border-border px-4 py-3 border-r border-t @max-lg:nth-[2n]:border-r-0 @lg:nth-[4n]:border-r-0 @max-lg:nth-[-n+2]:border-t-0 @lg:nth-[-n+4]:border-t-0";
+
+export function KpiPanel({
+  cells,
+  ariaLabel = "Portfolio KPIs",
+  variant = "cards",
+}: KpiPanelProps) {
+  const panel = variant === "panel";
   return (
     // Phase 52-02 / TYPE-04 — the panel is its OWN container-query context
     // (`@container`, inline-size) so it reflows on ITS width, not the viewport.
@@ -57,17 +78,24 @@ export function KpiPanel({ cells, ariaLabel = "Portfolio KPIs" }: KpiPanelProps)
     // SEPARATE elements — an element never queries its OWN container size (CSS
     // containment spec), so the host wraps the grid rather than sharing its
     // class list. Inline-size containment ONLY — the size-containment variant
-    // would collapse the panel's block size to 0.
+    // would collapse the panel's block size to 0. The panel variant keeps that
+    // split: `@lg` on the grid queries this host, it does not sit on it.
     <div className="@container">
       <div
-        className="grid grid-cols-1 gap-3 @sm:grid-cols-2 @lg:grid-cols-4"
+        className={
+          panel
+            ? "grid grid-cols-2 @lg:grid-cols-4"
+            : "grid grid-cols-1 gap-3 @sm:grid-cols-2 @lg:grid-cols-4"
+        }
         role="group"
         aria-label={ariaLabel}
       >
         {cells.map(({ key, label, value, valueClassName, children }) => (
           <div
             key={key}
-            className="rounded-lg border border-border bg-surface p-4"
+            className={
+              panel ? PANEL_CELL : "rounded-lg border border-border bg-surface p-4"
+            }
           >
             <div className="text-micro font-semibold uppercase tracking-wider text-text-muted">
               {label}

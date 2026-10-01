@@ -421,11 +421,15 @@ describe("DOGFOOD-1 — derivePhase07Fields.hasConnectedKeys uses isPerKeyDailie
 
   type Key = Parameters<typeof derivePhase07Fields>[0][number];
   const key = (over: Partial<Key>): Key => ({
+    id: "k-1",
     is_active: true,
     exchange: "binance",
     sync_status: "ok",
     last_sync_at: "2026-07-16T00:00:00Z",
     disconnected_at: null,
+    venue_account_id: null,
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
     ...over,
   });
 

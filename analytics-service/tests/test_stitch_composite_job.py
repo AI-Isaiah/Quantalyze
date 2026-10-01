@@ -143,6 +143,17 @@ class _FakeQuery:
     def lte(self, *a: Any, **k: Any) -> "_FakeQuery":
         return self
 
+    # C3 topic H: the composite writer's reconcile deletes now bound by
+    # lt/gt/in_ on `date` (upsert first, then delete what the payload lacks).
+    def lt(self, *a: Any, **k: Any) -> "_FakeQuery":
+        return self
+
+    def gt(self, *a: Any, **k: Any) -> "_FakeQuery":
+        return self
+
+    def in_(self, *a: Any, **k: Any) -> "_FakeQuery":
+        return self
+
     def single(self) -> "_FakeQuery":
         self._single = True
         return self

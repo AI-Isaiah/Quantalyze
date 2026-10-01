@@ -78,7 +78,7 @@ export function ShortlistCard({
               if (!alreadySent) onSendIntro();
             }}
             disabled={alreadySent}
-            className={`inline-flex items-center text-caption font-medium ${
+            className={`hidden md:inline-flex items-center text-caption font-medium ${
               alreadySent ? "text-text-muted" : "text-accent hover:text-accent-hover cursor-pointer"
             }`}
           >

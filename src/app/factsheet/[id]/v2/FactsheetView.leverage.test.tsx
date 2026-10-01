@@ -3,7 +3,7 @@ import { render, fireEvent, act } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
-import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
+import { deriveSeriesBundle, fixtureBenchmarkPrices } from "@/lib/factsheet/build-payload";
 import { FactsheetProvider } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
 import { PeerPercentilePanel } from "./BatchDPanels";
@@ -110,6 +110,7 @@ function buildSmall(): { payload: FactsheetPayload; base: ReturnType<typeof deri
     isArithmetic: false,
     markets: p.markets,
     strategyName: p.strategyName,
+    benchmarkPrices: fixtureBenchmarkPrices([clipped]),
   });
   const payload = {
     ...p,
@@ -118,6 +119,9 @@ function buildSmall(): { payload: FactsheetPayload; base: ReturnType<typeof deri
       ...p.comparators,
       btc: { ...p.comparators.btc, joint: base.comparators.btc.joint },
     },
+    // Phase 169.5 (D-21): the builders always carry the BTC series the joint was
+    // computed from; the levered re-derive aligns BTC from it.
+    benchmarkPrices: fixtureBenchmarkPrices([clipped]),
   } as FactsheetPayload;
   return { payload, base };
 }
@@ -135,10 +139,14 @@ function v5SingleKey(): FactsheetPayload {
 
 // v4-shaped single-key (no periodsPerYear) — fail-closed: control hidden.
 function v4SingleKey(): FactsheetPayload {
-  return buildScenarioFactsheetPayload({
+  // Phase 167.1.2 plan 07: the scenario builder now CARRIES periodsPerYear, so
+  // the stale-v4 shape (no basis) is made by omitting the key explicitly.
+  const { periodsPerYear: _omit, ...v4 } = buildScenarioFactsheetPayload({
     portfolioDaily: makeReturnsSeries(300),
     benchmark: null,
   });
+  void _omit;
+  return v4 as FactsheetPayload;
 }
 
 const MTM_SCALARS = {
@@ -171,6 +179,7 @@ function fixtureMtmWithBundle(): FactsheetPayload {
         isArithmetic: false,
         markets: p.markets,
         strategyName: p.strategyName,
+        benchmarkPrices: fixtureBenchmarkPrices([clipped]),
       }),
     },
   } as unknown as FactsheetPayload;
@@ -224,6 +233,7 @@ function fixtureMtmNoLossBook(): FactsheetPayload {
         isArithmetic: false,
         markets: p.markets,
         strategyName: p.strategyName,
+        benchmarkPrices: fixtureBenchmarkPrices([clipped]),
       }),
     },
   } as unknown as FactsheetPayload;
@@ -251,6 +261,7 @@ function fixtureMtmBundleNoScalars(): FactsheetPayload {
         isArithmetic: false,
         markets: p.markets,
         strategyName: p.strategyName,
+        benchmarkPrices: fixtureBenchmarkPrices([clipped]),
       }),
     },
   } as unknown as FactsheetPayload;
@@ -295,10 +306,14 @@ function v4Composite(): FactsheetPayload {
   } as unknown as FactsheetPayload;
 }
 
+// Phase 167.1.2 plan 07: mounted WITHOUT scenarioMode. The leverage input is
+// the real factsheet's control and ControlBar now hides it in scenarioMode (the
+// composer levers each constituent itself), so these arms render the surface
+// the control actually lives on.
 function renderBody(payload: FactsheetPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+      <FactsheetBody payload={payload} hideAllocatorSection />
     </FactsheetProvider>,
   );
 }

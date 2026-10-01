@@ -34,11 +34,7 @@ import { hashShareToken } from "@/lib/scenario-share-token";
 // client" boundary error (a 500 on every valid share link). The bogus-token
 // 404 path never reaches the toWealth() call, so this only surfaces for a
 // link that actually resolves a scenario.
-import {
-  computeStrategyCurve,
-  toWealth,
-  type DailyPoint,
-} from "@/lib/scenario";
+import { toWealth } from "@/lib/scenario";
 import { methodologyLine } from "@/lib/scenario-history";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { Card } from "@/components/ui/Card";
@@ -46,6 +42,11 @@ import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
 import { EquityChart } from "@/app/(dashboard)/allocations/widgets/performance/EquityChart";
 import { ScenarioBenchmarkSection } from "@/app/(dashboard)/allocations/components/ScenarioBenchmarkSection";
+import {
+  btcLevelsFromCloses,
+  parseBtcCloses,
+  type BtcCloses,
+} from "@/app/(dashboard)/allocations/lib/scenario-benchmark";
 import {
   resolveSharedScenario,
   type SharedScenarioRow,
@@ -61,7 +62,7 @@ export const runtime = "nodejs";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
-// WR-03 — bound the benchmark self-fetch so a slow/hung /api/benchmark/btc
+// WR-03 — bound the benchmark self-fetch so a slow/hung /api/benchmark/btc/prices
 // cannot stall every anonymous render of this force-dynamic, sessionless public
 // page (the phase's only anon entry point — a cheap DoS-amplification surface).
 // Without a timeout the plain catch below only handles a thrown/!res.ok result,
@@ -74,31 +75,49 @@ const BENCHMARK_FETCH_TIMEOUT_MS = 2500;
 // prefixes "Shared scenario · ").
 const PROJECTED_LABEL = "PROJECTED — hypothetical, not a live book";
 
-/** Fetch the public BTC daily-return series for the benchmark overlay. The
- *  route is shared market data and stays cacheable — we do NOT add no-store to
- *  it. A failed / empty / TIMED-OUT fetch degrades the benchmark section to its
- *  honest "unavailable" empty state ([] → benchmarkAvailable=false), never an
- *  error and never a stalled page (WR-03). */
-async function fetchBtcDaily(): Promise<DailyPoint[]> {
+/** Fetch the public BTC closes (`{ prices, dropped, through }`, Phase 169.4
+ *  D-67) for the benchmark overlay and the vs-BTC section. The route is shared
+ *  market data and stays cacheable — we do NOT add no-store to it. A failed /
+ *  TIMED-OUT fetch, a body of any other shape (`parseBtcCloses`, so a stale
+ *  returns array is refused, never misread) or a body with no close degrades
+ *  the benchmark section to its honest "unavailable" empty state (null), never
+ *  an error and never a stalled page (WR-03). */
+async function fetchBtcCloses(): Promise<BtcCloses | null> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), BENCHMARK_FETCH_TIMEOUT_MS);
+  // 169.4 review SFH MEDIUM-3: every failure branch is logged, as the
+  // composer's client twin does (F-08). Without it an outage, a wrong
+  // NEXT_PUBLIC_APP_URL, a 429 and a contract drift all read the same
+  // "unavailable" with nothing server-side to tell them apart. The lines carry
+  // the route path and a discriminator only, never the share token.
   try {
-    const res = await fetch(`${APP_URL}/api/benchmark/btc`, { signal: ctrl.signal });
-    if (!res.ok) return [];
-    const json = (await res.json()) as unknown;
-    if (!Array.isArray(json)) return [];
-    return json.filter(
-      (p): p is DailyPoint =>
-        p !== null &&
-        typeof p === "object" &&
-        typeof (p as DailyPoint).date === "string" &&
-        typeof (p as DailyPoint).value === "number" &&
-        Number.isFinite((p as DailyPoint).value),
-    );
-  } catch {
-    // A timeout (AbortError), a thrown fetch, or a non-ok response all degrade
+    const res = await fetch(`${APP_URL}/api/benchmark/btc/prices`, { signal: ctrl.signal });
+    if (!res.ok) {
+      console.warn("[scenario-share] /api/benchmark/btc/prices non-ok response", {
+        status: res.status,
+      });
+      return null;
+    }
+    const body = (await res.json()) as unknown;
+    const closes = parseBtcCloses(body);
+    if (closes === null) {
+      console.warn("[scenario-share] /api/benchmark/btc/prices unexpected body shape");
+      return null;
+    }
+    return closes.prices.length > 0 ? closes : null;
+  } catch (err) {
+    // A timeout (AbortError), a thrown fetch or an unparsable body all degrade
     // to the honest benchmark-unavailable empty state — never a thrown page.
-    return [];
+    if (err instanceof Error && err.name === "AbortError") {
+      console.warn("[scenario-share] /api/benchmark/btc/prices timed out", {
+        timeoutMs: BENCHMARK_FETCH_TIMEOUT_MS,
+      });
+    } else {
+      console.warn("[scenario-share] /api/benchmark/btc/prices fetch failed", {
+        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
+    }
+    return null;
   } finally {
     clearTimeout(timer);
   }
@@ -262,11 +281,11 @@ export default async function ScenarioSharePage({
     }
   }
 
-  // 4. Public BTC benchmark series (cacheable — NOT no-store). 5. Resolve.
-  // The resolve layer no longer consumes btcDaily (the benchmark is recomputed
-  // inside ScenarioBenchmarkSection from portfolioDaily + btcDaily); the page
-  // still fetches it here to feed the chart overlay + the section directly.
-  const btcDaily = await fetchBtcDaily();
+  // 4. Public BTC closes (cacheable — NOT no-store). 5. Resolve.
+  // The resolve layer does not consume BTC (the benchmark is recomputed inside
+  // ScenarioBenchmarkSection from portfolioDaily + the closes); the page fetches
+  // them here to feed the chart overlay + the section directly.
+  const btc = await fetchBtcCloses();
   const resolved = resolveSharedScenario(row, assetClassById, returnsSeriesById);
 
   // DI-23-01 — a version-ahead / undecodable / dangling-ref draft is honest
@@ -288,16 +307,19 @@ export default async function ScenarioSharePage({
 
   const { name, metrics, portfolioDaily, strategyNames, isMixed, periodsPerYear, leveraged } =
     resolved;
-  const btcAvailable = btcDaily.length > 0;
 
   // EquityChart needs cumulative-WEALTH form (start ~1.0). The engine's
   // `equity_curve` is cumulative RETURN (0.18 = +18%); convert via `+1` then
   // brand with toWealth (24-RESEARCH / Pitfall 1). The benchmark overlay is the
-  // BTC wealth curve (computeStrategyCurve), shown when the series is available.
+  // BTC close LEVEL (`btcLevelsFromCloses`, Phase 169.4 D-66: never compounded
+  // returns), shown when the closes are available. It is based on the last
+  // close on or before the scenario's first date (169.4 review WR-01), so BTC
+  // starts at 1.0 with the portfolio, not at the served series' first close.
   const scenarioWealth = toWealth(
     metrics.equity_curve.map((p) => ({ date: p.date, value: p.value + 1 })),
   );
-  const btcWealth = btcAvailable ? computeStrategyCurve(btcDaily) : undefined;
+  const btcWealth =
+    btc !== null ? btcLevelsFromCloses(btc.prices, portfolioDaily[0]?.date) : undefined;
 
   // KPI strip — RETURN / PERCENTAGE form only. No USD, no AUM. Null/non-finite
   // metrics render the em-dash "—" via the shared formatters (never a 0).
@@ -386,8 +408,7 @@ export default async function ScenarioSharePage({
       <Card className="mt-8">
         <ScenarioBenchmarkSection
           portfolioDaily={portfolioDaily}
-          btcDaily={btcDaily}
-          benchmarkAvailable={btcAvailable}
+          btc={btc}
           // Phase 84 (BLEND-01): ride the SAME basis the projection used, so the
           // vs-BTC TE/IR/alpha risk math matches the KPI strip's clock.
           periodsPerYear={periodsPerYear}

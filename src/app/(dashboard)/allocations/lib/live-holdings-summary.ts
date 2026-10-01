@@ -147,6 +147,32 @@ export interface LiveHoldingsSummary {
    *  holding here too, so the excludes side fails open like the includes
    *  side. Never added to, or subtracted from, `total` (D-03). */
   excludedUnknownStatus: LiveHoldingsPart;
+  /** Phase 167.1.2 SC-4. Holdings the contributing-set narrowing dropped from
+   *  `total` whose key is TRUSTED (present in `statusByKeyId`, not untrusted)
+   *  and not manager-side: an allocator key with no return series yet. Until
+   *  this part they fell through every branch and landed in no part at all,
+   *  so the composer said nothing about them. On the founder's book that is
+   *  where a shared account's dollars sat. The composer names it as "excludes
+   *  $X from connected keys with no return history yet". Never added to, or
+   *  subtracted from, `total` (D-03). */
+  excludedTrusted: LiveHoldingsPart;
+  /** Review C2 WR-03. Holdings the narrowing dropped whose key is in the
+   *  status map with a status that is not untrusted, but is NOT in the
+   *  payload's `eligibleApiKeyIds`: a soft-disconnected or inactive key whose
+   *  last holdings still arrive (`holdingsSummary` is not filtered by key
+   *  eligibility). Until this part they landed in `excludedTrusted` and were
+   *  called "connected keys with no return history yet", both halves false.
+   *  The composer names them "keys that are not connected". Empty when the
+   *  caller passes no eligible set, because then the two cannot be told apart.
+   *  Never added to, or subtracted from, `total` (D-03). */
+  excludedNotConnected: LiveHoldingsPart;
+  /** Phase 167.1.2 SC-4. Holdings the narrowing dropped whose key the payload
+   *  names as manager-side (D-20: not the allocator's book), whatever its
+   *  status. Kept OUT of every disclosure, per D-20's reasoning, but counted,
+   *  so that every toggled-on dollar is in exactly one of `total` or an
+   *  `excluded*` part (the conservation invariant the unit suite generates
+   *  books against). */
+  excludedManagerSide: LiveHoldingsPart;
 }
 
 /**
@@ -192,8 +218,15 @@ export function summarizeLiveHoldings(args: {
    *  as a manager. Read only to narrow `excludedUntrusted` to D-20's `$Y`. */
   managerSideApiKeyIds: readonly string[];
   statusByKeyId: ReadonlyMap<string, string | null>;
+  /** The payload's `eligibleApiKeyIds` (server-built by
+   *  `isPerKeyDailiesEligibleKey`; never re-derived here). Read only to split
+   *  `excludedNotConnected` out of `excludedTrusted` (review C2 WR-03).
+   *  Undefined means unknown, and nothing is called not-connected. */
+  eligibleApiKeyIds?: readonly string[];
 }): LiveHoldingsSummary {
   const contributing = new Set(args.contributingApiKeyIds);
+  const eligible =
+    args.eligibleApiKeyIds === undefined ? null : new Set(args.eligibleApiKeyIds);
   const managerSide = new Set(args.managerSideApiKeyIds);
   // ⚠️ The narrowing applies only when there IS a modelled set to narrow TO.
   // An EMPTY contributing set means no per-key row exists, so there is nothing
@@ -225,6 +258,9 @@ export function summarizeLiveHoldings(args: {
     unknownStatus: { amount: 0, count: 0, unavailable: 0 },
     excludedUntrusted: { amount: 0, count: 0, unavailable: 0 },
     excludedUnknownStatus: { amount: 0, count: 0, unavailable: 0 },
+    excludedTrusted: { amount: 0, count: 0, unavailable: 0 },
+    excludedNotConnected: { amount: 0, count: 0, unavailable: 0 },
+    excludedManagerSide: { amount: 0, count: 0, unavailable: 0 },
   };
   const addTo = (part: LiveHoldingsPart, h: DashboardHolding, equity: number) => {
     part.amount += equity;
@@ -247,14 +283,25 @@ export function summarizeLiveHoldings(args: {
       // D-20: a manager-side key the payload identifies is not the allocator's
       // book, so its holdings are not part of what the narrowing excluded from
       // THEIR AUM. Only the indistinguishable remainder may over-disclose.
-      if (!managerSide.has(h.api_key_id)) {
-        if (untrusted) {
-          addTo(out.excludedUntrusted, h, equity);
-        } else if (!args.statusByKeyId.has(h.api_key_id)) {
-          // Review round 3 WR-01: an ABSENT status is unknown, not trusted,
-          // on the excludes side too (the WR-05 `.has` rule).
-          addTo(out.excludedUnknownStatus, h, equity);
-        }
+      // Phase 167.1.2 SC-4: every branch below lands the holding in a part, so
+      // no toggled-on dollar leaves this loop unaccounted for.
+      if (managerSide.has(h.api_key_id)) {
+        addTo(out.excludedManagerSide, h, equity);
+      } else if (untrusted) {
+        addTo(out.excludedUntrusted, h, equity);
+      } else if (!args.statusByKeyId.has(h.api_key_id)) {
+        // Review round 3 WR-01: an ABSENT status is unknown, not trusted,
+        // on the excludes side too (the WR-05 `.has` rule).
+        addTo(out.excludedUnknownStatus, h, equity);
+      } else if (eligible !== null && !eligible.has(h.api_key_id)) {
+        // Review C2 WR-03: in the key list, status not untrusted, but not
+        // eligible: the key is disconnected or inactive, not "connected with
+        // no return history yet".
+        addTo(out.excludedNotConnected, h, equity);
+      } else {
+        // Trusted, not contributing, not manager-side: a key with no return
+        // series yet. Before 167.1.2 this fell through to `continue` unnamed.
+        addTo(out.excludedTrusted, h, equity);
       }
       continue;
     }
@@ -281,6 +328,15 @@ export interface KeyTrustClauseRender {
   /** The row unit, singular then plural, e.g. `holding` / `holdings`. */
   unit: readonly [string, string];
 }
+
+/** Phase 167.1.2 SC-4 — the noun for `excludedTrusted`, the one phrase the
+ *  plan fixed ("excludes $X from connected keys with no return history yet").
+ *  Local to this module: only this clause renders it. */
+const NO_RETURN_HISTORY_KEY_SET_NOUN = "connected keys with no return history yet";
+
+/** Review C2 WR-03 — the noun for `excludedNotConnected`. Local to this module
+ *  for the same reason as the noun above. */
+const NOT_CONNECTED_KEY_SET_NOUN = "keys that are not connected";
 
 /**
  * Phase 167.1 AUMTRUST — the ONE lower-case clause that names the parts of a
@@ -315,6 +371,15 @@ export interface KeyTrustClauseRender {
  *   with the unknown-status noun after the excluded untrusted part, e.g.
  *   `excludes $Z from keys with an unknown sync status`. Its presence rules
  *   out the shared-noun form. Open Positions passes neither excluded part.
+ * - Phase 167.1.2 SC-4: an optional `excludedTrusted` part (dropped dollars
+ *   from a trusted key with no return series yet) is named last, as
+ *   `excludes $X from connected keys with no return history yet`, with the
+ *   same count and unavailable rules. Its presence rules out the shared-noun
+ *   form, which would otherwise return before naming it. Open Positions
+ *   passes it no more than the other excluded parts.
+ * - Review C2 WR-03: an optional `excludedNotConnected` part (dropped dollars
+ *   from a key that is not connected) is named before it, as `excludes $X
+ *   from keys that are not connected`, with the same rules.
  */
 export function buildKeyTrustClause(
   untrusted: LiveHoldingsPart,
@@ -322,12 +387,23 @@ export function buildKeyTrustClause(
   render: KeyTrustClauseRender,
   excludedUntrusted?: LiveHoldingsPart,
   excludedUnknownStatus?: LiveHoldingsPart,
+  excludedTrusted?: LiveHoldingsPart,
+  excludedNotConnected?: LiveHoldingsPart,
 ): string {
   const phrase = (part: LiveHoldingsPart, noun: string): string => {
-    const base = `${render.amount(part.amount)} from ${noun}`;
+    const unitOf = (n: number) => (n === 1 ? render.unit[0] : render.unit[1]);
+    // 169 review round 2 IN-R2-05 / SFH R2-5: when EVERY row of the part is
+    // unavailable, `amount` is the 0 they were summed as, not a known figure.
+    // Stating it ("$0.00 from keys needing attention") put a dollar figure to
+    // the cent beside an Open Positions total that reads "—". Name the count
+    // instead; a partly reported part keeps its amount.
+    const lead =
+      part.unavailable > 0 && part.unavailable >= part.count
+        ? `${part.count} ${unitOf(part.count)}`
+        : render.amount(part.amount);
+    const base = `${lead} from ${noun}`;
     if (part.unavailable === 0) return base;
-    const unit = part.unavailable === 1 ? render.unit[0] : render.unit[1];
-    return `${base} (${render.missing} unavailable for ${part.unavailable} ${unit})`;
+    return `${base} (${render.missing} unavailable for ${part.unavailable} ${unitOf(part.unavailable)})`;
   };
   const parts: string[] = [];
   if (untrusted.count > 0) parts.push(phrase(untrusted, UNTRUSTED_KEY_SET_NOUN));
@@ -342,12 +418,26 @@ export function buildKeyTrustClause(
     excludedUnknownStatus !== undefined && excludedUnknownStatus.count > 0
       ? excludedUnknownStatus
       : null;
+  const excludedNoHistory =
+    excludedTrusted !== undefined && excludedTrusted.count > 0
+      ? excludedTrusted
+      : null;
+  const excludedGone =
+    excludedNotConnected !== undefined && excludedNotConnected.count > 0
+      ? excludedNotConnected
+      : null;
   const excludedParts: string[] = [];
   if (excluded !== null) {
     excludedParts.push(phrase(excluded, UNTRUSTED_KEY_SET_NOUN));
   }
   if (excludedUnknown !== null) {
     excludedParts.push(phrase(excludedUnknown, UNKNOWN_KEY_STATUS_SET_NOUN));
+  }
+  if (excludedGone !== null) {
+    excludedParts.push(phrase(excludedGone, NOT_CONNECTED_KEY_SET_NOUN));
+  }
+  if (excludedNoHistory !== null) {
+    excludedParts.push(phrase(excludedNoHistory, NO_RETURN_HISTORY_KEY_SET_NOUN));
   }
   if (excludedParts.length === 0) return `includes ${parts.join(" and ")}`;
   if (parts.length === 0) return `excludes ${excludedParts.join(" and ")}`;
@@ -356,6 +446,8 @@ export function buildKeyTrustClause(
   const oneNoun =
     excluded !== null &&
     excludedUnknown === null &&
+    excludedNoHistory === null &&
+    excludedGone === null &&
     unknownStatus.count === 0 &&
     untrusted.unavailable === 0 &&
     excluded.unavailable === 0;

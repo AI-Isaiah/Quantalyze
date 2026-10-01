@@ -11,6 +11,11 @@ import { Card } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { STRATEGY_NAMES, STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES } from "@/lib/constants";
 import type { Strategy } from "@/lib/types";
+import {
+  readCredentialInput,
+  CREDENTIAL_KEY_INPUT_PROPS,
+  CREDENTIAL_SECRET_INPUT_PROPS,
+} from "@/lib/credential-input";
 
 // F4 (Phase 122): this legacy StrategyForm connect-key modal renders a HARDCODED
 // API Secret field + generic "read-only keys only" copy — it is NOT token-only /
@@ -406,17 +411,17 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
           <Input
             label="API Key"
             value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
+            onChange={(e) => setApiKey(readCredentialInput(e))}
             placeholder="Your read-only API key"
-            autoComplete="off"
+            {...CREDENTIAL_KEY_INPUT_PROPS}
           />
           <Input
             label="API Secret"
             value={apiSecret}
-            onChange={(e) => setApiSecret(e.target.value)}
+            onChange={(e) => setApiSecret(readCredentialInput(e))}
             placeholder="Your API secret"
             type="password"
-            autoComplete="off"
+            {...CREDENTIAL_SECRET_INPUT_PROPS}
           />
           {apiExchange === "okx" && (
             <Input
@@ -425,7 +430,7 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
               onChange={(e) => setApiPassphrase(e.target.value)}
               placeholder="OKX passphrase"
               type="password"
-              autoComplete="off"
+              {...CREDENTIAL_SECRET_INPUT_PROPS}
             />
           )}
           <p className="text-xs text-text-muted">

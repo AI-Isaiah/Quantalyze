@@ -28,12 +28,53 @@ import { z } from "zod";
 import { exchangeEnum } from "./closed-sets";
 
 // --- /api/validate-key ---
+// Phase 167.1.2 (D-01, RESEARCH Pitfall 3): `venue_account_id` is NAMED here
+// because it IS written to `api_keys.venue_account_id` by the two connect routes
+// (validate-and-encrypt's persist arm, create-with-key's RPC argument). They
+// read this one named field and nothing else. `.min(1)` refuses a blank id at
+// the boundary (a blank is non-NULL to the venue-identity unique index and
+// would collapse two accounts into one); the service already sends null
+// instead of blank. The passthrough REMAINDER is still never spread into a
+// write, which is what the sanctioned exception below covers.
+//
+// 167.1.2 REVIEW IN-02 / SF-M6 — the field FAILS SOFT. The id is an optional
+// enrichment of a validation that already succeeded ("a missing id is None and
+// never fails validation", services/exchange.py), so an id this field cannot
+// accept (blank, over 128 characters, not a string) becomes null: the key
+// connects unstamped, exactly as for a venue that reports no id, instead of the
+// whole parse and so the whole connect failing. A blank still never reaches the
+// write, because it becomes null rather than "". The log line names the issue
+// codes only, never the value, which is an account identifier.
+//
+// 167.1.2 REVIEW-R2 SF2-M1 — the line is `console.error`, not `warn`. The
+// service's `_normalise` never sends a blank, over-long or non-string id, so
+// reaching this `.catch` is a contract break, and the key it belongs to
+// connects without its duplicate-account identity. This is the level and the shape
+// the seam's other contract break (`parseResponse` in analytics-client.ts)
+// uses: `console.error`, no Sentry helper. ⚠️ Measured, not assumed: the
+// Sentry setup (`src/instrumentation.ts`, the only Sentry init in the repo)
+// registers no console integration, so
+// neither line reaches Sentry; both reach the runtime's error-level logs only.
 export const ValidateKeyResponseSchema = z.object({
   valid: z.boolean(),
   read_only: z.boolean(),
   exchange: z.string().optional(),
   permissions: z.array(z.string()).optional(),
-}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; /api/validate-key result is read for UI display only, never spread into a write
+  venue_account_id: z
+    .string()
+    .trim()
+    .min(1)
+    .max(128)
+    .nullable()
+    .optional()
+    .catch((ctx) => {
+      console.error(
+        "[analytics-schemas] /api/validate-key venue_account_id refused, connecting unstamped:",
+        ctx.error.issues.map((issue) => issue.code).join(","),
+      );
+      return null;
+    }),
+}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; only the named venue_account_id field is written (to api_keys), the passthrough remainder is never spread into a write
 
 // --- /api/encrypt-key ---
 // The analytics service uses envelope encryption: every credential (key,

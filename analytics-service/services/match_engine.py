@@ -328,11 +328,18 @@ def _eligibility_check_hard_inner(
     owned_set: set[str],
     thumbs_down_set: set[str],
     explicitly_excluded_set: set[str],
+    authored_set: Optional[set[str]] = None,
 ) -> tuple[Optional[ExclusionReason], Optional[str]]:
     """Shared hard-only eligibility check. Returns (reason_enum, provenance) or (None, None)."""
     sid = candidate["strategy_id"]
     if sid in owned_set:
         return (ExclusionReason.OWNED, "portfolio")
+    # Phase 169.3 / D-05: a strategy the allocator AUTHORED is theirs too.
+    # Same OWNED reason (no new enum member, so the SQL CHECK and the
+    # exclusion-reason census do not move); the provenance tells the two
+    # apart in the persisted audit row.
+    if authored_set and sid in authored_set:
+        return (ExclusionReason.OWNED, "authored")
     if sid in thumbs_down_set:
         return (ExclusionReason.THUMBS_DOWN, "match_decision")
     # H-0705 fix: explicit exclusion set is honored as a hard filter so callers
@@ -352,6 +359,7 @@ def _eligibility_check(
     owned_set: set[str],
     thumbs_down_set: set[str],
     explicitly_excluded_set: Optional[set[str]] = None,
+    authored_set: Optional[set[str]] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Run eligibility checks. Returns (exclusion_reason, exclusion_provenance) or (None, None).
 
@@ -362,6 +370,7 @@ def _eligibility_check(
         explicitly_excluded_set = set()
     hard_reason, hard_provenance = _eligibility_check_hard_inner(
         candidate, preferences, owned_set, thumbs_down_set, explicitly_excluded_set,
+        authored_set,
     )
     if hard_reason is not None:
         return (hard_reason.value, hard_provenance)
@@ -408,12 +417,14 @@ def _eligibility_check_hard_only(
     owned_set: set[str],
     thumbs_down_set: set[str],
     explicitly_excluded_set: Optional[set[str]] = None,
+    authored_set: Optional[set[str]] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Same as _eligibility_check but only the hard rules. Used during relaxation."""
     if explicitly_excluded_set is None:
         explicitly_excluded_set = set()
     hard_reason, hard_provenance = _eligibility_check_hard_inner(
         candidate, preferences, owned_set, thumbs_down_set, explicitly_excluded_set,
+        authored_set,
     )
     if hard_reason is None:
         return (None, None)
@@ -845,6 +856,18 @@ def score_candidates(
     """
     prefs = merge_with_defaults(preferences or {})
     owned_set: set[str] = {ps["strategy_id"] for ps in portfolio_strategies}
+    # Phase 169.3 / D-05: `owned_set` is the PORTFOLIO; a strategy this
+    # allocator manages (`manager_id`, projected from the strategy's owner in
+    # routers/match.py `_load_candidate_universe`) is excluded the same hard
+    # way, so nobody is recommended their own strategy. A candidate with no
+    # `manager_id` matches nothing here. An already-persisted batch clears on
+    # the next daily recompute.
+    authored_set: set[str] = {
+        cand["strategy_id"]
+        for cand in candidate_strategies
+        if cand.get("manager_id") is not None
+        and cand.get("manager_id") == allocator_id
+    }
     if excluded_strategy_ids is None:
         excluded_strategy_ids = set()
     if thumbs_down_ids is None:
@@ -859,6 +882,7 @@ def score_candidates(
     for cand in candidate_strategies:
         reason, provenance = _eligibility_check(
             cand, prefs, owned_set, thumbs_down_ids, excluded_strategy_ids,
+            authored_set,
         )
         if reason is None:
             eligible.append(cand)
@@ -905,6 +929,7 @@ def score_candidates(
         for cand in candidate_strategies:
             reason, provenance = _eligibility_check_hard_only(
                 cand, relaxed_prefs, owned_set, thumbs_down_ids, excluded_strategy_ids,
+                authored_set,
             )
             if reason is None:
                 eligible.append(cand)

@@ -158,6 +158,42 @@ function defaultAnalyticsRow(
 }
 
 /**
+ * 167.1.2 C3 fix F (SFH-C3R2-X1 sweep) — the composite series read is an id
+ * keyset drain now (`drainById`). This fake serves it the way PostgREST does:
+ * ids assigned by seed position, the `id > cursor` filter honoured, rows cut
+ * to `.limit()` AND to a 1000-row server cap (`max_rows`), whatever the
+ * client asked for.
+ */
+const SERVER_MAX_ROWS = 1000;
+function pagedSeries(
+  rows: ReadonlyArray<{ date: string; daily_return: number }>,
+) {
+  const table = rows.map((r, i) => ({ id: i + 1, ...r }));
+  let afterId: number | null = null;
+  let limitN = Number.POSITIVE_INFINITY;
+  const self = {
+    eq: () => self,
+    gt: (_column: string, value: number) => {
+      afterId = value;
+      return self;
+    },
+    order: () => self,
+    limit: (n: number) => {
+      limitN = n;
+      return self;
+    },
+    then: (resolve: (v: { data: unknown[]; error: null }) => void) =>
+      resolve({
+        data: table
+          .filter((r) => afterId === null || r.id > afterId)
+          .slice(0, Math.min(limitN, SERVER_MAX_ROWS)),
+        error: null,
+      }),
+  };
+  return self;
+}
+
+/**
  * Chainable pure-stub composite client. Discriminates on (table, select-cols):
  *   - freshness probe (`computation_status, computed_at`) → stale complete
  *   - strategy_keys head-count (`select("*", {head})`) → { count: memberCount }
@@ -264,8 +300,8 @@ function installCompositeSupabaseMock(opts: Partial<CompositeMockOpts> = {}) {
             return result(o.members, 0);
           }
 
-          if (table === "csv_daily_returns" && cols === "date, daily_return") {
-            return result(o.series, 0);
+          if (table === "csv_daily_returns" && cols === "id, date, daily_return") {
+            return pagedSeries(o.series);
           }
 
           if (table === "strategies" && cols.includes("returns_denominator_config")) {
@@ -543,6 +579,53 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
     expect(snap.composite.gapDayCount).toBe(2);
     expect(snap.composite.series.length).toBe(DEFAULT_SERIES.length);
     expect(snap.tradeCount).toBe(0);
+  });
+
+  // 167.1.2 C3 fix F (SFH-C3R2-X1 sweep). WHY: PostgREST cuts every response
+  // to max_rows (1000) whatever `.limit()` asked for, with HTTP 200. The
+  // composite series used to be ONE `.limit(20000)` request, so a stitched
+  // composite past 1000 days reached the preview with 1000 of them: a wrong
+  // csvRowCount and an attribution series missing its newest days. 2500 days,
+  // stored newest-first so id order and date order disagree, under the cap.
+  it("reads a stitched series past the 1000-row server cap in full, date-ascending", async () => {
+    const DAYS = 2500;
+    const day = (i: number) =>
+      new Date(Date.UTC(2019, 0, 1) + i * 86_400_000).toISOString().slice(0, 10);
+    const longSeries = Array.from({ length: DAYS }, (_, i) => ({
+      date: day(DAYS - 1 - i),
+      daily_return: 0.0005 * ((i % 5) - 2),
+    }));
+    installCompositeSupabaseMock({
+      series: longSeries,
+      pollOutcome: () => ({ kind: "row", status: "complete_with_warnings" }),
+    });
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    const primary = screen.getByRole("button", {
+      name: /use this composite and continue/i,
+    });
+    await act(async () => {
+      fireEvent.click(primary);
+    });
+
+    const snap = baseProps.onComplete.mock.calls[0][0];
+    expect(snap.csvRowCount).toBe(DAYS);
+    expect(snap.composite.series).toHaveLength(DAYS);
+    expect(snap.composite.series[0].date).toBe(day(0));
+    expect(snap.composite.series[DAYS - 1].date).toBe(day(DAYS - 1));
+    // The drain's cursor column does not leak into the snapshot.
+    expect(Object.keys(snap.composite.series[0]).sort()).toEqual([
+      "daily_return",
+      "date",
+    ]);
   });
 
   // Pin 4 — NO TRADES ROUTING (Pitfall 1/4). Across the full passed lifecycle

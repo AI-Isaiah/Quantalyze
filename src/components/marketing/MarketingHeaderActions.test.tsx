@@ -1,0 +1,161 @@
+/**
+ * N-H (Phase 170, plan 07): masthead actions follow the session.
+ * Signed out, today's Sign in / Sign up links. Signed in, one "Go to app"
+ * link and no identity. An auth failure stays on the public header.
+ */
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen } from "@testing-library/react";
+import React from "react";
+import { redirect } from "next/navigation";
+import { createClient } from "@/lib/supabase/server";
+import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
+import { MarketingHeaderActions } from "./MarketingHeaderActions";
+
+const SIGN_IN_CLASS =
+  "inline-flex min-h-[44px] items-center rounded-md px-3 py-2 text-sm font-medium text-text-secondary transition-colors hover:bg-page hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+
+const SIGN_UP_CLASS =
+  "inline-flex min-h-[44px] items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+
+const HIDDEN_USER_ID = "usr_should_not_leak_9f3a";
+const HIDDEN_EMAIL = "hidden-session@example.test";
+
+const auth = vi.hoisted(() => ({
+  getUser: vi.fn(),
+}));
+
+vi.mock("next/link", () => ({
+  default: ({
+    href,
+    children,
+    ...rest
+  }: {
+    href: string;
+    children: React.ReactNode;
+  } & React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
+    <a href={href} {...rest}>
+      {children}
+    </a>
+  ),
+}));
+
+vi.mock("@/lib/supabase/server", () => ({
+  createClient: vi.fn(async () => ({
+    auth: { getUser: auth.getUser },
+  })),
+}));
+
+async function renderActions() {
+  const ui = await MarketingHeaderActions();
+  return render(ui as React.ReactElement);
+}
+
+function expectSignedOutLinks() {
+  const signIn = screen.getByRole("link", { name: "Sign in" });
+  const signUp = screen.getByRole("link", { name: "Sign up" });
+  expect(screen.getAllByRole("link")).toHaveLength(2);
+  expect(signIn).toHaveAttribute("href", "/login");
+  expect(signUp).toHaveAttribute("href", "/signup");
+  expect(signIn.getAttribute("class")).toBe(SIGN_IN_CLASS);
+  expect(signUp.getAttribute("class")).toBe(SIGN_UP_CLASS);
+  expect(screen.queryByRole("link", { name: "Go to app" })).toBeNull();
+}
+
+beforeEach(() => {
+  auth.getUser.mockReset();
+  vi.mocked(createClient).mockReset();
+  vi.mocked(createClient).mockImplementation(async () => ({
+    auth: { getUser: auth.getUser },
+  }) as never);
+});
+
+describe("MarketingHeaderActions", () => {
+  it("renders Sign in and Sign up, and no Go to app, when getUser resolves no user", async () => {
+    auth.getUser.mockResolvedValue({
+      data: { user: null },
+      error: null,
+    });
+    await renderActions();
+    expectSignedOutLinks();
+  });
+
+  it("renders one Go to app link and no identity when getUser resolves a user", async () => {
+    auth.getUser.mockResolvedValue({
+      data: { user: { id: HIDDEN_USER_ID, email: HIDDEN_EMAIL } },
+      error: null,
+    });
+    const { container } = await renderActions();
+    const links = screen.getAllByRole("link");
+    expect(links).toHaveLength(1);
+    expect(links[0]).toHaveAccessibleName("Go to app");
+    expect(DEFAULT_AUTHENTICATED_ROUTE).toBe("/discovery/crypto-sma");
+    expect(links[0]).toHaveAttribute("href", DEFAULT_AUTHENTICATED_ROUTE);
+    expect(links[0].getAttribute("class")).toBe(SIGN_UP_CLASS);
+    expect(screen.queryByRole("link", { name: "Sign in" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Sign up" })).toBeNull();
+    expect(container.innerHTML).not.toContain(HIDDEN_EMAIL);
+    expect(container.innerHTML).not.toContain(HIDDEN_USER_ID);
+  });
+
+  it("renders the signed-out links when getUser returns an error", async () => {
+    auth.getUser.mockResolvedValue({
+      data: { user: { id: HIDDEN_USER_ID, email: HIDDEN_EMAIL } },
+      error: { message: "invalid session" },
+    });
+    const { container } = await renderActions();
+    expectSignedOutLinks();
+    expect(container.innerHTML).not.toContain(HIDDEN_EMAIL);
+    expect(container.innerHTML).not.toContain(HIDDEN_USER_ID);
+  });
+
+  it("renders the signed-out links when getUser rejects, and logs the failure", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    auth.getUser.mockRejectedValue(new Error("auth down"));
+    await renderActions();
+    expectSignedOutLinks();
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[marketing-header] session read failed",
+      "auth down",
+    );
+    errorSpy.mockRestore();
+  });
+
+  it("renders the signed-out links when createClient rejects, and logs the failure", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(createClient).mockRejectedValueOnce(new Error("cookies unavailable"));
+    await renderActions();
+    expectSignedOutLinks();
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[marketing-header] session read failed",
+      "cookies unavailable",
+    );
+    errorSpy.mockRestore();
+  });
+
+  it("does not log the documented anonymous error return", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    auth.getUser.mockResolvedValue({
+      data: { user: null },
+      error: { name: "AuthSessionMissingError", message: "Auth session missing!" },
+    });
+    await renderActions();
+    expectSignedOutLinks();
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("rethrows a Next framework error instead of swallowing it into the signed-out fallback", async () => {
+    // SFH-170-04: the real `redirect()` throws Next's NEXT_REDIRECT error, the
+    // same class of framework throw cookies() raises. The old bare catch turned
+    // it into "Sign in"; unstable_rethrow must let it reach Next.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(createClient).mockImplementationOnce(async () => {
+      redirect("/framework-redirect");
+    });
+    await expect(MarketingHeaderActions()).rejects.toMatchObject({
+      digest: expect.stringContaining("NEXT_REDIRECT"),
+    });
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+});

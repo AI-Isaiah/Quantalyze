@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Tweaks } from "./Tweaks";
@@ -72,6 +73,109 @@ function Harness() {
     </TweaksProvider>
   );
 }
+
+// Export button class string, read from AllocationsTabs.tsx. The toggle must
+// carry every token of it (AD-05: same class list as the adjacent Export
+// button) plus the coarse-pointer hit target and shrink-0.
+const EXPORT_BUTTON_CLASSES = [
+  "inline-flex",
+  "items-center",
+  "gap-1",
+  "rounded-md",
+  "border",
+  "border-border",
+  "bg-surface",
+  "px-2.5",
+  "py-1",
+  "text-xs",
+  "font-medium",
+  "text-text-secondary",
+  "transition-colors",
+  "hover:border-accent/40",
+  "hover:text-text-primary",
+  "focus-visible:outline",
+  "focus-visible:outline-2",
+  "focus-visible:outline-accent",
+];
+
+describe("Tweaks — Phase 170 AD-05 / N-TWEAKS inline control", () => {
+  // WHY: a fixed bottom-right chip covered the mobile nav (2026-09-26) and
+  // the scenario footer's Commit button (2026-09-27). Inline means no
+  // position style at all, so it cannot cover either.
+  it("[AD-05] the toggle has no inline position and carries the Export class list", () => {
+    render(<Harness />);
+    const toggle = screen.getByRole("button", { name: /toggle tweaks panel/i });
+    expect(toggle.style.position).toBe("");
+    const classes = toggle.className.split(/\s+/);
+    for (const token of [
+      ...EXPORT_BUTTON_CLASSES,
+      "pointer-coarse:min-h-[44px]",
+      "shrink-0",
+    ]) {
+      expect(classes).toContain(token);
+    }
+  });
+
+  // WHY: DESIGN.md reserves accent for the pressed state (border, text,
+  // 12% tint). Variant classes keep that on aria-pressed without an inline
+  // style that would also pin position.
+  it("[AD-05] the pressed state is accent border, text, and tint via aria-pressed variants", () => {
+    render(<Harness />);
+    const toggle = screen.getByRole("button", { name: /toggle tweaks panel/i });
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    const classes = toggle.className.split(/\s+/);
+    expect(classes).toContain("aria-pressed:border-accent");
+    expect(classes).toContain("aria-pressed:text-accent");
+    expect(classes).toContain("aria-pressed:bg-accent/10");
+  });
+
+  // WHY: below md the panel must open above the nav (bottom-20) and scroll
+  // inside its own max height. Positioning by class is what makes the
+  // offset responsive; an inline bottom/right/width/position cannot.
+  it("[N-TWEAKS] the open panel is class-positioned above the nav", () => {
+    render(<Harness />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /toggle tweaks panel/i }),
+    );
+    const panel = screen.getByRole("dialog", { name: "Tweaks" });
+    const classes = panel.className.split(/\s+/);
+    for (const token of [
+      "fixed",
+      "z-50",
+      "bottom-20",
+      "md:bottom-5",
+      "right-4",
+      "left-4",
+      "sm:left-auto",
+      "sm:w-[300px]",
+      "md:right-5",
+      "max-h-[calc(100dvh-10rem)]",
+    ]) {
+      expect(classes).toContain(token);
+    }
+    expect(panel.style.bottom).toBe("");
+    expect(panel.style.right).toBe("");
+    expect(panel.style.width).toBe("");
+    expect(panel.style.position).toBe("");
+  });
+
+  // WHY: the outside-click guard closes on any mousedown that is not the
+  // toggle. The toggle click must still close exactly once, via the
+  // existing closest("[data-tweaks-toggle]") guard, not via a second close.
+  it("[AD-05] clicking the toggle while the panel is open closes it once", () => {
+    render(<Harness />);
+    const toggle = screen.getByRole("button", { name: /toggle tweaks panel/i });
+    fireEvent.click(toggle);
+    expect(screen.getByRole("dialog", { name: "Tweaks" })).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.queryByRole("dialog", { name: "Tweaks" })).toBeNull();
+    // A second click re-opens. If the outside-click guard also closed,
+    // this click would leave the panel shut.
+    fireEvent.click(toggle);
+    expect(screen.getByRole("dialog", { name: "Tweaks" })).toBeInTheDocument();
+  });
+});
 
 describe("Tweaks — toggle + panel visibility", () => {
   it("hides the panel by default (no toggle clicked)", () => {
@@ -708,5 +812,101 @@ describe("Tweaks — postMessage bridge invariant", () => {
     const src = readFileSync(filePath, "utf8");
     expect(src).not.toMatch(/postMessage/);
     expect(src).not.toMatch(/addEventListener\([^)]*['"`]message['"`]/);
+  });
+});
+
+// ─────────────────────────────────────────────── Phase 170 review WR-01
+//
+// The toggle lives in the header action row, but <Tweaks /> mounts after the
+// whole tab panel. Without focus management a keyboard user who opens the
+// panel tabs through every composer control before reaching it (WCAG 2.4.3).
+// The harness mirrors that DOM order: toggle, unrelated controls, panel.
+describe("Tweaks — keyboard focus follows the panel (Phase 170 review WR-01)", () => {
+  function KeyboardHarness() {
+    return (
+      <TweaksProvider>
+        <TweaksToggle />
+        <button type="button">+ Strategy</button>
+        <input aria-label="Weight" />
+        <button type="button">Commit</button>
+        <Tweaks />
+      </TweaksProvider>
+    );
+  }
+
+  /** The Escape/outside-click listeners attach on a 0 ms timeout. */
+  async function flushListeners() {
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+  }
+
+  it("opening with the keyboard moves focus into the panel, so the next Tab stays in it", async () => {
+    const user = userEvent.setup();
+    render(<KeyboardHarness />);
+    const toggle = screen.getByRole("button", { name: /toggle tweaks panel/i });
+    toggle.focus();
+    await user.keyboard(" ");
+    const panel = screen.getByRole("dialog", { name: "Tweaks" });
+    expect(panel.contains(document.activeElement)).toBe(true);
+    await user.tab();
+    expect(panel.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).not.toBe(screen.getByRole("button", { name: "+ Strategy" }));
+  });
+
+  it("Escape closes the panel and returns focus to the toggle", async () => {
+    const user = userEvent.setup();
+    render(<KeyboardHarness />);
+    const toggle = screen.getByRole("button", { name: /toggle tweaks panel/i });
+    toggle.focus();
+    await user.keyboard("{Enter}");
+    await flushListeners();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "Tweaks" })).toBeNull();
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it("the in-panel × button returns focus to the toggle", async () => {
+    const user = userEvent.setup();
+    render(<KeyboardHarness />);
+    const toggle = screen.getByRole("button", { name: /toggle tweaks panel/i });
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: "Close tweaks" }));
+    expect(screen.queryByRole("dialog", { name: "Tweaks" })).toBeNull();
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it("an outside click that closes the panel leaves focus on what was clicked", async () => {
+    const user = userEvent.setup();
+    render(<KeyboardHarness />);
+    await user.click(screen.getByRole("button", { name: /toggle tweaks panel/i }));
+    await flushListeners();
+    const weight = screen.getByRole("textbox", { name: "Weight" });
+    await user.click(weight);
+    expect(screen.queryByRole("dialog", { name: "Tweaks" })).toBeNull();
+    expect(document.activeElement).toBe(weight);
+  });
+
+  it("Escape pressed while focus has left the panel closes it without pulling focus back to the toggle", async () => {
+    const user = userEvent.setup();
+    render(<KeyboardHarness />);
+    await user.click(screen.getByRole("button", { name: /toggle tweaks panel/i }));
+    await flushListeners();
+    const weight = screen.getByRole("textbox", { name: "Weight" });
+    act(() => weight.focus());
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "Tweaks" })).toBeNull();
+    expect(document.activeElement).toBe(weight);
+  });
+
+  it("the toggle reports expanded state and names the panel it controls while open", async () => {
+    const user = userEvent.setup();
+    render(<KeyboardHarness />);
+    const toggle = screen.getByRole("button", { name: /toggle tweaks panel/i });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).not.toHaveAttribute("aria-controls");
+    await user.click(toggle);
+    const panel = screen.getByRole("dialog", { name: "Tweaks" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(panel.id).not.toBe("");
+    expect(toggle).toHaveAttribute("aria-controls", panel.id);
   });
 });

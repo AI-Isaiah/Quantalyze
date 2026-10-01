@@ -3,6 +3,7 @@
 import React, { type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
+import { pairedFloorReason } from "@/lib/factsheet/joint";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 // Phase 163 / HONEST-08 — the SERIES ladder (3d/7d) is shared with the
 // discovery-list badge, which must judge the same fact about the same rows.
@@ -57,7 +58,7 @@ import { SMOOTHED_MTM_UI_ENABLED } from "@/lib/closed-sets";
 import { ComparatorPicker } from "./ComparatorPicker";
 import { TimeSeriesChart } from "./TimeSeriesChart";
 import { HistogramChart } from "./HistogramChart";
-import { MetricsColumn } from "./MetricsColumn";
+import { MetricsColumn, headlineCoverageCaveat } from "./MetricsColumn";
 import { AllocatorSection } from "./BatchDPanels";
 import { StreakDistributionPanel } from "./AnalyticalPanels";
 import { EndOfYearBarsPanel, QuantileBoxPlotPanel, CorrelationStripPanel, CorrelationsMatrixPanel } from "./DistributionPanels";
@@ -451,9 +452,11 @@ export function FactsheetBody({
             {/* FINDING-2 (b06-silentfailure): Gate signatures on ingestSource === "api"
                 in addition to hasComparator. Event signatures stitch the internal BTC
                 fixture alongside the strategy returns; for CSV strategies with too few
-                observations aggregate() fills empty trace populations with all-zero
+                observations aggregate() filled empty trace populations with all-zero
                 arrays — fabricating a flat zero band line indistinguishable from a
-                real observation at 0% delta. Suppress for CSV to prevent false panels. */}
+                real observation at 0% delta. Suppress for CSV to prevent false panels.
+                (Phase 169.4 CR-01: aggregate() now returns null for an empty population
+                and the panels render the em-dash state; the api-arm gate stands.) */}
             {hasComparator && payload.ingestSource === "api" && (
               <CollapsibleSection
                 id="factsheet-signatures"
@@ -806,8 +809,15 @@ function NotEnoughDataPanel({ title, body }: { title: string; body: string }) {
  */
 export function OwnerUnpublishedNotice({
   hasActiveShare = false,
+  children,
 }: {
   hasActiveShare?: boolean;
+  /**
+   * Phase 170 C1-F3 — a last row INSIDE the notice box. Only
+   * `OwnerUnpublishedPanel` passes it (its share controls); absent, nothing
+   * renders, so the full-factsheet mount is byte-identical.
+   */
+  children?: React.ReactNode;
 }) {
   return (
     <section
@@ -832,6 +842,7 @@ export function OwnerUnpublishedNotice({
           share link to let someone view it without publishing.
         </p>
       )}
+      {children}
     </section>
   );
 }
@@ -877,20 +888,24 @@ export function OwnerUnpublishedPanel({
 
   return (
     <div className="mb-6">
-      <OwnerUnpublishedNotice hasActiveShare={shareLive} />
-      <div className="-mt-4 mb-2 flex flex-wrap items-center gap-2">
-        <ShareLinkButton
-          strategyId={strategyId}
-          ownerShare={{ hasActiveShare: shareLive }}
-          onShareLiveChange={setShareLive}
-        />
-        {shareLive && (
-          <ShareRevokeControl
+      {/* Phase 170 C1-F3 — the controls are the notice's own last row, one
+          layer, instead of a separate row pulled up under the box by a
+          negative margin. */}
+      <OwnerUnpublishedNotice hasActiveShare={shareLive}>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <ShareLinkButton
             strategyId={strategyId}
+            ownerShare={{ hasActiveShare: shareLive }}
             onShareLiveChange={setShareLive}
           />
-        )}
-      </div>
+          {shareLive && (
+            <ShareRevokeControl
+              strategyId={strategyId}
+              onShareLiveChange={setShareLive}
+            />
+          )}
+        </div>
+      </OwnerUnpublishedNotice>
       {shareNote && (
         <p className="mt-2 text-fixed-12 text-text-muted">{shareNote}</p>
       )}
@@ -1188,9 +1203,16 @@ const TONE_RANK: Record<Exclude<FreshnessTone, "neutral">, number> = {
  * fact is driving the verdict: `Computed · …` while the job is the stalest
  * thing here (unchanged — every previously-shipped render still reads exactly
  * this), and `Track record · …` on the one new arm, where a recent job sits over
- * a dead track. The date line beneath is untouched and still stamps the compute
- * date: dropping it would have cost the surface its provenance, and the series'
- * own date is already spelled out by `SeriesRecencyLine` directly below.
+ * a dead track.
+ *
+ * THE DATE LINE ALWAYS BELONGS TO THE SUBJECT (Phase 169 D-16, SC5). Until 169
+ * the date line kept stamping the compute date even under "Track record", so
+ * the chip said "track record: old" over a date from this morning. On the
+ * "Track record" arm the date line now shows the series end and its age, and
+ * the compute date moves to its own line labelled "Computed", so provenance is
+ * kept and every date on the chip names what it is a date of. On the
+ * "Computed" arm the render is exactly what it was. No threshold, tone or
+ * formatter was added: the ladder is the 3d / 7d one above.
  */
 function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; seriesDates: string[] }) {
   // Hooks must run unconditionally and in the same order every render, so this
@@ -1224,9 +1246,19 @@ function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; series
   // renders, so the chip and the sentence below it can never disagree about
   // where the track record ends.
   const seriesEnd = resolveSeriesEnd(seriesDates);
+  // 169 review WR-04: the series end is a UTC DATE, so its age is whole elapsed
+  // days (floor), and the tone is bucketed on the SAME number the date line
+  // prints. Bucketing the fractional age while printing the floored one read
+  // "old (7d)" and "stale (3d)" for most of each boundary day, against the
+  // ladder above. The future allowance holds: a bar dated tomorrow west of UTC
+  // is floor(-0.4) = -1, within SERIES_END_FUTURE_ALLOWANCE_DAYS; two days
+  // ahead is -2, still `future`.
+  const seriesAgeDays = seriesEnd
+    ? Math.floor((nowMs - new Date(seriesEnd.iso).getTime()) / 86_400_000)
+    : NaN;
   const seriesAgeTone: FreshnessTone = seriesEnd
     ? bucketByAge(
-        (nowMs - new Date(seriesEnd.iso).getTime()) / 86_400_000,
+        seriesAgeDays,
         // WR-06-UTC — the SERIES arm, and the only one whose discriminant
         // unlocks `SERIES_END_FUTURE_ALLOWANCE_DAYS`. The badge's
         // `bucketSeriesAge` reads the same constant from the same file, so
@@ -1259,6 +1291,15 @@ function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; series
     : tone === "old" ? "old"
     : tone === "future" ? "future — check data"
     : "—";
+  // Phase 169 D-16 (SC5): the date line belongs to the SUBJECT. Under
+  // "Track record" it is the series end and its age, read from the same
+  // `seriesEnd` the tone used (one derivation, so it matches SeriesRecencyLine
+  // byte for byte); an unknown end prints "—", never the compute date. The
+  // series age is already whole elapsed days (floor, above), the same value the
+  // tone was bucketed on: Math.round would call a bar dated 120 days ago "121d"
+  // every afternoon UTC.
+  const dateText = seriesIsBinding ? (seriesEnd?.formatted ?? "—") : formatIsoDate(computedAt);
+  const ageDays = seriesIsBinding ? seriesAgeDays : Math.round(days);
   return (
     <div>
       <div className="flex items-center justify-end gap-1.5 text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
@@ -1266,9 +1307,14 @@ function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; series
         {subject} · {label}
       </div>
       <p className="mt-1 text-small font-mono tabular-nums text-text-secondary">
-        {formatIsoDate(computedAt)}
-        {Number.isFinite(days) && days >= 0 && <span className="ml-1 text-text-muted">({Math.round(days)}d)</span>}
+        {dateText}
+        {Number.isFinite(ageDays) && ageDays >= 0 && <span className="ml-1 text-text-muted">({ageDays}d)</span>}
       </p>
+      {seriesIsBinding && (
+        <p className="mt-0.5 text-caption font-mono tabular-nums text-text-muted">
+          Computed {formatIsoDate(computedAt)}
+        </p>
+      )}
     </div>
   );
 }
@@ -1402,7 +1448,19 @@ function KpiStrip() {
   const appliedLeverage = useAppliedLeverage();
   const leverageApplied = leverageApplies(payload, basis, appliedLeverage);
   const m = leverageApplied ? view.strategyMetrics : basisM;
+  // Phase 169 review round 1 (SFH H-1): on a chain-broken row the stored cash
+  // headline covers only the record after its last break. Said beside it, only
+  // while the stored figures are the ones shown (cash basis, no what-if; a
+  // chain-broken row has no what-if anyway, `leverageEligibleFor`).
+  // Round 2, IN-R2-02: named by the strip's own labels.
+  const coverageCaveat = leverageApplied
+    ? null
+    : headlineCoverageCaveat(payload.dataQuality, basis, "Cum. Return, CAGR and Calmar");
   const j = view.comparators[cmpKey].joint;
+  // 169.4 review round 2 (SFH-R2 MEDIUM-2): below the paired floor the joint is
+  // withheld, not absent. The α/IR cells stay (9 cells) and read "—", and one
+  // muted line under the strip names the cause in the widget's words.
+  const jointWithheld = j ? null : (view.comparators[cmpKey].jointWithheld ?? null);
   const cn = cmp.shortName;
 
   // 9 cells when a comparator is active (mockup contract). When NONE, the
@@ -1426,7 +1484,7 @@ function KpiStrip() {
     { label: "Max DD", value: pct(m.max_dd, 1), tone: maxDdTone(m.max_dd) },
     { label: "Ann. Vol", value: pct(m.ann_vol, 1) },
   ];
-  if (j && cmpKey !== "none") {
+  if ((j || jointWithheld) && cmpKey !== "none") {
     // F5 (phase 103) + Phase 107 (LEV-BB): α / β / IR FOLLOW the active basis AND
     // leverage via the view's joint (above), matching §IV. At L≠1 the view re-derives
     // the joint on the levered strategy leg (β→L·β / α→L·α honestly, jointMetrics on
@@ -1443,25 +1501,33 @@ function KpiStrip() {
     const suppressRelative =
       (basis === "mark_to_market" && !mtmBundlePresent) ||
       (basis === "smoothed_mtm" && !smoothedBundlePresent);
+    const shown = suppressRelative ? null : j;
     items.push({
       label: `α vs ${cn}`,
-      value: suppressRelative ? "—" : pctSigned(j.alpha, 1),
-      tone: suppressRelative ? undefined : signTone(j.alpha),
+      value: shown ? pctSigned(shown.alpha, 1) : "—",
+      tone: shown ? signTone(shown.alpha) : undefined,
     });
     items.push({
       label: `IR vs ${cn}`,
-      value: suppressRelative ? "—" : num(j.info_ratio),
-      tone: suppressRelative ? undefined : signTone(j.info_ratio),
+      value: shown ? num(shown.info_ratio) : "—",
+      tone: shown ? signTone(shown.info_ratio) : undefined,
     });
   }
+  const jointFloorReason =
+    jointWithheld && cmpKey !== "none" ? pairedFloorReason(cn, jointWithheld.paired, "record", jointWithheld.floor) : null;
   // Phase 52-06 / TYPE-04 — the strip reflows on ITS OWN width via `@container`
   // (`@`-prefixed variants), NOT the viewport. The KPI strip sits in the
   // factsheet body whose effective width varies (full ~1440 measure on the route
   // vs the narrower composer mount), so a container query keeps it from thinking
   // it is at desktop width when it isn't. The 9-cell strip steps up to its full
   // column count only when the CONTAINER is wide (`@5xl`, ≈64rem — the old `lg:`
-  // ~1024px breakpoint as a container width); 7 cells likewise. `grid-cols-3` is
-  // the container-narrow fallback (3 rows of 3). Inline-size containment ONLY —
+  // ~1024px breakpoint as a container width); 7 cells likewise. Below that the
+  // ladder is `grid-cols-2`, then `@md:grid-cols-3` from a 28rem container.
+  // Phase 170 (j), 2026-09-30: three columns at 390 px and in the ~326 px
+  // composer mount broke values mid-number and ellipsised labels ("SOR…",
+  // "CAL…", "MAX…"), so the narrowest rung is two columns. Every cell keeps its
+  // own right + top hairline, so an odd last cell in the 2-column layout needs
+  // no filler. Inline-size containment ONLY —
   // the size-containment variant collapses the strip's block size to 0
   // (Pitfall 1), so the bare `@container` host is deliberate. The host is the
   // enclosing `<section>` (an ANCESTOR of the grid), not the grid itself — an
@@ -1514,7 +1580,7 @@ function KpiStrip() {
           border: "1px solid var(--color-border)",
         }}
       >
-      <div className={`grid grid-cols-3 ${containerCols} @5xl:divide-y-0`} style={{ }}>
+      <div className={`grid grid-cols-2 @md:grid-cols-3 ${containerCols} @5xl:divide-y-0`} style={{ }}>
         {items.map(it => (
           <div
             key={it.label}
@@ -1522,6 +1588,7 @@ function KpiStrip() {
             style={{ borderRight: "1px solid var(--color-border)", borderTop: "1px solid var(--color-border)" }}
           >
             <p
+              data-testid="factsheet-kpi-label"
               className="text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis"
               style={{ color: "var(--color-text-muted)" }}
             >
@@ -1540,6 +1607,7 @@ function KpiStrip() {
                 normal values. The LABEL <p> above KEEPS its pinned bounded-label
                 clip (short labels only). */}
             <p
+              data-testid="factsheet-kpi-value"
               className="mt-1.5 sm:mt-2 font-mono tabular-nums text-h2 leading-tight break-words"
               style={{
                 color:
@@ -1555,6 +1623,15 @@ function KpiStrip() {
           </div>
         ))}
       </div>
+      {jointFloorReason && (
+        <p
+          className="px-3 sm:px-4 py-2 text-micro font-mono"
+          data-testid="joint-floor-reason"
+          style={{ borderTop: "1px solid var(--color-border)", color: "var(--color-text-muted)" }}
+        >
+          {jointFloorReason}
+        </p>
+      )}
       {/* Short-track caveat: annualized CAGR/Sharpe/Sortino/Calmar/Ann.Vol
           are statistically unreliable with fewer than 252 observations (~1y).
           Surface the same warning here at the hero strip so mobile users who
@@ -1591,6 +1668,17 @@ function KpiStrip() {
           }}
         >
           ⚠ Track record under 90 days — annualized metrics are flagged as computed on an insufficient window.
+        </p>
+      )}
+      {coverageCaveat && (
+        <p
+          className="px-3 sm:px-4 py-2 text-micro font-mono"
+          style={{
+            borderTop: "1px solid var(--color-border)",
+            color: "var(--color-warning, #B45309)",
+          }}
+        >
+          ⚠ {coverageCaveat}
         </p>
       )}
       {/* HARD-05 (Phase 93): server-truth degraded-member flag from
@@ -1866,7 +1954,7 @@ function ShareLinkButton({
           ? "Copy a public, link-only factsheet URL — recipients see the same page with no outbound navigation"
           : "Copy a private, revocable link to this unpublished factsheet — anyone holding it can view this page until you revoke the link"
       }
-      className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] disabled:opacity-60"
+      className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] disabled:opacity-60"
     >
       {shareButtonLabel(phase, mode, hasActiveShare)}
     </button>
@@ -1934,14 +2022,14 @@ function ShareRevokeControl({
           type="button"
           autoFocus
           onClick={() => void confirmRevoke()}
-          className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+          className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
         >
           Revoke
         </button>
         <button
           type="button"
           onClick={() => setConfirming(false)}
-          className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm text-text-2 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+          className="px-2.5 py-1 text-caption rounded-sm text-text-2 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
         >
           Keep link
         </button>
@@ -1958,7 +2046,7 @@ function ShareRevokeControl({
           setConfirming(true);
         }}
         title="Turn off the private share link — anyone holding it loses access immediately"
-        className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+        className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
       >
         Revoke link
       </button>
@@ -2084,7 +2172,11 @@ function ControlBar({
   };
   return (
     <section className="factsheet-v2-no-print mt-6 flex flex-wrap items-center justify-start lg:justify-end gap-x-3 sm:gap-x-6 gap-y-3 border-b border-border pb-3">
-      {leverageEligible && (
+      {/* Phase 167.1.2 plan 07: never inside the composer (scenarioMode). Its
+          payload now carries periodsPerYear, which makes it leverage-eligible,
+          but the composer already levers each constituent, and a whole-blend
+          multiplier on top would lever the blend a second time. */}
+      {!scenarioMode && leverageEligible && (
         <div className="mr-auto flex flex-col items-start gap-1">
           <div className="flex items-center gap-2">
             <label
@@ -2120,7 +2212,7 @@ function ControlBar({
                 type="button"
                 onClick={resetLeverage}
                 aria-label="Reset leverage to 1×"
-                className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+                className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
               >
                 Reset 1×
               </button>
@@ -2212,10 +2304,23 @@ function ControlBar({
         type="button"
         onClick={resetView}
         title="Reset comparator + visible window to defaults (toggles, persisted layout stay)"
-        className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+        className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
       >
         Reset view
       </button>
+      {/* Phase 170 C1-F2 — Compare sits BEFORE the share controls, so the
+          private-link control is the last action ahead of ComparatorPicker. The
+          bar is `flex flex-wrap`, so it wraps and never overlaps content. */}
+      {!scenarioMode && !shareMode && (
+        <a
+          href={`/compare?ids=${payload.strategyId}`}
+          onClick={() => trackFactsheetEvent("factsheet_v2_compare_click", { strategy_id: payload.strategyId })}
+          title="Compare this strategy against another (multi-strategy overlay)"
+          className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
+        >
+          Compare strategies
+        </a>
+      )}
       {/* Phase 164 (SHARE-04) — a RECIPIENT must never see this control. It
           rebuilds the URL from `window.location` as `<origin><pathname>?share=1`,
           which on the token route would hand out a Copy-Link button that strips
@@ -2241,16 +2346,6 @@ function ControlBar({
           onShareLiveChange={onShareLiveChange}
         />
       )}
-      {!scenarioMode && !shareMode && (
-        <a
-          href={`/compare?ids=${payload.strategyId}`}
-          onClick={() => trackFactsheetEvent("factsheet_v2_compare_click", { strategy_id: payload.strategyId })}
-          title="Compare this strategy against another (multi-strategy overlay)"
-          className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
-        >
-          Compare strategies
-        </a>
-      )}
       <ComparatorPicker />
     </section>
   );
@@ -2267,7 +2362,7 @@ function DisplayMenu() {
   const activeCount = (darkMode ? 1 : 0) + (colorblind ? 1 : 0) + (regimes ? 1 : 0);
   return (
     <details className="relative">
-      <summary className="list-none cursor-pointer px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center gap-1">
+      <summary className="list-none cursor-pointer px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center gap-1">
         Display
         {activeCount > 0 && (
           <span
@@ -2362,9 +2457,9 @@ function FactsheetFooter({
   return (
     <footer className="mt-16 border-t border-text pt-6 flex flex-wrap items-start justify-between gap-6">
       <p className="max-w-3xl text-micro italic leading-relaxed text-text-muted">
-        Returns computed from the strategy&apos;s daily series. Benchmarks are daily
-        closes (forward-filled to the strategy&apos;s observation dates). Risk-free
-        rate set to 0%. Past performance is not indicative of future results.
+        Returns computed from the strategy&apos;s daily series. Benchmark returns are
+        taken from daily closes over the strategy&apos;s own intervals, never past a
+        benchmark&apos;s last close. Risk-free rate set to 0%. Past performance is not indicative of future results.
         Demo cohorts and demo portfolios are flagged inline; production replaces them
         with platform data.
       </p>

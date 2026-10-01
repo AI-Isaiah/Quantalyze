@@ -1,14 +1,17 @@
 import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
+import { buildFactsheetPayload, type BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
+import { BTC_DAILY } from "@/lib/factsheet/benchmarks";
+import type { BasisSeriesBundle, FactsheetPayload } from "@/lib/factsheet/types";
 import { FactsheetProvider, useActiveComparator } from "./factsheet-context";
+import { BasisProvider, useBasis } from "./basis-context";
 import { ComparatorPicker } from "./ComparatorPicker";
 
 // Regression: "None" radio was removed in favor of toggle-off semantics.
 // Clicking the active comparator chip clears it to "none"; clicking a
 // different chip selects it. Found by /qa on 2026-05-20.
 
-function makePayload() {
+function makePayload(opts?: BuildFactsheetOpts) {
   // 200 days of synthetic returns — long enough to clear every internal
   // length threshold (benchmark window, rolling window, etc).
   const dailyReturns = Array.from({ length: 200 }).map((_, i) => ({
@@ -27,6 +30,7 @@ function makePayload() {
       trustTier: null,
     },
     dailyReturns,
+    opts,
   );
   if (!payload) throw new Error("buildFactsheetPayload returned null in test");
   return payload;
@@ -37,9 +41,9 @@ function CurrentComparator() {
   return <span data-testid="active-comparator">{key}</span>;
 }
 
-function renderPicker() {
+function renderPicker(payload: FactsheetPayload = makePayload()) {
   return render(
-    <FactsheetProvider payload={makePayload()}>
+    <FactsheetProvider payload={payload}>
       <ComparatorPicker />
       <CurrentComparator />
     </FactsheetProvider>,
@@ -92,5 +96,131 @@ describe("ComparatorPicker", () => {
       "ariaPressed",
       "false",
     );
+  });
+});
+
+// Phase 169.5 (SC3, 169 D-09 / D-21 / D-52): the active comparator's coverage is
+// stated in words under the chips. The strategy axis of makePayload() ends on
+// 2024-08-04 (a Sunday). A comparator whose last close is earlier is dated, so a
+// reader never takes an em-dash window or a line that stops short for a flat
+// market; a failed BTC read says so instead of rendering a silent blank.
+describe("ComparatorPicker coverage caption", () => {
+  const CAPTION = /prices (through|unavailable)/;
+
+  it("dates BTC when its prices end before the strategy's last date", () => {
+    const cutoff = "2024-07-25";
+    renderPicker(
+      makePayload({
+        benchmarkPrices: {
+          prices: BTC_DAILY.filter(p => p.date <= cutoff),
+          through: cutoff,
+          dropped: [],
+        },
+      }),
+    );
+    expect(screen.getByText("BTC prices through Jul 25, 2024")).toBeDefined();
+  });
+
+  it("shows no caption when BTC covers the strategy's last date", () => {
+    const payload = makePayload();
+    expect(payload.comparators.btc.through).toBe("2024-08-04");
+    renderPicker(payload);
+    expect(screen.queryByText(CAPTION)).toBeNull();
+  });
+
+  it("says BTC prices are unavailable on the unavailable form (a failed read)", () => {
+    const payload = makePayload({ benchmarkPrices: { unavailable: true } });
+    expect(payload.comparators.btc.through).toBeNull();
+    expect(payload.comparators.btc.summary).toBeNull();
+    renderPicker(payload);
+    expect(screen.getByText("BTC prices unavailable")).toBeDefined();
+  });
+
+  it("shows no caption when `through` is absent (a hand-built block, D-21)", () => {
+    const cutoff = "2024-07-25";
+    const payload = makePayload({
+      benchmarkPrices: {
+        prices: BTC_DAILY.filter(p => p.date <= cutoff),
+        through: cutoff,
+        dropped: [],
+      },
+    });
+    // Same stale block, minus the field: absent means "no coverage information",
+    // never the unavailable sentence and never a guessed date.
+    const { through: _omit, ...handBuilt } = payload.comparators.btc;
+    void _omit;
+    renderPicker({ ...payload, comparators: { ...payload.comparators, btc: handBuilt } });
+    expect(screen.queryByText(CAPTION)).toBeNull();
+  });
+
+  // Review WR-01: coverage is read on SPX's own (weekday) calendar. Its last close on
+  // or before Sunday 2024-08-04 is Friday 2024-08-02, and no SPX trading day lies in
+  // (Fri, Sun], so SPX is fully covered: no caption, and the windows are numbers.
+  it("shows no SPX caption when SPX's Friday close covers a strategy ending that weekend", () => {
+    const payload = makePayload();
+    expect(payload.comparators.spx.through).toBe("2024-08-02");
+    expect(payload.comparators.spx.summary!.mtd).not.toBeNull();
+    renderPicker(payload);
+    expect(screen.queryByText(CAPTION)).toBeNull(); // BTC active and fully covered
+    fireEvent.click(screen.getByRole("button", { name: /SPX/ }));
+    expect(screen.queryByText(CAPTION)).toBeNull();
+  });
+
+  it("dates SPX when an SPX trading day lies after its last close", () => {
+    const payload = makePayload();
+    // Wednesday 2024-07-31: Thu 08-01 and Fri 08-02 are SPX days with no close.
+    renderPicker({
+      ...payload,
+      comparators: { ...payload.comparators, spx: { ...payload.comparators.spx, through: "2024-07-31" } },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /SPX/ }));
+    expect(screen.getByText("SPX prices through Jul 31, 2024")).toBeDefined();
+  });
+
+  it("shows no caption when no comparator is active", () => {
+    renderPicker(makePayload({ benchmarkPrices: { unavailable: true } }));
+    fireEvent.click(screen.getByRole("button", { name: /BTC/ }));
+    expect(screen.getByTestId("active-comparator").textContent).toBe("none");
+    expect(screen.queryByText(CAPTION)).toBeNull();
+  });
+});
+
+// Phase 169.5 review SFH-M-07: the caption reads the ACTIVE basis view. Nothing clamps
+// an MTM axis to the cash range, so an MTM series can end after the cash one. Here the
+// cash axis ends Sunday 2024-08-04 with BTC covering it, and the MTM axis runs two days
+// further with the same BTC close: the MTM windows are past BTC's coverage, and the
+// caption must say so under MTM while staying silent under cash.
+describe("ComparatorPicker coverage caption follows the active basis", () => {
+  const CAPTION = /prices (through|unavailable)/;
+
+  function ToMtm() {
+    const { setBasis } = useBasis();
+    return (
+      <button type="button" onClick={() => setBasis("mark_to_market")}>
+        to-mtm
+      </button>
+    );
+  }
+
+  it("dates BTC under MTM when the MTM axis ends after BTC's last close", () => {
+    const cash = makePayload();
+    expect(cash.comparators.btc.through).toBe("2024-08-04");
+    const mtm = {
+      ...cash,
+      dates: [...cash.dates, "2024-08-05", "2024-08-06"],
+      comparators: cash.comparators,
+    } as unknown as BasisSeriesBundle;
+    const payload = { ...cash, seriesByBasis: { mark_to_market: mtm } } as FactsheetPayload;
+    render(
+      <FactsheetProvider payload={payload}>
+        <BasisProvider>
+          <ComparatorPicker />
+          <ToMtm />
+        </BasisProvider>
+      </FactsheetProvider>,
+    );
+    expect(screen.queryByText(CAPTION)).toBeNull(); // cash: covered to its last date
+    fireEvent.click(screen.getByRole("button", { name: "to-mtm" }));
+    expect(screen.getByText("BTC prices through Aug 4, 2024")).toBeDefined();
   });
 });

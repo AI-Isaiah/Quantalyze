@@ -1,4 +1,5 @@
 import { cache } from "react";
+import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { castRow } from "@/lib/supabase/cast";
@@ -12,9 +13,14 @@ import {
   PERCENTILE_GATE_COLUMN,
   type SeriesState,
 } from "./closed-sets";
+import { isWorkingHolder, NOT_WORKING_SYNC_STATUSES } from "@/lib/account-share-note";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+// Phase 169.4 plan 02 (D-69, D-77): the ONE BTC read, from its server-safe home.
+// Never from `@/lib/factsheet/fetch-and-build-payload`: that module pulls
+// `server-only` (composite-read-path.ts) into every test importing this file.
+import { readFactsheetBenchmark } from "@/lib/factsheet/benchmark-read";
+import type { BenchmarkPricesOpt } from "@/lib/factsheet/types";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
-import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
 import {
   buildDateMapCache,
   computeScenario,
@@ -47,11 +53,16 @@ import type {
 } from "./types";
 import { SUPPORTED_EXCHANGES, type SupportedExchange } from "./utils";
 import { holdingScopeKey } from "./keys";
+import {
+  fetchLatestHoldingsPerKey,
+  latestHoldingsPerKey,
+} from "./latest-holdings-per-key";
 import { getOwnPreferences, type AllocatorOwnPreferences } from "./preferences";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { deriveSyncFreshness } from "@/lib/sync-freshness/types";
 import { safeFraction } from "./units";
+import { drainById } from "./drain-by-id";
 import { withPublishedOnly } from "./visibility";
 import {
   PERCENTILE_METRICS,
@@ -2856,6 +2867,13 @@ export interface MyAllocationDashboardPayload {
     side: "long" | "short" | "flat" | null;
     entry_price: number | null;
     unrealized_pnl_usd: number | null;
+    /**
+     * Review C4 SFH-C4-08: the day this row's key read it (`allocator_holdings.asof`,
+     * the key's own latest read under D-16). Open Positions dates a key's rows
+     * when that day is older than the newest read. Optional so legacy fixtures
+     * compile; the dashboard read always sets it.
+     */
+    asof?: string;
   }>;
   /** Row count of TRUSTWORTHY snapshots (flagged zero-baseline rows excluded) — drives the warm-up gate (snapshotCount < 30 → KPIs render `—`). */
   snapshotCount: number;
@@ -2877,31 +2895,53 @@ export interface MyAllocationDashboardPayload {
   /** True when any active api_key has sync_status='syncing'. */
   hasSyncing: boolean;
   /**
-   * Per VOICES-ACCEPTED f7: DailyPoint[] derived from equitySnapshots
-   * via equitySnapshotsToDailyPoints. Consumed by EquityCurve /
-   * DrawdownChart through the parallel-prop path (prefer this over
-   * strategies-derived compute when provided).
+   * The allocator $-equity curve (EquityCurve / DrawdownChart parallel-prop).
+   * Phase 167.1.2 plan 11: the version-2 derived curve when `"ready"`, else
+   * `[]`. Not built from `equitySnapshots`.
    */
   equityDailyPoints: DailyPoint[];
   /**
-   * Phase 115.1 / BACKBONE-02 (RD-1 + RD-2). Provenance of `equityDailyPoints`:
-   *   - `"derived"`: the series came from the NEW keyed `allocator_equity_derived`
-   *     surface (worker-side flow-aware $-curve), used ONLY when a row exists AND
-   *     its `payload.is_trustworthy === true` AND `payload.curve` is well-formed.
-   *   - `"legacy"`: the series came from the legacy `allocator_equity_snapshots`
-   *     `value_usd` path via `equitySnapshotsToDailyPoints` (the pre-115.1
-   *     rendering, byte-unchanged).
+   * Phase 167.1.2 / D-06. Flow-neutral book returns from
+   * `allocator_equity_derived.payload.returns` when the row is version 2,
+   * mapped `{ date, value: r }`. Empty unless `equityHistoryState` is
+   * `"ready"`. Factsheet KPIs and the Scenario own-book delta read this,
+   * never ratios of `equityDailyPoints`.
+   */
+  equityDailyReturns: DailyPoint[];
+  /**
+   * Phase 169.4 plan 02 (SC3, D-09, D-69). The database BTC closes the
+   * /allocations Overview builds its BTC comparator from, read through the
+   * factsheet's own `readFactsheetBenchmark` over the book's dates
+   * (`equityDailyReturns`), so the Overview and every factsheet read one series.
+   *   - closes (`{ prices, through, dropped }`) when the history is `"ready"`;
+   *   - `{ unavailable: true }` on a read error or when the read leaves nothing
+   *     to compare (never the bundled fixture);
+   *   - `null` while the history is rebuilding: no read is issued.
+   * `getMyAllocationDashboard` ALWAYS assigns it. It is optional only so hand-
+   * built payload literals elsewhere keep type-checking; every reader treats
+   * `undefined` exactly as `null`.
    *
-   * This is repointed at the ONE producer site (`derivePhase07Fields`) so ALL
-   * downstream consumers — the equity chart, the V2 Overview factsheet
-   * (`buildAllocatorPortfolioFactsheetPayload`), and the ScenarioComposer
-   * baseline — deliberately share the SAME basis (RD-1: one producer, all
-   * consumers). The legacy fallback is LOAD-BEARING until the founder-gated
-   * per-key backfill runs: all 517 prod allocator keys currently have zero
-   * per-key rows, so a hard cutover would blank every dashboard (the A1 census
-   * safety invariant). The UI renders an honest provenance indicator off this
-   * field — a legacy-fallback curve is NEVER presented as `api_verified`-grade
-   * (RD-2 / DESIGN.md Numbers Contract honesty).
+   * ⛔ NOT named `btcBenchmark`: `EquityChartWidget` receives this whole
+   * payload and its schema already types that key as an array of daily points
+   * (onInvalid "empty"), so this object under that key would blank every ready
+   * Overview's equity curve. `EquityChartWidget.payload-contract.test.tsx` pins it.
+   */
+  btcBenchmarkPrices?: BenchmarkPricesOpt | null;
+  /**
+   * Phase 115.1 / BACKBONE-02, narrowed by Phase 167.1.2 plan 11.
+   *   - `"derived"`: a trustworthy, well-formed `payload.curve` was present.
+   *     The DISPLAY series (`equityDailyPoints`) is that curve only when the
+   *     row is also a version-2 returns series and the book is `"ready"`.
+   *   - `"legacy"`: no such curve. Snapshots are not rendered as the curve
+   *     (plan 11 removed that fallback). The label stays because the union
+   *     is pinned (`equityChartWidgetDataSchema`'s enum).
+   *
+   * The only production reader is `EquityChart`'s provenance stamp, which
+   * mounts in the `"ready"` branch only, where this is always `"derived"`.
+   * Nothing reads it while the book is rebuilding. Review C3 SFH-C3-02 /
+   * IN-02: plan 14 removed the Overview warm-up and Scenario disclosure
+   * readers. Both now choose by `equityHistoryState` alone (D-15), and no
+   * consumer may gate on this field again.
    */
   equityCurveSource: "derived" | "legacy";
   /**
@@ -2918,10 +2958,47 @@ export interface MyAllocationDashboardPayload {
    * so the curve and every ratio built from it are unreliable. Consumers render
    * an honest "being rebuilt" state instead and are fail-closed: every value
    * other than an explicit `"ready"` (a missing field, `null`, `""`, a state
-   * added later) reads as `"rebuilding"`. `"ready"` is defined by plan 11 of
-   * Phase 167.1.2; until then the producer never emits it.
+   * added later) reads as `"rebuilding"`. `"ready"` requires a version-2
+   * trustworthy series, no eligible key counted through a working holder, and
+   * a known account on every eligible ccxt key (sFOX and MT5 exempt). See
+   * `equityHistoryReadiness`.
    */
   equityHistoryState: "rebuilding" | "ready";
+  /**
+   * Why `equityHistoryState` is not `"ready"`. Null when it is. One of
+   * `duplicate_account`, `key_not_syncing`, `account_identity_pending`,
+   * `awaiting_derivation`, `derivation_rejected`,
+   * `shared_account_no_working_key`, `shared_account_history_truncated`
+   * (review C2 round 3 R3-WR-03), `history_read_failed`.
+   */
+  equityHistoryRebuildReason: EquityHistoryRebuildReason | null;
+  /**
+   * Review C2 round 2 IN-04. When the reason is `key_not_syncing`, the ids of
+   * the keys it is about (eligible, account unknown, failing to sync), so the
+   * line can name the key when there is exactly one. `[]` under every other
+   * reason. Optional so a payload built without it (a stale cache, a hand-built
+   * fixture) renders the unnamed line rather than a wrong name.
+   */
+  equityHistoryNotSyncingKeyIds?: string[];
+  /**
+   * Review C4 SFH-C4-04. True when the history on screen (state "ready") left
+   * out at least one departed account the history rule includes, because the
+   * balance its history is measured from is gone. The derive raises the
+   * benign `departed_history_unavailable` flag in the payload's `flags` and
+   * still marks the curve trustworthy (job_worker.py); the Overview says so in
+   * one line. The flag carries no count. False whenever the curve is not shown.
+   * Optional so legacy fixtures compile; the producer always sets it.
+   */
+  departedHistoryUnavailable?: boolean;
+  /**
+   * Review C4 round 2 WR-R2-03. The keys whose rows in `holdingsSummary` were
+   * written, on `asof`, by a poll that could not read their open positions
+   * (`fetchLatestHoldingsPerKey`'s `partialReads`). Bound to the poll that
+   * wrote the rows, not to the key's current `sync_status`, so a later failed
+   * poll does not clear it. Optional so legacy fixtures compile; the dashboard
+   * read always sets it.
+   */
+  partialPositionReads?: Array<{ api_key_id: string; asof: string }>;
   /**
    * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
    * allocator's snapshots, or null when every snapshot's column is
@@ -3446,7 +3523,9 @@ export function liveBaselineMetricsFromPerKeyDailies(
     if (!returns || returns.length === 0) continue;
     strategies.push({
       id: apiKeyId,
-      name: `key ${apiKeyId}`,
+      // Phase 167.1.2 plan 07 (SC-5): a neutral constant. This unit's name is
+      // not rendered, but a raw api_key_id must not sit in a name field.
+      name: "Connected key",
       codename: null,
       disclosure_tier: "exploratory",
       strategy_types: [],
@@ -3600,27 +3679,24 @@ export function buildPerKeyReturnsByApiKeyId(
   return result;
 }
 
+const DERIVED_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
 /**
- * Phase 115.1 / BACKBONE-02 (RD-1). The derived-curve trust gate + malformed-
- * payload defence for the $-equity display repoint.
- *
- * Returns the derived $-curve as `DailyPoint[]` ONLY when the row is present,
- * `payload.is_trustworthy === true`, AND `payload.curve` is a well-formed dense
- * array of `{ date: string, equity_usd: finite number }`. Any other shape —
- * absent row, untrustworthy flag, non-array curve, a single malformed/NaN point
- * — returns `null`, which drives the LEGACY fallback at the producer site. This
- * is the safety invariant: a corrupt worker-written JSONB payload must degrade
- * to the legacy snapshot render, never crash SSR and never surface a NaN
- * coordinate to the chart (T-115.1-18). The JSONB is worker-written but treated
- * as an UNTRUSTED shape here (the DB→SSR trust boundary).
- *
- * The derived curve is already dense per the interfaces contract, so it maps
- * DIRECTLY to `{ date, value }` — NO `equitySnapshotsToDailyPoints` forward-fill
- * adapter, NO `new Date()` re-parsing.
+ * Review C4 SFH-C4-04. The benign flag the derive raises when it leaves a
+ * departed key's history out for want of an anchor (`departed_history_unavailable`
+ * in `derive_allocator_equity`'s `benign_flag_tokens`, job_worker.py). The name
+ * is the writer's; do not rename it here.
  */
-export function extractTrustworthyDerivedCurve(
-  payload: unknown,
-): DailyPoint[] | null {
+const DEPARTED_HISTORY_UNAVAILABLE_FLAG = "departed_history_unavailable";
+
+/**
+ * The pre-167.1.2 curve check: trustworthy + a non-empty well-formed curve.
+ * Does NOT require version 2. `extractTrustworthyDerivedSeries` builds on it
+ * and adds the version-2 returns check. The producer also stamps
+ * `equityCurveSource` / `derivedCurveComputedAt` from it (a provenance stamp,
+ * not a gate: nothing renders or hides on it while the book is rebuilding).
+ */
+function trustworthyDerivedCurve(payload: unknown): DailyPoint[] | null {
   if (payload === null || typeof payload !== "object") return null;
   const p = payload as Record<string, unknown>;
   if (p.is_trustworthy !== true) return null;
@@ -3634,20 +3710,350 @@ export function extractTrustworthyDerivedCurve(
     const equityUsd = point.equity_usd;
     // F4a: require a strict YYYY-MM-DD calendar day — a non-empty but malformed
     // date string (e.g. "not-a-date", "2026/03/10") would otherwise reach
-    // parseISO / the SVG x-scale as a NaN coordinate. Degrade to legacy instead.
-    if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    // parseISO / the SVG x-scale as a NaN coordinate.
+    if (typeof date !== "string" || !DERIVED_DAY.test(date)) return null;
     if (typeof equityUsd !== "number" || !Number.isFinite(equityUsd)) {
       return null;
     }
     points.push({ date, value: equityUsd });
   }
-  // B2 (115.1-close): an EMPTY curve is not a renderable series. A zero-anchored-
-  // keys allocator (every prod allocator today) composes { curve: [],
-  // is_trustworthy: true } — the honest-empty tokens are BENIGN in the frozen
-  // core. Returning [] here would keep `[] ?? legacy === []` and stamp the source
-  // "derived", blanking the chart while suppressing the legacy render that has
-  // real data. Degrade an empty curve to null → legacy fallback.
+  // B2 (115.1-close): an EMPTY curve is not a renderable series.
   return points.length > 0 ? points : null;
+}
+
+/**
+ * Phase 167.1.2 plan 11 (D-06, T-167.1.2-21). The display series.
+ *
+ * Returns the curve and the persisted flow-neutral returns ONLY when
+ * `version === 2`, `is_trustworthy === true`, the curve is well-formed as
+ * `trustworthyDerivedCurve`, and `returns` is a non-empty array of
+ * `{ date: YYYY-MM-DD, r: finite number }` in strictly ascending date order.
+ * Any other shape — a v1 row, a missing or reordered returns array, one
+ * non-finite `r` — returns null. The JSONB is worker-written and untrusted.
+ */
+export function extractTrustworthyDerivedSeries(
+  payload: unknown,
+): { curve: DailyPoint[]; returns: DailyPoint[] } | null {
+  if (payload === null || typeof payload !== "object") return null;
+  const p = payload as Record<string, unknown>;
+  if (p.version !== 2) return null;
+  const curve = trustworthyDerivedCurve(payload);
+  if (!curve) return null;
+  const returns = p.returns;
+  if (!Array.isArray(returns) || returns.length === 0) return null;
+  const points: DailyPoint[] = [];
+  let prevDate = "";
+  for (const raw of returns) {
+    if (raw === null || typeof raw !== "object") return null;
+    const point = raw as Record<string, unknown>;
+    const date = point.date;
+    const r = point.r;
+    if (typeof date !== "string" || !DERIVED_DAY.test(date)) return null;
+    if (prevDate !== "" && date <= prevDate) return null;
+    if (typeof r !== "number" || !Number.isFinite(r)) return null;
+    prevDate = date;
+    points.push({ date, value: r });
+  }
+  return { curve, returns: points };
+}
+
+/**
+ * Review C2 round 2 SFH-R2-05. Schedule a derived-row capture so it survives
+ * the response flush. `captureToSentry` returns its import chain for exactly
+ * this: a discarded chain can be reaped on a cold finish and the alert is lost.
+ * `after()` hands it to the platform's `waitUntil` (Next 16 docs: usable from
+ * Server Components, which is where `getMyAllocationDashboard` runs).
+ *
+ * The fallback is NOT optional (same shape as `ratelimit.ts`'s
+ * `scheduleLimiterCapture`): `after()` throws synchronously outside a request
+ * scope, and an observability call must never throw into the dashboard read.
+ * The console line before each capture is the local trace either way.
+ */
+function scheduleDerivedRowCapture(capture: Promise<void>): void {
+  try {
+    after(() => capture.catch(() => {}));
+  } catch {
+    console.warn(
+      "[queries.getMyAllocationDashboard] scheduling capture via queueMicrotask fallback (non-request scope)",
+    );
+    queueMicrotask(() => {
+      void capture.catch(() => {});
+    });
+  }
+}
+
+/**
+ * Review C2 round 3 R3-WR-04. How long one (allocator, rejection) pair stays
+ * reported. `router.refresh()` re-runs the dashboard read every 30 s while the
+ * Overview is open (AllocationsTabs' PERFORMANCE_POLL_INTERVAL_MS), and an
+ * untrustworthy row can last for days. Capturing on every load was ~120 events
+ * an hour per open tab, which kept the Sentry issue permanently active.
+ */
+export const DERIVED_ROW_CAPTURE_WINDOW_MS = 6 * 60 * 60 * 1000;
+
+// ponytail: per-instance and in memory. It resets on a cold start, and each
+// warm instance keeps its own window, so the real ceiling is one event per
+// (allocator, rejection) per 6 h per instance, not per deployment. Entries are
+// never evicted; the map holds at most one per allocator per rejection token.
+const derivedRowCaptureLastAt = new Map<string, number>();
+
+/** Whether this (allocator, rejection) may be reported now; records it if so. */
+function shouldCaptureDerivedRowRejection(
+  allocatorId: string,
+  rejection: DerivedPayloadRejection,
+): boolean {
+  const key = `${allocatorId}:${rejection}`;
+  const now = Date.now();
+  const last = derivedRowCaptureLastAt.get(key);
+  if (last !== undefined && now - last < DERIVED_ROW_CAPTURE_WINDOW_MS) return false;
+  derivedRowCaptureLastAt.set(key, now);
+  return true;
+}
+
+/** @internal Test-only reset of the R3-WR-04 capture window. */
+export function __resetDerivedRowCaptureThrottleForTests(): void {
+  derivedRowCaptureLastAt.clear();
+}
+
+/** Why the reader refused a PRESENT derived row. A token, never a value. */
+export type DerivedPayloadRejection = "not_version_2" | "untrustworthy" | "malformed";
+
+/**
+ * Review C2 SFH-05 (reader half). `null` when `extractTrustworthyDerivedSeries`
+ * accepts the payload, else the first thing it refuses: a pre-v2 row, a row the
+ * writer marked untrustworthy, or any other shape defect. The reader uses it
+ * to report a present-but-rejected row (token only) and to tell the outcomes
+ * the daily recompute answers (no row yet, or a pre-v2 row, which the daily
+ * compose rewrites as v2: review C2 round 2 R2-CR-03) apart from the ones it
+ * does not.
+ */
+export function derivedPayloadRejection(
+  payload: unknown,
+): DerivedPayloadRejection | null {
+  if (extractTrustworthyDerivedSeries(payload) !== null) return null;
+  if (payload === null || typeof payload !== "object") return "malformed";
+  const p = payload as Record<string, unknown>;
+  if (p.version !== 2) return "not_version_2";
+  if (p.is_trustworthy !== true) return "untrustworthy";
+  return "malformed";
+}
+
+/**
+ * Review C2 SFH-06. The derived-row read's outcome when the read itself
+ * failed, as distinct from "no row" (`null`). The producer turns it into
+ * `history_read_failed`, never into a promise of a daily recompute.
+ */
+export const DERIVED_ROW_READ_FAILED = "read_failed" as const;
+
+/** What the `allocator_equity_derived` read hands the producer. */
+export type DerivedEquityRowRead =
+  | { payload: unknown; computed_at: string | null }
+  | null
+  | typeof DERIVED_ROW_READ_FAILED;
+
+/**
+ * Venues whose account id can be read. sFOX has no stable id (D-10) and MT5
+ * is not in this set, so both are exempt rather than "pending".
+ */
+const ACCOUNT_IDENTITY_EXCHANGES: ReadonlySet<string> = new Set([
+  "binance",
+  "okx",
+  "bybit",
+  "deribit",
+]);
+
+export type EquityHistoryRebuildReason =
+  | "duplicate_account"
+  | "key_not_syncing"
+  | "account_identity_pending"
+  | "awaiting_derivation"
+  | "derivation_rejected"
+  | "shared_account_no_working_key"
+  | "shared_account_history_truncated"
+  | "history_read_failed";
+
+/**
+ * Why there is no display series, once the key list is clear. Only
+ * `awaiting_derivation` is answered by the daily recompute: no row yet, or a
+ * pre-v2 row. Review C2 round 2 R2-CR-03: every row written before C2 is
+ * pre-v2, and `derive-allocator-key-dailies` (05:30 UTC) re-composes each book
+ * as v2, so "recomputed once a day" is true for it. Review C2 SFH-05 / SFH-06:
+ * a v2 row the reader rejected, or a read that failed, must not be shown as a
+ * wait. Review C2 round 3 R3-WR-03: a v2 row the writer marked untrustworthy
+ * for a shared account names that cause (`untrustworthyRebuildReason`).
+ */
+export type MissingSeriesReason = Extract<
+  EquityHistoryRebuildReason,
+  | "awaiting_derivation"
+  | "derivation_rejected"
+  | "shared_account_no_working_key"
+  | "shared_account_history_truncated"
+  | "history_read_failed"
+>;
+
+/**
+ * Review C2 round 3 R3-WR-03 / SFH-R3-04. The reason for a v2 row the writer
+ * marked untrustworthy. Two of the writer's blocking tokens (job_worker's
+ * compose call puts them in `degrade_reasons`, never in `flags`) have a cause
+ * the owner can be told, so they get their own line instead of "did not pass
+ * its checks". When both are present, `shared_account_no_working_key` wins
+ * because it is the one the owner can fix; the writer sorts the tokens, so
+ * array order must not decide. Every other token, and a payload with no
+ * readable tokens, keeps `derivation_rejected`.
+ *
+ * Residual (recorded): alongside another blocker (for example `dropped_key`)
+ * the named line is still true, but fixing the key alone may not unlock the
+ * history. The TS side does not mirror the writer's blocking set.
+ */
+function untrustworthyRebuildReason(
+  payload: unknown,
+): Extract<
+  MissingSeriesReason,
+  "derivation_rejected" | "shared_account_no_working_key" | "shared_account_history_truncated"
+> {
+  const tokens =
+    payload !== null && typeof payload === "object"
+      ? (payload as Record<string, unknown>).degrade_reasons
+      : undefined;
+  if (!Array.isArray(tokens)) return "derivation_rejected";
+  if (tokens.includes("shared_account_no_working_key")) {
+    return "shared_account_no_working_key";
+  }
+  if (tokens.includes("shared_account_history_truncated")) {
+    return "shared_account_history_truncated";
+  }
+  return "derivation_rejected";
+}
+
+export type EquityHistoryKey = {
+  id: string;
+  exchange: string;
+  is_active: boolean;
+  sync_status: string | null;
+  disconnected_at: string | null;
+  venue_account_id: string | null;
+  account_share_kind: string | null;
+  account_shared_with_api_key_id: string | null;
+};
+
+function knownVenueAccountId(id: string | null | undefined): boolean {
+  return typeof id === "string" && id.trim() !== "";
+}
+
+/**
+ * A duplicate blocks "ready" only while its holder is working. "Working" is
+ * D-18's rule (`isWorkingHolder`, the column comment on account_share_kind
+ * from migration 20260927180000), the same rule the Exchanges page note uses,
+ * so the reason line and the note agree. A holder that is inactive,
+ * disconnected, failing or absent from the key list leaves the marked key
+ * ordinary. The marked key itself is judged by eligibility, as the derive job
+ * judges it.
+ */
+function countsAsDuplicate(
+  key: EquityHistoryKey,
+  byId: ReadonlyMap<string, EquityHistoryKey>,
+): boolean {
+  if (!isPerKeyDailiesEligibleKey(key)) return false;
+  if (key.account_share_kind !== "duplicate") return false;
+  const holderId = key.account_shared_with_api_key_id;
+  if (!holderId) return false;
+  const holder = byId.get(holderId);
+  if (!holder) return false;
+  return isWorkingHolder(holder);
+}
+
+/**
+ * Whether an eligible ccxt key's account is still unknown.
+ *
+ * Review C2 CR-02 / SFH-04: a key marked `duplicate` keeps a NULL
+ * `venue_account_id` for as long as its holder is live, because the holder
+ * keeps the partial unique index slot (`disconnected_at IS NULL`) whatever its
+ * status, and the stamper leaves the marked key's id NULL until the holder has
+ * left. Its account is still KNOWN: it is the holder's. So a marked duplicate
+ * whose holder is in the key list with a known id is identity-known. Reading
+ * it as unknown held the book in `account_identity_pending` for as long as a
+ * dead holder stayed connected, and no sync could ever clear that. Whether the
+ * pair then blocks "ready" is `countsAsDuplicate`'s question (a working
+ * holder), not this one.
+ */
+function identityStillPending(
+  key: EquityHistoryKey,
+  byId: ReadonlyMap<string, EquityHistoryKey>,
+): boolean {
+  if (!isPerKeyDailiesEligibleKey(key)) return false;
+  if (!ACCOUNT_IDENTITY_EXCHANGES.has(key.exchange.toLowerCase())) return false;
+  if (key.account_share_kind === "composite_member") return false;
+  if (knownVenueAccountId(key.venue_account_id)) return false;
+  const holder = key.account_shared_with_api_key_id
+    ? byId.get(key.account_shared_with_api_key_id)
+    : undefined;
+  return !(
+    key.account_share_kind === "duplicate" &&
+    holder !== undefined &&
+    knownVenueAccountId(holder.venue_account_id)
+  );
+}
+
+/** Review C2 WR-02: a key whose last sync failed (D-18's not-working statuses). */
+function failingToSync(key: EquityHistoryKey): boolean {
+  return key.sync_status !== null && NOT_WORKING_SYNC_STATUSES.has(key.sync_status);
+}
+
+/**
+ * Review C2 round 2 IN-04. The keys a `key_not_syncing` reason is about:
+ * identity-pending (the same `identityStillPending` rule the readiness check
+ * uses) AND failing to sync. `equityHistoryReadiness` returns
+ * `key_not_syncing` iff this list is non-empty and no duplicate blocks first,
+ * so the renderer can name the key when there is exactly one.
+ */
+export function notSyncingIdentityPendingKeyIds(
+  apiKeys: readonly EquityHistoryKey[],
+): string[] {
+  const byId = new Map<string, EquityHistoryKey>();
+  for (const key of apiKeys) byId.set(key.id, key);
+  return apiKeys
+    .filter((key) => identityStillPending(key, byId) && failingToSync(key))
+    .map((key) => key.id);
+}
+
+/**
+ * Phase 167.1.2 plan 11. Ready iff the version-2 series is present, no
+ * eligible key is a duplicate of a working holder, and every eligible key on
+ * okx/bybit/binance/deribit has a venue account id, is a composite member, or
+ * is a duplicate whose holder in the key list carries the shared id.
+ * The reason names the first failing condition, in that order. An unknown
+ * account on a key that is failing to sync is `key_not_syncing` (review C2
+ * WR-02); on any other key it is `account_identity_pending`.
+ *
+ * ⚠️ Review C2 fix coupling: a marked duplicate behind a NOT-working holder
+ * reads as identity-known and ordinary here, so "ready" relies on the writers
+ * counting that account once, through its working member (review CR-01's
+ * holder-drop half, in the Python writers). Ship the two together.
+ */
+export function equityHistoryReadiness(
+  apiKeys: readonly EquityHistoryKey[],
+  series: { curve: DailyPoint[]; returns: DailyPoint[] } | null,
+  missingSeriesReason: MissingSeriesReason = "awaiting_derivation",
+): { state: "ready" | "rebuilding"; reason: EquityHistoryRebuildReason | null } {
+  const byId = new Map<string, EquityHistoryKey>();
+  for (const key of apiKeys) byId.set(key.id, key);
+  if (apiKeys.some((key) => countsAsDuplicate(key, byId))) {
+    return { state: "rebuilding", reason: "duplicate_account" };
+  }
+  const pending = apiKeys.filter((key) => identityStillPending(key, byId));
+  // Review C2 WR-02: the stamper runs only after a SUCCESSFUL poll, so a key
+  // failing to sync (`error` / `sign_in_failed`; eligibility already excludes
+  // `revoked`) is never stamped while it fails. The hold stays, because its
+  // account really is unknown and the derive still counts it, but the reason
+  // names the failing key rather than promising a sync that cannot stamp it.
+  if (pending.some(failingToSync)) {
+    return { state: "rebuilding", reason: "key_not_syncing" };
+  }
+  if (pending.length > 0) {
+    return { state: "rebuilding", reason: "account_identity_pending" };
+  }
+  if (!series) return { state: "rebuilding", reason: missingSeriesReason };
+  return { state: "ready", reason: null };
 }
 
 /**
@@ -3663,6 +4069,7 @@ export function extractTrustworthyDerivedCurve(
  */
 export function derivePhase07Fields(
   apiKeys: Array<{
+    id: string;
     is_active: boolean;
     exchange: string;
     sync_status: string | null;
@@ -3670,6 +4077,13 @@ export function derivePhase07Fields(
     // DOGFOOD-1 (Phase 110.1): required by isPerKeyDailiesEligibleKey to
     // distinguish a genuinely connected key from a soft-disconnected one.
     disconnected_at: string | null;
+    // Phase 167.1.2 plan 11: read by equityHistoryReadiness. Required, not
+    // optional: a key list that omits them would read every duplicate as
+    // absent and a double-counted book as ready. getUserApiKeys projects all
+    // of them (API_KEY_USER_COLUMNS).
+    venue_account_id: string | null;
+    account_share_kind: string | null;
+    account_shared_with_api_key_id: string | null;
   }>,
   equitySnapshots: MyAllocationDashboardPayload["equitySnapshots"],
   snapshotCount: number,
@@ -3694,12 +4108,15 @@ export function derivePhase07Fields(
   equityBaselineUnknown: boolean,
   // Phase 115.1 / BACKBONE-02 (RD-1). The row read from the NEW keyed
   // `allocator_equity_derived` surface (kind='equity_curve'), or null when
-  // absent / the table is missing pre-migration. Threaded in so the ONE
-  // producer site below can gate the $-equity series onto the derived curve
-  // when trustworthy, else fall back to the legacy snapshot render. Null is
-  // the SAFETY default (legacy render) — every prod allocator hits this until
-  // the founder-gated backfill runs.
-  derivedEquityRow: { payload: unknown; computed_at: string | null } | null,
+  // there is no row. Threaded in so the ONE producer site below can gate the
+  // $-equity series onto the derived curve. Since plan 11 there is no legacy
+  // snapshot render to fall back to: without an accepted row the history is
+  // rebuilding. Review C2 SFH-06: or DERIVED_ROW_READ_FAILED when the read
+  // itself failed, which the producer names as `history_read_failed`.
+  derivedEquityRow: DerivedEquityRowRead,
+  // Review C4 round 2 WR-R2-03: the read's `partialReads`. Defaulted so
+  // callers that pass no holdings read (fixtures) name no key.
+  partialReads: ReadonlyArray<{ api_key_id: string; asof: string }> = [],
 ): Pick<
   MyAllocationDashboardPayload,
   | "equitySnapshots"
@@ -3709,9 +4126,14 @@ export function derivePhase07Fields(
   | "lastSyncAt"
   | "hasSyncing"
   | "equityDailyPoints"
+  | "equityDailyReturns"
   | "equityCurveSource"
   | "derivedCurveComputedAt"
   | "equityHistoryState"
+  | "equityHistoryRebuildReason"
+  | "equityHistoryNotSyncingKeyIds"
+  | "departedHistoryUnavailable"
+  | "partialPositionReads"
   | "minHistoryDepthMonths"
   | "activeVenues"
   | "hasConnectedKeys"
@@ -3735,35 +4157,66 @@ export function derivePhase07Fields(
   const lastSyncAt = freshness.lastSyncAt;
   const hasSyncing = freshness.syncing;
 
-  // Phase 115.1 / BACKBONE-02 (RD-1) — the ONE producer site for the allocator
-  // $-equity display series (chart + V2 factsheet + composer baseline all read
-  // this). Repoint rule (the safety invariant, verbatim): a derived row that
-  // exists AND is `is_trustworthy` AND carries a well-formed dense curve →
-  // render the derived curve (already dense — mapped DIRECTLY, NO forward-fill
-  // adapter). ELSE the legacy `equitySnapshotsToDailyPoints(...)` render,
-  // byte-unchanged. A malformed/untrusted/absent derived row degrades to legacy
-  // (see extractTrustworthyDerivedCurve) — never crashes SSR, never renders NaN.
-  // The legacy fallback is load-bearing until the founder-gated per-key backfill
-  // runs (all 517 prod keys currently have zero per-key rows — the A1 census).
-  const derivedCurve = extractTrustworthyDerivedCurve(
-    derivedEquityRow?.payload ?? null,
-  );
-  // f7 adapter (legacy path): DailyPoint[] for EquityCurve/DrawdownChart
-  // parallel-prop.
-  const candidateEquityDailyPoints =
-    derivedCurve ??
-    equitySnapshotsToDailyPoints(
-      equitySnapshots.map((s) => ({ asof: s.asof, value_usd: s.value_usd })),
-    );
-  // Phase 167.1.2 / D-02 ("Hide it until correct"): the curve is withheld here,
-  // at its one producer, for every allocator; plan 11 owns the "ready" condition.
-  const equityHistoryState: "rebuilding" | "ready" = "rebuilding";
+  // Phase 167.1.2 plan 11 — the ONE producer of the display series. Ready only
+  // when equityHistoryReadiness says so (v2 series, no working-holder
+  // duplicate, ccxt identity known). Otherwise both arrays are empty.
+  // Snapshots are not a display fallback.
+  const derivedReadFailed = derivedEquityRow === DERIVED_ROW_READ_FAILED;
+  const derivedRow = derivedReadFailed ? null : derivedEquityRow;
+  const derivedPayload = derivedRow?.payload ?? null;
+  const series = extractTrustworthyDerivedSeries(derivedPayload);
+  // Review C2 SFH-05 / SFH-06: a missing row waits on the daily recompute. A
+  // present v2 row the reader rejects already had its recompute, and a failed
+  // read says nothing about the history at all. Review C2 round 2 R2-CR-03: a
+  // pre-v2 row is a wait too. It passed every check its writer ran; only the
+  // reader's contract moved, and the daily compose rewrites it as v2.
+  const rejection =
+    derivedRow !== null ? derivedPayloadRejection(derivedRow.payload) : null;
+  const missingSeriesReason: MissingSeriesReason = derivedReadFailed
+    ? "history_read_failed"
+    : rejection === null || rejection === "not_version_2"
+      ? "awaiting_derivation"
+      : rejection === "untrustworthy"
+        ? untrustworthyRebuildReason(derivedPayload)
+        : "derivation_rejected";
+  const readiness = equityHistoryReadiness(apiKeys, series, missingSeriesReason);
+  const equityHistoryState = readiness.state;
+  const equityHistoryRebuildReason = readiness.reason;
+  const equityHistoryNotSyncingKeyIds =
+    equityHistoryRebuildReason === "key_not_syncing"
+      ? notSyncingIdentityPendingKeyIds(apiKeys)
+      : [];
+  // Review C4 SFH-C4-04: the writer's token, read defensively (the JSONB is
+  // worker-written and untrusted), and only for the curve on screen.
+  const payloadFlags =
+    derivedPayload !== null && typeof derivedPayload === "object"
+      ? (derivedPayload as Record<string, unknown>).flags
+      : undefined;
+  const departedHistoryUnavailable =
+    equityHistoryState === "ready" &&
+    Array.isArray(payloadFlags) &&
+    payloadFlags.includes(DEPARTED_HISTORY_UNAVAILABLE_FLAG);
   const equityDailyPoints: DailyPoint[] =
-    equityHistoryState === "rebuilding" ? [] : candidateEquityDailyPoints;
+    equityHistoryState === "ready" && series ? series.curve : [];
+  const equityDailyReturns: DailyPoint[] =
+    equityHistoryState === "ready" && series ? series.returns : [];
+  // Ready always stamps "derived", and EquityChart (mounted in "ready" only) is
+  // the one production reader. Review C3 SFH-C3-02 / IN-02: while rebuilding,
+  // no consumer reads either field. Plan 14 removed the Overview warm-up and
+  // Scenario disclosure readers; both choose by equityHistoryState (D-15). Do
+  // NOT restore a source-based gate. The rebuilding-state stamp is kept only
+  // because it is where the trust check stays observable while D-02 withholds
+  // the curve: FLIPRETRY-03 in queries.test.ts and the plan-05 arms in
+  // queries.my-allocation.test.ts pin it.
+  const curveForSource = trustworthyDerivedCurve(derivedPayload);
   const equityCurveSource: "derived" | "legacy" =
-    derivedCurve !== null ? "derived" : "legacy";
+    equityHistoryState === "ready"
+      ? "derived"
+      : curveForSource !== null
+        ? "derived"
+        : "legacy";
   const derivedCurveComputedAt =
-    derivedCurve !== null ? (derivedEquityRow?.computed_at ?? null) : null;
+    curveForSource !== null ? (derivedRow?.computed_at ?? null) : null;
 
   // f9: min non-null history_depth_months across snapshots. Null when
   // every snapshot's column is NULL (e.g. pure CoinGecko-fallback).
@@ -3783,11 +4236,9 @@ export function derivePhase07Fields(
 
   // Collapse holdings to latest-asof-per-{venue}:{symbol}:{holding_type}
   // via linear scan of the max-asof comparator. Input order is IRRELEVANT
-  // for correctness — the `.order("asof", { ascending: false })` clause on
-  // the PostgREST query above is a log-inspection hedge (newest rows render
-  // first in debug dumps), not a correctness requirement. Do NOT flip the
-  // comparator to "first-seen wins" thinking ordering is guaranteed —
-  // removing `.order()` would silently regress that assumption.
+  // for correctness: the read (fetchLatestHoldingsPerKey) concatenates the
+  // keys' rows in no guaranteed order. Do NOT flip the comparator to
+  // "first-seen wins" thinking ordering is guaranteed.
   //
   // NEW-C03-02: Key by `${venue}:${symbol}:${holding_type}`, not just
   // `symbol`. Keying on symbol alone silently collapsed multi-venue
@@ -3797,8 +4248,16 @@ export function derivePhase07Fields(
   // surviving venue could flip between page loads. The scope_ref keyspace
   // used everywhere else in the pipeline already uses this triple-key
   // format (see buildHoldingRef).
+  //
+  // Phase 167.1.2 D-16: the collapse runs only over each key's rows at that
+  // key's own latest asof (latestHoldingsPerKey), so a position a key closed
+  // before its latest poll no longer survives from an older row. Review C4
+  // SFH-C4-01 / SFH-C4-02: the read already dropped a key whose account a
+  // newer reading superseded (another key on the same exchange account, or
+  // the key's own later clean poll), so this collapse never picks a departed
+  // key's row for a symbol the account has closed since.
   const holdingsMap = new Map<string, (typeof holdingsRows)[number]>();
-  for (const r of holdingsRows) {
+  for (const r of latestHoldingsPerKey(holdingsRows)) {
     // B8: same canonical triple key as the scope_ref sites above
     // (holdingScopeKey) so the dedup keyspace cannot drift from the rest of
     // the pipeline. The "holding:" prefix is immaterial to a local dedup map.
@@ -3817,6 +4276,7 @@ export function derivePhase07Fields(
     side: r.side,
     entry_price: r.entry_price,
     unrealized_pnl_usd: r.unrealized_pnl_usd,
+    asof: r.asof,
   }));
 
   return {
@@ -3833,9 +4293,14 @@ export function derivePhase07Fields(
     lastSyncAt,
     hasSyncing,
     equityDailyPoints,
+    equityDailyReturns,
     equityCurveSource,
     derivedCurveComputedAt,
     equityHistoryState,
+    equityHistoryRebuildReason,
+    equityHistoryNotSyncingKeyIds,
+    departedHistoryUnavailable,
+    partialPositionReads: partialReads.map((p) => ({ ...p })),
     minHistoryDepthMonths,
     activeVenues,
     hasConnectedKeys,
@@ -3967,11 +4432,11 @@ export const getMyAllocationDashboard = cache(
       phase36PerKeyDailiesRes,
       // Phase 115.1 / BACKBONE-02 (RD-1) — the derived $-equity curve row from
       // the NEW keyed `allocator_equity_derived` surface. Resolves to
-      // `{ payload, computed_at }` or null. NON-FATAL by design (never
-      // assertOk'd below): the derived curve is an ADDITIVE enhancement over the
-      // legacy snapshot render, so any read failure degrades to the legacy
-      // fallback (the prod-cutover SAFETY invariant) rather than blanking a
-      // working dashboard.
+      // `{ payload, computed_at }`, null (no row), or DERIVED_ROW_READ_FAILED.
+      // NON-FATAL by design (never assertOk'd below): a failed read must not
+      // blank the rest of the dashboard. Since plan 11 there is no legacy
+      // curve to fall back to; a failed read renders the history as
+      // rebuilding with reason `history_read_failed` (review C2 SFH-06).
       phase115DerivedRow,
       // Phase 151 / 151-02 (AUM-04) — the owner's OWN strategies and the
       // composite `strategy_keys` links, the two halves of the manager-role
@@ -3995,22 +4460,25 @@ export const getMyAllocationDashboard = cache(
         // Cap to the reconstruction BACKFILL_CAP_DAYS (2 years) so the
         // payload can't grow unbounded as the table accumulates days.
         .limit(730),
-      supabase
-        .from("allocator_holdings")
-        .select(
-          // Phase 08 Plan 02 — api_key_id projected so HoldingsTable can
-          // resolve source_key_sync_status via the shared `apiKeys` array
-          // (avoids a nested PostgREST join).
-          //
-          // `side`, `entry_price`, `unrealized_pnl_usd` projected so the
-          // dashboard can render derivative rows in a separate Open
-          // Positions section without conflating notional `value_usd`
-          // with equity contribution (only `unrealized_pnl_usd` counts
-          // toward the equity curve for derivatives).
-          "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id, side, entry_price, unrealized_pnl_usd",
-        )
-        .eq("allocator_id", userId)
-        .order("asof", { ascending: false }),
+      // Phase 167.1.2 D-16: each key's rows at that key's own latest asof,
+      // read in bounded steps (the owner's key ids, then per key its latest
+      // asof, then its rows at it). Returns `{ data, error }` and never
+      // throws; a read that reaches the row cap returns a named error, so the
+      // `assertOk` below fails loud instead of rendering a partial list.
+      fetchLatestHoldingsPerKey(
+        supabase,
+        userId,
+        // Phase 08 Plan 02 — api_key_id projected so HoldingsTable can
+        // resolve source_key_sync_status via the shared `apiKeys` array
+        // (avoids a nested PostgREST join).
+        //
+        // `side`, `entry_price`, `unrealized_pnl_usd` projected so the
+        // dashboard can render derivative rows in a separate Open
+        // Positions section without conflating notional `value_usd`
+        // with equity contribution (only `unrealized_pnl_usd` counts
+        // toward the equity curve for derivatives).
+        "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id, side, entry_price, unrealized_pnl_usd",
+      ),
       getUserApiKeys(userId),
       admin
         .from("match_batches")
@@ -4041,45 +4509,66 @@ export const getMyAllocationDashboard = cache(
         .order("created_at", { ascending: false })
         .limit(200),
       // Phase 36 / 36-03 (D1, UNIFY-01/02) — per-key dailies for the Overview
-      // repoint. Bound by a DATE-WINDOW filter (`.gte("date", ...)`), NOT a
-      // bare ascending `.limit()`: the snapshot path caps at 730 rows because
-      // it is a single per-allocator series, but the per-key series spans K
-      // keys — a bare ascending `.limit(730)` over K keys would silently DROP
-      // the NEWEST rows (truncating the most recent ~730/K days), corrupting
-      // the curve. Filter by date instead so every key keeps its full 730-day
-      // window. `.limit(20000)` is a flat SAFETY CEILING (≈27 keys × 730d) so
-      // the payload cannot grow unbounded as csv_daily_returns accumulates
-      // (T-36-03-03), without truncating recent data for any realistic key
-      // count. User client + owner RLS gates the read (T-36-03-01).
-      supabase
-        .from("csv_daily_returns")
-        // allocator_id is NOT selected: RLS + the .eq below already scope the
-        // read to this allocator, and buildPerKeyReturnsByApiKeyId only consumes
-        // api_key_id / date / daily_return (trims wire bytes per review).
-        .select("api_key_id, date, daily_return")
-        .eq("allocator_id", userId)
-        .gte(
-          "date",
-          new Date(Date.now() - 730 * 24 * 60 * 60 * 1000)
-            .toISOString()
-            .slice(0, 10),
-        )
-        .order("date", { ascending: true })
-        .limit(20000),
+      // repoint. Bound by a DATE-WINDOW filter (`.gte("date", ...)`): every
+      // key keeps its full 730-day window, and the window is what bounds the
+      // payload as csv_daily_returns accumulates (T-36-03-03). User client +
+      // owner RLS gates the read (T-36-03-01).
+      //
+      // 167.1.2 C3 fix F (SFH-C3R2-X1): this used to be ONE request,
+      // `.order("date", asc).limit(20000)`, under a comment calling the
+      // limit a "flat SAFETY CEILING" that truncated nothing. That was false:
+      // PostgREST caps every response at max_rows (1000 on PROD) whatever the
+      // limit, answers 200 with a partial body, and the ascending order made
+      // the dropped rows the NEWEST. PROD 2026-09-29: an allocator with 2348
+      // rows in the window read only its oldest 1000. The read now drains
+      // every row through `drainById` (id keyset, stops on an empty page,
+      // fails loud at its page ceiling or on a non-monotone cursor). A drain
+      // failure resolves `{ data: null, error }`, so `assertOk` below logs
+      // and throws on it exactly as on a PostgREST error; never a silent
+      // partial series. Rows come back sorted by (api_key_id, date), which is
+      // the per-key date order buildPerKeyReturnsByApiKeyId relies on.
+      // A NULL api_key_id row (a strategy-scoped row) is excluded at the
+      // query: buildPerKeyReturnsByApiKeyId drops it anyway, and without the
+      // filter those rows would share natural keys across strategies.
+      (async () => {
+        const windowStart = new Date(Date.now() - 730 * 24 * 60 * 60 * 1000)
+          .toISOString()
+          .slice(0, 10);
+        return drainById<{
+          id: number;
+          api_key_id: string;
+          date: string;
+          daily_return: number;
+        }>({
+          label: "csv_daily_returns",
+          naturalKey: (r) => `${r.api_key_id}|${r.date}`,
+          fetchPage: (afterId, pageSize) => {
+            // allocator_id is NOT selected: RLS + the .eq below already scope
+            // the read to this allocator. `id` is selected because it is the
+            // keyset cursor.
+            let page = supabase
+              .from("csv_daily_returns")
+              .select("id, api_key_id, date, daily_return")
+              .eq("allocator_id", userId)
+              .not("api_key_id", "is", null)
+              .gte("date", windowStart);
+            if (afterId !== null) page = page.gt("id", afterId);
+            return page.order("id", { ascending: true }).limit(pageSize);
+          },
+        });
+      })(),
       // Phase 115.1 / BACKBONE-02 (RD-1) — one JSONB row per
       // (allocator_id, kind); the display row is kind='equity_curve'. USER
       // client + owner RLS + explicit `.eq("allocator_id", userId)` (the
       // phase36 T-36-03-01 pattern: RLS is the tenant boundary, the .eq is
-      // defence-in-depth; the admin client would bypass RLS). PGRST205 (table
-      // missing from the PostgREST schema cache on a pre-migration env) is
-      // swallowed to null so the SAFETY fallback renders the legacy curve —
-      // exactly the cutover-safe semantics. Any OTHER read failure also
-      // degrades to legacy (non-fatal enhancement) but logs a breadcrumb so a
-      // real fault stays observable.
-      (async (): Promise<{
-        payload: unknown;
-        computed_at: string | null;
-      } | null> => {
+      // defence-in-depth; the admin client would bypass RLS).
+      // Review C2 SFH-06: every read failure, PGRST205 included (the table
+      // exists on every environment now, so a schema-cache miss is a real
+      // fault), is logged, reported to Sentry, and returned as
+      // DERIVED_ROW_READ_FAILED. There is no legacy curve to fall back to.
+      // Review C2 SFH-05 (reader half): a PRESENT row the reader rejects is
+      // reported with its rejection token only, never a value.
+      (async (): Promise<DerivedEquityRowRead> => {
         const res = await supabase
           .from("allocator_equity_derived")
           .select("payload, computed_at")
@@ -4087,19 +4576,64 @@ export const getMyAllocationDashboard = cache(
           .eq("kind", "equity_curve")
           .maybeSingle();
         if (res.error) {
-          const code = (res.error as { code?: string }).code;
-          if (code !== "PGRST205") {
-            console.error(
-              "[queries.getMyAllocationDashboard] allocator_equity_derived read failed (falling back to legacy curve):",
-              res.error,
-            );
-          }
-          return null;
+          console.error(
+            "[queries.getMyAllocationDashboard] allocator_equity_derived read failed (rendering the history as rebuilding, reason history_read_failed):",
+            res.error,
+          );
+          scheduleDerivedRowCapture(
+            captureToSentry(res.error, {
+              tags: {
+                op: "getMyAllocationDashboard",
+                reason: "derived_row_read_failed",
+              },
+              level: "error",
+            }),
+          );
+          return DERIVED_ROW_READ_FAILED;
         }
-        return (res.data ?? null) as {
+        const row = (res.data ?? null) as {
           payload: unknown;
           computed_at: string | null;
         } | null;
+        if (row !== null) {
+          const rejection = derivedPayloadRejection(row.payload);
+          if (rejection === "not_version_2") {
+            // Review C2 round 2 R2-CR-03: every row written before C2 is
+            // pre-v2, and the daily compose rewrites it. That is a normal
+            // transition, not a fault, so it is logged and NOT sent to Sentry:
+            // a capture here fired once per dashboard load for every book on
+            // deploy day. Residual (recorded, not captured): a book whose
+            // compose never runs keeps its v1 row and reads
+            // awaiting_derivation; this log line is its only trace.
+            console.warn(
+              "[queries.getMyAllocationDashboard] allocator_equity_derived row is pre-version-2 (not_version_2); rendering the history as rebuilding, reason awaiting_derivation, until the daily compose rewrites it",
+            );
+          } else if (rejection !== null) {
+            console.error(
+              `[queries.getMyAllocationDashboard] allocator_equity_derived row rejected (${rejection}); rendering the history as rebuilding`,
+            );
+            // Review C2 round 3 R3-WR-04: the log line above runs on every
+            // load; the capture runs once per (allocator, rejection) window.
+            if (shouldCaptureDerivedRowRejection(userId, rejection)) {
+              scheduleDerivedRowCapture(
+                captureToSentry(
+                  new Error(`allocator_equity_derived row rejected: ${rejection}`),
+                  {
+                    tags: {
+                      op: "getMyAllocationDashboard",
+                      reason: "derived_row_rejected",
+                      rejection,
+                    },
+                    // A writer's own untrustworthy verdict is a data state; a
+                    // malformed row is a writer bug.
+                    level: rejection === "malformed" ? "error" : "warning",
+                  },
+                ),
+              );
+            }
+          }
+        }
+        return row;
       })(),
       // Phase 151 / AUM-04 — the owner's own strategies. `.eq("user_id",
       // userId)` (NOT allocator_id): on this table the owner column is
@@ -4325,7 +4859,18 @@ export const getMyAllocationDashboard = cache(
       // Phase 115.1 / BACKBONE-02 (RD-1) — the derived $-equity row (or null)
       // threaded into the ONE producer site so the repoint gates there.
       phase115DerivedRow,
+      // Review C4 round 2 WR-R2-03: keys whose rows' poll left positions unread.
+      phase07HoldingsRes.partialReads,
     );
+
+    // Phase 169.4 plan 02 (SC3, D-09, D-69): the Overview's BTC comparator
+    // reads the database through the factsheet's one read, over the book's own
+    // dates. `admin` because the reader is typed on the admin client and the
+    // table is public-SELECT (no tenant data). No read while rebuilding (SC2).
+    const btcBenchmarkPrices: BenchmarkPricesOpt | null =
+      phase07.equityHistoryState === "ready"
+        ? await readFactsheetBenchmark(admin, phase07.equityDailyReturns, undefined, null)
+        : null;
 
     // Phase 09 / D-07 + D-08 + D-11 + finding f5
     // Derive flaggedHoldings by READING match_batches.holding_flags JSONB.
@@ -4690,6 +5235,7 @@ export const getMyAllocationDashboard = cache(
         apiKeysCount,
         mandateIsSet,
         ...phase07,
+        btcBenchmarkPrices,
       };
     }
 
@@ -5120,6 +5666,7 @@ export const getMyAllocationDashboard = cache(
       apiKeysCount,
       mandateIsSet,
       ...phase07,
+      btcBenchmarkPrices,
     };
   },
 );
