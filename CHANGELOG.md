@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.117.0.2] - 2026-10-01 — LIVEDBGUARD: the live-DB test helper never calls the Management API with a lane URL or a production ref
+
+### Security
+- `src/lib/test-helpers/live-db.ts` decided whether to run its catalogue checks through the Supabase Management API from `SUPABASE_ACCESS_TOKEN` plus a project ref. The ref fell back to a regex over `NEXT_PUBLIC_SUPABASE_URL` that only matched `https://`, so a local lane URL came through unchanged. During Phase 164.9.3.2 plan 03 a developer shell holding a real access token sent it to `api.supabase.com/v1/projects/http://127.0.0.1:54421/database/query` about 49 times. Every request was refused with 404, so nothing was read or changed. The same path had no production check: a URL or `SUPABASE_PROJECT_REF` naming production would have run the test SQL on production, and the `assertNotProductionSupabaseUrl` guard covers only the service-role client.
+- The ref now counts only when it is a well-formed 20-character hosted ref, and never one of `PROD_PROJECT_REFS`. Otherwise `HAS_INTROSPECTION` is false and those arms skip, as they already do in CI, which sets neither variable.
+
+### Tests
+- `live-db.introspection-guard.test.ts`: four arms (loopback URL, production URL, explicit production ref, malformed explicit ref) fail on the old helper and pass on the new one; a fifth keeps a hosted test project working.
+
+### Notes
+- `TODOS.md` books two UI findings from the Phase 169.1 post-deploy browser pass for Phase 170.1: the doubled "READ ONLY ONLY" key warning (a test pins it as the D-08 sentence, so the decision is checked before the copy changes), and the /allocations Scenario commit bar floating about 74 px above the bottom nav at narrow widths. They ride here so the 169.1 close-out PR stays `.planning/`-only.
+
 ## [0.117.0.1] - 2026-10-01 — DEPS: the npm minor and patch group and the `actions/checkout` 7.0.1 pin, in one batch
 
 This entry covers two dependency updates replayed onto `main` as one branch, so they cost one CI run instead of two. It supersedes Dependabot #897 and the manual replay #900 of Dependabot #643. Dependabot #898 (Python) was tried in this batch and taken out again; see Notes. No application code changes.
