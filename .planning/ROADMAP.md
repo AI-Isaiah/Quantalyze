@@ -3323,6 +3323,18 @@ Plans:
 
 - [ ] 164.9.3.2-08-PLAN.md — REVIEW-GATE: three pre-merge migration reviewers (blocking), SC-3 asked alongside without blocking, ship condition under the founder's green-then-merge rule (lane: none)
 
+### Phase 164.9.3.2.1: ENQ40001 — the enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) answers a PostgREST caller instead of re-running the call (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 164.9.3.2
+**Plans:** 0 plans
+
+Booked 2026-10-01 by founder decision ENQ-SCOPE = `enq-sibling` (164.9.3.2 plan 01). Evidence carried from `164.9.3.2-01-SUMMARY.md`: the two-target shape (A2) is REFUTED (rejected up front with 22023), and the conflict-wait path converges through PostgREST (answered in 2–4 s). The race-loss RAISE itself never fired in five attempts, so its PostgREST behaviour is UNMEASURED; that it converges on retry is reasoned, not measured.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.9.3.2.1 to break down)
+
 ### Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner (INSERTED)
 
 **Goal:** `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner.
