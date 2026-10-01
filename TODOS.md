@@ -1368,6 +1368,25 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[170.1-READ-ONLY-ONLY-COPY]` The connect-key warning strip reads "READ ONLY ONLY — keys with
+      Trade or Withdraw permissions are refused on submission." (seen by the founder on the composite
+      wizard, 2026-10-01).**
+      - **Where.** `src/app/(dashboard)/strategies/new/wizard/WithdrawalWarningStrip.tsx`; the bold
+        span `READ ONLY` is followed by the text `ONLY — …`, so the page shows the word twice.
+      - ⚠️ **A test pins it:** `WithdrawalWarningStrip.test.tsx`
+        asserts the sentence byte for byte as the "verbatim D-08 sentence". Find the D-08 decision
+        before changing it; if D-08 meant the doubled form, the fix is a decision, not a typo.
+      - **Destination: Phase 170.1 COPY.**
+
+- [ ] **`[169.1-UAT-SCENARIO-COMMIT-BAR-GAP]` On the /allocations Scenario tab at narrow widths, the
+      sticky `No changes yet / Commit scenario` bar floats about 74 px above the bottom nav, and the
+      chart scrolls visibly through the gap (seen in the 169.1 browser pass, 2026-10-01).**
+      - **Measured.** At a 735 px viewport the bar's bottom edge sat at 629 px and the nav's top at
+        703 px. The bar carries `sticky bottom-16 md:bottom-0`; the 64 px offset alone does not explain
+        the 74 px gap, so measure the scroll container's own bottom padding before fixing.
+      - Seen at 500 px and 735 px. Not caused by 169.1.
+      - **Destination: Phase 170.1 COPY** (page-layout pass), or fix-or-drop if 170.1 declines it.
+
 - [ ] **`[164.6.7-RETRY-PLAIN-COMPLETE]` The transient retry keeps a factsheet published only if
       its row was `complete_with_warnings` or warned; a plain `complete` row is not protected across
       the retry (booked 2026-09-26, Phase 164.6.7 round-2 review WR-01 / SFH-R2-03).**
