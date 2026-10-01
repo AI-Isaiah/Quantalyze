@@ -10,7 +10,11 @@ import { dispersion, sharpe as sharpeRatio } from "@/lib/return-stats";
  *     byte-identical). Applies to vol/Sharpe/Sortino only — CAGR stays on the
  *     CALENDAR year (days / 365.25), which is asset-class-invariant.
  *   - population stdev (not sample) — `statistics.pstdev`
- *   - CAGR = eq[-1] ** (1 / years) - 1
+ *   - CAGR = eq[-1] ** (1 / years) - 1 by default (geometric); under the
+ *     arithmetic method (`conventions.cumulativeMethod`) it is the mean daily
+ *     return times periodsPerYear (see the CAGR block below)
+ *   - calendar windows (MTD … 5Y) and buckets (week / month / quarter / year)
+ *     compound by default and SUM under the arithmetic method (Phase 169.1 D-31)
  *   - Sharpe / Sortino use rf = 0 unless explicitly passed
  *
  * Degenerate cases (no drawdown, no losses, no left tail) surface as `null`
@@ -176,7 +180,11 @@ export function compute(
   // only case profitFactor is NaN, so a NaN never reaches this product.
   const commonSenseRatio = tailRatio != null ? tailRatio * profitFactor : null;
 
-  // Bucketed returns — compound returns within each bucket.
+  // Bucketed returns. Geometric (the default) compounds the returns within each
+  // bucket; ARITHMETIC sums them, as `compute_all_metrics`'s `simple` arm sums
+  // its monthly grid and `_bucket_return` (Phase 169.1 D-31). So on an
+  // arithmetic series the months of a year add up to that year.
+  const accum = arithmetic ? accumSum : accumProduct;
   const monthly = new Map<string, number>();
   const quarterly = new Map<string, number>();
   const yearly = new Map<string, number>();
@@ -187,10 +195,10 @@ export function compute(
     const mo = d.slice(5, 7);
     const quarter = `${yr}-Q${Math.floor((parseInt(mo, 10) - 1) / 3) + 1}`;
     const isoWeek = isoWeekKey(dates[i]);
-    accumProduct(monthly, `${yr}-${mo}`, rets[i]);
-    accumProduct(quarterly, quarter, rets[i]);
-    accumProduct(yearly, yr, rets[i]);
-    accumProduct(weekly, isoWeek, rets[i]);
+    accum(monthly, `${yr}-${mo}`, rets[i]);
+    accum(quarterly, quarter, rets[i]);
+    accum(yearly, yr, rets[i]);
+    accum(weekly, isoWeek, rets[i]);
   }
   const monthlyVals = Array.from(monthly.values());
   const quarterlyVals = Array.from(quarterly.values());
@@ -201,7 +209,19 @@ export function compute(
   const lastDate = new Date(lastIso);
   const lastYear = lastIso.slice(0, 4);
   const lastMonth = lastIso.slice(0, 7);
-  const compoundFrom = (cutoff: Date): number => {
+  // The return of the dates after `cutoff`. Geometric (the default) compounds;
+  // ARITHMETIC sums, mirroring `_bucket_return` in `compute_all_metrics` (`s.sum()`
+  // under the `simple` method), which feeds the engine's MTD, YTD, 3M and 6M
+  // (Phase 169.1 D-31). Only the accumulation follows the method: the cutoffs and
+  // D-11's coverage rule below stay the one implementation for both.
+  const returnFrom = (cutoff: Date): number => {
+    if (arithmetic) {
+      let s = 0;
+      for (let i = 0; i < n; i++) {
+        if (new Date(dates[i]) > cutoff) s += rets[i];
+      }
+      return s;
+    }
     let c = 1;
     for (let i = 0; i < n; i++) {
       if (new Date(dates[i]) > cutoff) c *= 1 + rets[i];
@@ -274,7 +294,7 @@ export function compute(
     for (let i = 0; i < 7 && isNonTradingDay(firstSession); i++) {
       firstSession.setUTCDate(firstSession.getUTCDate() + 1);
     }
-    return startDate > firstSession ? null : compoundFrom(cutoff);
+    return startDate > firstSession ? null : returnFrom(cutoff);
   };
 
   const yearlyObj: Record<string, number> = {};
@@ -389,7 +409,7 @@ function sumOf(xs: number[]): number {
   return t;
 }
 
-/** ISO 8601 week key (YYYY-Www) — used for compounding weekly returns. */
+/** ISO 8601 week key (YYYY-Www) — the weekly bucket of compute()'s best / worst week. */
 function isoWeekKey(iso: string): string {
   const d = new Date(iso + "T00:00:00Z");
   const dayNum = (d.getUTCDay() + 6) % 7; // Mon=0
@@ -406,6 +426,17 @@ function accumProduct(map: Map<string, number>, key: string, r: number): void {
   const prev = map.get(key);
   if (prev == null) map.set(key, r);
   else map.set(key, (1 + prev) * (1 + r) - 1);
+}
+
+/**
+ * Summing accumulator for return buckets — `bucket += r`. The arithmetic
+ * method's bucket (Phase 169.1 D-31), as the engine sums its monthly grid. It
+ * starts at the first return, as {@link accumProduct} does, so a bucket is the
+ * left fold of its returns in date order.
+ */
+function accumSum(map: Map<string, number>, key: string, r: number): void {
+  const prev = map.get(key);
+  map.set(key, prev == null ? r : prev + r);
 }
 
 /** Cumulative equity starting from 1.0. `cum_eq([r1, r2, ...])` → `[1+r1, (1+r1)*(1+r2), ...]`. */
