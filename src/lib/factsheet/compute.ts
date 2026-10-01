@@ -21,14 +21,23 @@ export function compute(
   dates: string[],
   rf = 0,
   periodsPerYear = 252,
+  conventions: ComputeConventions = {},
 ): ComputeResult {
   const n = rets.length;
   if (n === 0 || dates.length !== n) {
     throw new Error("compute(): rets and dates must be non-empty arrays of equal length");
   }
 
-  const eq = cumEq(rets);
-  const dd = drawdowns(eq);
+  // Phase 169.1 (D-28, D-30, D-36): the strategy's own conventions, mirroring
+  // `compute_all_metrics` in analytics-service/services/metrics.py. Absent, every
+  // figure is the geometric, calendar-basis one this function always returned.
+  // Under ARITHMETIC the equity and the underwater are the running-sum curves the
+  // composite chart draws, so cum_ret, max_dd, calmar and every drawdown-derived
+  // figure below (longest_dd, recovery_factor, pain_index, ulcer_index) follow
+  // them unchanged in form.
+  const arithmetic = conventions.cumulativeMethod === "arithmetic";
+  const eq = arithmetic ? arithmeticEquity(rets) : cumEq(rets);
+  const dd = arithmetic ? arithmeticUnderwater(rets) : drawdowns(eq);
   // Phase 166.2 (D-17, D-07): the mean and the population sd come from the
   // shared return-stats module, which reports a float-residue sd (a
   // compounding constant yield) as exactly 0, so ann_vol, skew and kurtosis
@@ -39,25 +48,51 @@ export function compute(
   const days = Math.max(1, (endDate.getTime() - startDate.getTime()) / 86_400_000);
   const years = days / 365.25;
 
+  // D-30 / D-36 (W2): the day basis moves EXACTLY ann_vol, sharpe, sortino and
+  // the arithmetic CAGR (so calmar under arithmetic). They run over the basis
+  // series, with its OWN mean and deviation; skew and kurt keep the all-returns
+  // `m` / `s` above, and var95, cvar95, win_rate, profit_factor and every other
+  // figure keep all returns, as the engine's do. On the calendar basis the basis
+  // series IS `rets`, so every figure is the one this function always returned.
+  // Plan 169.1-06 adds the calendar-density branch of the basis series (D-32).
+  const basisReturns = metricsBasisSeries(rets, dates, conventions).returns;
+  const basisN = basisReturns.length;
+  const { mean: basisMean, sd: basisSd } = dispersion(basisReturns, 0);
+
   const cumRet = eq[n - 1] - 1;
-  const cagr = years > 0 && eq[n - 1] > 0 ? Math.pow(eq[n - 1], 1 / years) - 1 : 0;
-  const annVol = s * Math.sqrt(periodsPerYear);
+  // Geometric: a calendar-span compound, on either day basis (the engine's is).
+  // Arithmetic: the mean daily return times periodsPerYear, the engine's
+  // `mean(stat_returns) * periods_per_year`. Its day count is the basis series'
+  // on the active basis, the calendar days from the first to the last date
+  // inclusive on a calendar-dense series (a composite, zero-filled by the
+  // stitch), and the observations otherwise. An active basis with no non-zero
+  // day has no mean: NaN, as the engine's None.
+  let cagr: number;
+  if (arithmetic) {
+    const active = conventions.dayBasis === "active";
+    const calendarDays = Math.round((endDate.getTime() - startDate.getTime()) / 86_400_000) + 1;
+    const cagrDays = !active && conventions.calendarDense ? calendarDays : basisN;
+    cagr = cagrDays > 0 ? (sumOf(basisReturns) / cagrDays) * periodsPerYear : NaN;
+  } else {
+    cagr = years > 0 && eq[n - 1] > 0 ? Math.pow(eq[n - 1], 1 / years) - 1 : 0;
+  }
+  const annVol = basisSd * Math.sqrt(periodsPerYear);
   // The Sharpe is the shared one. A null (no dispersion, or a non-finite
   // return) stays an absence: NaN, which every factsheet formatter renders as
   // "—", as the OG card and the tearsheet do for the same series (founder
   // decision D7, 2026-09-26, reversing D-07's "answer null as 0" for display).
   // `ComputeResult.sharpe` stays a `number`; NaN (or the null a JSON cache turns
   // it into) is the absent value, so a consumer tests `Number.isFinite`.
-  const sharpe = sharpeRatio(rets, { periodsPerYear, ddof: 0, rf }) ?? NaN;
+  const sharpe = sharpeRatio(basisReturns, { periodsPerYear, ddof: 0, rf }) ?? NaN;
 
-  const neg = rets.filter(x => x < 0);
-  const ddDev = neg.length > 0 ? Math.sqrt(neg.reduce((a, x) => a + x * x, 0) / n) * Math.sqrt(periodsPerYear) : 0;
+  const neg = basisReturns.filter(x => x < 0);
+  const ddDev = neg.length > 0 ? Math.sqrt(neg.reduce((a, x) => a + x * x, 0) / basisN) * Math.sqrt(periodsPerYear) : 0;
   // A series with no losing day has no Sortino, and one with no drawdown has no
   // Calmar: the ratio would be infinite, which means "does not exist", not 0.
   // Both stay NaN and render "—", as the tearsheet shows for the same series
   // (the analytics service persists None for both) and as the Sharpe above
   // does (founder decision D7, 2026-09-26; review round 2 HI-02).
-  const sortino = ddDev > 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / ddDev : NaN;
+  const sortino = ddDev > 0 ? ((basisMean - rf / periodsPerYear) * periodsPerYear) / ddDev : NaN;
 
   let maxDd = 0;
   for (let i = 0; i < dd.length; i++) if (dd[i] < maxDd) maxDd = dd[i];
@@ -295,6 +330,63 @@ export function compute(
     common_sense_ratio: commonSenseRatio,
     yearly: yearlyObj,
   };
+}
+
+/**
+ * Phase 169.1 (D-28, D-30) — the conventions a strategy's metrics were computed
+ * under, as `compute_all_metrics` takes them. Every field is optional; absent
+ * means geometric, calendar, not calendar-dense, so a caller passing nothing
+ * gets exactly the figures it always got.
+ *
+ *   - `cumulativeMethod`: "arithmetic" is the engine's `"simple"` (Σr, capital
+ *     reset); "geometric" compounds.
+ *   - `dayBasis`: "active" runs the headline risk statistics over the non-zero
+ *     days only (the engine's `stat_returns`); "calendar" over every day.
+ *   - `calendarDense`: the series stands for every calendar day (a composite,
+ *     zero-filled by the stitch), so a calendar-basis arithmetic CAGR divides by
+ *     the calendar-day count, not by the observations.
+ */
+export type ComputeConventions = {
+  cumulativeMethod?: "geometric" | "arithmetic";
+  dayBasis?: "calendar" | "active";
+  calendarDense?: boolean;
+};
+
+/**
+ * Phase 169.1 (D-30, D-36) — the series the three headline risk statistics
+ * (ann_vol, sharpe, sortino) run over, and where each day lands in it:
+ * `positions[i]` is the index of `dates[i]` in `returns`, or null when the basis
+ * excludes that day. Under the active day basis it is the non-zero finite
+ * returns (the engine's `stat_returns`); otherwise it is `rets` itself with the
+ * identity positions. Plan 169.1-06 adds the calendar-density branch (D-32).
+ * `dates` is part of the signature for that branch.
+ */
+export function metricsBasisSeries(
+  rets: number[],
+  dates: string[],
+  conventions: ComputeConventions = {},
+): { returns: number[]; positions: Array<number | null> } {
+  void dates;
+  if (conventions.dayBasis !== "active") {
+    return { returns: rets, positions: rets.map((_, i) => i) };
+  }
+  const returns: number[] = [];
+  const positions: Array<number | null> = [];
+  for (const r of rets) {
+    if (Number.isFinite(r) && r !== 0) {
+      positions.push(returns.length);
+      returns.push(r);
+    } else {
+      positions.push(null);
+    }
+  }
+  return { returns, positions };
+}
+
+function sumOf(xs: number[]): number {
+  let t = 0;
+  for (const x of xs) t += x;
+  return t;
 }
 
 /** ISO 8601 week key (YYYY-Www) — used for compounding weekly returns. */

@@ -745,6 +745,22 @@ export type FactsheetCommon = {
   /** Phase 90.5 (LEV-01/D2): #597 annualization basis (365 crypto / 252 traditional) — enables the client leverage recompute. Optional: absent (stale v4 cache drain) => leverage control hidden, fail-closed. */
   periodsPerYear?: number;
   /**
+   * Phase 169.1 (D-27 as amended, D-28) — the strategy's compounding method as
+   * the engine computed it, resolved by the read path (the persisted
+   * `data_quality_flags.cumulative_method`, then the frozen `cash_settlement`
+   * conventions, then the config). Present ONLY when "arithmetic"; absent means
+   * geometric, so a geometric payload is byte-identical (D-83 (b)). Consumed by
+   * the browser re-derive arms (`rederiveArgs` in basis-context.tsx).
+   */
+  cumulativeMethod?: "geometric" | "arithmetic";
+  /**
+   * Phase 169.1 (D-30) — the strategy's day basis as the engine computed it,
+   * resolved by the same read path. Present ONLY when "active" (vol, Sharpe and
+   * Sortino over the non-zero days); absent means calendar, so a calendar
+   * payload is byte-identical (D-83 (b)). Consumed by the browser re-derive arms.
+   */
+  dayBasis?: "calendar" | "active";
+  /**
    * Phase 103 (MTM-04) — per-basis series bundles keyed by basis. The cash
    * series stays TOP-LEVEL (the fields above), so this is ADDITIVE-ONLY:
    * absent when no persisted MTM series feeds the build → the object serializes

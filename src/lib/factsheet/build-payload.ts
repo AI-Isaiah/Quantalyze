@@ -1,7 +1,7 @@
 import type { BenchmarkPricesOpt, CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, BasisSeriesBundle, TrustTierKind, IngestSource } from "./types";
 import { alignCoveredReturns, COMPARATOR_CALENDARS } from "./align";
 import type { CoveredAlignment } from "./align";
-import { compute, cumEq, worstDrawdowns, arithmeticEquity, arithmeticUnderwater } from "./compute";
+import { compute, cumEq, worstDrawdowns } from "./compute";
 import { overlayBasisScalars } from "./basis-metrics";
 import { rollingVol, rollingSharpe, rollingSortino, pickRollingWindow, ROLL_WINDOW_90D, ROLL_WINDOW_30D } from "./rolling";
 import { buildComparatorBlock, noneComparatorBlock, unavailableComparatorBlock } from "./comparator-block";
@@ -73,6 +73,12 @@ export type BuildFactsheetOpts = {
    * single-key owner for a `simple` returns_denominator_config.
    */
   cumulativeMethod?: "geometric" | "arithmetic";
+  /**
+   * Phase 169.1 (D-30) — the strategy's day basis; "active" runs vol, Sharpe
+   * and Sortino over the non-zero days (the engine's `stat_returns`). Default
+   * calendar. Set by the composite reader's conventions resolver.
+   */
+  dayBasis?: "calendar" | "active";
   segmentBoundaries?: FactsheetCommon["segmentBoundaries"];
   missingSegments?: FactsheetCommon["missingSegments"];
   metricsByBasis?: FactsheetCommon["metricsByBasis"];
@@ -320,6 +326,13 @@ export function deriveSeriesBundle(
   args: {
     periodsPerYear: number;
     isArithmetic: boolean;
+    /** Phase 169.1 (D-30): the day basis; absent is calendar. */
+    dayBasis?: "calendar" | "active";
+    /**
+     * Phase 169.1 (D-30): the series stands for every calendar day (a composite),
+     * so a calendar-basis arithmetic CAGR divides by the calendar-day count.
+     */
+    calendarDense?: boolean;
     markets: string[];
     strategyName: string;
     comparatorAnnVol?: number;
@@ -332,7 +345,7 @@ export function deriveSeriesBundle(
     benchmarkPrices: BenchmarkPricesOpt;
   },
 ): BasisSeriesBundle {
-  const { periodsPerYear, isArithmetic, markets, strategyName } = args;
+  const { periodsPerYear, isArithmetic, dayBasis, calendarDense, markets, strategyName } = args;
   const dates = clipped.map(d => d.date);
   const stratRet = clipped.map(d => d.value);
 
@@ -344,10 +357,16 @@ export function deriveSeriesBundle(
     { window: ROLL_WINDOW_30D, label: "30d" },
   ]);
 
-  const fullMetrics = compute(stratRet, dates, 0, periodsPerYear);
-  // Arithmetic (composite) vs geometric — all THREE curve fields move together.
-  const stratEquity = isArithmetic ? arithmeticEquity(stratRet) : cumEq(stratRet);
-  const stratDd = isArithmetic ? arithmeticUnderwater(stratRet) : fullMetrics.dd;
+  // Phase 169.1 (D-28, D-30): the conventions go INTO compute(), and the curves
+  // are compute()'s own `eq` / `dd`: arithmetic (composite) vs geometric, all
+  // THREE curve fields and every metric move together, from one place.
+  const fullMetrics = compute(stratRet, dates, 0, periodsPerYear, {
+    cumulativeMethod: isArithmetic ? "arithmetic" : "geometric",
+    dayBasis,
+    calendarDense,
+  });
+  const stratEquity = fullMetrics.eq;
+  const stratDd = fullMetrics.dd;
 
   // Benchmark alignments on THIS bundle's own date axis (169.5 D-54: one
   // coverage-aware helper for all five; BTC from the database when the route
@@ -400,7 +419,7 @@ export function deriveSeriesBundle(
   const MAX_LEN = 14;
 
   // Phase 103 (MTM-04 follow-through, Finding A): the full scalar summary for THIS
-  // basis's series. eq/dd are re-derived per-basis above (arithmetic vs geometric),
+  // basis's series. eq/dd are compute()'s own above (arithmetic vs geometric),
   // so strip them to match the top-level ComputeSummary shape. The extended
   // distribution scalars (skew/kurt/VaR/CVaR/omega/…) read off this via view.
   const { eq: _bundleEq, dd: _bundleDd, ...bundleMetrics } = fullMetrics;
@@ -564,13 +583,22 @@ function buildFromBuildableSeries(
   // computedMetrics feeds the cash-scalar overlay (strategyMetrics — top-level
   // cash-only; the KpiStrip's persisted-scalar path owns MTM there, Phase 102).
   // eq/dd are re-derived per basis inside deriveSeriesBundle, not carried here.
-  const { eq: _eq, dd: _dd, ...computedMetrics } = compute(stratRet, dates, 0, periodsPerYear);
-
+  //
   // Phase 90 (D3) — arithmetic vs geometric curve basis; threaded into
   // deriveSeriesBundle so all THREE curve fields move together per basis.
   // Arithmetic for a composite's "simple" method and, since Phase 169 review
   // round 1 (SFH H-2), a single-key `simple` returns_denominator_config.
+  // Phase 169.1 (D-28, D-30): the same conventions reach compute() here and in
+  // every bundle, with the day basis and, on a composite (zero-filled every
+  // calendar day by the stitch), calendar density.
   const isArithmetic = opts?.cumulativeMethod === "arithmetic";
+  const dayBasis = opts?.dayBasis;
+  const calendarDense = opts?.dataQuality?.composite === true;
+  const { eq: _eq, dd: _dd, ...computedMetrics } = compute(stratRet, dates, 0, periodsPerYear, {
+    cumulativeMethod: isArithmetic ? "arithmetic" : "geometric",
+    dayBasis,
+    calendarDense,
+  });
 
   // Phase 90 (D3) — cash-scalar overlay. The KpiStrip's seven headline scalars
   // read the PERSISTED `cash_settlement` basis so they agree with discovery /
@@ -616,6 +644,8 @@ function buildFromBuildableSeries(
   const cashBundle = deriveSeriesBundle(clipped, {
     periodsPerYear,
     isArithmetic,
+    dayBasis,
+    calendarDense,
     markets: strategy.markets,
     strategyName: strategy.name,
     comparatorAnnVol: strategyMetrics.ann_vol,
@@ -638,6 +668,8 @@ function buildFromBuildableSeries(
         mark_to_market: deriveSeriesBundle(mtmClipped, {
           periodsPerYear,
           isArithmetic,
+          dayBasis,
+          calendarDense,
           markets: strategy.markets,
           strategyName: strategy.name,
           // comparatorAnnVol omitted → the MTM comparator uses the MTM series'
@@ -661,6 +693,8 @@ function buildFromBuildableSeries(
         smoothed_mtm: deriveSeriesBundle(smoothedClipped, {
           periodsPerYear,
           isArithmetic,
+          dayBasis,
+          calendarDense,
           markets: strategy.markets,
           strategyName: strategy.name,
           // comparatorAnnVol omitted → the smoothed comparator vol-matches the
@@ -729,6 +763,14 @@ function buildFromBuildableSeries(
     // from the serialized blob when no smoothed story, so cash/MTM stays identical).
     smoothedGate: opts?.smoothedGate,
     dataQuality: opts?.dataQuality,
+    // Phase 169.1 (D-27 as amended, D-30, D-83 (b)) — the strategy's conventions,
+    // for the browser re-derive arms. Emitted ONLY when non-default, by spread so
+    // the key is absent (not undefined) otherwise: the read path returns a method
+    // for EVERY composite ("geometric" included) and defaults the day basis to
+    // "calendar", so an unconditional emit would add two keys to every geometric
+    // composite payload.
+    ...(opts?.cumulativeMethod === "arithmetic" ? { cumulativeMethod: "arithmetic" as const } : {}),
+    ...(opts?.dayBasis === "active" ? { dayBasis: "active" as const } : {}),
     // Phase 90.5 (LEV-01/D2) — emit the #597 annualization basis so the client
     // leverage recompute annualizes on the SAME basis the server did. Additive-
     // optional: single-key payloads carry a number here, stale caches lack it.

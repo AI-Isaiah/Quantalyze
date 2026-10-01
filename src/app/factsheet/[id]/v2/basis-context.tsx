@@ -214,12 +214,17 @@ const leveredViewCache = new WeakMap<FactsheetPayload, Map<string, FactsheetPayl
 function rederiveArgs(view: FactsheetPayload): Parameters<typeof deriveSeriesBundle>[1] {
   return {
     periodsPerYear: view.periodsPerYear!,
-    // Geometric is right for the leverage arm: an arithmetic payload (a composite,
-    // or since review round 1 a single-key `simple` config, SFH H-2) is
-    // leverage-ineligible, so it never reaches that re-derive. For the window arm
-    // this is the known limit D-27 records (an arithmetic composite's window is
-    // compounded geometrically); plan 169.1-03 carries the compounding method.
-    isArithmetic: false,
+    // Phase 169.1 (D-27 as amended, D-28, D-30): the strategy's own conventions,
+    // read from the payload this view derives from. The window arm needs them: an
+    // arithmetic composite's window is the running sum its chart draws, and an
+    // active-day-basis window's vol, Sharpe and Sortino exclude the zero days.
+    // For the leverage arm they are a no-op by construction, because every payload
+    // carrying a non-default convention is leverage-ineligible (a composite, or a
+    // single-key payload flagged `returnsConventionOverride`, 169 SFH H-2; plan
+    // 169.1-04 keeps that flag, D-83).
+    isArithmetic: view.cumulativeMethod === "arithmetic",
+    dayBasis: view.dayBasis,
+    calendarDense: view.dataQuality?.composite === true,
     markets: view.markets,
     strategyName: view.strategyName,
     // comparatorAnnVol OMITTED — a re-derived bundle vol-matches its OWN vol
