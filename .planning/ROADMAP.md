@@ -135,7 +135,8 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
 - [ ] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
-- [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — planned (1 plan); HALTED 2026-09-27 at Task 3; resumes after Phase 166.4 ships
+- [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — complete with routed residuals 2026-10-01 (halted 2026-09-27, resumed after 166.4); verification pending
+- [ ] **Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds** (INSERTED) — not planned; inserted 2026-10-01 (founder); 166.3's R5 recompute waits on it
 - [ ] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [ ] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed
@@ -146,7 +147,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: human_needed
 - [ ] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified
 - [ ] **Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers** (INSERTED) — not yet verified (plan 01 shipped in #868)
-- [ ] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — not yet verified
+- [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
 - [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
 
 ### Phase 158: OPS-CI — A merge means a deploy
@@ -3661,6 +3662,33 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy
 - **Resume condition.** Phase 166.3 may resume after Phase 166.4 merges and its worker is deployed.
 - **Ratified the same day.** The founder also ratified 166.4 D-04 (the both-endpoints rule applies when BTC is the sparser leg too), D-05 (the first strategy date pairs with BTC's same-day return) and D-07 (BTC's base close is the day before its first stored return) on 2026-09-27. Phase 169.5 BENCHCOMPARE adopts D-05's day-one rule before it executes.
 
+⭐ **RESUMED AND COMPLETED 2026-10-01, with routed residuals (see `166.3-01-SUMMARY.md`).** 14 benchmarked strategies: 9 recompute jobs done, 2 failed, 3 not enqueued because they were already computed on post-166.4 code (2 of them published, and both lack stored daily returns, so the job would have failed them). The failed composite is routed to Phase 166.3.1 NAVBREACH (founder D-R5); the trailing 1000-day BTC window that moved alpha/beta is Phase 170.2 item 5 (founder D-BENCH). No published row was recomputed.
+⚠️ **FOUNDER OVERRIDE (D-OVR, 2026-10-01, verbatim "can't you use CLI for that?"):** from R2 on, the orchestrator ran the PROD statements through `psql`, marker-guarded, instead of the founder. This overrides the "every PROD statement is a founder step" rule above for that run only; recorded in `166.3-CONTEXT.md` too.
+
+### Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds (INSERTED)
+
+**Goal:** The private three-key Deribit composite (Phase 166.3's R5) recomputes through the normal `stitch_composite` job path, because the root cause of its `native_nav` inception reconciliation breach is found and fixed on the real member ledger, without weakening the gate.
+**Requirements**: success criteria below
+**Depends on:** nothing. Phase 166.3's R5 recompute waits on this phase. **Priority:** data integrity.
+**Plans:** 0 plans
+
+**Evidence (orchestrator, measured on PROD read-only, 2026-10-01; counts and error classes only):**
+- Phase 166.3 enqueued `stitch_composite` for the composite at 2026-10-01 11:38 UTC. It ended `failed_final` after one attempt, error class `run_stitch_composite_job: member ledger unrecoverable — native_nav inception reconciliation breached venue=deribit currencies=[BTC]`.
+- The same class failed it on 2026-08-25 (the job the Phase 168 and 161.1 notes cite). The composite has 3 member keys, all `deribit`.
+- Phase 168's CONTEXT fences this out as "a separate defect with its own owner", and `TODOS.md` item 0.2 records the same. No phase owned it until this one.
+- Side effects of the failed job: `computation_status` moved `complete_with_warnings` → `failed`, and `computed_at` was re-stamped to 2026-10-01 while `metrics_json` stayed on pre-fix values. `metrics_json_by_basis` is intact and the strategy is still private, so no public page is wrong.
+
+⭐ **ROUTED IN 2026-10-01 (founder, AskUserQuestion "Residual, route the breach").** Phase 166.3 records R5 as an unpublished failed-recompute residual, and the breach is routed here.
+
+## Success Criteria
+1. The root cause of the inception breach is identified on the real member ledger, and a test that fails on today's code reproduces it.
+2. The fix never weakens the reconciliation gate: no widened tolerance and no forged inception row.
+3. The composite's `stitch_composite` recompute on PROD succeeds through the normal job path, with its before/after recorded counts-only.
+4. A failed stitch no longer re-stamps `computed_at` as if the row were current, or that is recorded as a separate defect with an owner.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 166.3.1 to break down)
+
 ### Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric (INSERTED)
 
 **Goal:** For a strategy whose date index is sparser than BTC's 7-day calendar (for example weekday-only), every benchmark-relative metric pairs each strategy return with the BTC return over the SAME holding interval, so alpha, beta, correlation, information ratio, Treynor, r² and the rolling greeks and correlation describe the strategy's real co-movement with BTC, and r² equals correlation² again.
@@ -4368,6 +4396,36 @@ Plans:
 **⭐ ROUTED IN 2026-09-27 (measured by the orchestrator and the founder in the logged-in browser on PROD `/allocations?tab=scenario`, main at `320fba4e`/`e6c196d5`):**
 (a) With no benchmark selected, the scenario Returns chart subtitle reads "vs None". Root cause: `src/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload.ts` builds the `none` comparator with `inertComparatorBlock("None", "None")`, and `subtitleFor` in `src/app/factsheet/[id]/v2/TimeSeriesChart.tsx` prints `vs ${cmpName}` whenever the chart config has a `comparatorField`. Success: with no benchmark chosen the subtitle is empty or says "no benchmark".
 (b) The scenario KPI tiles show an unlabelled delta line (e.g. "+0.00") under each value. Success: the delta says what it is compared against (e.g. "vs current book").
+
+### Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity (INSERTED)
+
+**Goal:** Five user-facing items are fixed, four from Phase 170's post-deploy pass and one from Phase 166.3's recompute. The Allocations Holdings tab never scrolls sideways. The daily BTC benchmark refresh still lands a day when Binance fails. The /compare equity chart shows each strategy's real cumulative return. A CSV-ingested strategy's factsheet masthead states its venue as self-reported. Every benchmark-relative metric is measured over the strategy's full history wherever BTC prices exist.
+**Founder decision, 2026-10-01 (AskUserQuestion):** one inserted phase with three plans. Phases 169, 169.2 and 170 are closed, and nothing is added to them.
+**Evidence (measured 2026-10-01 on PROD, after the Phase 170 merge e3b4542da deployed):**
+(1) On `/allocations?tab=holdings` at 735 CSS px (desktop 200% zoom), `#main-content` scrollWidth is 885 against clientWidth 735. `HoldingsTabPanel.tsx`'s `<div data-tab-panel="holdings" className="grid gap-8">` has no column template, so its implicit track resolves to the min-content of its widest item (845 px). The Holdings and Open Positions tables (843 px) and the Exposure drill-down table (811 px) sit in `overflow-x-auto` scrollers. Those scrollers grow with their tables because their grid-item ancestors keep `min-width: auto`. The floor does not depend on the viewport, so every width below about 1000 CSS px overflows. CI missed it because the seeded book has no wide positions table.
+(2) The 2026-10-01 00:10 UTC Vercel cron `/api/cron/refresh-benchmark` answered 502 "no BTC series" (Sentry QUANTALYZE-1M, 1N and 1P). The newest stored BTC close is 2026-09-29; the 2026-09-30 run succeeded through 09-29. `fetch_btc_daily_prices` in `analytics-service/services/benchmark.py` falls back from Binance to CoinGecko `market_chart` with `days=1000`. The CoinGecko free tier refuses that (HTTP 401, error_code 10012, measured), while `days=365` answers 200. Any Binance failure therefore loses that day.
+(3) `/compare?ids=<one strategy>` draws an equity axis reading about 1e35%. `CompareEquityOverlay.tsx` compounds `strategy_analytics.returns_series` (`cum *= 1 + p.value`), but that column stores equity LEVELS. For the measured strategy it runs 0.99998 → 1.1454 over 112 days, with `cumulative_return` 0.1454, so 112 compounds of about 2 explode.
+(4) A CSV-ingested strategy's factsheet masthead shows no venue label. Phase 170's UI-SPEC copy row "Venue label on CSV-ingested strategies (169-routed (b))" sets the rule. Where a venue is declared, the label reads `{declared venue} · self-reported`. Where none is declared, the label is omitted (it is a label, not a metric, so there is no em-dash). The founder named the site under checkpoint FC-2.
+(5) Every benchmark-relative metric (alpha, beta, Treynor, R², correlation, information ratio, rolling alpha/beta) reads BTC as a TRAILING 1000-day window ending yesterday: `get_benchmark_returns(symbol="BTC", days=1000)` in `analytics-service/services/benchmark.py`, whose cache read is `.limit(days + 1)`. A strategy whose history starts more than 1000 days back is measured over a truncated overlap, each later recompute loses more of it, and the factsheet says full history. Measured on PROD 2026-10-01 during Phase 166.3 (counts only): three recomputed user-CSV strategies lost 41, 33 and 128 rolling alpha/beta points. Each loss matches, within one day, how far the window's start had moved past the strategy's first return since its previous compute, and their alpha, beta, Treynor and R² moved with it. It is the same file as item (2). ⚠️ Phase 169.2 BENCHFRESH shipped as "read in full"; at `e3b4542da` the read is still capped at 1000 days, so that claim is to be re-measured here, not trusted.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 170
+
+## Success Criteria
+
+1. At 390, 640 and 735 CSS px the Holdings tab's `#main-content` overflow is 0, and each wide table scrolls inside its own scroller. A seeded e2e case with a wide positions table fails on the old code.
+2. When Binance fails, the refresh still returns a current BTC series: the fallback stays within the free-tier window and merges with cached history, or uses another free source. A test fails on the old 1000-day request, and a missed day is backfilled by the next run.
+3. The /compare overlay's last point equals each strategy's stored cumulative return (+14.5% for the measured example). A test fails on the old compounding.
+4. On `/factsheet/[id]`, a CSV-ingested strategy with a declared venue shows `{venue} · self-reported` in the masthead. One with no declared venue shows no venue label. A test that fails on the current masthead pins both.
+5. Every benchmark-relative metric pairs over the strategy's FULL history wherever BTC prices exist: the benchmark read covers the strategy's first date, not a fixed trailing count. A test with a strategy older than 1000 days fails on today's code. The recompute that restores the stored rows is named: every benchmarked strategy, through the normal compute-job path.
+
+**⭐ ROUTED IN 2026-10-01 (founder, FC-2; edited by `/gsd-phase --edit`):** this is Phase 170 plan 14's FC-2 answer. Asked to name the site for the CSV-ingested venue label, the founder chose "Factsheet masthead". Phase 170 is closed and gets nothing added, so this became item (4) and criterion 4 of this phase.
+
+**⭐ ROUTED IN 2026-10-01 (founder, 1000-day benchmark window; edited by `/gsd-phase --edit`):** found by the orchestrator while checking Phase 166.3's recomputes. Asked where it goes, the founder chose "Add to 170.2" (AskUserQuestion), since item (2) is in the same file. It became item (5) and criterion 5.
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 170.2 to break down)
 
 ### Phase 165: ACTIONSDEPS — the four GitHub Actions dependabot PRs land first, in the verified order
 
