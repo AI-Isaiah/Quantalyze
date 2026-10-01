@@ -22,6 +22,10 @@ import { ShortcutHelpModal } from "@/components/admin/match/ShortcutHelpModal";
 import { ShortlistCard } from "@/components/admin/match/ShortlistCard";
 import { venueOutageMessage } from "@/components/admin/match/venueOutageCopy";
 
+/** SFH-170-05: shown when a recompute is refused by the below-md read-only rule. */
+export const RECOMPUTE_READ_ONLY_NOTICE =
+  "Recompute did not run. Open on a tablet or desktop (768px or wider) to recompute the match queue.";
+
 // ─── Types ──────────────────────────────────────────────────────────────
 
 interface ScoreBreakdown {
@@ -178,6 +182,20 @@ export function AllocatorMatchQueue({
   const isMd = useMediaQuery("(min-width: 768px)");
   const readOnly = forceReadOnly || !isMd;
 
+  // SFH-170-05: the preferences panel's confirm runs `onRecomputeRequested`
+  // from a setTimeout that closed over the render in which Save was pressed.
+  // If the viewport crossed below md while the PUT was in flight, that
+  // closure still sees the old `readOnly`. The ref carries the current value.
+  const readOnlyRef = useRef(readOnly);
+  useEffect(() => {
+    readOnlyRef.current = readOnly;
+  }, [readOnly]);
+
+  // A recompute refused by the read-only rule says so instead of dropping
+  // silently. Kept apart from `error`, whose early return would replace the
+  // whole queue with the error card for what is not a failure.
+  const [recomputeNotice, setRecomputeNotice] = useState<string | null>(null);
+
   // Track in-flight load requests to prevent a stale response from overwriting
   // a newer one. Incremented on each load(); responses only apply if they match
   // the current id.
@@ -198,6 +216,7 @@ export function AllocatorMatchQueue({
     const thisLoadId = ++loadIdRef.current;
     setLoading(true);
     setError(null);
+    setRecomputeNotice(null);
     try {
       const res = await fetch(`${sourceApiPath}/${allocatorId}`);
       if (loadIdRef.current !== thisLoadId) return; // A newer load is in flight
@@ -232,7 +251,10 @@ export function AllocatorMatchQueue({
   const selectedCandidate = data?.candidates[selectedIdx] ?? null;
 
   const handleRecompute = useCallback(async () => {
-    if (readOnly) return;
+    if (readOnly || readOnlyRef.current) {
+      setRecomputeNotice(RECOMPUTE_READ_ONLY_NOTICE);
+      return;
+    }
     if (recomputeIdRef.current !== 0) return; // A recompute is already in flight
     const thisRecomputeId = ++recomputeIdRef.current;
     setRecomputing(true);
@@ -471,6 +493,16 @@ export function AllocatorMatchQueue({
             <strong className="font-semibold">Read-only on mobile.</strong>{" "}
             Open on a tablet or desktop (768px or wider) to record KEEP / SKIP / Send Intro decisions.
           </p>
+        </div>
+      )}
+
+      {/* SFH-170-05: a refused recompute is announced at every width. */}
+      {recomputeNotice && (
+        <div
+          role="status"
+          className="rounded-md border border-accent/30 bg-accent/5 px-4 py-3"
+        >
+          <p className="text-small text-text-primary">{recomputeNotice}</p>
         </div>
       )}
 
@@ -862,6 +894,7 @@ export function AllocatorMatchQueue({
             load();
           }}
           onRecomputeRequested={handleRecompute}
+          readOnly={readOnly}
         />
       )}
 

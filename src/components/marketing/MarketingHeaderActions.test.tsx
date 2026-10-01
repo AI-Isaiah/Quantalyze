@@ -6,6 +6,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import React from "react";
+import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
 import { MarketingHeaderActions } from "./MarketingHeaderActions";
@@ -107,15 +108,54 @@ describe("MarketingHeaderActions", () => {
     expect(container.innerHTML).not.toContain(HIDDEN_USER_ID);
   });
 
-  it("renders the signed-out links when getUser rejects", async () => {
+  it("renders the signed-out links when getUser rejects, and logs the failure", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     auth.getUser.mockRejectedValue(new Error("auth down"));
     await renderActions();
     expectSignedOutLinks();
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[marketing-header] session read failed",
+      "auth down",
+    );
+    errorSpy.mockRestore();
   });
 
-  it("renders the signed-out links when createClient rejects", async () => {
+  it("renders the signed-out links when createClient rejects, and logs the failure", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.mocked(createClient).mockRejectedValueOnce(new Error("cookies unavailable"));
     await renderActions();
     expectSignedOutLinks();
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[marketing-header] session read failed",
+      "cookies unavailable",
+    );
+    errorSpy.mockRestore();
+  });
+
+  it("does not log the documented anonymous error return", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    auth.getUser.mockResolvedValue({
+      data: { user: null },
+      error: { name: "AuthSessionMissingError", message: "Auth session missing!" },
+    });
+    await renderActions();
+    expectSignedOutLinks();
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("rethrows a Next framework error instead of swallowing it into the signed-out fallback", async () => {
+    // SFH-170-04: the real `redirect()` throws Next's NEXT_REDIRECT error, the
+    // same class of framework throw cookies() raises. The old bare catch turned
+    // it into "Sign in"; unstable_rethrow must let it reach Next.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(createClient).mockImplementationOnce(async () => {
+      redirect("/framework-redirect");
+    });
+    await expect(MarketingHeaderActions()).rejects.toMatchObject({
+      digest: expect.stringContaining("NEXT_REDIRECT"),
+    });
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });

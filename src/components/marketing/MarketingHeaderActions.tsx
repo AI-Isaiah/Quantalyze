@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { unstable_rethrow } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
 
@@ -41,7 +42,18 @@ export async function MarketingHeaderActions() {
       error,
     } = await supabase.auth.getUser();
     signedIn = !error && user != null;
-  } catch {
+  } catch (err) {
+    // SFH-170-04: a framework error thrown through cookies() (a dynamic-usage
+    // bailout, redirect or notFound) belongs to Next, not to this fallback.
+    unstable_rethrow(err);
+    // Anything else is unexpected (missing env, cookie-store fault, network
+    // failure inside getUser). Log it so an auth outage is visible, then fail
+    // closed. The documented `error` return above stays unlogged: it is the
+    // ordinary anonymous-visitor path.
+    console.error(
+      "[marketing-header] session read failed",
+      err instanceof Error ? err.message : String(err),
+    );
     signedIn = false;
   }
   if (!signedIn) return <SignedOutLinks />;

@@ -955,33 +955,79 @@ describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
     expect(document.querySelector(".fixed.inset-0")).toBeNull();
   });
 
-  it("below md, PreferencesPanel onRecomputeRequested does not POST recompute", async () => {
-    // Open while md matches, then narrow. The panel is already mounted, so
-    // the early return — not the opener — is what stops the recompute.
-    const media = installMatchMedia({ md: true, lg: false });
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-    const fetchMock = vi.spyOn(global, "fetch").mockImplementation((input: RequestInfo | URL) => {
+  // SFH-170-05 replaced the case that stood here. It submitted the form below
+  // md and waited for the post-save confirm, which only fires after a
+  // successful PUT, so it asserted the defect (Save still wrote below md) as
+  // the expected path. The two cases below split what it was reaching for.
+  function prefsFetch() {
+    return vi.spyOn(global, "fetch").mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.includes("/preferences/")) return Promise.resolve(jsonResponse({ ok: true }));
       return Promise.resolve(jsonResponse(buildPayload()));
     });
+  }
+
+  it("SFH-170-05: preferences opened at md then narrowed below md disable Save, say why, and write nothing", async () => {
+    const media = installMatchMedia({ md: true, lg: false });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const fetchMock = prefsFetch();
 
     render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
     await screen.findByRole("heading", { name: /Demo Allocator/i });
     fireEvent.click(screen.getByRole("button", { name: /Edit preferences/i }));
-    expect(screen.getByRole("heading", { name: /CRM-style editor/i })).toBeInTheDocument();
+    const editor = screen.getByRole("heading", { name: /CRM-style editor/i });
+    const save = screen.getByRole("button", { name: "Save preferences" });
+    expect(save).not.toBeDisabled();
 
     act(() => {
       media.set({ md: false });
     });
 
-    const form = screen.getByRole("button", { name: "Save preferences" }).closest("form");
-    expect(form).not.toBeNull();
-    fireEvent.submit(form!);
+    expect(save).toBeDisabled();
+    const panel = editor.closest(".fixed") as HTMLElement;
+    expect(within(panel).getByRole("status").textContent).toMatch(
+      /Read-only on mobile\..*768px or wider.*save preferences/,
+    );
+
+    // A disabled button does not stop a scripted or implicit submit.
+    fireEvent.submit(save.closest("form")!);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+    expect(mutationCalls(fetchMock, "/preferences/")).toHaveLength(0);
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(mutationCalls(fetchMock, "/api/admin/match/recompute")).toHaveLength(0);
+  });
+
+  it("SFH-170-05: a confirmed recompute after narrowing below md mid-save is refused visibly, not dropped", async () => {
+    const media = installMatchMedia({ md: true, lg: false });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const fetchMock = prefsFetch();
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+    fireEvent.click(screen.getByRole("button", { name: /Edit preferences/i }));
+
+    // Save at md: the PUT goes out and its success arms the 100 ms confirm.
+    fireEvent.submit(screen.getByRole("button", { name: "Save preferences" }).closest("form")!);
+    await waitFor(() => {
+      expect(mutationCalls(fetchMock, "/preferences/")).toHaveLength(1);
+    });
+
+    // The viewport crosses below md before the confirm runs.
+    act(() => {
+      media.set({ md: false });
+    });
 
     await waitFor(() => {
       expect(confirmSpy).toHaveBeenCalled();
     });
+    const notice = await screen.findByText(
+      "Recompute did not run. Open on a tablet or desktop (768px or wider) to recompute the match queue.",
+    );
+    expect(notice.closest('[role="status"]')).not.toBeNull();
+    // Visible at every width: no `hidden` / `md:hidden` on the notice.
+    expect(notice.closest('[role="status"]')!.className).not.toMatch(/(^|\s)(md:)?hidden(\s|$)/);
     expect(mutationCalls(fetchMock, "/api/admin/match/recompute")).toHaveLength(0);
   });
 
