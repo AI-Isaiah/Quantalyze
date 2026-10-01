@@ -127,6 +127,14 @@ jobs:
     # anything that is not a pull_request, so the push/dispatch corpus is never
     # filtered (`ci.yml`'s own header: every commit to main must produce its own
     # recorded green run, and Railway waits on main CI).
+    # (⚠️ CORRECTED 2026-10-01, Phase 164.9.4 review WR-01, by the founder's
+    # 2026-09-27 routing: a PUSH is now classified by its pushed range
+    # `before..HEAD` with the same rule, and fails SAFE to code whenever that
+    # range cannot be determined. A workflow_dispatch is still never filtered.
+    # A docs-only push is a SHORT run, never a missing one: this job, the
+    # always-on jobs and the `if: always()` `frontend` aggregator still run, so
+    # the SHA still gets its own recorded green run. The sentence above is kept
+    # as lineage.)
     #
     # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply to this
     # one, for the same reason it does not apply to `sql-gate-lint` and
@@ -181,8 +189,17 @@ jobs:
       # convention — this classifier is the filter's single point of trust, and
       # a wrong `true` skips sixteen gates at once.
       - run: node scripts/classify-changed-paths.mjs --self-test
+      # Phase 164.9.4 (founder routing 2026-09-27, review WR-01): on a push the
+      # classifier diffs the PUSHED range `before..HEAD` and fails SAFE to code
+      # when that range cannot be determined (zero before-SHA, a forced push, a
+      # before-SHA missing from this clone or not an ancestor). The two event
+      # fields reach it through `env:`, never interpolated into `run:`. Both are
+      # empty on a pull_request and a workflow_dispatch, which never read them.
       - id: classify
         run: node scripts/classify-changed-paths.mjs
+        env:
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_FORCED: ${{ github.event.forced }}
       # Same red-path-first shape for the SQL gate subset derivation: its
       # self-test drives every verdict (including an unreadable base, which is
       # a MEASURE_FAIL and never an empty change set) before the real run. A
@@ -6254,6 +6271,14 @@ jobs:
       # the arm.
       # No URL or host is printed on any path: this log is public. Every grep
       # sends its output to /dev/null, and every error line is fixed text.
+      # (2026-10-01, Phase 164.9.4 review SFH-01: (ii) and (iii) are NEGATIVE
+      # arms, so `if grep ...; then exit 1` read grep's exit status 2 (an error:
+      # a missing directory, an unreadable file, an I/O fault) exactly like 1
+      # (no match), and passed on a bundle it never fully read. Both scanned
+      # directories are now asserted to exist first, and (ii)/(iii) capture the
+      # status and fail LOUD on anything that is not 0 or 1. Their stderr is no
+      # longer discarded: grep's error lines name file paths, never the pattern
+      # or a URL, so the public-log rule above still holds.)
       - name: Verify build inlined real test-Supabase URL
         run: |
           set -euo pipefail
@@ -6261,6 +6286,12 @@ jobs:
             echo "::error::NEXT_PUBLIC_SUPABASE_URL is empty - the lane handoff step did not export the lane URL, so the build could not inline it"
             exit 1
           fi
+          for d in .next/static .next/server; do
+            if [ ! -d "$d" ]; then
+              echo "::error::$d is missing after the build - the inlined URL cannot be verified, so this step refuses to call the bundle clean"
+              exit 1
+            fi
+          done
           # Strip the scheme and any path, leaving the loopback host:port.
           hostport="${NEXT_PUBLIC_SUPABASE_URL#https://}"
           hostport="${hostport#http://}"
@@ -6269,14 +6300,20 @@ jobs:
             echo "::error::(i) the rebuild did not inline the lane URL into .next/static or .next/server - the seed-gated specs would run against a bundle aimed elsewhere"
             exit 1
           fi
-          if grep -r -l -F --include='*.js' --include='*.json' 'placeholder.supabase.co' .next/static .next/server > /dev/null 2>&1; then
-            echo "::error::(ii) the rebuild inlined the placeholder Supabase URL - the seed-gated specs would run against the placeholder bundle"
-            exit 1
-          fi
-          if grep -r -l -E --include='*.js' --include='*.json' 'https://[a-z0-9]{20}\.supabase\.co' .next/static .next/server > /dev/null 2>&1; then
-            echo "::error::(iii) the rebuild inlined a hosted-project Supabase URL - this job builds against its own lane, never a shared or production project"
-            exit 1
-          fi
+          rc=0
+          grep -r -l -F --include='*.js' --include='*.json' 'placeholder.supabase.co' .next/static .next/server > /dev/null || rc=$?
+          case "$rc" in
+            0) echo "::error::(ii) the rebuild inlined the placeholder Supabase URL - the seed-gated specs would run against the placeholder bundle"; exit 1 ;;
+            1) ;;
+            *) echo "::error::(ii) grep could not scan the build output (exit $rc) - refusing to call it free of the placeholder URL"; exit 1 ;;
+          esac
+          rc=0
+          grep -r -l -E --include='*.js' --include='*.json' 'https://[a-z0-9]{20}\.supabase\.co' .next/static .next/server > /dev/null || rc=$?
+          case "$rc" in
+            0) echo "::error::(iii) the rebuild inlined a hosted-project Supabase URL - this job builds against its own lane, never a shared or production project"; exit 1 ;;
+            1) ;;
+            *) echo "::error::(iii) grep could not scan the build output (exit $rc) - refusing to call it free of a hosted-project URL"; exit 1 ;;
+          esac
           echo "Rebuild inlined the lane URL, and no placeholder or hosted-project URL - proceeding to seed-gated specs."
       - name: Guard -- sfox-badge anti-mask assertions present (FACTSHEET-02)
         # Phase 126 / FACTSHEET-02 anti-tamper: e2e-seeded is now BLOCKING
