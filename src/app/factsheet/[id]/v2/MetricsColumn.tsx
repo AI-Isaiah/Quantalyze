@@ -84,7 +84,7 @@ export function windowCoverageCaveat(
   if (from === undefined) return null;
   const date = from === null ? null : isoToMonthDay(from);
   if (from === null || date === null || date === "—") {
-    return `The record has a break in the return chain at a date this view cannot name, so this range may span it. Its ${subject} are compounded across any break inside it.`;
+    return `The record has a break in the return chain at a date this view cannot name, so this range may span it. Its ${subject} compound across any break inside it.`;
   }
   if (rangeStart.slice(0, 10) >= from.slice(0, 10)) return null;
   return `This range starts before ${date}, where the record resumes after its last break in the return chain. Its ${subject} compound returns from before that date, which the full-history figures leave out.`;

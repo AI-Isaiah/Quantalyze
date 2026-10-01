@@ -372,7 +372,7 @@ describe("the window holds across basis and leverage and never fabricates a figu
   // 169.1 review round 1 (SFH MEDIUM-2). D-78 dropped the chain-broken caveat inside
   // a window, but the window re-derive compounds every return in the slice, while the
   // engine compounds only the record from `headlineCoversFrom` on. A range starting
-  // before that day showed a break-spanning Cum. Return / CAGR / Max DD with nothing
+  // before that day showed a break-spanning Cum. Return / CAGR / Calmar with nothing
   // on the page saying so. The strip and the rail are asserted SEPARATELY, by each
   // surface's own subject, so a fix to only one of them stays red.
   function chainBroken(headlineCoversFrom: string | null | undefined): FactsheetPayload {
@@ -382,7 +382,7 @@ describe("the window holds across basis and leverage and never fabricates a figu
       dataQuality: { ...(base.dataQuality ?? {}), twrChainBroken: true, headlineCoversFrom },
     } as FactsheetPayload;
   }
-  const STRIP_SUBJECT = "Cum. Return, CAGR, Calmar and Max DD";
+  const STRIP_SUBJECT = "Cum. Return, CAGR and Calmar";
   const RAIL_SUBJECT = "Cumulative Return, CAGR and Calmar";
 
   it("on a chain-broken record a range starting before the break keeps a caveat on the strip and the rail; the stored-headline caveat returns on reset", async () => {
@@ -397,7 +397,7 @@ describe("the window holds across basis and leverage and never fabricates a figu
     const rail = windowCoverageCaveat(payload.dataQuality, "cash_settlement", payload.dates[100], RAIL_SUBJECT);
     // The sentence is pinned literally once, so the date and the claim are read, not just echoed.
     expect(strip).toBe(
-      "This range starts before Jun 1, 2024, where the record resumes after its last break in the return chain. Its Cum. Return, CAGR, Calmar and Max DD compound returns from before that date, which the full-history figures leave out.",
+      "This range starts before Jun 1, 2024, where the record resumes after its last break in the return chain. Its Cum. Return, CAGR and Calmar compound returns from before that date, which the full-history figures leave out.",
     );
     expect(container.textContent, "the KPI strip names the break").toContain(`⚠ ${strip}`);
     expect(container.textContent, "the rail's Main Metrics names the break").toContain(`⚠ ${rail}`);
@@ -425,7 +425,7 @@ describe("the window holds across basis and leverage and never fabricates a figu
     await click("zoom");
     const strip = windowCoverageCaveat(payload.dataQuality, "cash_settlement", payload.dates[200], STRIP_SUBJECT);
     expect(strip).toBe(
-      "The record has a break in the return chain at a date this view cannot name, so this range may span it. Its Cum. Return, CAGR, Calmar and Max DD are compounded across any break inside it.",
+      "The record has a break in the return chain at a date this view cannot name, so this range may span it. Its Cum. Return, CAGR and Calmar compound across any break inside it.",
     );
     expect(container.textContent).toContain(`⚠ ${strip}`);
     expect(container.textContent).toContain(

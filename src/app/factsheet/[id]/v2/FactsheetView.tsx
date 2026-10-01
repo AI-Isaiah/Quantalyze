@@ -1463,9 +1463,10 @@ function KpiStrip() {
   // 169.1 review round 1 (SFH MEDIUM-2): a window shows no stored figure (D-78),
   // but unlike the leverage arm it DOES compute on a chain-broken row, so a range
   // starting before the last break compounds days the engine leaves out. It keeps a
-  // caveat that says so; Max DD is named because the window re-derives it too.
+  // caveat that says so, naming the same three figures as the full-history caveat:
+  // the engine's Max DD already spans the whole record (`compute_all_metrics`).
   const coverageCaveat = selected
-    ? windowCoverageCaveat(payload.dataQuality, basis, scope.start, "Cum. Return, CAGR, Calmar and Max DD")
+    ? windowCoverageCaveat(payload.dataQuality, basis, scope.start, "Cum. Return, CAGR and Calmar")
     : leverageApplied
       ? null
       : headlineCoverageCaveat(payload.dataQuality, basis, "Cum. Return, CAGR and Calmar");
