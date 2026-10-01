@@ -4,7 +4,9 @@ audit-2026-05-07 P97 / G12.A.2 — compute_jobs claim-token fencing.
 Migration 117 adds `claim_token UUID` to compute_jobs and threads it through
 the claim → mark_done / mark_failed lifecycle so a watchdog reclaim that
 hands the row off to a new worker rejects the original worker's late mark
-RPC with PostgreSQL `serialization_failure` (SQLSTATE 40001).
+RPC with PostgreSQL `serialization_failure` (SQLSTATE 40001); since Phase
+164.9.3.2 the fence raises SQLSTATE 55006 (object_in_use) instead, because
+PostgREST 14 re-runs a 40001 without bound.
 
 This file holds two tracks:
 
@@ -18,7 +20,7 @@ This file holds two tracks:
      dispatch_tick wiring). These verify that:
        (a) main_worker.dispatch_tick reads `claim_token` from the claimed
            job and forwards it as `p_claim_token` to mark_done/mark_failed;
-       (b) on a raised PostgREST APIError(code='40001'), dispatch_tick logs
+       (b) on a raised PostgREST APIError(code='55006'), dispatch_tick logs
            LATE_MARK_IGNORED and does NOT propagate as a failure.
 
 The live-DB track is the regression that proves the fence WORKS. The
@@ -32,7 +34,7 @@ Verification of "test fails without the migration":
     parameter) or — if mig 117's mark RPC isn't loaded — silently mark the
     job done. Both are observable: the live test asserts SerializationError.
   * The mocked tests assert dispatch_tick PASSES `p_claim_token` in the RPC
-    params dict and CATCHES a code='40001' APIError without re-raising.
+    params dict and CATCHES a code='55006' APIError without re-raising.
     Pre-fix dispatch_tick didn't carry the token at all and would re-raise
     any APIError as a runtime failure.
 """
@@ -365,7 +367,7 @@ class TestDispatchTickThreadsClaimToken:
     async def test_late_mark_done_serialization_failure_swallowed(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """When mark_compute_job_done raises APIError(code='40001'), the
+        """When mark_compute_job_done raises APIError(code='55006'), the
         exception is logged as LATE_MARK_IGNORED and dispatch_tick
         returns cleanly. No retry, no re-raise — another worker is
         legitimately handling the row.
@@ -391,7 +393,7 @@ class TestDispatchTickThreadsClaimToken:
                 chain.execute.return_value = MagicMock(data=jobs)
             elif name == "mark_compute_job_done":
                 chain.execute.side_effect = APIError({
-                    "code": "40001",
+                    "code": "55006",
                     "message": "preempted by watchdog reclaim",
                 })
             else:
@@ -428,7 +430,7 @@ class TestDispatchTickThreadsClaimToken:
     async def test_late_mark_failed_serialization_failure_swallowed(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Same contract as DONE → APIError 40001 swallowed, no re-raise.
+        """Same contract as DONE → APIError 55006 swallowed, no re-raise.
 
         I3: includes the same caplog assertion as the DONE-equivalent."""
         tok = str(uuid.uuid4())
@@ -448,7 +450,7 @@ class TestDispatchTickThreadsClaimToken:
                 chain.execute.return_value = MagicMock(data=jobs)
             elif name == "mark_compute_job_failed":
                 chain.execute.side_effect = APIError({
-                    "code": "40001",
+                    "code": "55006",
                     "message": "preempted by watchdog reclaim",
                 })
             else:
@@ -467,9 +469,9 @@ class TestDispatchTickThreadsClaimToken:
              caplog.at_level(logging.WARNING, logger="quantalyze.analytics.worker"):
             await dispatch_tick("worker-fp")
 
-        # Exactly one mark_failed attempt — the swallowed 40001 must NOT
+        # Exactly one mark_failed attempt — the swallowed 55006 must NOT
         # cascade into the fallback mark_failed branch (which would also
-        # 40001 and obscure the LATE_MARK_IGNORED log line).
+        # 55006 and obscure the LATE_MARK_IGNORED log line).
         rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
         assert rpc_names.count("mark_compute_job_failed") == 1
         assert any(
@@ -482,7 +484,7 @@ class TestDispatchTickThreadsClaimToken:
     ) -> None:
         """PR #149 second-pass review fix #4 (HIGH conf 8): when dispatch()
         raises AND the outer-catch fallback's mark_failed itself swallows
-        a 40001, the resulting LATE_MARK_IGNORED log record MUST carry
+        a 55006 fence preemption, the resulting LATE_MARK_IGNORED log record MUST carry
         `event_type="preempted_after_dispatch_error"` in its `extra`
         dict.
 
@@ -514,10 +516,10 @@ class TestDispatchTickThreadsClaimToken:
             if name == "claim_compute_jobs_with_priority":
                 chain.execute.return_value = MagicMock(data=jobs)
             elif name == "mark_compute_job_failed":
-                # The outer-catch's _mark_failed_fallback hits 40001 too —
+                # The outer-catch's _mark_failed_fallback hits 55006 too —
                 # this is the cascade scenario.
                 chain.execute.side_effect = APIError({
-                    "code": "40001",
+                    "code": "55006",
                     "message": "preempted by watchdog reclaim",
                 })
             else:
@@ -1360,7 +1362,8 @@ def test_late_mark_done_with_stale_token_raises_serialization_failure(admin, str
       Watchdog reclaims → token NULLed
       W2 claims → token2 (≠ token1)
       W1 calls mark_compute_job_done(job_id, p_claim_token=token1)
-        → MUST raise SQLSTATE 40001 (serialization_failure)
+        → MUST raise SQLSTATE 55006 (object_in_use; 40001 before Phase
+          164.9.3.2, which PostgREST 14 re-ran without bound)
       W2 calls mark_compute_job_done(job_id, p_claim_token=token2)
         → succeeds, row → done.
     """
@@ -1398,9 +1401,10 @@ def test_late_mark_done_with_stale_token_raises_serialization_failure(admin, str
         )
 
         # W1's late mark MUST raise. We don't depend on a specific exception
-        # class because supabase-py wraps PostgREST errors in APIError (whose
-        # .code is '40001') and the wire-level message also embeds the SQLSTATE.
-        # Either signal proves the fence engaged.
+        # class; supabase-py wraps PostgREST errors in APIError, whose .code
+        # carries the SQLSTATE. Assert the code (55006) AND the literal: the
+        # old disjunction also accepted 40001 text, so it could not tell the
+        # fix from the body PostgREST 14 loops on (Phase 164.9.3.2).
         late_mark_failed = False
         try:
             admin.rpc("mark_compute_job_done", {
@@ -1409,14 +1413,12 @@ def test_late_mark_done_with_stale_token_raises_serialization_failure(admin, str
             }).execute()
         except Exception as exc:  # noqa: BLE001
             err_str = str(exc)
-            assert (
-                "40001" in err_str
-                or "serialization_failure" in err_str
-                or "preempted" in err_str
-            ), (
+            assert getattr(exc, "code", None) == "55006", (
                 f"W1's late mark_done raised the wrong exception: {exc!r}. "
-                "Expected SQLSTATE 40001 / serialization_failure / "
-                "'preempted' in the message."
+                "Expected SQLSTATE 55006 (object_in_use)."
+            )
+            assert "preempted by watchdog reclaim" in err_str, (
+                f"W1's late mark_done lost the classifier literal: {exc!r}."
             )
             late_mark_failed = True
         assert late_mark_failed, (
@@ -1485,11 +1487,13 @@ def test_late_mark_failed_with_stale_token_raises_serialization_failure(admin, s
             }).execute()
         except Exception as exc:  # noqa: BLE001
             err_str = str(exc)
-            assert (
-                "40001" in err_str
-                or "serialization_failure" in err_str
-                or "preempted" in err_str
-            ), f"W1's late mark_failed raised the wrong exception: {exc!r}"
+            assert getattr(exc, "code", None) == "55006", (
+                f"W1's late mark_failed raised the wrong exception: {exc!r}. "
+                "Expected SQLSTATE 55006 (object_in_use)."
+            )
+            assert "preempted by watchdog reclaim" in err_str, (
+                f"W1's late mark_failed lost the classifier literal: {exc!r}."
+            )
             late_mark_failed = True
         assert late_mark_failed, (
             "W1's mark_compute_job_failed(token1) MUST raise after watchdog "
@@ -1885,7 +1889,8 @@ def test_late_mark_done_after_w2_completed_raises_serialization_failure(admin, s
       W2 claims         → token2 (≠ token1)
       **W2 marks done first** → row.status='done', row.claim_token=token2
       W1 calls mark_compute_job_done(job_id, p_claim_token=token1)
-        → MUST raise SQLSTATE 40001 (serialization_failure), NOT silently
+        → MUST raise SQLSTATE 55006 (object_in_use; 40001 before Phase
+          164.9.3.2), NOT silently
         return via the mig 109 P6 idempotent branch.
 
     PR #149 second-pass review fix #2. Without this guard the prior
@@ -1941,14 +1946,13 @@ def test_late_mark_done_after_w2_completed_raises_serialization_failure(admin, s
             }).execute()
         except Exception as exc:  # noqa: BLE001
             err_str = str(exc)
-            assert (
-                "40001" in err_str
-                or "serialization_failure" in err_str
-                or "preempted" in err_str
-            ), (
+            assert getattr(exc, "code", None) == "55006", (
                 f"W1's late mark_done on done row raised the wrong "
-                f"exception: {exc!r}. Expected SQLSTATE 40001 / "
-                "serialization_failure / 'preempted' in the message."
+                f"exception: {exc!r}. Expected SQLSTATE 55006 (object_in_use)."
+            )
+            assert "preempted by watchdog reclaim" in err_str, (
+                f"W1's late mark_done on done row lost the classifier "
+                f"literal: {exc!r}."
             )
             late_mark_failed = True
         assert late_mark_failed, (
