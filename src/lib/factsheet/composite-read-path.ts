@@ -180,7 +180,8 @@ export async function readSmoothedSeries(
  * Phase 169 review round 1 (WR-05 / SFH M-3): the persisted MTM and smoothed
  * series reads throw it too, on a composite AND on a single-key strategy, and
  * `read` names which series failed. The class keeps the name of its first case,
- * because the discovery detail page and the resolve stage catch it by class.
+ * because the resolve stage catches it by class (since Phase 169.1 plan 01 the
+ * discovery detail page builds through that stage and no longer catches it).
  */
 export type FactsheetSeriesRead =
   | "csv_daily_returns"
@@ -278,10 +279,11 @@ async function readCsvDailyReturns(admin: SupabaseClient, strategyId: string): P
 
 /**
  * Round-2 H-2 — the ONE composite read-path (D6, the milestone's "one path"
- * lesson). BOTH surfaces that render the composite factsheet — the canonical
- * `/factsheet/[id]/v2` route AND the discovery detail page
- * (`/discovery/[slug]/[strategyId]`) — route a composite through THIS helper so
- * they can't diverge. Before this existed, the discovery page had no composite
+ * lesson). Every surface that renders the composite factsheet reaches it through
+ * the shared resolve stage (`fetch-and-build-payload.ts`), which routes a
+ * composite through THIS helper; since Phase 169.1 plan 01 that includes the
+ * discovery detail page (`/discovery/[slug]/[strategyId]`), which no longer
+ * calls it itself. Before this existed, the discovery page had no composite
  * branch: a composite (daily_returns NULL, returns_series populated) fell through
  * `deriveIngestSource` → "api" → invented PeerPercentile / AllocatorSection /
  * EventSignatures panels + a dense-0.0-gap-filled series drawing flat-zero gap
@@ -298,16 +300,19 @@ async function readCsvDailyReturns(admin: SupabaseClient, strategyId: string): P
  *   - F1/H-1 gate: refuse to render when the persisted `cash_settlement` lacks a
  *     trustworthy headline (returns null → placeholder); a degenerate-but-valid
  *     composite renders (strict overlay shows null scalars as "—").
- *   - C-1: resolve the cumulative method from `returns_denominator_config`
- *     (arithmetic only for the "simple"/allocated-capital override; geometric
- *     mainline).
+ *   - C-1 / HARD-03, amended by Phase 169.1 (D-30): resolve the cumulative
+ *     method AND the day basis through {@link resolveMetricsConventions} (the
+ *     persisted flag, then the `cash_settlement` conventions echo read by
+ *     {@link readCashConventions}, then `returns_denominator_config`). That read
+ *     never throws; a failure degrades to the config tier.
  *   - F2/M-1 MTM gate + FS-01/FS-02 markers threading.
  *
  * Data-access: `admin` MUST be the service-role handle. `csv_daily_returns` has
  * service_role/owner/admin RLS only (migration 20260522111839), so the admin
  * handle is the ONLY client that can read it. The CALLER is responsible for the
- * upstream published-factsheet visibility gate (the factsheet route's RLS
- * signature probe; the discovery page's `discovery_categories!inner` + auth) —
+ * upstream published-factsheet visibility gate (the visibility predicate each
+ * caller of the resolve stage injects: published-only, published-or-owner, or a
+ * share link's token predicate) —
  * this helper does NOT widen visibility, it only reads the sparse series for a
  * strategy the caller already authorized.
  *
@@ -368,44 +373,11 @@ export async function readCompositeFactsheet(
     return null;
   }
 
-  // C-1 / HARD-03 (#69, Phase-90 LOW-2): cumulation basis precedence —
-  //   1. the PERSISTED method frozen into `data_quality_flags.cumulative_method`
-  //      at stitch (Task 1), which matches the headline compute BY CONSTRUCTION;
-  //   2. else the LIVE re-derive from returns_denominator_config (older composites
-  //      with no persisted key — self-heals on next re-stitch, HARD-04 precedent).
-  // Preferring the persisted value kills the chart↔headline drift an owner could
-  // trigger by editing the config after publish without re-stitching. The
-  // "simple"→"arithmetic" map is the SAME single rule `attributionBasisFromConfig`
-  // encodes, applied to the RAW worker vocabulary — persisted and fallback can't
-  // diverge. Strict-literal coercion (only the exact strings "simple"/"geometric"
-  // honored; anything else falls back) mirrors the `=== true` server-truth
-  // discipline in this file (T-92-05).
-  const persisted = dqf?.cumulative_method;
-  // HARD-03 hardening (Phase 93.1): an UNEXPECTED persisted value — PRESENT but
-  // neither "simple" nor "geometric" — silently re-derives below, re-opening the
-  // exact chart↔headline drift HARD-03 closes, with ZERO signal. It is unreachable
-  // for correctly-written current data (the worker persists only the two RAW
-  // literals at :3868), so surface it LOUD before the (preserved) live fallback.
-  // Absent/null stays SILENT — that is the legitimate older-composite fallback
-  // (no persisted key), not a defect. Warn-level per the sibling malformed-input
-  // convention in build-payload.ts (deriveSegmentMarkers): recoverable, not Sentry.
-  if (
-    persisted !== null &&
-    persisted !== undefined &&
-    persisted !== "simple" &&
-    persisted !== "geometric"
-  ) {
-    console.warn(
-      "[factsheet] readCompositeFactsheet — unexpected persisted cumulative_method; falling back to live re-derive",
-      { strategyId, persisted },
-    );
-  }
-  const cumulativeMethod =
-    persisted === "simple"
-      ? "arithmetic"
-      : persisted === "geometric"
-        ? "geometric"
-        : attributionBasisFromConfig(returnsDenominatorConfig);
+  // C-1 / HARD-03 (#69, Phase-90 LOW-2), amended by Phase 169.1 (D-30): the
+  // method AND the day basis come from ONE resolver, {@link resolveMetricsConventions},
+  // which keeps the HARD-03 precedence and inserts the frozen conventions echo
+  // between the persisted flag and the live config. The echo is read below,
+  // concurrently with the MTM / smoothed series reads.
   // F2/M-1: MTM enabled iff the mark_to_market basis is present with a finite
   // headline (locked D1 intent); the strict overlay renders degenerate scalars "—".
   const mtmAvailable = hasBasisHeadline(
@@ -430,15 +402,27 @@ export async function readCompositeFactsheet(
   // smoothed gate is available (skip the roundtrip otherwise) — same gating as MTM.
   // The two reads are independent; fire them concurrently (each still gated so a
   // skipped read stays skipped — resolves to null without a roundtrip).
-  const [mtmSeries, smoothedSeries] = await Promise.all([
+  // Phase 169.1 (D-30, D-83 (a) scope): the `cash_settlement` conventions echo,
+  // read for EVERY composite (one extra `strategy_analytics_series` read per
+  // composite row, the probe included, selecting only `payload->conventions`).
+  // It never throws: a failed read degrades to the config tier.
+  const [mtmSeries, smoothedSeries, cashConventions] = await Promise.all([
     mtmAvailable ? readMtmSeries(admin, strategyId) : Promise.resolve(null),
     smoothedAvailable ? readSmoothedSeries(admin, strategyId) : Promise.resolve(null),
+    readCashConventions(admin, strategyId),
   ]);
+  const { cumulativeMethod, dayBasis } = resolveMetricsConventions({
+    dqf,
+    cashConventions,
+    returnsDenominatorConfig,
+    strategyId,
+  });
 
   return {
     dailyReturns,
     buildOpts: {
       cumulativeMethod,
+      dayBasis,
       segmentBoundaries: markers.segmentBoundaries,
       missingSegments: markers.missingSegments,
       metricsByBasis,
@@ -825,6 +809,125 @@ export async function readSingleKeyBasisOpts(
   }
   if (Object.keys(addedQuality).length === 0) return withHeadline;
   return { ...withHeadline, dataQuality: { ...singleKeyDataQuality(dqf), ...addedQuality } };
+}
+
+/**
+ * Phase 169.1 (D-30, D-83) — the `conventions` object the analytics service froze
+ * into the `cash_settlement` series row's payload (`derive_basis_series`:
+ * `periods_per_year`, `cumulative_method`, `day_basis`, optional `benchmark`,
+ * `densify`), or null. Selected by JSON path, never the whole payload (the series
+ * rows are not read). `admin` is the caller's service-role handle, behind the
+ * caller's own visibility gate; this read widens nothing.
+ *
+ * It CHOOSES a convention; it does not decide whether the factsheet builds. So,
+ * unlike {@link readMtmSeries} and {@link readHeadlineCoversFrom}, it never throws
+ * {@link CompositeSeriesReadError}: an `error` result AND a thrown query chain
+ * (a client mock that does not answer this query, a network fault) both log a
+ * `console.error` and return null, and {@link resolveMetricsConventions} falls to
+ * the config tier (D-30, D-78). Exported for plan 169.1-04's single-key arm.
+ */
+export async function readCashConventions(
+  admin: SupabaseClient,
+  strategyId: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const { data, error } = await admin
+      .from("strategy_analytics_series")
+      .select("conventions:payload->conventions")
+      .eq("strategy_id", strategyId)
+      .eq("kind", CASH_SETTLEMENT_SERIES_KIND)
+      .maybeSingle();
+    if (error) {
+      console.error("[factsheet] cash_settlement conventions read failed; resolving from the config", {
+        strategyId,
+        message: error.message,
+      });
+      return null;
+    }
+    const conventions = (data as { conventions?: unknown } | null)?.conventions;
+    return conventions !== null && typeof conventions === "object" && !Array.isArray(conventions)
+      ? (conventions as Record<string, unknown>)
+      : null;
+  } catch (e) {
+    console.error("[factsheet] cash_settlement conventions read threw; resolving from the config", {
+      strategyId,
+      message: e instanceof Error ? e.message : String(e),
+    });
+    return null;
+  }
+}
+
+/**
+ * Phase 169.1 (D-30) — the ONE resolver of a strategy's metric conventions: the
+ * compounding method and the day basis the engine computed it under. Exported
+ * for plan 169.1-04, which routes the single-key arm through it (D-83).
+ *
+ * Method, C-1 / HARD-03 (#69, Phase-90 LOW-2) precedence, amended by D-30:
+ *   1. the PERSISTED method frozen into `data_quality_flags.cumulative_method` at
+ *      stitch, which matches the headline compute BY CONSTRUCTION;
+ *   2. else the `cumulative_method` of the frozen `cash_settlement` conventions
+ *      echo (the engine's own input, frozen with the series);
+ *   3. else the LIVE re-derive from `returns_denominator_config` (older
+ *      composites with no persisted key — self-heals on next re-stitch, HARD-04
+ *      precedent).
+ * Preferring the frozen values kills the chart↔headline drift an owner could
+ * trigger by editing the config after publish without re-stitching. The
+ * "simple"→"arithmetic" map is the SAME single rule `attributionBasisFromConfig`
+ * encodes, applied to the RAW worker vocabulary, so the tiers can't diverge.
+ *
+ * Day basis: the conventions echo's `day_basis` ("calendar" / "active"), else the
+ * config's `metrics_basis` ("active_day" → active, "calendar_day" → calendar, the
+ * engine's `metrics_day_basis` map), else calendar.
+ *
+ * Strict-literal coercion throughout, mirroring the `=== true` server-truth
+ * discipline in this file (T-92-05). HARD-03 hardening (Phase 93.1): a PRESENT
+ * but unexpected value is warned (naming the strategy and the value) and the
+ * next tier decides; it is unreachable for correctly-written current data, so
+ * it surfaces LOUD rather than silently re-opening the drift. Absent / null
+ * stays SILENT — the legitimate older-row fallback. Warn-level per the sibling
+ * malformed-input convention in build-payload.ts (deriveSegmentMarkers).
+ */
+export function resolveMetricsConventions(input: {
+  dqf: { cumulative_method?: unknown } | null | undefined;
+  cashConventions: Record<string, unknown> | null | undefined;
+  returnsDenominatorConfig: unknown;
+  strategyId: string;
+}): { cumulativeMethod: "geometric" | "arithmetic"; dayBasis: "calendar" | "active" } {
+  const { dqf, cashConventions, returnsDenominatorConfig, strategyId } = input;
+  const unexpected = (what: string, value: unknown) =>
+    console.warn(`[factsheet] resolveMetricsConventions — unexpected ${what}; falling through to the next tier`, {
+      strategyId,
+      value,
+    });
+  const present = (v: unknown) => v !== null && v !== undefined;
+
+  const method = (raw: unknown, what: string): "geometric" | "arithmetic" | null => {
+    if (raw === "simple") return "arithmetic";
+    if (raw === "geometric") return "geometric";
+    if (present(raw)) unexpected(what, raw);
+    return null;
+  };
+  const cumulativeMethod =
+    method(dqf?.cumulative_method, "persisted cumulative_method") ??
+    method(cashConventions?.cumulative_method, "conventions cumulative_method") ??
+    attributionBasisFromConfig(returnsDenominatorConfig);
+
+  const conventionsDayBasis = (raw: unknown): "calendar" | "active" | null => {
+    if (raw === "calendar" || raw === "active") return raw;
+    if (present(raw)) unexpected("conventions day_basis", raw);
+    return null;
+  };
+  const configDayBasis = (raw: unknown): "calendar" | "active" | null => {
+    const v = raw !== null && typeof raw === "object" ? (raw as { metrics_basis?: unknown }).metrics_basis : undefined;
+    if (v === "active_day") return "active";
+    if (v === "calendar_day") return "calendar";
+    if (present(v)) unexpected("config metrics_basis", v);
+    return null;
+  };
+  const dayBasis =
+    conventionsDayBasis(cashConventions?.day_basis) ?? configDayBasis(returnsDenominatorConfig) ?? "calendar";
+
+  return { cumulativeMethod, dayBasis };
 }
 
 /**

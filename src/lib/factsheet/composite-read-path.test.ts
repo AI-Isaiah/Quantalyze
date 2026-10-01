@@ -963,10 +963,17 @@ describe("MTM-04 readCompositeFactsheet — gated MTM series threading (one owne
     let mtmReadCount = 0;
     const from = (table: string) => {
       if (table === "strategy_analytics_series") {
+        // Phase 169.1 (D-30): the cash_settlement conventions read answers "no
+        // row" and is not an MTM roundtrip, so it is not counted.
+        let conventionsRead = false;
         const chain = {
-          select: () => chain,
+          select: (s?: string) => {
+            conventionsRead = s === "conventions:payload->conventions";
+            return chain;
+          },
           eq: () => chain,
           maybeSingle: () => {
+            if (conventionsRead) return Promise.resolve({ data: null, error: null });
             mtmReadCount++;
             return Promise.resolve({
               data: opts.mtmRowNull ? null : { payload: opts.mtmPayload },
