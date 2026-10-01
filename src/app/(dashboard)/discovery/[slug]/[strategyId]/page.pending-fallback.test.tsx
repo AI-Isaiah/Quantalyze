@@ -515,6 +515,22 @@ describe("discovery page — the single-key arm's series reads and returns conve
 
   it("a `simple` returns_denominator_config draws the arithmetic curve and withholds the leverage what-if", async () => {
     await seedSingleKey({ metricsJsonByBasis: null, config: { cumulative_method: "simple" } });
+    // 169.1 SFH HIGH-1: a build reads the `cash_settlement` conventions echo,
+    // and a FAILED read is now captured. The default double throws on that
+    // table, so it answers here as a real empty read (no echo row, a fact), and
+    // the config tier decides without an outage in play.
+    vi.mocked(createAdminClient).mockReturnValue(
+      withStrategiesRead({
+        from: (table: string) => {
+          if (table !== "strategy_analytics_series") throw new Error(`unexpected table ${table}`);
+          const chain: Record<string, unknown> = {};
+          chain.select = () => chain;
+          chain.eq = () => chain;
+          chain.maybeSingle = () => Promise.resolve({ data: null, error: null });
+          return chain;
+        },
+      }) as never,
+    );
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const payload = findPayload(

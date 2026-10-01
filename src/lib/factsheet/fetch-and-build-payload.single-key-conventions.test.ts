@@ -64,6 +64,22 @@ vi.mock("@/lib/supabase/admin", () => {
       }
       return { data: null, error: null };
     };
+    if (table === "csv_daily_returns") {
+      // The composite reader's date-keyset pages (SFH HIGH-1's composite arm):
+      // a page after the first carries `.gt("date", cursor)`, and an empty page
+      // ends it.
+      let after: string | null = null;
+      b.gt = (_c: string, v: string) => {
+        after = v;
+        return b;
+      };
+      b.limit = async () => ({
+        data: dailyReturns()
+          .filter((r) => after === null || r.date > after)
+          .map((r) => ({ date: r.date, daily_return: r.value })),
+        error: null,
+      });
+    }
     if (table === "benchmark_prices") {
       // An empty successful page ends the BTC keyset reader at once.
       b.gte = self;
@@ -76,7 +92,12 @@ vi.mock("@/lib/supabase/admin", () => {
   return { createAdminClient: () => ({ from: (table: string) => builder(table) }) };
 });
 
-import { fetchAndBuildPayload, probeFactsheetBuildable } from "./fetch-and-build-payload";
+import {
+  fetchAndBuildPayload,
+  fetchAndBuildPayloadWithReason,
+  probeFactsheetBuildable,
+} from "./fetch-and-build-payload";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 const STRATEGY_ID = "00000000-0000-4000-8000-0000000000d4";
 const publicVisibility = <Q,>(q: Q): Q => q;
@@ -150,7 +171,14 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.mocked(console.warn).mockClear();
   vi.mocked(console.error).mockClear();
+  vi.mocked(captureToSentry).mockClear();
 });
+
+/** The one Sentry event a degraded build sends (169.1 SFH HIGH-1). */
+const conventionsCaptures = () =>
+  vi.mocked(captureToSentry).mock.calls.filter(
+    (c) => (c[1] as { tags?: { reason?: string } } | undefined)?.tags?.reason === "conventions_read_error",
+  );
 
 describe("169.1-04 D-83 (a): the frozen conventions echo decides before the live config", () => {
   it("ECHO BEATS A NULL CONFIG: echo simple + active draws the arithmetic curve and carries the active day basis", async () => {
@@ -227,6 +255,20 @@ describe("169.1-04 D-30: a failed conventions read degrades to the config tier a
     expect(vi.mocked(console.error).mock.calls.some((c) => String(c[0]).includes("conventions read failed"))).toBe(
       true,
     );
+    // SFH HIGH-1: `console.*` does not reach Sentry in this repo, so the build
+    // that shipped on the config tier is captured once, with the read's code.
+    expect(conventionsCaptures()).toHaveLength(1);
+    expect(conventionsCaptures()[0][1]).toMatchObject({
+      tags: {
+        stage: "factsheet-resolve",
+        caller: "build",
+        reason: "conventions_read_error",
+        code: "57014",
+        strategy_id: STRATEGY_ID,
+        read: "cash_settlement",
+      },
+      extra: { errorMessage: "upstream timeout" },
+    });
   });
 
   it("READ THROWS: a thrown chain logs and the geometric default decides", async () => {
@@ -239,6 +281,74 @@ describe("169.1-04 D-30: a failed conventions read degrades to the config tier a
     expect(vi.mocked(console.error).mock.calls.some((c) => String(c[0]).includes("conventions read threw"))).toBe(
       true,
     );
+    expect(conventionsCaptures()).toHaveLength(1);
+    expect(conventionsCaptures()[0][1]).toMatchObject({
+      tags: { reason: "conventions_read_error", code: "threw" },
+      extra: { errorMessage: "socket hang up" },
+    });
+  });
+
+  it("DEGRADED MARKER: a failed read marks the build result degraded, so the public cache refuses it (SFH HIGH-1)", async () => {
+    seedStrategy({ cumulative_method: "simple" });
+    fake.conventionsError = { message: "upstream timeout", code: "57014" };
+    const built = await fetchAndBuildPayloadWithReason(STRATEGY_ID, publicVisibility);
+    expect(built.payload).not.toBeNull();
+    expect(built.reason).toBeNull();
+    expect(built).toMatchObject({ conventionsDegraded: true });
+  });
+
+  it("CONTROL: a clean read (and an absent row) is not degraded and captures nothing", async () => {
+    seedStrategy({ cumulative_method: "simple" });
+    fake.conventions = { cumulative_method: "geometric", day_basis: "calendar" };
+    const clean = await fetchAndBuildPayloadWithReason(STRATEGY_ID, publicVisibility);
+    expect("conventionsDegraded" in clean, "a clean build carries the degraded key").toBe(false);
+    fake.conventions = null;
+    const absent = await fetchAndBuildPayloadWithReason(STRATEGY_ID, publicVisibility);
+    expect("conventionsDegraded" in absent, "an absent row is a fact, not an outage").toBe(false);
+    expect(conventionsCaptures()).toHaveLength(0);
+  });
+});
+
+describe("169.1 SFH HIGH-1: the composite arm marks and captures a failed conventions read for a build only", () => {
+  function seedComposite() {
+    seedStrategy({ cumulative_method: "simple", metrics_basis: "active_day" });
+    const row = fake.strategyResult.data as Row;
+    row.strategy_analytics = {
+      ...(row.strategy_analytics as Row),
+      daily_returns: null,
+      data_quality_flags: { composite: true },
+      metrics_json_by_basis: {
+        cash_settlement: {
+          cumulative_return: SUM,
+          cagr: 0.7,
+          volatility: 0.3,
+          sharpe: 2.1,
+          sortino: 3.2,
+          calmar: 7,
+          max_drawdown: -0.1,
+        },
+      },
+    };
+    fake.conventionsError = { message: "upstream timeout", code: "57014" };
+  }
+
+  it("BUILD: degraded, built on the config tier, captured once", async () => {
+    seedComposite();
+    const built = await fetchAndBuildPayloadWithReason(STRATEGY_ID, publicVisibility);
+    expect(built.payload).not.toBeNull();
+    expect(built.payload!.cumulativeMethod).toBe("arithmetic");
+    expect(built.payload!.dayBasis).toBe("active");
+    expect(built).toMatchObject({ conventionsDegraded: true });
+    expect(conventionsCaptures()).toHaveLength(1);
+    expect(conventionsCaptures()[0][1]).toMatchObject({ tags: { caller: "build", code: "57014" } });
+  });
+
+  it("PROBE: buildable, and no capture (167.2.1-REVIEW-R2 WR-01: a probe never captures)", async () => {
+    seedComposite();
+    const probe = await probeFactsheetBuildable(STRATEGY_ID, publicVisibility);
+    expect(probe).toEqual({ buildable: true });
+    expect(conventionsReads(), "the composite probe did read the conventions").toBe(1);
+    expect(conventionsCaptures()).toHaveLength(0);
   });
 });
 

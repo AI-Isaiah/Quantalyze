@@ -304,7 +304,9 @@ async function readCsvDailyReturns(admin: SupabaseClient, strategyId: string): P
  *     method AND the day basis through {@link resolveMetricsConventions} (the
  *     persisted flag, then the `cash_settlement` conventions echo read by
  *     {@link readCashConventions}, then `returns_denominator_config`). That read
- *     never throws; a failure degrades to the config tier.
+ *     never throws; a failure degrades to the config tier and is returned as
+ *     `conventionsReadFailure` (SFH HIGH-1), which the resolve stage captures
+ *     and keeps out of the public cache.
  *   - F2/M-1 MTM gate + FS-01/FS-02 markers threading.
  *
  * Data-access: `admin` MUST be the service-role handle. `csv_daily_returns` has
@@ -345,7 +347,11 @@ export async function readCompositeFactsheet(
     metricsJsonByBasis: unknown;
     returnsDenominatorConfig: unknown;
   },
-): Promise<{ dailyReturns: DailyReturn[]; buildOpts: BuildFactsheetOpts } | null> {
+): Promise<{
+  dailyReturns: DailyReturn[];
+  buildOpts: BuildFactsheetOpts;
+  conventionsReadFailure?: { code: string; message: string };
+} | null> {
   const { strategyId, dqf, metricsJsonByBasis, returnsDenominatorConfig } = input;
 
   // F3 / Phase 169 (D-41, routed from 167.2.1 D-07): a composite depends
@@ -405,21 +411,24 @@ export async function readCompositeFactsheet(
   // Phase 169.1 (D-30, D-83 (a) scope): the `cash_settlement` conventions echo,
   // read for EVERY composite (one extra `strategy_analytics_series` read per
   // composite row, the probe included, selecting only `payload->conventions`).
-  // It never throws: a failed read degrades to the config tier.
-  const [mtmSeries, smoothedSeries, cashConventions] = await Promise.all([
+  // It never throws: a failed read degrades to the config tier, and is returned
+  // as `conventionsReadFailure` beside `buildOpts` (SFH HIGH-1) so the resolve
+  // stage can capture it for a build and keep that build out of the public cache.
+  const [mtmSeries, smoothedSeries, cashRead] = await Promise.all([
     mtmAvailable ? readMtmSeries(admin, strategyId) : Promise.resolve(null),
     smoothedAvailable ? readSmoothedSeries(admin, strategyId) : Promise.resolve(null),
     readCashConventions(admin, strategyId),
   ]);
   const { cumulativeMethod, dayBasis } = resolveMetricsConventions({
     dqf,
-    cashConventions,
+    cashConventions: cashRead.conventions,
     returnsDenominatorConfig,
     strategyId,
   });
 
   return {
     dailyReturns,
+    ...(cashRead.failed ? { conventionsReadFailure: { code: cashRead.code, message: cashRead.message } } : {}),
     buildOpts: {
       cumulativeMethod,
       dayBasis,
@@ -850,14 +859,26 @@ export async function readSingleKeyBasisOpts(
  * It CHOOSES a convention; it does not decide whether the factsheet builds. So,
  * unlike {@link readMtmSeries} and {@link readHeadlineCoversFrom}, it never throws
  * {@link CompositeSeriesReadError}: an `error` result AND a thrown query chain
- * (a client mock that does not answer this query, a network fault) both log a
- * `console.error` and return null, and {@link resolveMetricsConventions} falls to
- * the config tier (D-30, D-78). Exported for plan 169.1-04's single-key arm.
+ * (a client that does not answer this query, a network fault) both log a
+ * `console.error` and answer `conventions: null`, and {@link resolveMetricsConventions}
+ * falls to the config tier (D-30, D-78). Exported for plan 169.1-04's single-key arm.
+ *
+ * Phase 169.1 review round 1 (SFH HIGH-1): a FAILED read is no longer
+ * indistinguishable from an absent row. It answers `failed: true` with its code
+ * (`"threw"` for a thrown chain), because a build on the config tier after an
+ * outage can draw the curve on a method the stored headline was not computed
+ * under. The resolve stage captures it to Sentry for a build that ships, and
+ * marks the build degraded so the public cache never stores it. The degrade
+ * itself (D-30: a blip must not blank a factsheet) is unchanged.
  */
+export type CashConventionsRead =
+  | { conventions: Record<string, unknown> | null; failed: false }
+  | { conventions: null; failed: true; code: string; message: string };
+
 export async function readCashConventions(
   admin: SupabaseClient,
   strategyId: string,
-): Promise<Record<string, unknown> | null> {
+): Promise<CashConventionsRead> {
   try {
     const { data, error } = await admin
       .from("strategy_analytics_series")
@@ -870,18 +891,23 @@ export async function readCashConventions(
         strategyId,
         message: error.message,
       });
-      return null;
+      return { conventions: null, failed: true, code: error.code || "none", message: error.message };
     }
     const conventions = (data as { conventions?: unknown } | null)?.conventions;
-    return conventions !== null && typeof conventions === "object" && !Array.isArray(conventions)
-      ? (conventions as Record<string, unknown>)
-      : null;
+    return {
+      conventions:
+        conventions !== null && typeof conventions === "object" && !Array.isArray(conventions)
+          ? (conventions as Record<string, unknown>)
+          : null,
+      failed: false,
+    };
   } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
     console.error("[factsheet] cash_settlement conventions read threw; resolving from the config", {
       strategyId,
-      message: e instanceof Error ? e.message : String(e),
+      message,
     });
-    return null;
+    return { conventions: null, failed: true, code: "threw", message };
   }
 }
 

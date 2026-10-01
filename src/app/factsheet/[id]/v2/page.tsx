@@ -89,6 +89,25 @@ class FactsheetReadError extends Error {
   }
 }
 
+/**
+ * 169.1 review round 1 (SFH HIGH-1) — the public build succeeded, but its
+ * `cash_settlement` conventions read failed, so the payload was built on the
+ * config tier (D-30) and may draw its curve on a method the stored headline was
+ * not computed under. Thrown from inside the `unstable_cache` callback, exactly
+ * like `FactsheetReadError`, so that build is never stored for the analytics
+ * run. Unlike a `read_error` it CARRIES the payload: a blip must not blank a
+ * factsheet (D-30), so the page renders it, uncached. The resolve stage has
+ * already captured the failed read once. Module-private.
+ */
+class FactsheetDegradedBuildError extends Error {
+  readonly payload: FactsheetPayload;
+  constructor(payload: FactsheetPayload) {
+    super("public factsheet build: built on the config tier after a failed conventions read");
+    this.name = "FactsheetDegradedBuildError";
+    this.payload = payload;
+  }
+}
+
 function buildFactsheetPayloadCached(
   id: string,
   computedAt: string,
@@ -140,6 +159,8 @@ function buildFactsheetPayloadCached(
     async () => {
       const built = await fetchAndBuildPayloadWithReason(id, withPublishedOnly);
       if (built.reason === "read_error") throw new FactsheetReadError();
+      // SFH HIGH-1: a degraded build is rendered, never stored (see the class).
+      if (built.payload && built.conventionsDegraded) throw new FactsheetDegradedBuildError(built.payload);
       return built.payload;
     },
     // Cache key carries a shape-version suffix. Bump it (e.g. -v2 → -v3)
@@ -521,9 +542,14 @@ export default async function FactsheetV2Page({
     try {
       payload = await buildFactsheetPayloadCached(id, computedAt);
     } catch (err) {
-      if (!(err instanceof FactsheetReadError)) throw err;
-      publicReadFailed = true;
-      payload = null;
+      // SFH HIGH-1: a degraded build renders its payload, uncached (D-30).
+      if (err instanceof FactsheetDegradedBuildError) {
+        payload = err.payload;
+      } else {
+        if (!(err instanceof FactsheetReadError)) throw err;
+        publicReadFailed = true;
+        payload = null;
+      }
     }
   }
   if (!payload) {
