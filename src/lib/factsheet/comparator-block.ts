@@ -114,9 +114,21 @@ export function buildComparatorBlock(
   // then compound. Lets users compare both curves on a single chart fairly.
   // D-59: the scale inherits the comparator basis through benchSummary.ann_vol
   // (a switched input, no new ratio: D-36, the compute-once gate holds).
-  const vmScale = benchSummary && benchSummary.ann_vol > 0 ? stratAnnVol / benchSummary.ann_vol : 1;
-  const scaledCovered = coveredReturns.map(r => r * vmScale);
-  const volMatched = scatterCovered(benchReturns, cumEq(scaledCovered));
+  // 169.1 review-fix D: a strategy vol that is not finite (an active-day basis
+  // bundle with fewer than two non-zero days, MD-03) has nothing to match. The
+  // series and the label are then null, as in the unavailable block: no "× NaN"
+  // legend, no curve scaled by an invented factor.
+  // 169.1 review-fix E (SFH-R2 MEDIUM-1): the same rule on the comparator side.
+  // A missing summary, or a comparator vol that is not finite and > 0 (fewer
+  // than two covered returns, or a flat comparator), has nothing to match
+  // either. There is no `× 1.00` fallback: that factor was never measured.
+  const benchVol = benchSummary?.ann_vol;
+  const vmAvailable =
+    Number.isFinite(stratAnnVol) && benchVol != null && Number.isFinite(benchVol) && benchVol > 0;
+  const vmScale = vmAvailable ? stratAnnVol / (benchVol as number) : NaN;
+  const volMatched = vmAvailable
+    ? scatterCovered(benchReturns, cumEq(coveredReturns.map(r => r * vmScale)))
+    : null;
   return {
     name: label,
     shortName: short,
@@ -148,7 +160,7 @@ export function buildComparatorBlock(
     rollingSharpe: rollingOverCovered(benchReturns, rollWindowDays, w => rollingSharpe(w, w.length, benchPeriodsPerYear)),
     rollingSortino: rollingOverCovered(benchReturns, rollWindowDays, w => rollingSortino(w, w.length, benchPeriodsPerYear)),
     volMatched,
-    volMatchedLabel: `${short} × ${vmScale.toFixed(2)}`,
+    volMatchedLabel: vmAvailable ? `${short} × ${vmScale.toFixed(2)}` : null,
     rollingBeta: rollingBetaOverPaired(stratReturns, aligned, rollBetaWindowDays),
     through: aligned.through,
   };

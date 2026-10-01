@@ -9,74 +9,29 @@ import { getStrategyDetail } from "@/lib/queries";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { KCS10_PUBLIC_SENTENCE } from "@/lib/status-surface-copy";
 import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { captureToSentry } from "@/lib/sentry-capture";
-import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
-import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
-import {
-  CompositeSeriesReadError,
-  readCompositeFactsheet,
-  singleKeyDataQuality,
-  readSingleKeyBasisOpts,
-} from "@/lib/factsheet/composite-read-path";
-import { readFactsheetBenchmark } from "@/lib/factsheet/fetch-and-build-payload";
-import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
-import type { DailyReturn, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
+import { fetchAndBuildPayloadWithReason } from "@/lib/factsheet/fetch-and-build-payload";
+import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
+import { withPublishedOnly } from "@/lib/visibility";
 import { notFound, redirect } from "next/navigation";
 
 /**
- * 169-REVIEW-SFH H-3: what this page says when a factsheet series read FAILS
- * (`CompositeSeriesReadError`): a composite's `csv_daily_returns`, or since
- * review round 1 (T5) any series the single-key assembly reads (the MTM,
- * smoothed MTM or stored cash series). KCS-10's "not
- * available yet" describes the row as not ready, which is false for an outage:
- * the row may be fine and the next request reads again. Active voice with the
- * owner lane's retry remedy (KCS09-UNREADABLE, "Reload this page to try
- * again."). The public v2 lane has no counterpart: it renders KCS-10 on a
- * `read_error` by design, so this sentence lives here, next to its one caller.
- * Its home is `status-surface-copy.ts` if Phase 169.1 plan 169.1-01 does not
- * retire this page's assembly.
+ * 169-REVIEW-SFH H-3: what this page says when a factsheet series read FAILS.
+ * KCS-10's "not available yet" describes the row as not ready, which is false
+ * for an outage: the row may be fine and the next request reads again. Active
+ * voice with the owner lane's retry remedy (KCS09-UNREADABLE, "Reload this
+ * page to try again."). The public v2 lane has no counterpart: it renders
+ * KCS-10 on a `read_error` by design, so this sentence lives here, next to its
+ * one caller.
+ *
+ * Phase 169.1 plan 01 (D-81): the outage is now named by the SHARED resolve
+ * stage, as the `read_error` reason `fetchAndBuildPayloadWithReason` returns
+ * (a failed admin read of the strategy row, or a failed `csv_daily_returns`,
+ * MTM, smoothed MTM or stored cash series read). The resolve stage also
+ * captures a build's `read_error` once (`seriesReadError`), so this page
+ * captures nothing itself: a second capture here would double-report.
  */
 const SERIES_READ_FAILED_SENTENCE =
   "We could not load this strategy's factsheet right now. Reload this page to try again.";
-
-/**
- * 169-REVIEW-SFH H-3, extended to the single-key arm in review round 1 (T5): a
- * series read outage on this page is logged and captured to Sentry once
- * (`console.error` alone never reaches Sentry: `src/instrumentation.ts`
- * registers no console integration). The reader's own error is sent, so its
- * PostgREST message rides as `cause`, which `captureToSentry` folds, scrubbed,
- * into the event message. `read` is the error's own discriminant: since T1
- * (WR-05 / M-3) the composite reader can also throw for its MTM and smoothed
- * reads, so a fixed `csv_daily_returns` tag would misname those. `stage` names
- * which assembly read it.
- */
-function reportSeriesReadFailure(
-  err: CompositeSeriesReadError,
-  strategyId: string,
-  stage: "composite-read" | "single-key-read",
-): void {
-  console.error(
-    `[discovery/strategyDetail] ${err.read} read failed, rendering the read-failure line`,
-    {
-      strategyId,
-      stage,
-      errorCode: err.code,
-      errorMessage: typeof err.cause === "string" ? err.cause : undefined,
-    },
-  );
-  captureToSentry(err, {
-    level: "error",
-    tags: {
-      route: "discovery/strategy-detail",
-      stage,
-      reason: "read_error",
-      code: err.code,
-      strategy_id: strategyId,
-      read: err.read,
-    },
-  });
-}
 
 export default async function StrategyDetailPage({
   params,
@@ -98,15 +53,15 @@ export default async function StrategyDetailPage({
   // mismatches at the SQL layer (returns null → not-found UI). Without
   // this, /discovery/<wrong-slug>/<strategyId> renders the full chart
   // suite + RSC payload for any published strategy.
-  // Phase 159 (159-03 / RANK-02): "discovery" opts this AUTHED surface into the
-  // wider analytics projection — data_quality_flags, daily_returns,
-  // returns_series and metrics_json_by_basis, every one of which is read below.
-  // The default "public" variant deliberately omits them, so a future ANON
-  // caller of getStrategyDetail cannot inherit this surface's column set.
-  const result = await getStrategyDetail(strategyId, slug, "discovery");
+  // Phase 169.1 plan 01 (D-26): this read serves the header, the breadcrumb,
+  // `disclosureTier`, the slug guard, the published gate and the trust tier.
+  // The factsheet itself is built below by the shared path, so the default
+  // projection is enough; the discovery-only projection it used to request
+  // existed only for the assembly that plan removed.
+  const result = await getStrategyDetail(strategyId, slug);
   if (!result) notFound();
 
-  const { strategy, analytics, disclosureTier } = result;
+  const { strategy, disclosureTier } = result;
   // Breadcrumb still uses the pseudonym-safe label (it shows in the
   // sidebar context above the factsheet). The factsheet body itself is a
   // full-identity context and uses the real name when present.
@@ -115,216 +70,26 @@ export default async function StrategyDetailPage({
     strategy.name ?? strategy.codename ?? breadcrumbName;
   const displayName = factsheetName;
 
-  // analytics-service-only strategies have daily_returns=null but the
-  // real cumprod equity curve in returns_series. resolveDailyReturnSeries
-  // handles both shapes + the three real-world daily_returns dict layouts.
-  const analyticsRow = analytics as
-    | {
-        daily_returns?: unknown;
-        returns_series?: unknown;
-        data_quality_flags?: unknown;
-        metrics_json_by_basis?: unknown;
-        computation_status?: unknown;
-      }
-    | null
-    | undefined;
-  const dailyRaw = analyticsRow?.daily_returns;
-  let dailyReturns = resolveDailyReturnSeries(
-    dailyRaw,
-    analyticsRow?.returns_series,
-  );
-
-  // Derive ingestSource through the SHARED deriveIngestSource (same source of
-  // truth as factsheet/[id]/v2/page.tsx). Without an explicit source,
-  // buildFactsheetPayload defaults to "csv" and all gated panels (PeerPercentile,
-  // AllocatorSection, Signatures) are permanently suppressed for API strategies
-  // on the discovery surface. (RED-TEAM-H1)
-  let ingestSource: IngestSource = deriveIngestSource(dailyRaw);
-
-  // H-2 (Round 2): a stitched composite has daily_returns=NULL + returns_series
-  // populated, so the plain path above would classify it "api" (invented
-  // PeerPercentile / AllocatorSection / EventSignatures) and draw a dense-0.0
-  // gap-filled series (flat-zero gap lines). Route it through the SAME shared
-  // composite read-path the factsheet route uses: force ingestSource "csv"
-  // (suppresses the invented panels), read the honest sparse csv_daily_returns
-  // series, and thread the marker/basis/method opts. A null result = data defect
-  // → the still-computing placeholder (never the api arm).
-  const dqf = analyticsRow?.data_quality_flags as
-    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown }
-    | null
-    | undefined;
-  let buildOpts: BuildFactsheetOpts | undefined;
-  // A series read outage on either arm below (`CompositeSeriesReadError`): the
-  // payload is not built, and the fallback says the load failed.
-  let seriesReadFailed = false;
-  if (dqf?.composite === true) {
-    ingestSource = "csv";
-    const admin = createAdminClient();
-    // Phase 169 (D-41): a FAILED `csv_daily_returns` read throws
-    // `CompositeSeriesReadError`. It is caught here, and only it: this page is
-    // dynamic and not cached, so the answer holds for this one request and the
-    // next request reads again. Any other throw is not an outage this page can
-    // name and stays the error boundary's. Phase 169.1 plan 169.1-01 removes
-    // this assembly in favour of `fetchAndBuildPayload`, whose resolve stage
-    // already answers the same throw as `read_error`.
-    //
-    // 169-REVIEW-SFH H-3: the outage is captured to Sentry, as the resolve
-    // stage captures it for a build, and the page says the load failed rather
-    // than KCS-10's "not available yet" (`reportSeriesReadFailure`).
-    let composite: Awaited<ReturnType<typeof readCompositeFactsheet>>;
-    try {
-      composite = await readCompositeFactsheet(admin, {
-        strategyId: strategy.id,
-        dqf,
-        metricsJsonByBasis: analyticsRow?.metrics_json_by_basis,
-        returnsDenominatorConfig: (strategy as { returns_denominator_config?: unknown })
-          .returns_denominator_config,
-      });
-    } catch (err) {
-      if (!(err instanceof CompositeSeriesReadError)) throw err;
-      reportSeriesReadFailure(err, strategy.id, "composite-read");
-      seriesReadFailed = true;
-      composite = null;
-    }
-    if (composite) {
-      dailyReturns = composite.dailyReturns;
-      buildOpts = composite.buildOpts;
-    } else {
-      // Data defect (untrusted cash headline), or the read outage caught
-      // above → empty series → no payload. The fallback below tells the two
-      // apart through `seriesReadFailed`.
-      dailyReturns = [] as DailyReturn[];
-    }
-  } else {
-    // HARD-04 (#67) / Finding B: single-key strategies persist
-    // `insufficient_window` at the analytics_runner CAGR site too, but buildOpts
-    // was assigned ONLY on the composite arm, so `payload.dataQuality` stayed
-    // undefined and the FactsheetView :876 caveat never rendered single-key
-    // despite the server truth. Thread it through the ONE shared owner
-    // (`singleKeyDataQuality`) so this discovery surface and the factsheet route
-    // can't diverge on the DQ opt (the composite "one path" lesson).
-    //
-    // MTM-01/MTM-04 (Phases 102/103) + SMTM-01 (Phase 133, review WR-01): the
-    // single-key basis story (predicates → gated `mtm_daily_returns` /
-    // `smoothed_mtm_daily_returns` reads → gate/scalar/series threading) is
-    // assembled by the ONE shared owner `readSingleKeyBasisOpts`, so this
-    // surface and the factsheet route cannot diverge — WR-01 was exactly this
-    // page keeping an inline 4-arg copy when the smoothed 5th arg landed
-    // (Smoothed segment enabled, charts permanently cash). getStrategyDetail
-    // is called above with the "discovery" variant, whose explicit projection
-    // (queries.ts, Phase 159/RANK-02) names `computation_status` as a MUST-STAY
-    // column precisely so it still arrives on the row — it used to arrive via a
-    // wildcard analytics embed, which no longer exists. Narrowing that constant
-    // without this read in mind is the way to break this line silently.
-    //
-    // Phase 169 (SC4, D-10): the row itself is passed too, so the owner can
-    // overlay its seven persisted headline scalars (the same projection carries
-    // them: `PUBLIC_ANALYTICS_COLUMNS` in queries.ts). A rankable single-key row
-    // therefore renders the stored CAGR and Sharpe that discovery,
-    // recommendations and my-strategies show, and the payload is no longer the
-    // TypeScript-only headline. A row that is not rankable keeps the computed
-    // headline; that arm is reachable from this page only (the factsheet route's
-    // resolve stage refuses such a row), until Phase 169.1 plan 169.1-01 moves
-    // this page onto the shared build. The series rows live behind deny-all RLS,
-    // so the assembly takes the service-role factory as a thunk — the handle is
-    // constructed only when a cheap gate holds (hot path stays roundtrip-free).
-    //
-    // Phase 169 review round 1 (T5, from T1's handoff):
-    //   - SFH H-2 / M-2: the strategy's `returns_denominator_config` is passed
-    //     (the 7th argument, the same column the composite arm reads above), so a
-    //     single-key `simple` row draws its arithmetic curve here too, and an
-    //     active-day or `simple` row is flagged `returnsConventionOverride`, which
-    //     withholds the leverage what-if. Without it this page kept the geometric
-    //     curve and the what-if the factsheet route no longer shows.
-    //   - WR-05 / M-3: the owner now THROWS `CompositeSeriesReadError` on a failed
-    //     MTM, smoothed MTM or stored cash series read, where it used to degrade
-    //     to cash charts. It is caught exactly as the composite arm catches it
-    //     (that class only, any other throw stays the error boundary's): the
-    //     outage is captured and the page says the load failed. A partial payload
-    //     is not built: it would show cash charts under an MTM label as if the
-    //     row had no MTM series.
-    let singleKeyOpts: Awaited<ReturnType<typeof readSingleKeyBasisOpts>> | null;
-    try {
-      singleKeyOpts = await readSingleKeyBasisOpts(
-        createAdminClient,
-        strategy.id,
-        dqf,
-        analyticsRow?.metrics_json_by_basis,
-        analyticsRow?.computation_status,
-        analyticsRow,
-        (strategy as { returns_denominator_config?: unknown }).returns_denominator_config,
-      );
-    } catch (err) {
-      if (!(err instanceof CompositeSeriesReadError)) throw err;
-      reportSeriesReadFailure(err, strategy.id, "single-key-read");
-      seriesReadFailed = true;
-      singleKeyOpts = null;
-    }
-    if (singleKeyOpts) {
-      buildOpts = {
-        ...(buildOpts ?? {}),
-        dataQuality: singleKeyDataQuality(dqf),
-        ...singleKeyOpts,
-      };
-    } else {
-      // The read outage caught above → empty series → no payload, and the
-      // fallback says the load failed.
-      dailyReturns = [] as DailyReturn[];
-    }
-  }
-
-  // Phase 169.5 (SC3, D-09, D-23, D-54): BTC from the database through the ONE
-  // read the factsheet route makes (`readFactsheetBenchmark`), with the SAME two
-  // inputs (the cash `dailyReturns` and the assembled `buildOpts`), called AFTER
-  // `buildOpts` is assembled so its MTM / smoothed series widen the bound as on
-  // the route (D-64(4) as amended). Called unconditionally: on the failure arms
-  // every date axis is empty and it answers the unavailable marker WITHOUT a
-  // query. An error or throw from the two DB calls (the paged read and the
-  // first-date probe) is the unavailable form, logged with this strategy's id,
-  // never the fixture; a bug in the pure merge / align code throws to the error
-  // boundary (169.5 review SFH-M-01). Pinned against the route by the LOCKSTEP case in
-  // `basis-context.benchmark-prices.test.tsx`; Phase 169.1 plan 169.1-01 moves
-  // this page onto `fetchAndBuildPayload` and deletes that case.
-  buildOpts = {
-    ...(buildOpts ?? {}),
-    benchmarkPrices: await readFactsheetBenchmark(createAdminClient(), dailyReturns, buildOpts, strategy.id),
-  };
-
-  // RED-TEAM-H2: Never fall back to "now" for a missing computed_at — that
-  // would make FreshnessChip show a green "fresh" badge for a strategy with
-  // no real analytics data. Mirror the epoch sentinel from page.tsx so the
-  // chip correctly signals staleness. Consistent with FINDING-5 fix.
-  if (!analytics?.computed_at) {
-    console.warn(
-      "[discovery/strategyDetail] analytics.computed_at missing, freshness chip will show epoch",
-      { strategyId },
-    );
-  }
-  const computedAt = analytics?.computed_at ?? "1970-01-01T00:00:00Z";
-
-  const factsheetPayload = buildFactsheetPayload(
-    {
-      id: strategy.id,
-      name: factsheetName,
-      types: strategy.strategy_types ?? [],
-      markets: strategy.markets ?? [],
-      computedAt,
-      trustTier: (strategy.trust_tier ?? null) as TrustTierKind | null,
-      ingestSource,
-      description: strategy.description ?? null,
-      subtypes: strategy.subtypes ?? [],
-      supportedExchanges: strategy.supported_exchanges ?? [],
-      leverageRange: strategy.leverage_range ?? null,
-      aum: strategy.aum ?? null,
-      maxCapacity: strategy.max_capacity ?? null,
-      avgDailyTurnover: strategy.avg_daily_turnover ?? null,
-      startDate: strategy.start_date ?? null,
-      benchmark: strategy.benchmark ?? null,
-      assetClass: strategy.asset_class ?? null,
-    },
-    dailyReturns,
-    buildOpts,
-  );
+  // Phase 169.1 plan 01 (D-23 as amended 2026-09-25, D-25, D-26, D-81): the
+  // factsheet is built by the ONE shared resolve-and-build, the same uncached
+  // call the v2 factsheet page's lanes make, so every number here (CAGR,
+  // Sharpe, the BTC block, the record length) is the number that path
+  // produces, and nothing on this page can drift from it. It is never the v2
+  // page's id-keyed cached wrapper: this page was uncached and stays so.
+  // `withPublishedOnly` is passed explicitly (the parameter is REQUIRED): this
+  // page shows published strategies only, to every signed-in viewer, the
+  // owner included. A null payload carries the resolve stage's reason;
+  // `read_error` is an outage and says so, every other reason is a row that
+  // cannot build and says KCS-10.
+  const built = await fetchAndBuildPayloadWithReason(strategy.id, withPublishedOnly);
+  // The trust tier is overlaid after the build, exactly as the v2 page
+  // overlays it (`payloadWithTrust`): the shared builder passes null, and the
+  // tier comes from the published-gated verification signal `getStrategyDetail`
+  // already read. The spread keeps the `ingestSource` discriminant.
+  const factsheetPayload: FactsheetPayload | null = built.payload
+    ? { ...built.payload, trustTier: (strategy.trust_tier ?? null) as TrustTierKind | null }
+    : null;
+  const seriesReadFailed = built.reason === "read_error";
 
   return (
     <>

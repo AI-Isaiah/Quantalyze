@@ -29,7 +29,7 @@ import {
 } from "@/components/strategy/ShareableLink";
 import type { CapitalOwnership } from "@/lib/capital-ownership";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
-import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSeriesView, useAppliedLeverage, leverageApplies, leverageEligibleFor, mtmDisabledReasonCopy, mtmReasonTone, smoothedDisabledReasonCopy, type Basis } from "./basis-context";
+import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSeriesView, useWindowedView, useAppliedLeverage, leverageApplies, leverageEligibleFor, mtmDisabledReasonCopy, mtmReasonTone, smoothedDisabledReasonCopy, type Basis } from "./basis-context";
 // Phase 90.5 (LEV-01, D1/D2) + Phase 107 (LEV-BB): ephemeral single-key leverage.
 // LeverageProvider wraps the body (transparent to GUARD-02); useLeverage drives the
 // ControlBar input AND the KpiStrip's levered-view gate. The KpiStrip now reads the
@@ -58,7 +58,7 @@ import { SMOOTHED_MTM_UI_ENABLED } from "@/lib/closed-sets";
 import { ComparatorPicker } from "./ComparatorPicker";
 import { TimeSeriesChart } from "./TimeSeriesChart";
 import { HistogramChart } from "./HistogramChart";
-import { MetricsColumn, headlineCoverageCaveat } from "./MetricsColumn";
+import { MetricsColumn, RangeEyebrow, headlineCoverageCaveat, windowCoverageCaveat } from "./MetricsColumn";
 import { AllocatorSection } from "./BatchDPanels";
 import { StreakDistributionPanel } from "./AnalyticalPanels";
 import { EndOfYearBarsPanel, QuantileBoxPlotPanel, CorrelationStripPanel, CorrelationsMatrixPanel } from "./DistributionPanels";
@@ -651,6 +651,14 @@ function PerformanceCharts() {
     }
   }, [payload.rollingWindow, payload.rollingBetaWindow, payload.strategyId]);
 
+  const volMatchedAbsent = view.comparators[cmpKey]?.volMatched == null;
+  // The reason line below is shown only when the comparator HAS a summary, so it
+  // has covered returns and the match was skipped for want of a measurable vol.
+  // A comparator with no summary (prices unavailable, no covered day, or the
+  // composer's inert block) is hidden without it: the picker already names the
+  // unavailable case, and "no measurable volatility" would misstate the others.
+  const volMatchedNoVol =
+    cmpKey !== "none" && volMatchedAbsent && view.comparators[cmpKey]?.summary != null;
   const configs = React.useMemo(() => {
     return CHART_CONFIGS
       .filter(cfg => !(cmpKey === "none" && cfg.stratField === null && cfg.comparatorAsPrimary))
@@ -660,6 +668,13 @@ function PerformanceCharts() {
       // visually identical to the Equity Curve panel above it. Show it only
       // when there's an actual comparator to scale.
       .filter(cfg => !(cmpKey === "none" && cfg.key === "volMatched"))
+      // 169.1 review-fix E (SFH-R2 MEDIUM-1): the same panel, for the same
+      // reason, when a comparator IS selected but has nothing to match (the
+      // strategy or the comparator has no finite, non-zero vol on this basis):
+      // its volMatched is null and the panel would draw the strategy line alone.
+      // Read from the basis view, the block TimeSeriesChart draws, not the cash
+      // payload: the strategy-side null shows up on the MTM / smoothed bundles.
+      .filter(cfg => !(volMatchedAbsent && cfg.key === "volMatched"))
       .filter(cfg => !(cfg.key === "rollingBeta" && !beta.enough))
       .filter(cfg => !(ROLLING_CHART_KEYS.has(cfg.key) && !roll.enough))
       .map(cfg => {
@@ -673,7 +688,7 @@ function PerformanceCharts() {
         }
         return cfg;
       });
-  }, [cmpKey, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window]);
+  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window]);
 
   return (
     <>
@@ -741,6 +756,12 @@ function PerformanceCharts() {
         <NotEnoughDataPanel
           title="Rolling β — Not enough data"
           body="Strategy history is too short to compute even a 30-day rolling beta against the comparator. This panel will appear once the strategy has at least ~35 observations."
+        />
+      )}
+      {volMatchedNoVol && (
+        <NotEnoughDataPanel
+          title="Volatility Matched — Not available"
+          body="The strategy or the comparator has no measurable volatility on this basis, so there is no scale to match the comparator to. This panel will appear once both do."
         />
       )}
     </>
@@ -1447,20 +1468,40 @@ function KpiStrip() {
   // read let the caption claim a what-if the (deferred) numbers had not yet applied.
   const appliedLeverage = useAppliedLeverage();
   const leverageApplied = leverageApplies(payload, basis, appliedLeverage);
-  const m = leverageApplied ? view.strategyMetrics : basisM;
+  // Phase 169.1 (SC10, D-27): the strip follows the zoom window. `wv` is `view` BY
+  // REFERENCE at full history (so everything below reads exactly as before), and the
+  // active view re-derived on the selected slice otherwise. Inside a window the seven
+  // scalars are the slice bundle's own: no persisted overlay and no leverage re-pin,
+  // which describe the whole record.
+  const { view: wv, scope } = useWindowedView(payload);
+  const selected = scope.kind === "selected";
+  const m = selected ? wv.strategyMetrics : leverageApplied ? view.strategyMetrics : basisM;
   // Phase 169 review round 1 (SFH H-1): on a chain-broken row the stored cash
   // headline covers only the record after its last break. Said beside it, only
   // while the stored figures are the ones shown (cash basis, no what-if; a
-  // chain-broken row has no what-if anyway, `leverageEligibleFor`).
-  // Round 2, IN-R2-02: named by the strip's own labels.
-  const coverageCaveat = leverageApplied
-    ? null
-    : headlineCoverageCaveat(payload.dataQuality, basis, "Cum. Return, CAGR and Calmar");
-  const j = view.comparators[cmpKey].joint;
+  // chain-broken row has no what-if anyway, `leverageEligibleFor`). Round 2,
+  // IN-R2-02: named by the strip's own labels.
+  // 169.1 review round 1 (SFH MEDIUM-2): a window shows no stored figure (D-78),
+  // but unlike the leverage arm it DOES compute on a chain-broken row, so a range
+  // starting before the last break compounds days the engine leaves out. It keeps a
+  // caveat that says so, naming the same three figures as the full-history caveat:
+  // the engine's Max DD already spans the whole record (`compute_all_metrics`).
+  const coverageCaveat = selected
+    ? windowCoverageCaveat(payload.dataQuality, basis, scope.start, "Cum. Return, CAGR and Calmar")
+    : leverageApplied
+      ? null
+      : headlineCoverageCaveat(payload.dataQuality, basis, "Cum. Return, CAGR and Calmar");
+  const j = wv.comparators[cmpKey].joint;
   // 169.4 review round 2 (SFH-R2 MEDIUM-2): below the paired floor the joint is
   // withheld, not absent. The α/IR cells stay (9 cells) and read "—", and one
-  // muted line under the strip names the cause in the widget's words.
-  const jointWithheld = j ? null : (view.comparators[cmpKey].jointWithheld ?? null);
+  // muted line under the strip names the cause in the widget's words. Inside a
+  // window it is the slice's own paired count (169.4 D-69 as amended, D-78).
+  const jointWithheld = j ? null : (wv.comparators[cmpKey].jointWithheld ?? null);
+  // A withheld window (D-27 short slice, D-82 no annualization basis) blanks the
+  // joint; the α/IR slots stay, reading "—", wherever the full view shows them, so
+  // the strip keeps its cell count.
+  const baseBlock = view.comparators[cmpKey];
+  const keepRelativeSlots = wv.withheld != null && (baseBlock.joint != null || baseBlock.jointWithheld != null);
   const cn = cmp.shortName;
 
   // 9 cells when a comparator is active (mockup contract). When NONE, the
@@ -1484,7 +1525,7 @@ function KpiStrip() {
     { label: "Max DD", value: pct(m.max_dd, 1), tone: maxDdTone(m.max_dd) },
     { label: "Ann. Vol", value: pct(m.ann_vol, 1) },
   ];
-  if ((j || jointWithheld) && cmpKey !== "none") {
+  if ((j || jointWithheld || keepRelativeSlots) && cmpKey !== "none") {
     // F5 (phase 103) + Phase 107 (LEV-BB): α / β / IR FOLLOW the active basis AND
     // leverage via the view's joint (above), matching §IV. At L≠1 the view re-derives
     // the joint on the levered strategy leg (β→L·β / α→L·α honestly, jointMetrics on
@@ -1514,7 +1555,9 @@ function KpiStrip() {
     });
   }
   const jointFloorReason =
-    jointWithheld && cmpKey !== "none" ? pairedFloorReason(cn, jointWithheld.paired, "record", jointWithheld.floor) : null;
+    jointWithheld && cmpKey !== "none"
+      ? pairedFloorReason(cn, jointWithheld.paired, selected ? "range" : "record", jointWithheld.floor)
+      : null;
   // Phase 52-06 / TYPE-04 — the strip reflows on ITS OWN width via `@container`
   // (`@`-prefixed variants), NOT the viewport. The KPI strip sits in the
   // factsheet body whose effective width varies (full ~1440 measure on the route
@@ -1573,8 +1616,19 @@ function KpiStrip() {
           {`What-if projection at ${appliedLeverage}× leverage: daily returns are scaled r → L·r and the return-derived metrics, charts, and rail re-derive; peer, allocator, and event-study panels stay at base 1×. Excludes borrow, funding, and liquidation cost — not the strategy's realized track record.`}
         </p>
       )}
+      {/* Phase 169.1 (SC10, D-27): the range the strip's figures cover, from the
+          same scope the figures use: "Full history: <start> – <end>" or
+          "Selected range: <start> – <end>". The rail renders the same component
+          (MetricsColumn.tsx RangeEyebrow), so the two print one string. Outside
+          the role="status" leverage caption. */}
+      <RangeEyebrow scope={scope} surface="strip" className="mt-6" />
+      {wv.withheld === "no-annualization-basis" && (
+        <p className="mt-1 text-caption text-text-muted" data-testid="window-withheld-reason">
+          The figures for a selected range need an annualization basis this view does not carry. Resetting the range shows the full-history figures.
+        </p>
+      )}
       <section
-        className="mt-6 overflow-hidden @container"
+        className="mt-2 overflow-hidden @container"
         style={{
           backgroundColor: "var(--color-surface)",
           border: "1px solid var(--color-border)",
@@ -1643,7 +1697,9 @@ function KpiStrip() {
           `m.n` (always cash) would understate the low-N risk under an MTM label.
           Under cash the view returns the payload by reference, so this is
           byte-identical to `m.n`. */}
-      {view.strategyMetrics.n < 252 && (
+      {/* Phase 169.1 (D-27): inside a window the count is the WINDOW's (`wv` is
+          `view` by reference at full history). */}
+      {wv.strategyMetrics.n < 252 && (
         <p
           className="px-3 sm:px-4 py-2 text-micro font-mono"
           style={{
@@ -1651,7 +1707,7 @@ function KpiStrip() {
             color: "var(--color-warning, #B45309)",
           }}
         >
-          ⚠ Only {view.strategyMetrics.n} observation{view.strategyMetrics.n !== 1 ? "s" : ""} — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
+          ⚠ Only {wv.strategyMetrics.n} observation{wv.strategyMetrics.n !== 1 ? "s" : ""} — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
         </p>
       )}
       {/* HARD-04 (#67): server-truth short-window flag from

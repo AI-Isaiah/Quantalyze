@@ -426,12 +426,27 @@ describe("SCEN-01 LAYER B — every series reader resolves through the ONE resol
     expect(src).toMatch(/fetchAndBuildPayload(?:WithReason)?\(/);
   });
 
-  it("REFERENCE discovery strategy page still resolves through the same resolver", () => {
+  // Phase 169.1 plan 01 (D-23 as amended 2026-09-25, D-26, D-81): the
+  // discovery page used to resolve the series ITSELF with a second copy of the
+  // builder's assembly, kept in step by a lockstep test. It now resolves
+  // through the shared builder, exactly as the v2 page does, so it is pinned
+  // the same way, and the assembly it removed is pinned ABSENT: any one of
+  // these calls back on the page is a second path that can drift from the
+  // factsheet route's numbers.
+  it("REFERENCE discovery strategy page resolves its series THROUGH the shared builder, never its own assembly", () => {
     const src = stripComments(
       readSource("src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx"),
     );
-    expect(src).toContain(RESOLVER_CALL);
-    expect(src).toContain("returns_series");
+    expect(src).toContain("@/lib/factsheet/fetch-and-build-payload");
+    expect(src).toMatch(/fetchAndBuildPayload(?:WithReason)?\(/);
+    const ownAssembly = [
+      "buildFactsheetPayload(",
+      RESOLVER_CALL,
+      "readCompositeFactsheet(",
+      "readSingleKeyBasisOpts(",
+      "readFactsheetBenchmark(",
+    ].filter((call) => src.includes(call));
+    expect(ownAssembly, "the discovery page assembles the factsheet itself").toEqual([]);
   });
 
   // --- The resolver itself -----------------------------------------------
