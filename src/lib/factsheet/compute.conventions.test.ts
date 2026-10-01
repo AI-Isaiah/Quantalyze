@@ -534,6 +534,14 @@ describe("every strip key either arm changes is overlaid on a composite's full-h
   // The drawdown-derived extended metrics move with the arithmetic drawdown by
   // design (D-28, stated consequence); they are rail figures, not strip keys.
   const DRAWDOWN_DERIVED = new Set(["longest_dd", "recovery_factor", "pain_index", "ulcer_index"]);
+  // Phase 169.1 D-31 (plan 169.1-05): the calendar windows and buckets SUM under
+  // the arithmetic method, as the engine's do; they are rail rows (hidden while
+  // a range is selected, D-27), never strip keys.
+  const CALENDAR_SUMS = new Set([
+    "mtd", "ytd", "p3m", "p6m", "p1y", "p3y", "p5y",
+    "best_week", "worst_week", "best_month", "worst_month",
+    "best_quarter", "worst_quarter", "best_year", "worst_year", "yearly",
+  ]);
   const changed = (a: Record<string, unknown>, b: Record<string, unknown>) =>
     Object.keys(a)
       .filter((k) => k !== "eq" && k !== "dd")
@@ -547,10 +555,10 @@ describe("every strip key either arm changes is overlaid on a composite's full-h
     for (const k of keys) expect(MAP.has(k), k).toBe(true);
   });
 
-  it("the arithmetic arm changes cum_ret, cagr, max_dd and calmar (all in BASIS_KPI_MAP) and otherwise only drawdown-derived rail figures", () => {
+  it("the arithmetic arm changes cum_ret, cagr, max_dd and calmar (all in BASIS_KPI_MAP) and otherwise only drawdown-derived and D-31 calendar rail figures", () => {
     const base = compute(TREND_RETS, TREND_DATES, 0, P);
     const keys = changed(withConv(TREND_RETS, TREND_DATES, { cumulativeMethod: "arithmetic" }), base);
     expect(keys.filter((k) => MAP.has(k))).toEqual(["cagr", "calmar", "cum_ret", "max_dd"]);
-    for (const k of keys.filter((k) => !MAP.has(k))) expect(DRAWDOWN_DERIVED.has(k), k).toBe(true);
+    for (const k of keys.filter((k) => !MAP.has(k))) expect(DRAWDOWN_DERIVED.has(k) || CALENDAR_SUMS.has(k), k).toBe(true);
   });
 });

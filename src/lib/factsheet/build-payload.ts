@@ -445,7 +445,9 @@ export function deriveSeriesBundle(
       spx: buildComparatorBlock("S&P 500", "SPX", al.spx, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear, Math.min(periodsPerYear, annualizationPeriods("traditional"))),
       none: noneComparatorBlock,
     },
-    monthlyReturns: monthlyReturnsMatrix(stratRet, dates),
+    // Phase 169.1 (D-31): the heatmap and Calmar by Year follow the method too,
+    // so an arithmetic year's cells, its YTD, its Calmar row and `yearly` agree.
+    monthlyReturns: monthlyReturnsMatrix(stratRet, dates, isArithmetic ? "arithmetic" : "geometric"),
     dailyHeatmap: dailyReturnsByYear(stratRet, dates),
     missingSegments: args.missingSegments,
     quantiles: quantileSummary(stratRet),
@@ -458,7 +460,7 @@ export function deriveSeriesBundle(
       longestLoss: losses.length > 0 ? Math.max(...losses) : 0,
       maxLen: MAX_LEN,
     },
-    calmarByYear: calmarByYear(stratRet, dates),
+    calmarByYear: calmarByYear(stratRet, dates, isArithmetic ? "arithmetic" : "geometric"),
     bootstrapCI: bootstrapCI(stratRet, 2000, 5, 42, periodsPerYear),
     styleDrift: computeStyleDrift(stratRet, dates),
     // CR-01 (SC3): stress windows take BTC null-honest — a window with an uncovered
