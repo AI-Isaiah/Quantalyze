@@ -269,6 +269,23 @@ function mountProbe(payload: FactsheetPayload, basisTo?: Basis) {
   );
 }
 
+describe("windowView — an unavailable comparator stays unavailable (W2)", () => {
+  it("a BTC block that is unavailable at full history is the base block by reference under a window", () => {
+    const n = 400;
+    const rows: DailyReturn[] = Array.from({ length: n }, (_, i) => ({
+      date: addDays(START, i),
+      value: 0.0009 + Math.sin(i * 0.31) * 0.012,
+    }));
+    const base = buildFactsheetPayload(STRATEGY, rows, { benchmarkPrices: { unavailable: true } });
+    if (!base) throw new Error("fixture must build a payload");
+    expect(base.comparators.btc.summary).toBeNull();
+    expect(base.comparators.btc.joint).toBeNull();
+    const w = windowView(base, 100, 299);
+    expect(w.withheld).toBeUndefined();
+    expect(w.comparators.btc).toBe(base.comparators.btc);
+  });
+});
+
 describe("useWindowedView — the full-history arm is the base view BY REFERENCE (D-27)", () => {
   it("returns the same object useBasisSeriesView returns at the full range, a windowed view when zoomed, and the same object again after reset", async () => {
     const payload = build400();

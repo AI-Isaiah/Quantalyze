@@ -1,13 +1,26 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, fireEvent, act, screen } from "@testing-library/react";
-import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
+import { render, fireEvent, act, screen, within } from "@testing-library/react";
+
+// Count deriveSeriesBundle calls AS IMPORTED BY basis-context.tsx: a passthrough
+// over the real implementation, so every figure is genuinely computed.
+vi.mock("@/lib/factsheet/build-payload", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/factsheet/build-payload")>();
+  return { ...actual, deriveSeriesBundle: vi.fn(actual.deriveSeriesBundle) };
+});
+
+import { buildFactsheetPayload, deriveSeriesBundle } from "@/lib/factsheet/build-payload";
 import type { BenchmarkPricesOpt } from "@/lib/factsheet/build-payload";
 import { compute } from "@/lib/factsheet/compute";
+import { MIN_PAIRED_OBSERVATIONS, pairedFloorReason } from "@/lib/factsheet/joint";
 import type { DailyPrice, DailyReturn, FactsheetPayload } from "@/lib/factsheet/types";
+import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider, useXRange } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
-import { isoToMonthDay } from "./MetricsColumn";
+import { headlineCoverageCaveat, isoToMonthDay } from "./MetricsColumn";
+import { useWindowedView, type WindowedView } from "./basis-context";
 import { pct, pctSigned, ratio as num } from "./format";
+
+const deriveSpy = vi.mocked(deriveSeriesBundle);
 
 /**
  * Phase 169.1 plan 02 (SC10, D-27) — the KPI strip follows the MasterBrush zoom
@@ -53,18 +66,25 @@ const STRATEGY = {
 
 const START = "2024-01-01";
 
-function build400(): FactsheetPayload {
-  const n = 400;
-  const rows: DailyReturn[] = Array.from({ length: n }, (_, i) => ({
-    date: addDays(START, i),
-    value: 0.0009 + Math.sin(i * 0.31) * 0.012 + Math.cos(i * 0.07) * 0.004,
-  }));
-  const btc: DailyPrice[] = Array.from({ length: n + 1 }, (_, i) => ({
+const stratValue = (i: number) => 0.0009 + Math.sin(i * 0.31) * 0.012 + Math.cos(i * 0.07) * 0.004;
+
+/**
+ * An `n`-day crypto record. BTC closes run from the day before the first date
+ * through `btcThroughIdx` (default: the last date), so every interval up to
+ * there pairs with BTC.
+ */
+function build400(
+  n = 400,
+  btcThroughIdx = n - 1,
+  opts: Parameters<typeof buildFactsheetPayload>[2] = {},
+): FactsheetPayload {
+  const rows: DailyReturn[] = Array.from({ length: n }, (_, i) => ({ date: addDays(START, i), value: stratValue(i) }));
+  const btc: DailyPrice[] = Array.from({ length: btcThroughIdx + 2 }, (_, i) => ({
     date: addDays(START, i - 1),
     close: 40000 * (1 + 0.15 * Math.sin(i * 0.05)) + ((i * 37) % 11) * 120,
   }));
   const opt: BenchmarkPricesOpt = { prices: btc, through: btc[btc.length - 1].date, dropped: [] };
-  const payload = buildFactsheetPayload(STRATEGY, rows, { benchmarkPrices: opt });
+  const payload = buildFactsheetPayload(STRATEGY, rows, { benchmarkPrices: opt, ...opts });
   if (!payload) throw new Error("fixture must build a payload");
   return payload;
 }
@@ -191,5 +211,270 @@ describe("KPI strip follows the zoom window (SC10, D-27)", () => {
     expect(container.textContent).not.toMatch(/Only \d+ observations? — annualized/);
     await click("zoom");
     expect(container.textContent).toContain("Only 200 observations — annualized");
+  });
+});
+
+/** A sibling reader of the windowed view, outside FactsheetBody's own providers (cash, L = 1). */
+const windowReads: WindowedView[] = [];
+function WindowProbe({ payload }: { payload: FactsheetPayload }) {
+  windowReads.push(useWindowedView(payload).view);
+  return null;
+}
+
+function mountScenario(payload: FactsheetPayload, range: readonly [number, number]) {
+  windowReads.length = 0;
+  return render(
+    <FactsheetProvider payload={payload} persist={false}>
+      <RangeHarness range={range} />
+      <WindowProbe payload={payload} />
+      <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+    </FactsheetProvider>,
+  );
+}
+
+function scenarioPayload(): FactsheetPayload {
+  return buildScenarioFactsheetPayload({
+    portfolioDaily: Array.from({ length: 120 }, (_, i) => ({ date: addDays("2025-03-01", i), value: stratValue(i) })),
+    benchmark: null,
+    periodsPerYear: 365,
+  });
+}
+
+/** The text of the cells in the rail row whose first cell is `label`, in the panel titled `title`. */
+function railRow(title: string, label: string): string[] {
+  const h = [...document.querySelectorAll("h3")].find((el) => el.textContent === title);
+  const p = h?.closest("section");
+  if (!p) throw new Error(`no panel titled "${title}"`);
+  const tr = [...p.querySelectorAll("tr")].find((r) => r.querySelector("td")?.textContent === label);
+  if (!tr) throw new Error(`no row "${label}" in "${title}"`);
+  return [...tr.querySelectorAll("td")].map((td) => td.textContent ?? "");
+}
+
+function hasPanel(title: string): boolean {
+  return [...document.querySelectorAll("h3")].some((el) => el.textContent === title);
+}
+
+describe("the window holds across basis and leverage and never fabricates a figure (SC10, D-27)", () => {
+  it("under MTM (basis set first, then the range) the strip's Sharpe is compute() of the MTM slice, not the cash slice and not the persisted MTM scalar", async () => {
+    const cash = build400();
+    const mtmRows: DailyReturn[] = Array.from({ length: 400 }, (_, i) => ({
+      date: addDays(START, i),
+      value: 0.0006 + Math.sin(i * 0.23 + 1) * 0.013,
+    }));
+    const payload = build400(400, 399, {
+      mtmGate: { available: true },
+      mtmSeries: { dailyReturns: mtmRows, gapSpans: [] },
+      metricsByBasis: {
+        mark_to_market: {
+          cumulative_return: 0.5,
+          volatility: 0.3,
+          max_drawdown: -0.2,
+          cagr: 0.4,
+          sharpe: 6.66,
+          sortino: 7.77,
+          calmar: 2,
+        },
+      },
+    } as Parameters<typeof buildFactsheetPayload>[2]);
+    expect(payload.seriesByBasis?.mark_to_market, "fixture: the MTM bundle is present").toBeDefined();
+    mount(payload);
+    await act(async () => {
+      fireEvent.click(screen.getByText("Mark-to-market"));
+    });
+    expect(stripCells().Sharpe).toBe("6.66");
+    await click("zoom");
+    const mtmSlice = compute(mtmRows.slice(100, 300).map((r) => r.value), mtmRows.slice(100, 300).map((r) => r.date), 0, payload.periodsPerYear!);
+    const cashSlice = compute(cash.strategyReturns.slice(100, 300), cash.dates.slice(100, 300), 0, payload.periodsPerYear!);
+    expect(stripCells().Sharpe).toBe(num(mtmSlice.sharpe));
+    expect(num(mtmSlice.sharpe)).not.toBe(num(cashSlice.sharpe));
+    expect(stripCells().Sharpe).not.toBe("6.66");
+  });
+
+  it("on cash at leverage 2 the window shows compute() of the LEVERED slice, with no re-pin to the persisted Sharpe / Sortino", async () => {
+    const base = build400();
+    const payload = {
+      ...base,
+      metricsByBasis: {
+        cash_settlement: {
+          cumulative_return: 0.5,
+          volatility: 0.3,
+          max_drawdown: -0.2,
+          cagr: 0.4,
+          sharpe: 5.55,
+          sortino: 6.66,
+          calmar: 2,
+        },
+      },
+    } as FactsheetPayload;
+    mount(payload);
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/Leverage multiplier/), { target: { value: "2" } });
+    });
+    // Full history at L = 2: the leverage arm re-pins the two invariant ratios (D-25).
+    expect(stripCells().Sharpe).toBe("5.55");
+    expect(stripCells().Sortino).toBe("6.66");
+    await click("zoom");
+    const levered = compute(
+      base.strategyReturns.slice(100, 300).map((r) => 2 * r),
+      base.dates.slice(100, 300),
+      0,
+      base.periodsPerYear!,
+    );
+    expect(stripCells().Sharpe).toBe(num(levered.sharpe));
+    expect(stripCells().Sortino).toBe(num(levered.sortino));
+    expect(stripCells().CAGR).toBe(pctSigned(levered.cagr, 1));
+    expect(stripCells()["Max DD"]).toBe(pct(levered.max_dd, 1));
+  });
+
+  it("a BTC comparator whose prices stop inside the window is measured over the paired intervals only; a window wholly after them is the unavailable form", async () => {
+    const payload = build400(400, 250);
+    const { unmount } = mount(payload);
+    await click("zoom");
+    const slice = payload.strategyReturns.slice(100, 300).map((value, i) => ({ date: payload.dates[100 + i], value }));
+    const expected = vi.mocked(deriveSeriesBundle).getMockImplementation()!(slice, {
+      periodsPerYear: payload.periodsPerYear!,
+      isArithmetic: false,
+      markets: payload.markets,
+      strategyName: payload.strategyName,
+      missingSegments: payload.missingSegments,
+      benchmarkPrices: payload.benchmarkPrices ?? { unavailable: true },
+    }).comparators.btc;
+    expect(expected.through).toBe(payload.dates[250]);
+    expect(expected.summary).not.toBeNull();
+    expect(railRow("Main Metrics", "Cumulative Return")[2]).toBe(
+      `${expected.summary!.cum_ret >= 0 ? "+" : ""}${(expected.summary!.cum_ret * 100).toFixed(2)}%`,
+    );
+    expect(stripCells()["α vs BTC"]).toBe(pctSigned(expected.joint!.alpha, 1));
+    unmount();
+
+    mount(payload, [300, 399]);
+    await click("zoom");
+    expect(railRow("Main Metrics", "Cumulative Return")[2]).toBe("—");
+    expect(railRow("Main Metrics", "Sharpe")[2]).toBe("—");
+    expect(stripCells()["α vs BTC"] ?? "—").toBe("—");
+  });
+
+  it("below the paired floor inside a window the strip keeps 9 cells, alpha and IR read the em-dash, and the strip AND §IV name the range's count (D-85)", async () => {
+    const payload = build400();
+    mount(payload, [100, 107]);
+    expect(screen.queryAllByTestId("joint-floor-reason")).toHaveLength(0);
+    await click("zoom");
+    const cells = stripCells();
+    expect(Object.keys(cells)).toHaveLength(9);
+    expect(cells["α vs BTC"]).toBe("—");
+    expect(cells["IR vs BTC"]).toBe("—");
+    const sentence = pairedFloorReason("BTC", 8, "range", MIN_PAIRED_OBSERVATIONS);
+    expect(sentence).toBe("Alpha and beta need at least 10 days paired with BTC; the selected range has 8.");
+    const reasons = screen.getAllByTestId("joint-floor-reason").map((el) => el.textContent);
+    expect(reasons).toEqual([sentence, sentence]);
+  });
+
+  it("on a chain-broken record the coverage caveat shows at full history exactly as before and is absent while a range is selected (D-78)", async () => {
+    const base = build400();
+    const payload = {
+      ...base,
+      dataQuality: { ...(base.dataQuality ?? {}), twrChainBroken: true, headlineCoversFrom: "2024-06-01" },
+    } as FactsheetPayload;
+    const caveat = headlineCoverageCaveat(payload.dataQuality, "cash_settlement", "Cum. Return, CAGR and Calmar");
+    expect(caveat).not.toBeNull();
+    const { container } = mount(payload);
+    expect(container.textContent).toContain(`⚠ ${caveat}`);
+    await click("zoom");
+    expect(container.textContent).not.toContain(caveat!);
+    await click("reset");
+    expect(container.textContent).toContain(`⚠ ${caveat}`);
+  });
+
+  it("the short-track caveat states a 60-observation window's count; an 800-observation record with no zoom shows none", async () => {
+    const long = build400(800);
+    const { container, unmount } = mount(long, [100, 159]);
+    expect(container.textContent).not.toMatch(/Only \d+ observations? — annualized/);
+    await click("zoom");
+    expect(container.textContent).toContain("Only 60 observations — annualized");
+    unmount();
+  });
+
+  it("the strip and the rail at one window run deriveSeriesBundle ONCE, and a second render at that window runs it zero more times", async () => {
+    const payload = build400();
+    mount(payload);
+    deriveSpy.mockClear();
+    await click("zoom");
+    expect(screen.getByTestId("range-eyebrow-strip").textContent).toMatch(/^Selected range/);
+    expect(screen.getByTestId("range-eyebrow-rail").textContent).toMatch(/^Selected range/);
+    expect(deriveSpy).toHaveBeenCalledTimes(1);
+    deriveSpy.mockClear();
+    // The same window again: a new range object, the same indices.
+    await click("zoom");
+    expect(deriveSpy).toHaveBeenCalledTimes(0);
+  });
+
+  it("the Scenario mount shows window figures equal to compute() of its slice, keeps its inert comparator blocks, renders no leverage control, and resets exactly (D-82, W2)", async () => {
+    const payload = scenarioPayload();
+    expect(payload.periodsPerYear).toBe(365);
+    mountScenario(payload, [10, 60]);
+    const before = stripCells();
+    const benchBefore = railRow("Main Metrics", "Sharpe")[2];
+    expect(screen.queryByLabelText(/Leverage multiplier/)).toBeNull();
+
+    await click("zoom");
+    expect(screen.getByTestId("range-eyebrow-strip").textContent).toMatch(/^Selected range: /);
+    const slice = compute(payload.strategyReturns.slice(10, 61), payload.dates.slice(10, 61), 0, 365);
+    const cells = stripCells();
+    expect(cells.Sharpe).toBe(num(slice.sharpe));
+    expect(cells.CAGR).toBe(pctSigned(slice.cagr, 1));
+    expect(cells["Max DD"]).toBe(pct(slice.max_dd, 1));
+    // The BTC column keeps its unavailable form: the same text as at full history.
+    expect(railRow("Main Metrics", "Sharpe")[2]).toBe(benchBefore);
+    const w = windowReads[windowReads.length - 1];
+    expect(w.withheld).toBeUndefined();
+    for (const key of ["btc", "spx", "none"] as const) {
+      expect(w.comparators[key], `${key} stays the base block`).toBe(payload.comparators[key]);
+    }
+    expect(screen.queryByLabelText(/Leverage multiplier/)).toBeNull();
+
+    await click("reset");
+    expect(stripCells()).toEqual(before);
+  });
+
+  it("a Scenario payload with no periodsPerYear withholds every window figure on the strip AND the rail, with one sentence (D-82, W1)", async () => {
+    const full = scenarioPayload();
+    const noBasis = { ...full } as Record<string, unknown>;
+    delete noBasis.periodsPerYear;
+    const payload = noBasis as unknown as FactsheetPayload;
+    mountScenario(payload, [10, 60]);
+    const railCells: Array<[string, string]> = [
+      ["Main Metrics", "Sharpe"],
+      ["Main Metrics", "CAGR"],
+      ["Max Drawdown", "Max Drawdown"],
+      ["Extended Metrics", "P5 (daily)"],
+      ["Extended Metrics", "P95 (daily)"],
+      ["Bootstrap 95% Confidence", "Sharpe"],
+      ["Bootstrap 95% Confidence", "Max Drawdown"],
+      ["Compound Performance", "Start Date"],
+      ["Compound Performance", "End Date"],
+    ];
+    const stripFull = stripCells();
+    const railFull = railCells.map(([t, l]) => railRow(t, l)[1]);
+    expect(hasPanel("Worst 10 Drawdowns")).toBe(true);
+    expect(screen.queryByTestId("window-withheld-reason")).toBeNull();
+
+    await click("zoom");
+    const strip = stripCells();
+    for (const [label, text] of Object.entries(strip)) {
+      expect(text, label).toBe("—");
+      expect(text).not.toBe(stripFull[label]);
+    }
+    expect(screen.getByTestId("window-withheld-reason").textContent).toBe(
+      "The figures for a selected range need an annualization basis this view does not carry. Resetting the range shows the full-history figures.",
+    );
+    railCells.forEach(([t, l], i) => {
+      const v = railRow(t, l)[1];
+      expect(v, `${t} / ${l}`).not.toBe(railFull[i]);
+      if (t !== "Compound Performance") expect(v, `${t} / ${l}`).toBe("—");
+    });
+    expect(railRow("Compound Performance", "Start Date")[1]).toBe(isoToMonthDay(payload.dates[10]));
+    expect(railRow("Compound Performance", "End Date")[1]).toBe(isoToMonthDay(payload.dates[60]));
+    expect(hasPanel("Worst 10 Drawdowns")).toBe(false);
+    expect(within(document.body).queryByText(/stationary block-bootstrap resamples/)).toBeNull();
   });
 });
