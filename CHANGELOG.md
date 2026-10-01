@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.117.0.1] - 2026-10-01 — DEPS: the minor and patch dependency groups and the `actions/checkout` 7.0.1 pin, in one batch
+
+This entry covers three dependency updates replayed onto `main` as one branch, so they cost one CI run instead of three. It supersedes Dependabot #897 and #898 and the manual replay #900 of Dependabot #643. No application code changes.
+
+### Changed
+- **npm (#897):** minor and patch updates to 29 packages, among them `next` 16.3.6, `react` and `react-dom` 19.3.0, `@supabase/supabase-js` 2.117.1, `zod` 4.6.5, `recharts` 3.10.1 and `@playwright/test` 1.63.0.
+- **Python (#898):** minor and patch updates to 12 packages, among them `fastapi` 0.141.1, `pandas` 2.3.3, `numpy` 2.5.3, `ccxt` 4.5.84 and `pydantic` 2.13.5.
+- **GitHub Actions (#900, from #643):** all 44 `actions/checkout` pins move from v7.0.0 (`9c091bb2`) to v7.0.1 (`3d3c42e5`).
+
+### Fixed
+- Dependabot's `package-lock.json` for #897 did not match its own `package.json`: `npm ci` refused it, missing `puppeteer-core`'s new proxy-agent dependencies. The lockfile is regenerated with `npm install` under Node 22, and `npm ci` passes on it.
+
+### Notes
+- The `@playwright/test` bump ships a newer Chromium, so the SVG chart goldens may need a re-bake on this branch.
+- Neither banned package (`react-native-international-phone-number`, `react-native-country-select`) is in the regenerated lockfile.
+- The major-version Dependabot PRs (#612, #614, #626, #627, #645, #646) are not part of this batch. Each is handled on its own.
+
 ## [0.116.0.0] - 2026-10-01 — LAYOUT: pages hold at 390 px and desktop 200% zoom, with tab strips that scroll inside themselves, stacked rows, one Scenario blend-window panel and a factsheet that reads as one voice
 
 ⭐ **What changed for whoever reads this next.** Phase 170 (LAYOUT) ships plans 01 to 13, gap-closure plans 15 to 20, one round of code review and silent-failure review with four fix topics, and a round-2 confirmation review. This entry covers the branch's 125 non-merge commits after `origin/main` `76bec2022`: research, UI contract, pattern map, plan and plan-check before execution (8); plans 01 to 13 (72); the first verification (`gaps_found`, 9/19) and the gap-closure plan with two plan-check rounds (5); gap plans 15 to 20 (17); the round-1 code review and silent-failure review (2); the four fix topics with their reports and the ROADMAP amendment (14); the CR-01 draft-row e2e case and its record (2); the round-2 confirmation reviews (2); the security and re-verification records (2); and one ROADMAP tick for Phases 159 and 164.1.1 (1). The 12 merge commits are not counted.
