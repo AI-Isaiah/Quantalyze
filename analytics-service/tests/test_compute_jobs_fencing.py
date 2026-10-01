@@ -1212,7 +1212,9 @@ def test_reclaim_invalidates_claim_token(admin, strategy_id):
 
 def test_defer_compute_job_token_fence(admin, strategy_id):
     """NEW-C12-06 (CL10): defer_compute_job must reject a stale claim_token on
-    a still-running row (serialization_failure) so a preempted worker (W1)
+    a still-running row (SQLSTATE 55006 since Phase 164.9.3.2; the body
+    raised 40001 before, which PostgREST 14 re-ran without bound, so the
+    call never answered) so a preempted worker (W1)
     cannot yank a job the watchdog reclaimed and W2 re-claimed under a fresh
     token. A MATCHING token defers normally and NULLs the stale fence token.
 
@@ -1246,7 +1248,7 @@ def test_defer_compute_job_token_fence(admin, strategy_id):
             "claimed_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", job_id).execute()
 
-        # (1) Mismatched token → serialization_failure, running row UNTOUCHED.
+        # (1) Mismatched token → SQLSTATE 55006 answered once, running row UNTOUCHED.
         wrong_token = str(uuid.uuid4())
         with pytest.raises(Exception) as exc_info:
             _rpc_retry_timeout(lambda: admin.rpc("defer_compute_job", {
@@ -1255,8 +1257,13 @@ def test_defer_compute_job_token_fence(admin, strategy_id):
                 "p_reason": "c12-06 mismatch probe",
                 "p_claim_token": wrong_token,
             }).execute())
-        assert "preempted" in str(exc_info.value) or "serialization" in str(exc_info.value).lower(), (
-            f"mismatched-token defer must raise serialization_failure, got: {exc_info.value}"
+        assert getattr(exc_info.value, "code", None) == "55006", (
+            "mismatched-token defer must answer SQLSTATE 55006 (object_in_use); "
+            f"got code={getattr(exc_info.value, 'code', None)!r}: {exc_info.value}"
+        )
+        assert "preempted by watchdog reclaim" in str(exc_info.value), (
+            "mismatched-token defer must carry the 'preempted by watchdog reclaim' "
+            f"literal the worker's deploy-window fallback reads, got: {exc_info.value}"
         )
         row = admin.table("compute_jobs").select("status,claim_token,attempts").eq("id", job_id).single().execute().data
         assert row["status"] == "running", "mismatched-token defer must NOT yank the running job (W2 keeps it)"
