@@ -1466,7 +1466,7 @@ true for 146 and half of 142–145, and **false for 141**.
       ✅ **Destination: Phase 169.4 ALLOCTRUTH**, whose plans read BTC through `readBenchmarkPrices`
       and `mergeWithFixture`. **Closed when:** consumers build the overlay from closes (or levels)
       and the metrics from exactly-one-day returns, with a test for each across a missing day.
-- [ ] **`[169-SCENARIO-WINDOW-ANNUALIZATION]` A selected range on the `/allocations` Scenario tab
+- [x] **`[169-SCENARIO-WINDOW-ANNUALIZATION]` A selected range on the `/allocations` Scenario tab
       shows the withheld form, because the Scenario payload carries no `periodsPerYear`
       (booked 2026-09-26, Phase 169 D-29).**
       Phase 169 plan 14 makes the KPI strip and the rail follow the zoom window on every
@@ -1485,6 +1485,12 @@ true for 146 and half of 142–145, and **false for 141**.
       `FactsheetBody` under a sub-range and asserts figures (not the em-dash) that equal
       `compute()` of the slice; and 167.1.2 records whether the leverage control should appear on
       the Scenario tab.
+      ✅ **CLOSED 2026-10-01 by Phase 169.1 ZOOMKPIS (plan 169.1-02, D-82).** The Scenario payload has
+      carried `periodsPerYear` since Phase 167.1.2 plan 07, and the leverage control is hidden in
+      `scenarioMode` (`FactsheetView.tsx`, `!scenarioMode && leverageEligible`). The gate test is
+      `FactsheetView.window-kpis.test.tsx` > "the Scenario mount shows window figures equal to
+      compute() of its slice, keeps its inert comparator blocks, renders no leverage control, and
+      resets exactly (D-82, W2)", commit `c78baf846`.
 
 - [ ] **`[169-PORTFOLIO-ANALYTICS-COLUMNS]` The portfolio analytics compute behind `/portfolios/[id]`
       may never refresh (booked 2026-09-27, Phase 169 D-53; inferred from source, NOT measured).**
