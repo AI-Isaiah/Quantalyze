@@ -52,6 +52,36 @@ interface BasisContextValue {
 const BasisContext = createContext<BasisContextValue | null>(null);
 
 /**
+ * 169.1 review MD-01 — a range gesture in progress (a brush pan or handle drag).
+ * While one is held, the windowed view keeps the range the gesture STARTED on, so
+ * the strip and the rail derive once when the gesture ends instead of once per
+ * pointer move (each derive runs the 2000-resample bootstrap: measured ~290 ms at
+ * 3000 observations). The charts keep following the live range.
+ */
+type RangeGestureValue = {
+  /** The range the gesture started on, or null when no gesture is held. */
+  held: readonly [number, number] | null;
+  begin: (startRange: readonly [number, number]) => void;
+  end: () => void;
+};
+
+const RangeGestureContext = createContext<RangeGestureValue | null>(null);
+
+const NO_GESTURE = { begin: () => {}, end: () => {} };
+
+/**
+ * MD-01 — begin / end a range gesture. `begin(range)` takes the range the gesture
+ * starts on (the one the strip shows); `end()` releases it and the windowed view
+ * derives the final range once. Call `end()` on every way a gesture can stop
+ * (pointer up, cancel, lost capture, unmount): a gesture never ended keeps the
+ * strip on its start range. Outside a BasisProvider both are no-ops.
+ */
+export function useRangeGesture(): Pick<RangeGestureValue, "begin" | "end"> {
+  const v = useContext(RangeGestureContext);
+  return v ?? NO_GESTURE;
+}
+
+/**
  * Ephemeral basis state. Renders children only (no DOM element) so wrapping the
  * FactsheetBody tree is transparent to the GUARD-02 byte-identity gate. Default
  * `cash_settlement` (D5).
@@ -59,7 +89,20 @@ const BasisContext = createContext<BasisContextValue | null>(null);
 export function BasisProvider({ children }: { children: ReactNode }) {
   const [basis, setBasis] = useState<Basis>("cash_settlement");
   const value = useMemo<BasisContextValue>(() => ({ basis, setBasis }), [basis]);
-  return <BasisContext.Provider value={value}>{children}</BasisContext.Provider>;
+  const [held, setHeld] = useState<readonly [number, number] | null>(null);
+  // begin / end keep ONE identity for the provider's life, so a consumer's
+  // unmount-cleanup effect keyed on `end` never fires (and releases the hold)
+  // just because a gesture began.
+  const actions = useMemo(
+    () => ({ begin: (startRange: readonly [number, number]) => setHeld(startRange), end: () => setHeld(null) }),
+    [],
+  );
+  const gesture = useMemo<RangeGestureValue>(() => ({ held, ...actions }), [held, actions]);
+  return (
+    <BasisContext.Provider value={value}>
+      <RangeGestureContext.Provider value={gesture}>{children}</RangeGestureContext.Provider>
+    </BasisContext.Provider>
+  );
 }
 
 /** Subscribe to the active basis + setter. Throws outside the provider. */
@@ -628,13 +671,21 @@ const windowedViewCache = new WeakMap<FactsheetPayload, { key: string; view: Win
  * D-27 — the window-following view. At full history it returns the active view BY
  * REFERENCE, so a reset shows exactly the stored values (the 169-01 overlay, D-10,
  * and the leverage re-pin, D-25). The range is read through `useDeferredValue`, the
- * same debounce the leverage read uses, so a brush drag never blocks on the derive.
+ * same debounce the leverage read uses.
+ *
+ * 169.1 review MD-01: while a range gesture is held (`useRangeGesture`, a brush
+ * drag), the view keeps the range the gesture started on, so a drag derives once,
+ * on release, rather than once per pointer move. `scope` comes from that same held
+ * range, so the "Selected range" eyebrow always names the range its figures
+ * describe (the WR-01 caption-versus-numbers rule). The figures after release are
+ * `windowView` of the final range, exactly what a drag-free zoom to it shows.
  */
 export function useWindowedView(payload: FactsheetPayload): { view: WindowedView; scope: RangeScope } {
   const base = useBasisSeriesView(payload);
   const basis = useContext(BasisContext)?.basis ?? "cash_settlement";
   const appliedLeverage = useAppliedLeverage();
-  const range = useDeferredValue(useXRange().xRange);
+  const liveRange = useDeferredValue(useXRange().xRange);
+  const range = useContext(RangeGestureContext)?.held ?? liveRange;
   return useMemo(() => {
     const scope = resolveRangeScope(range, payload.dates.length, base);
     if (scope.kind === "full") return { view: base, scope };
