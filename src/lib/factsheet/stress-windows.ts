@@ -1,3 +1,4 @@
+import { arithmeticEquity, arithmeticUnderwater } from "./compute";
 import type { StressWindow, StressWindowPayload } from "./types";
 
 /**
@@ -89,6 +90,8 @@ export function computeStressWindows(
   benchRet: ReadonlyArray<number | null>,
   benchName: string,
   markets: string[] = [],
+  /** Phase 169.1 (D-34): the headline's cumulative method for the strategy leg. Default geometric. */
+  cumulativeMethod: "geometric" | "arithmetic" = "geometric",
 ): StressWindowPayload {
   if (dates.length > 0 && !ISO_DATE.test(dates[0])) {
     throw new Error(`stress-windows: dates must be ISO (YYYY-MM-DD); got "${dates[0]}"`);
@@ -153,6 +156,19 @@ export function computeStressWindows(
       const benchDD = benchCum / benchPeak - 1;
       if (benchDD < benchMaxDD) benchMaxDD = benchDD;
     }
+    // Phase 169.1 (D-34): the strategy leg mirrors the headline's method. On an
+    // arithmetic series the headline and equity chart are running sums, so the
+    // window's return is the sum of its returns and its drawdown the running-sum
+    // trough, through the same helpers compute() uses. The benchmark stays
+    // geometric, because the benchmark headline beside it is. An inserted 0.0
+    // day moves neither a sum nor a product, so the day basis moves no figure.
+    let stratReturn = stratCum - 1;
+    if (cumulativeMethod === "arithmetic") {
+      const slice = stratRet.slice(startIdx, endIdx + 1);
+      stratReturn = arithmeticEquity(slice)[slice.length - 1] - 1;
+      stratMaxDD = 0;
+      for (const v of arithmeticUnderwater(slice)) if (v < stratMaxDD) stratMaxDD = v;
+    }
     windows.push({
       name: def.name,
       note: def.note,
@@ -161,7 +177,7 @@ export function computeStressWindows(
       days: actualDays,
       expectedCalendarDays: expectedDays,
       coverage: coverageRatio >= 0.85 ? "full" : "partial",
-      stratReturn: stratCum - 1,
+      stratReturn,
       benchReturn: benchCovered ? benchCum - 1 : null,
       stratMaxDD,
       benchMaxDD: benchCovered ? benchMaxDD : null,

@@ -493,7 +493,8 @@ export function deriveSeriesBundle(
     styleDrift: computeStyleDrift(stratRet, dates),
     // CR-01 (SC3): stress windows take BTC null-honest — a window with an uncovered
     // BTC day gets null bench fields, never a compounded 0% day. Not under D-65.
-    stressWindows: computeStressWindows(dates, stratRet, btcAl.returns, "BTC", markets),
+    // Phase 169.1 (D-34): the strategy leg follows the headline's method.
+    stressWindows: computeStressWindows(dates, stratRet, btcAl.returns, "BTC", markets, isArithmetic ? "arithmetic" : "geometric"),
     strategyMetrics: bundleMetrics,
     correlations,
     correlationMatrix: { labels: correlationLabels, matrix: correlationMatrix },
