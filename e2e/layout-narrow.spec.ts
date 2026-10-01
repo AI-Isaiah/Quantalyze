@@ -18,6 +18,7 @@ import {
   assertChildrenInside,
   assertInsideViewport,
   assertFitsOrScrollsInside,
+  assertNotClippedByAncestors,
   assertNotCovered,
   assertScrollsInside,
   rectsIntersect,
@@ -367,11 +368,14 @@ test.describe("/profile — SC2-PROFILE", () => {
       );
       console.log(`SC2-PROFILE ${vp.id} profile tab list scrolls=${scrolls}`);
       // Gap 7: at 640x400 Disconnect sits below the fold (y=439), which is
-      // reachable, not clipped. Scroll it into view so the check measures
-      // clipping. The not-covered check stays after it: a fixed bottom nav
-      // over the scrolled-to button would be a real defect.
+      // reachable, not clipped, so scroll it into view first. Then three
+      // separate measures: its own box lies inside the viewport; no
+      // overflow-clipping ancestor (the key list wrapper is overflow-hidden,
+      // SFH-170-02) cuts any part of it off; and its centre is not covered,
+      // since a fixed bottom nav over the scrolled-to button is a real defect.
       await disconnect.scrollIntoViewIfNeeded();
       await assertInsideViewport(page, disconnect, `${vp.id} Disconnect`);
+      await assertNotClippedByAncestors(disconnect, `${vp.id} Disconnect`);
       await assertNotCovered(page, disconnect, `${vp.id} Disconnect`);
 
       // Every other profile tab still fits the page. Anchor on the tablist:

@@ -1,6 +1,9 @@
 import { expect, test } from "@playwright/test";
 import { assertNoReflow } from "./helpers/reflow";
-import { assertFitsOrScrollsInside } from "./helpers/geometry";
+import {
+  assertFitsOrScrollsInside,
+  assertNotClippedByAncestors,
+} from "./helpers/geometry";
 
 /**
  * Phase 44-04 / A11Y-02 — Reflow gate (WCAG 1.4.10) at the 390px floor.
@@ -253,5 +256,66 @@ test.describe("geometry helper self-test (Phase 170 GC-01)", () => {
     await expect(
       assertFitsOrScrollsInside(page.locator("#strip"), "overflows"),
     ).rejects.toThrow(/does not scroll inside itself/);
+  });
+});
+
+/**
+ * SFH-170-02 — server-free self-test of assertNotClippedByAncestors. A 200 px
+ * overflow:hidden row stands in for the AllocatorExchangeManager key list
+ * wrapper. A button pushed half past its edge must reject; one that fits must
+ * resolve; and an absolute button whose containing block lies OUTSIDE the
+ * clipping wrapper is not clipped by it, so it must resolve too (guards the
+ * containing-block walk against a false positive in the seeded SC2-PROFILE row).
+ */
+function clipFixture(inner: string): string {
+  return FIXTURE_SHELL.replace(
+    "PLACEHOLDER",
+    `<div style="width:200px;height:60px;overflow:hidden">${inner}</div>`,
+  );
+}
+
+test.describe("geometry helper self-test (SFH-170-02 ancestor clip)", () => {
+  test.describe.configure({ timeout: 30_000 });
+
+  test("half-clipped fixture: a button pushed past an overflow:hidden row's edge rejects", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.setContent(
+      clipFixture(
+        '<button id="target" style="display:block;margin-left:150px;width:100px;height:32px">Disconnect</button>',
+      ),
+    );
+    await expect(
+      assertNotClippedByAncestors(page.locator("#target"), "half-clipped"),
+    ).rejects.toThrow(/clipped by ancestor DIV \(overflow hidden\/hidden\)/);
+  });
+
+  test("visible fixture: a button fully inside the overflow:hidden row resolves", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.setContent(
+      clipFixture(
+        '<button id="target" style="display:block;margin-left:50px;width:100px;height:32px">Disconnect</button>',
+      ),
+    );
+    await assertNotClippedByAncestors(page.locator("#target"), "visible");
+  });
+
+  test("escapee fixture: an absolute button whose containing block is outside the clipping row resolves", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.setContent(
+      FIXTURE_SHELL.replace(
+        "PLACEHOLDER",
+        '<div style="position:relative;width:360px;height:120px">' +
+          '<div style="width:200px;height:60px;overflow:hidden">' +
+          '<button id="target" style="position:absolute;left:150px;top:0;width:100px;height:32px">Disconnect</button>' +
+          "</div></div>",
+      ),
+    );
+    await assertNotClippedByAncestors(page.locator("#target"), "escapee");
   });
 });
