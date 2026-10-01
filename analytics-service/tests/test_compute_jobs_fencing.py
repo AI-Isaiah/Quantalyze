@@ -172,9 +172,16 @@ except ImportError:  # pragma: no cover — only when postgrest isn't on path
 
 class TestSerializationFailureDetector:
     """_is_serialization_failure must classify ONLY:
-      (a) PostgREST APIError with .code == '40001', AND
-      (b) bare exceptions whose str contains our specific RAISE message
+      (a) PostgREST APIError with .code == '55006' (object_in_use), AND
+      (b) exceptions whose str contains our specific RAISE message
           literal 'preempted by watchdog reclaim'.
+
+    Phase 164.9.3.2: the fence raises moved from SQLSTATE 40001 to 55006
+    because PostgREST 14 re-runs a transaction that raised 40001 without
+    bound, so a stale-token mark never returned to the worker at all. The
+    literal branch is the deploy-window guarantee: an old body (40001)
+    still carries the literal, so a preempted mark is classified whichever
+    of the migration apply and the worker deploy lands first.
 
     PR #149 review I4 (maintainability conf 8 + security conf 6):
     tightened from the previous fuzzy detection that ALSO matched
@@ -182,12 +189,44 @@ class TestSerializationFailureDetector:
     That collided with unrelated 40001 sources (other SERIALIZABLE
     isolation conflicts, advisory-lock contention surfacing as 40001,
     third-party library messages embedding '40001' for unrelated
-    reasons). Tighter = P97-specific.
+    reasons). Tighter = P97-specific. Since 164.9.3.2 a bare code 40001
+    without the literal is no longer a fence event at all.
     """
 
-    def test_apierror_with_code_40001_detected(self) -> None:
-        exc = APIError({"code": "40001", "message": "preempted"})
+    def test_apierror_with_code_55006_and_literal_detected(self) -> None:
+        exc = APIError({
+            "code": "55006",
+            "message": "mark_compute_job_done: job X preempted by watchdog reclaim "
+                       "(caller token=t1, current token=t2)",
+        })
         assert _is_serialization_failure(exc) is True
+
+    def test_apierror_with_code_55006_detected_without_literal(self) -> None:
+        """The code alone identifies the fence: these RPCs raise 55006
+        nowhere else, so a reworded message must still classify."""
+        exc = APIError({"code": "55006", "message": "unrelated"})
+        assert _is_serialization_failure(exc) is True
+
+    def test_deploy_window_old_code_40001_with_literal_detected(self) -> None:
+        """Deploy window: a worker carrying this classifier meets a body that
+        still raises 40001 (migration not yet applied). The literal fallback
+        must classify it as a preempted mark."""
+        exc = APIError({
+            "code": "40001",
+            "message": "mark_compute_job_done: job X preempted by watchdog reclaim "
+                       "(caller token=t1, current token=t2)",
+        })
+        assert _is_serialization_failure(exc) is True
+
+    def test_apierror_bare_code_40001_without_literal_NOT_detected(self) -> None:
+        """A bare 40001 without the literal can only be an unrelated
+        serialization conflict now that the fence answers 55006. Swallowing
+        it as LATE_MARK_IGNORED would bury a real failure."""
+        exc = APIError({
+            "code": "40001",
+            "message": "could not serialize access due to concurrent update",
+        })
+        assert _is_serialization_failure(exc) is False
 
     def test_apierror_with_other_code_not_detected(self) -> None:
         exc = APIError({"code": "23505", "message": "unique violation"})
