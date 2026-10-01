@@ -304,6 +304,13 @@ describe("StrategiesPage — N-STRAT row layout (170-05)", () => {
 
     const link = container.querySelector("a")!;
     expect(link.textContent).toBe("Alpha Long-Short Beta");
+    // WR-02 (170 review): /strategies does not scroll, so its name words must
+    // be breakable when one is wider than the name block. A nowrap word there
+    // let a 40-character hyphenated name overflow the card at 390 px.
+    for (const word of link.querySelectorAll("span")) {
+      expect(word.className.split(/\s+/)).toContain("inline-block");
+      expect(word.className.split(/\s+/)).not.toContain("whitespace-nowrap");
+    }
 
     const tagRow = link.nextElementSibling as HTMLElement;
     expect(tagRow.className).toContain("flex-wrap");

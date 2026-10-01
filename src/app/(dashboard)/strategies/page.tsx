@@ -780,7 +780,7 @@ export default async function StrategiesPage() {
                       and the name painted over the controls. */}
                   <div className="flex-1 min-w-0 md:min-w-[160px]">
                     <Link href={`/strategies/${s.id}/edit`} className="font-medium text-text-primary hover:text-accent transition-colors">
-                      <NowrapWords text={s.name} />
+                      <NowrapWords text={s.name} breakOverlong />
                     </Link>
                     <div className="flex flex-wrap gap-1 mt-1">
                       {s.strategy_types.map((t: string) => (
