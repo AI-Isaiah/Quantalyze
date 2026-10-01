@@ -314,12 +314,27 @@ describe("StrategiesPage — N-STRAT row layout (170-05)", () => {
       expect(chip.className).toContain("whitespace-nowrap");
     }
 
+    // CR-01 (170 review, measured 2026-10-01 in Chromium with DM Sans): from
+    // md up the name block keeps a hard 160 px floor and the control group
+    // may shrink and wrap. With `md:shrink-0` the group held its one-line
+    // width (~401 px for a draft row), so at 768 and 800 px (desktop 200%
+    // zoom on 1536/1600 px screens) the name block got 0 px and the name
+    // painted over the controls. The floor and the shrinkable group are the
+    // fix; `md:shrink-0` coming back re-opens the overlap.
+    const nameBlock = link.parentElement as HTMLElement;
+    const nameTokens = nameBlock.className.split(/\s+/);
+    for (const token of ["flex-1", "min-w-0", "md:min-w-[160px]"]) {
+      expect(nameTokens).toContain(token);
+    }
+
     const group = rowEl.lastElementChild as HTMLElement;
     const groupTokens = group.className.split(/\s+/);
     expect(groupTokens).toContain("flex-wrap");
-    for (const token of ["md:ml-4", "md:shrink-0"]) {
+    for (const token of ["md:ml-4", "md:min-w-0"]) {
       expect(groupTokens).toContain(token);
     }
+    expect(groupTokens).not.toContain("md:shrink-0");
+    expect(groupTokens).not.toContain("shrink-0");
 
     // GC-02: none of the five layout utilities may sit on the sm: prefix.
     const smLayout = [
