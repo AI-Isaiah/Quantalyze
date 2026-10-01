@@ -192,7 +192,7 @@ Plans:
   4. The two money-math defects are closed on the strategy-analytics path: an all-non-negative return series with a >100% day is never re-read as prices (no sign-flipped Sharpe), and a blend leg with unknown `asset_class` is treated as crypto for RISK (a sole crypto leg no longer inflates Sharpe via √252).
   5. Two concurrent same-session resubmits cannot both take the FILL arm (compare-and-set on `category_id IS NULL`); the classification-conflict 409's own remedy can mint a fresh session (the re-mint fingerprint accounts for classification, or the exclusion is documented at the fingerprint); and `withPublishedOrOwner` validates the uid's shape before interpolating it into the PostgREST `.or()` filter.
 
-**Plans**: 7 plans
+**Plans**: 7/7 plans complete
 
 Plans:
 **Wave 1**
@@ -1274,7 +1274,7 @@ Plans:
 
 **Requirements**: TODOS entry `[PROBER-CADENCE-UNDELIVERED-01]` — this phase is its named owner.
 **Depends on:** Phase 164.1 (the prober it observes), Phase 164.7 (the settled Vault-backed `cron.job` mechanism any new PROD cron row must consume rather than invent a second answer to)
-**Plans:** 4/6 plans executed — ⭐ **2026-09-30 (closure note, founder decision):** 6/6. Plan 06 ran on PROD on 2026-09-18 (PR #819 `b8e375283`), and its SUMMARY was written retrospectively on 2026-09-30.
+**Plans:** 6/6 plans complete — ⭐ **2026-09-30 (closure note, founder decision):** 6/6. Plan 06 ran on PROD on 2026-09-18 (PR #819 `b8e375283`), and its SUMMARY was written retrospectively on 2026-09-30.
 
 ⛔ **Criterion 4 is ALREADY MET** by commit `126517a8`, which corrected the workflow header at its own
 site. Plan 03 pins it with a calibrated test and does NOT re-edit it — re-deriving the figures would
