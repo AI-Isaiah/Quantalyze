@@ -4371,12 +4371,13 @@ Plans:
 
 ### Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity (INSERTED)
 
-**Goal:** Three user-facing defects found in the post-170 browser pass are fixed: the Allocations Holdings tab never scrolls sideways, the daily BTC benchmark refresh still lands a day when Binance fails, and the /compare equity chart shows each strategy's real cumulative return.
+**Goal:** Four user-facing items from Phase 170's post-deploy pass are fixed. The Allocations Holdings tab never scrolls sideways. The daily BTC benchmark refresh still lands a day when Binance fails. The /compare equity chart shows each strategy's real cumulative return. A CSV-ingested strategy's factsheet masthead states its venue as self-reported.
 **Founder decision, 2026-10-01 (AskUserQuestion):** one inserted phase with three plans. Phases 169, 169.2 and 170 are closed, and nothing is added to them.
 **Evidence (measured 2026-10-01 on PROD, after the Phase 170 merge e3b4542da deployed):**
 (1) On `/allocations?tab=holdings` at 735 CSS px (desktop 200% zoom), `#main-content` scrollWidth is 885 against clientWidth 735. `HoldingsTabPanel.tsx`'s `<div data-tab-panel="holdings" className="grid gap-8">` has no column template, so its implicit track resolves to the min-content of its widest item (845 px). The Holdings and Open Positions tables (843 px) and the Exposure drill-down table (811 px) sit in `overflow-x-auto` scrollers. Those scrollers grow with their tables because their grid-item ancestors keep `min-width: auto`. The floor does not depend on the viewport, so every width below about 1000 CSS px overflows. CI missed it because the seeded book has no wide positions table.
 (2) The 2026-10-01 00:10 UTC Vercel cron `/api/cron/refresh-benchmark` answered 502 "no BTC series" (Sentry QUANTALYZE-1M, 1N and 1P). The newest stored BTC close is 2026-09-29; the 2026-09-30 run succeeded through 09-29. `fetch_btc_daily_prices` in `analytics-service/services/benchmark.py` falls back from Binance to CoinGecko `market_chart` with `days=1000`. The CoinGecko free tier refuses that (HTTP 401, error_code 10012, measured), while `days=365` answers 200. Any Binance failure therefore loses that day.
 (3) `/compare?ids=<one strategy>` draws an equity axis reading about 1e35%. `CompareEquityOverlay.tsx` compounds `strategy_analytics.returns_series` (`cum *= 1 + p.value`), but that column stores equity LEVELS. For the measured strategy it runs 0.99998 → 1.1454 over 112 days, with `cumulative_return` 0.1454, so 112 compounds of about 2 explode.
+(4) A CSV-ingested strategy's factsheet masthead shows no venue label. Phase 170's UI-SPEC copy row "Venue label on CSV-ingested strategies (169-routed (b))" sets the rule. Where a venue is declared, the label reads `{declared venue} · self-reported`. Where none is declared, the label is omitted (it is a label, not a metric, so there is no em-dash). The founder named the site under checkpoint FC-2.
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 170
 
@@ -4385,6 +4386,9 @@ Plans:
 1. At 390, 640 and 735 CSS px the Holdings tab's `#main-content` overflow is 0, and each wide table scrolls inside its own scroller. A seeded e2e case with a wide positions table fails on the old code.
 2. When Binance fails, the refresh still returns a current BTC series: the fallback stays within the free-tier window and merges with cached history, or uses another free source. A test fails on the old 1000-day request, and a missed day is backfilled by the next run.
 3. The /compare overlay's last point equals each strategy's stored cumulative return (+14.5% for the measured example). A test fails on the old compounding.
+4. On `/factsheet/[id]`, a CSV-ingested strategy with a declared venue shows `{venue} · self-reported` in the masthead. One with no declared venue shows no venue label. A test that fails on the current masthead pins both.
+
+**⭐ ROUTED IN 2026-10-01 (founder, FC-2; edited by `/gsd-phase --edit`):** this is Phase 170 plan 14's FC-2 answer. Asked to name the site for the CSV-ingested venue label, the founder chose "Factsheet masthead". Phase 170 is closed and gets nothing added, so this became item (4) and criterion 4 of this phase.
 
 **Plans:** 0 plans
 
