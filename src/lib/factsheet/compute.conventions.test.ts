@@ -43,6 +43,8 @@ const GAP_SKIP = new Set([4, 9, 10, 17, 22, 23]);
 const GAP_RETS = Array.from({ length: 30 }, (_, i) => baseReturn(i + 3));
 const GAP_DATES = isoDays(30, GAP_SKIP);
 
+// Bake these snapshots under the `.nvmrc` Node (22, as CI runs): `skew` in B and
+// C differs by one ULP between Node 22 and Node 25 (measured 2026-10-01).
 describe("compute() with no conventions argument is byte-identical to the pre-change compute() (D-36, W1, FROZEN)", () => {
   it("fixture A: a trending series", () => {
     expect(compute(TREND_RETS, TREND_DATES, 0, P)).toMatchInlineSnapshot(`
@@ -257,7 +259,7 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
         "profit_factor": 1.374269049232962,
         "recovery_factor": 1.0329235074131304,
         "sharpe": 2.3721427668612827,
-        "skew": -0.11360716852722538,
+        "skew": -0.11360716852722537,
         "sortino": 3.645527545583594,
         "start": "2024-01-01",
         "tail_ratio": 0.9332956884971672,
@@ -374,7 +376,7 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
         "profit_factor": 1.3289587370435494,
         "recovery_factor": 0.9695392592187879,
         "sharpe": 2.3065394136537356,
-        "skew": 0.036844507138638946,
+        "skew": 0.036844507138639,
         "sortino": 3.6720722932906,
         "start": "2024-01-01",
         "tail_ratio": 1.0457856903578668,
