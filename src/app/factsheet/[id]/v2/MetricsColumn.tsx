@@ -430,8 +430,14 @@ export function comparatorPartialYear(
 /**
  * Phase 170 (169-routed item (a), UI-SPEC AD-10) — the label of the month row in
  * Returns and Cumulative Return Metrics. compute()'s `mtd` is the return of the
- * record's LAST month, so it is "Month-to-date" only while that month is the
- * current UTC calendar month. An ended record names it: `Final month (Jun 2024)`.
+ * record's LAST month, and `end` is the last RETURN date, not an "ended" marker
+ * (the payload has none). So the label goes by how many UTC calendar months
+ * that last month lies behind `now` (amended 2026-10-01, review WR-03):
+ *   0 (or a future `end`) → "Month-to-date";
+ *   1 → `Last month (Sep 2026)`: neutral, because a live strategy reads this way
+ *       on the 1st of every month and, on a weekday-only market, over a
+ *       month-start weekend;
+ *   2+ → `Final month (Jun 2024)`: the record has genuinely stopped.
  * Only the label branches on the clock; the value and 169-05's em-dash lock are
  * unchanged. An empty or unparseable `end` keeps "Month-to-date".
  */
@@ -439,8 +445,11 @@ export function monthRowLabel(end: string, now: Date = new Date()): string {
   if (!end) return "Month-to-date";
   const d = new Date(end);
   if (Number.isNaN(d.getTime())) return "Month-to-date";
-  if (d.getUTCFullYear() === now.getUTCFullYear() && d.getUTCMonth() === now.getUTCMonth()) return "Month-to-date";
-  return `Final month (${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()})`;
+  const monthsBehind =
+    (now.getUTCFullYear() - d.getUTCFullYear()) * 12 + (now.getUTCMonth() - d.getUTCMonth());
+  if (monthsBehind <= 0) return "Month-to-date";
+  const named = `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+  return monthsBehind === 1 ? `Last month (${named})` : `Final month (${named})`;
 }
 
 export function isoToMonthDay(iso: string): string {

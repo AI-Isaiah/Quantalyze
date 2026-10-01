@@ -7,8 +7,13 @@
  * of the month BEFORE the record's last month, so it is the return of the
  * record's final month. A record that stopped in June 2024 printed that figure
  * under "Month-to-date", which reads as this month's return on a live strategy.
- * The label now says `Final month (Jun 2024)` unless the record's last month is
- * the current UTC calendar month, when "Month-to-date" is true and stays.
+ * The label is chosen by how old the record's last month is against the current
+ * UTC month (amended 2026-10-01, Phase 170 review WR-03): the current month is
+ * "Month-to-date"; the previous calendar month is the neutral `Last month (Aug
+ * 2026)`, because a live strategy reads that way on the 1st of every month and,
+ * for a weekday-only market, over a month-start weekend; two or more months
+ * back is `Final month (Jun 2024)`, because the record has genuinely stopped.
+ * The payload carries no "ended" flag, so the age of the data is the only signal.
  *
  * What does NOT change: the value (still `m.mtd`) and 169-05's em-dash lock (a
  * null `mtd` renders "—" in a row that is still shown, never an omitted row).
@@ -133,8 +138,37 @@ describe("the month row names an ended record's last month (Phase 170, AD-10)", 
     expect(container.textContent).not.toContain("Month-to-date");
   });
 
-  it("the month boundary is read in UTC: a record ending 31 Aug is 'Final month (Aug 2026)' from 00:30 UTC on 1 Sep", () => {
+  it("the 1st of the month on a live record: a record ending 31 Aug reads 'Last month (Aug 2026)' from 00:30 UTC on 1 Sep, never 'Final month'", () => {
     vi.setSystemTime(new Date("2026-09-01T00:30:00Z"));
+    const { container } = renderColumn(payloadEnding("2026-08-31"));
+    for (const title of PANELS) expect(firstRow(section(container, title)).label, title).toBe("Last month (Aug 2026)");
+    expect(container.textContent).not.toContain("Final month");
+  });
+
+  it("the review's own case: a live record ending 30 Sep reads 'Last month (Sep 2026)' on 1 Oct", () => {
+    vi.setSystemTime(new Date("2026-10-01T09:00:00Z"));
+    const { container } = renderColumn(payloadEnding("2026-09-30"));
+    for (const title of PANELS) expect(firstRow(section(container, title)).label, title).toBe("Last month (Sep 2026)");
+    expect(container.textContent).not.toContain("Final month");
+  });
+
+  it("a month-start weekend (a weekday-only market's last daily is Fri 30 Oct): it reads 'Last month (Oct 2026)' on Sun 1 Nov and Mon 2 Nov", () => {
+    for (const now of ["2026-11-01T12:00:00Z", "2026-11-02T08:00:00Z"]) {
+      vi.setSystemTime(new Date(now));
+      const { container, unmount } = renderColumn(payloadEnding("2026-10-30"));
+      for (const title of PANELS) expect(firstRow(section(container, title)).label, `${title} @ ${now}`).toBe("Last month (Oct 2026)");
+      unmount();
+    }
+  });
+
+  it("the year boundary counts as one month: a record ending 31 Dec 2025 reads 'Last month (Dec 2025)' on 1 Jan 2026", () => {
+    vi.setSystemTime(new Date("2026-01-01T00:30:00Z"));
+    const { container } = renderColumn(payloadEnding("2025-12-31"));
+    for (const title of PANELS) expect(firstRow(section(container, title)).label, title).toBe("Last month (Dec 2025)");
+  });
+
+  it("two calendar months back is a stopped record: a record ending 31 Aug reads 'Final month (Aug 2026)' on 1 Oct", () => {
+    vi.setSystemTime(new Date("2026-10-01T00:30:00Z"));
     const { container } = renderColumn(payloadEnding("2026-08-31"));
     for (const title of PANELS) expect(firstRow(section(container, title)).label, title).toBe("Final month (Aug 2026)");
   });
