@@ -989,7 +989,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
             : series.map((s, idx) => {
                 if (muted.has(idx)) return null;
                 const useLog = config.scalable && scale === "log";
-                const d = buildPath(s.values, X, Y, useLog);
+                const d = buildPath(s.values, X, Y, useLog, s.bridgeAt);
                 if (s.fill && config.baseline != null) {
                   const baselineY = Y(config.baseline);
                   const filled = closePathToBaseline(d, X, baselineY, xStart, xEnd, s.values);
@@ -1331,18 +1331,35 @@ function ariaLabel(cfg: ChartConfig, strategyName: string, cmpName: string, hasC
   return `${cfg.title}: ${strategyName}${hasCmp ? ` vs ${cmpName}` : ""}`;
 }
 
+/**
+ * `bridgeAt` (Phase 169.1, D-38 as narrowed by D-84) is an optional per-index
+ * mask, absent by default (every null breaks the line, as before). Where it is
+ * true, a null or non-finite value drawn AFTER a finite point does not break the
+ * subpath: the next finite value continues it with `L`. Only `resolveSeries` sets
+ * it, on the strategy series of a config that opts in (the rolling Sharpe), and
+ * only at the days the active day basis excluded. That is why it is never set on
+ * a comparator line (Phase 169.5 plan 02 relies on that line breaking past
+ * `through`), and why a no-dispersion null (founder D7: no Sharpe exists for that
+ * window) is not bridged: its mask entry is false. The leading warm-up stays a gap
+ * (nothing is drawn before the first finite value), trailing nulls draw nothing,
+ * and a non-positive value under log scale still breaks the line.
+ */
 function buildPath(
   values: ReadonlyArray<number | null>,
   X: (i: number) => number,
   Y: (v: number) => number,
   useLog: boolean,
+  bridgeAt?: ReadonlyArray<boolean>,
 ): string {
   const parts: string[] = [];
   let prevValid = false;
   for (let i = 0; i < values.length; i++) {
     const v = values[i];
-    const skip = v == null || !Number.isFinite(v) || (useLog && v <= 0);
-    if (skip) {
+    if (v == null || !Number.isFinite(v)) {
+      if (!bridgeAt?.[i]) prevValid = false;
+      continue;
+    }
+    if (useLog && v <= 0) {
       prevValid = false;
       continue;
     }
