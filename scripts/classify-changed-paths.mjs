@@ -48,6 +48,8 @@
  *
  * The rule: a pull request whose changed-file list is ENTIRELY under
  * `.planning/` is docs-only; anything else is code.
+ * (2026-10-01, Phase 164.9.4 review WR-01: the same rule now also applies to a
+ * PUSH, over its pushed range, failing safe to code — see `classifyPushRange`.)
  *
  * ⛔ FAIL-CLOSED, BY DECISION. Every unreadable, empty or otherwise ambiguous
  * input classifies as CODE. The asymmetry is the whole argument: a wrong
@@ -61,8 +63,8 @@
  * phase exists to remove — and this classifier is the single point of trust for
  * the whole path filter, so its own table is the first thing that must be true.
  */
-import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
@@ -164,6 +166,73 @@ export function changedFilesAgainstBase({ baseRefName = process.env.GITHUB_BASE_
 }
 
 /**
+ * THE PUSH PATH — Phase 164.9.4, routed in by the founder on 2026-09-27
+ * (ROADMAP `### Phase 164.9.4`, "a docs-only push to `main` runs the full
+ * corpus"). It supersedes the Phase 164.6.3 trigger-scope decision that the
+ * push corpus is never filtered, for `push` ONLY: `workflow_dispatch` and every
+ * other non-PR event still hard-code a code verdict in `main()`.
+ *
+ * A push is classified by the PUSHED RANGE, `<before>..HEAD`, with the same
+ * `judge()` the PR path uses. On a single squash merge `before` is HEAD's first
+ * parent, so this is exactly the ROADMAP's "diff against its first parent". On a
+ * multi-commit push it is the union of every pushed commit, which is STRICTER: a
+ * code commit followed by a docs commit stays code, where a `HEAD^1..HEAD` diff
+ * would have read only the docs commit and skipped the corpus.
+ *
+ * ⛔ FAIL SAFE TO CODE, NEVER TO RED. Every range this function cannot determine
+ * returns `docsOnly: false` with a named reason, and `main()` exits 0. It never
+ * throws: a non-zero exit fails `changed-paths`, which skips every dependent and
+ * turns the `frontend` aggregator red on `main`, so Railway skips the deploy.
+ * The undeterminable shapes, each one a "we do not know what was pushed":
+ *   - `before` absent, or not a 40/64-hex object name;
+ *   - `before` all zeros (a branch-creating push);
+ *   - `forced` is true (a force push rewrote history, so `before` is not a base);
+ *   - `before` is not a commit in this clone;
+ *   - `before` is not an ancestor of HEAD (the ancestor check also covers a
+ *     forced push whose payload lost the flag);
+ *   - any git error during the diff;
+ *   - an empty diff (`judge([])` is code by decision).
+ *
+ * ⭐ A docs-only push is a SHORT run, never a missing one. `changed-paths`, the
+ * always-on jobs and the `if: always()` `frontend` aggregator still run, so the
+ * SHA gets a recorded green run that deploy automation can wait on.
+ *
+ * @param {{before?: string, forced?: string|boolean, cwd?: string}} opts —
+ *   `before` and `forced` come from `github.event.before` / `.forced`, passed in
+ *   through the step's `env:`. `cwd` exists for the self-test's scratch repos.
+ * @returns {{docsOnly: boolean, reason: string}}
+ */
+export function classifyPushRange({ before, forced, cwd } = {}) {
+  const code = (reason) => ({ docsOnly: false, reason: `push range undeterminable (${reason}) — classified as code, full corpus` });
+  const sha = String(before ?? "").trim();
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return code(`before-SHA ${sha ? "is not an object name" : "is absent"}`);
+  if (/^0+$/.test(sha)) return code("before-SHA is all zeros, a branch-creating push");
+  if (String(forced ?? "").trim() === "true" || forced === true) return code("a forced push");
+  try {
+    git(["cat-file", "-e", `${sha}^{commit}`], cwd);
+  } catch {
+    return code("before-SHA is not a commit in this clone");
+  }
+  try {
+    git(["merge-base", "--is-ancestor", sha, "HEAD"], cwd);
+  } catch {
+    return code("before-SHA is not an ancestor of HEAD");
+  }
+  let files;
+  try {
+    // Two-dot, `--no-renames` and `-z` for the same reasons the PR diff carries
+    // them (see `changedFilesAgainstBase`).
+    files = git(["diff", "--name-only", "--no-renames", "-z", sha, "HEAD"], cwd)
+      .split("\0")
+      .filter(Boolean);
+  } catch {
+    return code("git diff over the range failed");
+  }
+  if (files.length === 0) return code("the range changed no files");
+  return { docsOnly: judge(files), reason: `${files.length} changed file(s) in the pushed range ${sha.slice(0, 12)}..HEAD` };
+}
+
+/**
  * One machine-readable summary line always; the `$GITHUB_OUTPUT` append only
  * when the variable is present, so a bare local run still works the way every
  * other script in `scripts/` does.
@@ -173,6 +242,47 @@ function emit(value, reason) {
   if (process.env.GITHUB_OUTPUT) {
     appendFileSync(process.env.GITHUB_OUTPUT, `docs_only=${value}\n`);
   }
+}
+
+/**
+ * A throwaway git repository for the push-range rows. `commit(files)` writes
+ * the given paths, commits them and returns the new HEAD sha.
+ */
+function scratchRepo(label) {
+  const dir = mkdtempSync(join(tmpdir(), `gsd-classify-${label}-`));
+  const g = (args) =>
+    execFileSync("git", ["-c", "user.name=self-test", "-c", "user.email=self-test@invalid", "-c", "commit.gpgsign=false", ...args], {
+      cwd: dir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  g(["init", "-q"]);
+  const commit = (files) => {
+    for (const [rel, body] of Object.entries(files)) {
+      mkdirSync(join(dir, rel, ".."), { recursive: true });
+      writeFileSync(join(dir, rel), body);
+    }
+    g(["add", "-A"]);
+    g(["commit", "-q", "-m", "c"]);
+    return g(["rev-parse", "HEAD"]);
+  };
+  return { dir, g, commit, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+/**
+ * Run THIS script's `main()` end to end as CI does, in `cwd`, on a push event.
+ * Returns the exit code and the `docs_only=` value it appended to GITHUB_OUTPUT.
+ */
+function runMainOnPush(cwd, env) {
+  const outFile = join(cwd, ".gsd-github-output");
+  writeFileSync(outFile, "");
+  const res = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, GITHUB_EVENT_NAME: "push", GITHUB_OUTPUT: outFile, PUSH_BEFORE_SHA: "", PUSH_FORCED: "", ...env },
+  });
+  const line = readFileSync(outFile, "utf8").match(/^docs_only=(.*)$/m);
+  return { code: res.status, docsOnly: line ? line[1] : null, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
 }
 
 /**
@@ -362,6 +472,91 @@ const CASES = [
       }
     },
   },
+  {
+    claim: "WR-01: a docs-only PUSH range takes the SHORT path (docs_only=true), through main() as CI runs it",
+    run: (ok) => {
+      // RED against the pre-164.9.4 code, which hard-coded a code verdict for
+      // every push. Both the function and the end-to-end main() must say true.
+      const r = scratchRepo("push-docs");
+      try {
+        const before = r.commit({ "src/a.ts": "export {};\n" });
+        r.commit({ ".planning/ROADMAP.md": "# r\n" });
+        let pass = ok(classifyPushRange({ before, cwd: r.dir }).docsOnly === true, "classifyPushRange says docs-only for a .planning/-only pushed range");
+        const e2e = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: before });
+        pass = ok(e2e.code === 0 && e2e.docsOnly === "true", `main() on a push event writes docs_only=true and exits 0 (got exit ${e2e.code}, docs_only=${e2e.docsOnly})`) && pass;
+        return pass;
+      } finally {
+        r.cleanup();
+      }
+    },
+  },
+  {
+    claim: "WR-01: a CODE-touching push range is NOT filtered, including a code commit hidden under a later docs commit",
+    run: (ok) => {
+      const r = scratchRepo("push-code");
+      try {
+        const base = r.commit({ "src/a.ts": "export {};\n" });
+        r.commit({ "src/b.ts": "export {};\n" });
+        let pass = ok(classifyPushRange({ before: base, cwd: r.dir }).docsOnly === false, "a single code commit pushed classifies as code");
+        const mid = r.g(["rev-parse", "HEAD"]);
+        r.commit({ ".planning/STATE.md": "# s\n" });
+        // CALIBRATION: the last commit alone IS docs-only, so a first-parent
+        // `HEAD^1..HEAD` diff would skip the corpus here. This row can fail.
+        const lastOnly = r.g(["diff", "--name-only", "--no-renames", mid, "HEAD"]).split("\n").filter(Boolean);
+        pass = ok(judge(lastOnly) === true, "CALIBRATION: the newest pushed commit on its own is docs-only") && pass;
+        pass = ok(classifyPushRange({ before: base, cwd: r.dir }).docsOnly === false, "a two-commit push (code, then docs) classifies as code") && pass;
+        const e2e = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: base });
+        pass = ok(e2e.code === 0 && e2e.docsOnly === "false", `main() writes docs_only=false for it (got exit ${e2e.code}, docs_only=${e2e.docsOnly})`) && pass;
+        return pass;
+      } finally {
+        r.cleanup();
+      }
+    },
+  },
+  {
+    claim: "WR-01: an UNDETERMINABLE push range fails SAFE to code (full corpus) and never red",
+    run: (ok) => {
+      const r = scratchRepo("push-undet");
+      try {
+        const base = r.commit({ "src/a.ts": "export {};\n" });
+        r.commit({ ".planning/a.md": "a\n" });
+        const head = r.g(["rev-parse", "HEAD"]);
+        // A sibling of HEAD off the same base, differing from HEAD only under
+        // `.planning/`: the shape a force push leaves as `before`.
+        r.g(["checkout", "-q", "-b", "sibling", base]);
+        const sibling = r.commit({ ".planning/b.md": "b\n" });
+        r.g(["checkout", "-q", head]);
+        const siblingDiff = r.g(["diff", "--name-only", "--no-renames", sibling, "HEAD"]).split("\n").filter(Boolean);
+        let pass = ok(
+          judge(siblingDiff) === true,
+          `CALIBRATION: a two-dot diff from the non-ancestor sibling is docs-only, so only the ancestor guard keeps this row code (got ${JSON.stringify(siblingDiff)})`,
+        );
+        // CALIBRATION: the same repo says docs-only for its real range, so a
+        // `false` below is caused by the bad input and not by the fixture.
+        pass = ok(classifyPushRange({ before: base, cwd: r.dir }).docsOnly === true, "CALIBRATION: the real pushed range is docs-only") && pass;
+        const undeterminable = [
+          ["a non-ancestor (force-pushed-over) before-SHA", { before: sibling }],
+          ["a forced push flag (string, as GitHub's expression renders it)", { before: base, forced: "true" }],
+          ["a forced push flag (boolean)", { before: base, forced: true }],
+          ["an all-zero before-SHA (branch creation)", { before: "0".repeat(40) }],
+          ["a before-SHA that is not in this clone", { before: "1".repeat(40) }],
+          ["an absent before-SHA", { before: "" }],
+          ["a before-SHA that is not an object name", { before: "HEAD~1" }],
+        ];
+        for (const [label, input] of undeterminable) {
+          const v = classifyPushRange({ ...input, cwd: r.dir });
+          pass = ok(v.docsOnly === false && v.reason.startsWith("push range undeterminable"), `${label} classifies as code (${v.reason})`) && pass;
+        }
+        const e2e = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: "0".repeat(40) });
+        pass = ok(e2e.code === 0 && e2e.docsOnly === "false", `main() exits 0 with docs_only=false on an undeterminable range, never red (got exit ${e2e.code}, docs_only=${e2e.docsOnly})`) && pass;
+        const dispatch = runMainOnPush(r.dir, { GITHUB_EVENT_NAME: "workflow_dispatch", PUSH_BEFORE_SHA: base });
+        pass = ok(dispatch.code === 0 && dispatch.docsOnly === "false", `a workflow_dispatch is still never filtered (got docs_only=${dispatch.docsOnly})`) && pass;
+        return pass;
+      } finally {
+        r.cleanup();
+      }
+    },
+  },
 ];
 
 function selfTest() {
@@ -404,14 +599,28 @@ function selfTest() {
 function main() {
   if (process.argv.includes("--self-test")) return selfTest();
 
+  if (process.env.GITHUB_EVENT_NAME === "push") {
+    // Phase 164.9.4 (founder routing 2026-09-27): a push is classified by its
+    // pushed range, failing SAFE to code. See `classifyPushRange`.
+    const { docsOnly, reason } = classifyPushRange({
+      before: process.env.PUSH_BEFORE_SHA,
+      forced: process.env.PUSH_FORCED,
+    });
+    emit(docsOnly, reason);
+    return 0;
+  }
+
   if (process.env.GITHUB_EVENT_NAME !== "pull_request") {
-    // LOCKED DECISION (CONTEXT.md, trigger scope): the push and dispatch corpus
-    // is NEVER filtered. `ci.yml`'s own header records why — every commit to
-    // main must produce its own recorded green run (deploy automation keys on
+    // LOCKED DECISION (Phase 164.6.3 CONTEXT.md, trigger scope): the dispatch
+    // corpus, and every event that is neither a push nor a pull_request, is
+    // NEVER filtered. `ci.yml`'s own header records why — every commit to main
+    // must produce its own recorded green run (deploy automation keys on
     // per-SHA status), and Railway waits on main CI and SKIPS the
-    // analytics-service deploy when it is red. A half-skipped main run is a
-    // change to deploy behaviour, which this phase is not allowed to make.
-    emit(false, `event is '${process.env.GITHUB_EVENT_NAME ?? "(unset)"}', not pull_request — never filtered`);
+    // analytics-service deploy when it is red.
+    // (2026-10-01, Phase 164.9.4 review WR-01: `push` left this branch above,
+    // by the founder's 2026-09-27 routing. A docs-only push still produces a
+    // recorded green run; it is a short run, not a missing one.)
+    emit(false, `event is '${process.env.GITHUB_EVENT_NAME ?? "(unset)"}', neither push nor pull_request — never filtered`);
     return 0;
   }
 

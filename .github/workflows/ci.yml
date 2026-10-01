@@ -127,6 +127,14 @@ jobs:
     # anything that is not a pull_request, so the push/dispatch corpus is never
     # filtered (`ci.yml`'s own header: every commit to main must produce its own
     # recorded green run, and Railway waits on main CI).
+    # (⚠️ CORRECTED 2026-10-01, Phase 164.9.4 review WR-01, by the founder's
+    # 2026-09-27 routing: a PUSH is now classified by its pushed range
+    # `before..HEAD` with the same rule, and fails SAFE to code whenever that
+    # range cannot be determined. A workflow_dispatch is still never filtered.
+    # A docs-only push is a SHORT run, never a missing one: this job, the
+    # always-on jobs and the `if: always()` `frontend` aggregator still run, so
+    # the SHA still gets its own recorded green run. The sentence above is kept
+    # as lineage.)
     #
     # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply to this
     # one, for the same reason it does not apply to `sql-gate-lint` and
@@ -181,8 +189,17 @@ jobs:
       # convention — this classifier is the filter's single point of trust, and
       # a wrong `true` skips sixteen gates at once.
       - run: node scripts/classify-changed-paths.mjs --self-test
+      # Phase 164.9.4 (founder routing 2026-09-27, review WR-01): on a push the
+      # classifier diffs the PUSHED range `before..HEAD` and fails SAFE to code
+      # when that range cannot be determined (zero before-SHA, a forced push, a
+      # before-SHA missing from this clone or not an ancestor). The two event
+      # fields reach it through `env:`, never interpolated into `run:`. Both are
+      # empty on a pull_request and a workflow_dispatch, which never read them.
       - id: classify
         run: node scripts/classify-changed-paths.mjs
+        env:
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_FORCED: ${{ github.event.forced }}
       # Same red-path-first shape for the SQL gate subset derivation: its
       # self-test drives every verdict (including an unreadable base, which is
       # a MEASURE_FAIL and never an empty change set) before the real run. A

@@ -365,6 +365,24 @@ describe("[164.6.3 / CI-DOCSPATH-01] the docs-only filter's aggregator arm, EXEC
     expect(out).not.toContain("tolerated for this row only");
   });
 
+  // ── S1p — the docs-only PUSH to main (Phase 164.9.4 review WR-01) ────────
+  // The classifier now says docs_only=true for a `.planning/`-only push range.
+  // A push is a TRUSTED event, so e2e-seeded's and test-db-drift's own arms
+  // would redden a skip there. This scenario proves the uniform arm, being
+  // first, claims them, and the push still gets a GREEN recorded run rather
+  // than a red one or none.
+  it("S1p — docs-only PUSH: skipped filterable rows are tolerated and the board is GREEN", () => {
+    const docsOnly = String(judge([".planning/ROADMAP.md"]));
+    expect(docsOnly, "CALIBRATION: S1p is only S1p under a docs-only classification").toBe("true");
+
+    const { code, out } = runGate({ docsOnly, results: allFilterableSkipped(), eventName: "push" });
+    expect(code, `expected a GREEN board on a docs-only push.\n${out}`).toBe(0);
+    expect(out).toContain("All frontend-* jobs succeeded.");
+    expect(out).toContain("e2e-seeded: skipped by the docs-only path filter");
+    expect(out).toContain("test-db-drift: skipped by the docs-only path filter");
+    expect(out).not.toContain("on a TRUSTED event");
+  });
+
   // ── S4 — the code PR: a skip still reddens ───────────────────────────────
   // ROADMAP criterion 2 as an executable assertion.
   it("S4 — code PR: a skipped row still reddens the board", () => {
@@ -839,15 +857,18 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
         `is job-level and must stay job-level.`,
     ).toEqual([]);
 
-    // ⛔ And the `push:` trigger's own branch list is untouched: CONTEXT.md
-    // REFUSES filtering it, because deploy automation and Railway both key on a
-    // per-SHA green run of main CI.
+    // ⛔ And the `push:` trigger's own branch list is untouched: deploy
+    // automation and Railway both key on a per-SHA green run of main CI.
+    // (2026-10-01, Phase 164.9.4 review WR-01: a docs-only push is now
+    // classified SHORT at JOB level by the founder's 2026-09-27 routing. It
+    // still produces a run, which is exactly why the trigger must stay
+    // unfiltered: a workflow-level filter would produce NO run at all.)
     const pushAt = onBlock.indexOf("  push:");
     expect(
       onBlock[pushAt + 1],
-      "the `push:` trigger's `branches: [main]` moved or changed. Filtering the push corpus is " +
-        "REFUSED in CONTEXT.md: every commit to main must produce its own recorded green run, and " +
-        "Railway waits on main CI and SKIPS the analytics deploy when it is red.",
+      "the `push:` trigger's `branches: [main]` moved or changed. Every commit to main must produce " +
+        "its own recorded run, and Railway waits on main CI and SKIPS the analytics deploy when it is " +
+        "red. A docs-only push is shortened at JOB level only (Phase 164.9.4), never at the trigger.",
     ).toBe("    branches: [main]");
   });
 });
@@ -981,6 +1002,26 @@ describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test 
     expect(out).toContain(FAILED_BANNER);
     expect(out).toContain("FAIL — one code file anywhere in the list makes the whole diff code");
     expect(out).toContain("FAIL — a sibling directory sharing the prefix does not launder into the allow-list");
+  });
+
+  // ── neuter legs 3 and 4: the PUSH path (Phase 164.9.4 review WR-01) ──────
+  it("CALIBRATION — routing a push back to the old hard-coded code verdict turns the self-test RED", () => {
+    // The push branch's verdict is forced back to `false`, the pre-164.9.4
+    // behaviour. (Anchored on the emit, not the event check, so this file
+    // carries no literal env read for the env-manifest scan to count.)
+    const mutated = mutate("emit(docsOnly, reason);", "emit(false, reason);", "push-route");
+    const { code, out } = selfTest(mutated);
+    expect(code, `a classifier that never shortens a docs-only push must EXIT NON-ZERO.\n${out}`).not.toBe(0);
+    expect(out).toContain(FAILED_BANNER);
+    expect(out).toContain("FAIL — main() on a push event writes docs_only=true and exits 0");
+  });
+
+  it("CALIBRATION — dropping the ancestor guard turns the self-test RED (a force-pushed-over before-SHA)", () => {
+    const mutated = mutate('git(["merge-base", "--is-ancestor", sha, "HEAD"], cwd);', "", "ancestor-guard");
+    const { code, out } = selfTest(mutated);
+    expect(code, `a classifier that trusts a non-ancestor before-SHA must EXIT NON-ZERO.\n${out}`).not.toBe(0);
+    expect(out).toContain(FAILED_BANNER);
+    expect(out).toContain("FAIL — a non-ancestor (force-pushed-over) before-SHA classifies as code");
   });
 
   // ── review 164.4.2 IN-02: no raw git line above a PASSED verdict ──────────
