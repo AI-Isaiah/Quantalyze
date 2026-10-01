@@ -70,6 +70,12 @@ DECLARE
   k        UUID;
   s_defer  UUID;
   j_defer  UUID;
+  s_mdone  UUID;
+  j_mdone  UUID;
+  s_mrun   UUID;
+  j_mrun   UUID;
+  s_frun   UUID;
+  j_frun   UUID;
   tok_a    UUID := gen_random_uuid();
   tok_b    UUID := gen_random_uuid();
   v_state  TEXT;
@@ -90,6 +96,21 @@ BEGIN
   INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
   VALUES (s_defer, 'derive_broker_dailies', 'running', tok_a, 1, 3) RETURNING id INTO j_defer;
 
+  -- M1: an already-DONE row whose recorded token is A (seeded directly, never
+  -- through a prior mark call, so this arm depends on no other RPC).
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'cfe done-late') RETURNING id INTO s_mdone;
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
+  VALUES (s_mdone, 'derive_broker_dailies', 'done', tok_a, 1, 3) RETURNING id INTO j_mdone;
+
+  -- M2: a RUNNING row held by token A, for mark_compute_job_done.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'cfe done-running') RETURNING id INTO s_mrun;
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
+  VALUES (s_mrun, 'derive_broker_dailies', 'running', tok_a, 1, 3) RETURNING id INTO j_mrun;
+
+  -- F1: a RUNNING row held by token A, for mark_compute_job_failed.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'cfe failed-running') RETURNING id INTO s_frun;
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
+  VALUES (s_frun, 'derive_broker_dailies', 'running', tok_a, 1, 3) RETURNING id INTO j_frun;
   -- ===== ARM D1 / D1L — defer_compute_job, token mismatch on a running row ==
   -- A worker holding token B defers a job that token A now holds.
   v_state := NULL; v_msg := NULL;
@@ -115,7 +136,78 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (D1L): defer_compute_job''s fence message (%) lost the classifier literal. A worker still on the old classifier recognises the new code only by that literal, so the deploy window would misclassify a lost claim as a real failure.', v_msg;
   END IF;
 
-  RAISE NOTICE 'ALL 2 ARMS EXECUTED (D1, D1L) and passed — defer_compute_job''s claim-token fence raises 55006, not 40001, with the classifier literal intact (provisional roster; Task 2 adds the mark RPCs).';
+  -- ===== ARM M1 / M1L — mark_compute_job_done, late mark on an already-done row ==
+  v_state := NULL; v_msg := NULL;
+  BEGIN
+    PERFORM mark_compute_job_done(j_mdone, tok_b);
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE; v_msg := SQLERRM;
+  END;
+
+  -- RED-UNDER: put mark_compute_job_done's late-mark raise (already-done row) in
+  --            20261001120000 back on `serialization_failure`; LAYERED with the
+  --            mark_compute_job_done combined self-verify guard stood down.
+  -- RED-UNDER-M: {"arm":"M1","apply":[{"kind":"edit","file":"supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql","find":"'mark_compute_job_done: job % preempted by watchdog reclaim (late mark on already-done row, caller token=%, current token=%)',\n        p_job_id, p_claim_token, v_current_token\n        USING ERRCODE = '55006';","replace":"'mark_compute_job_done: job % preempted by watchdog reclaim (late mark on already-done row, caller token=%, current token=%)',\n        p_job_id, p_claim_token, v_current_token\n        USING ERRCODE = 'serialization_failure';","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql","find":"IF v_done_body ~* 'serialization_failure' OR regexp_count(v_done_body, '''55006''') <> 2 OR regexp_count(v_done_body, 'preempted by watchdog reclaim') <> 2 THEN","replace":"IF FALSE THEN","occurrences":1}]}
+  IF v_state IS DISTINCT FROM '55006' THEN
+    RAISE EXCEPTION 'TEST FAILED (M1): a late mark_compute_job_done with a stale token on an already-done row raised SQLSTATE % (message: %), expected 55006. SQLSTATE 40001 is retried without bound by PostgREST 14, so the worker''s mark call would loop instead of failing once.', v_state, v_msg;
+  END IF;
+
+  -- RED-UNDER: reword the classifier literal in mark_compute_job_done's late-mark
+  --            message in 20261001120000; LAYERED with the mark_compute_job_done
+  --            combined self-verify guard stood down.
+  -- RED-UNDER-M: {"arm":"M1L","apply":[{"kind":"edit","file":"supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql","find":"'mark_compute_job_done: job % preempted by watchdog reclaim (late mark on already-done row","replace":"'mark_compute_job_done: job % preempted by watchdog requeue (late mark on already-done row","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql","find":"IF v_done_body ~* 'serialization_failure' OR regexp_count(v_done_body, '''55006''') <> 2 OR regexp_count(v_done_body, 'preempted by watchdog reclaim') <> 2 THEN","replace":"IF FALSE THEN","occurrences":1}]}
+  IF v_msg IS NULL OR position('preempted by watchdog reclaim' IN v_msg) = 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (M1L): the fence message of a late mark_compute_job_done with a stale token on an already-done row (%) lost the classifier literal. A worker still on the old classifier recognises the new code only by that literal, so the deploy window would misclassify a lost claim as a real failure.', v_msg;
+  END IF;
+
+  -- ===== ARM M2 / M2L — mark_compute_job_done, token mismatch on a running row ==
+  v_state := NULL; v_msg := NULL;
+  BEGIN
+    PERFORM mark_compute_job_done(j_mrun, tok_b);
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE; v_msg := SQLERRM;
+  END;
+
+  -- RED-UNDER: put mark_compute_job_done's running-row mismatch raise in
+  --            20261001120000 back on `serialization_failure`; LAYERED with the
+  --            mark_compute_job_done combined self-verify guard stood down.
+  -- RED-UNDER-M: {"arm":"M2","apply":[{"kind":"edit","file":"supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql","find":"'mark_compute_job_done: job % preempted by watchdog reclaim (caller token=%, current token=%)',\n        p_job_id, p_claim_token, v_current_token\n        USING ERRCODE = '55006';","replace":"'mark_compute_job_done: job % preempted by watchdog reclaim (caller token=%, current token=%)',\n        p_job_id, p_claim_token, v_current_token\n        USING ERRCODE = 'serialization_failure';","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql","find":"IF v_done_body ~* 'serialization_failure' OR regexp_count(v_done_body, '''55006''') <> 2 OR regexp_count(v_done_body, 'preempted by watchdog reclaim') <> 2 THEN","replace":"IF FALSE THEN","occurrences":1}]}
+  IF v_state IS DISTINCT FROM '55006' THEN
+    RAISE EXCEPTION 'TEST FAILED (M2): mark_compute_job_done with a stale token on a running row raised SQLSTATE % (message: %), expected 55006. SQLSTATE 40001 is retried without bound by PostgREST 14, so the worker''s mark call would loop instead of failing once.', v_state, v_msg;
+  END IF;
+
+  -- RED-UNDER: reword the classifier literal in mark_compute_job_done's running-row
+  --            mismatch message in 20261001120000; LAYERED with the
+  --            mark_compute_job_done combined self-verify guard stood down.
+  -- RED-UNDER-M: {"arm":"M2L","apply":[{"kind":"edit","file":"supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql","find":"'mark_compute_job_done: job % preempted by watchdog reclaim (caller token=","replace":"'mark_compute_job_done: job % preempted by watchdog requeue (caller token=","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql","find":"IF v_done_body ~* 'serialization_failure' OR regexp_count(v_done_body, '''55006''') <> 2 OR regexp_count(v_done_body, 'preempted by watchdog reclaim') <> 2 THEN","replace":"IF FALSE THEN","occurrences":1}]}
+  IF v_msg IS NULL OR position('preempted by watchdog reclaim' IN v_msg) = 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (M2L): the fence message of mark_compute_job_done with a stale token on a running row (%) lost the classifier literal. A worker still on the old classifier recognises the new code only by that literal, so the deploy window would misclassify a lost claim as a real failure.', v_msg;
+  END IF;
+
+  -- ===== ARM F1 / F1L — mark_compute_job_failed, token mismatch on a running row ==
+  v_state := NULL; v_msg := NULL;
+  BEGIN
+    PERFORM mark_compute_job_failed(j_frun, 'cfe fence probe', 'transient', tok_b);
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE; v_msg := SQLERRM;
+  END;
+
+  -- RED-UNDER: put mark_compute_job_failed's running-row mismatch raise in
+  --            20261001120000 back on `serialization_failure`; LAYERED with the
+  --            mark_compute_job_failed combined self-verify guard stood down.
+  -- RED-UNDER-M: {"arm":"F1","apply":[{"kind":"edit","file":"supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql","find":"'mark_compute_job_failed: job % preempted by watchdog reclaim (caller token=%, current token=%)',\n        p_job_id, p_claim_token, v_current_token\n        USING ERRCODE = '55006';","replace":"'mark_compute_job_failed: job % preempted by watchdog reclaim (caller token=%, current token=%)',\n        p_job_id, p_claim_token, v_current_token\n        USING ERRCODE = 'serialization_failure';","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql","find":"IF v_failed_body ~* 'serialization_failure' OR regexp_count(v_failed_body, '''55006''') <> 1 OR position('preempted by watchdog reclaim' IN v_failed_body) = 0 THEN","replace":"IF FALSE THEN","occurrences":1}]}
+  IF v_state IS DISTINCT FROM '55006' THEN
+    RAISE EXCEPTION 'TEST FAILED (F1): mark_compute_job_failed with a stale token on a running row raised SQLSTATE % (message: %), expected 55006. SQLSTATE 40001 is retried without bound by PostgREST 14, so the worker''s mark call would loop instead of failing once.', v_state, v_msg;
+  END IF;
+
+  -- RED-UNDER: reword the classifier literal in mark_compute_job_failed's fence
+  --            message in 20261001120000; LAYERED with the mark_compute_job_failed
+  --            combined self-verify guard stood down.
+  -- RED-UNDER-M: {"arm":"F1L","apply":[{"kind":"edit","file":"supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql","find":"'mark_compute_job_failed: job % preempted by watchdog reclaim (caller token=","replace":"'mark_compute_job_failed: job % preempted by watchdog requeue (caller token=","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql","find":"IF v_failed_body ~* 'serialization_failure' OR regexp_count(v_failed_body, '''55006''') <> 1 OR position('preempted by watchdog reclaim' IN v_failed_body) = 0 THEN","replace":"IF FALSE THEN","occurrences":1}]}
+  IF v_msg IS NULL OR position('preempted by watchdog reclaim' IN v_msg) = 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (F1L): the fence message of mark_compute_job_failed with a stale token on a running row (%) lost the classifier literal. A worker still on the old classifier recognises the new code only by that literal, so the deploy window would misclassify a lost claim as a real failure.', v_msg;
+  END IF;
+  RAISE NOTICE 'ALL 8 ARMS EXECUTED (D1, D1L, M1, M1L, M2, M2L, F1, F1L) and passed — every claim-token fence raise answers SQLSTATE 55006, never 40001, so PostgREST 14 returns it once instead of retrying it without bound: D1 defer_compute_job on a running row held by another token, M1 mark_compute_job_done late on an already-done row, M2 mark_compute_job_done on a running row held by another token, F1 mark_compute_job_failed on a running row held by another token; and each message keeps the classifier literal (D1L, M1L, M2L, F1L), which keeps the deploy window safe in both directions.';
 END $$;
 
 ROLLBACK;
