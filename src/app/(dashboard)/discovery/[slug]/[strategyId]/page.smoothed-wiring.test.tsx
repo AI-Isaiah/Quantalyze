@@ -102,14 +102,24 @@ function mockAdminSeries(
   const reads: string[] = [];
   const from = (table: string) => {
     let seenKind: string | undefined;
+    let selected = "";
     const chain = {
-      select: () => chain,
+      select: (s?: string) => {
+        selected = String(s);
+        return chain;
+      },
       eq: (col: string, val: string) => {
         if (col === "kind") seenKind = val;
         return chain;
       },
       maybeSingle: () => {
         if (table === "strategies") return Promise.resolve({ data: row, error: null });
+        // Phase 169.1 (D-83 (a)): a build reads the cash_settlement row's frozen
+        // CONVENTIONS echo (a JSON-path projection, not a series). It is answered
+        // with no row and not counted, so `readsByKind` still counts series reads.
+        if (table === "strategy_analytics_series" && selected === "conventions:payload->conventions") {
+          return Promise.resolve({ data: null, error: null });
+        }
         if (table === "strategy_analytics_series" && seenKind) reads.push(seenKind);
         return Promise.resolve(
           table === "strategy_analytics_series" && seenKind && seenKind in byKind

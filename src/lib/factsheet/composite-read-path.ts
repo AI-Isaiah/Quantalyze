@@ -470,9 +470,10 @@ export async function readCompositeFactsheet(
  * → `payload.dataQuality` undefined → the FactsheetView :876 caveat NEVER rendered
  * single-key, despite the server truth being persisted (with a passing lift test).
  *
- * Both surfaces now derive the single-key opt from THIS ONE owner — mirroring the
- * composite "one path" lesson (this file's header) so the two FactsheetView
- * consumers can't diverge on a future DQ flag. `composite: false` is behaviorally
+ * The single-key opt is derived from THIS ONE owner — mirroring the composite
+ * "one path" lesson (this file's header). Its one caller is the shared factsheet
+ * build (`fetch-and-build-payload.ts`), which both FactsheetView surfaces reach
+ * since Phase 169.1 plan 01, so they can't diverge on a future DQ flag. `composite: false` is behaviorally
  * identical to an absent `dataQuality` for every `=== true` composite reader
  * (FactsheetView :331/:393/:724/:1048), so this adds the caveat WITHOUT touching
  * the composite branch. Strict `=== true` server-truth coercion mirrors the
@@ -556,9 +557,10 @@ async function readHeadlineCoversFrom(admin: SupabaseClient, strategyId: string)
  * options strategy persists its MTM basis into `metrics_json_by_basis.mark_to_market`
  * (Phase 101) plus a surviving `data_quality_flags.mtm_gated_reason` on honest
  * degrade, but — like the Finding-B `insufficient_window` flag — the single-key arm
- * of both factsheet surfaces never threaded it. This is the ONE owner both surfaces
- * (the `/factsheet/[id]/v2` route + the discovery detail page) delegate to, so they
- * can't diverge (the "one path" lesson, this file's header).
+ * of both factsheet surfaces never threaded it. This is the ONE owner, reached
+ * through {@link readSingleKeyBasisOpts} from the shared factsheet build that both
+ * surfaces (the `/factsheet/[id]/v2` route + the discovery detail page) use since
+ * Phase 169.1 plan 01, so they can't diverge (the "one path" lesson, this file's header).
  *
  * Two load-bearing invariants (falsifiable in composite-read-path.test.ts):
  *   - F-4 (T-102-01): `available` is gated on `computationStatus ∈ {complete,
@@ -653,9 +655,11 @@ export function singleKeyBasisOpts(
 }
 
 /**
- * Phase 133 review (WR-01/WR-02) — the ONE single-key basis ASSEMBLY both
- * FactsheetView surfaces (`/factsheet/[id]/v2` + `/discovery/[slug]/[strategyId]`)
- * call. It owns the WHOLE single-key basis story end-to-end: the cheap
+ * Phase 133 review (WR-01/WR-02) — the ONE single-key basis ASSEMBLY. Its one
+ * caller is the shared factsheet resolve stage (`resolveFactsheetInputs` in
+ * `fetch-and-build-payload.ts`), which both FactsheetView surfaces
+ * (`/factsheet/[id]/v2` + `/discovery/[slug]/[strategyId]`) build through since
+ * Phase 169.1 plan 01. It owns the WHOLE single-key basis story end-to-end: the cheap
  * should-read predicates → the gated `mtm_daily_returns` / `smoothed_mtm_daily_returns`
  * roundtrips → the {@link singleKeyBasisOpts} gate/scalar/series threading.
  *
@@ -663,13 +667,13 @@ export function singleKeyBasisOpts(
  * used to inline the predicate+read steps itself, and when Phase 133 added the
  * smoothed sibling the discovery page's inline copy silently kept the old 4-arg
  * call — the Smoothed segment rendered ENABLED there while its charts stayed cash
- * PERMANENTLY (WR-01). With the assembly hoisted here, a page cannot thread the
- * scalars without the series: the two surfaces are identical by construction, and
- * a future fourth basis lands on both pages automatically.
+ * PERMANENTLY (WR-01). With the assembly hoisted here, and since Phase 169.1 plan
+ * 01 called from the one shared build, no page threads the scalars without the
+ * series, and a future fourth basis lands on both surfaces automatically.
  *
  * `getAdmin` is a thunk (not a client) so the hot non-options path — no by-basis
- * object, or not DONE — never even CONSTRUCTS the service-role handle (preserving
- * the discovery page's lazy `createAdminClient()` posture, byte-identical). It is
+ * object, or not DONE — never even CONSTRUCTS the service-role handle (the lazy
+ * posture `composite-read-path.test.ts` pins). It is
  * memoized: at most ONE handle is created per call regardless of how many basis
  * series are read. The handle MUST be service-role: `strategy_analytics_series` is
  * deny-all RLS (see {@link readMtmSeries}); the caller owns the upstream
@@ -685,24 +689,29 @@ export function singleKeyBasisOpts(
  * does for a composite. See {@link persistedCashHeadline} for the gates: the row must
  * be rankable (`isRankableAnalyticsRow`, the predicate recommendations uses), because
  * a failed run leaves the previous run's scalars behind and they must not render.
- * The factsheet resolve stage's G1 gate already refuses a non-computed row, so the
- * not-rankable arm is reached from the discovery detail page only, until Phase 169.1
- * plan 169.1-01 moves that page onto the shared build. It adds no read for a clean
+ * The factsheet resolve stage's G1 gate already refuses a non-computed row, and
+ * since Phase 169.1 plan 01 every page builds through that stage, so no page
+ * reaches the not-rankable arm today; it stays as this owner's own guard. It adds no read for a clean
  * row, so the admin thunk posture above is unchanged there; a chain-broken row
  * (review round 1, SFH H-1) reads its stored `cash_settlement` series once, to name
  * the span its headline covers, and returns `dataQuality` with that start date.
  * Omitting `persistedRow` keeps the pre-169 result.
  *
- * Review round 1 (SFH H-2): `returnsDenominatorConfig` is the strategy's
- * `returns_denominator_config`. The Python single-key runner computes the stored
- * headline under it (a `simple` config stores the SUM of the returns, with an
- * arithmetic CAGR and drawdown), so the curve must be drawn on the same method or
- * the stored "Since Inception" and the equity curve drift apart with every period.
- * The method is resolved with the composite's own rule
- * ({@link attributionBasisFromConfig}: arithmetic only for `simple`), and returned as
- * `cumulativeMethod` only when it is arithmetic, so a geometric strategy's opts are
- * unchanged. Omitting the config keeps the geometric default. Both production
- * callers (the factsheet resolve stage and the discovery detail page) pass it.
+ * Review round 1 (SFH H-2), re-routed by Phase 169.1 (D-83, D-30): the Python
+ * single-key runner computes the stored headline under the strategy's conventions
+ * (a `simple` method stores the SUM of the returns, with an arithmetic CAGR and
+ * drawdown; an active day basis runs vol, Sharpe and Sortino over the non-zero
+ * days), so the curve and the zoom window must use the same ones, or the stored
+ * "Since Inception" and the equity curve drift apart with every period. Both are
+ * decided by the ONE resolver the composite path uses,
+ * {@link resolveMetricsConventions}: the persisted `dqf.cumulative_method` (the
+ * single-key runner does not write it today), then `options.cashConventions` (the
+ * frozen `cash_settlement` conventions echo, read by the caller for a build only
+ * and passed in, so this function issues no query for it), then
+ * `returnsDenominatorConfig` (the live config, which can be edited after the run,
+ * so it is the last tier). `cumulativeMethod` is returned only when arithmetic and
+ * `dayBasis` only when active (D-83 (b)), so a default strategy's opts are
+ * unchanged. Its one caller (the factsheet resolve stage) passes the config.
  *
  * `options.captureDefects` (default true) decides whether the persisted-headline
  * defects below reach Sentry (review round 1, WR-01 / SFH M-1 / SFH H-1). They are
@@ -713,21 +722,26 @@ export function singleKeyBasisOpts(
  * @throws {CompositeSeriesReadError} when a gated MTM or smoothed series read FAILS
  *          (review round 1, WR-05), or when the chain-broken row's `cash_settlement`
  *          series read FAILS (review round 1, SFH H-1; `read: "cash_settlement"`). The
- *          factsheet resolve stage answers it `read_error`; the discovery page shows its
- *          read-failure sentence.
+ *          factsheet resolve stage answers it `read_error`, which the discovery page
+ *          shows as its read-failure sentence.
  */
 export async function readSingleKeyBasisOpts(
   getAdmin: () => SupabaseClient,
   strategyId: string,
   dqf:
-    | { mtm_gated_reason?: unknown; insufficient_window?: unknown; twr_chain_broken?: unknown }
+    | {
+        mtm_gated_reason?: unknown;
+        insufficient_window?: unknown;
+        twr_chain_broken?: unknown;
+        cumulative_method?: unknown;
+      }
     | null
     | undefined,
   metricsJsonByBasis: unknown,
   computationStatus: unknown,
   persistedRow?: Record<string, unknown> | null,
   returnsDenominatorConfig?: unknown,
-  options: { captureDefects?: boolean } = {},
+  options: { captureDefects?: boolean; cashConventions?: Record<string, unknown> | null } = {},
 ): Promise<
   Pick<
     BuildFactsheetOpts,
@@ -737,6 +751,7 @@ export async function readSingleKeyBasisOpts(
     | "smoothedGate"
     | "smoothedSeries"
     | "cumulativeMethod"
+    | "dayBasis"
     | "dataQuality"
   >
 > {
@@ -758,18 +773,31 @@ export async function readSingleKeyBasisOpts(
       : Promise.resolve(null),
   ]);
   const basisOpts = singleKeyBasisOpts(dqf, metricsJsonByBasis, computationStatus, mtmSeries, smoothedSeries);
-  const arithmetic = attributionBasisFromConfig(returnsDenominatorConfig) === "arithmetic";
-  const opts = arithmetic ? { ...basisOpts, cumulativeMethod: "arithmetic" as const } : basisOpts;
+  // Phase 169.1 (D-83, D-30): the method and day basis come from the ONE resolver
+  // the composite path uses, the frozen echo before the live config. Each is added
+  // only when it is not the default (D-83 (b)), so a default row's opts are unchanged.
+  const conventions = resolveMetricsConventions({
+    dqf,
+    cashConventions: options.cashConventions ?? null,
+    returnsDenominatorConfig,
+    strategyId,
+  });
+  const arithmetic = conventions.cumulativeMethod === "arithmetic";
+  const activeDays = conventions.dayBasis === "active";
+  const opts = {
+    ...basisOpts,
+    ...(arithmetic ? { cumulativeMethod: "arithmetic" as const } : {}),
+    ...(activeDays ? { dayBasis: "active" as const } : {}),
+  };
   // `dataQuality` is returned ONLY when this owner has something to add to it: it is
-  // the single-key opt both callers already set from `singleKeyDataQuality(dqf)` and
-  // spread this result over, so a clean row's opts stay unchanged.
+  // the single-key opt its caller already sets from `singleKeyDataQuality(dqf)` and
+  // spreads this result over, so a clean row's opts stay unchanged.
   const addedQuality: Partial<NonNullable<BuildFactsheetOpts["dataQuality"]>> = {};
-  // Review round 1 (SFH M-2): the stored headline was computed under a returns
-  // convention TypeScript does not reproduce (a `simple` sum, or an active-day
-  // Sharpe and volatility; `compute()` has no active-day basis). The client
-  // leverage re-derive could not continue it from L=1, so the payload says so and
+  // Review round 1 (SFH M-2), kept and now derived from the resolved conventions
+  // (D-83 (c)): the client leverage re-derive does not continue a `simple` sum or an
+  // active-day Sharpe and volatility from L=1, so the payload says so and
   // `leverageEligibleFor` withholds the what-if, as it does for a composite.
-  if (arithmetic || activeDayMetricsBasis(returnsDenominatorConfig)) addedQuality.returnsConventionOverride = true;
+  if (arithmetic || activeDays) addedQuality.returnsConventionOverride = true;
   const captureDefects = options.captureDefects ?? true;
   const cashHeadline = persistedCashHeadline(
     strategyId,
@@ -931,20 +959,6 @@ export function resolveMetricsConventions(input: {
 }
 
 /**
- * Review round 1 (SFH M-2) — the `returns_denominator_config` asks for active-day
- * risk metrics (`metrics_basis: "active_day"`, the analytics service's
- * `metrics_day_basis` → `active`): volatility, Sharpe and Sortino over non-zero
- * days only. Strict literal match, as {@link attributionBasisFromConfig} is.
- */
-function activeDayMetricsBasis(raw: unknown): boolean {
-  return (
-    raw !== null &&
-    typeof raw === "object" &&
-    (raw as { metrics_basis?: unknown }).metrics_basis === "active_day"
-  );
-}
-
-/**
  * Phase 169 (SC4, D-10) — the single-key `cash_settlement` headline, BUILT from the
  * analytics row's persisted top-level scalars. Returns `undefined` (the caller keeps
  * the TypeScript headline, as before Phase 169) when:
@@ -969,9 +983,10 @@ function activeDayMetricsBasis(raw: unknown): boolean {
  * "—" under the strict overlay, as the lists do; a rankable row storing no finite
  * `cumulative_return` is a data defect and is warned and captured at `warning` with
  * the non-finite keys. A lone null `sortino` / `calmar` (no losing day, no drawdown)
- * is legitimate and is neither warned nor captured. The discovery detail page runs
- * this per request (it is not cached), so a defective row captures on each of its
- * views there until Phase 169.1 plan 169.1-01 moves that page onto the shared build.
+ * is legitimate and is neither warned nor captured. Since Phase 169.1 plan 01 the
+ * discovery detail page builds through the shared but UNCACHED
+ * `fetchAndBuildPayloadWithReason`, as a build (`captureDefects: true`), so a
+ * defective row still captures on each of its views there.
  */
 function persistedCashHeadline(
   strategyId: string,
@@ -1043,9 +1058,10 @@ function persistedCashHeadline(
  * Phase 103 (MTM-04) — the cheapest honest predicate deciding whether a single-key
  * strategy should incur the `mtm_daily_returns` DB roundtrip. Mirrors
  * {@link singleKeyBasisOpts}' F-4 gate: the raw `metrics_json_by_basis` carries a
- * `mark_to_market` OBJECT AND `computation_status` is DONE. Both factsheet surfaces
- * (the `/factsheet/[id]/v2` route + the discovery detail page) call THIS one
- * predicate so they can't diverge on when to read (the "one path" lesson).
+ * `mark_to_market` OBJECT AND `computation_status` is DONE. Its one caller,
+ * {@link readSingleKeyBasisOpts}, runs in the shared factsheet build that both
+ * surfaces (the `/factsheet/[id]/v2` route + the discovery detail page) use since
+ * Phase 169.1 plan 01, so they can't diverge on when to read (the "one path" lesson).
  *
  * It is deliberately CHEAPER than the full `hasBasisHeadline` gate: a degenerate
  * mark_to_market object (present key, no finite headline) may pass here and waste

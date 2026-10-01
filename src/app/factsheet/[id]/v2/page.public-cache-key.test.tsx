@@ -119,11 +119,15 @@ function adminRow(analytics: { computed_at: string; computation_status: string; 
 let adminReads = 0;
 
 function mockAdmin(strategy: unknown, error: unknown = null): SupabaseClient {
-  const from = () => {
+  const from = (table: string) => {
     const chain = {
       select: () => chain,
       eq: () => chain,
       maybeSingle: () => {
+        // Phase 169.1 (D-83 (a)): a single-key BUILD also reads the cash_settlement
+        // conventions echo from strategy_analytics_series. One build is one
+        // strategies read, so only that read is counted; the echo has no row here.
+        if (table !== "strategies") return Promise.resolve({ data: null, error: null });
         adminReads += 1;
         return Promise.resolve(error ? { data: null, error } : { data: strategy, error: null });
       },
