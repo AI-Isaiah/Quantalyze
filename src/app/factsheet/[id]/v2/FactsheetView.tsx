@@ -1590,7 +1590,10 @@ function KpiStrip() {
         </p>
       )}
       {/* Phase 169.1 (SC10, D-27): the range the strip's figures cover, from the
-          same scope the figures use. Outside the role="status" leverage caption. */}
+          same scope the figures use: "Full history: <start> – <end>" or
+          "Selected range: <start> – <end>". The rail renders the same component
+          (MetricsColumn.tsx RangeEyebrow), so the two print one string. Outside
+          the role="status" leverage caption. */}
       <RangeEyebrow scope={scope} surface="strip" className="mt-6" />
       {wv.withheld === "no-annualization-basis" && (
         <p className="mt-1 text-caption text-text-muted" data-testid="window-withheld-reason">
