@@ -937,27 +937,238 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
 // set is now derived from the WHOLE tree: every tracked vitest / Playwright test
 // file (`*.test.*`, `*.spec.*`), every pytest file under `analytics-service/tests/`,
 // and, transitively, every tracked local module they import (relative, `@/`, or a
-// Python module under `analytics-service/`) or name by a `scripts/…` /
-// `analytics-service/…` path literal (a spawned script). Every docs-filtered test
-// job runs one of those runners, so a read anywhere in that closure is a read a
-// docs-only push skips.
+// Python module under `analytics-service/`, absolute, relative or parenthesised
+// over several lines) or name as a spawned script (one `scripts/…` /
+// `analytics-service/…` literal in any quote, a `../`-relative one, or split
+// segments `join(…, "scripts", "x", "y.mjs")`). Every docs-filtered test job runs
+// one of those runners, so a read anywhere in that closure is a read a docs-only
+// push skips.
 //
-// THE EXCLUSION RULE, kept in ONE place (`NOT_SCANNED` below). A file is not
-// scanned when its `.planning` literals are not real-tree reads that a
-// docs-filtered job alone would catch:
-//   - this contract file: its literals are `judge()` fixtures, not reads;
-//   - the classifier: it holds the list itself, so scanning it would derive the
-//     list from the list and hide a stale entry;
-//   - whole-tree WALKERS, which read every planning file by enumeration rather
-//     than by name, so a named-file list cannot express them. Each is covered
-//     elsewhere, and EXACTLY how is in its reason below (review 164.9.4 round 4,
-//     WR-02 + SFH LOW-09; the earlier "re-runs them on every event" was false):
-//     `check-planning-hygiene.ts` runs in the always-on `frontend-lint` on every
-//     event, but its TEST's encoded-identity arm runs nowhere on a docs-only
-//     push; `verify-plan-anchors.mjs --pending` runs in `plan-anchor-verify`,
-//     which is `pull_request` ONLY, so a push is covered only because every
-//     commit it brings is a PR merge, and `classifyPushRange` CHECKS that.
+// ⛔ Review 164.9.4 round 4, IN-01 + SFH LOW-08: the scan FAILS CLOSED. Every
+// `.planning` occurrence in a scanned source is found by a small lexer (strings in
+// every quote, backtick templates and Python triple quotes included, multi-line
+// too; comments skipped; JS regex literals recognised), and each one either
+// resolves to a planning FILE the list must carry, or is an UNRECOGNISED shape
+// that is a red until `NOT_READS` names it with a reason:
+//   - a static literal naming a file, wherever `.planning` sits in it (`./`, a
+//     `${ROOT}/` or `{ROOT}/` prefix): DERIVED. A file that does NOT exist is
+//     derived too, never dropped, because a test may pin its absence;
+//   - a `.planning` root or directory joined with literal segments
+//     (`join(ROOT, ".planning", "x.md")`, `ROOT / ".planning" / "x.md"`), or a
+//     directory literal whose basename literal sits in the same file: DERIVED;
+//   - a computed path (`${…}` / `{…}` / a glob), the bare root or a directory
+//     held for a later join with a VARIABLE, a regex literal, or a `.planning`
+//     the lexer finds outside any literal or comment: UNRECOGNISED. These cannot
+//     be resolved statically, so they are loud instead of silent.
+//
+// THE EXCLUSION RULE, kept in ONE place (the two maps at the top of the block):
+//   - `NOT_SCANNED`, whole files whose `.planning` literals are not real-tree
+//     reads a docs-filtered job alone would catch:
+//     - this contract file: its literals are `judge()` fixtures, not reads;
+//     - the classifier: it holds the list itself, so scanning it would derive the
+//       list from the list and hide a stale entry;
+//     - whole-tree WALKERS, which read every planning file by enumeration rather
+//       than by name, so a named-file list cannot express them. Each is covered
+//       elsewhere, and EXACTLY how is in its reason below (review 164.9.4 round 4,
+//       WR-02 + SFH LOW-09; the earlier "re-runs them on every event" was false):
+//       `check-planning-hygiene.ts` runs in the always-on `frontend-lint` on every
+//       event, but its TEST's encoded-identity arm runs nowhere on a docs-only
+//       push; `verify-plan-anchors.mjs --pending` runs in `plan-anchor-verify`,
+//       which is `pull_request` ONLY, so a push is covered only because every
+//       commit it brings is a PR merge, and `classifyPushRange` CHECKS that.
+//   - `NOT_READS`, single (source, token) pairs that are not real-tree reads: a
+//     scratch-tree fixture, prose, a predicate. Keyed by SOURCE (review 164.9.4
+//     round 4, WR-02: the round-3 `FIXTURE_COLLISIONS` dropped `.planning/STATE.md`
+//     for EVERY source, so a future real reader of the most-edited planning file
+//     would have been silently excluded). Each entry is fenced: its source must
+//     still be tracked and still produce that exact token.
 // ---------------------------------------------------------------------------
+type ScanToken = { token: string; kind: string; derived: string[] };
+
+const PLANNING_TOKEN = /(?<![\w.-])\.planning(?![\w-])(?:\/[^\s"'`,;:)\]<>|]*)?/g;
+const FILE_SHAPED = /(?:^|\/)[^/]*\.[A-Za-z0-9]+$/;
+
+/** Every `.planning` path token in `s`, trailing sentence dots trimmed. */
+function planningTokens(s: string): string[] {
+  return [...s.matchAll(PLANNING_TOKEN)].map((m) => m[0].replace(/\.+$/, ""));
+}
+
+type Lit = { body: string; start: number; end: number };
+
+/**
+ * A small lexer, enough to find every string literal and every `.planning` in
+ * CODE. Strings: '…', "…", JS `…` (a `${…}` placeholder kept RAW in the body, so
+ * a computed path stays visible as computed), Python '''…''' / """…""". Comments
+ * are skipped (`//`, `/* … *\/` in JS/TS; `#` in Python and shell). A JS regex
+ * literal is recognised by the previous significant character and reported as a
+ * code hit, never as a string. A single-line string that meets a newline ends
+ * there, so a stray apostrophe in JSX text desyncs at most one line.
+ */
+function lex(text: string, lang: "js" | "py" | "sh"): { lits: Lit[]; codeHits: Array<{ at: number; body: string }> } {
+  const lits: Lit[] = [];
+  const codeHits: Array<{ at: number; body: string }> = [];
+  const n = text.length;
+  const lineEnd = (i: number) => {
+    const e = text.indexOf("\n", i);
+    return e < 0 ? n : e;
+  };
+  let prev = "";
+  let word = "";
+  let lastWord = "";
+  let i = 0;
+  while (i < n) {
+    const c = text[i];
+    const two = text.slice(i, i + 2);
+    const three = text.slice(i, i + 3);
+    if (lang === "js" && two === "//") {
+      i = lineEnd(i);
+      continue;
+    }
+    if (lang === "js" && two === "/*") {
+      const e = text.indexOf("*/", i + 2);
+      i = e < 0 ? n : e + 2;
+      continue;
+    }
+    if (lang !== "js" && c === "#" && (lang === "py" || i === 0 || /\s/.test(text[i - 1]))) {
+      i = lineEnd(i);
+      continue;
+    }
+    if (lang === "py" && (three === '"""' || three === "'''")) {
+      const e = text.indexOf(three, i + 3);
+      const end = e < 0 ? n : e + 3;
+      lits.push({ body: text.slice(i + 3, e < 0 ? n : e), start: i, end });
+      i = end;
+      prev = '"';
+      word = "";
+      continue;
+    }
+    if (c === '"' || c === "'" || (lang === "js" && c === "`")) {
+      let j = i + 1;
+      while (j < n) {
+        const d = text[j];
+        if (d === "\\") {
+          j += 2;
+          continue;
+        }
+        if (c === "`" && d === "$" && text[j + 1] === "{") {
+          let k = j + 2;
+          let depth = 1;
+          while (k < n && depth > 0) {
+            if (text[k] === "{") depth += 1;
+            else if (text[k] === "}") depth -= 1;
+            k += 1;
+          }
+          j = k;
+          continue;
+        }
+        if (d === c) break;
+        if (d === "\n" && c !== "`" && lang !== "sh") break;
+        j += 1;
+      }
+      lits.push({ body: text.slice(i + 1, Math.min(j, n)), start: i, end: Math.min(j + 1, n) });
+      i = j + 1;
+      prev = '"';
+      word = "";
+      continue;
+    }
+    if (/[\w$]/.test(c)) {
+      word += c;
+    } else if (word) {
+      lastWord = word;
+      word = "";
+    }
+    if (
+      lang === "js" &&
+      c === "/" &&
+      (prev === "" || /[(,=:[!&|?{};+\-*%<>~^]/.test(prev) || (!word && /^(?:return|typeof|case|in|of|delete|void|throw|new)$/.test(lastWord) && prev === lastWord.slice(-1)))
+    ) {
+      let j = i + 1;
+      let cls = false;
+      while (j < n && text[j] !== "\n") {
+        const d = text[j];
+        if (d === "\\") {
+          j += 2;
+          continue;
+        }
+        if (d === "[") cls = true;
+        else if (d === "]") cls = false;
+        else if (d === "/" && !cls) break;
+        j += 1;
+      }
+      const body = text.slice(i + 1, j);
+      if (body.includes("planning")) codeHits.push({ at: i, body: `REGEX:/${body}/` });
+      i = j + 1;
+      while (i < n && /[a-z]/.test(text[i])) i += 1;
+      prev = "/";
+      continue;
+    }
+    if (text.startsWith(".planning", i)) {
+      const m = /^\.planning[^\s"'`,;:)\]<>|]*/.exec(text.slice(i));
+      codeHits.push({ at: i, body: `CODE:${m ? m[0] : ".planning"}` });
+    }
+    if (!/\s/.test(c)) prev = c;
+    i += 1;
+  }
+  return { lits, codeHits };
+}
+
+const langOf = (src: string): "js" | "py" | "sh" => (src.endsWith(".py") ? "py" : src.endsWith(".sh") ? "sh" : "js");
+
+/**
+ * PURE apart from existence checks against the real tree: every `.planning`
+ * token in one source, its kind, and the planning files it DERIVES (empty for
+ * an unrecognised shape). Exported to the synthetic rows below, which drive
+ * every shape, so the grammar itself is shown to fire.
+ */
+function scanSource(src: string, text: string): ScanToken[] {
+  const isFile = (p: string) => existsSync(join(ROOT, p)) && statSync(join(ROOT, p)).isFile();
+  const isDir = (p: string) => existsSync(join(ROOT, p)) && statSync(join(ROOT, p)).isDirectory();
+  const { lits, codeHits } = lex(text, langOf(src));
+  const out: ScanToken[] = [];
+  const consumed = new Set<number>();
+  const basenames = lits.map((l) => l.body).filter((b) => /^[\w.-]+\.(?:md|json)$/.test(b));
+  // Joins: a `.planning` root or directory literal followed by plain literal
+  // segments separated by `,` or `/`, stopping after a file-shaped segment.
+  for (let k = 0; k < lits.length; k += 1) {
+    const head = lits[k].body;
+    if (!/^\.planning(?:\/[\w.@-]+)*\/?$/.test(head) || FILE_SHAPED.test(head.replace(/^\.planning/, ""))) continue;
+    const segs = [head];
+    let m = k;
+    while (m + 1 < lits.length && /^\s*[,/]\s*$/.test(text.slice(lits[m].end, lits[m + 1].start)) && /^[\w.@-]+(?:\/[\w.@-]+)*$/.test(lits[m + 1].body)) {
+      segs.push(lits[m + 1].body);
+      m += 1;
+      if (FILE_SHAPED.test(lits[m].body)) break;
+    }
+    if (segs.length === 1) continue;
+    for (let x = k; x <= m; x += 1) consumed.add(x);
+    const p = posix.normalize(segs.join("/"));
+    out.push(classify(p));
+    k = m;
+  }
+  function classify(token: string): ScanToken {
+    if (/[{}*]/.test(token)) return { token, kind: "COMPUTED", derived: [] };
+    if (token === ".planning" || token === ".planning/") return { token, kind: "ROOT", derived: [] };
+    if (FILE_SHAPED.test(token.replace(/^\.planning/, "")) && !isDir(token)) {
+      return { token, kind: isFile(token) ? "FILE" : "ABSENT", derived: [token] };
+    }
+    if (isDir(token)) {
+      const dir = token.replace(/\/$/, "");
+      const derived = basenames.map((b) => `${dir}/${b}`).filter(isFile);
+      return { token, kind: derived.length > 0 ? "DIR+BASENAME" : "DIR", derived };
+    }
+    return { token, kind: "ABSENT-DIR", derived: [] };
+  }
+  lits.forEach((l, k) => {
+    if (consumed.has(k) || !l.body.includes(".planning")) return;
+    // A `${…}` placeholder (JS) or `{…}` (a Python f-string) BEFORE `.planning`
+    // is a root prefix and the token after it is static; one INSIDE the token
+    // makes it computed, which `classify` sees.
+    for (const t of planningTokens(l.body)) out.push(classify(t));
+  });
+  for (const h of codeHits) out.push({ token: h.body, kind: "UNRECOGNISED", derived: [] });
+  return out;
+}
+
 describe("[164.9.4 WR-01 / CR-01] TEST_READ_PLANNING_PATHS matches the planning files the tests read, derived from the whole tree", () => {
   const NOT_SCANNED = new Map<string, string>([
     ["src/__tests__/contracts/ci-docs-path-filter.contract.test.ts", "this file: its .planning literals are judge() fixtures"],
@@ -977,10 +1188,159 @@ describe("[164.9.4 WR-01 / CR-01] TEST_READ_PLANNING_PATHS matches the planning 
         "(isPrMergeCommit): a range carrying any other commit runs the full corpus (review 164.9.4 round 4, WR-02)",
     ],
   ]);
-  // A literal that resolves to a real repo file but is only ever written into a
-  // TEMP fixture tree, never read from the real one. verify-plan-anchors.test.ts
-  // seeds `.planning/STATE.md` into a scratch tree for its @-reference arm.
-  const FIXTURE_COLLISIONS = new Set([".planning/STATE.md"]);
+
+  // Each reason says why the token is not a real-tree read. Two shared reasons:
+  const FIXTURE = "a fixture path this file seeds into a mkdtemp scratch tree (or asserts on inside one); never read from the real tree";
+  const DOCSTRING = "prose in a docstring or comment-like string citing where a decision is recorded; nothing opens it";
+  const NOT_READS = new Map<string, Array<[string, string]>>([
+    [
+      "src/__tests__/verify-plan-anchors.test.ts",
+      [
+        [".planning/STATE.md", FIXTURE],
+        [".planning/milestones/v1.20-phases/164-old/164-01-PLAN.md", FIXTURE],
+        [".planning/phases/.keep", FIXTURE],
+        [".planning/phases/00-x/.keep", FIXTURE],
+        [".planning/phases/98-done/98-01-PLAN.md", FIXTURE],
+        [".planning/phases/98-done/98-01-SUMMARY.md", FIXTURE],
+        [".planning/phases/98-done/98-02-PLAN.md", FIXTURE],
+        [".planning/phases/99-fixture/99-00-SUMMARY.md", FIXTURE],
+        [".planning/phases/99-fixture/99-01-DEFERRED.md", FIXTURE],
+        [".planning/phases/99-fixture/99-01-PLAN.md", FIXTURE],
+        [".planning/phases/99-fixture/99-02-PLAN.md", FIXTURE],
+        [".planning/phases/99-fixture/99-03-PLAN.md", FIXTURE],
+        [".planning/phases/99-open/99-01-DEFERRED.md", FIXTURE],
+        [".planning/phases/99-open/99-01-PLAN.md", FIXTURE],
+        [".planning/phases/99-open/99-02-PLAN.md", FIXTURE],
+        [".planning/phases", "join(root, \".planning\", \"phases\") on the mkdtemp scratch root, to list the fixture tree it seeded"],
+        [".planning/phases/164-.../pg-harness/run.sh", "prose inside a fixture plan body (an anchor the fixture expects verify-plan-anchors to report), not a path this file opens"],
+      ],
+    ],
+    [
+      "analytics-service/tests/test_constit_blend_parity.py",
+      [
+        [".planning/PROJECT.md", DOCSTRING],
+      ],
+    ],
+    [
+      "analytics-service/tests/test_position_reconstruction_fifo_flip.py",
+      [
+        [".planning/audit-2026-05-07/INVEST-PATTERN-2-POSITIONS.md", DOCSTRING],
+      ],
+    ],
+    [
+      "analytics-service/tests/test_probe_composite_claimtime.py",
+      [
+        [".planning/h.log", "a repo-root path fed to the probe so the test can assert the probe REFUSES a log path inside the repository; never opened"],
+      ],
+    ],
+    [
+      "analytics-service/tests/test_mt5_relogin.py",
+      [
+        [".planning/", DOCSTRING],
+      ],
+    ],
+    [
+      "analytics-service/tests/test_mt5_session_monitor.py",
+      [
+        [".planning/", DOCSTRING],
+      ],
+    ],
+    [
+      "analytics-service/tests/test_phase12_kill_switch.py",
+      [
+        [".planning", DOCSTRING],
+        [".planning/", DOCSTRING],
+      ],
+    ],
+    [
+      "analytics-service/scripts/phase12_kill_switch.py",
+      [
+        [".planning/phases/12-backend-metric-contracts/TODOS.md", "TODOS_PATH, an append target that does not exist in the tree; every test of the module monkeypatches TODOS_PATH to a tmp path, so no test reads or writes the real one (measured, review 164.9.4 round 3)"],
+        [".planning/", DOCSTRING],
+      ],
+    ],
+    [
+      "analytics-service/scripts/phase12_deploy.py",
+      [
+        [".planning/phases/12-backend-metric-contracts/TODOS.md", "the same absent TODOS_PATH target as phase12_kill_switch.py, cited in the module docstring and joined for a deploy-time write no test performs"],
+      ],
+    ],
+    [
+      "analytics-service/scripts/probe_composite_claimtime.py",
+      [
+        [".planning/", DOCSTRING],
+      ],
+    ],
+    [
+      "analytics-service/services/db.py",
+      [
+        [".planning/phases/140.1-.../140.1-TS-OBLIGATIONS.md", DOCSTRING],
+      ],
+    ],
+    [
+      "analytics-service/routers/process_key.py",
+      [
+        [".planning/phases/140.1-.../140.1-TS-OBLIGATIONS.md", DOCSTRING],
+      ],
+    ],
+    [
+      "analytics-service/services/feedback_engine.py",
+      [
+        [".planning/phases/04-feedback-loop/04-CONTEXT.md", DOCSTRING],
+      ],
+    ],
+    [
+      "analytics-service/services/allocator_equity_derive.py",
+      [
+        [".planning/phases/115-e2-allocator-equity-reconstruction-scope-gated-verify-first/115-STITCH-02-DEFERRAL.md", DOCSTRING],
+      ],
+    ],
+    [
+      "analytics-service/services/ingestion/csv_adapter.py",
+      [
+        [".planning/phase-19/csv-adapter-deviation.md", DOCSTRING],
+      ],
+    ],
+    [
+      "src/lib/founder-lp/readiness.ts",
+      [
+        [".planning/phase-18/founder-lp-runbook.md", "operator-facing message copy (a readiness reason string pointing at the runbook); the app never opens it"],
+      ],
+    ],
+    [
+      "src/lib/founder-lp/email-templates.ts",
+      [
+        [".planning/phase-18/founder-lp-runbook.md", "operator-facing email copy pointing at the runbook; the app never opens it"],
+      ],
+    ],
+    [
+      "src/app/api/cron/flag-monitor/route.ts",
+      [
+        [".planning/phase-19/rollback-runbook.md", "alert-email copy pointing at the runbook; the route never opens it"],
+      ],
+    ],
+    [
+      "scripts/check-version-bump.mjs",
+      [
+        [".planning/", "the planning-only exemption predicate (startsWith) and its messages; a prefix, not a file read"],
+      ],
+    ],
+    [
+      "src/__tests__/contracts/contracts-registry.test.ts",
+      [
+        [".planning/", "invariant description prose in the registry table; not a path read"],
+        [".planning/**", "invariant description prose in the registry table; not a path read"],
+      ],
+    ],
+    [
+      "src/__tests__/vac06-mechanism-arms.test.ts",
+      [
+        [".planning/", "a startsWith predicate asserting the demos record does NOT live under .planning/, and its message"],
+        [".planning/phases/", "message prose explaining why the record must not live there"],
+        [".planning/phases/**", "message prose explaining why the record must not live there"],
+      ],
+    ],
+  ]);
 
   const TRACKED = new Set(
     execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8" }).split("\0").filter(Boolean),
@@ -997,10 +1357,53 @@ describe("[164.9.4 WR-01 / CR-01] TEST_READ_PLANNING_PATHS matches the planning 
     for (const e of JS_EXT) if (TRACKED.has(base + e)) return base + e;
     return null;
   }
-  function resolvePy(mod: string): string | null {
-    const p = mod.replace(/\./g, "/");
-    for (const c of [`analytics-service/${p}.py`, `analytics-service/${p}/__init__.py`]) if (TRACKED.has(c)) return c;
-    return null;
+  /** A Python module spec (absolute `a.b`, relative `.a` / `..a` / `.`) as a path stem. */
+  function pyStem(from: string, mod: string): string {
+    const dots = (/^\.*/.exec(mod) ?? [""])[0].length;
+    const rest = mod.slice(dots).replace(/\./g, "/");
+    if (dots === 0) return `analytics-service/${rest}`;
+    let dir = posix.dirname(from);
+    for (let k = 1; k < dots; k += 1) dir = posix.dirname(dir);
+    return rest ? `${dir}/${rest}` : dir;
+  }
+  const resolvePy = (stem: string) => [`${stem}.py`, `${stem}/__init__.py`].find((c) => TRACKED.has(c)) ?? null;
+
+  /**
+   * PURE: the tracked local modules and scripts one source imports or spawns.
+   * Exported to the synthetic rows below.
+   */
+  function importsOf(f: string, text: string): string[] {
+    const next: string[] = [];
+    if (f.endsWith(".py")) {
+      // `from x import a, b`, `from x import (\n a,\n b,\n)`, `from .x import a`, `from . import a`.
+      for (const m of text.matchAll(/^[ \t]*from[ \t]+(\.*[\w.]*)[ \t]+import[ \t]+(\([^)]*\)|[^\n#]+)/gm)) {
+        const stem = pyStem(f, m[1]);
+        next.push(resolvePy(stem) ?? "");
+        for (const part of m[2].replace(/[()]/g, "").split(",")) {
+          const name = part.trim().split(/\s+/)[0];
+          if (name && name !== "*" && name !== "\\") next.push(resolvePy(`${stem}/${name}`) ?? "");
+        }
+      }
+      for (const m of text.matchAll(/^[ \t]*import[ \t]+([\w., \t]+)/gm)) {
+        for (const part of m[1].split(",")) next.push(resolvePy(pyStem(f, part.trim().split(/\s+/)[0])) ?? "");
+      }
+    } else {
+      for (const m of text.matchAll(/(?:from\s+|import\s*\(\s*|require\s*\(\s*|import\s+)["'`]([^"'`]+)["'`]/g)) {
+        next.push(resolveJs(f, m[1]) ?? "");
+      }
+    }
+    const SCRIPT = /\.(?:mjs|ts|js|cjs|sh|py)$/;
+    for (const m of text.matchAll(/["'`]((?:\.\.?\/)*(?:scripts|analytics-service)\/[^"'`\s]+)["'`]/g)) {
+      if (!SCRIPT.test(m[1])) continue;
+      const lit = m[1].replace(/^(?:\.\.?\/)+/, "");
+      next.push(lit, posix.normalize(posix.join(posix.dirname(f), m[1])));
+    }
+    // Split segments: join(ROOT, "scripts", "local-stack", "run.sh").
+    for (const m of text.matchAll(/(["'`])(scripts|analytics-service)\1((?:\s*,\s*(["'`])[\w.-]+\4)+)/g)) {
+      const segs = [m[2], ...[...m[3].matchAll(/(["'`])([\w.-]+)\1/g)].map((s) => s[2])];
+      next.push(segs.join("/"));
+    }
+    return next.filter((x) => x && TRACKED.has(x));
   }
 
   /** The test files plus every tracked local module they import or spawn, transitively. */
@@ -1011,65 +1414,47 @@ describe("[164.9.4 WR-01 / CR-01] TEST_READ_PLANNING_PATHS matches the planning 
       const f = queue.pop() as string;
       if (seen.has(f)) continue;
       seen.add(f);
-      const text = readFileSync(join(ROOT, f), "utf8");
-      const next: string[] = [];
-      if (f.endsWith(".py")) {
-        for (const m of text.matchAll(/^\s*(?:from\s+([\w.]+)\s+import\s+([\w, ]+)|import\s+([\w.]+))/gm)) {
-          if (m[1]) {
-            next.push(resolvePy(m[1]) ?? "");
-            for (const n of m[2].split(",")) next.push(resolvePy(`${m[1]}.${n.trim().split(/\s+/)[0]}`) ?? "");
-          } else next.push(resolvePy(m[3]) ?? "");
-        }
-      } else {
-        for (const m of text.matchAll(/(?:from\s+|import\s*\(\s*|require\s*\(\s*|import\s+)["']([^"']+)["']/g)) {
-          next.push(resolveJs(f, m[1]) ?? "");
-        }
-      }
-      for (const m of text.matchAll(/["']((?:scripts|analytics-service)\/[^"'\s]+\.(?:mjs|ts|js|cjs|sh|py))["']/g)) next.push(m[1]);
-      for (const n of next) if (n && TRACKED.has(n) && !seen.has(n)) queue.push(n);
+      for (const n of importsOf(f, readFileSync(join(ROOT, f), "utf8"))) if (!seen.has(n)) queue.push(n);
     }
     return seen;
   }
 
-  /**
-   * Every real-tree `.planning/` FILE a scanned source names, mapped to the
-   * source(s) naming it. Three shapes: a full literal, adjacent literals joined
-   * by `,` or `/` (`join(ROOT, ".planning", "x")`, `ROOT / ".planning" / "x"`),
-   * and a non-root dir literal + a basename literal in the SAME file (G2 reads
-   * 164.3-07-DEFERRED.md that way). Basenames are never joined across files, and
-   * never onto the bare `.planning` / `.planning/` root, which several files
-   * carry beside unrelated `*.md` names.
-   */
-  function derive(): { reached: Set<string>; paths: Map<string, Set<string>> } {
+  type Derivation = {
+    reached: Set<string>;
+    paths: Map<string, Set<string>>;
+    unrecognised: string[];
+    tokensBySource: Map<string, Set<string>>;
+  };
+  let memo: Derivation | null = null;
+  /** Memoised: every arm reads the same derivation, computed once. */
+  function derive(): Derivation {
+    if (memo) return memo;
     const reached = closure();
     const paths = new Map<string, Set<string>>();
-    const add = (p: string, src: string) => {
-      if (FIXTURE_COLLISIONS.has(p)) return;
-      if (!paths.has(p)) paths.set(p, new Set());
-      paths.get(p)?.add(src);
-    };
+    const unrecognised: string[] = [];
+    const tokensBySource = new Map<string, Set<string>>();
     for (const src of reached) {
       if (NOT_SCANNED.has(src)) continue;
       const text = readFileSync(join(ROOT, src), "utf8");
       if (!text.includes(".planning")) continue;
-      const literals = [...text.matchAll(/(["'])(\.planning[^"'\n]*)\1/g)].map((m) => m[2]);
-      for (const m of text.matchAll(/(["'])(\.planning[^"'\n]*)\1((?:\s*[,/]\s*(["'])[^"'\n]*\4)+)/g)) {
-        const segs = [m[2], ...[...m[3].matchAll(/(["'])([^"'\n]*)\1/g)].map((s) => s[2])];
-        literals.push(posix.normalize(segs.join("/")));
-      }
-      const basenames = [...text.matchAll(/["']([\w.-]+\.(?:md|json))["']/g)].map((m) => m[1]);
-      for (const lit of literals) {
-        const abs = join(ROOT, lit);
-        if (!existsSync(abs)) continue;
-        if (statSync(abs).isFile()) {
-          add(lit, src);
+      const allowed = new Map(NOT_READS.get(src) ?? []);
+      const seenTokens = new Set<string>();
+      for (const t of scanSource(src, text)) {
+        seenTokens.add(t.token);
+        if (allowed.has(t.token)) continue;
+        if (t.derived.length === 0) {
+          unrecognised.push(`${src} :: ${t.token} (${t.kind})`);
           continue;
         }
-        if (lit === ".planning" || lit === ".planning/") continue;
-        for (const b of basenames) if (existsSync(join(abs, b)) && statSync(join(abs, b)).isFile()) add(`${lit.replace(/\/$/, "")}/${b}`, src);
+        for (const p of t.derived) {
+          if (!paths.has(p)) paths.set(p, new Set());
+          paths.get(p)?.add(src);
+        }
       }
+      tokensBySource.set(src, seenTokens);
     }
-    return { reached, paths };
+    memo = { reached, paths, unrecognised, tokensBySource };
+    return memo;
   }
 
   const describeSources = (paths: Map<string, Set<string>>, f: string) => [...(paths.get(f) ?? [])].join(", ");
@@ -1084,18 +1469,49 @@ describe("[164.9.4 WR-01 / CR-01] TEST_READ_PLANNING_PATHS matches the planning 
     expect([...reached].some((f) => f.startsWith("analytics-service/tests/")), "no pytest file in the walk").toBe(true);
     expect(reached.has("scripts/check-planning-hygiene.ts"), "the JS import resolver no longer reaches a script a test imports").toBe(true);
     expect(reached.has("analytics-service/scripts/phase12_kill_switch.py"), "the Python import resolver no longer reaches a module a test imports").toBe(true);
+  });
+
+  it("the exclusions are fenced: every source is tracked, and every NOT_READS token is still produced by its source", () => {
+    const { tokensBySource } = derive();
     for (const f of NOT_SCANNED.keys()) expect(TRACKED.has(f), `${f} is excluded but no longer tracked; drop it from NOT_SCANNED`).toBe(true);
+    for (const [src, entries] of NOT_READS) {
+      expect(TRACKED.has(src), `${src} has NOT_READS entries but is no longer tracked; drop them`).toBe(true);
+      expect(NOT_SCANNED.has(src), `${src} is in BOTH maps; a whole-file exclusion makes its NOT_READS entries dead`).toBe(false);
+      for (const [token, reason] of entries) {
+        expect(reason.length, `${src} :: ${token} carries no reason`).toBeGreaterThan(20);
+        expect(
+          tokensBySource.get(src)?.has(token) ?? false,
+          `${src} no longer produces the token ${token}, so its NOT_READS entry is STALE; drop it ` +
+            `(an entry that matches nothing could later hide a real reader that happens to reuse it)`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("FAIL CLOSED: no scanned source carries a `.planning` shape the derivation cannot resolve", () => {
+    const { unrecognised } = derive();
+    expect(
+      unrecognised,
+      "these `.planning` occurrences are neither a resolvable planning file nor named in NOT_READS. A computed " +
+        "path, a root or directory held for a later join with a variable, a regex, or text outside any literal " +
+        "cannot be derived statically, and a silent pass here is how a real reader hides. Either it is a real " +
+        "read (add the file to TEST_READ_PLANNING_PATHS and make the literal static) or it is not (add a " +
+        "(source, token) entry to NOT_READS with the reason).",
+    ).toEqual([]);
   });
 
   it("every real-tree planning file a test reads is on the list (the list cannot lag the tests)", () => {
     const { paths } = derive();
-    for (const f of paths.keys()) {
-      expect(
-        TEST_READ_PLANNING_PATHS,
-        `${f} is read by ${describeSources(paths, f)} but is NOT in TEST_READ_PLANNING_PATHS, so a ` +
-          `docs-only push that breaks it goes green on main. Add it to the list in scripts/classify-changed-paths.mjs.`,
-      ).toContain(f);
-    }
+    const missing = [...paths.keys()]
+      .filter((f) => !TEST_READ_PLANNING_PATHS.includes(f))
+      .map((f) => `${f} (read by ${describeSources(paths, f)})`);
+    expect(
+      missing,
+      "these planning files are read by a scanned source but are NOT in TEST_READ_PLANNING_PATHS, so a " +
+        "docs-only push that breaks one goes green on main. Add each to the list in scripts/classify-changed-paths.mjs, " +
+        "or, if it is not a real-tree read, name the (source, token) in NOT_READS with the reason. (A file that does " +
+        "not exist counts: a test may pin its absence, and creating it must run the full corpus.)",
+    ).toEqual([]);
   });
 
   it("every listed path is derived, or is the ABSENT -SUMMARY sibling of a derived deferred plan (no stale entry)", () => {
@@ -1106,6 +1522,43 @@ describe("[164.9.4 WR-01 / CR-01] TEST_READ_PLANNING_PATHS matches the planning 
       expect(plan !== f && paths.has(plan), `${f} is on the list but no test reads it`).toBe(true);
       expect(existsSync(join(ROOT, f)), `${f} now EXISTS, so the deferral the pins assert has ended; revisit the list`).toBe(false);
     }
+  });
+
+  // ── the grammar itself can fire (review 164.9.4 round 4, IN-01 + SFH LOW-08) ──
+  // Each row feeds ONE shape the round-3 scan missed. Real planning paths are
+  // used so existence resolves against the real tree.
+  const kinds = (src: string, text: string) => scanSource(src, text).map((t) => `${t.kind} ${t.token}`);
+  it.each([
+    ["a backtick template, static", "x.test.ts", "readFileSync(`.planning/ROADMAP.md`, 'utf8');", ["FILE .planning/ROADMAP.md"]],
+    ["a backtick template with a ROOT placeholder before .planning", "x.test.ts", "readFileSync(`${ROOT}/.planning/ROADMAP.md`);", ["FILE .planning/ROADMAP.md"]],
+    ["a `./` prefix mid-string", "x.test.ts", 'readFileSync("./.planning/ROADMAP.md");', ["FILE .planning/ROADMAP.md"]],
+    ["a Python f-string with a root placeholder", "t.py", 'open(f"{ROOT}/.planning/ROADMAP.md")', ["FILE .planning/ROADMAP.md"]],
+    ["a COMPUTED segment after .planning", "x.test.ts", "readFileSync(`.planning/${phase}/PLAN.md`);", ["COMPUTED .planning/${phase}/PLAN.md"]],
+    ["a COMPUTED Python f-string", "t.py", 'open(f".planning/{phase}/PLAN.md")', ["COMPUTED .planning/{phase}/PLAN.md"]],
+    ["the root held in a variable and joined later", "x.test.ts", 'const P = join(ROOT, ".planning");\nreadFileSync(join(P, "ROADMAP.md"));', ["ROOT .planning"]],
+    ["a root joined with literal segments", "x.test.ts", 'readFileSync(join(ROOT, ".planning", "ROADMAP.md"), "utf8");', ["FILE .planning/ROADMAP.md"]],
+    ["a Python path join", "t.py", 'p = ROOT / ".planning" / "ROADMAP.md"', ["FILE .planning/ROADMAP.md"]],
+    ["a file literal followed by an encoding is NOT joined", "x.test.ts", 'readFileSync(".planning/ROADMAP.md", "utf8");', ["FILE .planning/ROADMAP.md"]],
+    ["an ABSENT file is kept, never dropped (a test may pin absence)", "x.test.ts", 'existsSync(".planning/phases/00-none/00-01-SUMMARY.md");', ["ABSENT .planning/phases/00-none/00-01-SUMMARY.md"]],
+    ["a multi-line Python docstring", "t.py", 'def f():\n    """\n    See .planning/ROADMAP.md.\n    """\n', ["FILE .planning/ROADMAP.md"]],
+    ["a multi-line template literal", "x.ts", "const html = `<p>\n  .planning/ROADMAP.md\n</p>`;", ["FILE .planning/ROADMAP.md"]],
+    ["a regex literal naming .planning", "x.test.ts", "const re = /\\.planning\\/x/;", ["UNRECOGNISED REGEX:/\\.planning\\/x/"]],
+    ["a comment is not a read", "x.test.ts", "// see .planning/ROADMAP.md\nconst a = 1;", []],
+    ["a Python comment is not a read", "t.py", "# see .planning/ROADMAP.md\na = 1\n", []],
+    ["a regex with a quote does not desync the lexer", "x.test.ts", 'const re = /["\']/;\nreadFileSync(".planning/ROADMAP.md");', ["FILE .planning/ROADMAP.md"]],
+  ] as const)("the scanner resolves %s", (_label, src, text, want) => {
+    expect(kinds(src, text)).toEqual([...want]);
+  });
+
+  it.each([
+    ["a multi-line parenthesised Python import", "analytics-service/tests/test_x.py", "from scripts.phase12_kill_switch import (\n    main,\n)\n", "analytics-service/scripts/phase12_kill_switch.py"],
+    ["a relative Python import", "analytics-service/scripts/x.py", "from .phase12_kill_switch import main\n", "analytics-service/scripts/phase12_kill_switch.py"],
+    ["a `from . import` relative import", "analytics-service/scripts/x.py", "from . import phase12_kill_switch\n", "analytics-service/scripts/phase12_kill_switch.py"],
+    ["a script spawned through split segments", "src/__tests__/x.test.ts", 'spawnSync("node", [join(ROOT, "scripts", "classify-changed-paths.mjs")]);', "scripts/classify-changed-paths.mjs"],
+    ["a script spawned through a backtick literal", "src/__tests__/x.test.ts", "spawnSync('bash', [`scripts/local-stack/run.sh`]);", "scripts/local-stack/run.sh"],
+    ["a script spawned through a ../-relative literal", "src/__tests__/x.test.ts", 'spawnSync("node", [resolve(__dirname, "../../scripts/classify-changed-paths.mjs")]);', "scripts/classify-changed-paths.mjs"],
+  ] as const)("the closure follows %s", (_label, from, text, want) => {
+    expect(importsOf(from, text)).toContain(want);
   });
 });
 
