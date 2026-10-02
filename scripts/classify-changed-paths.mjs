@@ -263,16 +263,24 @@ export function changedFilesAgainstBase({ baseRefName = process.env.GITHUB_BASE_
  * and `lighthouse-mobile` are docs-filtered jobs outside the aggregator, and CI
  * run `36892795002` concluded `failure` while its `frontend` concluded
  * `success`. See `predecessorVerdict`.)
+ * (Review 164.9.4 round 4, CR-01 + WR-01 + SFH MEDIUM-01 + LOW-07: "every
+ * Actions check run non-red" was NOT enough on its own. Scheduled and
+ * `workflow_run` workflows attach green checks to `main` SHAs, so a commit whose
+ * CI never ran, or had not finished, passed it. The gate now also requires a
+ * completed, successful `frontend` check run (CI's `if: always()` aggregator)
+ * and every GitHub Actions check SUITE on `before` completed. See
+ * `predecessorVerdict`.)
  *
- * @param {{before?: string, forced?: string|boolean, cwd?: string, fetchCheckRuns?: (sha: string) => any}} opts —
+ * @param {{before?: string, forced?: string|boolean, cwd?: string, fetchPredecessor?: (sha: string) => any}} opts —
  *   `before` and `forced` come from `github.event.before` / `.forced`, passed in
  *   through the step's `env:`. `cwd` exists for the self-test's scratch repos.
- *   `fetchCheckRuns` is the predecessor-verdict seam: production reads it
- *   through `gh api` (`readCheckRuns`); the self-test injects canned
- *   responses, offline.
+ *   `fetchPredecessor` is the predecessor-verdict seam, answering
+ *   `{ runs, suites }` (the two `gh api` bodies): production reads it through
+ *   `gh api` (`readPredecessor`); the self-test injects canned responses,
+ *   offline.
  * @returns {{docsOnly: boolean, reason: string}}
  */
-export function classifyPushRange({ before, forced, cwd, fetchCheckRuns = defaultFetchCheckRuns } = {}) {
+export function classifyPushRange({ before, forced, cwd, fetchPredecessor = defaultFetchPredecessor } = {}) {
   const fullCorpus = (reason) => ({ docsOnly: false, reason: `${reason} — classified as code, full corpus` });
   const code = (reason) => fullCorpus(`push range undeterminable (${reason})`);
   const sha = String(before ?? "").trim();
@@ -307,60 +315,92 @@ export function classifyPushRange({ before, forced, cwd, fetchCheckRuns = defaul
   // merge-push backstop. See `TEST_READ_PLANNING_PATHS`.
   const read = files.filter((f) => TEST_READ_PLANNING_PATHS.includes(f));
   if (read.length > 0) return fullCorpus(`the pushed range changes ${read.length} planning file(s) a frontend-test assertion reads: ${read.join(", ")}`);
-  // Review 164.9.4 round 2, SFH-04 (round 3, WR-01). A docs-only range proves
+  // Review 164.9.4 round 2, SFH-04 (rounds 3 and 4). A docs-only range proves
   // nothing about the CODE under it, which is exactly `before`'s code. The short
-  // path is taken only when every GitHub Actions check run on `before` is
-  // non-red, Railway's own gate; see `predecessorVerdict`. Consulted LAST, so a
-  // code push never calls the API.
-  const verdict = predecessorVerdict(sha, fetchCheckRuns);
+  // path is taken only when CI provably ran and finished green on `before`; see
+  // `predecessorVerdict`. Consulted LAST, so a code push never calls the API.
+  const verdict = predecessorVerdict(sha, fetchPredecessor);
   if (!verdict.ok) return fullCorpus(`predecessor ${sha.slice(0, 12)} is not proven green (${verdict.why})`);
   return { docsOnly: true, reason: `${range}; predecessor ${sha.slice(0, 12)} ${verdict.why}` };
 }
 
 /**
- * The predecessor's verdict mirrors RAILWAY'S OWN GATE (review 164.9.4 round 3,
- * WR-01 + SFH LOW-04, orchestrator decision 2026-10-02).
- * `docs/runbooks/railway-worker.md` (Recovery, step 2) records that Railway
- * gates on the CHECK-RUNS of a commit, not the combined status, "so every
- * workflow's check on it must be non-red". So the predicate reads every check
- * run GitHub Actions created on `before` (app slug `github-actions`), across
- * every workflow and every event, `workflow_dispatch` included because Railway
- * counts those too. Non-Actions check runs (Vercel's, for one) are ignored.
+ * WHAT "PROVEN" MEANS for `before` (review 164.9.4 round 4: CR-01, WR-01, SFH
+ * MEDIUM-01 and LOW-07, one root cause, design decided by the orchestrator on
+ * 2026-10-02). The gate must prove CI actually RAN and FINISHED on `before`, not
+ * merely that whatever checks happen to exist are green. ALL THREE must hold:
  *
- * EVERY Actions check run the lookup returns must be `completed` with a
- * conclusion in `PREDECESSOR_OK_CONCLUSIONS`, and at least one must exist.
- * `filter=latest` already collapses re-run attempts INSIDE a check suite, and
- * that is the only "superseded" case trusted here. Runs of the same check name in
- * DIFFERENT suites (a push and a dispatch, say) are NOT deduplicated: whether
- * Railway lets a newer suite hide an older red one is unmeasured, so an older
- * red suite still refuses the short path (orchestrator decision 2026-10-02).
+ *   (a) a completed `frontend` check run concluded `success`. `frontend` is
+ *       `ci.yml`'s `if: always()` aggregator, a job name only `ci.yml` carries,
+ *       and it is created only after every job it needs has finished, so its
+ *       presence proves CI ran to the end. Round 3 dropped this requirement, and
+ *       a commit carrying only a scheduled workflow's green checks (a skip-trailer
+ *       merge, say), or a CI run caught between `needs:` stages, then passed.
+ *   (b) every GitHub Actions check run (app slug `github-actions`, every
+ *       workflow, every event, `workflow_dispatch` included) is completed with a
+ *       conclusion in `PREDECESSOR_OK_CONCLUSIONS`. Read with `filter=all` and
+ *       deduplicated HERE, explicitly, by (check_suite.id, name), keeping the
+ *       highest id: the latest attempt inside ONE suite, so an in-suite re-run
+ *       that went green supersedes its red attempt. Runs in DIFFERENT suites are
+ *       never collapsed, so a newer suite cannot hide an older red one. (Round 3
+ *       relied on `filter=latest` for that, and whether `latest` also collapses
+ *       across suites was unmeasured, SFH LOW-07. Now it is true by construction.)
+ *   (c) every GitHub Actions check SUITE is `completed`, with a conclusion in the
+ *       same set. A workflow run queued at the workflow level (a
+ *       `supabase-migrate` run waiting on its concurrency group, review WR-01)
+ *       has a suite but no check runs yet, so (b) alone cannot see it. The
+ *       conclusion half is stricter than the decided design and is the safe
+ *       direction: a completed suite with no runs and a red conclusion is a
+ *       workflow that failed to start (a workflow-file error), and it is refused.
+ *       Non-Actions suites are ignored: measured 2026-10-02 on three `main`
+ *       commits, the `claude`, `vercel`, `railway-app` and `fly-io` apps each
+ *       leave a suite `queued` with zero runs forever.
+ *
+ * Anything else (absent, pending, red, a truncated page, a foreign SHA, a
+ * malformed body, a lookup error) runs the full corpus with the reason printed.
+ *
+ * ⚠️ ACCEPTED COST, by decision (review 164.9.4 round 4, IN-03): because (b) and
+ * (c) count every workflow, a scheduled or `workflow_run` workflow that is
+ * running or red on `before` (the hourly `prod-prober` and `phase-19-stability`,
+ * the daily `Nightly probes`, the `Main CI cancelled watcher`) also costs the
+ * short path. That is the safe direction, and it is not scoped away.
  */
 export const PREDECESSOR_APP_SLUG = "github-actions";
 export const PREDECESSOR_OK_CONCLUSIONS = new Set(["success", "skipped", "neutral"]);
+/** `ci.yml`'s `if: always()` aggregator: requirement (a). */
+export const PREDECESSOR_REQUIRED_CHECK = "frontend";
 
-/** The `gh api` path for `before`'s check runs. A truncated page is refused, never trusted. */
+/** The `gh api` path for `before`'s check runs, every attempt. A truncated page is refused, never trusted. */
 export function checkRunsPath(repo, sha) {
-  return `repos/${repo}/commits/${sha}/check-runs?filter=latest&per_page=100`;
+  return `repos/${repo}/commits/${sha}/check-runs?filter=all&per_page=100`;
+}
+
+/** The `gh api` path for `before`'s check suites. A truncated page is refused, never trusted. */
+export function checkSuitesPath(repo, sha) {
+  return `repos/${repo}/commits/${sha}/check-suites?per_page=100`;
 }
 
 /**
- * PRODUCTION reader for `before`'s check runs, through `gh api` with the job's
- * `GH_TOKEN` (`checks: read`). `GITHUB_REPOSITORY` is set on every Actions
- * runner. THROWS on anything it cannot read; `predecessorVerdict` turns a throw
- * into a code verdict.
+ * PRODUCTION reader for `before`'s check runs and check suites, through `gh api`
+ * with the job's `GH_TOKEN` (`checks: read` covers both). `GITHUB_REPOSITORY` is
+ * set on every Actions runner. THROWS on anything it cannot read;
+ * `predecessorVerdict` turns a throw into a code verdict.
  */
-export function readCheckRuns(sha, repo = process.env.GITHUB_REPOSITORY) {
+export function readPredecessor(sha, repo = process.env.GITHUB_REPOSITORY) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(String(repo ?? ""))) {
     throw new Error(`GITHUB_REPOSITORY is ${repo ? "not an owner/name pair" : "absent"}`);
   }
   // argv elements, never a shell string; a bounded wait, since the job has five
   // minutes in total.
-  const raw = execFileSync("gh", ["api", checkRunsPath(repo, sha)], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: 60_000,
-  });
-  return JSON.parse(raw);
+  const get = (path) =>
+    JSON.parse(
+      execFileSync("gh", ["api", path], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 60_000,
+      }),
+    );
+  return { runs: get(checkRunsPath(repo, sha)), suites: get(checkSuitesPath(repo, sha)) };
 }
 
 /**
@@ -371,7 +411,7 @@ export function readCheckRuns(sha, repo = process.env.GITHUB_REPOSITORY) {
  * would not be a red: `predecessorVerdict` turns it into a code verdict, which
  * is what most of those rows expect anyway.
  */
-let defaultFetchCheckRuns = readCheckRuns;
+let defaultFetchPredecessor = readPredecessor;
 
 /**
  * Review 164.9.4 round 2, LOW-03: git's own reason for a fail-safe arm, as
@@ -394,37 +434,73 @@ function firstLine(e) {
 }
 
 /**
- * PURE apart from the injected `fetchCheckRuns(sha)`: would Railway's gate pass
- * on `before`? Anything else (a red, cancelled, timed-out, action-required or
- * stale check, a pending one, no Actions check at all, a truncated or malformed
- * response, a run for another commit, or a lookup that threw) is `ok: false`
- * with the reason, and the caller runs the full corpus.
+ * PURE apart from the injected `fetchPredecessor(sha)`: did CI provably run and
+ * finish green on `before`? The three requirements are documented above
+ * `PREDECESSOR_APP_SLUG`. Anything else is `ok: false` with the reason, and the
+ * caller runs the full corpus.
  *
- * ⛔ FAIL SAFE TO CODE.
+ * ⛔ FAIL SAFE TO CODE. The checks run in a fixed order so each refusal names
+ * its most specific cause: the shape of both bodies, a foreign SHA, the run
+ * dedupe, a pending run, a red run, an open or red suite, and requirement (a)
+ * last.
  *
  * @returns {{ok: boolean, why: string}}
  */
-export function predecessorVerdict(sha, fetchCheckRuns = defaultFetchCheckRuns) {
+export function predecessorVerdict(sha, fetchPredecessor = defaultFetchPredecessor) {
   let body;
   try {
-    body = fetchCheckRuns(sha);
+    body = fetchPredecessor(sha);
   } catch (e) {
     return { ok: false, why: `the check-run lookup failed: ${firstLine(e)}` };
   }
-  if (!Array.isArray(body?.check_runs)) return { ok: false, why: "the check-run lookup returned no check_runs array" };
-  const all = body.check_runs;
-  if (typeof body.total_count !== "number" || body.total_count > all.length) {
-    return { ok: false, why: `the lookup returned ${all.length} of ${body.total_count} check run(s), so the rest are unread` };
+  const runsBody = body?.runs;
+  const suitesBody = body?.suites;
+  if (!Array.isArray(runsBody?.check_runs)) return { ok: false, why: "the check-run lookup returned no check_runs array" };
+  const all = runsBody.check_runs;
+  if (typeof runsBody.total_count !== "number" || runsBody.total_count > all.length) {
+    return { ok: false, why: `the lookup returned ${all.length} of ${runsBody.total_count} check run(s), so the rest are unread` };
   }
-  const foreign = all.find((r) => r?.head_sha !== sha);
-  if (foreign) return { ok: false, why: `the lookup returned a check run for another commit (${String(foreign?.head_sha).slice(0, 12)})` };
-  const runs = all.filter((r) => r?.app?.slug === PREDECESSOR_APP_SLUG);
+  if (!Array.isArray(suitesBody?.check_suites)) return { ok: false, why: "the check-suite lookup returned no check_suites array" };
+  const allSuites = suitesBody.check_suites;
+  if (typeof suitesBody.total_count !== "number" || suitesBody.total_count > allSuites.length) {
+    return { ok: false, why: `the lookup returned ${allSuites.length} of ${suitesBody.total_count} check suite(s), so the rest are unread` };
+  }
+  const foreign = [...all, ...allSuites].find((r) => r?.head_sha !== sha);
+  if (foreign) return { ok: false, why: `the lookup returned a check run or suite for another commit (${String(foreign?.head_sha).slice(0, 12)})` };
+
+  // (b) Dedupe by (check_suite.id, name), keeping the highest id: the latest
+  // attempt inside ONE suite. Never across suites.
+  const latest = new Map();
+  for (const r of all.filter((x) => x?.app?.slug === PREDECESSOR_APP_SLUG)) {
+    const suite = r?.check_suite?.id;
+    if (typeof suite !== "number" || typeof r.id !== "number" || typeof r.name !== "string") {
+      return { ok: false, why: "a GitHub Actions check run carries no numeric id, check_suite.id or name, so its attempt cannot be placed" };
+    }
+    const key = `${suite}\u0000${r.name}`;
+    if (!latest.has(key) || latest.get(key).id < r.id) latest.set(key, r);
+  }
+  const runs = [...latest.values()];
   if (runs.length === 0) return { ok: false, why: "absent: no GitHub Actions check run on that commit" };
   const pending = runs.find((r) => r.status !== "completed");
   if (pending) return { ok: false, why: `pending: check '${pending.name}' status ${pending.status}` };
   const bad = runs.find((r) => !PREDECESSOR_OK_CONCLUSIONS.has(r.conclusion));
   if (bad) return { ok: false, why: `check '${bad.name}' concluded ${bad.conclusion}` };
-  return { ok: true, why: `all ${runs.length} GitHub Actions check(s) non-red` };
+
+  // (c) Every GitHub Actions check suite completed, and not red.
+  const suites = allSuites.filter((s) => s?.app?.slug === PREDECESSOR_APP_SLUG);
+  const open = suites.find((s) => s.status !== "completed");
+  if (open) {
+    return { ok: false, why: `pending: GitHub Actions check suite ${open.id} status ${open.status} with ${open.latest_check_runs_count ?? "an unknown number of"} check run(s) so far` };
+  }
+  const redSuite = suites.find((s) => !PREDECESSOR_OK_CONCLUSIONS.has(s.conclusion));
+  if (redSuite) return { ok: false, why: `GitHub Actions check suite ${redSuite.id} concluded ${redSuite.conclusion}` };
+
+  // (a) CI ran to the end: its aggregator exists and succeeded.
+  const frontendOk = runs.some((r) => r.name === PREDECESSOR_REQUIRED_CHECK && r.conclusion === "success");
+  if (!frontendOk) {
+    return { ok: false, why: `absent: no successful '${PREDECESSOR_REQUIRED_CHECK}' check run, so CI has not run or not finished on that commit` };
+  }
+  return { ok: true, why: `'${PREDECESSOR_REQUIRED_CHECK}' succeeded and all ${runs.length} GitHub Actions check run(s) in ${suites.length} completed suite(s) are non-red` };
 }
 
 /**
@@ -473,20 +549,27 @@ function runMainOnPush(cwd, env, { gh = "fail" } = {}) {
   writeFileSync(outFile, "");
   // ⭐ OFFLINE BY CONSTRUCTION (SFH-04). A fake `gh` goes FIRST on the child's
   // PATH, so the production reader runs its real argv and never reaches the
-  // network. It records the argv it was given and answers with the canned
-  // check-run body for `gh` ("success" | "failure"), or exits 1 for "fail". The
-  // default is "fail": a row that reaches the lookup without asking for a
-  // verdict reads as code, the safe direction.
+  // network. It APPENDS the argv of every call (the reader makes two: check
+  // runs, then check suites) and answers each by its path with the canned body
+  // for `gh` ("success" | "failure": the `frontend` run's conclusion, its one
+  // suite completed success), or exits 1 for "fail". The default is "fail": a
+  // row that reaches the lookup without asking for a verdict reads as code, the
+  // safe direction.
   const bin = mkdtempSync(join(tmpdir(), "gsd-classify-gh-"));
   const argvFile = join(bin, "argv");
-  const body = JSON.stringify({
+  const head = env.PUSH_BEFORE_SHA ?? "";
+  const runsBody = JSON.stringify({
     total_count: 1,
-    check_runs: [{ id: 1, name: "frontend", app: { slug: PREDECESSOR_APP_SLUG }, head_sha: env.PUSH_BEFORE_SHA ?? "", status: "completed", conclusion: gh }],
+    check_runs: [{ id: 1, name: "frontend", app: { slug: PREDECESSOR_APP_SLUG }, check_suite: { id: 1 }, head_sha: head, status: "completed", conclusion: gh }],
+  });
+  const suitesBody = JSON.stringify({
+    total_count: 1,
+    check_suites: [{ id: 1, app: { slug: PREDECESSOR_APP_SLUG }, head_sha: head, status: "completed", conclusion: "success", latest_check_runs_count: 1 }],
   });
   const script =
     gh === "fail"
-      ? `#!/bin/sh\nprintf '%s\\n' "$@" > '${argvFile}'\necho 'gh: self-test lookup failure' >&2\nexit 1\n`
-      : `#!/bin/sh\nprintf '%s\\n' "$@" > '${argvFile}'\nprintf '%s' '${body}'\n`;
+      ? `#!/bin/sh\nprintf '%s\\n' "$@" >> '${argvFile}'\necho 'gh: self-test lookup failure' >&2\nexit 1\n`
+      : `#!/bin/sh\nprintf '%s\\n' "$@" >> '${argvFile}'\ncase "$2" in\n  *check-suites*) printf '%s' '${suitesBody}' ;;\n  *) printf '%s' '${runsBody}' ;;\nesac\n`;
   writeFileSync(join(bin, "gh"), script, { mode: 0o755 });
   try {
     const res = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
@@ -517,14 +600,28 @@ function runMainOnPush(cwd, env, { gh = "fail" } = {}) {
 }
 
 /**
- * Canned check-run bodies for the in-process predecessor rows: GitHub Actions
- * check runs on the asked SHA, named `frontend` and numbered in order, unless a
- * row overrides a field.
+ * Canned `{ runs, suites }` bodies for the in-process predecessor rows: GitHub
+ * Actions check runs on the asked SHA, named `frontend`, numbered in order and
+ * placed in check suite 1, unless a row overrides a field. The suites body
+ * carries one COMPLETED, successful suite per distinct suite id the runs name,
+ * with the app of the first run in it, plus any `extraSuites` a row adds (a
+ * queued one, a red one, a Vercel one).
  */
-const checkRuns = (...runs) => (sha) => ({
-  total_count: runs.length,
-  check_runs: runs.map((r, i) => ({ id: i + 1, name: "frontend", app: { slug: PREDECESSOR_APP_SLUG }, head_sha: sha, ...r })),
-});
+const checkRuns = (...runs) => withSuites(runs, []);
+const withSuites = (runs, extraSuites) => (sha) => {
+  const placed = runs.map((r, i) => ({ id: i + 1, name: "frontend", app: { slug: PREDECESSOR_APP_SLUG }, check_suite: { id: 1 }, head_sha: sha, ...r }));
+  const suites = new Map();
+  for (const r of placed) {
+    const id = r.check_suite?.id;
+    if (!suites.has(id)) suites.set(id, { id, app: r.app, head_sha: sha, status: "completed", conclusion: "success", latest_check_runs_count: 0 });
+    suites.get(id).latest_check_runs_count += 1;
+  }
+  const allSuites = [...suites.values(), ...extraSuites.map((x) => ({ app: { slug: PREDECESSOR_APP_SLUG }, head_sha: sha, latest_check_runs_count: 0, ...x }))];
+  return {
+    runs: { total_count: placed.length, check_runs: placed },
+    suites: { total_count: allSuites.length, check_suites: allSuites },
+  };
+};
 const GREEN = checkRuns({ status: "completed", conclusion: "success" });
 const done = (name, conclusion, extra = {}) => ({ name, status: "completed", conclusion, ...extra });
 
@@ -725,7 +822,7 @@ const CASES = [
         const before = r.commit({ "src/a.ts": "export {};\n" });
         r.commit({ ".planning/STATE.md": "# s\n" });
         let pass = ok(
-          classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === true,
+          classifyPushRange({ before, cwd: r.dir, fetchPredecessor: GREEN }).docsOnly === true,
           "classifyPushRange says docs-only for a .planning/-only pushed range on a green predecessor",
         );
         const e2e = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: before }, { gh: "success" });
@@ -779,7 +876,7 @@ const CASES = [
         );
         // CALIBRATION: the same repo says docs-only for its real range, so a
         // `false` below is caused by the bad input and not by the fixture.
-        pass = ok(classifyPushRange({ before: base, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === true, "CALIBRATION: the real pushed range is docs-only") && pass;
+        pass = ok(classifyPushRange({ before: base, cwd: r.dir, fetchPredecessor: GREEN }).docsOnly === true, "CALIBRATION: the real pushed range is docs-only") && pass;
         const undeterminable = [
           ["a non-ancestor (force-pushed-over) before-SHA", { before: sibling }],
           ["a forced push flag (string, as GitHub's expression renders it)", { before: base, forced: "true" }],
@@ -808,10 +905,13 @@ const CASES = [
     },
   },
   {
-    claim: "SFH-04 / WR-01 r3: a docs-only push on an UNPROVEN predecessor runs the full corpus; only Railway's gate (every Actions check run on `before` non-red) earns the short path",
+    claim: "SFH-04 / CR-01 r4: a docs-only push on an UNPROVEN predecessor runs the full corpus; only proof that CI ran and finished green on `before` (a successful `frontend`, every Actions check run and suite completed non-red) earns the short path",
     run: (ok) => {
       // RED against the round-1 code, which judged the pushed range alone: every
       // row below then said docs_only=true over a red or unfinished code commit.
+      // The no-`frontend` rows are RED against the round-3 code (review round 4
+      // CR-01, SFH MEDIUM-01), and the queued-suite row against every earlier
+      // round (review round 4 WR-01).
       const r = scratchRepo("push-pred");
       try {
         const before = r.commit({ "src/a.ts": "export {};\n" });
@@ -819,18 +919,24 @@ const CASES = [
         const sha12 = before.slice(0, 12);
         // CALIBRATION: with a green predecessor this exact range IS docs-only,
         // so each `false` below is caused by the verdict and not by the range.
-        let pass = ok(classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === true, "CALIBRATION: green predecessor, docs-only range → docs_only=true");
+        let pass = ok(classifyPushRange({ before, cwd: r.dir, fetchPredecessor: GREEN }).docsOnly === true, "CALIBRATION: green predecessor, docs-only range → docs_only=true");
+        const s2 = { check_suite: { id: 2 } };
         // Rows that MUST take the short path: each pins one half of the rule, so
         // a predicate that refused everything could not pass this table.
         const proven = [
           ["every Actions check green, one SKIPPED and one NEUTRAL", checkRuns(done("frontend", "success"), done("e2e", "skipped"), done("lighthouse-mobile", "neutral"))],
-          ["a FAILED non-Actions check (a Vercel deployment) is ignored", checkRuns(done("frontend", "success"), done("Vercel", "failure", { app: { slug: "vercel" } }))],
-          // An in-suite re-run: `filter=latest` returns only the latest attempt, so
-          // a red attempt re-run green arrives as ONE green run. That is trusted.
-          ["an in-suite re-run (only the latest, green attempt returned)", checkRuns(done("e2e", "success", { id: 7 }), done("frontend", "success", { id: 8 }))],
+          ["a FAILED non-Actions check (a Vercel deployment) is ignored", checkRuns(done("frontend", "success"), done("Vercel", "failure", { app: { slug: "vercel" }, check_suite: { id: 9 } }))],
+          // Measured 2026-10-02 on three `main` commits: the claude, vercel,
+          // railway-app and fly-io apps each leave a suite QUEUED with zero runs
+          // forever. Requirement (c) must ignore them, or it refuses every push.
+          ["a QUEUED non-Actions suite with no runs (Vercel's, every commit carries one) is ignored", withSuites([done("frontend", "success")], [{ id: 9, app: { slug: "vercel" }, status: "queued", conclusion: null }])],
+          // An in-suite re-run: `filter=all` returns BOTH attempts, the red one
+          // with the lower id. Deduped by (suite, name), the green attempt wins.
+          ["an in-suite re-run (an older RED attempt and a newer GREEN attempt, same suite)", checkRuns(done("e2e", "failure", { id: 7 }), done("e2e", "success", { id: 8 }), done("frontend", "success", { id: 9 }))],
+          ["a green CI suite beside a green scheduled workflow's suite", checkRuns(done("frontend", "success"), done("npm-audit", "success", s2))],
         ];
-        for (const [label, fetchCheckRuns] of proven) {
-          const v = classifyPushRange({ before, cwd: r.dir, fetchCheckRuns });
+        for (const [label, fetchPredecessor] of proven) {
+          const v = classifyPushRange({ before, cwd: r.dir, fetchPredecessor });
           pass = ok(v.docsOnly === true, `${label} → docs_only=true (${v.reason})`) && pass;
         }
         const unproven = [
@@ -838,26 +944,40 @@ const CASES = [
           // Review round 3 WR-01: CI run 36892795002's shape. Its `frontend` check
           // concluded success while a job outside the aggregator reddened the run.
           ["a RED non-aggregated check beside a green frontend (run 36892795002's shape)", checkRuns(done("frontend", "success"), done("e2e", "failure")), "'e2e' concluded failure"],
-          ["a RED check from ANOTHER workflow on the same commit", checkRuns(done("frontend", "success"), done("apply-test", "failure")), "'apply-test' concluded failure"],
-          ["a RED dispatch-run check (Railway counts dispatch runs too)", checkRuns(done("frontend", "success"), done("secret-scan", "failure")), "'secret-scan' concluded failure"],
-          ["an older GREEN run superseded by a newer RED run of the same check", checkRuns(done("e2e", "success"), done("e2e", "failure")), "'e2e' concluded failure"],
+          ["a RED check from ANOTHER workflow on the same commit", checkRuns(done("frontend", "success"), done("apply-test", "failure", s2)), "'apply-test' concluded failure"],
+          ["a RED dispatch-run check (Railway counts dispatch runs too)", checkRuns(done("frontend", "success"), done("secret-scan", "failure", s2)), "'secret-scan' concluded failure"],
+          ["a newer RED attempt of the same check in the same suite", checkRuns(done("e2e", "success", { id: 7 }), done("e2e", "failure", { id: 8 }), done("frontend", "success", { id: 9 })), "'e2e' concluded failure"],
           // Orchestrator decision 2026-10-02: a newer suite does NOT hide an older
           // red one. Whether Railway lets it is unmeasured, so this is refused.
-          ["an older RED run in another suite beside a newer GREEN run of the same check", checkRuns(done("e2e", "failure"), done("e2e", "success"), done("frontend", "success")), "'e2e' concluded failure"],
+          ["a RED run in another suite beside a GREEN run of the same name", checkRuns(done("e2e", "failure"), done("e2e", "success", s2), done("frontend", "success")), "'e2e' concluded failure"],
           ["a CANCELLED predecessor", checkRuns(done("frontend", "cancelled")), "concluded cancelled"],
           ["a TIMED-OUT check", checkRuns(done("frontend", "timed_out")), "concluded timed_out"],
           ["an ACTION_REQUIRED check", checkRuns(done("frontend", "action_required")), "concluded action_required"],
           ["a STALE check", checkRuns(done("frontend", "stale")), "concluded stale"],
           ["a PENDING predecessor (its CI still running)", checkRuns({ name: "frontend", status: "in_progress", conclusion: null }), "status in_progress"],
-          ["a MISSING predecessor verdict (no check run)", () => ({ total_count: 0, check_runs: [] }), "absent"],
+          // Review round 4 CR-01 / SFH MEDIUM-01: green checks are not proof that
+          // CI ran. Each of these three is the round-3 fail-open.
+          ["green Actions checks but NO frontend (CI caught between needs: stages)", checkRuns(done("changed-paths", "success"), done("python", "success"), done("contracts", "success", s2)), "no successful 'frontend' check run"],
+          ["ONLY a scheduled workflow's checks (a skip-trailer merge: CI never ran)", checkRuns(done("npm-audit", "success"), done("preflight", "success")), "no successful 'frontend' check run"],
+          ["a SKIPPED frontend (it must have concluded success)", checkRuns(done("frontend", "skipped"), done("python", "success")), "no successful 'frontend' check run"],
+          // Review round 4 WR-01: a workflow run queued at the workflow level (a
+          // supabase-migrate run waiting on its concurrency group) has a suite
+          // and no check runs yet.
+          ["a QUEUED Actions suite with no check runs beside a green CI", withSuites([done("frontend", "success")], [{ id: 5, status: "queued", conclusion: null }]), "check suite 5 status queued with 0 check run(s)"],
+          ["a COMPLETED Actions suite with no runs that concluded failure (a workflow that failed to start)", withSuites([done("frontend", "success")], [{ id: 5, status: "completed", conclusion: "failure" }]), "check suite 5 concluded failure"],
+          ["a MISSING predecessor verdict (no check run)", withSuites([], []), "absent: no GitHub Actions check run"],
           ["only non-Actions check runs (no Actions verdict at all)", checkRuns(done("Vercel", "success", { app: { slug: "vercel" } })), "absent"],
           ["an API ERROR during the lookup", () => { const e = new Error("Command failed: gh api"); e.stderr = "gh: HTTP 502: Bad Gateway\n"; throw e; }, "gh: HTTP 502: Bad Gateway"],
           ["a malformed API body", () => ({ message: "Not Found" }), "no check_runs array"],
-          ["a TRUNCATED lookup (more check runs than one page)", (sha) => ({ ...GREEN(sha), total_count: 150 }), "the rest are unread"],
+          ["a malformed check-suite body", (sha) => ({ ...GREEN(sha), suites: { message: "Not Found" } }), "no check_suites array"],
+          ["a TRUNCATED lookup (more check runs than one page)", (sha) => ({ ...GREEN(sha), runs: { ...GREEN(sha).runs, total_count: 150 } }), "check run(s), so the rest are unread"],
+          ["a TRUNCATED check-suite lookup (more suites than one page)", (sha) => ({ ...GREEN(sha), suites: { ...GREEN(sha).suites, total_count: 150 } }), "check suite(s), so the rest are unread"],
           ["a check run for ANOTHER commit in the response", checkRuns(done("frontend", "success", { head_sha: "f".repeat(40) })), "another commit"],
+          ["a check SUITE for ANOTHER commit in the response", withSuites([done("frontend", "success")], [{ id: 5, status: "completed", conclusion: "success", head_sha: "f".repeat(40) }]), "another commit"],
+          ["an Actions check run with no check_suite.id (its attempt cannot be placed)", checkRuns(done("frontend", "success", { check_suite: null })), "cannot be placed"],
         ];
-        for (const [label, fetchCheckRuns, why] of unproven) {
-          const v = classifyPushRange({ before, cwd: r.dir, fetchCheckRuns });
+        for (const [label, fetchPredecessor, why] of unproven) {
+          const v = classifyPushRange({ before, cwd: r.dir, fetchPredecessor });
           pass =
             ok(
               v.docsOnly === false && v.reason.startsWith(`predecessor ${sha12} is not proven green`) && v.reason.includes(why),
@@ -870,7 +990,7 @@ const CASES = [
           called = true;
           return GREEN(sha);
         };
-        const zero = classifyPushRange({ before: "0".repeat(40), cwd: r.dir, fetchCheckRuns: spy });
+        const zero = classifyPushRange({ before: "0".repeat(40), cwd: r.dir, fetchPredecessor: spy });
         pass = ok(zero.docsOnly === false && !called, `a zero before-SHA is code without consulting the predecessor (${zero.reason})`) && pass;
         // End to end through main() and the production `gh api` reader, offline:
         // the fake gh records its argv, so the endpoint itself is pinned.
@@ -878,8 +998,14 @@ const CASES = [
         pass = ok(red.code === 0 && red.docsOnly === "false", `main() on a red predecessor writes docs_only=false and exits 0, never red (got exit ${red.code}, docs_only=${red.docsOnly})`) && pass;
         pass =
           ok(
-            JSON.stringify(red.ghArgv) === JSON.stringify(["api", `repos/self-test/repo/commits/${before}/check-runs?filter=latest&per_page=100`]),
-            `the production reader asks gh for exactly before's latest check runs (got ${JSON.stringify(red.ghArgv)})`,
+            JSON.stringify(red.ghArgv) ===
+              JSON.stringify([
+                "api",
+                `repos/self-test/repo/commits/${before}/check-runs?filter=all&per_page=100`,
+                "api",
+                `repos/self-test/repo/commits/${before}/check-suites?per_page=100`,
+              ]),
+            `the production reader asks gh for exactly before's check runs (every attempt) and check suites (got ${JSON.stringify(red.ghArgv)})`,
           ) && pass;
         const broken = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: before }, { gh: "fail" });
         pass = ok(broken.code === 0 && broken.docsOnly === "false" && /gh: self-test lookup failure/.test(broken.out), `main() on a failing gh writes docs_only=false, exits 0 and prints gh's reason (got exit ${broken.code}, docs_only=${broken.docsOnly})`) && pass;
@@ -888,7 +1014,7 @@ const CASES = [
         // A CODE range never calls the API either: the lookup is consulted last.
         r.commit({ "src/b.ts": "export {};\n" });
         called = false;
-        const codeRange = classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: spy });
+        const codeRange = classifyPushRange({ before, cwd: r.dir, fetchPredecessor: spy });
         pass = ok(codeRange.docsOnly === false && !called, `a code-touching range is code without consulting the predecessor (${codeRange.reason})`) && pass;
         return pass;
       } finally {
@@ -909,17 +1035,17 @@ const CASES = [
         // CALIBRATION: a planning file NOT on the list still takes the short path.
         let before = head;
         head = r.commit({ ".planning/STATE.md": "# s\n" });
-        pass = ok(classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === true, "CALIBRATION: a STATE.md-only push on a green predecessor stays docs-only") && pass;
+        pass = ok(classifyPushRange({ before, cwd: r.dir, fetchPredecessor: GREEN }).docsOnly === true, "CALIBRATION: a STATE.md-only push on a green predecessor stays docs-only") && pass;
         for (const f of TEST_READ_PLANNING_PATHS) {
           before = head;
           head = r.commit({ [f]: `# ${f}\n` });
-          const v = classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN });
+          const v = classifyPushRange({ before, cwd: r.dir, fetchPredecessor: GREEN });
           pass = ok(v.docsOnly === false && v.reason.includes(f), `${f} alone classifies as code (${v.reason})`) && pass;
         }
         // Mixed with an unlisted planning file it is still code.
         before = head;
         head = r.commit({ ".planning/ROADMAP.md": "# r2\n", ".planning/STATE.md": "# s2\n" });
-        pass = ok(classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === false, "ROADMAP.md beside STATE.md classifies as code") && pass;
+        pass = ok(classifyPushRange({ before, cwd: r.dir, fetchPredecessor: GREEN }).docsOnly === false, "ROADMAP.md beside STATE.md classifies as code") && pass;
         const e2e = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: before }, { gh: "success" });
         pass = ok(e2e.code === 0 && e2e.docsOnly === "false", `main() writes docs_only=false for it and exits 0 (got exit ${e2e.code}, docs_only=${e2e.docsOnly})`) && pass;
         // The PR path is unchanged by decision: judge() still says docs-only.
@@ -959,7 +1085,7 @@ function selfTest() {
   // `runMainOnPush` rows run in a child process with a fake `gh` and are unaffected.
   const STRAY = "self-test row reached the predecessor lookup without a seam";
   let stray = false;
-  defaultFetchCheckRuns = () => {
+  defaultFetchPredecessor = () => {
     stray = true;
     throw new Error(STRAY);
   };
@@ -968,10 +1094,10 @@ function selfTest() {
       console.log(`=== SELF-TEST ${i + 1}/${CASES.length}: ${c.claim}`);
       stray = false;
       pass = c.run(ok) && pass;
-      if (stray) pass = ok(false, `${STRAY} (row ${i + 1}); inject fetchCheckRuns, never the real gh`) && pass;
+      if (stray) pass = ok(false, `${STRAY} (row ${i + 1}); inject fetchPredecessor, never the real gh`) && pass;
     });
   } finally {
-    defaultFetchCheckRuns = readCheckRuns;
+    defaultFetchPredecessor = readPredecessor;
   }
 
   console.log("");

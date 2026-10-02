@@ -213,11 +213,14 @@ jobs:
       # before-SHA missing from this clone or not an ancestor). The two event
       # fields reach it through `env:`, never interpolated into `run:`. Both are
       # empty on a pull_request and a workflow_dispatch, which never read them.
-      # (2026-10-02, review round 2 SFH-04; round 3 WR-01) A docs-only push
-      # range takes the short path ONLY when Railway's own gate would pass on
-      # `before`: every GitHub Actions check run `filter=latest` returns on it
-      # (all workflows and events; no cross-suite dedupe) completed as success,
-      # skipped or neutral.
+      # (2026-10-02, review round 2 SFH-04; rounds 3 and 4) A docs-only push
+      # range takes the short path ONLY when CI provably ran and finished green
+      # on `before`: (a) a completed `frontend` check run concluded success,
+      # (b) every GitHub Actions check run (all workflows and events, read with
+      # `filter=all`, deduped by check suite and name to the latest attempt
+      # inside one suite, never across suites) completed as success, skipped or
+      # neutral, and (c) every GitHub Actions check suite on it is completed and
+      # not red, so a workflow run still queued with no jobs blocks it too.
       # Red, cancelled, timed out, pending, absent, a truncated or malformed
       # response, or an API error runs the full corpus with the reason printed.
       # `GH_TOKEN` is this job's `checks: read` token, scoped to this step

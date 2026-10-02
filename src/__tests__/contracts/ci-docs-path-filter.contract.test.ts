@@ -764,8 +764,9 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
     for (let i = at + 1; i < block.length && /^ {6}\S/.test(block[i]); i += 1) perms.push(block[i].trim());
     // A job-level block REPLACES the workflow-level one: `contents: read` must
     // be restated, and nothing broader may ride in beside the one uplift.
-    // Round 3 WR-01: the classifier reads every Actions check run on `before`
-    // (Railway's gate), which `checks: read` covers; nothing needs `actions: read`.
+    // Round 3 WR-01, round 4 CR-01 + WR-01: the classifier reads every check run
+    // and every check suite on `before`, both of which `checks: read` covers;
+    // nothing needs `actions: read`.
     expect(perms.sort()).toEqual(["checks: read", "contents: read"]);
     const tokenLines = block.filter((l) => /^\s+GH_TOKEN:/.test(l));
     expect(tokenLines, "GH_TOKEN must reach exactly one step, the classify step").toHaveLength(1);
@@ -1261,6 +1262,30 @@ describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test 
     expect(out).toContain("FAIL — a RED check from ANOTHER workflow on the same commit classifies as code");
     expect(out).toContain("FAIL — a PENDING predecessor (its CI still running) classifies as code");
     expect(out).toContain("FAIL — an API ERROR during the lookup classifies as code");
+  });
+
+  // ── neuter legs 7 and 8: requirements (a) and (c) of the predecessor gate
+  // (review 164.9.4 round 4, CR-01 + SFH MEDIUM-01, and WR-01). Each deletes ONE
+  // requirement and expects the rows only that requirement refuses to go RED.
+  it("CALIBRATION — dropping the `frontend` requirement turns the self-test RED (CR-01)", () => {
+    // Without it, green checks from a scheduled workflow, or a CI run caught
+    // between `needs:` stages, prove `before` and a docs-only push goes short
+    // over code CI never finished.
+    const mutated = mutate("if (!frontendOk) {", "if (false) {", "frontend-required");
+    const { code, out } = selfTest(mutated);
+    expect(code, `a classifier that never asks for a finished CI run must EXIT NON-ZERO.\n${out}`).not.toBe(0);
+    expect(out).toContain(FAILED_BANNER);
+    expect(out).toContain("FAIL — green Actions checks but NO frontend (CI caught between needs: stages) classifies as code");
+    expect(out).toContain("FAIL — ONLY a scheduled workflow's checks (a skip-trailer merge: CI never ran) classifies as code");
+    expect(out).toContain("FAIL — a SKIPPED frontend (it must have concluded success) classifies as code");
+  });
+
+  it("CALIBRATION — dropping the open-suite requirement turns the self-test RED (WR-01)", () => {
+    const mutated = mutate("  if (open) {", "  if (false) {", "suite-completed");
+    const { code, out } = selfTest(mutated);
+    expect(code, `a classifier blind to a queued workflow run must EXIT NON-ZERO.\n${out}`).not.toBe(0);
+    expect(out).toContain(FAILED_BANNER);
+    expect(out).toContain("FAIL — a QUEUED Actions suite with no check runs beside a green CI classifies as code");
   });
 
   // ── neuter leg 6: the test-read planning rule (review 164.9.4 round 2, WR-01)

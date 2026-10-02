@@ -9283,6 +9283,10 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   and events, non-red (`docs/runbooks/railway-worker.md`, Recovery step 2). So a docs merge can no
   longer turn `main` green over a red predecessor either. Both halves above therefore
   still hold for those files. The paragraph above is kept as lineage.
+  ⛔ **CORRECTED 2026-10-02 (Phase 164.9.4 review round 4, CR-01):** "every Actions check run
+  non-red" alone was not proof CI ran on the predecessor (a scheduled workflow's green checks
+  passed it). The predecessor must now also carry a successful `frontend` check run, and every
+  GitHub Actions check suite on it must be completed and non-red (D-16 in `164.9.4-CONTEXT.md`).
   ⛔ **TWO REMEDIES WERE CONSIDERED AND BOTH REFUSED, recorded so neither is re-proposed as new.**
   (1) Widen the always-on set to include `frontend-test` — REFUSED: that job is most of the saving
   the filter exists to produce, so buying two deferred assertions back at that price undoes the
