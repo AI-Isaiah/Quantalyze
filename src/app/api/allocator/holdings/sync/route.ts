@@ -45,8 +45,12 @@ import { retryOnceOnSerializationFailure } from "@/lib/supabase/retry-serializat
  *      exactly ONCE, with no sleep, through `retryOnceOnSerializationFailure`,
  *      when PostgREST surfaces it (PostgREST 16 or later). Before PostgREST
  *      16.0 (measured on 14.5 and 14.7) the gateway re-runs the call itself
- *      and this route sees the final result (measured converging in Phase
- *      164.9.3.2.1 plan 01). The whole
+ *      and this route sees the final result. The PostgREST convergence was
+ *      measured in Phase 164.9.3.2.1 plan 01 for the strategy-target branch
+ *      (csv-finalize's shape), not for this route. This route enqueues on the
+ *      api_key-target branch, which arm R3 of
+ *      supabase/tests/test_enqueue_race_loss_40001.sql pins DB-side: the race
+ *      raises 40001 and the re-run enqueues a fresh poll job. The whole
  *      RPC is re-issued, which is retry-safe: the RPC's one exception handler
  *      (around its reconstruct enqueue) traps only the unique-index
  *      collision, so a 40001 aborts its own transaction (the `api_keys`

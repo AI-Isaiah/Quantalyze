@@ -1058,8 +1058,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // read `expected 545 to be 513`, then `expected 595 to be 544`.
     // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): `armsSeen` 545 -> 553 and `stepsSeen` 595 -> 611: the NEW gate test_compute_job_fence_errcode.sql (8 arms, each twin carrying two `edit` steps with a `find`, 16 file steps). MEASURED: this file's run read `expected 553 to be 545`, then `expected 611 to be 595`.
 // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): `armsSeen` 553 -> 555 and `stepsSeen` 611 -> 614: the NEW gate test_enqueue_race_loss_40001.sql (2 arms; R1's twin carries two `edit` steps with a `find`, R2's one, 3 file steps). MEASURED: this file's run read `expected 555 to be 553`, then `expected 614 to be 611`.
-    expect(armsSeen).toBe(555);
-    expect(stepsSeen).toBe(614);
+    // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): `armsSeen` 555 -> 556 and `stepsSeen` 614 -> 615: arm R3 in test_enqueue_race_loss_40001.sql, whose twin carries one `edit` step with a `find`. MEASURED: this file's run read `expected 556 to be 555`, then `expected 615 to be 614`.
+    expect(armsSeen).toBe(556);
+    expect(stepsSeen).toBe(615);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1974,7 +1975,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // `stepsSeen` (the 51 file steps of the plan 12 gate file). MEASURED: `expected 595 to be 544`.
     // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 595 -> 611, moving WITH `stepsSeen` (the 16 file steps of the fence-errcode gate). MEASURED: `expected 611 to be 595`.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 611 -> 614, moving WITH `stepsSeen` (the 3 file steps of the enqueue race-loss gate). MEASURED: `expected 614 to be 611`.
-    expect(needles.length).toBe(614);
+    // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 614 -> 615, moving WITH `stepsSeen` (R3's one file step). MEASURED: `expected 615 to be 614`.
+    expect(needles.length).toBe(615);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

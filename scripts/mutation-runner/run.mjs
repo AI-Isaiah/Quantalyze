@@ -2789,7 +2789,26 @@ export const FILES_FLOOR = 56;
 //    FILES_FLOOR 57): a full lane run exits 1 naming `ARMS_FLOOR regression:
 //    555 biting arm(s) < floor 556`; restored from a byte backup and proved
 //    with cmp. WAIVED_CEILING stays 0 — no waiver was added.
-export const ARMS_FLOOR = 555;
+// ⭐ RE-DERIVED 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01):
+//    555 -> 556. ONE arm, R3, in the ALREADY-ANNOTATED gate
+//    supabase/tests/test_enqueue_race_loss_40001.sql (2 -> 3): the race-loss
+//    raise and its convergence on the api_key-target branch, its twin widening
+//    the api_key look-up of migration 20260924230827 to `done`. No file joined
+//    the annotated set, so FILES_FLOOR stays 56. MEASURED on ONE full lane run
+//    with the constant still at 555: `scope: FULL 56/56 annotated files`,
+//    `coverage: files 56/83`, `arms: 556/556/0`, `biting: 556`,
+//    `lane-invocations: 556` (plus 56 baseline / 56 restore legs),
+//    `per-arm lane time: mean 1.2s over 556 arm run(s)`. Per-file line:
+//    `test_enqueue_race_loss_40001.sql: sections 3 / judged 3 / annotated 3 /
+//    waived 0 / biting 3`. That run's only defect was `dirty-checkout`, caused by
+//    comment and census edits made in the checkout while it ran; the
+//    confirmation run at 556, with no file edited during it, is recorded in the
+//    phase's 164.9.3.2.1-REVIEW-FIX.md. Stale-low direction OBSERVED at 555:
+//    src/__tests__/mutation-runner-floors.test.ts FAILS with `The corpus
+//    declares 556 twin(s) of which 0 are waivers, so a green run bites 556.
+//    ARMS_FLOOR is 555.` Too-high direction NOT re-run for this +1.
+//    WAIVED_CEILING stays 0 — no waiver was added.
+export const ARMS_FLOOR = 556;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

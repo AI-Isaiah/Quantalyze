@@ -14,8 +14,11 @@
  *     this code never sees it. The re-run converges: the winner is terminal
  *     by then, so the second attempt enqueues a fresh job. Measured on the local-stack lane's PostgREST v14.7
  *     in Phase 164.9.3.2.1 plan 01 (race induced once and three times, HTTP
- *     200 both times), and pinned DB-side by
- *     supabase/tests/test_enqueue_race_loss_40001.sql.
+ *     200 both times) for the strategy-target branch, csv-finalize's shape.
+ *     Pinned DB-side, for the strategy-target branch (arms R1, R2) and the
+ *     api_key-target branch holdings sync uses (arm R3), by
+ *     supabase/tests/test_enqueue_race_loss_40001.sql. The portfolio and
+ *     allocator branches are neither measured nor pinned.
  *   - LIVE on PostgREST 16 or later, which returns the 40001 to the client as
  *     HTTP 500 with `code` `40001` (PostgREST PR #4222) instead of retrying it.
  *   - It STAYS because PROD's PostgREST version can differ from the lane's,
