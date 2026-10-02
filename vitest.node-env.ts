@@ -67,6 +67,7 @@ export const NODE_ENV_TEST_FILES: string[] = [
   "src/__tests__/delete-allocator-api-key-rpc.test.ts",
   "src/__tests__/deletion-request-admin-self.test.ts",
   "src/__tests__/e2e-match-queue-no-vacuous-admin-gate.test.ts",
+  "src/__tests__/e2e-seeded-hydration-guard.test.ts",
   "src/__tests__/encrypt-key-schema-c40.test.ts",
   "src/__tests__/funding-fee-runtime-guard.test.ts",
   "src/__tests__/gdpr-export-coverage-hook.test.ts",
