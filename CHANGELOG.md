@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.118.0.1] - 2026-10-02 — BASELINE: automated re-dump after the PROD apply of 5a88a165
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `36981647441`, after the PROD apply of merge `5a88a165`: sha256 `43302190…` → `a45dcc44…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261001120000_compute_job_fence_errcode_55006.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-02` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.118.0.0 → 0.118.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=284 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `36981647441` succeeded, and this entry was composed by the `redump-pr` job. Run `36981647441` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.118.0.0] - 2026-10-02 — DEFER40001: a compute-job fence raise answers a PostgREST caller once instead of being retried without end
 
 ⭐ **What changed for whoever reads this next.** Phase 164.9.3.2 (DEFER40001) ships plans 01 to 07. This entry covers the branch's 42 non-merge commits after `origin/main` `05ebb559b`: pre-execution research, pattern map, plans and four plan-check rounds (12); plan 01's raise-site measurements and the sibling booking (5); the fix migration and its gate (2); its comments and VAC-04 acknowledgements plus the header routing sentence (3); the four live-DB arms (2); the two worker classifiers, each RED then GREEN (4); the census floors and pins (2); the ledger entry landed then closed (2); the ENQ-SCOPE line in the phase CONTEXT (1); and the per-plan SUMMARY and record commits (9). The 3 merge commits of `origin/main` are not counted.
