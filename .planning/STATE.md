@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 169.1.1
 current_phase_name: HYDRATIONTICKS
 status: executing
-stopped_at: Phase 169.1.1 planned (4 plans, checker passed)
+stopped_at: Phase 169.1.1 ready to ship (verification human_needed: CI reads on the pushed head)
 last_updated: "2026-10-02T10:48:30.128Z"
 last_activity: 2026-10-02
-last_activity_desc: Phase 169.1.1 execution started
-state_head: 86289b98deb91feae047a33a73382f1e22b5814c
+last_activity_desc: Phase 169.1.1 executed (4/4 plans), 3 review rounds fixed, secured, verified human_needed (CI reads at ship); 164.9.5 closed earlier
+state_head: 4dd2aacfb
 progress:
   total_phases: 85
-  completed_phases: 45
+  completed_phases: 46
   total_plans: 450
   completed_plans: 439
-  percent: 53
+  percent: 54
 ---
 
 ## ⭐ STATE lineage
@@ -179,8 +179,9 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
+Phase: 164.9.5 (AUTOREDUMP) — COMPLETE 2026-10-02 (verification passed; first changed re-dump opened bot PR #920, all head-sha runs green)
 Phase: 164.9.3.2 (DEFER40001) — COMPLETE 2026-10-02 (verification passed; PR #919 merged, v0.118.0.0; migration applied to TEST and PROD by Supabase Migrate run 36981647441)
-Phase: 169.1.1 (HYDRATIONTICKS) — EXECUTING, urgent insert (founder 2026-10-02); 4 plans, plan checker passed 2026-10-02; then 164.9.3.2.1
+Phase: 169.1.1 (HYDRATIONTICKS) — SHIPPING, urgent insert (founder 2026-10-02); 4 plans, plan checker passed 2026-10-02; then 164.9.3.2.1
 Phase: 164.9.3.2.1 (ENQ40001) — after 169.1.1 (founder 2026-10-02)
 Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
 Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
@@ -970,7 +971,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [█████░░░░░] 53%
+Progress: [█████░░░░░] 54%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
