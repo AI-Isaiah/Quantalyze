@@ -2000,17 +2000,22 @@ async function writeFailedStrategyAnalyticsPlaceholder(
  *
  * ⛔ IT MUST NOT PROMISE AN AUTOMATIC RETRY. The review that raised WR-07
  * proposed "…and will retry automatically". Since Phase 164.6 (OPS-08-TS) this
- * route DOES retry a 40001 — exactly once, immediately, through
- * `retryOnceOnSerializationFailure` in `enqueueCsvAnalyticsAfter` — and this
- * copy is written ONLY after that single retry is exhausted. At that point no
+ * route DOES retry a 40001 when PostgREST surfaces it (PostgREST 16 or later)
+ * — exactly once, immediately, through `retryOnceOnSerializationFailure` in
+ * `enqueueCsvAnalyticsAfter` — and this copy is written ONLY after that single
+ * retry is exhausted. On PostgREST 14.x the gateway re-runs the call itself
+ * and this route sees the final result (measured converging in Phase
+ * 164.9.3.2.1 plan 01), so this copy is reached only on 16 or later, where
+ * the gateway passes the 40001 through. At that point no
  * further automatic retry exists: the enqueue did not happen, no job exists to
  * retry itself, and re-running the sync is the thing that gets the work done.
  * So "Retry the sync" is still true, and a promise of an automatic retry would
  * still be a false one — the HONEST-01 defect over again one layer down. This
  * arm claims nothing about automatic retries, and that is what keeps it true.
- * (The Python classifiers that recognise the code — `_is_serialization_failure`
- * in `main_worker.py`, `_defer_lost_ownership` in `services/job_worker.py` —
- * still wrap the MARK RPCs and the defer path only, never an enqueue.)
+ * (The Python classifiers that recognise the claim-token fence code, `55006`
+ * since Phase 164.9.3.2 — `_is_serialization_failure` in `main_worker.py`,
+ * `_defer_lost_ownership` in `services/job_worker.py` — wrap the MARK RPCs and
+ * the defer path only, never an enqueue.)
  */
 const ENQUEUE_LOST_RACE_USER_COPY =
   "Analytics could not complete for this strategy. Retry the sync, or contact support if this persists.";
@@ -2029,14 +2034,19 @@ function enqueueCsvAnalyticsAfter(
     // never on this string"). This is that branch. History (the pre-164.6
     // state): before it existed, `grep -rn "40001" src/` had ZERO non-test hits
     // and every enqueue failure read identically to the user. Since Phase 164.6
-    // the enqueue below is retried once on a 40001 first, so this flag is set
-    // only when that single retry ALSO lost the race.
+    // the enqueue below is retried once on a 40001 first, when PostgREST
+    // surfaces it (PostgREST 16 or later), so this flag is set only when that
+    // single retry ALSO lost the race. On PostgREST 14.x the gateway re-runs
+    // the call itself and this route sees the final result, so no 40001
+    // reaches this flag there.
     let enqueueLostRace = false;
     try {
       const { createAdminClient } = await import("@/lib/supabase/admin");
       const admin = createAdminClient();
       // OPS-08-TS (Phase 164.6): a 40001 lost race is retried exactly once,
-      // immediately. The retried attempt is a console.warn, never Sentry — an
+      // immediately, when PostgREST surfaces it (PostgREST 16 or later); on
+      // PostgREST 14.x the gateway re-runs the call itself and this route sees
+      // the final result. The retried attempt is a console.warn, never Sentry — an
       // expected MVCC outcome; only a failure that survives it is captured below.
       // @audit-skip: see helper-level audit-skip block above. Internal
       // compute-job enqueue — user intent was already audited by

@@ -41,14 +41,19 @@ import { retryOnceOnSerializationFailure } from "@/lib/supabase/retry-serializat
  *      "Queued — retry in {N}s" during rate-limit contagion windows.
  *   5. Phase 164.6 (OPS-08-TS): a `40001` (`serialization_failure`, the
  *      lost-enqueue-race code `_enqueue_compute_job_internal` raises since
- *      mig 20260826150000) is retried exactly ONCE, with no sleep, through
- *      `retryOnceOnSerializationFailure`. The whole RPC is re-issued, which
- *      is retry-safe: the RPC's one exception handler (around its
- *      reconstruct enqueue) traps only the unique-index collision, so a 40001
- *      aborts its own transaction (the `api_keys` UPDATE included) and the
- *      re-issue starts clean. The retried attempt is a `console.warn`; a
- *      40001 that survives the retry takes the existing 500 branch, and
- *      every other error is never retried.
+ *      mig 20260826150000, latest definition mig 20260924230827) is retried
+ *      exactly ONCE, with no sleep, through `retryOnceOnSerializationFailure`,
+ *      when PostgREST surfaces it (PostgREST 16 or later). On PostgREST 14.x
+ *      the gateway re-runs the call itself and this route sees the final
+ *      result (measured converging in Phase 164.9.3.2.1 plan 01). The whole
+ *      RPC is re-issued, which is retry-safe: the RPC's one exception handler
+ *      (around its reconstruct enqueue) traps only the unique-index
+ *      collision, so a 40001 aborts its own transaction (the `api_keys`
+ *      UPDATE included) and the re-issue starts clean. The same reasoning
+ *      describes PostgREST 14's own retry, which re-runs that transaction
+ *      from the start. The retried attempt is a `console.warn`; a 40001 that
+ *      survives the retry takes the existing 500 branch, and every other
+ *      error is never retried.
  *
  * Architectural delta from `src/app/api/keys/sync/route.ts`: that route
  * uses a service-role client for `enqueue_compute_job` (REVOKEd from
