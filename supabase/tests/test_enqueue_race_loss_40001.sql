@@ -50,6 +50,10 @@
 -- ARMS.
 --   R1  the induced race raises SQLSTATE 40001, message starting `enqueue
 --       race lost`, with exactly one shot fired and one competitor flipped.
+--   R2  after the winner is terminal (`done`, seeded AFTER R1 so R2's twin
+--       cannot make R1 fail first), the disarmed re-run returns a new,
+--       non-NULL id that is not the done row's, the row is `pending`, exactly
+--       one row is in flight for the strategy and kind, and shots reads 2.
 --
 -- ⭐ MACHINE-EXECUTABLE TWINS. Each prose RED-UNDER below carries an adjacent
 -- `RED-UNDER-M` object that scripts/mutation-runner executes: it mutates
@@ -60,6 +64,7 @@
 -- 10-param body stood down with `IF FALSE THEN`, because the guard refuses a
 -- body without the `serialization_failure` raise and would abort the apply
 -- before this file ran. Step 2 touches the runner's scratch copy only.
+-- R2's twin is one step: the strategy look-up widened to include `done`.
 --
 -- ⚠️ SETUP. The apply list below is copied byte for byte from
 -- supabase/tests/test_enqueue_compute_job_dedupe_non_terminal.sql, which
@@ -78,6 +83,10 @@ DECLARE
   v_msg    TEXT;
   v_shots  BIGINT;
   v_flips  BIGINT;
+  v_done_id  UUID;
+  v_new_id   UUID;
+  v_status   TEXT;
+  v_inflight BIGINT;
 BEGIN
   -- ----- SEED (as postgres, before any role switch) ----------------------
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
@@ -176,7 +185,63 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (R1): the competitor was moved to done % time(s), expected exactly 1. Without that flip the re-read finds the competitor in flight and returns its id, so the raise is never reached.', v_flips;
   END IF;
 
-  RAISE NOTICE 'ALL 1 ARMS EXECUTED (R1) and passed — the induced enqueue race raises SQLSTATE 40001 (provisional sentinel).';
+  -- ===== ARM R2 — the re-run converges once the winner is terminal ======
+  -- The winner's final state, seeded only now: seeded before R1, R2's twin
+  -- (look-up widened to `done`) would make R1's call return this row and R1
+  -- would fail first. The BEFORE trigger's WHEN excludes status `done`, so
+  -- this seed fires no shot and spawns no competitor.
+  INSERT INTO compute_jobs (strategy_id, kind, status, metadata)
+  VALUES (s_r1, c_kind, 'done', jsonb_build_object('fixture', 'enq40001-r2-winner'))
+  RETURNING id INTO v_done_id;
+
+  -- The re-run PostgREST 14 makes after the 40001, here made by hand. The
+  -- single shot was spent in R1, so this call runs disarmed.
+  v_state := NULL; v_msg := NULL; v_new_id := NULL;
+  SET LOCAL ROLE service_role;
+  BEGIN
+    v_new_id := enqueue_compute_job(
+      p_strategy_id => s_r1,
+      p_kind        => c_kind,
+      p_metadata    => jsonb_build_object('fixture', 'enq40001-r2'));
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE; v_msg := SQLERRM;
+  END;
+  RESET ROLE;
+
+  SELECT status INTO v_status FROM compute_jobs WHERE id = v_new_id;
+  SELECT count(*) INTO v_inflight
+    FROM compute_jobs
+   WHERE strategy_id = s_r1
+     AND kind = c_kind
+     AND status IN ('pending', 'running', 'done_pending_children');
+  SELECT CASE WHEN is_called THEN last_value ELSE 0 END INTO v_shots FROM enq40001_gate.shots;
+
+  -- RED-UNDER: widen the strategy-scoped optimistic look-up in 20260924230827
+  --            to `status IN ('pending', 'running', 'done_pending_children',
+  --            'done')`. The re-run then matches the finished winner and hands
+  --            back its id, so the call PostgREST 14 retries "converges" on a
+  --            job that will never run and no analytics are computed.
+  -- RED-UNDER-M: {"arm":"R2","apply":[{"kind":"edit","file":"supabase/migrations/20260924230827_fanin_initial_status_10param.sql","find":"    SELECT id INTO v_existing_id\n      FROM compute_jobs\n     WHERE strategy_id = p_strategy_id\n       AND kind = p_kind\n       AND status IN ('pending', 'running', 'done_pending_children')","replace":"    SELECT id INTO v_existing_id\n      FROM compute_jobs\n     WHERE strategy_id = p_strategy_id\n       AND kind = p_kind\n       AND status IN ('pending', 'running', 'done_pending_children', 'done')","occurrences":1}]}
+  IF v_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (R2): the re-run after the winner reached done raised SQLSTATE % (message: %), expected it to enqueue. PostgREST 14''s retry of the race-loss 40001 converges only if this call succeeds.', v_state, v_msg;
+  END IF;
+  IF v_new_id IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (R2): the re-run after the winner reached done returned a NULL job id, expected a new one. csv-finalize reads that id back; NULL means no job was enqueued.';
+  END IF;
+  IF v_new_id = v_done_id THEN
+    RAISE EXCEPTION 'TEST FAILED (R2): the re-run returned the finished winner''s id %, expected a new job. The look-up matched a done row, so the converged call points at a job that will never run.', v_new_id;
+  END IF;
+  IF v_status IS DISTINCT FROM 'pending' THEN
+    RAISE EXCEPTION 'TEST FAILED (R2): the job the re-run returned has status %, expected pending. A strategy-scoped job with no parent must start pending, or the worker never claims it.', v_status;
+  END IF;
+  IF v_inflight <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (R2): % in-flight compute_analytics_from_csv row(s) exist for the fixture strategy after the re-run, expected exactly 1. The convergence must leave one live job, not none and not a duplicate.', v_inflight;
+  END IF;
+  IF v_shots <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (R2): the race trigger counted % shot(s) after the re-run, expected 2 (R1''s armed shot plus this disarmed call). Any other count means the re-run did not go through the INSERT this arm reads.', v_shots;
+  END IF;
+
+  RAISE NOTICE 'ALL 2 ARMS EXECUTED (R1, R2) and passed — R1: the induced enqueue race raises SQLSTATE 40001 with the race-lost message, the code PostgREST 14 re-runs; R2: once the winner is done, the re-run enqueues a new pending job (not the done one), leaving exactly one in flight, so that retry converges.';
 END $$;
 
 ROLLBACK;
