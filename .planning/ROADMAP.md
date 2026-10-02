@@ -125,7 +125,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD** (INSERTED)
 - [x] **Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim** (INSERTED) — verification: passed (completed 2026-09-27, PR #890, v0.109.0.0)
 - [ ] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — not yet verified
-- [ ] **Phase 164.9.3.2: DEFER40001 — a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end** (INSERTED) — not yet verified
+- [x] **Phase 164.9.3.2: DEFER40001 — a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end** (INSERTED) — verification: passed (completed 2026-10-02, PR #919, v0.118.0.0)
 - [ ] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — not yet verified
 - [ ] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [x] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -3279,7 +3279,7 @@ Plans:
 **Goal:** A compute-job RPC called through PostgREST never raises SQLSTATE 40001, so PostgREST never re-runs the call in a loop. A preempted worker's `defer_compute_job` (and any sibling RPC with the same errcode) fails once, with an error the caller can read.
 **Requirements**: TODOS-style id `[164.9.4-DEFER-40001-RETRY-HANG]` (owned here)
 **Depends on:** none in code. ⭐ It is a BLOCKER in the ratified 2026-09-27 order: it sits in the blockers group beside Phase 164.9.3, and Phase 164.9.4's SC-3 cannot pass until it lands.
-**Plans:** 8 plans
+**Plans:** 8/8 plans complete
 
 ⭐ **Founder decision, 2026-09-27 (AskUserQuestion, "New blocker phase (Recommended)"):** the 40001 retry loop gets its own blocker phase, not a fold into 164.9.4.
 
@@ -4588,7 +4588,7 @@ kept verbatim.
 | 164.9.2 REFDATAUPDATES | 5/5 | Complete | v0.93.0.1 · #862 |
 | 164.9.3 CLAIMPAIR | 6/6 | Complete    | 2026-09-27 |
 | 164.9.3.1 FANINGRAPH | 0/? | Queued — blocker, after 164.9.3 | - |
-| 164.9.3.2 DEFER40001 | 0/? | Queued — blocker, beside 164.9.3 (founder 2026-09-27) | - |
+| 164.9.3.2 DEFER40001 | 8/8 | Complete    | 2026-10-02 |
 | 164.9.4 CIOFFMUTEX | planned, not on main | In progress — draft PR #880 (measurement run) | - |
 | 164.9.5 AUTOREDUMP | 9/9 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.106.0.0 · #875 |
 | 164.10 BODYDRIFT | - | Closed by decision (c): the drift is real, measured and deliberately left | v0.79.1.1 · #824 |

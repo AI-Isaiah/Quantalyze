@@ -61,8 +61,8 @@
   ],
   "next": {
     "command": "/gsd:progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 164.9.3.2 of 83 · 53% · executing"
+    "label": "Advance to the next step (Phase 164.9.3.2.1)",
+    "reason": "Phase 164.9.3.2 complete; next Phase 164.9.3.2.1 (founder 2026-10-02)"
   },
-  "updated_at": "2026-10-01T18:31:27.516Z"
+  "updated_at": "2026-10-02T08:25:37.281Z"
 }
