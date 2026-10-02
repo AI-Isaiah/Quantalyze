@@ -30,7 +30,7 @@
  * the `e2e-seeded` batch in `.github/workflows/ci.yml` — a NEW spec needs that
  * entry or it never runs anywhere, which is a false green, not a passing test.
  */
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./helpers/hydration-guard";
 import {
   seedTestAllocator,
   seedWizardDraft,

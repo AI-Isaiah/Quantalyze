@@ -1,4 +1,4 @@
-import { test, expect, type Page, type Locator } from "@playwright/test";
+import { test, expect, type Page, type Locator } from "./helpers/hydration-guard";
 
 /**
  * Audit 2026-05-07 C-0309: credentials are read from env vars at test

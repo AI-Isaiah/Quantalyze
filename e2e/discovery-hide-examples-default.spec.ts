@@ -33,7 +33,7 @@
  * tautologies, no `waitForTimeout` / `networkidle` flake patterns.
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 import { cleanupTestAllocator } from "./helpers/cleanup-test-project";
 import { loginAs } from "./helpers/login";

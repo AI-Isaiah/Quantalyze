@@ -28,7 +28,7 @@
  * file into the `e2e-seeded` batch list in .github/workflows/ci.yml — until
  * that entry exists the spec runs nowhere in CI, which is false coverage.
  */
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./helpers/hydration-guard";
 import {
   seedTestAllocator,
   seedWizardDraft,

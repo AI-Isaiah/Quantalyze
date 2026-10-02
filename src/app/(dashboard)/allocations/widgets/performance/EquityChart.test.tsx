@@ -10,6 +10,16 @@ import {
   type OverlaySeries,
   type Period,
 } from "./EquityChart";
+import { pow10 } from "@/lib/chart-ticks";
+
+// Phase 169.1.1 — the y-tick walker takes its power of ten from the shared
+// engine-independent helper. A partial mock wraps `pow10` in a spy that
+// delegates to the real function, so every rendered tick is unchanged and the
+// memo tests below can count walker runs by its calls.
+vi.mock("@/lib/chart-ticks", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/chart-ticks")>();
+  return { ...actual, pow10: vi.fn(actual.pow10) };
+});
 
 // ---------------------------------------------------------------------------
 // Phase 09.1 Plan 07 / Task 3 — EquityChart test suite.
@@ -823,20 +833,25 @@ describe("EquityChart — M-1060 anchorFromFirstPositive memoization", () => {
 // the data window (visible / benchmark / overlays / width). These tests
 // prove the projection does NOT recompute on hover.
 //
-// Probe: the y-tick walker calls Math.pow(10, p) for p in [-3..3] — seven
-// calls per projection computation — and that is the ONLY Math.pow call
-// site in the component (verified against the source). Crucially it is NOT
-// reached by the hover crosshair or tooltip render (unlike
-// toLocaleDateString/parseISO, which the tooltip also calls). So Math.pow
-// is a clean, deterministic projection-recompute counter: pre-fix it climbs
-// on every mousemove (walker re-ran in the render body); post-fix it is
-// frozen after mount because hover only flips hoverIdx, not a memo dep.
+// Probe: the y-tick walker calls `pow10(p)` for p in [-3..3] — seven calls
+// per projection computation — and `pow10` is the ONLY `@/lib/chart-ticks`
+// helper the component calls (verified against the source). Crucially it is
+// NOT reached by the hover crosshair or tooltip render (unlike
+// toLocaleDateString/parseISO, which the tooltip also calls). So the `pow10`
+// call count is a clean, deterministic projection-recompute counter: pre-fix
+// it climbed on every mousemove (walker re-ran in the render body); post-fix
+// it is frozen after mount because hover only flips hoverIdx, not a memo dep.
+// The mocked `pow10` delegates to the real one, so no rendered tick changes.
 // ───────────────────────────────────────────────────────────────────
 
 describe("EquityChart — H-0167/M-1059 projection memoized across hover", () => {
-  it("does not re-run the y-tick walker (Math.pow) on repeated hover", () => {
+  it("does not re-run the y-tick walker (pow10) on repeated hover", () => {
     const series = makeSeries(60);
-    const powSpy = vi.spyOn(Math, "pow");
+    const powSpy = vi.mocked(pow10);
+    // Earlier describes in this file render EquityChart through the same
+    // module-level spy, so it starts this test already counting (measured: 210).
+    // Clear it first, or the mount sanity pin below cannot fail.
+    powSpy.mockClear();
     try {
       const { container } = render(
         <EquityChart equityDailyPoints={series} initialPeriod="ALL" />,
@@ -853,18 +868,22 @@ describe("EquityChart — H-0167/M-1059 projection memoized across hover", () =>
         fireEvent.mouseMove(svg!, { clientX: px, clientY: 40 });
       }
 
-      // Hover must NOT recompute the projection: zero additional Math.pow
+      // Hover must NOT recompute the projection: zero additional pow10
       // calls after mount. A regression that inlines the block again, or
       // adds hoverIdx to the memo deps, fails here.
       expect(powSpy.mock.calls.length).toBe(afterMount);
     } finally {
-      powSpy.mockRestore();
+      powSpy.mockClear();
     }
   });
 
   it("recomputes the projection when the period (data window) actually changes", () => {
     const series = makeSeries(200);
-    const powSpy = vi.spyOn(Math, "pow");
+    const powSpy = vi.mocked(pow10);
+    // Earlier describes in this file render EquityChart through the same
+    // module-level spy, so it starts this test already counting (measured: 210).
+    // Clear it first, or the mount sanity pin below cannot fail.
+    powSpy.mockClear();
     try {
       const { getByRole, container } = render(
         <EquityChart equityDailyPoints={series} initialPeriod="ALL" />,
@@ -879,7 +898,7 @@ describe("EquityChart — H-0167/M-1059 projection memoized across hover", () =>
       fireEvent.click(getByRole("tab", { name: "1M" }));
       expect(powSpy.mock.calls.length).toBeGreaterThan(afterMount);
     } finally {
-      powSpy.mockRestore();
+      powSpy.mockClear();
     }
   });
 });
