@@ -4,12 +4,12 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.9.3.2.1
 current_phase_name: ENQ40001
-status: planning
+status: executing
 stopped_at: Phase 164.9.3.2.1 ENQ40001 planned (3 plans, checker passed); next execute plan 01
-last_updated: "2026-10-02T16:43:51.860Z"
+last_updated: "2026-10-02T16:45:17.840Z"
 last_activity: 2026-10-02
-last_activity_desc: Phase 164.9.3.2.1 ENQ40001 planned — 3 plans in 3 waves, plan checker passed after 2 revisions
-state_head: 19f9654685b4acb777882efbb6dc980454aec431
+last_activity_desc: Phase 164.9.3.2.1 execution started
+state_head: e0323dfdb1950d836d520a6138180bf3872496ac
 progress:
   total_phases: 85
   completed_phases: 48
@@ -179,13 +179,13 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.9.3.2.1 (ENQ40001) — READY TO EXECUTE
+Phase: 164.9.3.2.1 (ENQ40001) — EXECUTING
 Phase: 164.9.3.2 (DEFER40001) — COMPLETE 2026-10-02 (verification passed; PR #919 merged, v0.118.0.0; migration applied to TEST and PROD by Supabase Migrate run 36981647441)
 Phase: 169.1.1 (HYDRATIONTICKS) — COMPLETE 2026-10-02 (verification passed; PR #925 merged, v0.118.1.0)
 Phase: 164.9.3.2.1 (ENQ40001) — NEXT, after the 164.4.2 gate-only close (founder 2026-10-02)
 Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
 Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
-Plan: 1 of 4
+Plan: 2 of 3
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
 Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
@@ -501,7 +501,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Ready to plan Phase 164.9.3.2.1
+Status: Executing Phase 164.9.3.2.1
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -517,7 +517,7 @@ Status: Ready to plan Phase 164.9.3.2.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-10-02 — Phase 164.4.2 complete (SUBSET observed on PR #927)
+Last activity: 2026-10-02 — Phase 164.9.3.2.1 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
