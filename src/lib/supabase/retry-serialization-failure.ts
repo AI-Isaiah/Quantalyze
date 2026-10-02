@@ -9,10 +9,10 @@
  *
  * ⚠️ WHETHER THIS HELPER EVER FIRES DEPENDS ON THE POSTGREST VERSION.
  *
- *   - DORMANT on PostgREST 14.x. The gateway runs every RPC in a retrying
- *     transaction and re-runs a 40001 itself, so this code never sees it. The
- *     re-run converges: the winner is terminal by then, so the second attempt
- *     enqueues a fresh job. Measured on the local-stack lane's PostgREST v14.7
+ *   - DORMANT before PostgREST 16.0 (measured on 14.5 and 14.7). The gateway
+ *     runs every RPC in a retrying transaction and re-runs a 40001 itself, so
+ *     this code never sees it. The re-run converges: the winner is terminal
+ *     by then, so the second attempt enqueues a fresh job. Measured on the local-stack lane's PostgREST v14.7
  *     in Phase 164.9.3.2.1 plan 01 (race induced once and three times, HTTP
  *     200 both times), and pinned DB-side by
  *     supabase/tests/test_enqueue_race_loss_40001.sql.

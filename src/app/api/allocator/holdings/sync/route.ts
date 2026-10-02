@@ -43,9 +43,10 @@ import { retryOnceOnSerializationFailure } from "@/lib/supabase/retry-serializat
  *      lost-enqueue-race code `_enqueue_compute_job_internal` raises since
  *      mig 20260826150000, latest definition mig 20260924230827) is retried
  *      exactly ONCE, with no sleep, through `retryOnceOnSerializationFailure`,
- *      when PostgREST surfaces it (PostgREST 16 or later). On PostgREST 14.x
- *      the gateway re-runs the call itself and this route sees the final
- *      result (measured converging in Phase 164.9.3.2.1 plan 01). The whole
+ *      when PostgREST surfaces it (PostgREST 16 or later). Before PostgREST
+ *      16.0 (measured on 14.5 and 14.7) the gateway re-runs the call itself
+ *      and this route sees the final result (measured converging in Phase
+ *      164.9.3.2.1 plan 01). The whole
  *      RPC is re-issued, which is retry-safe: the RPC's one exception handler
  *      (around its reconstruct enqueue) traps only the unique-index
  *      collision, so a 40001 aborts its own transaction (the `api_keys`
