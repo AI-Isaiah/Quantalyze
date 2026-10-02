@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.118.1.1] - 2026-10-02 — BACKFILLDAILY: a backfill-role worker no longer seeds the daily position poll
+
+### Fixed
+- `analytics-service/main_worker.py` `daily_enqueue_loop` now returns immediately when `WORKER_CLAIM_ROLE=backfill`. FLIP runbook Step 1 (`docs/runbooks/flipretry-derived-equity-go-live.md`) adds a second Railway service running `python -m main_worker` with that role, next to the API's merged worker, which already runs the daily `poll_positions` seed. Without this guard the second service would have enqueued a second `poll_positions` job per strategy per day from its first 24h tick (the in-flight dedup does not cover completed rows), doubling exchange calls. The `interactive` and `all` roles keep seeding.
+
+### Tests
+- `tests/test_main_worker.py` `test_daily_enqueue_loop_skipped_only_for_backfill_role`, parametrized over `backfill` (0 ticks), `interactive` and `all` (1 tick each). Red on the previous code for `backfill`, green after; the two other arms stop a guard that disabled the seed for every role from passing.
+
+### Notes
+- The runbook still describes the pre-merge topology (a separate worker service). Production today is one combined API+worker service plus the new backfill service; Step 2 (`WORKER_CLAIM_ROLE=interactive` on the API service) is unchanged by this fix.
+
 ## [0.118.1.0] - 2026-10-02 — HYDRATIONTICKS: factsheet and allocation chart ticks render the same on the server and in the browser
 
 ⭐ **What changed for whoever reads this next.** Phase 169.1.1 (HYDRATIONTICKS) ships plans 01 to 04. This entry covers the branch's 44 commits after `origin/main`: smart-discuss context, UI-SPEC, research, founder decisions, validation strategy, pattern map, plans and two plan-check rounds (14); the tick fix (3); its tests, the guard and the 26 guard-import swaps (7); the composite axe wait with one CI list line (1); the per-plan SUMMARY and record commits (6); three code-review rounds, their 9 fix commits and 2 report commits (11); and two release commits, the second folding the review rounds into this entry (2).
