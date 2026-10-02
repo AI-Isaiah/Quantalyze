@@ -600,11 +600,14 @@ BEGIN
     VALUES (p_strategy_id, 'computing', NULL, now(), NULL, NULL)
     ON CONFLICT (strategy_id) DO UPDATE
        SET computation_status = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN 'computing'
              WHEN strategy_analytics.computation_status = 'complete_with_warnings'
                   OR strategy_analytics.computation_warned
              THEN 'complete_with_warnings'
              ELSE 'computing'
            END,
+           computation_warned = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids) THEN FALSE ELSE strategy_analytics.computation_warned END,
            computation_error  = EXCLUDED.computation_error,
            -- Phase 164.2 / criterion 2: the sentence on the line above is being
            -- blanked, so the provenance that described it must go with it. A
@@ -622,6 +625,8 @@ BEGIN
            -- multi-hop chain and the reaper would never fire (the Phase 106
            -- janitor bug, re-implemented in a new column).
            computing_started_at = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN CASE WHEN strategy_analytics.computation_status IS DISTINCT FROM 'computing' THEN now() ELSE strategy_analytics.computing_started_at END
              -- Arm 1: this branch RESOLVED to complete_with_warnings, i.e. the
              -- row is NOT computing. That is an exit — clear the stamp.
              WHEN strategy_analytics.computation_status = 'complete_with_warnings'
@@ -838,6 +843,9 @@ DECLARE
   v_body                       TEXT;
   v_unprotected_agg_anchored   BOOLEAN;
   v_b_warned_anchored          BOOLEAN;
+  v_membership_sites           INTEGER;
+  v_warned_case_sites          INTEGER;
+  v_a_status_first_anchored    BOOLEAN;
 BEGIN
   -- ======================================================================
   -- (P0) THE COLUMN SHAPE. Type, nullability and defaultlessness are ASSERTED,
@@ -1372,6 +1380,39 @@ BEGIN
   v_b_warned_anchored := v_body ~ 'computation_error_job_id\s*=\s*CASE\s+WHEN\s+strategy_analytics\.computation_error_source\s*=\s*''writer''\s+AND\s+strategy_analytics\.computation_error_job_id\s*=\s*v_latest_job_id\s+THEN\s+strategy_analytics\.computation_error_job_id\s+ELSE\s+NULL\s+END\s*,\s*computation_warned\s*=\s*CASE\s+WHEN\s+strategy_analytics\.computation_error_source\s*=\s*''writer''\s+AND\s+strategy_analytics\.computation_error_job_id\s*=\s*ANY\s*\(\s*v_unprotected_job_ids\s*\)\s+THEN\s+FALSE\s+ELSE\s+strategy_analytics\.computation_warned\s+END';
   IF NOT v_b_warned_anchored THEN
     RAISE EXCEPTION 'bridge-residue: branch (b) does not clear computation_warned when the row''s writer-provenance job is among the unprotected live failures. A marker retraction between the Python live re-read and the permanent mark then leaves the warning flag up over a failed run ([164.6.7-COMPOSITE-REREAD-RESIDUE]).';
+  END IF;
+
+  -- (iii) The membership predicate appears in EXACTLY four places: branch (a)'s
+  -- status arm, branch (a)'s warned assignment, branch (a)'s stamp arm, and
+  -- branch (b)'s warned assignment. A COUNT, not a presence test: any one
+  -- survivor would satisfy a presence test.
+  SELECT count(*) INTO v_membership_sites
+    FROM regexp_matches(v_body, 'strategy_analytics\.computation_error_source\s*=\s*''writer''\s+AND\s+strategy_analytics\.computation_error_job_id\s*=\s*ANY\s*\(\s*v_unprotected_job_ids\s*\)', 'g');
+  IF v_membership_sites <> 4 THEN
+    RAISE EXCEPTION 'bridge-residue: the writer-provenance membership predicate appears % time(s) in the body, not 4. Each of the four sites (branch (a) status, warned and stamp arms; branch (b) warned) closes a distinct corner of [164.6.7-COMPOSITE-REREAD-RESIDUE]: losing a branch-(a) site publishes complete_with_warnings over a failed run whenever a sibling is in flight at the mark, or leaves the row computing with no reaper stamp.', v_membership_sites;
+  END IF;
+
+  -- (iv) computation_warned is assigned by a CASE in exactly two places
+  -- (branches (a) and (b)). Branches (b-prime) and (c) never write it.
+  SELECT count(*) INTO v_warned_case_sites
+    FROM regexp_matches(v_body, 'computation_warned\s*=\s*CASE', 'g');
+  IF v_warned_case_sites <> 2 THEN
+    RAISE EXCEPTION 'bridge-residue: computation_warned is assigned by a CASE % time(s) in the body, not 2 (branches (a) and (b)). Fewer leaves the warning flag over a failed run on one of the two loud branches; more means another branch now writes the runner-owned flag.', v_warned_case_sites;
+  END IF;
+
+  -- (v) Branch (a)'s status CASE tests membership FIRST, ahead of the
+  -- complete_with_warnings arm; in the other order the warned arm wins on
+  -- exactly the rows this fix exists for.
+  v_a_status_first_anchored := v_body ~ 'SET\s+computation_status\s*=\s*CASE\s+WHEN\s+strategy_analytics\.computation_error_source\s*=\s*''writer''\s+AND\s+strategy_analytics\.computation_error_job_id\s*=\s*ANY\s*\(\s*v_unprotected_job_ids\s*\)\s+THEN\s+''computing''\s+WHEN\s+strategy_analytics\.computation_status\s*=\s*''complete_with_warnings''';
+  IF NOT v_a_status_first_anchored THEN
+    RAISE EXCEPTION 'bridge-residue: branch (a)''s status CASE does not test the writer-provenance membership predicate FIRST, ahead of the complete_with_warnings arm. A sibling in flight at the mark of an unprotected, writer-reached failure then publishes complete_with_warnings over the failed run.';
+  END IF;
+
+  -- (vi) Branch (b-prime) must not write computation_warned: a protected
+  -- failure leaves every publish column alone. Bounded by b-prime's own WHERE,
+  -- the same bound the carried b-prime negatives use.
+  IF v_body ~* 'SET\s+computation_error\s*=\s*CASE(?:(?!WHERE\s+strategy_id)(?:.|\n))*?computation_warned\s*=' THEN
+    RAISE EXCEPTION 'bridge-residue: branch (b-prime) writes computation_warned. A protected refresh failure over a healthy published row must leave the publish state, including the runner-owned warning flag, untouched.';
   END IF;
 
   RAISE NOTICE 'Migration 20261003120000: sync_strategy_analytics_status re-based on 20260906120000 (BRIDGERESIDUE, Phase 164.5.2.1); every carried 20260906120000 anchor passed on the new body, and this file''s own comment-stripped anchors passed after them.';
