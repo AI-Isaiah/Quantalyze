@@ -62,7 +62,7 @@
   "next": {
     "command": "/gsd:progress --next",
     "label": "Advance to the next step (plan phase 164.9.3.2.1)",
-    "reason": "Phase 164.4.2 complete (PR #927); 164.9.3.2.1 ENQ40001 next"
+    "reason": "Phase 164.9.3.2.1 planned (3 plans); execute next"
   },
-  "updated_at": "2026-10-02T10:48:30.158Z"
+  "updated_at": "2026-10-02T16:43:51.889Z"
 }

@@ -5,15 +5,15 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.9.3.2.1
 current_phase_name: ENQ40001
 status: planning
-stopped_at: Phase 164.4.2 complete (SUBSET observed in CI on PR #927); next Phase 164.9.3.2.1
-last_updated: "2026-10-02T10:48:30.128Z"
+stopped_at: Phase 164.9.3.2.1 ENQ40001 planned (3 plans, checker passed); next execute plan 01
+last_updated: "2026-10-02T16:43:51.860Z"
 last_activity: 2026-10-02
-last_activity_desc: Phase 164.4.2 SUBSETSPLIT complete — verification passed (SUBSET run read from CI on PR #927, merged fd4d86cd)
-state_head: 4dd2aacfb
+last_activity_desc: Phase 164.9.3.2.1 ENQ40001 planned — 3 plans in 3 waves, plan checker passed after 2 revisions
+state_head: 19f9654685b4acb777882efbb6dc980454aec431
 progress:
   total_phases: 85
   completed_phases: 48
-  total_plans: 450
+  total_plans: 453
   completed_plans: 449
   percent: 56
 ---
@@ -179,7 +179,7 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.9.5 (AUTOREDUMP) — COMPLETE 2026-10-02 (verification passed; first changed re-dump opened bot PR #920, all head-sha runs green)
+Phase: 164.9.3.2.1 (ENQ40001) — READY TO EXECUTE
 Phase: 164.9.3.2 (DEFER40001) — COMPLETE 2026-10-02 (verification passed; PR #919 merged, v0.118.0.0; migration applied to TEST and PROD by Supabase Migrate run 36981647441)
 Phase: 169.1.1 (HYDRATIONTICKS) — COMPLETE 2026-10-02 (verification passed; PR #925 merged, v0.118.1.0)
 Phase: 164.9.3.2.1 (ENQ40001) — NEXT, after the 164.4.2 gate-only close (founder 2026-10-02)
