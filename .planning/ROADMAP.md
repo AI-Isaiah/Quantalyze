@@ -3344,7 +3344,7 @@ Plans:
 - [x] 164.9.3.2.1-02-PLAN.md — converge branch: gate `test_enqueue_race_loss_40001.sql` (R1/R2 + twins, both lanes) and the D-04 comment corrections
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 164.9.3.2.1-03-PLAN.md — census moves on the merged tree and the release commit
+- [x] 164.9.3.2.1-03-PLAN.md — census moves on the merged tree and the release commit
 
 ### Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner (INSERTED)
 
