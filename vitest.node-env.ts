@@ -212,6 +212,7 @@ export const NODE_ENV_TEST_FILES: string[] = [
   "src/lib/bridge-outcome-label.test.ts",
   "src/lib/bridge/send-intro.test.ts",
   "src/lib/capital-ownership.test.ts",
+  "src/lib/chart-ticks.test.ts",
   "src/lib/closed-sets.mt5-flag.test.ts",
   "src/lib/closed-sets.sfox-flag.test.ts",
   "src/lib/closed-sets.test.ts",
