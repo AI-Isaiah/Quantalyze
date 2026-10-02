@@ -4581,6 +4581,14 @@ jobs:
           # Re-measured 2026-09-24 (Phase 164.6): composite 15 -> 16, fan-out 18 -> 19 (arm N each).
           # Re-measured 2026-09-24 (Phase 164.6 review fix): composite 16 -> 23, fan-out 19 -> 26
           # (N2, N3, T, U, V1, V2, W each). The new test_cron_runs_rls.sql declares no sentinel.
+          # Re-measured 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06), ONE move:
+          #   test_compute_job_fence_errcode.sql, NEW, 8 arms (D1, D1L, M1, M1L, M2,
+          #   M2L, F1, F1L): the four claim-token fence raises of migration
+          #   20261001120000 answer SQLSTATE 55006, never 40001. A new sentinel-bearing
+          #   file changes the FILE SET, so SENTINEL_FLOOR 11 -> 12 and ARMS_FLOOR
+          #   229 -> 237, read off each file's own first `ALL N ARMS EXECUTED`
+          #   sentinel on the tree merged with origin/main. The mutation runner's own
+          #   ARMS_FLOOR moved 545 -> 553 in the same phase, also +8.
           # ⚠️ Re-measured 2026-09-17 (164.5.1, arm R): the fan-out file goes
           # 15 -> 18. Its own closing sentinel had been stuck at 15 and did not
           # list arms P or Q although both run, so this table AGREED WITH A STALE
@@ -4590,6 +4598,7 @@ jobs:
           # inserted between them — or at a different indent — makes the table
           # read as GONE. Keep prose above this line.
           #   test_analytics_service_settings_and_vault_tick.sql 13
+          #   test_compute_job_fence_errcode.sql              8
           #   test_create_wizard_strategy_for_key.sql         9
           #   test_get_verified_cohort_rank_gate.sql          6
           #   test_ledger_refresh_composite_arm.sql          23
@@ -4669,8 +4678,8 @@ jobs:
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=11  # files declaring a sentinel
-          ARMS_FLOOR=229     # 13 + 9 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 7 + 23
+          SENTINEL_FLOOR=12  # files declaring a sentinel
+          ARMS_FLOOR=237     # 13 + 8 + 9 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
