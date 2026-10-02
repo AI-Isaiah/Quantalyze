@@ -9272,10 +9272,13 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   longer unfiltered.** Since 164.9.4 a `.planning/`-only push is classified by its pushed range
   (`scripts/classify-changed-paths.mjs` `classifyPushRange`) and takes the short path. To keep the
   first backstop above, the founder decided on 2026-10-02 that a push range touching a `.planning/`
-  file a `frontend-test` assertion reads is CODE: `TEST_READ_PLANNING_PATHS` lists the six measured
-  files (`REQUIREMENTS.md`, `ROADMAP.md`, `159-VERIFICATION.md`, and Phase 164.3's
+  file a `frontend-test` assertion reads is CODE: `TEST_READ_PLANNING_PATHS` lists the seven measured
+  entries (`config.json`, `REQUIREMENTS.md`, `ROADMAP.md`, `159-VERIFICATION.md`, and Phase 164.3's
   `164.3-07-DEFERRED.md`, `164.3-07-PLAN.md` and absent `164.3-07-SUMMARY.md`), so the merge push of
-  a docs-only PR that touches one of them still runs `frontend-test`. Both halves above therefore
+  a docs-only PR that touches one of them still runs `frontend-test`. (Round 3, CR-01, same day:
+  `config.json` was added after a whole-tree derivation found `critical-regressions.test.ts` reading
+  it; the earlier "six" was measured from two named test files only. The founder confirmed the list
+  may grow beyond the original three.) Both halves above therefore
   still hold for those files. The paragraph above is kept as lineage.
   ⛔ **TWO REMEDIES WERE CONSIDERED AND BOTH REFUSED, recorded so neither is re-proposed as new.**
   (1) Widen the always-on set to include `frontend-test` — REFUSED: that job is most of the saving

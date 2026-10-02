@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { judge, TEST_READ_PLANNING_PATHS } from "../../../scripts/classify-changed-paths.mjs";
 
 /**
@@ -925,57 +925,167 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // Review 164.9.4 round 2, WR-01 (founder decision 2026-10-02): a push touching a
-// `.planning/` file a `frontend-test` assertion reads is CODE. The classifier's
-// list is hand-kept, so it is RE-DERIVED here from the two test files that read
-// the real tree, in both directions, and cannot drift silently.
+// `.planning/` file a test assertion reads is CODE. The classifier's list is
+// hand-kept, so it is RE-DERIVED here, in both directions.
+//
+// ⛔ Review 164.9.4 round 3, CR-01: the round-2 derivation scanned only the two
+// test files the review had named, so a THIRD reader (`critical-regressions.test.ts`
+// on `.planning/config.json`) was invisible to it by construction. The SOURCE
+// set is now derived from the WHOLE tree: every tracked vitest / Playwright test
+// file (`*.test.*`, `*.spec.*`), every pytest file under `analytics-service/tests/`,
+// and, transitively, every tracked local module they import (relative, `@/`, or a
+// Python module under `analytics-service/`) or name by a `scripts/…` /
+// `analytics-service/…` path literal (a spawned script). Every docs-filtered test
+// job runs one of those runners, so a read anywhere in that closure is a read a
+// docs-only push skips.
+//
+// THE EXCLUSION RULE, kept in ONE place (`NOT_SCANNED` below). A file is not
+// scanned when its `.planning` literals are not real-tree reads that a
+// docs-filtered job alone would catch:
+//   - this contract file: its literals are `judge()` fixtures, not reads;
+//   - the classifier: it holds the list itself, so scanning it would derive the
+//     list from the list and hide a stale entry;
+//   - whole-tree WALKERS, which read every planning file by enumeration rather
+//     than by name, and whose own always-on job already re-runs them on every
+//     event: `check-planning-hygiene` (test and script, run by the always-on
+//     `frontend-lint`) and `verify-plan-anchors.mjs`'s `--pending` corpus scan
+//     (run unfiltered by `plan-anchor-verify`).
 // ---------------------------------------------------------------------------
-describe("[164.9.4 WR-01] TEST_READ_PLANNING_PATHS matches the planning files the tests read", () => {
-  const SOURCES = ["src/__tests__/lint-sql-gates.test.ts", "src/__tests__/verify-plan-anchors.test.ts"];
+describe("[164.9.4 WR-01 / CR-01] TEST_READ_PLANNING_PATHS matches the planning files the tests read, derived from the whole tree", () => {
+  const NOT_SCANNED = new Map<string, string>([
+    ["src/__tests__/contracts/ci-docs-path-filter.contract.test.ts", "this file: its .planning literals are judge() fixtures"],
+    ["scripts/classify-changed-paths.mjs", "the list's own home: scanning it would derive the list from itself"],
+    ["src/__tests__/check-planning-hygiene.test.ts", "whole-tree walker; the always-on frontend-lint runs the same hygiene script"],
+    ["scripts/check-planning-hygiene.ts", "whole-tree walker; the always-on frontend-lint runs it on every event"],
+    ["scripts/verify-plan-anchors.mjs", "whole-corpus --pending walker; plan-anchor-verify runs it unfiltered"],
+  ]);
   // A literal that resolves to a real repo file but is only ever written into a
   // TEMP fixture tree, never read from the real one. verify-plan-anchors.test.ts
   // seeds `.planning/STATE.md` into a scratch tree for its @-reference arm.
   const FIXTURE_COLLISIONS = new Set([".planning/STATE.md"]);
 
-  /** Every real-tree `.planning/` FILE the two tests name, by full literal or dir + basename join. */
-  function derive(): Set<string> {
-    const out = new Set<string>();
-    for (const rel of SOURCES) {
-      const text = readFileSync(join(ROOT, rel), "utf8");
-      const literals = [...text.matchAll(/"(\.planning[^"]*)"/g)].map((m) => m[1]);
-      const basenames = [...text.matchAll(/"([\w.-]+\.md)"/g)].map((m) => m[1]);
+  const TRACKED = new Set(
+    execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8" }).split("\0").filter(Boolean),
+  );
+  const isTestFile = (f: string) =>
+    /\.(test|spec)\.(ts|tsx|mjs|js)$/.test(f) || /^analytics-service\/tests\/.*\.py$/.test(f);
+  const JS_EXT = ["", ".ts", ".tsx", ".mjs", ".js", ".cjs", "/index.ts", "/index.tsx", "/index.js"];
+
+  function resolveJs(from: string, spec: string): string | null {
+    let base: string;
+    if (spec.startsWith("./") || spec.startsWith("../")) base = posix.normalize(posix.join(posix.dirname(from), spec));
+    else if (spec.startsWith("@/")) base = `src/${spec.slice(2)}`;
+    else return null;
+    for (const e of JS_EXT) if (TRACKED.has(base + e)) return base + e;
+    return null;
+  }
+  function resolvePy(mod: string): string | null {
+    const p = mod.replace(/\./g, "/");
+    for (const c of [`analytics-service/${p}.py`, `analytics-service/${p}/__init__.py`]) if (TRACKED.has(c)) return c;
+    return null;
+  }
+
+  /** The test files plus every tracked local module they import or spawn, transitively. */
+  function closure(): Set<string> {
+    const seen = new Set<string>();
+    const queue = [...TRACKED].filter(isTestFile);
+    while (queue.length > 0) {
+      const f = queue.pop() as string;
+      if (seen.has(f)) continue;
+      seen.add(f);
+      const text = readFileSync(join(ROOT, f), "utf8");
+      const next: string[] = [];
+      if (f.endsWith(".py")) {
+        for (const m of text.matchAll(/^\s*(?:from\s+([\w.]+)\s+import\s+([\w, ]+)|import\s+([\w.]+))/gm)) {
+          if (m[1]) {
+            next.push(resolvePy(m[1]) ?? "");
+            for (const n of m[2].split(",")) next.push(resolvePy(`${m[1]}.${n.trim().split(/\s+/)[0]}`) ?? "");
+          } else next.push(resolvePy(m[3]) ?? "");
+        }
+      } else {
+        for (const m of text.matchAll(/(?:from\s+|import\s*\(\s*|require\s*\(\s*|import\s+)["']([^"']+)["']/g)) {
+          next.push(resolveJs(f, m[1]) ?? "");
+        }
+      }
+      for (const m of text.matchAll(/["']((?:scripts|analytics-service)\/[^"'\s]+\.(?:mjs|ts|js|cjs|sh|py))["']/g)) next.push(m[1]);
+      for (const n of next) if (n && TRACKED.has(n) && !seen.has(n)) queue.push(n);
+    }
+    return seen;
+  }
+
+  /**
+   * Every real-tree `.planning/` FILE a scanned source names, mapped to the
+   * source(s) naming it. Three shapes: a full literal, adjacent literals joined
+   * by `,` or `/` (`join(ROOT, ".planning", "x")`, `ROOT / ".planning" / "x"`),
+   * and a non-root dir literal + a basename literal in the SAME file (G2 reads
+   * 164.3-07-DEFERRED.md that way). Basenames are never joined across files, and
+   * never onto the bare `.planning` / `.planning/` root, which several files
+   * carry beside unrelated `*.md` names.
+   */
+  function derive(): { reached: Set<string>; paths: Map<string, Set<string>> } {
+    const reached = closure();
+    const paths = new Map<string, Set<string>>();
+    const add = (p: string, src: string) => {
+      if (FIXTURE_COLLISIONS.has(p)) return;
+      if (!paths.has(p)) paths.set(p, new Set());
+      paths.get(p)?.add(src);
+    };
+    for (const src of reached) {
+      if (NOT_SCANNED.has(src)) continue;
+      const text = readFileSync(join(ROOT, src), "utf8");
+      if (!text.includes(".planning")) continue;
+      const literals = [...text.matchAll(/(["'])(\.planning[^"'\n]*)\1/g)].map((m) => m[2]);
+      for (const m of text.matchAll(/(["'])(\.planning[^"'\n]*)\1((?:\s*[,/]\s*(["'])[^"'\n]*\4)+)/g)) {
+        const segs = [m[2], ...[...m[3].matchAll(/(["'])([^"'\n]*)\1/g)].map((s) => s[2])];
+        literals.push(posix.normalize(segs.join("/")));
+      }
+      const basenames = [...text.matchAll(/["']([\w.-]+\.(?:md|json))["']/g)].map((m) => m[1]);
       for (const lit of literals) {
         const abs = join(ROOT, lit);
         if (!existsSync(abs)) continue;
         if (statSync(abs).isFile()) {
-          if (!FIXTURE_COLLISIONS.has(lit)) out.add(lit);
+          add(lit, src);
           continue;
         }
-        if (lit === ".planning") continue;
-        // G2 reads 164.3-07-DEFERRED.md as join(<dir literal>, "<basename>").
-        for (const b of basenames) if (existsSync(join(abs, b))) out.add(`${lit}/${b}`);
+        if (lit === ".planning" || lit === ".planning/") continue;
+        for (const b of basenames) if (existsSync(join(abs, b)) && statSync(join(abs, b)).isFile()) add(`${lit.replace(/\/$/, "")}/${b}`, src);
       }
     }
-    return out;
+    return { reached, paths };
   }
 
-  it("every real-tree planning file the two tests read is on the list (the list cannot lag the tests)", () => {
-    const derived = derive();
-    expect(derived.size, `vacuity fence: the derivation found ${derived.size} file(s)`).toBeGreaterThanOrEqual(5);
-    for (const f of derived) {
+  const describeSources = (paths: Map<string, Set<string>>, f: string) => [...(paths.get(f) ?? [])].join(", ");
+
+  it("the derivation is not vacuous: it walks every runner's tests and resolves imports in both languages", () => {
+    const { reached, paths } = derive();
+    const readers = new Set([...paths.values()].flatMap((s) => [...s]));
+    expect(readers.size, `vacuity fence: only ${readers.size} reader file(s) found (${[...readers].join(", ")})`).toBeGreaterThanOrEqual(3);
+    expect(paths.size, `vacuity fence: the derivation found ${paths.size} file(s)`).toBeGreaterThanOrEqual(6);
+    // Each runner's tests are in the walk, and each import resolver reached a module.
+    expect([...reached].some((f) => f.startsWith("e2e/") && f.endsWith(".spec.ts")), "no Playwright spec in the walk").toBe(true);
+    expect([...reached].some((f) => f.startsWith("analytics-service/tests/")), "no pytest file in the walk").toBe(true);
+    expect(reached.has("scripts/check-planning-hygiene.ts"), "the JS import resolver no longer reaches a script a test imports").toBe(true);
+    expect(reached.has("analytics-service/scripts/phase12_kill_switch.py"), "the Python import resolver no longer reaches a module a test imports").toBe(true);
+    for (const f of NOT_SCANNED.keys()) expect(TRACKED.has(f), `${f} is excluded but no longer tracked; drop it from NOT_SCANNED`).toBe(true);
+  });
+
+  it("every real-tree planning file a test reads is on the list (the list cannot lag the tests)", () => {
+    const { paths } = derive();
+    for (const f of paths.keys()) {
       expect(
         TEST_READ_PLANNING_PATHS,
-        `${f} is read by a frontend-test assertion but is NOT in TEST_READ_PLANNING_PATHS, so a ` +
+        `${f} is read by ${describeSources(paths, f)} but is NOT in TEST_READ_PLANNING_PATHS, so a ` +
           `docs-only push that breaks it goes green on main. Add it to the list in scripts/classify-changed-paths.mjs.`,
       ).toContain(f);
     }
   });
 
   it("every listed path is derived, or is the ABSENT -SUMMARY sibling of a derived deferred plan (no stale entry)", () => {
-    const derived = derive();
+    const { paths } = derive();
     for (const f of TEST_READ_PLANNING_PATHS) {
-      if (derived.has(f)) continue;
+      if (paths.has(f)) continue;
       const plan = f.replace(/-SUMMARY\.md$/, "-PLAN.md");
-      expect(plan !== f && derived.has(plan), `${f} is on the list but no test reads it`).toBe(true);
+      expect(plan !== f && paths.has(plan), `${f} is on the list but no test reads it`).toBe(true);
       expect(existsSync(join(ROOT, f)), `${f} now EXISTS, so the deferral the pins assert has ended; revisit the list`).toBe(false);
     }
   });

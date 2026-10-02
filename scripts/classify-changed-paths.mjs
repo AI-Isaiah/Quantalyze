@@ -96,6 +96,8 @@ export const DOCS_ONLY_PREFIXES = [".planning/"];
  * STATE / state.json / VERIFICATION close-out merges.
  *
  * Each entry, and the assertion that reads it:
+ *   - config.json: `src/__tests__/critical-regressions.test.ts`, the two
+ *     `workflow.use_worktrees` guards (review 164.9.4 round 3, CR-01).
  *   - REQUIREMENTS.md, ROADMAP.md: `src/__tests__/lint-sql-gates.test.ts` G3
  *     ("the PLANNING DOCUMENTS do not claim more shapes than the linter ships").
  *   - 159-VERIFICATION.md, 164.3-07-DEFERRED.md: `src/__tests__/verify-plan-anchors.test.ts`
@@ -106,8 +108,11 @@ export const DOCS_ONLY_PREFIXES = [".planning/"];
  *     it ends the deferral those two pins assert, so adding it reds them.
  *
  * ⚠️ The founder's question named THREE files (the review listed REQUIREMENTS,
- * ROADMAP and 159-VERIFICATION). Measured against the two test files, G2 and
- * its neighbours also read the 164.3-07 trio by name, so the exact set is six.
+ * ROADMAP and 159-VERIFICATION). G2 and its neighbours also read the 164.3-07
+ * trio by name, and round 3 (CR-01) found `config.json`, read by a third test
+ * file the round-2 measurement never scanned. The exact set is SEVEN entries:
+ * six existing files plus the absent SUMMARY. The founder confirmed on
+ * 2026-10-02 that the list may grow past the original three.
  * The whole-corpus `--pending` scans in `verify-plan-anchors.test.ts` are NOT
  * listed: `plan-anchor-verify` runs the same scan, unfiltered, on every PR,
  * docs-only PRs included, so the PR board already carries that backstop.
@@ -115,9 +120,12 @@ export const DOCS_ONLY_PREFIXES = [".planning/"];
  * ⛔ PUSH ONLY. The PR path is unchanged: the PR board is green by the
  * accepted `[CI-DOCSPATH-01]` trade, and this list is what makes the merge
  * push re-check it. The list is hand-kept; `ci-docs-path-filter.contract.test.ts`
- * re-derives it from the two test files so it cannot drift silently.
+ * re-derives it from EVERY tracked test file (vitest, Playwright, pytest) and
+ * the local modules they import or spawn, in both directions, so a reader the
+ * list lacks and an entry no test reads are each a red.
  */
 export const TEST_READ_PLANNING_PATHS = [
+  ".planning/config.json",
   ".planning/REQUIREMENTS.md",
   ".planning/ROADMAP.md",
   ".planning/phases/159-rank-public-ranking-integrity/159-VERIFICATION.md",
@@ -813,7 +821,7 @@ const CASES = [
       // docs-only and so dropped the merge-push backstop for these files.
       const r = scratchRepo("push-testread");
       try {
-        let pass = ok(TEST_READ_PLANNING_PATHS.length === 6, `the list carries the six measured paths (got ${TEST_READ_PLANNING_PATHS.length})`);
+        let pass = ok(TEST_READ_PLANNING_PATHS.length === 7, `the list carries the seven measured paths (got ${TEST_READ_PLANNING_PATHS.length})`);
         pass = ok(TEST_READ_PLANNING_PATHS.every((f) => judge([f])), "CALIBRATION: every listed path is docs-only to judge(), so only the new rule can make it code") && pass;
         let head = r.commit({ "src/a.ts": "export {};\n" });
         // CALIBRATION: a planning file NOT on the list still takes the short path.
