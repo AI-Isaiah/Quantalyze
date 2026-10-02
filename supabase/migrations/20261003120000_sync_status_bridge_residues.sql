@@ -674,6 +674,8 @@ BEGIN
              WHEN strategy_analytics.computation_status = 'complete_with_warnings'
                   OR strategy_analytics.computation_warned
              THEN NULL
+             WHEN v_refresh_keep AND strategy_analytics.computation_status = 'complete'
+             THEN NULL
              -- Arm 2: resolved to 'computing' from some OTHER prior status —
              -- a genuine transition in. Stamp it.
              WHEN strategy_analytics.computation_status IS DISTINCT FROM 'computing'
@@ -1492,12 +1494,12 @@ BEGIN
     RAISE EXCEPTION 'bridge-residue: v_refresh_keep is not v_publish_healthy AND COALESCE(<unmarked count>, 1) = 0 AND COALESCE(<failed count>, 1) = 0. Dropping a conjunct keeps a plain complete row while unmarked work is in flight, while an unprotected failure is live, or on a row that is not published; a 0 default would keep it on an unknown count.';
   END IF;
 
-  -- (xi) the keep arms in branch (a): a COUNT, so a lost arm cannot hide
-  -- behind a surviving one.
+  -- (xi) the keep arms in branch (a), one in the status CASE and one in the
+  -- stamp CASE: a COUNT, so a lost arm cannot hide behind a surviving one.
   SELECT count(*) INTO v_keep_arms
     FROM regexp_matches(v_body, 'WHEN\s+v_refresh_keep\s+AND\s+strategy_analytics\.computation_status\s*=\s*''complete''', 'g');
-  IF v_keep_arms <> 1 THEN
-    RAISE EXCEPTION 'bridge-residue: branch (a) carries % refresh keep arm(s), not 1. Without the status keep arm a plain complete row is rewritten to computing on every marked in-scope refresh retry ([164.6.7-RETRY-PLAIN-COMPLETE]).', v_keep_arms;
+  IF v_keep_arms <> 2 THEN
+    RAISE EXCEPTION 'bridge-residue: branch (a) carries % refresh keep arm(s), not 2 (the status arm and the stamp arm). Without the status arm a plain complete row is rewritten to computing on every marked in-scope refresh retry ([164.6.7-RETRY-PLAIN-COMPLETE]); without the stamp arm a kept complete row carries a stuck-computing reaper stamp.', v_keep_arms;
   END IF;
 
   RAISE NOTICE 'Migration 20261003120000: sync_strategy_analytics_status re-based on 20260906120000 (BRIDGERESIDUE, Phase 164.5.2.1); every carried 20260906120000 anchor passed on the new body, and this file''s own comment-stripped anchors passed after them.';

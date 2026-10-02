@@ -67,6 +67,20 @@
 --                 transiently (left failed_retry): the row must still read
 --                 complete. Pre-fix it is rewritten to computing.
 --   R1-COMPOSITE  the same retry on stitch_composite. Folded into section R1.
+--   R2  (guard)   R1's retry plus an UNMARKED out-of-scope sibling in flight:
+--                 computing. Twin-only proof (unmarked-count conjunct dropped).
+--   R3  (guard)   a MARKED process_key_long retry (kind out of scope):
+--                 computing. Twin-only proof (kind test dropped from the FILTER).
+--   R4  (guard)   an UNMARKED derive_broker_dailies retry: computing. Twin-only
+--                 proof (marker test dropped from the FILTER).
+--   R5            R1's scenario: the kept row's computing_started_at is NULL.
+--                 Pre-fix (and with the status keep arm alone) it is stamped.
+--   R6  (guard)   a live UNPROTECTED sibling failure (no provenance) beside a
+--                 marked retry: computing. Twin-only proof (failed-count
+--                 conjunct dropped). Derived at research (assumption A2),
+--                 measured here.
+--   INVARIANT     (named, NOT counted, no twin) a failed row with a marked
+--                 retry goes computing: the keep holds a published row only.
 --
 -- ⚠️ W1 alone is green under D-04 as first written (branch (b) only, keyed on
 -- the latest failure). W2 is the arm that tells D-04 and D-04b apart, and
@@ -669,7 +683,7 @@ BEGIN
   -- RED-UNDER: delete branch (a)'s status keep arm, so a plain complete row falls
   --            through to the ELSE and is rewritten to computing (the pre-fix
   --            behaviour). ⚠️ LAYERED: the keep-arm count anchor is re-baselined.
-  -- RED-UNDER-M: {"arm":"R1","apply":[{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"             WHEN v_refresh_keep AND strategy_analytics.computation_status = 'complete'\n             THEN 'complete'\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF v_keep_arms <> 1 THEN","replace":"IF v_keep_arms <> 0 THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"R1","apply":[{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"             WHEN v_refresh_keep AND strategy_analytics.computation_status = 'complete'\n             THEN 'complete'\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF v_keep_arms <> 2 THEN","replace":"IF v_keep_arms <> 1 THEN","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'complete' THEN
     RAISE EXCEPTION 'TEST FAILED (R1): a plain complete row whose only in-flight job is a MARKED in-scope refresh retry now reads %. The recurring refresh arm retrying a transient venue error is not new work a user started; rewriting the published factsheet to computing on every such retry is [164.6.7-RETRY-PLAIN-COMPLETE].', COALESCE(v_status, 'NULL');
   END IF;
@@ -718,6 +732,342 @@ BEGIN
   SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
   IF v_status IS DISTINCT FROM 'complete' THEN
     RAISE EXCEPTION 'TEST FAILED (R1-COMPOSITE): a plain complete composite row whose only in-flight job is a MARKED stitch_composite retry now reads %. The composite refresh arm is a different enqueue path from the single-key one, and the residue holds on both ([164.6.7-RETRY-PLAIN-COMPLETE]).', COALESCE(v_status, 'NULL');
+  END IF;
+END $$;
+
+-- ===== ARM R2 (guard) — an UNMARKED sibling in flight beside the retry ===
+-- R1's retry plus an UNMARKED process_key_long sibling, pending. That sibling
+-- is work a user is waiting on, so the row must read computing. GREEN on both
+-- bodies by design; only its twin (the unmarked-count conjunct dropped from the
+-- keep flag) proves it can fail. ⚠️ S is deliberately OUT of the refresh kind
+-- scope: R4's twin drops the marker test from the FILTER, which would stop
+-- counting an IN-scope unmarked sibling and redden this arm before R4.
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  tok        UUID;
+  v_status   TEXT;
+  v_jobstat  TEXT;
+  v_jobsrc   TEXT;
+  j_s        UUID;
+  v_s_kind   TEXT;
+  v_s_src    TEXT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'bres-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'bres', 'bres-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'bres mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'bres R2') RETURNING id INTO s;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned)
+  VALUES (s, 'complete', FALSE);
+
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s, 'derive_broker_dailies', 'running', tok, 0, 3,
+          jsonb_build_object('source', 'ledger-refresh', 'enqueued_at', now()))
+  RETURNING id INTO j;
+
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts)
+  VALUES (s, 'process_key_long', 'pending', 0, 3)
+  RETURNING id INTO j_s;
+
+  PERFORM mark_compute_job_failed(j, 'venue returned 503, retry scheduled', 'transient', tok);
+
+  SELECT status, metadata ->> 'source' INTO v_jobstat, v_jobsrc FROM compute_jobs WHERE id = j;
+  IF v_jobstat IS DISTINCT FROM 'failed_retry' OR v_jobsrc IS DISTINCT FROM 'ledger-refresh' THEN
+    RAISE EXCEPTION 'TEST FAILED (R2-SETUP): the retried job is % with source %, not a failed_retry carrying source ledger-refresh, so the bridge never decided the retry this arm is about.', v_jobstat, COALESCE(v_jobsrc, 'NULL');
+  END IF;
+
+  SELECT kind, metadata ->> 'source', status INTO v_s_kind, v_s_src, v_jobstat FROM compute_jobs WHERE id = j_s;
+  IF v_s_kind IS DISTINCT FROM 'process_key_long' OR v_s_src IS NOT NULL OR v_jobstat IS DISTINCT FROM 'pending' THEN
+    RAISE EXCEPTION 'TEST FAILED (R2-SETUP): the sibling is % / % with source %, not an UNMARKED, OUT-of-scope process_key_long in flight, so this arm does not measure the unmarked-count conjunct.', v_s_kind, v_jobstat, COALESCE(v_s_src, 'NULL');
+  END IF;
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
+  -- RED-UNDER: drop the unmarked-count conjunct from v_refresh_keep, so an unmarked
+  --            sibling in flight no longer stops the keep. ⚠️ LAYERED: the keep-flag
+  --            anchor is stood down.
+  -- RED-UNDER-M: {"arm":"R2","apply":[{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"\n                    AND COALESCE(v_nonterminal_unmarked_count, 1) = 0","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF NOT v_refresh_keep_anchored THEN","replace":"IF FALSE AND NOT v_refresh_keep_anchored THEN","occurrences":1}]}
+  IF v_status IS DISTINCT FROM 'computing' THEN
+    RAISE EXCEPTION 'TEST FAILED (R2): with an UNMARKED sibling job in flight beside the refresh retry, the bridge wrote computation_status = %. That sibling is work a user started; keeping the row complete hides it from the wizard poller, which then reads a terminal success over a running job.', COALESCE(v_status, 'NULL');
+  END IF;
+END $$;
+
+-- ===== ARM R3 (guard) — a marker on an OUT-of-scope kind keeps nothing ===
+-- process_key_long carrying the ledger-refresh source. No refresh arm enqueues
+-- that kind, and its metadata source is request-derived (routers/process_key.py),
+-- so the marker must not be trusted there. GREEN on both bodies by design; its
+-- twin drops the kind test from the FILTER.
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  tok        UUID;
+  v_status   TEXT;
+  v_jobstat  TEXT;
+  v_jobsrc   TEXT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'bres-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'bres', 'bres-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'bres mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'bres R3') RETURNING id INTO s;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned)
+  VALUES (s, 'complete', FALSE);
+
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s, 'process_key_long', 'running', tok, 0, 3,
+          jsonb_build_object('source', 'ledger-refresh', 'enqueued_at', now()))
+  RETURNING id INTO j;
+
+  PERFORM mark_compute_job_failed(j, 'venue returned 503, retry scheduled', 'transient', tok);
+
+  SELECT status, metadata ->> 'source' INTO v_jobstat, v_jobsrc FROM compute_jobs WHERE id = j;
+  IF v_jobstat IS DISTINCT FROM 'failed_retry' OR v_jobsrc IS DISTINCT FROM 'ledger-refresh' THEN
+    RAISE EXCEPTION 'TEST FAILED (R3-SETUP): the retried job is % with source %, not a failed_retry carrying source ledger-refresh, so the bridge never decided the retry this arm is about.', v_jobstat, COALESCE(v_jobsrc, 'NULL');
+  END IF;
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
+  -- RED-UNDER: drop the kind test from the unmarked FILTER, so a marked job of ANY kind
+  --            counts as a refresh retry. ⚠️ LAYERED: the FILTER anchor is stood down.
+  -- RED-UNDER-M: {"arm":"R3","apply":[{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"\n           AND kind IN ('derive_broker_dailies',\n                        'compute_analytics_from_csv',\n                        'stitch_composite'),","replace":",","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF NOT v_unmarked_filter_anchored THEN","replace":"IF FALSE AND NOT v_unmarked_filter_anchored THEN","occurrences":1}]}
+  IF v_status IS DISTINCT FROM 'computing' THEN
+    RAISE EXCEPTION 'TEST FAILED (R3): a process_key_long job carrying a refresh marker kept the row at %. That kind is outside the refresh scope and its source value is request-derived; trusting it lets any request that spells the marker hold a published row over new work.', COALESCE(v_status, 'NULL');
+  END IF;
+END $$;
+
+-- ===== ARM R4 (guard) — an UNMARKED in-scope retry keeps nothing ==========
+-- derive_broker_dailies with NO marker: a user-initiated resync failing
+-- transiently. It is new work, so the row must read computing. GREEN on both
+-- bodies by design; its twin drops the marker test from the FILTER.
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  tok        UUID;
+  v_status   TEXT;
+  v_jobstat  TEXT;
+  v_jobsrc   TEXT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'bres-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'bres', 'bres-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'bres mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'bres R4') RETURNING id INTO s;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned)
+  VALUES (s, 'complete', FALSE);
+
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s, 'derive_broker_dailies', 'running', tok, 0, 3,
+          jsonb_build_object('enqueued_at', now()))
+  RETURNING id INTO j;
+
+  PERFORM mark_compute_job_failed(j, 'venue returned 503, retry scheduled', 'transient', tok);
+
+  SELECT status, metadata ->> 'source' INTO v_jobstat, v_jobsrc FROM compute_jobs WHERE id = j;
+  IF v_jobstat IS DISTINCT FROM 'failed_retry' OR v_jobsrc IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (R4-SETUP): the retried job is % with source %, not a failed_retry carrying no source, so the bridge never decided the retry this arm is about.', v_jobstat, COALESCE(v_jobsrc, 'NULL');
+  END IF;
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
+  -- RED-UNDER: drop the marker test from the unmarked FILTER, so every in-scope job
+  --            counts as a refresh retry. ⚠️ LAYERED: the FILTER anchor is stood down.
+  -- RED-UNDER-M: {"arm":"R4","apply":[{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"           (metadata ->> 'source') IN ('ledger-refresh', 'ledger-refresh-composite')\n           AND kind IN (","replace":"           kind IN (","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF NOT v_unmarked_filter_anchored THEN","replace":"IF FALSE AND NOT v_unmarked_filter_anchored THEN","occurrences":1}]}
+  IF v_status IS DISTINCT FROM 'computing' THEN
+    RAISE EXCEPTION 'TEST FAILED (R4): an UNMARKED derive_broker_dailies retry kept the row at %. Without a refresh marker the job is a user-initiated resync, and the poller must see it as computing.', COALESCE(v_status, 'NULL');
+  END IF;
+END $$;
+
+-- ===== ARM R5 — a kept row carries no reaper stamp ========================
+-- R1's scenario on its own strategy. The kept row is not computing, so the
+-- 16-hour stuck-computing reaper key must stay NULL; a stamp on a complete row
+-- would make the reaper's view disagree with the status.
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  tok        UUID;
+  v_status   TEXT;
+  v_jobstat  TEXT;
+  v_jobsrc   TEXT;
+  v_anchor   TIMESTAMPTZ;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'bres-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'bres', 'bres-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'bres mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'bres R5') RETURNING id INTO s;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned)
+  VALUES (s, 'complete', FALSE);
+
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s, 'derive_broker_dailies', 'running', tok, 0, 3,
+          jsonb_build_object('source', 'ledger-refresh', 'enqueued_at', now()))
+  RETURNING id INTO j;
+
+  PERFORM mark_compute_job_failed(j, 'venue returned 503, retry scheduled', 'transient', tok);
+
+  SELECT status, metadata ->> 'source' INTO v_jobstat, v_jobsrc FROM compute_jobs WHERE id = j;
+  IF v_jobstat IS DISTINCT FROM 'failed_retry' OR v_jobsrc IS DISTINCT FROM 'ledger-refresh' THEN
+    RAISE EXCEPTION 'TEST FAILED (R5-SETUP): the retried job is % with source %, not a failed_retry carrying source ledger-refresh, so the bridge never decided the retry this arm is about.', v_jobstat, COALESCE(v_jobsrc, 'NULL');
+  END IF;
+
+  SELECT computation_status, computing_started_at INTO v_status, v_anchor
+    FROM strategy_analytics WHERE strategy_id = s;
+  IF v_status IS DISTINCT FROM 'complete' THEN
+    RAISE EXCEPTION 'TEST FAILED (R5-SETUP): the row reads % rather than complete, so the keep did not fire and the stamp assertion below would measure another arm.', COALESCE(v_status, 'NULL');
+  END IF;
+  -- RED-UNDER: delete branch (a)'s stamp keep arm; the transition-in arm below it then
+  --            stamps now() on the kept row. ⚠️ LAYERED: the keep-arm count anchor is
+  --            re-baselined.
+  -- RED-UNDER-M: {"arm":"R5","apply":[{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"             WHEN v_refresh_keep AND strategy_analytics.computation_status = 'complete'\n             THEN NULL\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF v_keep_arms <> 2 THEN","replace":"IF v_keep_arms <> 1 THEN","occurrences":1}]}
+  IF v_anchor IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (R5): a row kept at complete carries computing_started_at = %. The stamp is the stuck-computing reaper key and means "entered computing at"; on a complete row it is a false transition the reaper and every operator query would read.', v_anchor;
+  END IF;
+END $$;
+
+-- ===== ARM R6 (guard) — a live UNPROTECTED failure blocks the keep =======
+-- A plain complete row with no provenance, an UNMARKED compute_analytics_from_csv
+-- failed_final with no later done of its kind (a live, unprotected permanent
+-- failure), and R1's marked retry. The row is broken, so it must not stay
+-- published: computing now, and branch (b) once the retry terminates. GREEN on
+-- both bodies (research assumption A2 derived it; this arm MEASURES it); its
+-- twin drops the failed-count conjunct from the keep flag.
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  tok        UUID;
+  v_status   TEXT;
+  v_jobstat  TEXT;
+  v_jobsrc   TEXT;
+  j_f        UUID;
+  v_f_stat   TEXT;
+  v_f_src    TEXT;
+  v_later    INTEGER;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'bres-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'bres', 'bres-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'bres mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'bres R6') RETURNING id INTO s;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned)
+  VALUES (s, 'complete', FALSE);
+
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, created_at)
+  VALUES (s, 'compute_analytics_from_csv', 'failed_final', 3, 3, now() - INTERVAL '1 hour')
+  RETURNING id INTO j_f;
+
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s, 'derive_broker_dailies', 'running', tok, 0, 3,
+          jsonb_build_object('source', 'ledger-refresh', 'enqueued_at', now()))
+  RETURNING id INTO j;
+
+  PERFORM mark_compute_job_failed(j, 'venue returned 503, retry scheduled', 'transient', tok);
+
+  SELECT status, metadata ->> 'source' INTO v_jobstat, v_jobsrc FROM compute_jobs WHERE id = j;
+  IF v_jobstat IS DISTINCT FROM 'failed_retry' OR v_jobsrc IS DISTINCT FROM 'ledger-refresh' THEN
+    RAISE EXCEPTION 'TEST FAILED (R6-SETUP): the retried job is % with source %, not a failed_retry carrying source ledger-refresh, so the bridge never decided the retry this arm is about.', v_jobstat, COALESCE(v_jobsrc, 'NULL');
+  END IF;
+
+  SELECT status, metadata ->> 'source' INTO v_f_stat, v_f_src FROM compute_jobs WHERE id = j_f;
+  SELECT count(*) INTO v_later FROM compute_jobs
+   WHERE strategy_id = s AND kind = 'compute_analytics_from_csv' AND status = 'done';
+  IF v_f_stat IS DISTINCT FROM 'failed_final' OR v_f_src IS NOT NULL OR v_later <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (R6-SETUP): the sibling failure is % with source % and % done job(s) of its kind, so it is not a live UNPROTECTED failure and this arm does not measure the failed-count conjunct.', v_f_stat, COALESCE(v_f_src, 'NULL'), v_later;
+  END IF;
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
+  -- RED-UNDER: drop the failed-count conjunct from v_refresh_keep, so a live unprotected
+  --            failure no longer stops the keep. ⚠️ LAYERED: the keep-flag anchor is
+  --            stood down.
+  -- RED-UNDER-M: {"arm":"R6","apply":[{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"\n                    AND COALESCE(v_failed_count, 1) = 0;","replace":";","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF NOT v_refresh_keep_anchored THEN","replace":"IF FALSE AND NOT v_refresh_keep_anchored THEN","occurrences":1}]}
+  IF v_status IS DISTINCT FROM 'computing' THEN
+    RAISE EXCEPTION 'TEST FAILED (R6): with a live UNPROTECTED permanent failure on the strategy, a marked refresh retry kept the row at %. The strategy is broken; the keep would publish it as healthy until the retry terminates.', COALESCE(v_status, 'NULL');
+  END IF;
+END $$;
+
+-- ===== INVARIANT (named, NOT counted) — a failed row is never kept ========
+-- A row at 'failed' with R1's marked retry must still go computing: the keep
+-- protects a PUBLISHED row only. Uncounted and untwinned on purpose: the health
+-- read and the keep arm's own `= 'complete'` test are mutually redundant, so no
+-- single production mutation reddens it. It raises INVARIANT, never a section
+-- identity, and stays outside the sentinel roster.
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  tok        UUID;
+  v_status   TEXT;
+  v_jobstat  TEXT;
+  v_jobsrc   TEXT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'bres-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'bres', 'bres-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'bres mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'bres INV') RETURNING id INTO s;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned)
+  VALUES (s, 'failed', FALSE);
+
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s, 'derive_broker_dailies', 'running', tok, 0, 3,
+          jsonb_build_object('source', 'ledger-refresh', 'enqueued_at', now()))
+  RETURNING id INTO j;
+
+  PERFORM mark_compute_job_failed(j, 'venue returned 503, retry scheduled', 'transient', tok);
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
+  IF v_status IS DISTINCT FROM 'computing' THEN
+    RAISE EXCEPTION 'INVARIANT (failed row with a marked retry): a failed row with a marked in-scope retry reads % instead of computing. The keep must only ever hold a published row; a failed row kept, or bounced to anything but computing, hides the retry from the poller.', COALESCE(v_status, 'NULL');
   END IF;
 END $$;
 
