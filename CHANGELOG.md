@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.118.1.4] - 2026-10-02 — ENQ40001: the enqueue race-loss 40001 converges through PostgREST 14, measured and pinned
+## [0.118.1.5] - 2026-10-02 — ENQ40001: the enqueue race-loss 40001 converges through PostgREST 14, measured and pinned
 
 ### Added
 - **The D-02 verdict, measured: `converges`.** When `_enqueue_compute_job_internal` loses its in-flight race it raises SQLSTATE `40001`. That raise was induced on the local-stack lane and called through the lane's PostgREST (`rest` image `postgrest:v14.7`), in csv-finalize's call shape. Raw numbers (D-03):
@@ -41,6 +41,12 @@
 - **RESEARCH open question 3** is out of scope. The 7-param overload's race raise is dead code, because every 7-arg call fails with 42725 first. This was already recorded in `20260924230827`'s header.
 - **RESEARCH open question 4** is decided as not wired. The PostgREST probe is not a CI step, because the lane's `rest` image is unpinned and a PostgREST 16 image would turn it red for a non-defect. The durable CI pin is the SQL gate above.
 - **The phase's planning record** sits under `.planning/phases/164.9.3.2.1-enq40001-*`: context, research, validation strategy, three plans and their summaries. Plan 01's summary carries every probe line quoted above.
+
+## [0.118.1.4] - 2026-10-02 — deps: actions/setup-python 6.3.0 → 7.0.0 (#627)
+
+### Changed
+- `actions/setup-python` moves from v6.3.0 to v7.0.0 (pinned by SHA `5fda3b95…`) at both of its steps: `ci.yml`'s `python` job and `cassette-refresh.yml`. v7 migrates the action to ESM, removes the `pip-install` input (not used here), and retries the Python-versions manifest fetch instead of failing silently. No input this repo passes changed.
+- Two merges of `origin/main` bring the Dependabot branch current; no setup-python step was added on main since the PR opened, so the two pins Dependabot moved are all of them.
 
 ## [0.118.1.3] - 2026-10-02 — deps: Python pip-minor-patch group (#898), with requirements.in reconciled to pandas 3.0.3
 
