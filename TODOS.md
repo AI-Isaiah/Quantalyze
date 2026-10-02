@@ -1368,6 +1368,50 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[164.9.3.2.1-OQ1-DEPARTED-KEY-55006-DEFEATS-RETRY]` `set_departed_key_history_inclusion` turns the
+      enqueue race-loss 40001 into a 55006 "try again", so the user is asked to retry a race PostgREST 14
+      would have absorbed (booked 2026-10-02, Phase 164.9.3.2.1 review WR-02, RESEARCH open question 1).**
+      - **Where.** `supabase/migrations/20260927180000_working_holder_rule_d18.sql`, the
+        `EXCEPTION WHEN serialization_failure THEN RAISE EXCEPTION 'HISTORY_RECOMPOSE_RACED' USING ERRCODE = '55006'`
+        block around its `enqueue_compute_job(p_kind := 'derive_allocator_equity', p_allocator_id := v_uid)`
+        call. Its DETAIL reads "Try again; nothing was changed."
+      - **Why it matters.** Phase 164.9.3.2.1 plan 01 measured the race-loss 40001 converging through
+        PostgREST v14.7: the gateway re-runs the transaction and the re-run enqueues. Catching the 40001
+        inside the function and re-raising 55006 removes the code PostgREST retries, so the gateway
+        returns the error to the user once instead of converging. The mechanism is REASONED, NOT
+        MEASURED: the 20260927180000 comment itself says the lost race "needs a second backend", and
+        this call is on the allocator-target branch, which neither plan 01 nor
+        `supabase/tests/test_enqueue_race_loss_40001.sql` exercises (that gate pins the strategy and
+        api_key branches only).
+      - **Not changed in 164.9.3.2.1:** that phase took the D-02 converge branch, which carries no
+        migration. A fix is a re-based `CREATE OR REPLACE` of the function (latest definition across ALL
+        migrations) with the three pre-merge migration reviewers, because merge auto-applies to PROD.
+      - **Trigger.** A user report of `HISTORY_RECOMPOSE_RACED` / 55006 on the departed-key history
+        toggle, OR the next edit to `set_departed_key_history_inclusion`, OR evidence that PROD's
+        PostgREST is ≥16 (where the 40001 would no longer be retried and the 55006 becomes the
+        better answer, so the decision flips).
+      ⏳ **Destination: AWAITS ROUTING via /gsd-phase (founder freeze 2026-09-27).**
+
+- [ ] **`[164.9.3.2.1-OQ2-PYTHON-ENQUEUE-NO-40001]` The Python enqueue callers have no 40001 handling, so on
+      PostgREST ≥16 a lost enqueue race fails the enqueue instead of converging (booked 2026-10-02, Phase
+      164.9.3.2.1 review WR-02, RESEARCH open question 2).**
+      - **Where.** `supabase.rpc("enqueue_compute_job", …)` call sites in `analytics-service/`, measured
+        2026-10-02 by grep: `routers/process_key.py:947` and `:1896`, `routers/cron.py:1151`,
+        `services/job_worker.py:2117`, `:5722` and `:6684`, `services/ingestion/long_fetch.py:685`.
+        None of those files handles SQLSTATE 40001 around an enqueue (the `40001` hits in
+        `job_worker.py` are the claim-token fence, now 55006).
+      - **Why it matters.** On PostgREST 14.x the gateway re-runs the race-loss 40001 itself and the
+        re-run converges (measured on v14.7, Phase 164.9.3.2.1 plan 01). PostgREST 16.0 stopped retrying
+        and returns the 40001 to the client as HTTP 500 (PostgREST PR #4222), so after an upgrade each
+        of these callers would see a lost race as an enqueue error: a compute job that should have been
+        queued is not. The TS callers already carry a retry-once helper
+        (`src/lib/supabase/retry-serialization-failure.ts`); the Python side has no equivalent.
+      - **Not changed in 164.9.3.2.1:** D-04 limited that phase to comment corrections.
+      - **Trigger.** Any evidence that PROD's PostgREST is ≥16 (D-06 forbade measuring it in
+        164.9.3.2.1; RESEARCH assumed 14.5 from a link cache), OR a PostgREST image bump on the
+        local-stack lane to ≥16, OR a production enqueue failure carrying `40001`.
+      ⏳ **Destination: AWAITS ROUTING via /gsd-phase (founder freeze 2026-09-27).**
+
 - [ ] **`[170.1-READ-ONLY-ONLY-COPY]` The connect-key warning strip reads "READ ONLY ONLY — keys with
       Trade or Withdraw permissions are refused on submission." (seen by the founder on the composite
       wizard, 2026-10-01).**
