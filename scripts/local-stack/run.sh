@@ -228,16 +228,19 @@ arm_teardown() {
 }
 
 # --- local-target assertion ---------------------------------------------------
+# Review 164.9.4 round 2, SFH-02: PARSED, not globbed. The old prefix glob
+# `http://127.0.0.1:*` also accepted a URL whose loopback host and port sit in
+# the userinfo before an `@`, with an external host as the real host (measured:
+# `--assert-local-handoff` passed it). `capability-probe.mjs --refuse-nonlocal-url`
+# is the sibling of the WR-08 DSN gate: http, 127.0.0.1/localhost, a port, no
+# userinfo. The URL travels in the environment, never argv, and is never printed.
 assert_local() {
   local api_url="$1"
-  case "$api_url" in
-    http://127.0.0.1:*|http://localhost:*) ;;
-    *)
-      echo "FATAL: stack reported a non-local API URL. Refusing to continue." >&2
-      echo "       This lane is local-only; TEST is shared and PROD is PROD." >&2
-      exit 1
-      ;;
-  esac
+  if ! LOOPBACK_URL="$api_url" node "${LANE_DIR}/capability-probe.mjs" --refuse-nonlocal-url >/dev/null; then
+    echo "FATAL: stack reported a non-local API URL. Refusing to continue." >&2
+    echo "       This lane is local-only; TEST is shared and PROD is PROD." >&2
+    exit 1
+  fi
 }
 
 # --- env handoff --------------------------------------------------------------

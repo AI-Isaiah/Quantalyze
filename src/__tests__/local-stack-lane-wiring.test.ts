@@ -1245,6 +1245,10 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
         ["?host= DB_URL override", ['API_URL="http://127.0.0.1:54421"', 'DB_URL="postgresql://nonecho_marker_user@127.0.0.1:54422/postgres?host=db.example.invalid"']],
         // A host that only LOOKS loopback: assert_local's glob needs `http://127.0.0.1:`.
         ["loopback-prefixed API host", ['API_URL="http://127.0.0.1.nonecho-marker.example.invalid:54421"', `DB_URL="${LOOPBACK_DB}"`]],
+        // Review 164.9.4 round 2, SFH-02 (reproduced): the loopback host and port
+        // as the USERINFO, an external host as the real host. The old prefix glob
+        // accepted it. Built from parts, so no literal smuggling URL is tracked.
+        ["userinfo-smuggled API host", [`API_URL="${["http://", "127.0.0.1:54421", "@", "nonecho-marker.example.invalid"].join("")}"`, `DB_URL="${LOOPBACK_DB}"`]],
       ];
       for (const [name, lines] of refused) {
         const r = assertHandoff(name.replace(/[^a-z]+/gi, "-"), lines);
