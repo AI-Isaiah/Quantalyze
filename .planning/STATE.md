@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 169.1.1
-current_phase_name: HYDRATIONTICKS
-status: executing
-stopped_at: Phase 169.1.1 ready to ship (verification human_needed: CI reads on the pushed head)
+current_phase: 164.9.3.2.1
+current_phase_name: ENQ40001
+status: planning
+stopped_at: Phase 169.1.1 complete (PR #925 merged, v0.118.1.0); next the 164.4.2 gate-only close, then Phase 164.9.3.2.1
 last_updated: "2026-10-02T10:48:30.128Z"
 last_activity: 2026-10-02
-last_activity_desc: Phase 169.1.1 executed (4/4 plans), 3 review rounds fixed, secured, verified human_needed (CI reads at ship); 164.9.5 closed earlier
+last_activity_desc: Phase 169.1.1 HYDRATIONTICKS complete — verification passed (SC-4/SC-6 read from CI on PR #925), merged 8b9b02e7
 state_head: 4dd2aacfb
 progress:
   total_phases: 85
-  completed_phases: 46
+  completed_phases: 47
   total_plans: 450
-  completed_plans: 439
-  percent: 54
+  completed_plans: 443
+  percent: 55
 ---
 
 ## ⭐ STATE lineage
@@ -181,8 +181,8 @@ is decided by verification status, never by plan counts.**
 
 Phase: 164.9.5 (AUTOREDUMP) — COMPLETE 2026-10-02 (verification passed; first changed re-dump opened bot PR #920, all head-sha runs green)
 Phase: 164.9.3.2 (DEFER40001) — COMPLETE 2026-10-02 (verification passed; PR #919 merged, v0.118.0.0; migration applied to TEST and PROD by Supabase Migrate run 36981647441)
-Phase: 169.1.1 (HYDRATIONTICKS) — SHIPPING, urgent insert (founder 2026-10-02); 4 plans, plan checker passed 2026-10-02; then 164.9.3.2.1
-Phase: 164.9.3.2.1 (ENQ40001) — after 169.1.1 (founder 2026-10-02)
+Phase: 169.1.1 (HYDRATIONTICKS) — COMPLETE 2026-10-02 (verification passed; PR #925 merged, v0.118.1.0)
+Phase: 164.9.3.2.1 (ENQ40001) — NEXT, after the 164.4.2 gate-only close (founder 2026-10-02)
 Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
 Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
 Plan: 1 of 4
@@ -501,7 +501,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 169.1.1
+Status: Ready to plan Phase 164.9.3.2.1
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -517,7 +517,7 @@ Status: Executing Phase 169.1.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-10-02 — Phase 169.1.1 execution started
+Last activity: 2026-10-02 — Phase 169.1.1 complete (PR #925)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -971,7 +971,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [█████░░░░░] 54%
+Progress: [██████░░░░] 55%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -2494,7 +2494,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** Phase 169.1.1 UI-SPEC approved
+**Stopped At:** Phase 169.1.1 complete; next 164.4.2 gate-only close, then 164.9.3.2.1
 **Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
