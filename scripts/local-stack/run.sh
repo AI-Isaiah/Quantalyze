@@ -85,7 +85,15 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LANE_DIR="${REPO_ROOT}/scripts/local-stack"
-ENV_FILE="${LANE_DIR}/.stack-env"
+# The env handoff. ONE name for every reader and writer (review 164.9.4 round 3,
+# IN-02): `up` writes it, `--assert-local-handoff` defaults to it, `down` and the
+# failure trap delete it, and the self-test asserts it is gone. `LANE_ENV_FILE`,
+# the variable the `python` / `e2e-seeded` / `sql-tests` export steps already read,
+# overrides it HERE, so a diverging value moves the write, the guard and the
+# teardown together instead of leaving the mode-600 file (service-role key
+# included) behind at a path `down` never removes. Unset, it is the gitignored
+# default below, which is what every CI step uses today.
+ENV_FILE="${LANE_ENV_FILE:-${LANE_DIR}/.stack-env}"
 BASELINE_FILE="${REPO_ROOT}/supabase/schema/baseline.sql"
 # Three DECISION F seams (Phase 164.4.2 plan 06). The defaults are the repo paths;
 # the overrides exist so the replay can be driven end to end — synthetic
@@ -991,7 +999,7 @@ case "${1:-}" in
   # "unwired". No daemon, no stack — it reads the marker, the dump's sha256 and
   # the migrations directory, and names the replay set (DECISION F).
   --check-currency) check_baseline_currency ;;
-  # Asserts the lane HANDOFF (default: this lane's own .stack-env) is loopback,
+  # Asserts the lane HANDOFF (default: ENV_FILE, i.e. LANE_ENV_FILE or .stack-env) is loopback,
   # and exits 1 on any other answer. Same argument as the seams above, applied to
   # D-04 (Phase 164.9.4): the `python` and `e2e-seeded` lane-handoff steps call it
   # FIRST, before any $GITHUB_ENV write, so they REUSE `assert_local` and the WR-08
