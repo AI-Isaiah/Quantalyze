@@ -4189,6 +4189,32 @@ Plans:
 - [ ] 169.1-09-PLAN.md — the rolling Sharpe line stays continuous across the days the day basis excluded; the warm-up and no-dispersion (D7) windows stay gaps (SC10, SC9, D-38, D-40, D-84)
 - [ ] 169.1-08-PLAN.md — integration run + post-deploy browser re-check (SC9; this phase's items from old 12, verbatim) (was 169-12, narrowed)
 
+### Phase 169.1.1: HYDRATIONTICKS — factsheet chart ticks render the same on server and client, so hydration never fails (INSERTED)
+
+**Goal:** Every factsheet and allocation chart computes the same y-axis ticks on the server and in the browser, so React never reports a hydration mismatch (#418) and never rebuilds the tree after first paint. The Overview EquityChart a user (or a test) is looking at is the one that stays on the page.
+**Requirements**: TBD
+**Depends on:** Phase 169.1
+**Plans:** 0 plans
+
+⭐ **Founder decision, 2026-10-02 (AskUserQuestion, "New phase, first"):** a phase of its own, run BEFORE Phase 164.9.3.2.1.
+
+**Root cause, measured 2026-10-02** (debug session `e2e-equitychart-detached-320`): `Math.pow(10, n)` returns different doubles in Node 22's V8 and in Chromium for n = -4 and -5 (Node: `9.999999999999999e-5`; Chromium: exactly `1e-4`); `10 ** n` behaves the same. `niceLinearTicks` in `src/app/factsheet/[id]/v2/TimeSeriesChart.tsx` derives the tick step from it, so on the daily-returns chart the zero tick is exactly 0 on the server ("+0.0%", baseline style) and a tiny negative in the browser ("-0.0%", gridline style). The exact `t.value === config.baseline` comparison turns that ulp into different markup. Reproduced 10/10 on a private local-stack lane with no shared TEST; an engine-independent power of ten turned it 10/10 green with no #418.
+
+**Symptom:** `e2e/target-size.spec.ts:246` (EquityChart tap rect at 320px on /allocations) has failed with "Element is not attached to the DOM" in 16 of 64 CI runs since 2026-09-29, when Phase 167.1.2 PR C2 restored that test. It turned main CI red at `dbe329186` and `05ebb559b`, and a red main makes Railway skip the analytics deploy.
+
+**Same idiom, found by reading (unverified):** `TimeSeriesChart.tsx` (log-scale path), `AnalyticalPanels.tsx`, `CrossSignaturePanels.tsx`, `SignaturePanels.tsx`, `src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx`. Cite by symbol at planning; line numbers drift.
+
+## Success Criteria
+1. Tick values never depend on an engine's power-of-ten rounding: every site of the class builds ticks so server and browser produce byte-identical values (for example integer index times step, rounded to the step's decimals). The whole class is fixed, not one site.
+2. A near-zero tick snaps to exactly 0, and the baseline comparison no longer depends on exact float equality.
+3. A test that fails on today's code proves server and browser tick arrays agree for the measured daily-returns span.
+4. Seeded e2e pages fail on a `pageerror` carrying React #418, so a future hydration mismatch is red, not flaky.
+5. ⛔ `e2e/target-size.spec.ts` is not weakened: no re-query-until-stable at its line 274, no added retry.
+6. Whether the `e2e/composite-factsheet-render.spec.ts` axe (cash basis) flake is the same class is measured and recorded.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 169.1.1 to break down)
+
 ### Phase 169.2: BENCHFRESH — the BTC benchmark is refreshed daily and read in full (INSERTED)
 
 **Goal:** The BTC benchmark every page compares against is current: a daily cron route refreshes it through the analytics service's existing fetcher, a failed or stale refresh answers non-2xx, and the one reader of `benchmark_prices` pages it in full.
@@ -4612,6 +4638,7 @@ kept verbatim.
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 03 is the founder's live retry | v0.97.0.0 · #867 |
 | 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 7 plans on `feat/169-pagetruth`, not on main | Queued — feature; comparator plans split to 169.5 on 2026-09-27 (D-61); waits for 167.1.2 PR C | - |
 | 169.1 ZOOMKPIS | 9/9 | Complete    | 2026-10-01 |
+| 169.1.1 HYDRATIONTICKS | 0/? | Queued — urgent, runs before 164.9.3.2.1 (founder 2026-10-02) | - |
 | 169.2 BENCHFRESH | 3/3 | Shipped — verification `human_needed` (14/16, 2 routed to human checks): post-deploy checks pending, not closed | v0.107.0.0 · #879 |
 | 169.3 SMALLFIXES | 1/5 (plan 01 on main; 02–05 on `feat/169-pagetruth`) | In progress — plan 01 shipped (v0.97.0.1, #868); plans 02–05 next, 03/04 gated on 167.1.2 PR C | - |
 | 169.4 ALLOCTRUTH | 3 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 169, 169.5, 169.2 and 167.1.2 PR C | - |
