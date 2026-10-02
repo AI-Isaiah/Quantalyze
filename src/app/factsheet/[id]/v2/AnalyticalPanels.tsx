@@ -1,10 +1,11 @@
 "use client";
 
 import { usePayload } from "./factsheet-context";
-import { useBasisSeriesView } from "./basis-context";
+import { useBasisSeriesView, useWindowedView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { useTapPin } from "@/hooks/useTapPin";
+import { decimalExponent, pow10 } from "@/lib/chart-ticks";
 
 /**
  * Three analytical panels rounding out the v2 page:
@@ -246,7 +247,7 @@ function StreakHist({ title, data, color, maxLen }: { title: string; data: numbe
 function niceCountTicks(lo: number, hi: number, count: number): { value: number; label: string }[] {
   if (hi <= lo) return [{ value: 0, label: "0" }];
   const rough = (hi - lo) / count;
-  const mag = Math.pow(10, Math.floor(Math.log10(Math.abs(rough)) || 0));
+  const mag = pow10(decimalExponent(rough));
   const norm = rough / mag;
   let nice: number;
   if (norm < 1.5) nice = 1;
@@ -262,10 +263,30 @@ function niceCountTicks(lo: number, hi: number, count: number): { value: number;
   return out;
 }
 
+/**
+ * Phase 169.1 (D-27) — the scope note (shared with MetricsColumn, which imports it from here) a full-history panel carries while a range is
+ * selected: per-calendar-year figures and the §III Style section are computed on
+ * the whole record, so beside window figures they say so.
+ */
+export const FULL_HISTORY_NOTE = "Full history";
+
+/** The note's data-eyebrow voice (DESIGN.md: Geist Mono, uppercase, 0.18em, muted). */
+export function ScopeNote({ text }: { text: string }) {
+  return (
+    <span data-testid="scope-note" className="font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">
+      {text}
+    </span>
+  );
+}
+
 export function CalmarByYearPanel() {
   // Phase 103 (MTM-04): per-year Calmar recomputes from the strategy's own daily
   // series → follows the active basis (cash view === payload).
-  const view = useBasisSeriesView(usePayload());
+  const payload = usePayload();
+  const view = useBasisSeriesView(payload);
+  // Phase 169.1 (D-27): per-calendar-year figures stay full history; while a range
+  // is selected the panel says so.
+  const selected = useWindowedView(payload).scope.kind === "selected";
   const rows = view.calmarByYear;
   if (rows.length === 0) return null;
   // Flag any partial-year row — < 200 trading days means Calmar is annualised
@@ -274,7 +295,14 @@ export function CalmarByYearPanel() {
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
-        <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">Calmar by Year</h3>
+        {selected ? (
+          <div className="flex items-baseline gap-2">
+            <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">Calmar by Year</h3>
+            <ScopeNote text={FULL_HISTORY_NOTE} />
+          </div>
+        ) : (
+          <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">Calmar by Year</h3>
+        )}
       </header>
       <table className="w-full text-micro">
         <thead>
@@ -328,9 +356,34 @@ export function BootstrapCIPanel() {
   // series length the resamples were drawn from), NOT the cash `strategyMetrics.n`.
   // A genuinely short MTM window (MTM n<252 while cash n≥252) therefore fires the
   // warning instead of silently inheriting the cash count and suppressing it.
-  const view = useBasisSeriesView(usePayload());
+  // Phase 169.1 (D-27): the windowed view, so the CIs describe the selected range
+  // (the active view by reference at full history). A withheld window (W1) carries
+  // NaN figures and no resamples: the figures read "—" and neither the low-N
+  // warning nor the resample footer is shown, since no bootstrap ran.
+  const { view } = useWindowedView(usePayload());
   const b = view.bootstrapCI;
-  const lowN = b.n < 252;
+  const withheld = view.withheld != null;
+  const lowN = !withheld && b.n < 252;
+  // A resample with no Sharpe (no dispersion) or no Sortino (no losing day) is
+  // dropped, not counted as 0 (founder decision D7). Say how many were used
+  // whenever that is fewer than all of them (review round 2, SFH-R2-M2). A
+  // payload cached before `n_valid` existed reads as "all of them".
+  const sharpeUsed = b.sharpe.n_valid ?? b.n_resamples;
+  const sortinoUsed = b.sortino.n_valid ?? b.n_resamples;
+  const droppedNote = (
+    [
+      ["Sharpe", sharpeUsed],
+      ["Sortino", sortinoUsed],
+    ] as const
+  )
+    .filter(([, used]) => used < b.n_resamples)
+    .map(([label, used]) =>
+      // None survived: say so plainly, as degenerateNote does, never "from 0 of
+      // 2,000 resamples (the rest have no …)" (review round 3 IN3-01).
+      used === 0
+        ? `no resample has a ${label}`
+        : `${label} from ${used.toLocaleString()} of ${b.n_resamples.toLocaleString()} resamples (the rest have no ${label})`,
+    );
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
@@ -361,14 +414,17 @@ export function BootstrapCIPanel() {
           density, not just the CI bounds. Sharpe = primary (accent), Sortino
           + Max-DD stacked below in muted tones. */}
       <div className="mt-3 flex flex-col gap-2.5">
-        <BootHist title="Sharpe" hist={b.sharpe.hist} point={b.sharpe.point} ci={[b.sharpe.lo, b.sharpe.hi]} fmt={n => n.toFixed(2)} accent />
-        <BootHist title="Sortino" hist={b.sortino.hist} point={b.sortino.point} ci={[b.sortino.lo, b.sortino.hi]} fmt={n => n.toFixed(2)} />
+        <BootHist title="Sharpe" hist={b.sharpe.hist} point={b.sharpe.point} ci={[b.sharpe.lo, b.sharpe.hi]} fmt={n => n.toFixed(2)} nValid={sharpeUsed} nTotal={b.n_resamples} accent />
+        <BootHist title="Sortino" hist={b.sortino.hist} point={b.sortino.point} ci={[b.sortino.lo, b.sortino.hi]} fmt={n => n.toFixed(2)} nValid={sortinoUsed} nTotal={b.n_resamples} />
         <BootHist title="Max DD" hist={b.max_dd.hist} point={b.max_dd.point} ci={[b.max_dd.lo, b.max_dd.hi]} fmt={n => `${(n * 100).toFixed(1)}%`} />
       </div>
 
-      <p className="mt-2 text-micro italic text-text-muted">
-        {b.n_resamples.toLocaleString()} stationary block-bootstrap resamples · {b.block_len}-day block length · 95% CI
-      </p>
+      {!withheld && (
+        <p className="mt-2 text-micro italic text-text-muted">
+          {b.n_resamples.toLocaleString()} stationary block-bootstrap resamples · {b.block_len}-day block length · 95% CI
+          {droppedNote.map(note => ` · ${note}`).join("")}
+        </p>
+      )}
     </section>
   );
 }
@@ -379,6 +435,8 @@ function BootHist({
   point,
   ci,
   fmt,
+  nValid,
+  nTotal,
   accent,
 }: {
   title: string;
@@ -386,6 +444,9 @@ function BootHist({
   point: number;
   ci: [number, number];
   fmt: (n: number) => string;
+  /** Resamples that have this metric, out of `nTotal`; both omitted = all of them. */
+  nValid?: number;
+  nTotal?: number;
   accent?: boolean;
 }) {
   const isMobile = useBreakpoint() === "mobile";
@@ -398,12 +459,29 @@ function BootHist({
   const plotW = W - PAD.left - PAD.right;
   const plotH = H - PAD.top - PAD.bottom;
   const degenerate = hist.bins.length === 0 || hist.hi === hist.lo;
+  // An absent value (NaN, or null after a JSON cache round-trip) is "—": the
+  // Sharpe of a series with no dispersion, or a Sharpe CI with too few
+  // resamples that have one (founder decision D7, 2026-09-26). `fmt` is only
+  // ever called on a finite number.
+  const show = (v: number | null) => (v != null && Number.isFinite(v) ? fmt(v) : "—");
+  const ciKnown = Number.isFinite(ci[0]) && Number.isFinite(ci[1]);
   const maxCount = degenerate ? 1 : Math.max(1, ...hist.bins);
   const barW = degenerate ? 0 : plotW / hist.bins.length;
   const span = hist.hi - hist.lo;
   const X = (v: number) => (span > 0 ? PAD.left + ((v - hist.lo) / span) * plotW : PAD.left + plotW / 2);
   const color = accent ? "var(--color-accent)" : "var(--color-text-muted)";
   if (degenerate) {
+    if (!Number.isFinite(point)) {
+      return (
+        <div>
+          <div className="flex items-baseline justify-between text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
+            <span>{title}</span>
+            <span className="normal-case tracking-normal text-text-muted">—</span>
+          </div>
+          <div className="h-[36px]" aria-hidden="true" />
+        </div>
+      );
+    }
     return (
       <div>
         <div className="flex items-baseline justify-between text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
@@ -411,7 +489,7 @@ function BootHist({
           <span className="normal-case tracking-normal text-text-muted">no variance</span>
         </div>
         <div className="h-[36px] flex items-center justify-center text-micro text-text-muted italic">
-          all resamples produced {fmt(point)}
+          {degenerateNote(title, nValid, nTotal, fmt(point))}
         </div>
       </div>
     );
@@ -421,21 +499,23 @@ function BootHist({
       <div className="flex items-baseline justify-between text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
         <span>{title}</span>
         <span className="normal-case tracking-normal">
-          <span className="text-text-2">{fmt(ci[0])}</span> ·{" "}
-          <span className="text-text-primary font-semibold">{fmt(point)}</span> ·{" "}
-          <span className="text-text-2">{fmt(ci[1])}</span>
+          <span className="text-text-2">{show(ci[0])}</span> ·{" "}
+          <span className="text-text-primary font-semibold">{show(point)}</span> ·{" "}
+          <span className="text-text-2">{show(ci[1])}</span>
         </span>
       </div>
       <ResponsiveChartFrame width={W} height={H} role="img" aria-label={`${title} bootstrap distribution`}>
-        {/* CI shaded band */}
-        <rect
-          x={X(ci[0])}
-          y={PAD.top}
-          width={Math.max(0, X(ci[1]) - X(ci[0]))}
-          height={plotH}
-          fill={color}
-          fillOpacity={0.08}
-        />
+        {/* CI shaded band (omitted when the interval is absent) */}
+        {ciKnown && (
+          <rect
+            x={X(ci[0])}
+            y={PAD.top}
+            width={Math.max(0, X(ci[1]) - X(ci[0]))}
+            height={plotH}
+            fill={color}
+            fillOpacity={0.08}
+          />
+        )}
         {hist.bins.map((c, i) => {
           if (c === 0) return null;
           const h = (c / maxCount) * plotH;
@@ -451,18 +531,32 @@ function BootHist({
             />
           );
         })}
-        {/* Point estimate vertical line */}
-        <line
-          x1={X(point)}
-          x2={X(point)}
-          y1={PAD.top}
-          y2={PAD.top + plotH + 2}
-          stroke="var(--color-text-primary)"
-          strokeWidth={1.4}
-        />
+        {/* Point estimate vertical line (omitted when the point is absent) */}
+        {Number.isFinite(point) && (
+          <line
+            x1={X(point)}
+            x2={X(point)}
+            y1={PAD.top}
+            y2={PAD.top + plotH + 2}
+            stroke="var(--color-text-primary)"
+            strokeWidth={1.4}
+          />
+        )}
       </ResponsiveChartFrame>
     </div>
   );
+}
+
+/**
+ * The line under a no-variance histogram. "all resamples produced X" is true
+ * only when every resample has the metric (IN-01, review round 2). When some
+ * were dropped (no Sharpe or no Sortino, D7) it names how many the value rests
+ * on, and when none has it, it says so.
+ */
+function degenerateNote(title: string, nValid: number | undefined, nTotal: number | undefined, shown: string): string {
+  if (nValid == null || nTotal == null || nValid >= nTotal) return `all resamples produced ${shown}`;
+  if (nValid === 0) return `no resample has a ${title}`;
+  return `all ${nValid.toLocaleString()} of ${nTotal.toLocaleString()} resamples with a ${title} produced ${shown}`;
 }
 
 function Row({ label, point, ci }: { label: string; point: string; ci: string }) {

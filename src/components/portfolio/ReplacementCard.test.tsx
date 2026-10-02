@@ -32,7 +32,10 @@ function buildCandidate(partial: Partial<BridgeCandidate> = {}): BridgeCandidate
 }
 
 function mockFetch(impl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
-  globalThis.fetch = vi.fn(impl) as unknown as typeof fetch;
+  // stubGlobal, not `globalThis.fetch = …` — only a stub is undone by
+  // `unstubGlobals: true` (vitest.config.ts). A direct assignment leaks this
+  // mock to every later file in the worker.
+  vi.stubGlobal("fetch", vi.fn(impl) as unknown as typeof fetch);
 }
 
 beforeEach(() => {
@@ -137,6 +140,26 @@ describe("<ReplacementCard> — H-1077", () => {
     );
     const chip = screen.getByText("-10.0% Corr");
     expect(chip.className).toContain("text-negative");
+  });
+
+  // 166.1 D7 (founder 2026-09-26) / round-1 SFH HIGH-2: a flat incumbent or
+  // candidate gives the bridge a delta that does not exist. It arrived as 0.0
+  // and rendered "+0.00 Sharpe" / "+0.0% Corr" in green, read as "unchanged".
+  it("renders a null delta as a colorless dash, never +0", () => {
+    render(
+      <ReplacementCard
+        candidate={buildCandidate({ sharpe_delta: null, corr_delta: null, dd_delta: 0.04 })}
+        replacementFor="old-1"
+      />,
+    );
+    for (const label of ["Sharpe", "Corr"]) {
+      const chip = screen.getByText(`— ${label}`);
+      expect(chip.className).toContain("text-text-muted");
+      expect(chip.className).not.toContain("text-positive");
+      expect(chip.className).not.toContain("text-negative");
+    }
+    expect(screen.queryByText(/\+0\.00 Sharpe|\+0\.0% Corr/)).toBeNull();
+    expect(screen.getByText("+4.0% MaxDD").className).toContain("text-positive");
   });
 
   it("POSTs to /api/intro with the candidate id, source=bridge, and replacement_for", async () => {

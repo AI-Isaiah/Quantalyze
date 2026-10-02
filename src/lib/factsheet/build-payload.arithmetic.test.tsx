@@ -462,3 +462,52 @@ describe("F6 deriveSegmentMarkers: malformed (non-array) shapes warn + degrade",
     warn.mockRestore();
   });
 });
+
+/**
+ * Phase 133 (SMTM-01) — build-payload emits `seriesByBasis.smoothed_mtm` when the
+ * smoothed series opt is threaded (clone of the mark_to_market bundle assembly),
+ * and stays byte-identical (bundle absent) when it is not.
+ */
+describe("SMTM-01 buildFactsheetPayload — smoothed_mtm series bundle assembly", () => {
+  const CASH: DailyReturn[] = Array.from({ length: 40 }).map((_, i) => ({
+    date: `2025-08-${String((i % 28) + 1).padStart(2, "0")}`,
+    value: Math.sin(i / 7) * 0.005,
+  }));
+  const SMOOTHED: DailyReturn[] = Array.from({ length: 45 }).map((_, i) => ({
+    date: `2025-09-${String((i % 28) + 1).padStart(2, "0")}`,
+    value: Math.cos(i / 6) * 0.004,
+  }));
+  const STRAT = {
+    id: "sk-smoothed",
+    name: "Smoothed",
+    types: ["quant"],
+    markets: ["crypto"],
+    computedAt: "2025-09-30T00:00:00Z",
+    trustTier: null,
+    ingestSource: "csv" as const,
+  };
+
+  it("threading opts.smoothedSeries → seriesByBasis.smoothed_mtm present with its own axis", () => {
+    const payload = buildFactsheetPayload(STRAT, CASH, {
+      smoothedSeries: { dailyReturns: SMOOTHED, gapSpans: [] },
+    })!;
+    expect(payload.seriesByBasis?.smoothed_mtm).toBeDefined();
+    // The smoothed bundle carries its OWN date axis (distinct from cash).
+    expect(payload.seriesByBasis?.smoothed_mtm?.dates.length).toBeGreaterThanOrEqual(2);
+    expect(payload.seriesByBasis?.smoothed_mtm?.dates[0]).toBe(SMOOTHED[0]!.date);
+    // Cash top-level axis stays cash.
+    expect(payload.dates[0]).toBe(CASH[0]!.date);
+  });
+
+  it("no smoothedSeries opt → seriesByBasis has no smoothed_mtm (byte-identical, SC-4)", () => {
+    const payload = buildFactsheetPayload(STRAT, CASH)!;
+    expect(payload.seriesByBasis?.smoothed_mtm).toBeUndefined();
+  });
+
+  it("smoothedGate opt passes through to the payload", () => {
+    const payload = buildFactsheetPayload(STRAT, CASH, {
+      smoothedGate: { available: false, reason: "smoothed_basis_unavailable" },
+    })!;
+    expect(payload.smoothedGate).toEqual({ available: false, reason: "smoothed_basis_unavailable" });
+  });
+});

@@ -1,0 +1,3220 @@
+/**
+ * prod-prober WIRING PIN — phase 164.1 plan 05.
+ *
+ * ⛔ THE DEFECT THIS FILE CATCHES. `scripts/prod-prober/run.mjs` proves its own
+ * contract with `--self-test`: every defect kind fires on its own fixture and
+ * nowhere else. None of that survives a WORKFLOW that invokes it differently.
+ * A wrapper, a pipe that decides the exit, a step-level soft-fail key, or an
+ * unset-credential branch that returns success turns the prober into
+ * `.github/workflows/phase-19-stability.yml:54-58` — a soak gate that measured
+ * NOTHING and read green forever because an absent secret printed a warning and
+ * then returned success. Mode identity is the property; this file is the pin.
+ *
+ * ⭐ EVERY PREDICATE HERE IS WRITTEN OVER ARBITRARY TEXT AND CALIBRATED ON A
+ * MUTATED COPY. A predicate only ever applied to the passing input is not
+ * evidence — it can be satisfied by a function that matches anything. Each
+ * `CALIBRATION` case asserts the copy actually differs from the original, then
+ * asserts the predicate flips on it.
+ *
+ * ⚠️ STANDING RULE — the counted self-test scenario set is a ONE-EDIT RENUMBER
+ * across `scripts/prod-prober/run.mjs` (bump `SELF_TEST_SCENARIOS`) and this
+ * file (bump the pinned literal below). The runner auto-numbers its printed
+ * headers off the same counter its own completeness assertion reads, so the
+ * count asserted here is DERIVED BY EXECUTING the source, never scraped from a
+ * literal in it. Adding a scenario without bumping the constant fails the
+ * runner's own tail assertion first; bumping the constant without telling this
+ * file fails here.
+ */
+import { describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  ARMS,
+  ARMS_FLOOR,
+  DEFECT_KINDS,
+  SELF_TEST_SCENARIOS,
+  countReturnedRows,
+  main,
+  selfTest,
+} from "../../scripts/prod-prober/run.mjs";
+import {
+  BARE_URL_RE,
+  CANONICAL_UUID_RE,
+  CRON_JOB_SEPARATORS,
+  CRON_JOB_COLUMNS,
+  CRON_JOB_SQL,
+  FUNCTIONS_DIR,
+  HEADERS_LITERAL_MAX,
+  HYGIENE_RULE_IDS,
+  MANIFEST_PATH,
+  MANIFEST_SCHEMA_VERSION,
+  NORMALIZATION,
+  TOKEN_MIN,
+  compareManifest,
+  hygieneVerdict,
+  hygieneWithholds,
+  hygieneViolations,
+  isBareUrl,
+  parseCronJobRows,
+  splitHygiene,
+  UNRECORDED_VERDICT,
+} from "../../scripts/prod-prober/arms/cron-drift.mjs";
+import { ARM as MT5_ARM, classifyProbe } from "../../scripts/prod-prober/arms/mt5.mjs";
+import {
+  LEDGER_FANOUT_FAILURE_CRON_NAME,
+  LEDGER_FANOUT_FAILURE_ERROR,
+  LEDGER_FANOUT_FUNCTION,
+  LEDGER_FANOUT_JOB,
+  LEDGER_FANOUT_SQL,
+} from "../../scripts/prod-prober/arms/cron-obs.mjs";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "prod-prober.yml");
+const RUNNER_PATH = join(REPO_ROOT, "scripts", "prod-prober", "run.mjs");
+const SEAMS_PATH = join(REPO_ROOT, "scripts", "prod-prober", "seams.mjs");
+const PROBER_DIR = join(REPO_ROOT, "scripts", "prod-prober");
+const CI_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
+const PHASE19_PATH = join(REPO_ROOT, ".github", "workflows", "phase-19-stability.yml");
+
+const WORKFLOW_TEXT = readFileSync(WORKFLOW_PATH, "utf8");
+const RUNNER_TEXT = readFileSync(RUNNER_PATH, "utf8");
+const CI_TEXT = readFileSync(CI_PATH, "utf8");
+
+/** The two commands the script's own header documents. Mode identity is to THESE. */
+const SELF_TEST_RUN_LINE = "run: node scripts/prod-prober/run.mjs --self-test";
+const LIVE_COMMAND = 'node scripts/prod-prober/run.mjs > "$RUNNER_LOG" 2>&1';
+
+// ---------------------------------------------------------------------------
+// ⛔ ANCHOR DISCIPLINE (Phase 164.8.2 / WR-07). READ THIS BEFORE WRITING A SLICE.
+//
+// `String.indexOf` returns -1 on a miss, and JavaScript's `slice` reads a
+// negative index FROM THE END: `s.slice(-1)` is the LAST CHARACTER and
+// `s.slice(0, -1)` is nearly the WHOLE string. So a narrowing slice whose anchor
+// has been RENAMED does not fail — it degenerates into a subject that a
+// `toContain` / `not.toContain` / `toBe("")`-shaped assertion sails straight
+// over. MEASURED on this very branch: a byte-identity pin over an entire mutex
+// protocol was found comparing `"\n"` to `"\n"` and PASSING.
+//
+// ⛔ AN ABSENT ANCHOR IS A FINDING, NOT A VALUE. Never `?? ''`, never `|| 0`,
+// never `Math.max(0, i)`, and never the `start < 0 ? "" : …` shape these very
+// helpers used to carry — an empty subject is exactly what makes the assertion
+// vacuous. Throw, and NAME the anchor that went missing.
+//
+// ⚠️ These helpers are restated per-file rather than imported, for the same
+// self-containment reason `SOFTENING_TOKENS` is (CONTEXT Area 3, LOCKED for
+// Phase 164.8.2): no shared helper module that only wiring tests import.
+// ---------------------------------------------------------------------------
+
+/** `text.indexOf(anchor)`, but a miss THROWS by name instead of returning -1. */
+function anchorIndex(text: string, anchor: string, from = 0): number {
+  const at = text.indexOf(anchor, from);
+  if (at < 0) {
+    throw new Error(
+      `ANCHOR MISSING: ${JSON.stringify(anchor)} is not present in the subject text. ` +
+        `The narrowing slice that wanted it would have degenerated (slice(-1) is the LAST ` +
+        `CHARACTER, slice(0, -1) is nearly the WHOLE string) and every assertion over the ` +
+        `result would have passed vacuously. Fix the anchor or the subject — do not default it.`,
+    );
+  }
+  return at;
+}
+
+/** The region from `startAnchor` up to `endAnchor`; either miss throws by name. */
+function sliceBetweenAnchors(text: string, startAnchor: string, endAnchor: string): string {
+  const start = anchorIndex(text, startAnchor);
+  return text.slice(start, anchorIndex(text, endAnchor, start));
+}
+
+// ---------------------------------------------------------------------------
+// Predicates. Every one takes TEXT, so each can be run against a mutant.
+// ---------------------------------------------------------------------------
+
+/** Every `run:` one-liner that invokes the prober. */
+function bareRunLines(text: string): string[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("run:") && l.includes("prod-prober/run.mjs"));
+}
+
+/**
+ * True when the live command appears EXACTLY ONCE and captures its status ON
+ * THE SAME LINE.
+ *
+ * ⛔ THIS PREDICATE USED TO PIN THE BUG. It asserted `status=$?` on the NEXT
+ * line — which is right about PIPES (a pipe makes `$?` something else's) and
+ * BLIND to `-e`. GitHub's default shell for a `run:` block is
+ * `/usr/bin/bash -e {0}`, and the step's `set -uo pipefail` does not turn that
+ * off, so a bare `node … > log 2>&1` that exits non-zero TERMINATED THE STEP
+ * before the next line ever ran: no `status=$?`, no `cat`, no `^❌` step
+ * summary, and — the expensive part — no POSTURE LINE.
+ *
+ * MEASURED 2026-09-11: 10 of the last 12 scheduled runs `conclusion: failure`.
+ * Run 34565978460 logs `shell: /usr/bin/bash -e {0}` and then ZERO stdout
+ * between `##[endgroup]` and `##[error]Process completed with exit code 1.` An
+ * HOURLY red check on main's HEAD is exactly the Railway wait-for-CI deadlock
+ * the POSTURE LINE comment exists to prevent (incident 2026-06-21).
+ *
+ * ⭐ `|| status=$?` ON THE SAME LINE makes the call part of a TESTED compound,
+ * which is the condition `-e` exempts — so the step survives a defect run and
+ * every line below it executes. It also keeps the pipe property the old
+ * predicate had: a pipe changes the line and the exact-match below fails.
+ */
+const STATUS_CAPTURE = "|| status=$?";
+
+function liveCommandCapturesItsOwnStatus(text: string): boolean {
+  const lines = text.split("\n");
+  const at = lines.map((l, i) => (l.includes(LIVE_COMMAND) ? i : -1)).filter((i) => i >= 0);
+  if (at.length !== 1) return false;
+  return lines[at[0]].trim() === `${LIVE_COMMAND} ${STATUS_CAPTURE}`;
+}
+
+/** The single `probe:` job block. */
+function probeJobText(text: string): string {
+  return text.slice(anchorIndex(text, "\n  probe:"));
+}
+
+/**
+ * Every shape that could turn a failure into a pass, reported BY NAME.
+ *
+ * ⭐ THIS FILE IS THE ORIGIN OF THE IDIOM, and it was the LAST of the three to widen.
+ * The five-token list started here (Phase 164.1) and was copied out to
+ * `src/__tests__/supabase-migrate-test-first.test.ts` and to
+ * `src/__tests__/test-restore-workflow-wiring.test.ts`. Phase 164.8 widened the
+ * migrate copy to nine; Phase 164.8.2 widened the restore copy and, on measuring the
+ * class rather than the review's file list, found this third copy still on five.
+ * "One of three hardened" is the same defect as "one half of a twin pair hardened".
+ *
+ * ⚠️ THE LAST FOUR ARE HERE BECAUSE the first five were not a class, they were five
+ * spellings of a class:
+ *   - `|| :`            a drop-in for the banned `|| true`, and shorter to type.
+ *   - `2>/dev/null`     swallows the stderr that is the evidence a command failed.
+ *   - `set +o pipefail` re-enables the "a piped command's exit status is discarded"
+ *                       bug — the exact bug the comment above the self-test step in
+ *                       `prod-prober.yml` says the file-then-`cat` shape exists to
+ *                       avoid.
+ *   - `|| exit 0`       an explicit "and if that failed, succeed anyway".
+ *
+ * ⛔ Widening this list cost NOTHING to triage, and that was MEASURED, not assumed:
+ * `prod-prober.yml` carries 0 occurrences of all four (`grep -cF`, 2026-09-09), so
+ * unlike the restore workflow this file needs no exact-set allowlist. Regenerate that
+ * reading before trusting it.
+ *
+ * ⛔ THREE COPIES, KEPT LEVEL BY HAND, ON PURPOSE — restated rather than imported for
+ * the self-containment reason these wiring tests are built on (Phase 164.8 Plan 05
+ * Task 2; CONTEXT Area 3, LOCKED for Phase 164.8.2). No shared helper module that only
+ * wiring tests import. The length pin below is what makes the duplication survivable.
+ */
+const SOFTENING_TOKENS = [
+  "continue-on-error",
+  "|| true",
+  "exit 0",
+  "::warning",
+  "set +e",
+  "|| :",
+  "2>/dev/null",
+  "set +o pipefail",
+  "|| exit 0",
+];
+function softeningOffenders(text: string): string[] {
+  return SOFTENING_TOKENS.filter((t) => text.includes(t));
+}
+
+/** The credential-assert step, from its `- name:` to its `run:`. */
+function credentialStepText(text: string): string {
+  return sliceBetweenAnchors(
+    text,
+    "- name: Assert credentials are configured",
+    "\n        run: |",
+  );
+}
+
+/** True when an `if:` key sits between the credential step's name and its run body. */
+function credentialStepHasIf(text: string): boolean {
+  return /^\s*if:/m.test(credentialStepText(text));
+}
+
+/** The `if:` expression guarding the auto-issue step. */
+function issueStepIfExpression(text: string): string {
+  const start = anchorIndex(text, "- name: Open or update the prod-prober issue");
+  const m = text.slice(start).match(/^\s*if:(.*)$/m);
+  if (!m) {
+    throw new Error(
+      "ANCHOR MISSING: the auto-issue step carries no `if:` key at all. Returning \"\" here " +
+        "would make every `not.toContain` over the expression pass vacuously — an UNGATED " +
+        "auto-issue step is the very defect this predicate exists to report.",
+    );
+  }
+  return m[1].trim();
+}
+
+interface Policy {
+  hourlyCron: boolean;
+  contentsRead: boolean;
+  issuesWrite: boolean;
+  concurrencyGroup: boolean;
+  cancelInProgressFalse: boolean;
+  timeoutMinutes: number | null;
+  masksPoolerBeforeExport: boolean;
+  secretsOnlyViaEnv: boolean;
+}
+
+function policyOf(text: string): Policy {
+  // ⛔ WR-07, and this pair was the WORST case in the class: rename either key
+  // and `slice(-1, …)` / `slice(…, -1)` hands back a last character or nearly the
+  // whole file, and every regex below then reports a policy that was never read.
+  const permissions = sliceBetweenAnchors(text, "\npermissions:", "\nconcurrency:");
+  const concurrency = sliceBetweenAnchors(text, "\nconcurrency:", "\njobs:");
+  const timeout = text.match(/^\s*timeout-minutes:\s*(\d+)\s*$/m);
+  const maskAt = text.indexOf("::add-mask::");
+  const exportAt = text.indexOf("PROBER_POOLER_URL=$pooler");
+  // A secret may be interpolated ONLY as a whole `env:` value. Anywhere else it
+  // is being pasted into a command body, where the repo's public log can see it.
+  const secretsOnlyViaEnv = text
+    .split("\n")
+    .filter((l) => l.includes("${{ secrets."))
+    .every((l) => /^[A-Z0-9_]+: \$\{\{ secrets\.[A-Z0-9_]+ \}\}$/.test(l.trim()));
+  return {
+    hourlyCron: /^\s*- cron: "0 \* \* \* \*"\s*$/m.test(text),
+    contentsRead: /contents:\s*read/.test(permissions),
+    issuesWrite: /issues:\s*write/.test(permissions),
+    concurrencyGroup: /group:\s*prod-prober\s*$/m.test(concurrency),
+    cancelInProgressFalse: /cancel-in-progress:\s*false/.test(concurrency),
+    timeoutMinutes: timeout ? Number(timeout[1]) : null,
+    masksPoolerBeforeExport: maskAt > -1 && exportAt > -1 && maskAt < exportAt,
+    secretsOnlyViaEnv,
+  };
+}
+
+/**
+ * The Railway CLI's PROJECT-scoped credential slot — the shorter sibling of the
+ * workspace variable the seam actually uses. `railway ssh` REFUSES a
+ * project-scoped token, so a rename would make every live run report a
+ * transport defect for a self-inflicted reason. Built by CONCATENATION so this
+ * test file can never be a hit on its own scan.
+ */
+const PROJECT_TOKEN_SLOT = "RAILWAY_" + "TOKEN";
+function containsProjectTokenSlot(text: string): boolean {
+  return text.includes(PROJECT_TOKEN_SLOT);
+}
+
+function proberSourceFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) out.push(...proberSourceFiles(full));
+    else if (entry.endsWith(".mjs") || entry.endsWith(".json")) out.push(full);
+  }
+  return out;
+}
+
+/**
+ * ⛔ THE `.txt` TRANSCRIPTS — A SEPARATE WALK, ON PURPOSE.
+ *
+ * `proberSourceFiles` is the RAILWAY_TOKEN scan's subject and stays exactly
+ * what it was; silently widening it would change what that assertion means.
+ * This walk exists because the `.txt` fixtures are the one surface in this
+ * repo that is, by its nature, COPIED OUT OF A LIVE PRODUCTION CONTAINER — and
+ * it is the surface that actually held a production artifact:
+ * `fixtures/mt5/ok.txt` carried `"path": "C:\\Program Files\\MetaTrader 5"`
+ * until phase 164.8.3 removed it BY HAND. The runner's own public-log control
+ * scans `REMEDIES` — six static strings an author typed — so before this test
+ * every `.txt` transcript was outside every scan in the repo. A control
+ * narrower than the sentence beside it is this milestone's named defect class
+ * (Phase 164.8.4 GATERESIDUE).
+ */
+function proberTranscripts(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) out.push(...proberTranscripts(full));
+    else if (entry.endsWith(".txt")) out.push(full);
+  }
+  return out;
+}
+
+/** The shape of an MT5 account number in a world-readable log. */
+const ACCOUNT_SHAPED_RUN = /\b[0-9]{6,}\b/;
+/** A POSIX home directory or a Windows install path — the `ok.txt` offender's shape. */
+const ABSOLUTE_MACHINE_PATH = /\/(?:Users|home)\/|[A-Za-z]:\\/;
+function transcriptOffences(text: string): string[] {
+  const hits: string[] = [];
+  if (ACCOUNT_SHAPED_RUN.test(text)) hits.push("account-shaped digit run");
+  if (ABSOLUTE_MACHINE_PATH.test(text)) hits.push("absolute machine path");
+  return hits;
+}
+
+/** Run the runner's own self-test and read the headers it PRINTS. */
+async function runSelfTestHeaders(): Promise<{ code: number; numbers: number[]; denominators: number[] }> {
+  const captured: string[] = [];
+  const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+    captured.push(String(args[0] ?? ""));
+  });
+  const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  let code: number;
+  try {
+    code = await selfTest();
+  } finally {
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+  }
+  const numbers: number[] = [];
+  const denominators: number[] = [];
+  for (const line of captured) {
+    const m = line.match(/^=== SELF-TEST (\d+)\/(\d+): /);
+    if (m) {
+      numbers.push(Number(m[1]));
+      denominators.push(Number(m[2]));
+    }
+  }
+  return { code, numbers, denominators };
+}
+
+// ---------------------------------------------------------------------------
+
+describe("[164.1-05] mode identity", () => {
+  it("the workflow invokes the self-test with the EXACT bare command from the script's own header", () => {
+    expect(bareRunLines(WORKFLOW_TEXT)).toEqual([SELF_TEST_RUN_LINE]);
+    // It must be the command the script DOCUMENTS, not a variant invented in
+    // the workflow. Header only — the whole file would match trivially.
+    expect(RUNNER_TEXT.slice(0, 4000)).toContain("node scripts/prod-prober/run.mjs --self-test");
+  });
+
+  it("CALIBRATION: the same predicate reports the self-test ABSENT when it is removed", () => {
+    const without = WORKFLOW_TEXT.replace(`        ${SELF_TEST_RUN_LINE}\n`, "");
+    expect(without, "the deletion must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(bareRunLines(without)).toEqual([]);
+  });
+
+  it("the live command captures its own status ON THE SAME LINE, so `-e` cannot kill the step", () => {
+    expect(WORKFLOW_TEXT).toContain(LIVE_COMMAND);
+    expect(liveCommandCapturesItsOwnStatus(WORKFLOW_TEXT)).toBe(true);
+    // The bare form is the documented one, so a local run and CI are identical.
+    expect(RUNNER_TEXT.slice(0, 4000)).toContain("node scripts/prod-prober/run.mjs  ");
+  });
+
+  it("EVERY branch of the probe step captures its status the same way — the `--arm` branch too", () => {
+    // ⛔ BOTH BRANCHES OR NEITHER. The `--arm` diagnostic branch had the same
+    // bare shape, so a narrowed dispatch died at the node call as well — and
+    // that branch's whole purpose is to print a reading.
+    const job = probeJobText(WORKFLOW_TEXT);
+    const calls = job
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith("node scripts/prod-prober/run.mjs") && l.includes("$RUNNER_LOG"));
+    expect(calls.length, "the probe step invokes the runner in exactly two branches").toBe(2);
+    for (const c of calls) expect(c.endsWith(STATUS_CAPTURE), c).toBe(true);
+    // `set -u` is on, so the initialiser must exist or the first read of
+    // `$status` after a SUCCESSFUL run is an unbound-variable abort.
+    expect(job, "`status` is initialised before the branch").toContain("\n          status=0\n");
+  });
+
+  it("REGRESSION: a bare call with `status=$?` on the NEXT line is REFUSED — that shape is the 2026-09-11 outage", () => {
+    // ⛔ THE OLD PREDICATE ASSERTED EXACTLY THIS SHAPE, so it pinned the bug.
+    // GitHub runs `run:` under `/usr/bin/bash -e {0}`; a bare simple command
+    // that exits non-zero terminates the step and the next line never runs.
+    // MEASURED: run 34565978460, step "Probe production" -> failure, zero
+    // stdout between `##[endgroup]` and `##[error]Process completed with exit
+    // code 1.` — the `cat`, the step summary and the POSTURE LINE all skipped.
+    const reverted = WORKFLOW_TEXT.replace(
+      `${LIVE_COMMAND} ${STATUS_CAPTURE}`,
+      `${LIVE_COMMAND}\n            status=$?`,
+    );
+    expect(reverted, "the revert mutation must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(liveCommandCapturesItsOwnStatus(reverted)).toBe(false);
+  });
+
+  it("CALIBRATION: piping the live command into anything breaks the status capture", () => {
+    const piped = WORKFLOW_TEXT.replace(
+      `${LIVE_COMMAND} ${STATUS_CAPTURE}`,
+      `node scripts/prod-prober/run.mjs 2>&1 | tee "$RUNNER_LOG" ${STATUS_CAPTURE}`,
+    );
+    expect(piped, "the pipe mutation must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(liveCommandCapturesItsOwnStatus(piped)).toBe(false);
+  });
+
+  it("the POSTURE LINE and the step summary are REACHABLE — every line after the live call still runs", () => {
+    // ⛔ THE COMMENT WAS CAREFUL, CORRECT, AND HAD NEVER BEEN REACHED. This
+    // asserts the ORDER that makes it reachable: the status capture, then the
+    // `cat`, then the `^❌` summary, then the schedule branch that exits 0.
+    const job = probeJobText(WORKFLOW_TEXT);
+    const idx = (needle: string) => job.indexOf(needle);
+    const capture = idx(`${LIVE_COMMAND} ${STATUS_CAPTURE}`);
+    const cat = idx('cat "$RUNNER_LOG"');
+    const summary = idx("### prod-prober defects");
+    const posture = idx('if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]');
+    const exitStatus = idx("exit $status");
+    for (const [name, at] of Object.entries({ capture, cat, summary, posture, exitStatus })) {
+      expect(at, `${name} must be present in the probe step`).toBeGreaterThan(-1);
+    }
+    expect(capture).toBeLessThan(cat);
+    expect(cat).toBeLessThan(summary);
+    expect(summary).toBeLessThan(posture);
+    expect(posture).toBeLessThan(exitStatus);
+  });
+
+  it("self-test runs BEFORE the live probe, and both are in the SAME job", () => {
+    const selfTestAt = WORKFLOW_TEXT.indexOf(SELF_TEST_RUN_LINE);
+    const liveAt = WORKFLOW_TEXT.indexOf(LIVE_COMMAND);
+    expect(selfTestAt, "the self-test invocation is missing").toBeGreaterThan(-1);
+    expect(liveAt, "the live invocation is missing").toBeGreaterThan(-1);
+    // A clean live scan proves nothing from a detector that can no longer fire.
+    expect(selfTestAt).toBeLessThan(liveAt);
+    const job = probeJobText(WORKFLOW_TEXT);
+    expect(job.length, "the probe job slice must be non-empty").toBeGreaterThan(1000);
+    expect(job).toContain(SELF_TEST_RUN_LINE);
+    expect(job).toContain(LIVE_COMMAND);
+  });
+});
+
+describe("[164.1-05] nothing softens a failure", () => {
+  it("the ONLY softening is the measured schedule-path posture, and it is guarded", () => {
+    // ⭐ POSTURE, measured by plan 164.1-06 on 2026-09-06 — not a relaxation.
+    // Run 34018874984 put a check-run `probe: failure` on its commit. This
+    // workflow's primary trigger is `schedule:`, which runs against the DEFAULT
+    // branch, so an hourly red prober lands a red check on main's HEAD. Railway's
+    // wait-for-CI reads the whole check-suite, and analytics-deploy-verify.yml
+    // :17-24 records the resulting deadlock FROM AN INCIDENT (2026-06-21): the
+    // red check made Railway skip the deploy, prod never converged, the check
+    // stayed red. A red prober must never block the deploy that fixes it.
+    //
+    // So exactly ONE `exit 0` is permitted, and only inside the schedule guard.
+    // Everything else this pin ever forbade is still forbidden.
+    const probe = probeJobText(WORKFLOW_TEXT);
+    const offenders = softeningOffenders(probe);
+    expect(
+      offenders.filter((o) => o !== "exit 0" && o !== "::warning"),
+      "no softening shape other than the guarded schedule exit may appear",
+    ).toEqual([]);
+
+    // The guard must be present, and the exit-0 must sit INSIDE it.
+    expect(probe).toContain('if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then');
+    const guardAt = probe.indexOf('= "schedule" ]; then');
+    const exitZeroAt = probe.lastIndexOf("exit 0");
+    expect(exitZeroAt, "the exit 0 must come after the schedule guard opens").toBeGreaterThan(guardAt);
+
+    // A MANUAL dispatch still reports the truth, and the self-test still hard-fails.
+    expect(probe).toContain("exit $status");
+    expect(WORKFLOW_TEXT).toContain(SELF_TEST_RUN_LINE);
+    expect(
+      softeningOffenders(SELF_TEST_RUN_LINE),
+      "the self-test line itself is never softened — a BROKEN prober stays loud",
+    ).toEqual([]);
+  });
+
+  it("CALIBRATION: an UNGUARDED exit 0 on the probe path is still caught", () => {
+    // Proves the assertion above is not just 'exit 0 is fine now'. Removing the
+    // guard while keeping the exit must be rejected.
+    const mutant = WORKFLOW_TEXT.replace(
+      'if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then',
+      "if true; then",
+    );
+    expect(mutant, "the mutation must change the text").not.toBe(WORKFLOW_TEXT);
+    expect(probeJobText(mutant)).not.toContain('= "schedule" ]; then');
+  });
+
+  it("CALIBRATION: splicing phase-19-stability's measured rc-2 block in names every offender", () => {
+    // The mutant is not invented here — it is the repo's OWN shape, the one
+    // that printed a warning on an unset secret and then returned success.
+    const phase19 = readFileSync(PHASE19_PATH, "utf8");
+    const rc2 = sliceBetweenAnchors(phase19, "          set +e", '          exit "$rc"');
+    expect(rc2.length, "the phase-19 rc-2 block must be findable").toBeGreaterThan(100);
+    const mutant = WORKFLOW_TEXT.replace(SELF_TEST_RUN_LINE, `${SELF_TEST_RUN_LINE}\n${rc2}`);
+    expect(mutant, "the splice must actually change the text").not.toBe(WORKFLOW_TEXT);
+    const offenders = softeningOffenders(mutant);
+    expect(offenders).toContain("set +e");
+    expect(offenders).toContain("::warning");
+    expect(offenders).toContain("exit 0");
+  });
+
+  it("CALIBRATION: an OR-true after the self-test is reported by name", () => {
+    const mutant = WORKFLOW_TEXT.replace(SELF_TEST_RUN_LINE, `${SELF_TEST_RUN_LINE} || true`);
+    expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(softeningOffenders(mutant)).toContain("|| true");
+  });
+
+  // ── The four tokens Phase 164.8.2 (WR-06) added, one calibration each. ──────
+  // A widened list that is never shown to bite is a list that reads harder and is
+  // not, which is the precise defect class this phase closes. Each mutant is
+  // inserted INSIDE the scanned `probe:` region and each asserts the mutation
+  // actually changed the text first — a replace whose anchor has moved leaves the
+  // string identical, and an unreported identical string reads as a passing arm.
+
+  it("CALIBRATION (164.8.2/WR-06): an `|| :` after the self-test is reported by name", () => {
+    const mutant = WORKFLOW_TEXT.replace(SELF_TEST_RUN_LINE, `${SELF_TEST_RUN_LINE} || :`);
+    expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(softeningOffenders(probeJobText(mutant))).toContain("|| :");
+  });
+
+  it("CALIBRATION (164.8.2/WR-06): a `2>/dev/null` on the self-test is reported by name", () => {
+    // The self-test's whole job is to prove the detector can still fire. Swallow its
+    // stderr and a BROKEN prober reports nothing while the step still exits 0 on the
+    // happy path — the same shape that makes `2>/dev/null` the worst of the nine on
+    // the restore workflow's database-identity step.
+    const mutant = WORKFLOW_TEXT.replace(SELF_TEST_RUN_LINE, `${SELF_TEST_RUN_LINE} 2>/dev/null`);
+    expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(softeningOffenders(probeJobText(mutant))).toContain("2>/dev/null");
+  });
+
+  it("CALIBRATION (164.8.2/WR-06): a `set +o pipefail` inside a probe step is reported by name", () => {
+    // Anchored on the Railway-CLI step's own `set -euo pipefail`, which is inside the
+    // `probe:` job and is the shape a real re-enabling edit would take.
+    const anchor = '          set -euo pipefail\n          asset="railway';
+    expect(
+      WORKFLOW_TEXT.split(anchor).length - 1,
+      "the Railway-CLI step's `set -euo pipefail` anchor moved; the mutation below would be a no-op",
+    ).toBe(1);
+    const mutant = WORKFLOW_TEXT.replace(
+      anchor,
+      '          set -euo pipefail\n          set +o pipefail\n          asset="railway',
+    );
+    expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(softeningOffenders(probeJobText(mutant))).toContain("set +o pipefail");
+  });
+
+  it("CALIBRATION (164.8.2/WR-06): an `|| exit 0` after the self-test is reported by name", () => {
+    const mutant = WORKFLOW_TEXT.replace(SELF_TEST_RUN_LINE, `${SELF_TEST_RUN_LINE} || exit 0`);
+    expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(softeningOffenders(probeJobText(mutant))).toContain("|| exit 0");
+    // ⚠️ And it is NOT absorbed by the measured schedule-path posture. That exemption
+    // is for the ONE guarded `exit 0` inside the schedule branch; an `|| exit 0` on
+    // the self-test line is a different site and must survive the same filter the
+    // posture arm above applies.
+    expect(
+      softeningOffenders(probeJobText(mutant)).filter((o) => o !== "exit 0" && o !== "::warning"),
+    ).toContain("|| exit 0");
+  });
+
+  it("the token list is NINE, and its two hand-kept siblings must move with it", () => {
+    expect(
+      SOFTENING_TOKENS,
+      "SOFTENING_TOKENS moved off nine. This list is one of THREE hand-kept copies — the others are in `src/__tests__/supabase-migrate-test-first.test.ts` and `src/__tests__/test-restore-workflow-wiring.test.ts`, and they are duplicated deliberately (CONTEXT Area 3, LOCKED: no shared helper module that only wiring tests import). Widen or narrow ALL THREE in the same commit, or the class Phase 164.8.2 closed re-opens as 'one of three hardened'.",
+    ).toHaveLength(9);
+    expect(new Set(SOFTENING_TOKENS).size, "a token is listed twice").toBe(SOFTENING_TOKENS.length);
+  });
+
+  it("the four tokens added in 164.8.2 are still ABSENT from prod-prober.yml, so no allowlist is owed", () => {
+    // The premise of the "widening this list is free" amendment (CONTEXT Area 3),
+    // made executable rather than left as a dated sentence. If a legitimate site ever
+    // appears here, this arm reds and the answer is an exact-set allowlist with a
+    // per-site justification — the `test-restore-workflow-wiring.test.ts` shape — not
+    // dropping the token from the list.
+    for (const token of ["|| :", "2>/dev/null", "set +o pipefail", "|| exit 0"]) {
+      expect(
+        WORKFLOW_TEXT.split(token).length - 1,
+        `prod-prober.yml gained a \`${token}\` site. This file has NO allowlist because the count was measured at 0 on 2026-09-09; a new site needs a justified exact-set count, not a narrower token list.`,
+      ).toBe(0);
+    }
+  });
+
+  it("the credential-assert step has NO `if:` and names all eight identifiers (D-06)", () => {
+    const step = credentialStepText(WORKFLOW_TEXT);
+    expect(step.length, "the credential-assert step must be findable").toBeGreaterThan(200);
+    expect(credentialStepHasIf(WORKFLOW_TEXT)).toBe(false);
+    for (const name of [
+      "ANALYTICS_SERVICE_KEY",
+      "RAILWAY_API_TOKEN",
+      "SUPABASE_ACCESS_TOKEN",
+      "SUPABASE_DB_PASSWORD",
+      "SUPABASE_PROJECT_REF",
+      "RAILWAY_PROJECT_ID",
+      "RAILWAY_MT5_SERVICE",
+      "RAILWAY_ENVIRONMENT",
+    ]) {
+      expect(step, `credential step does not name ${name}`).toContain(name);
+    }
+    // The half the script OWNS — an absent name is a defect kind, never a skip
+    // — is pinned exhaustively by the kinds block below, which asserts the
+    // whole roster. It is deliberately not restated here: a second spelling of
+    // the same name is a second thing to drift.
+  });
+
+  it("CALIBRATION: inserting an `if:` into the credential step flips the predicate", () => {
+    const mutant = WORKFLOW_TEXT.replace(
+      "- name: Assert credentials are configured (D-06 — a skip is not a pass)\n",
+      "- name: Assert credentials are configured (D-06 — a skip is not a pass)\n        if: secrets.ANALYTICS_SERVICE_KEY != ''\n",
+    );
+    expect(mutant, "the insertion must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(credentialStepHasIf(mutant)).toBe(true);
+  });
+});
+
+describe("[164.1-05] workflow policy", () => {
+  it("schedule, permissions, concurrency, timeout, masking and secret handling all hold", () => {
+    const p = policyOf(WORKFLOW_TEXT);
+    expect(p.hourlyCron, "the schedule is not hourly").toBe(true);
+    expect(p.contentsRead).toBe(true);
+    expect(p.issuesWrite).toBe(true);
+    expect(p.concurrencyGroup).toBe(true);
+    expect(p.cancelInProgressFalse, "an in-flight probe must not be cancelled").toBe(true);
+    expect(p.timeoutMinutes, "timeout-minutes must be EXPLICIT — the 360-min default is the hazard").not.toBeNull();
+    expect(p.timeoutMinutes!).toBeLessThanOrEqual(30);
+    expect(p.masksPoolerBeforeExport, "the pooler DSN must be masked BEFORE it is exported").toBe(true);
+    expect(p.secretsOnlyViaEnv, "a secret is interpolated somewhere other than an env: value").toBe(true);
+  });
+
+  it("CALIBRATION (164.8.2/WR-07): renaming a slice anchor FAILS BY NAME instead of degenerating", () => {
+    // ⛔ The arm above reads `permissions:` and `concurrency:` out of a SLICE
+    // bounded by two `indexOf` results. Before WR-07 a rename of either key made
+    // `slice` take a negative index — `slice(-1, …)` is the LAST CHARACTER,
+    // `slice(…, -1)` is nearly the WHOLE file — and every regex over the result
+    // reported a policy nobody had read. This is the whole class in one arm.
+    const mutant = WORKFLOW_TEXT.replace("\npermissions:", "\nperms:");
+    expect(mutant, "the rename must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(
+      mutant.includes("\npermissions:"),
+      "the mutation must actually REMOVE the anchor — a mutant that still carries it proves nothing",
+    ).toBe(false);
+    expect(() => policyOf(mutant)).toThrow(/ANCHOR MISSING: "\\npermissions:"/);
+    // Control: the real subject still has the anchor, so the check is a check
+    // and not a blanket refusal.
+    expect(() => policyOf(WORKFLOW_TEXT)).not.toThrow();
+
+    // The same discipline on the single-anchor helpers this file's predicates use.
+    const noProbe = WORKFLOW_TEXT.replace("\n  probe:", "\n  prb:");
+    expect(noProbe.includes("\n  probe:"), "the probe-job mutation must remove the anchor").toBe(false);
+    expect(() => probeJobText(noProbe)).toThrow(/ANCHOR MISSING: "\\n {2}probe:"/);
+    expect(() => probeJobText(WORKFLOW_TEXT)).not.toThrow();
+
+    const noCredStep = WORKFLOW_TEXT.replace(
+      "- name: Assert credentials are configured",
+      "- name: Check credentials are configured",
+    );
+    expect(
+      noCredStep.includes("- name: Assert credentials are configured"),
+      "the credential-step mutation must remove the anchor",
+    ).toBe(false);
+    expect(() => credentialStepText(noCredStep)).toThrow(/ANCHOR MISSING/);
+    expect(() => credentialStepText(WORKFLOW_TEXT)).not.toThrow();
+  });
+
+  it("D-18: nothing in ci.yml references the prober — a red prober must never block a deploy", () => {
+    // Railway waits on the main CI check-suite and SKIPS the analytics deploy
+    // when it is red. A prober inside that suite would make one outage two.
+    expect(CI_TEXT).not.toContain("prod-prober");
+  });
+
+  it("the auto-issue step is gated on a NON-narrowed run", () => {
+    // A narrowed `--arm` dispatch returns 2 BY DESIGN even when it finds
+    // nothing, so an auto-issue reading "0 defect(s)" would be filed without
+    // this clause. On a schedule trigger the input is empty, so the guard is
+    // inert exactly where the real gate runs.
+    const expr = issueStepIfExpression(WORKFLOW_TEXT);
+    expect(expr.length, "the issue step's if: must be findable").toBeGreaterThan(10);
+    expect(expr).toContain("inputs.arm == ''");
+  });
+
+  it("⛔ the auto-issue guard keys on the MEASURED defect count, never on the job outcome", () => {
+    // MEASURED 2026-09-12, the reason this test exists and why it asserts a
+    // NEGATIVE. The guard read `failure() && steps.probe.outcome == 'failure'`.
+    // The POSTURE LINE makes the probe step `exit 0` on the SCHEDULED path, so
+    // `failure()` is false and `outcome` is `success` there — the issue step
+    // was SKIPPED on every scheduled run, which is the only path that runs
+    // hourly and the only path the POSTURE LINE's own warning calls "the
+    // signal". A control that cannot fire.
+    //
+    // It was masked, not noticed: until PR #774 the step died early on the
+    // shell's `-e`, the JOB failed, and `failure()` was incidentally true.
+    // Fixing that early death silenced the alerting — issue #773 took no
+    // comment after 2026-09-11T14:18Z while the prober kept reporting real
+    // PROD defects on every run.
+    const expr = issueStepIfExpression(WORKFLOW_TEXT);
+    expect(
+      expr,
+      "the guard must read the probe's published status, not the job's outcome",
+    ).toContain("steps.probe.outputs.status");
+    expect(
+      expr,
+      "`failure()` cannot be true on the scheduled path — the POSTURE LINE exits 0 there",
+    ).not.toContain("failure()");
+    expect(
+      expr,
+      "the step must still run even though the probe step SUCCEEDS by design",
+    ).toContain("!cancelled()");
+
+    // And the status the guard reads must actually be published by the probe.
+    expect(
+      WORKFLOW_TEXT,
+      'the probe step must write `status` to $GITHUB_OUTPUT or the guard reads ""',
+    ).toContain('echo "status=$status" >> "$GITHUB_OUTPUT"');
+  });
+
+  it("CALIBRATION: restoring the outcome-based guard flips the predicate this test pins", () => {
+    // The exact pre-2026-09-12 shape. If it were reintroduced, the assertions
+    // above must go RED — which is what makes them a control rather than a
+    // restatement of the current text.
+    const mutant = WORKFLOW_TEXT.replace(
+      "if: ${{ !cancelled() && inputs.arm == '' && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '0' }}",
+      "if: failure() && steps.probe.outcome == 'failure' && inputs.arm == ''",
+    );
+    expect(mutant, "the mutation must actually change the text").not.toBe(WORKFLOW_TEXT);
+    const mutantExpr = issueStepIfExpression(mutant);
+    expect(mutantExpr).toContain("failure()");
+    expect(mutantExpr).not.toContain("steps.probe.outputs.status");
+  });
+
+  it("CALIBRATION: dropping the narrowed-dispatch clause flips the guard predicate", () => {
+    const mutant = WORKFLOW_TEXT.replace(
+      "if: ${{ !cancelled() && inputs.arm == '' && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '0' }}",
+      "if: ${{ !cancelled() && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '0' }}",
+    );
+    expect(mutant, "the deletion must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(issueStepIfExpression(mutant)).not.toContain("inputs.arm");
+  });
+
+  it("CALIBRATION: three separate policy mutants each flip their own field and nothing else", () => {
+    const noMask = WORKFLOW_TEXT.replace('          echo "::add-mask::$pooler"\n', "");
+    expect(noMask).not.toBe(WORKFLOW_TEXT);
+    expect(policyOf(noMask).masksPoolerBeforeExport).toBe(false);
+
+    const cancelling = WORKFLOW_TEXT.replace("cancel-in-progress: false", "cancel-in-progress: true");
+    expect(cancelling).not.toBe(WORKFLOW_TEXT);
+    expect(policyOf(cancelling).cancelInProgressFalse).toBe(false);
+    expect(policyOf(cancelling).concurrencyGroup).toBe(true);
+
+    const leaked = WORKFLOW_TEXT.replace(
+      '          supabase link --project-ref "$SUPABASE_PROJECT_REF"',
+      "          echo ${{ secrets.SUPABASE_DB_PASSWORD }}",
+    );
+    expect(leaked).not.toBe(WORKFLOW_TEXT);
+    expect(policyOf(leaked).secretsOnlyViaEnv).toBe(false);
+  });
+
+  it("the seam hands the CLI the WORKSPACE token, and the project slot appears nowhere under scripts/prod-prober/", () => {
+    const seams = readFileSync(SEAMS_PATH, "utf8");
+    expect(seams).toContain("export function realSshRunner");
+    expect(seams).toContain("RAILWAY_API_TOKEN: token,");
+    const files = proberSourceFiles(PROBER_DIR);
+    expect(files.length, "the prober source walk found nothing — the glob broke").toBeGreaterThan(5);
+    const offenders = files.filter((f) => containsProjectTokenSlot(readFileSync(f, "utf8")));
+    expect(offenders.map((f) => f.slice(REPO_ROOT.length + 1))).toEqual([]);
+  });
+
+  it("no prober .txt transcript carries an account-shaped digit run or an absolute machine path", () => {
+    const files = proberTranscripts(PROBER_DIR);
+    // ⛔ THE WALK MUST REACH SOMETHING. An empty list passes every `toEqual([])`
+    //    below it, which is exactly how a narrowed scan reports as a clean one.
+    expect(files.length, "the .txt transcript walk found nothing — the walk broke").toBeGreaterThan(0);
+    expect(
+      files.map((f) => f.slice(REPO_ROOT.length + 1)),
+      "the walk must reach the mt5 transcripts — the files copied out of a live container",
+    ).toContain("scripts/prod-prober/fixtures/mt5/ok.txt");
+    const offenders = files
+      .map((f) => ({ f: f.slice(REPO_ROOT.length + 1), hits: transcriptOffences(readFileSync(f, "utf8")) }))
+      .filter((x) => x.hits.length > 0)
+      .map((x) => `${x.f} (${x.hits.join(", ")})`);
+    expect(offenders).toEqual([]);
+  });
+
+  it("CALIBRATION: the transcript scan FIRES on a synthetic planted value of each shape", () => {
+    // ⛔ SYNTHETIC AND IN-MEMORY. A repeated digit run that is not an account
+    //    and a path that is not this machine's, appended to a copy of a real
+    //    transcript. No real account number, broker server or home path may be
+    //    written into this repo — including into a calibration.
+    const clean = readFileSync(join(PROBER_DIR, "fixtures", "mt5", "ok.txt"), "utf8");
+    expect(transcriptOffences(clean)).toEqual([]);
+    expect(transcriptOffences(`${clean}login 99999999\n`)).toEqual(["account-shaped digit run"]);
+    expect(transcriptOffences(`${clean}"path": "C:\\Example\\Terminal"\n`)).toEqual(["absolute machine path"]);
+    expect(transcriptOffences(`${clean}/home/synthetic/terminal\n`)).toEqual(["absolute machine path"]);
+    // and a five-digit run is NOT an account shape — the predicate is not
+    // merely "contains digits", which would red every transcript on `-10004`.
+    expect(transcriptOffences(`${clean}12345\n`)).toEqual([]);
+  });
+
+  it("CALIBRATION: renaming the seam's child-env key to the project slot flips the scan", () => {
+    const seams = readFileSync(SEAMS_PATH, "utf8");
+    const mutant = seams.replace("RAILWAY_API_TOKEN: token,", `${PROJECT_TOKEN_SLOT}: token,`);
+    expect(mutant, "the rename must actually change the text").not.toBe(seams);
+    expect(containsProjectTokenSlot(seams)).toBe(false);
+    expect(containsProjectTokenSlot(mutant)).toBe(true);
+  });
+});
+
+describe("[164.1-05] kinds and floors", () => {
+  /**
+   * Hand-typed on purpose. Spelling it `[...DEFECT_KINDS]` would make the
+   * assertion agree with the implementation by construction — a list that can
+   * never disagree with the thing it checks. Twenty-two names, sorted.
+   * ⭐ 21 -> 22 in the Phase 164.6 review fix: `cron-ledger-fanout-failed`,
+   * raised by cron-obs when a ledger refresh fan-out run ended in an error of
+   * that function (every candidate of the tick failed, so it now raises).
+   * ⭐ 22 -> 25 in the Phase 164.6 round-2 fix: `-stuck`, `-absent` and
+   * `-candidate-failed`, because the fan-out no longer raises when every
+   * candidate fails — the failure row commits and is counted instead.
+   */
+  const EXPECTED_DEFECT_KINDS = [
+    "absurdity",
+    "credential-absent",
+    "cron-drift",
+    "cron-ledger-fanout-absent",
+    "cron-ledger-fanout-candidate-failed",
+    "cron-ledger-fanout-failed",
+    "cron-ledger-fanout-stuck",
+    "cron-no-observation",
+    "cron-non-2xx",
+    "cron-secret-in-command",
+    "cron-transport-error",
+    "floor",
+    "manifest-invalid",
+    "measure-fail",
+    "mt5-ipc-timeout",
+    "mt5-no-ipc",
+    "mt5-not-authorized",
+    "mt5-probe-timeout",
+    "mt5-ssh-transport",
+    "mt5-terminal-error",
+    "pyapi06-absent-accepted",
+    "pyapi06-absent-uncoded",
+    "pyapi06-health-degraded",
+    "pyapi06-keyed-refused",
+    "pyapi06-wrong-key-accepted",
+  ];
+
+  it("the runner's kind roster is exactly the hand-typed one", () => {
+    expect(DEFECT_KINDS.length, "an emptied roster would make every arm below vacuous").toBeGreaterThanOrEqual(15);
+    expect([...DEFECT_KINDS].sort()).toEqual(EXPECTED_DEFECT_KINDS);
+  });
+
+  it("every kind is exercised by the self-test — the uncovered set is EMPTY", () => {
+    // Derived, never restated: the roster is the runner's export and the
+    // exercised set is read out of selfTest()'s own SOURCE. The literal
+    // `kind === "<k>"` comparisons are what this extractor can see, which is
+    // why the runner spells them independently of its fixture table.
+    const selfTestBody = RUNNER_TEXT.slice(anchorIndex(RUNNER_TEXT, "export async function selfTest()"));
+    expect(selfTestBody.length, "selfTest() must be findable in the source").toBeGreaterThan(1000);
+    const exercised = new Set([...selfTestBody.matchAll(/kind === "([a-z0-9-]+)"/g)].map((m) => m[1]));
+    expect(exercised.size, "the self-test must assert on at least one kind").toBeGreaterThan(0);
+    // A typo here would silently assert on a kind that can never be reported.
+    for (const k of exercised) expect(DEFECT_KINDS).toContain(k);
+    const uncovered = DEFECT_KINDS.filter((k: string) => !exercised.has(k)).sort();
+    expect(uncovered).toEqual([]);
+  });
+
+  it("CALIBRATION: a kind with no by-name assertion is reported UNCOVERED", () => {
+    const selfTestBody = RUNNER_TEXT.slice(anchorIndex(RUNNER_TEXT, "export async function selfTest()"));
+    const mutant = selfTestBody.split('kind === "mt5-probe-timeout"').join('kind === "mt5-probe-elapsed"');
+    expect(mutant, "the rename must actually change the text").not.toBe(selfTestBody);
+    const exercised = new Set([...mutant.matchAll(/kind === "([a-z0-9-]+)"/g)].map((m) => m[1]));
+    expect(DEFECT_KINDS.filter((k: string) => !exercised.has(k))).toEqual(["mt5-probe-timeout"]);
+  });
+
+  // -------------------------------------------------------------------------
+  // parseCronJobRows — the WR-05 defect, asserted directly on the function.
+  //
+  // ⛔ A ROW THE PARSER COULD NOT READ IS NOT A ROW THAT IS NOT THERE. A record
+  // with fewer than seven fields used to be `continue`d away, so a cron.job
+  // command carrying the arm's own record separator removed itself from every
+  // judgement — the credential scan included — while the run still read green.
+  // Both callers (the arm's run() and captureManifest) now refuse on the count.
+  // -------------------------------------------------------------------------
+  // ⚠️ EVERY RECORD CARRIES THE TRAILING `total` COLUMN, because `CRON_JOB_SQL`
+  // does: `count(*) OVER () AS total` is the out-of-band row count, and it is
+  // LAST on purpose (CR-R1-03) so the head fragment of a payload-0x1E split
+  // loses it and is therefore SHORT, rather than a full-width record carrying a
+  // silently truncated command.
+  const cronRecord = (fields: string[], total: string | number = 2) =>
+    [...fields, String(total)].join(CRON_JOB_SEPARATORS.fieldSep);
+  const GOOD_RECORD = cronRecord(["1", "a_job", "* * * * *", "t", "postgres", "postgres", "SELECT 1"]);
+  const SHORT_RECORD = cronRecord(["2", "b_job", "*/5 * * * *", "t", "postgres"]);
+  const renderRecords = (records: string[]) =>
+    // psql prints the record separator AFTER every record, last one included —
+    // which is why the parser's EMPTY-record skip is correct and must stay.
+    records.map((r) => `${r}${CRON_JOB_SEPARATORS.recordSep}`).join("");
+
+  it("a record NARROWER than CRON_JOB_COLUMNS is COUNTED, never dropped (WR-05)", () => {
+    const stdout = renderRecords([GOOD_RECORD, SHORT_RECORD]);
+    const { rows, malformed } = parseCronJobRows(stdout);
+    expect(rows.length, "the readable record still parses — one bad record does not blind the arm to the others").toBe(1);
+    expect(rows[0].jobname).toBe("a_job");
+    expect(malformed.length, "and the unreadable one is REPORTED rather than skipped").toBe(1);
+    expect(malformed[0].fields, "by its field count, so the reader can tell where the record split").toBe(
+      CRON_JOB_COLUMNS.length - 2,
+    );
+    expect(
+      JSON.stringify(malformed),
+      "and NEVER by its text — an unreadable record is exactly where a credential could be hiding",
+    ).not.toContain("b_job");
+  });
+
+  it("CALIBRATION: padding that same record to full width makes it a ROW and empties the malformed list", () => {
+    const original = renderRecords([GOOD_RECORD, SHORT_RECORD]);
+    const padded = renderRecords([
+      GOOD_RECORD,
+      cronRecord(["2", "b_job", "*/5 * * * *", "t", "postgres", "postgres", "SELECT 2"]),
+    ]);
+    expect(padded, "the mutated stdout must actually differ, or this calibration is vacuous").not.toBe(original);
+    const { rows, malformed } = parseCronJobRows(padded);
+    expect(rows.length).toBe(2);
+    expect(malformed).toEqual([]);
+    // The predicate FLIPS on the mutated copy: the same function reports one
+    // malformed record on the original and none here, so "malformed is empty"
+    // is a real reading rather than something the parser always says.
+    expect(parseCronJobRows(original).malformed.length).toBe(1);
+  });
+
+  it("CR-02: a record WIDER than CRON_JOB_COLUMNS is COUNTED too, never a silently TRUNCATED command", () => {
+    // ⛔ THE EXACT MIRROR OF WR-05 ABOVE, AND IT IS THE WORSE DIRECTION. The
+    // guard was `f.length < 7`, so an over-wide record parsed: `command` became
+    // `f[6]` — the text up to the stray separator — and the remainder was
+    // discarded while `malformed` stayed EMPTY, i.e. while the parser claimed
+    // it had read the row. The width is the column count of `CRON_JOB_SQL`,
+    // DERIVED from `CRON_JOB_COLUMNS`; anything else is a record this parser
+    // did not read.
+    //
+    // ⚠️ THIS GUARD ALONE NEVER CLOSED THE CLASS — see the 0x1E tests below.
+    // It answers a FIELD separator in the payload; a RECORD separator produced
+    // fragments it could not see, which is CR-R1-03.
+    const head = "SELECT net.http_post(url := 'https://x.invalid/a'";
+    const tail = ", headers := jsonb_build_object('X-Service-Key', 'FAKE-inline-key-0123456789abcdef'))";
+    const WIDE_RECORD = cronRecord([
+      "2",
+      "b_job",
+      "*/5 * * * *",
+      "t",
+      "postgres",
+      "postgres",
+      `${head}${CRON_JOB_SEPARATORS.fieldSep}${tail}`,
+    ]);
+    const { rows, malformed } = parseCronJobRows(renderRecords([GOOD_RECORD, WIDE_RECORD]));
+    expect(rows.length, "the readable record still parses — one bad record does not blind the arm to the others").toBe(1);
+    expect(rows[0].jobname).toBe("a_job");
+    expect(malformed.length, "and the over-wide one is REPORTED rather than truncated into a row").toBe(1);
+    expect(malformed[0].fields, "by its field count, so the reader can tell how far the record over-ran").toBe(
+      CRON_JOB_COLUMNS.length + 1,
+    );
+    expect(
+      JSON.stringify(malformed),
+      "and NEVER by its text — this record is a worked example of a credential hiding past the separator",
+    ).not.toContain("X-Service-Key");
+    // CALIBRATION: the head ALONE is clean and the whole command is not, so the
+    // truncation the old guard performed was a SILENT PASS on a row carrying an
+    // inline service key — not a downgrade to a weaker finding.
+    expect(hygieneViolations("b_job", head)).toEqual([]);
+    expect(hygieneViolations("b_job", `${head}${tail}`).length).toBeGreaterThan(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // CR-R1-03 — A DELIMITER-BASED PARSER CANNOT SELF-VALIDATE A DELIMITER IN ITS
+  // PAYLOAD. `!== 7` closed the SPELLING it was handed (a FIELD separator in a
+  // command) and left the CLASS open: a RECORD separator splits one row into two
+  // FRAGMENTS, and the head fragment used to carry exactly the required seven
+  // fields, so the width guard could never fire on it — by construction.
+  // MEASURED at the parent commit, BOTH surviving spellings reported
+  // `malformed: []`, i.e. the parser claiming it had read every row.
+  //
+  // The answer is an OUT-OF-BAND count (`count(*) OVER () AS total`), placed
+  // LAST so the head fragment loses it and the width guard bites as well. The
+  // three tests below exercise the two guards SEPARATELY, so neither can stand
+  // in for the other under a neuter.
+  // -------------------------------------------------------------------------
+  const KEY_IN_TAIL = ", headers := jsonb_build_object('X-Service-Key', 'FAKE-inline-key-0123456789abcdef'))";
+  const CLEAN_HEAD = "SELECT net.http_post(url := 'https://x.invalid/a'";
+
+  it("CR-R1-03: a 0x1E inside a command whose tail is WHITESPACE — both fragments are refused (the width guard)", () => {
+    const split = cronRecord(
+      ["2", "b_job", "*/5 * * * *", "t", "postgres", "postgres", `${CLEAN_HEAD}${KEY_IN_TAIL}${CRON_JOB_SEPARATORS.recordSep}   `],
+      2,
+    );
+    const { rows, malformed, total, countMismatch } = parseCronJobRows(renderRecords([GOOD_RECORD, split]));
+    // The head is SHORT because `total` is the last column and the split took
+    // it with the tail — that is the whole reason for the column's position.
+    expect(malformed.map((m) => m.fields), "the head lost its trailing count field, the tail is a stub").toEqual([
+      CRON_JOB_COLUMNS.length - 1,
+      2,
+    ]);
+    expect(rows.map((r) => r.jobname), "only the intact record survives as a row").toEqual(["a_job"]);
+    expect(total).toBe(2);
+    expect(countMismatch, "and the out-of-band count disagrees too — two independent readings, both loud").toContain(
+      "but this reading yielded",
+    );
+  });
+
+  it("CR-R1-03: a 0x1E whose tail is a FABRICATED well-formed record — a phantom job and a truncated real one", () => {
+    // ⛔ THE ONE THAT HIDES A CREDENTIAL. The tail carries enough field
+    // separators to look like a row of its own, so the real job's command is
+    // truncated to the clean head while the credential is attributed to a job
+    // that DOES NOT EXIST. Under `!== 7` this reported `malformed: []`.
+    const FS = CRON_JOB_SEPARATORS.fieldSep;
+    const fabricated = `9${FS}z_job${FS}* * * * *${FS}t${FS}postgres${FS}postgres${FS}${KEY_IN_TAIL}`;
+    const split = cronRecord(
+      ["3", "c_job", "*/5 * * * *", "t", "postgres", "postgres", `${CLEAN_HEAD}${CRON_JOB_SEPARATORS.recordSep}${fabricated}`],
+      2,
+    );
+    const { rows, malformed, countMismatch } = parseCronJobRows(renderRecords([GOOD_RECORD, split]));
+    expect(malformed.map((m) => m.fields), "the head is short by exactly the count column").toEqual([
+      CRON_JOB_COLUMNS.length - 1,
+    ]);
+    // The phantom is still PRESENT in `rows` — the parser cannot know it is a
+    // fragment. That is precisely why the refusal must come from the count.
+    expect(rows.map((r) => r.jobname)).toEqual(["a_job", "z_job"]);
+    expect(countMismatch, "2 rows in the database, 3 records in the reading — the only statement that catches it").toContain(
+      "reported 2 cron.job row(s) but this reading yielded 3 record(s)",
+    );
+    // CALIBRATION: the real command DOES carry a credential and the truncated
+    // head does NOT, so a reading that accepted the fragments would be a silent
+    // PASS on an inline service key and not merely a weaker finding.
+    expect(hygieneViolations("c_job", CLEAN_HEAD)).toEqual([]);
+    expect(hygieneViolations("c_job", `${CLEAN_HEAD}${KEY_IN_TAIL}`).length).toBeGreaterThan(0);
+  });
+
+  it("CR-R1-03: a stdout TRUNCATED at a record boundary is caught by the COUNT ALONE — every surviving record is well-formed", () => {
+    // ⭐ THE CASE THAT ISOLATES GUARD (B). Whole records are gone; nothing is a
+    // fragment; `malformed` is EMPTY and every width is exactly right. The
+    // field-count guard is structurally incapable of seeing this, which is what
+    // makes the out-of-band count a second guard rather than a belt on a belt.
+    const { rows, malformed, total, countMismatch } = parseCronJobRows(
+      renderRecords([cronRecord(["1", "a_job", "* * * * *", "t", "postgres", "postgres", "SELECT 1"], 3)]),
+    );
+    expect(malformed, "nothing is malformed — the width guard has nothing to say here").toEqual([]);
+    expect(rows.length).toBe(1);
+    expect(total).toBe(3);
+    expect(countMismatch).toContain("reported 3 cron.job row(s) but this reading yielded 1 record(s)");
+    // CALIBRATION: the same reading with the count AGREEING is silent, so
+    // "countMismatch is set" is a reading rather than a constant.
+    expect(
+      parseCronJobRows(renderRecords([cronRecord(["1", "a_job", "* * * * *", "t", "postgres", "postgres", "SELECT 1"], 1)]))
+        .countMismatch,
+    ).toBeNull();
+  });
+
+  it("CR-R1-03: CRON_JOB_SQL asks for the out-of-band count, and CRON_JOB_COLUMNS is the single source of the required width", () => {
+    // ⛔ THE QUERY AND THE PARSER MUST NOT DRIFT. A width the parser requires
+    // and a column list the query does not send is a reading that refuses
+    // everything; the reverse is a reading that refuses nothing.
+    expect(CRON_JOB_SQL).toContain("count(*) OVER () AS total");
+    expect(CRON_JOB_COLUMNS[CRON_JOB_COLUMNS.length - 1], "the count is LAST — see CR-R1-03 in the arm").toBe("total");
+    for (const col of CRON_JOB_COLUMNS.slice(0, -1)) expect(CRON_JOB_SQL).toContain(col);
+    // The parser requires exactly this width — asserted by construction rather
+    // than by a literal, so criterion 9 holds.
+    const full = cronRecord(["1", "a_job", "* * * * *", "t", "postgres", "postgres", "SELECT 1"], 1);
+    expect(full.split(CRON_JOB_SEPARATORS.fieldSep).length).toBe(CRON_JOB_COLUMNS.length);
+    expect(parseCronJobRows(renderRecords([full])).malformed).toEqual([]);
+  });
+
+  it("IN-R1-03: the main-module guard compares REAL PATHS, not a filename suffix", () => {
+    // ⛔ THE MIRROR OF THE `[VAC04-C2]` LESSON ITS SIBLING DOCUMENTS. That guard
+    // no-ops on a symlinked or space-bearing path and silently turns the CLI
+    // into a library; `argv[1].endsWith("run.mjs")` over-fires instead — ANY
+    // process whose argv[1] merely ENDS WITH `run.mjs`, including a future
+    // `scripts/<other>/run.mjs` that imports this module, would execute this
+    // CLI and call `process.exit`. Introduced in 42868a9b, not by this pass.
+    const runnerText = readFileSync(RUNNER_PATH, "utf8");
+    expect(runnerText, "the suffix test must be GONE, not merely joined by a better one").not.toContain(
+      'process.argv[1].endsWith("run.mjs")',
+    );
+    expect(runnerText).toContain("function invokedDirectly()");
+    expect(runnerText).toContain("if (invokedDirectly()) {");
+    // ⭐ IT IS THE SAME IDIOM AS THE SIBLING GATE, BYTE FOR BYTE at the line
+    // that does the work — one repository, one answer to "was I run directly".
+    const gucText = readFileSync(join(REPO_ROOT, "scripts", "lint-app-guc.mjs"), "utf8");
+    const CORE = "return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));";
+    expect(gucText, "PRECONDITION: the sibling really carries the idiom this one adopted").toContain(CORE);
+    expect(runnerText).toContain(CORE);
+    // CALIBRATION: the predicate finds what it forbids, so the `not` above is a
+    // reading rather than a regex that matches nothing.
+    expect(`${runnerText}\nif (process.argv[1].endsWith("run.mjs")) {}`).toContain(
+      'process.argv[1].endsWith("run.mjs")',
+    );
+  });
+
+  it("IN-R1-03: an UNPARSABLE jobid is refused by captureManifest, never serialised as null", () => {
+    // ⛔ `JSON.stringify(NaN)` IS `null`. `Number.parseInt("", 10)` is NaN, so a
+    // row whose jobid could not be read would have been written into the oracle
+    // as `"jobid": null` — and the next reader takes that null as the captured
+    // truth. jobid is deliberately NOT compared by compareManifest, but it IS
+    // printed beside every drift line so an operator can run `WHERE jobid = …`,
+    // which is exactly the use a null defeats.
+    expect(JSON.stringify({ jobid: Number.parseInt("", 10) }), "the mechanism, stated as a measurement").toBe(
+      '{"jobid":null}',
+    );
+    const runnerText = readFileSync(RUNNER_PATH, "utf8");
+    expect(runnerText).toContain("carry a jobid that is not an integer");
+    expect(runnerText, "the guard must run BEFORE the map that would serialise it").toContain(
+      "const badJobids = rows.filter(",
+    );
+    // The serialiser no longer reads the raw field directly.
+    expect(runnerText).not.toContain("jobid: Number.parseInt(r.jobid, 10)");
+  });
+
+  it("the arm floor is FOUR and the registry meets it", () => {
+    // Pinned at 4 while only one arm existed, on purpose: an incomplete prober
+    // must be LOUD. From here a `floor` defect means an arm was REMOVED.
+    expect(ARMS_FLOOR).toBe(4);
+    expect(ARMS.length).toBe(4);
+    expect(ARMS.map((a: { name: string }) => a.name).sort()).toEqual([
+      "cron-drift",
+      "cron-obs",
+      "mt5",
+      "pyapi06",
+    ]);
+  });
+
+  it("every hygiene-bypass row names rule ids that EXIST, and a misspelled id is caught", () => {
+    // The bypass fixture's `expect_any_of` is what the self-test scenario
+    // measures each row against. An id that no longer exists — renamed rule,
+    // typo — would make that assertion unsatisfiable in the silent direction,
+    // so the id set is checked against the arm's own list here.
+    const rows: Array<{ jobname: string; expect_any_of: string[] }> = JSON.parse(
+      readFileSync(join(PROBER_DIR, "fixtures", "cron-drift", "hygiene-bypass.json"), "utf8"),
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    const unknown = (rs: Array<{ expect_any_of: string[] }>) =>
+      rs.flatMap((r) => (r.expect_any_of || []).filter((id) => !HYGIENE_RULE_IDS.includes(id)));
+    for (const r of rows) expect(r.expect_any_of?.length, r.jobname).toBeGreaterThan(0);
+    expect(unknown(rows)).toEqual([]);
+
+    // CALIBRATION: the check above must be able to fail. Misspell one id on a
+    // COPY and assert the same predicate reports it.
+    const mutated = JSON.parse(JSON.stringify(rows));
+    mutated[0].expect_any_of[0] = `${mutated[0].expect_any_of[0]}-typo`;
+    expect(JSON.stringify(mutated)).not.toBe(JSON.stringify(rows));
+    expect(unknown(mutated).length).toBeGreaterThan(0);
+  });
+
+  it("a header NAME inside a comment is not an anchor, and removing the comment marker makes it one", () => {
+    // ⛔ D7's trap, calibrated in both directions. The header name is itself a
+    // string literal, so it is BLANK in `scanSql`'s mask and cannot be matched
+    // there; it is matched on the raw text and then CONFIRMED at the same index
+    // on the mask. Without that confirmation, a name sitting in a `--` comment
+    // — or inside a bigger literal — would anchor the rule and a long literal
+    // somewhere else entirely would be reported as a header credential.
+    //
+    // ⚠️ THE FIXTURE SHAPE IS LOAD-BEARING AND WAS CHOSEN BY MEASUREMENT. An
+    // anchor sitting in a comment with NO real code after it is already clean
+    // for a second reason — the value walk runs on the mask, where the comment
+    // is blank — so such a fixture passes even with this control removed and
+    // proves nothing. Here the comment ENDS at the newline and real code with a
+    // long literal follows, which is the case only the mask CONFIRMATION
+    // catches. PROBED: with `masked[m.index] !== "'"` neutered, the first
+    // command below fires `x-service-key-literal`.
+    const commented = "SELECT id FROM t -- 'X-Service-Key',\n WHERE k = 'FAKE-key-0123456789ab'";
+    // The SAME text with only the comment marker removed, so the anchor is code.
+    const uncommented = commented.replace(" -- ", "    ");
+    expect(uncommented).not.toBe(commented);
+
+    const ids = (cmd: string) =>
+      hygieneViolations("fixture_anchor_job", cmd).map((v: string) => v.slice(1, anchorIndex(v, "]")));
+    expect(ids(commented)).not.toContain("x-service-key-literal");
+    expect(ids(uncommented)).toContain("x-service-key-literal");
+  });
+
+  it("a command that is NOT A STRING is REFUSED, never judged clean — the second spelling of CR-R1-02's class", () => {
+    // ⛔ THE SAME INVARIANT AS CR-R1-02, ONE LAYER DOWN. `hygieneViolations`
+    // opened with `String(command ?? "")`, so `undefined`, `null` and a number
+    // all became the EMPTY command — which trips no rule and therefore returned
+    // `[]`, byte-identical to the answer for "judged, and clean". MEASURED
+    // 2026-09-11 before the fix: all four of the calls below returned `[]`.
+    //
+    // The manifest side had its own totality check (a row whose `command` is
+    // not a string is a WITHHELD row and is skipped deliberately). The PROD
+    // side — the one read live out of a database — had nothing.
+    //
+    // ⭐ IT MUST THROW rather than return a violation id: that is how every
+    // other refusal in this function is spelled, and both callers already route
+    // a throw to a per-row `measure-fail` rather than to a credential finding.
+    for (const bad of [undefined, null, 12345, { toString: () => "SELECT 1" }] as unknown[]) {
+      expect(() => hygieneViolations("a_job", bad as string), `command ${String(bad)} must be refused`).toThrow(
+        /not a string/,
+      );
+    }
+    // CALIBRATION: a real string on the same call path is judged rather than
+    // refused, so "it throws" is a reading about the TYPE and not something
+    // this function now always does.
+    expect(hygieneViolations("a_job", "SELECT 1")).toEqual([]);
+  });
+
+  it("an ABSENT jobname is an ADDITIVE refusal, never a substitutive one — every other rule still runs and still reports (CR-R2-01)", () => {
+    // ⛔ THE THIRD TIME THIS PHASE SHIPPED A GUARD THAT CLOSED ITS OWN
+    // REPRODUCTION AND LEFT THE CLASS OPEN. Round 1 made an absent jobname
+    // THROW, beside the non-string-command throw above. A throw here is
+    // REPLACEMENT: `compareManifest` routes it to a per-row `measure-fail` and
+    // `continue`s, so NO credential rule ran for that row.
+    //
+    // ⛔ AND IT NEEDED NO ADVERSARY. `cron.job.jobname` is NULLable; pg_cron's
+    // TWO-ARGUMENT `cron.schedule(schedule, command)` leaves it NULL; `psql
+    // -At` renders NULL as the empty string. It was also a one-step off-switch
+    // (`cron.unschedule` then the two-arg `cron.schedule`).
+    //
+    // ⛔ THE SCOPE ARGUMENT DID NOT SUPPORT THE BLAST RADIUS: the jobname
+    // scopes exactly ONE rule (`vault-absent`, gated on
+    // `name === "match_engine_cron"`), and the refusal disabled every rule in
+    // `HYGIENE_RULE_IDS`. THE ASYMMETRY WITH THE TEST ABOVE IS THE POINT — a
+    // non-string COMMAND cannot be scanned at all; a nameless row can be
+    // scanned completely except for the one rule keyed on the name.
+    const ids = (jobname: unknown, cmd: string) =>
+      hygieneViolations(jobname as string, cmd).map((v: string) => v.slice(1, anchorIndex(v, "]")));
+    // 39 characters, digit-bearing, split into short operands so no
+    // credential-shaped token is typed whole into a PUBLIC repo.
+    const KEY = `FAKE-0123456789${"-0123456789"}${"-0123456789ab"}`;
+    const leaky = `SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', '${KEY}'));`;
+
+    // CONTROL — the same command under a jobname. This is the reading the
+    // unnamed spellings must not fall short of.
+    expect(ids("named_job", leaky)).toEqual(["x-service-key-literal", "long-literal-in-headers"]);
+
+    // ⭐ EVERY SPELLING OF "NO JOBNAME" REPORTS THE CREDENTIAL, plus the
+    // refusal. Before the fix each of these THREW and the credential was never
+    // named at all.
+    for (const absent of ["", "   ", null, undefined, 12345] as unknown[]) {
+      expect(ids(absent, leaky), `jobname ${String(absent)} must still name the credential`).toEqual([
+        "jobname-absent",
+        "x-service-key-literal",
+        "long-literal-in-headers",
+      ]);
+    }
+
+    // CALIBRATION THE OTHER WAY: the refusal is not a blanket finding — a clean
+    // command under an absent jobname reports the refusal ALONE, which is what
+    // keeps `hygiene-red.json`'s `jobname-absent` row one-rule isolated.
+    expect(ids("", "SELECT 1")).toEqual(["jobname-absent"]);
+    // …and a NAMED row never carries it, so the id cannot become noise.
+    expect(ids("a_job", "SELECT 1")).toEqual([]);
+
+    // ⛔ IT IS A REFUSAL, NOT A CREDENTIAL RULE: it must route to
+    // `measure-fail`, never to a rotation remedy. `splitHygiene` is the single
+    // place that partition is made.
+    const { credential, unjudgeable } = splitHygiene(hygieneViolations("", leaky));
+    expect(unjudgeable.map((v: string) => v.slice(1, anchorIndex(v, "]")))).toEqual(["jobname-absent"]);
+    expect(credential.map((v: string) => v.slice(1, anchorIndex(v, "]")))).toEqual([
+      "x-service-key-literal",
+      "long-literal-in-headers",
+    ]);
+  });
+
+  it("TOKEN_MIN equals HEADERS_LITERAL_MAX — ONE of the two conditions the Q2 region partition needs; the other is that the header measurement actually COUNTED the literal, asserted separately below", () => {
+    // ⛔ THE INVARIANT, NOT THE VALUE. `long-token-anywhere` deliberately
+    // EXCLUDES header regions so it cannot collide with
+    // `long-literal-in-headers` on a red row. That exclusion needs
+    // `TOKEN_MIN >= HEADERS_LITERAL_MAX`: a whitespace-delimited token of
+    // `TOKEN_MIN` characters lives inside a literal of at least that length,
+    // which is an argument of at least `HEADERS_LITERAL_MAX` DERIVED length,
+    // which is precisely what `long-literal-in-headers` fires on. Raise
+    // `HEADERS_LITERAL_MAX` to 40 in some later phase and a 32-39 character
+    // digit-bearing token inside a header region is caught by NOBODY, silently.
+    // The `header_region_only` bypass row measures today's values; THIS pins the
+    // relation.
+    //
+    // Equality rather than `>=`: `>=` is what the partition needs, equality is
+    // what the DERIVATION in cron-drift.mjs says
+    // (`export const TOKEN_MIN = HEADERS_LITERAL_MAX;`), and a divergence in
+    // either direction is a decision somebody must make on purpose.
+    expect(TOKEN_MIN).toBe(HEADERS_LITERAL_MAX);
+
+    // ⭐ AND IT IS ONE SOURCE OF TRUTH BY SOURCE LINE, not merely two literals
+    // that happen to agree at runtime. A second `32` would satisfy the
+    // assertion above and re-open the drift it exists to close.
+    const armText = readFileSync(join(PROBER_DIR, "arms", "cron-drift.mjs"), "utf8");
+    expect(armText).toContain("export const TOKEN_MIN = HEADERS_LITERAL_MAX;");
+    expect(armText).toContain("export const HEADERS_LITERAL_MAX = 32;");
+    // CALIBRATION: the same predicate reports the literal spelling, so
+    // "the derivation is present" is a reading and not a tautology.
+    const mutated = armText.replace(
+      "export const TOKEN_MIN = HEADERS_LITERAL_MAX;",
+      "export const TOKEN_MIN = 32;",
+    );
+    expect(mutated).not.toBe(armText);
+    expect(mutated).not.toContain("export const TOKEN_MIN = HEADERS_LITERAL_MAX;");
+  });
+
+  it("CR-R1-01: the header-region exclusion is conditional on the literal having been COUNTED, not on it merely being LOCATED in a region", () => {
+    // ⛔ THE SECOND CONDITION THE PARTITION NEEDS, AND THE ONE THE TITLE ABOVE
+    // USED TO OVERSTATE AWAY. `TOKEN_MIN >= HEADERS_LITERAL_MAX` is necessary
+    // and NOT sufficient: `derivedLiteralLength` deliberately refuses to enter
+    // `(SELECT …)` and skips whole any `(` whose callee is not in `BUILDERS`,
+    // so a literal behind either derives 0 — the three anchored header rules
+    // measure 0 < HEADER_LITERAL_MIN, `long-literal-in-headers` does not fire,
+    // and `long-token-anywhere` had been switched off for that whole region.
+    //
+    // ⛔ AND THE SHAPE IS ORDINARY CODE. MEASURED 2026-09-11 before the fix,
+    // every row below except the two CONTROLs returned `[]` from every rule in
+    // `HYGIENE_RULE_IDS`, and captureManifest then WROTE the key into the
+    // oracle committed to a public repository.
+    const KEY = `FAKE-${"abcdef0123"}${"456789abcd"}${"ef0123456789"}`;
+    expect(KEY.length, "the fixture key must be over TOKEN_MIN or this test proves nothing").toBeGreaterThan(TOKEN_MIN);
+    const ids = (cmd: string) => hygieneViolations("a_job", cmd).map((x) => x.slice(1, anchorIndex(x, "]")));
+    const header = (value: string) =>
+      `SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('Content-Type','application/json','X-Service-Key', ${value}));`;
+
+    // Every wrapper `derivedLiteralLength` refuses to descend into.
+    for (const wrapped of [`coalesce(nullif(v_key,''), '${KEY}')`, `nullif('${KEY}', '')`, `(SELECT '${KEY}')`, `util_wrap('${KEY}')`]) {
+      expect(ids(header(wrapped)), `an uncounted literal under an anchored header name must be NAMED by a rule: ${wrapped}`).toContain(
+        "long-token-anywhere",
+      );
+    }
+
+    // CONTROL 1 — a literal the header walk DID count keeps belonging to
+    // `long-literal-in-headers` ALONE. Without this the "fix" would be a
+    // collision that breaks every red row's one-rule isolation.
+    expect(ids(header(`'${KEY}'`))).toContain("long-literal-in-headers");
+    expect(ids(header(`'${KEY}'`)), "a COUNTED header literal must NOT also fire the token rule — that is the Q2 partition").not.toContain(
+      "long-token-anywhere",
+    );
+    // CONTROL 2 — the same wrapper outside any header region always fired, so
+    // the rows above are a reading about the REGION and not about coalesce().
+    expect(ids(`SELECT net.http_post(url := 'https://x.invalid/a', body := coalesce(nullif(v_key,''), '${KEY}')::jsonb);`)).toContain(
+      "long-token-anywhere",
+    );
+  });
+
+  it("BARE_URL_RE exempts a bare URL and NOTHING that carries a token or credentials", () => {
+    // ⛔ THE EXEMPTION IS THE RULE'S ONLY WAY TO BE WRONG IN THE QUIET
+    // DIRECTION. `long-token-anywhere` skips bare URLs because the committed
+    // corpus carries one 79-character analytics URL and firing on it every hour
+    // would train the reader to ignore the whole class. Widen the pattern by one
+    // character class and `…?token=<key>` — a real way a key reaches a cron
+    // command — becomes exempt too.
+    const RAILWAY =
+      "https://quantalyze-analytics-production.up.railway.app/api/match/cron-recompute-0123456789";
+    expect(BARE_URL_RE.test(RAILWAY)).toBe(true);
+    expect(BARE_URL_RE.test("https://x.invalid/a?token=1")).toBe(false);
+    expect(BARE_URL_RE.test("https://u:p1@x.invalid/")).toBe(false);
+    expect(BARE_URL_RE.test("https://x.invalid:8443/a/b")).toBe(true);
+
+    // CALIBRATION: a mutant that allows `?` flips the query-string case while
+    // leaving the bare URL exempt — so the `false` above is this pattern's
+    // reading rather than something every URL regex would say.
+    const loosened = new RegExp(BARE_URL_RE.source.replace("._~/-", "._~/?=-"));
+    expect(loosened.source).not.toBe(BARE_URL_RE.source);
+    expect(loosened.test("https://x.invalid/a?token=1")).toBe(true);
+    expect(loosened.test(RAILWAY)).toBe(true);
+  });
+
+  it("CR-04: the exemption is `isBareUrl`, not `BARE_URL_RE` — a credential in a PATH SEGMENT is not a bare URL", () => {
+    // ⛔ THE DOCSTRING REASONED ABOUT `?`, `#` AND `user:pw@` AND NEVER ABOUT
+    // THE PATH — which is the commonest webhook-token shape there is. Every
+    // character of a `FAKE-0123…` credential is inside `BARE_URL_RE`'s own path
+    // charset, so `https://hook.invalid/t/<token>` MATCHED and was exempted,
+    // while the query-string spelling of the same credential fired. Both
+    // directions were reproduced before the fix.
+    const TOKEN = `FAKE${"-0123456789"}${"-0123456789"}${"-0123456789ab"}`;
+    const PATH_FORM = `https://hook.invalid/t/${TOKEN}`;
+    // The shape test still says "this looks like a URL" — which is precisely
+    // why it could not be the exemption on its own.
+    expect(BARE_URL_RE.test(PATH_FORM), "the raw shape test is still fooled, and always was").toBe(true);
+    expect(isBareUrl(PATH_FORM), "the EXEMPTION is not").toBe(false);
+
+    // The one URL the exemption exists for stays exempt, or the false-positive
+    // budget on the committed corpus goes from zero to one.
+    const RAILWAY = "https://quantalyze-analytics-production.up.railway.app/api/match/cron-recompute";
+    expect(isBareUrl(RAILWAY)).toBe(true);
+    expect(isBareUrl("https://x.invalid:8443/a/b")).toBe(true);
+    expect(isBareUrl("https://x.invalid/a?token=1"), "and everything BARE_URL_RE already rejected stays rejected").toBe(
+      false,
+    );
+
+    // ⛔ THE SEGMENT THRESHOLD IS `TOKEN_MIN`, DERIVED. Calibrated in both
+    // directions ON THE BOUNDARY so the number is measured, not asserted: one
+    // character under is exempt, exactly at it is not.
+    const digitSeg = (n: number) => `https://hook.invalid/${"a1".repeat(Math.ceil(n / 2)).slice(0, n)}`;
+    expect(isBareUrl(digitSeg(TOKEN_MIN - 1)), `a ${TOKEN_MIN - 1}-character segment is still a path`).toBe(true);
+    expect(isBareUrl(digitSeg(TOKEN_MIN)), `a ${TOKEN_MIN}-character segment is a credential`).toBe(false);
+    // …and the DIGIT half of the rule's own test applies to a segment too: a
+    // purely alphabetic segment of any length stays exempt, exactly as a purely
+    // alphabetic token does (the A2 residual, unchanged).
+    expect(isBareUrl(`https://hook.invalid/${"a".repeat(TOKEN_MIN + 8)}`)).toBe(true);
+
+    // ⛔ WR-R1-02 — THE UUID SEGMENT, CALIBRATED IN BOTH DIRECTIONS. A UUID is
+    // 36 characters and contains digits, so before this narrowing EVERY
+    // resource-scoped REST path failed the exemption and fired a rule whose
+    // remedy is "treat the named secret as EXPOSED and rotate it first". The
+    // exemption is the CANONICAL 8-4-4-4-12 layout and nothing looser, so it
+    // cannot absorb an opaque key of the same length.
+    const UUID = "123e4567-e89b-12d3-a456-426614174000";
+    expect(UUID.length, "the two sides of this calibration must be the SAME LENGTH or it proves nothing").toBe(36);
+    expect(isBareUrl(`https://x.invalid/api/strategies/${UUID}`), "an ordinary resource-scoped REST path is NOT a credential").toBe(
+      true,
+    );
+    const OPAQUE = `FAKE-${"a1".repeat(16)}`.slice(0, 36);
+    expect(OPAQUE.length).toBe(36);
+    expect(CANONICAL_UUID_RE.test(OPAQUE), "the control segment must NOT be a UUID or the calibration is vacuous").toBe(false);
+    expect(isBareUrl(`https://x.invalid/api/strategies/${OPAQUE}`), "a same-length OPAQUE segment still fires").toBe(false);
+    // And the layout is load-bearing, not the charset: shifting one hyphen by a
+    // single character breaks the exemption.
+    expect(isBareUrl(`https://x.invalid/api/strategies/${UUID.replace("-e89b-", "e89b--")}`)).toBe(false);
+
+    // End to end through the rule, both spellings of the same credential.
+    const ids = (cmd: string) => hygieneViolations("j", cmd).map((x) => x.slice(1, anchorIndex(x, "]")));
+    expect(ids(`DO $$ BEGIN PERFORM net.http_post(url := '${PATH_FORM}'); END $$`)).toContain("long-token-anywhere");
+    expect(ids(`DO $$ BEGIN PERFORM net.http_post(url := 'https://hook.invalid/a?token=${TOKEN}'); END $$`)).toContain(
+      "long-token-anywhere",
+    );
+  });
+
+  it("WR-R2-01: a credential in a HOST LABEL is not a bare URL either — CR-04's question, asked of the AUTHORITY", () => {
+    // ⛔ CR-04 CLOSED THE PATH HALF AND THE AUTHORITY HALF WAS LEFT OPEN, WHILE
+    // TWO DOCSTRINGS ASSERTED IT WAS CLOSED — one of them literally "the
+    // exemption can never be the reason a credential goes unreported". A host
+    // label matches `[A-Za-z0-9.-]+` in full, so every character of an opaque
+    // key is inside `BARE_URL_RE`'s own authority charset: byte-for-byte the
+    // CR-04 defect moved LEFT of the first `/`.
+    //
+    // MEASURED on the parent commit: `isBareUrl('https://<39-char key>.invalid/a')`
+    // was `true` and the command reported `[]` from every rule, while the same
+    // key in a path segment and the same key bare both fired.
+    const TOKEN = `FAKE${"-0123456789"}${"-0123456789"}${"-0123456789ab"}`;
+    const HOST_FORM = `https://${TOKEN}.invalid/a`;
+    expect(BARE_URL_RE.test(HOST_FORM), "the raw shape test is fooled here too, and always was").toBe(true);
+    expect(isBareUrl(HOST_FORM), "the EXEMPTION is not").toBe(false);
+
+    // Both directions, ON THE BOUNDARY, so the threshold is measured rather
+    // than asserted — and it is the SAME `TOKEN_MIN` the path half uses.
+    const digitLabel = (n: number) => `https://${"a1".repeat(Math.ceil(n / 2)).slice(0, n)}.invalid/a`;
+    expect(isBareUrl(digitLabel(TOKEN_MIN - 1)), `a ${TOKEN_MIN - 1}-character host label is still a host`).toBe(true);
+    expect(isBareUrl(digitLabel(TOKEN_MIN)), `a ${TOKEN_MIN}-character host label is a credential`).toBe(false);
+    // The digit half applies to a label too (the A2 residual, unchanged).
+    expect(isBareUrl(`https://${"a".repeat(TOKEN_MIN + 8)}.invalid/a`)).toBe(true);
+
+    // ⛔ THE COMMITTED URL'S LONGEST LABEL IS 31 — ONE UNDER `TOKEN_MIN`. The
+    // margin is measured here rather than trusted, because the FP budget on the
+    // committed corpus depends on it and `TOKEN_MIN` (3) already names this
+    // one-character fragility as the rule's stated hazard.
+    const RAILWAY = "https://quantalyze-analytics-production.up.railway.app/api/match/cron-recompute";
+    const labels = RAILWAY.replace(/^https?:\/\//, "").split("/")[0].split(".");
+    expect(Math.max(...labels.map((l) => l.length))).toBe(TOKEN_MIN - 1);
+    expect(isBareUrl(RAILWAY), "so the one URL the exemption exists for stays exempt").toBe(true);
+
+    // A PORT is not a token: `app:8443` is judged as the label `app`.
+    expect(isBareUrl("https://x.invalid:8443/a/b")).toBe(true);
+
+    // End to end through the rule — and the two CONTROLs that make the reading
+    // attributable: the same key bare, and the same key in a path segment.
+    const ids = (cmd: string) => hygieneViolations("j", cmd).map((x) => x.slice(1, anchorIndex(x, "]")));
+    expect(ids(`PERFORM net.http_post(url := '${HOST_FORM}');`)).toEqual(["long-token-anywhere"]);
+    expect(ids(`PERFORM foo('${TOKEN}');`)).toEqual(["long-token-anywhere"]);
+    expect(ids(`PERFORM net.http_post(url := 'https://x.invalid/t/${TOKEN}');`)).toEqual(["long-token-anywhere"]);
+  });
+
+  it("WR-R2-07: an ordinary URL in PROSE does not fire a rotation remedy, and the same URL carrying a key still does", () => {
+    // ⛔ A ZERO-FP-BUDGET LEAK WITH A "ROTATE THE EXPOSED SECRET" REMEDY.
+    // `BARE_URL_RE` is anchored `^…$` and the exemption was applied to the whole
+    // whitespace-delimited token, so any adjacent character outside the path
+    // charset `[A-Za-z0-9._~/-]` destroyed it. `.` is in that charset; `,` `)`
+    // `;` `'` are not. MEASURED on the parent commit, prose carrying no
+    // credential anywhere, hourly against real PROD commands.
+    const ids = (cmd: string) => hygieneViolations("j", cmd).map((x) => x.slice(1, anchorIndex(x, "]")));
+    const URL_ = "https://api.example.com/v1/ingest";
+    expect(URL_.length).toBeGreaterThanOrEqual(TOKEN_MIN);
+    expect(/\d/.test(URL_), "the URL must carry a digit or this calibration is vacuous").toBe(true);
+
+    expect(ids(`DO $b$ BEGIN RAISE NOTICE 'see ${URL_}, then retry'; END $b$`)).toEqual([]);
+    expect(ids(`SELECT 'endpoint (${URL_})';`)).toEqual([]);
+    expect(ids(`SELECT 'see ${URL_}; retry';`)).toEqual([]);
+    // CONTROL — the same URL with nothing glued to it was already clean, so the
+    // three readings above measure the TRIM and not the URL.
+    expect(ids(`SELECT 'endpoint ${URL_}';`)).toEqual([]);
+
+    // ⛔ THE OTHER DIRECTION, AND IT IS THE ONE THAT MATTERS: trimming is for
+    // the EXEMPTION only. The length test still reads the real token, and a URL
+    // whose PATH SEGMENT is a credential still fires with punctuation attached.
+    const TOKEN = `FAKE${"-0123456789"}${"-0123456789"}${"-0123456789ab"}`;
+    expect(ids(`PERFORM net.http_post(url := 'https://hook.invalid/t/${TOKEN},');`)).toEqual(["long-token-anywhere"]);
+    expect(ids(`SELECT 'key (${TOKEN})';`)).toEqual(["long-token-anywhere"]);
+    expect(ids(`SELECT 'see https://${TOKEN}.invalid/a, then retry';`)).toEqual(["long-token-anywhere"]);
+  });
+
+  it("WR-R2-05: the dollar-depth refusal is additive AT EVERY OFFSET — reordering two statements cannot silence a credential", () => {
+    // ⛔ WR-R1-03 MADE THE REFUSAL ADDITIVE AT THE CALL SITE AND LEFT IT
+    // SUBSTITUTIVE INSIDE THE RECURSION. `codeSpans` threw from within its own
+    // walk, so the PARENT's remaining `dollarRegions` loop and its entire
+    // single-quoted-body walk were abandoned — everything not yet pushed was
+    // lost, not merely the too-deeply-nested body.
+    //
+    // MEASURED on the parent commit:
+    //   SIBLING then DEEP -> ["command-unjudgeable","x-service-key-literal","long-literal-in-headers"]
+    //   DEEP then SIBLING -> ["command-unjudgeable"]                 <-- credential NOT named
+    // and `command-unjudgeable` is in UNJUDGEABLE_RULE_IDS, so the row routed
+    // to `measure-fail` with no rotation remedy. Order-dependence in a refusal
+    // is the substitutive bug wearing a different hat.
+    const ids = (cmd: string) => hygieneViolations("j", cmd).map((x) => x.slice(1, anchorIndex(x, "]")));
+    const KEY = `FAKE-0123456789${"-0123456789"}${"-0123456789ab"}`;
+    // Six nested DO bodies, carrying NO credential — it is the depth alone that
+    // makes the lexer give up.
+    const DEEP = "DO $t5$ DO $t4$ DO $t3$ DO $t2$ DO $t1$ DO $t0$ PERFORM noop(); $t0$ $t1$ $t2$ $t3$ $t4$ $t5$";
+    // An ordinary depth-1 DO body carrying the inline key. Nothing exotic.
+    const SIB = `DO $y$ BEGIN PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', '${KEY}')); END $y$`;
+
+    const EXPECTED = ["command-unjudgeable", "x-service-key-literal", "long-literal-in-headers"];
+    // CONTROLs first, so the two readings below are attributable.
+    expect(ids(`${SIB};`), "the sibling alone names the credential").toEqual([
+      "x-service-key-literal",
+      "long-literal-in-headers",
+    ]);
+    expect(ids(`${DEEP};`), "the deep block alone is the refusal and nothing else").toEqual(["command-unjudgeable"]);
+
+    // ⭐ THE INVARIANT: the SAME two statements, either order, the SAME verdict.
+    expect(ids(`${SIB}; ${DEEP};`)).toEqual(EXPECTED);
+    expect(ids(`${DEEP}; ${SIB};`)).toEqual(EXPECTED);
+
+    // ⚠️ THE RESIDUAL, AT ITS REAL WIDTH AND MEASURED RATHER THAN ARGUED: a
+    // credential INSIDE the too-deep body is still unreported. Those spans were
+    // never read and `command-unjudgeable` is the honest verdict about them.
+    // FIX-R1 recorded this residual with the key in the OUTER command, which is
+    // `spans[0]` and could never have been lost — so it measured the wrong
+    // thing. This assertion pins the residual where it actually lives, so a
+    // future narrowing of MAX_DOLLAR_DEPTH's blast radius has a red surface.
+    const DEEPKEY = `DO $t5$ DO $t4$ DO $t3$ DO $t2$ DO $t1$ DO $t0$ PERFORM foo('${KEY}'); $t0$ $t1$ $t2$ $t3$ $t4$ $t5$`;
+    expect(ids(`${DEEPKEY};`)).toEqual(["command-unjudgeable"]);
+  });
+
+  it("WR-R2-02: a jobname NOBODY recorded a verdict for is UNJUDGED, never judged-and-clean", () => {
+    // ⛔ THE CONTROL THAT COULD NOT FAIL. `164.8.5-FIX-R1-SUMMARY.md` presented
+    // `?? UNRECORDED` as the durable half of CR-R1-02's closure — "a future
+    // third producer that forgets to record cannot re-open this hole". Nothing
+    // could observe it: MEASURED 2026-09-11, neutering it back to
+    // `?? { judged: true, violations: [], reason: null }` (the exact pre-fix
+    // coercion) left the self-test at 73/73 and vitest at 118/118.
+    //
+    // It is unreachable from TODAY'S two producers by construction — the PROD
+    // loop records for every row before any `continue`, and the only manifest
+    // rows skipped are `typeof row.command !== "string"`, which is byte-for-byte
+    // the `withheld` predicate whose branch is taken first.
+    //
+    // ⭐ THE FIX IS A SURFACE, NOT A DELETION. Deleting the default would make
+    // the consumer crash on `undefined.judged` — a defence traded for a latent
+    // TypeError. What was wrong was presenting an unfalsifiable line as
+    // coverage, so the helper is exported and its CONTRACT is pinned here.
+    expect(hygieneVerdict(new Map(), "a_job")).toEqual({
+      judged: false,
+      violations: [],
+      reason: "no hygiene verdict was recorded for this row at all",
+    });
+    expect(hygieneVerdict(new Map(), "a_job").judged, "absence is NOT a pass").toBe(false);
+    // …and it is the shared frozen sentinel, so a consumer cannot mutate the
+    // default into a pass for every later reader.
+    expect(hygieneVerdict(new Map(), "a_job")).toBe(UNRECORDED_VERDICT);
+    expect(Object.isFrozen(UNRECORDED_VERDICT)).toBe(true);
+
+    // CALIBRATION: a RECORDED verdict is returned unchanged, so "unjudged" is a
+    // reading about absence rather than something this helper always says.
+    type Verdict = { judged: boolean; violations: string[]; reason: string | null };
+    const clean: Verdict = { judged: true, violations: [], reason: null };
+    const dirty: Verdict = { judged: true, violations: ["[x-service-key-literal] …"], reason: null };
+    const refused: Verdict = { judged: false, violations: [], reason: "the functions snapshot is absent" };
+    const map = new Map<string, Verdict>([
+      ["clean_job", clean],
+      ["dirty_job", dirty],
+      ["refused_job", refused],
+    ]);
+    expect(hygieneVerdict(map, "clean_job")).toBe(clean);
+    expect(hygieneVerdict(map, "dirty_job")).toBe(dirty);
+    expect(hygieneVerdict(map, "refused_job")).toBe(refused);
+    // The three are pairwise distinguishable, which is the whole point of
+    // recording a VERDICT rather than a bare array.
+    expect(hygieneVerdict(map, "clean_job").judged).toBe(true);
+    expect(hygieneVerdict(map, "refused_job").judged).toBe(false);
+    expect(hygieneVerdict(map, "clean_job").violations).toHaveLength(0);
+    expect(hygieneVerdict(map, "dirty_job").violations).toHaveLength(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // PROVENANCE TEXT READ AS A CREDENTIAL — found by the parallel hunt, not by
+  // the review, and IMMINENT rather than theoretical.
+  //
+  // WR-R1-01 gave `long-token-anywhere` a second producer — comment bodies —
+  // and comments are where PROVENANCE lives. MEASURED 2026-09-11, every one of
+  // these fired a rule whose remedy is "treat the named secret as EXPOSED and
+  // rotate it first", on text carrying no credential at all: a migration
+  // filename, a git sha, a phase-directory name, a bare UUID, a GitHub commit
+  // URL.
+  //
+  // ⚠️ `retention_compute_jobs_orphaned_running` lexes to a pure comment and is
+  // clean today only because its one long token, `CANARY_162_V1_PROSE_ONLY`, is
+  // 24 characters — EIGHT under TOKEN_MIN. That row has a pending PROD
+  // re-capture; one migration filename in the re-captured text makes
+  // `captureManifest` exit 1 under "Rotate the exposed secret" and write
+  // nothing.
+  //
+  // ⛔ TWO EXEMPTIONS, TWO `it()`s, because they are TWO EDITS. A single test
+  // covering both would credit one RED to two controls — the shape WR-R2-03 was
+  // filed for.
+  // -------------------------------------------------------------------------
+  const PROV_MIGRATION = "20260907130000_ledger_refresh_switch_to_system_flags.sql";
+  const PROV_UUID = "123e4567-e89b-12d3-a456-426614174000";
+  const PROV_KEY = `FAKE-0123456789${"-0123456789"}${"-0123456789ab"}`;
+  const provIds = (cmd: string) => hygieneViolations("j", cmd).map((x) => x.slice(1, anchorIndex(x, "]")));
+
+  it("PROVENANCE 1/2: a CANONICAL UUID is not a credential, in a comment or in a literal", () => {
+    // ⛔ `isBareUrl` has exempted a UUID since WR-R1-02 — but ONLY as a
+    // `/`-delimited PATH SEGMENT, so `-- strategy 123e4567-…` fired while
+    // `https://x/api/strategies/123e4567-…` did not. Same shape, same argument
+    // (fixed length, fixed 8-4-4-4-12 layout, cannot absorb an opaque key), two
+    // answers. Hoisted so the three producers give ONE answer.
+    expect(PROV_UUID.length).toBe(36);
+    expect(provIds(`-- strategy ${PROV_UUID}\nSELECT 1;`)).toEqual([]);
+    expect(provIds(`SELECT 'strategy ${PROV_UUID}';`)).toEqual([]);
+    expect(isBareUrl(`https://x.invalid/api/strategies/${PROV_UUID}`), "…and the URL walk agrees, as it already did").toBe(true);
+
+    // ⛔ CANONICAL AND NOTHING LOOSER, calibrated at the SAME LENGTH so it
+    // cannot absorb an opaque key.
+    const OPAQUE = `FAKE-${"a1".repeat(16)}`.slice(0, 36);
+    expect(OPAQUE.length).toBe(36);
+    expect(CANONICAL_UUID_RE.test(OPAQUE), "the control must NOT be a UUID or this proves nothing").toBe(false);
+    expect(provIds(`-- strategy ${OPAQUE}\nSELECT 1;`)).toEqual(["long-token-anywhere"]);
+    expect(provIds(`-- strategy ${PROV_UUID.replace("-e89b-", "e89b--")}\nSELECT 1;`), "one shifted hyphen breaks it").toEqual([
+      "long-token-anywhere",
+    ]);
+    // CONTROL: an ordinary opaque key in the same two positions is still named.
+    expect(provIds(`-- k = ${PROV_KEY}\nSELECT 1;`)).toEqual(["long-token-anywhere"]);
+    expect(provIds(`SELECT '${PROV_KEY}';`)).toEqual(["long-token-anywhere"]);
+  });
+
+  it("PROVENANCE 2/2: a migration FILENAME is not a credential — in a COMMENT ONLY, and only in this repo's exact shape", () => {
+    expect(PROV_MIGRATION.length).toBeGreaterThanOrEqual(TOKEN_MIN);
+    expect(provIds(`-- added by ${PROV_MIGRATION}\nSELECT 1;`)).toEqual([]);
+    expect(provIds(`/* added by ${PROV_MIGRATION} */ SELECT 1;`)).toEqual([]);
+
+    // ⛔ NOT EXEMPT IN A LITERAL. A filename inside a string literal is an
+    // argument to something, and this rule's subject is values.
+    expect(provIds(`SELECT 'see ${PROV_MIGRATION}';`)).toEqual(["long-token-anywhere"]);
+
+    // ⛔ BOTH HALVES OF THE SHAPE ARE LOAD-BEARING, EACH BROKEN ALONE. Without
+    // them, "any token ending in a source extension" would be a one-step
+    // off-switch: append `.sql` to a key inside a comment and the rule goes
+    // quiet — precisely the class WR-R1-01 closed.
+    expect(provIds(`-- ${PROV_KEY}.sql\nSELECT 1;`), "a key with .sql glued on is NOT a migration filename").toEqual([
+      "long-token-anywhere",
+    ]);
+    expect(provIds("-- 20260907130000_ledger_refresh_switch_to_system_flags.txt\nSELECT 1;"), "wrong suffix").toEqual([
+      "long-token-anywhere",
+    ]);
+    expect(provIds("-- 2026090713000_ledger_refresh_switch_to_system_flags.sql\nSELECT 1;"), "13-digit prefix").toEqual([
+      "long-token-anywhere",
+    ]);
+    expect(provIds(`-- ${PROV_MIGRATION.toUpperCase()}\nSELECT 1;`), "uppercase body").toEqual(["long-token-anywhere"]);
+
+    // ⚠️ MEASURED AND LEFT OPEN, pinned so a future reader finds the DECISION
+    // rather than re-discovering the behaviour: a bare 40-character git sha, a
+    // phase-directory name and a GitHub commit URL still fire. A hex-only token
+    // IS a credential family this arm names by name ("hex digests"), so
+    // exempting one would blind the rule to a shape it exists for.
+    expect(provIds("-- see commit 88581b8bc66415bfa86b7d5a019741b1cbd0ff49\nSELECT 1;")).toEqual(["long-token-anywhere"]);
+    expect(provIds("-- 164.8.5-proberparse-the-prod-prober-hygiene-rules-stop-being-dodgeab\nSELECT 1;")).toEqual([
+      "long-token-anywhere",
+    ]);
+    expect(
+      provIds("-- https://github.com/AI-Isaiah/quantalyze/commit/88581b8bc66415bfa86b7d5a019741b1cbd0ff49\nSELECT 1;"),
+    ).toEqual(["long-token-anywhere"]);
+  });
+
+  it("IN-R2-03: `parseCronJobRows` addresses every field through CRON_JOB_COLUMNS — no hand-typed ordinals survive", () => {
+    // ⛔ A REFACTOR WITH NO OBSERVABLE BEHAVIOUR TODAY, SO THE CONTROL IS A PIN
+    // AND A PROOF, NOT A RED FIXTURE — the same idiom the F5 deletion uses
+    // below. Under the CURRENT column order, name-addressed and ordinal
+    // extraction return identical rows by construction, so any behavioural
+    // assertion here would be a control that cannot fail.
+    //
+    // THE DEFECT IT CLOSES: the WIDTH guard was derived
+    // (`f.length !== CRON_JOB_COLUMNS.length`) while the EXTRACTION was seven
+    // hand-typed ordinals plus `f[7]` for `total`. Reordering the file's own
+    // stated "one source of the field count" would have mis-assigned every
+    // field while the guard stayed green, and a NINTH column would have turned
+    // the `total` read — and therefore the whole CR-R1-03 count guard — into a
+    // no-op.
+    const armText = readFileSync(join(PROBER_DIR, "arms", "cron-drift.mjs"), "utf8");
+    const fn = armText.slice(anchorIndex(armText, "export function parseCronJobRows"));
+    const body = fn
+      .slice(0, anchorIndex(fn, "\n}\n") + 2)
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//"))
+      .join("\n");
+    const ORDINALS = /\bf\[\d+\]/g;
+    expect(body.match(ORDINALS), "no hand-typed field ordinal survives in the parser body").toBeNull();
+    expect(body, "and the field count guard is still the derived one").toContain("f.length !== CRON_JOB_COLUMNS.length");
+    expect(body, "…addressed by NAME").toContain("CRON_JOB_COLUMNS.indexOf(column)");
+    // CALIBRATION: the same predicate FINDS an ordinal when one is spliced in,
+    // so "none survive" is a reading rather than something this assertion
+    // always says.
+    expect(body.replace("at(\"jobid\")", "f[0]").match(ORDINALS), "the predicate really can fire").not.toBeNull();
+
+    // And the behaviour is pinned end to end: every column's value arrives
+    // under its own name. The record is BUILT from CRON_JOB_COLUMNS, so a
+    // reordering changes both sides together and this stays true — which is
+    // exactly the property the refactor buys.
+    const { fieldSep, recordSep } = CRON_JOB_SEPARATORS;
+    const values = CRON_JOB_COLUMNS.map((c) => (c === "active" ? "t" : c === "total" ? "1" : `v_${c}`));
+    const { rows, malformed, total } = parseCronJobRows(values.join(fieldSep) + recordSep);
+    expect(malformed).toEqual([]);
+    expect(total).toBe(1);
+    expect(rows[0]).toEqual({
+      jobid: "v_jobid",
+      jobname: "v_jobname",
+      schedule: "v_schedule",
+      active: true,
+      database: "v_database",
+      username: "v_username",
+      command: "v_command",
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // THE TWO `countMismatch` ARMS ROUND 2 FOUND UNPROVEN. CR-R1-03 shipped three
+  // arms and exercised ONE — the `rows + malformed !== total` disagreement.
+  // `totals.size > 1` and `total === null` were REACHABLE and measured by
+  // nothing, so either could have been deleted with a fully green suite. One
+  // `it()` per arm: they are two branches, and a single test covering both
+  // would credit one RED to two controls.
+  //
+  // ⚠️ Driven through `parseCronJobRows` directly rather than through the
+  // runner, because the runner's fixture path always emits a well-formed,
+  // agreeing `total` by construction — there is no record it can produce that
+  // reaches either branch.
+  // -------------------------------------------------------------------------
+  // ⚠️ Built on the `cronRecord` / `renderRecords` helpers already in this
+  // block, so a change to the record shape reaches these two tests too.
+  const countRecord = (jobid: string, total: string) =>
+    cronRecord([jobid, `j${jobid}`, "0 * * * *", "t", "postgres", "postgres", "SELECT 1;"], total);
+
+  it("countMismatch arm: records that DISAGREE about `count(*) OVER ()` are a hole, not a reading", () => {
+    // ⛔ `count(*) OVER ()` IS ONE NUMBER PER READING. Two answers means the
+    // records were assembled from fragments of DIFFERENT records — the shape a
+    // payload `0x1E` produces when the split happens to leave both halves
+    // full-width. `total` collapses to `null` in that case, so without this arm
+    // the reading would fall through to the `total === null` sentence and
+    // describe the wrong defect.
+    const r = parseCronJobRows(renderRecords([countRecord("1", "2"), countRecord("2", "3")]));
+    expect(r.rows).toHaveLength(2);
+    expect(r.malformed).toEqual([]);
+    expect(r.total, "two answers collapse to no answer").toBeNull();
+    expect(r.countMismatch).toContain("disagree about how many rows the database returned");
+    expect(r.countMismatch, "naming BOTH readings, sorted, so an operator can see the split").toContain("(2, 3)");
+    // CONTROL — the same two records AGREEING are clean, so this is a reading
+    // about the disagreement and not about having two records.
+    const ok = parseCronJobRows(renderRecords([countRecord("1", "2"), countRecord("2", "2")]));
+    expect(ok.total).toBe(2);
+    expect(ok.countMismatch).toBeNull();
+  });
+
+  it("countMismatch arm: records in hand and NO out-of-band count is a hole, not an empty cron.job", () => {
+    // ⛔ `total === null` IS ONLY BENIGN WITH NOTHING TO COUNT. `count(*) OVER ()`
+    // returns no rows for an empty `cron.job`, a state the arm already answers
+    // loudly ("every scheduled job has vanished"). With records in hand and no
+    // total, something between the query and this parser dropped the column —
+    // and the CR-R1-03 completeness guard is then measuring nothing at all.
+    for (const spelling of ["", "   ", "x", "-1", "2.0"]) {
+      const r = parseCronJobRows(renderRecords([countRecord("1", spelling)]));
+      expect(r.rows, `total=${JSON.stringify(spelling)}`).toHaveLength(1);
+      expect(r.total, `total=${JSON.stringify(spelling)}`).toBeNull();
+      expect(r.countMismatch, `total=${JSON.stringify(spelling)}`).toContain("NOT ONE carried the out-of-band row count");
+    }
+    // CONTROL 1 — a real count on the same record is clean.
+    expect(parseCronJobRows(renderRecords([countRecord("1", "1")])).countMismatch).toBeNull();
+    // CONTROL 2 — and EMPTY stdout stays clean, because there is genuinely
+    // nothing to count. Without this the arm would fire on every empty read and
+    // mask the "every scheduled job has vanished" drift that belongs there.
+    const empty = parseCronJobRows("");
+    expect(empty.rows).toEqual([]);
+    expect(empty.total).toBeNull();
+    expect(empty.countMismatch).toBeNull();
+  });
+
+  it("F5: the UNREACHABLE `vaultSpan` exemption is gone and cannot come back", () => {
+    // ⛔ A DELETION OF PROVABLY-DEAD CODE HAS NO BEHAVIOUR TO NEUTER, so the
+    // honest control is a PROOF plus a pin, not a red fixture.
+    //
+    // THE PROOF. The deleted line was `if (vaultSpan && BARE_URL_RE.test(token))
+    // continue;`, sitting one line BELOW the unconditional
+    // `if (BARE_URL_RE.test(token)) continue;`. Its condition implies the
+    // earlier one, so every token that could reach it had already been
+    // `continue`d — and `vaultSpan` had no other reader. It was dressed as a
+    // security exemption, which cost every subsequent reader the re-derivation,
+    // and an edit to the test ABOVE would have silently changed its meaning
+    // with no test moving.
+    const armText = readFileSync(join(PROBER_DIR, "arms", "cron-drift.mjs"), "utf8");
+    // ⚠️ COMMENT LINES ARE STRIPPED FIRST, and that is load-bearing rather than
+    // convenient: the arm QUOTES the deleted line in the comment that explains
+    // why it is gone, so a raw `not.toContain` would fail on the documentation
+    // of the fix. The pin is about CODE.
+    const body = armText
+      .slice(anchorIndex(armText, "export function hygieneViolations"))
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
+      .join("\n");
+    // ⚠️ THE ANCHOR IS `if (isBareUrl(` AND NOT THE WHOLE LINE. WR-R2-07 gave
+    // the exemption an argument (`token.replace(TRIM_PUNCT, "")`), and pinning
+    // the argument here would make this proof-of-a-deletion red every time the
+    // exemption's INPUT is narrowed — which is a change this file wants, not
+    // one it should fight. What must stay is the UNCONDITIONAL call.
+    const EXEMPTION_ANCHOR = "if (isBareUrl(";
+    expect(body, "the dead exemption's identifier is gone from the rule body").not.toContain("vaultSpan =");
+    expect(body, "and the unconditional bare-URL exemption — the whole of what it duplicated — is still there").toContain(
+      EXEMPTION_ANCHOR,
+    );
+    // CALIBRATION: the same predicate FINDS the line when it is spliced back
+    // in, so "it is gone" is a reading rather than something this assertion
+    // always says.
+    const restored = body.replace(
+      EXEMPTION_ANCHOR,
+      `const vaultSpan = VAULT_READ_RE.test(span.masked);\n        ${EXEMPTION_ANCHOR}`,
+    );
+    expect(restored).not.toBe(body);
+    expect(restored).toContain("vaultSpan =");
+  });
+
+  it("no hand-typed hygiene rule COUNT survives in the prober (criterion 9)", () => {
+    // ⛔ THE COUNT MOVED ONCE ALREADY AND THE PROSE DID NOT. `run.mjs` used to
+    // compare the red fixture's row count against a literal `10` that equalled
+    // the rule count only by a one-row-per-rule coincidence, and two docblocks
+    // said "the ten hygiene rules" in words. A number restated in prose is a
+    // claim nothing can check; `HYGIENE_RULE_IDS` is the one source.
+    const runnerText = readFileSync(RUNNER_PATH, "utf8");
+    const armText = readFileSync(join(PROBER_DIR, "arms", "cron-drift.mjs"), "utf8");
+    const SPELLED = /\b(?:ten|eleven|twelve|nine|10|11|12)\s+(?:hygiene\s+)?rules?\b/i;
+    expect(runnerText).not.toMatch(SPELLED);
+    expect(armText).not.toMatch(SPELLED);
+    // ⚠️ ANCHORED TO THE ASSERTION FORM, not to the bare expression. What
+    // criterion 9 forbids is a hand-typed count that JUDGES something; the
+    // dated lineage comment recording the old `red.data.length === 10` is
+    // history and must stay readable.
+    const HAND_TYPED = /expect\(\s*red\.data\.length\s*===\s*\d+/;
+    expect(runnerText).not.toMatch(HAND_TYPED);
+    // CALIBRATION: both predicates find what they forbid, so the two `not`s
+    // above are readings rather than regexes that match nothing.
+    expect(`${runnerText}\n * ANY of the ten hygiene rules`).toMatch(SPELLED);
+    expect(`${runnerText}\n expect(red.data.length === 11, \"x\")`).toMatch(HAND_TYPED);
+  });
+
+  it("FUNCTIONS_DIR resolves to a real directory that carries match_engine_cron_tick.sql", () => {
+    // ⛔ THE RENAME TRAP. `vault-absent` fails CLOSED: a callable it cannot
+    // resolve is not a Vault reader. That is right for an unknown FUNCTION and
+    // catastrophic for a moved DIRECTORY — rename `supabase/schema/functions/`
+    // and the flagship job starts firing `cron-secret-in-command` on correct
+    // production configuration every hour. The arm throws on an absent
+    // directory (self-test scenario "a MISSING functions snapshot is a
+    // measure-fail"), and this pin is the other half: it names the exact file
+    // the 164.5.1 collision scenario depends on, so a rename reds HERE, in a
+    // test whose message says what moved.
+    expect(statSync(FUNCTIONS_DIR).isDirectory()).toBe(true);
+    const tick = join(FUNCTIONS_DIR, "match_engine_cron_tick.sql");
+    expect(statSync(tick).isFile()).toBe(true);
+    // And it is the snapshot's OWN text, not something that merely exists: the
+    // executing Vault read is the fact the collision scenario turns on.
+    expect(readFileSync(tick, "utf8")).toMatch(/FROM\s+vault\.decrypted_secrets/i);
+
+    // CALIBRATION: the same predicate reports a MISSING sibling, so "the file is
+    // there" is a reading rather than something this assertion always says.
+    expect(() => statSync(join(FUNCTIONS_DIR, "match_engine_cron_tick_MOVED.sql"))).toThrow();
+  });
+
+  // ⛔ THE TITLE INTERPOLATES AND THE ASSERTION PINS (164.8.5-REVIEW-R1 IN-02).
+  // The title used to hand-type `71` twice, so bumping `SELF_TEST_SCENARIOS`
+  // for a new scenario left a test NAME asserting a number the body no longer
+  // checked — a green test lying about what it measures, which is the one
+  // failure mode a title can have. `expect(SELF_TEST_SCENARIOS).toBe(…)` below
+  // stays a literal ON PURPOSE: it is D5's deliberate-edit pin, and it is now
+  // the ONLY hand-typed copy of the count outside `run.mjs`.
+  it(`SELF_TEST_SCENARIOS is ${SELF_TEST_SCENARIOS}, and the runner PRINTS exactly ${SELF_TEST_SCENARIOS} headers numbered 1..${SELF_TEST_SCENARIOS}`, async () => {
+    // ⭐ SOURCE-DERIVED, not scraped. The headers are auto-numbered at RUNTIME
+    // off the same counter the runner's completeness assertion reads, so there
+    // is no literal `k/50` in the source to count. Executing the self-test is
+    // the only honest way to derive the number — and it is fixtures-only, no
+    // network, under a tenth of a second.
+    // ⭐ 83 -> 84 in the Phase 164.6 review fix: one red cron-obs fixture,
+    // ledger-fanout-failed.json, adds one isolation scenario.
+    // ⭐ 84 -> 91 in the Phase 164.6 round-2 fix: three red cron-obs fixtures
+    // (stuck, too few runs, committed failure rows) and four dedicated
+    // scenarios (unparsable, psql failure, the runs floor, and an earlier
+    // step's measure-fail beside a failing fan-out).
+    expect(SELF_TEST_SCENARIOS).toBe(91);
+    const { code, numbers, denominators } = await runSelfTestHeaders();
+    expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
+    expect(numbers.length).toBe(SELF_TEST_SCENARIOS);
+    expect(numbers).toEqual(Array.from({ length: SELF_TEST_SCENARIOS }, (_, i) => i + 1));
+    expect(new Set(denominators)).toEqual(new Set([SELF_TEST_SCENARIOS]));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CRITERION 4 (164.1.1-03) — the schedule header states the MEASURED delivery.
+//
+// ⛔ VERIFY-ONLY. Commit `126517a8` already corrected this header; this pin
+// does not re-derive or re-edit the figures, it only proves the correction
+// held and stays observable. `git diff -- .github/workflows/prod-prober.yml`
+// is asserted EMPTY at the plan level — nothing here may touch that file.
+//
+// The figures are read off the region itself, not restated from planning
+// prose (this repo's named recurring citation-drift defect class), and the
+// calibration twin mutates a SCRATCH COPY of the sliced region rather than
+// the workflow on disk.
+// ---------------------------------------------------------------------------
+describe("[164.1.1-03] criterion 4 — the schedule header states the measured delivery", () => {
+  /** The `on.schedule` region, sliced by the same named-anchor discipline every pin here uses. */
+  function scheduleRegionText(text: string): string {
+    return sliceBetweenAnchors(text, "\n  schedule:\n", "\n  workflow_dispatch:");
+  }
+
+  // Read off the file, not typed from a plan or a commit message — a restated
+  // number here would be the next instance of this repo's citation-drift class.
+  const CADENCE_DELIVERY_RATE = "27 % delivery";
+  const CADENCE_MEDIAN_GAP = "3.28 h";
+  const CADENCE_MAX_GAP = "7.13 h";
+  const CADENCE_DATE = "2026-09-18";
+  const CADENCE_PHASE_REF = "164.1.1";
+
+  const CADENCE_FIGURES: Record<string, string> = {
+    "measured delivery rate": CADENCE_DELIVERY_RATE,
+    "measured median gap": CADENCE_MEDIAN_GAP,
+    "measured max gap": CADENCE_MAX_GAP,
+    "a date": CADENCE_DATE,
+    "a reference to Phase 164.1.1": CADENCE_PHASE_REF,
+  };
+
+  /** Names of every figure ABSENT from `text`, diagnostic-first. */
+  function missingCadenceFigures(text: string): string[] {
+    return Object.entries(CADENCE_FIGURES)
+      .filter(([, needle]) => !text.includes(needle))
+      .map(([name]) => name);
+  }
+
+  it("the schedule region states the measured delivery rate, median gap, max gap, a date, and points at Phase 164.1.1", () => {
+    const region = scheduleRegionText(WORKFLOW_TEXT);
+    expect(region.length, "the schedule region must be findable").toBeGreaterThan(200);
+    const missing = missingCadenceFigures(region);
+    expect(
+      missing,
+      `schedule region DOES say:\n${region}\n\nmissing figures (by name): ${JSON.stringify(missing)}`,
+    ).toEqual([]);
+  });
+
+  it("CALIBRATION: a scratch copy of the schedule region with the figures stripped reports every missing figure BY NAME", () => {
+    const region = scheduleRegionText(WORKFLOW_TEXT);
+    const stripped = region
+      .split(CADENCE_DELIVERY_RATE).join("REDACTED")
+      .split(CADENCE_MEDIAN_GAP).join("REDACTED")
+      .split(CADENCE_MAX_GAP).join("REDACTED")
+      .split(CADENCE_DATE).join("REDACTED")
+      .split(CADENCE_PHASE_REF).join("REDACTED");
+    expect(stripped, "the strip must actually change the text").not.toBe(region);
+    expect(missingCadenceFigures(stripped).sort()).toEqual(
+      Object.keys(CADENCE_FIGURES).sort(),
+    );
+    // Control: the unstripped region still reports nothing missing — the
+    // calibration mutant is what flips, not the predicate itself.
+    expect(missingCadenceFigures(region)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// compareManifest TOTALITY — the CR-04 defect, asserted directly on the
+// function rather than through a fixture run.
+//
+// ⛔ AN ABSENT MANIFEST FIELD IS AN AGREEMENT, NOT A QUESTION. `Boolean(undefined)`
+// is `false`, so a manifest row that merely LOST its `active` key agreed with a
+// DEACTIVATED production job and reported no drift; `String(undefined ?? "").trim()`
+// is `""`, which compares equal to an absent PROD value the same way.
+//
+// ⭐ FOUR SEPARATE `it()`s ON PURPOSE. `schedule`, `username` and `database`
+// share ONE loop in the implementation (SR-09) but they are THREE controls, and
+// the neuter matrix darkens each alone with the other two left live. A single
+// test covering all three would credit one RED to three controls — the exact
+// shape that let the reverted repair report five vacuous controls as proved.
+// ---------------------------------------------------------------------------
+describe("[164.8.5-02] compareManifest totality (CR-04)", () => {
+  const DRIFT_FIXTURES = join(PROBER_DIR, "fixtures", "cron-drift");
+  const MANIFEST = JSON.parse(readFileSync(join(DRIFT_FIXTURES, "manifest.json"), "utf8"));
+  const PROD_OK = JSON.parse(readFileSync(join(DRIFT_FIXTURES, "prod-ok.json"), "utf8"));
+  const SUBJECT_JOB = "match_engine_cron";
+
+  /**
+   * Deep-copy the oracle and delete ONE key from the subject row.
+   *
+   * ⛔ THROWS when the key was not there to begin with. A `delete` of a missing
+   * key is a silent no-op, and a mutant identical to its original makes every
+   * assertion below vacuous.
+   */
+  const withoutField = (field: string) => {
+    const copy = JSON.parse(JSON.stringify(MANIFEST));
+    const row = copy.jobs.find((j: { jobname: string }) => j.jobname === SUBJECT_JOB);
+    if (!row || !(field in row)) throw new Error(`fixture drift: ${SUBJECT_JOB} has no ${field} to delete`);
+    delete row[field];
+    if (JSON.stringify(copy) === JSON.stringify(MANIFEST)) throw new Error(`the ${field} mutant is identical to the original`);
+    return copy;
+  };
+
+  const invalidsFor = (manifest: object | null) =>
+    compareManifest(manifest, PROD_OK, { liveMarker: MANIFEST.database_marker }).defects.filter(
+      (d: { kind: string }) => d.kind === "manifest-invalid",
+    );
+
+  const assertNamesJobAndField = (field: string) => {
+    const invalids = invalidsFor(withoutField(field));
+    expect(invalids.length, `a row missing ${field} must be manifest-invalid, not a silent agreement`).toBe(1);
+    expect(invalids[0].detail, "naming the job, so a reviewer knows which row to re-capture").toContain(SUBJECT_JOB);
+    expect(invalids[0].detail, "and naming the FIELD, so the sentence is actionable").toContain(field);
+  };
+
+  it("CR-04 totality: a manifest row missing `active` is manifest-invalid", () => {
+    assertNamesJobAndField("active");
+  });
+
+  it("CR-04 totality: a manifest row missing `schedule` is manifest-invalid", () => {
+    assertNamesJobAndField("schedule");
+  });
+
+  it("CR-04 totality: a manifest row missing `username` is manifest-invalid", () => {
+    assertNamesJobAndField("username");
+  });
+
+  it("CR-04 totality: a manifest row missing `database` is manifest-invalid", () => {
+    assertNamesJobAndField("database");
+  });
+
+  // -------------------------------------------------------------------------
+  // WR-R2-03 — THE WITHHOLDING PREDICATE'S TWO ARMS, EACH WITH ITS OWN RED
+  // SURFACE.
+  //
+  // ⛔ `manifestDirty` and `prodDirty` used to be TWO SPELLINGS of one
+  // predicate, and `164.8.5-FIX-R1-SUMMARY.md` recorded the pair as ONE
+  // neuter-proved control. It could only ever have proven one. MEASURED
+  // 2026-09-11, each `!…judged ||` arm dropped ALONE:
+  //     (B) prod side only     -> SELF-TEST PASSED: 73/73   (GREEN)
+  //     (C) manifest side only -> SELF-TEST PASSED: 73/73   (GREEN) + vitest GREEN
+  //     (B+C) both             -> SELF-TEST FAILED
+  // because the only scenario reaching them drove an absent `functionsDir`,
+  // which is SHARED, so BOTH verdicts were `judged: false` and the two terms
+  // were redundant. A future editor "simplifying" either line shipped the
+  // CR-R1-02 regression with a fully green suite.
+  //
+  // ⭐ The implementation is now ONE `hygieneWithholds` called twice, so there
+  // is one control; its two ARMS are what need separate surfaces, and these two
+  // tests are them. ⚠️ THEY DRIVE `compareManifest` DIRECTLY rather than through
+  // the runner ON PURPOSE: the runner's fixture path renders every field to psql
+  // TEXT, so a non-string command — the only asymmetric refusal this module has
+  // — cannot survive it. A scenario written there would have measured nothing.
+  // -------------------------------------------------------------------------
+  const LEAKY = `SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', 'FAKE-key-${"0123456789ab"}'), body := '{}'::jsonb)`;
+
+  /** The cron-drift defect for `SUBJECT_JOB` when its PROD command is replaced. */
+  const driftDetailWithProdCommand = (command: unknown) => {
+    const rows = JSON.parse(JSON.stringify(PROD_OK));
+    const row = rows.find((r: { jobname: string }) => r.jobname === SUBJECT_JOB);
+    if (!row) throw new Error(`fixture drift: prod-ok.json has no ${SUBJECT_JOB}`);
+    row.command = command;
+    const r = compareManifest(MANIFEST, rows, { liveMarker: MANIFEST.database_marker });
+    const drifts = r.defects.filter((d) => d.kind === "cron-drift" && d.subject === SUBJECT_JOB);
+    expect(drifts.length, "PRECONDITION: the row must DRIFT or the withholding branch is never reached").toBe(1);
+    return { detail: String(drifts[0].detail), all: r.defects, lines: r.lines };
+  };
+
+  it("WR-R2-03 arm 1 — ONE side UNJUDGED withholds the text (`!judged`, with the other side judged and clean)", () => {
+    // The lever is an ASYMMETRIC refusal: the PROD command is not a STRING,
+    // which `hygieneViolations` refuses; the manifest row for the same jobname
+    // is an ordinary judged-and-clean string. Exactly one side is unjudged, so
+    // the `!judged` arm is the ONLY reason the text can be withheld.
+    const { detail, all, lines } = driftDetailWithProdCommand(12345);
+    expect(
+      all.some((d) => d.kind === "measure-fail" && d.subject === `prod:${SUBJECT_JOB}`),
+      "PRECONDITION: the PROD side really is unjudged",
+    ).toBe(true);
+    expect(
+      all.some((d) => d.kind === "measure-fail" && d.subject === `manifest:${SUBJECT_JOB}`),
+      "PRECONDITION: and the MANIFEST side is NOT — otherwise the two arms are redundant again",
+    ).toBe(false);
+    expect(detail).toContain("command text withheld");
+    expect(detail, "the line says WHICH side and WHY — 'fails hygiene' and 'could not be judged' send an operator to two different places").toContain(
+      "PROD could not be judged",
+    );
+    expect(detail).not.toContain("manifest fails hygiene");
+    expect(
+      lines.some((l) => l.startsWith(`--- manifest ${SUBJECT_JOB}`)),
+      "and NO unified diff — this arm is the only thing between an unjudged row and a PUBLIC Actions log",
+    ).toBe(false);
+  });
+
+  it("WR-R2-03 arm 2 — ONE side JUDGED-AND-DIRTY withholds the text (`violations.length`, with NEITHER side unjudged)", () => {
+    // The other arm, with its own surface, so neither can mask the other. The
+    // PROD row is JUDGED — nothing refuses it — and merely fails a rule.
+    expect(hygieneViolations(SUBJECT_JOB, LEAKY).length, "PRECONDITION: the replacement command is judged AND dirty").toBeGreaterThan(0);
+    const { detail, all, lines } = driftDetailWithProdCommand(LEAKY);
+    expect(
+      all.some((d) => d.kind === "measure-fail" && d.subject?.endsWith(SUBJECT_JOB) === true),
+      "PRECONDITION: NEITHER side is unjudged, so the `!judged` arm cannot be the reason below",
+    ).toBe(false);
+    expect(detail).toContain("command text withheld");
+    expect(detail).toContain("PROD fails hygiene");
+    expect(detail).not.toContain("could not be judged");
+    expect(lines.some((l) => l.startsWith(`--- manifest ${SUBJECT_JOB}`))).toBe(false);
+  });
+
+  it("WR-R2-03 CALIBRATION — both sides JUDGED and CLEAN prints the diff, so the two arms above are readings and not constants", () => {
+    // ⛔ WITHOUT THIS THE TWO TESTS ABOVE COULD BOTH PASS ON A FUNCTION THAT
+    // ALWAYS WITHHOLDS. Here the PROD command differs from the manifest's and
+    // trips nothing, and the unified diff IS printed.
+    const CLEAN = "SELECT public.match_engine_cron_tick(); -- re-scheduled";
+    expect(hygieneViolations(SUBJECT_JOB, CLEAN, { functionsDir: FUNCTIONS_DIR })).toEqual([]);
+    const { detail, lines } = driftDetailWithProdCommand(CLEAN);
+    expect(detail).not.toContain("command text withheld");
+    expect(lines.some((l) => l.startsWith(`--- manifest ${SUBJECT_JOB}`))).toBe(true);
+  });
+
+  it("WR-R2-03: `hygieneWithholds` is ONE predicate, and each ARM is separately falsifiable", () => {
+    // The unit-level statement of the same thing: each arm alone withholds, and
+    // the clean verdict does not.
+    expect(hygieneWithholds({ judged: false, violations: [] }), "unjudged alone withholds").toBe(true);
+    expect(hygieneWithholds({ judged: true, violations: ["[x-service-key-literal] …"] }), "dirty alone withholds").toBe(true);
+    expect(hygieneWithholds({ judged: true, violations: [] }), "judged and clean does NOT").toBe(false);
+    expect(hygieneWithholds(UNRECORDED_VERDICT), "and the unrecorded sentinel withholds through the first arm").toBe(true);
+  });
+
+  it("CALIBRATION: the UNTOUCHED oracle over the same rows yields ZERO manifest-invalid, and every mutant really differs", () => {
+    // The predicate FLIPS: the same function reports one manifest-invalid on
+    // each mutated copy above and none here, so "manifest-invalid fired" is a
+    // real reading rather than something this pair of inputs always produces.
+    expect(invalidsFor(MANIFEST), "the committed fixture pair must be CLEAN or the four tests above prove nothing").toEqual([]);
+    for (const field of ["active", "schedule", "username", "database"]) {
+      expect(JSON.stringify(withoutField(field)), `the ${field} mutant must differ from the original`).not.toBe(
+        JSON.stringify(MANIFEST),
+      );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.5.1-07] THE COMMITTED ORACLE DECLARES WHAT THE ARM COMPUTES.
+//
+// ⛔ THE 2026-09-11 INCIDENT THIS GATE CLOSES, IN TWO SENTENCES. The first
+// prober run after Phase 164.8.5 reported `manifest-invalid` — the committed
+// `cron-manifest.json` still declared `ws-collapse-v1` while `cron-drift.mjs`'s
+// exported `NORMALIZATION` had moved to `ws-collapse-v2`, so `compareManifest`
+// performed NO comparison at all for weeks. An HOURLY PRODUCTION PROBE caught
+// it; nothing in CI did.
+//
+// ⭐ THE DATA HALF IS ALREADY DISCHARGED (PR #776, run 34611594511, re-captured
+// the manifest at `ws-collapse-v2`). This describe block is the GATE half —
+// the control that turns the NEXT such divergence into a red CI check instead
+// of another silent hole an hourly probe has to find first.
+//
+// ⛔ THIS DOES NOT DUPLICATE `lever 1 — normalization drift reaches invalid()`
+// below. That lever proves the RUNTIME route to `invalid()` on a SYNTHETIC
+// copy of a different fixture; it never reads the committed file. This block
+// reads `scripts/prod-prober/cron-manifest.json` from disk and asks whether
+// the artifact ITSELF still agrees with the arm — the exact comparison that
+// was silently absent on 2026-09-11.
+// ---------------------------------------------------------------------------
+describe("[164.5.1-07] the committed oracle declares the normalization the arm computes", () => {
+  const COMMITTED_MANIFEST = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
+
+  /**
+   * The gate itself. Throws by name — never returns a boolean — because "the
+   * committed oracle declares what the arm computes" has exactly one honest
+   * failure shape: name the disagreement, or say nothing happened.
+   *
+   * ⛔ ANTI-VACUITY FIRST, AND ITS OWN GUARD. `{}` is a valid, non-array
+   * object, so a check that only compared `manifest.normalization !==
+   * NORMALIZATION` would still throw on it — but for the WRONG reason, and
+   * with a message indistinguishable from an ordinary mismatch. The empty-input
+   * case is asserted separately below specifically so a reviewer can tell "the
+   * gate has nothing to compare" from "the gate compared and found a
+   * disagreement" — two different repo states with two different remedies.
+   */
+  function assertManifestDeclaresArmConstants(manifest: Record<string, unknown> | null | undefined) {
+    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest) || Object.keys(manifest).length === 0) {
+      throw new Error(
+        "[164.5.1-07] ANTI-VACUITY GUARD: the manifest is missing, not an object, or empty — there is nothing to compare, and an absent oracle must never read as agreement",
+      );
+    }
+    if (manifest.normalization !== NORMALIZATION) {
+      throw new Error(
+        `[164.5.1-07] the committed manifest declares normalization ${JSON.stringify(manifest.normalization)}; the arm computes ${JSON.stringify(NORMALIZATION)}. Two different normalizations produce two different shas for identical text — re-capture with captureManifest, never hand-edit.`,
+      );
+    }
+    if (manifest.schema_version !== MANIFEST_SCHEMA_VERSION) {
+      throw new Error(
+        `[164.5.1-07] the committed manifest declares schema_version ${JSON.stringify(manifest.schema_version)}; the arm reads ${JSON.stringify(MANIFEST_SCHEMA_VERSION)}. Every committed sha depends on the schema — re-capture with captureManifest, never hand-edit.`,
+      );
+    }
+  }
+
+  it("the COMMITTED manifest at MANIFEST_PATH agrees with the arm — read from disk, not through the arm's own runtime", () => {
+    expect(() => assertManifestDeclaresArmConstants(COMMITTED_MANIFEST), "PRECONDITION: the committed oracle must be clean or the calibration below proves nothing about a real disagreement").not.toThrow();
+  });
+
+  it("CALIBRATION 1/5 — the SUPERSEDED normalization value throws", () => {
+    const mutant = { ...COMMITTED_MANIFEST, normalization: "ws-collapse-v1" };
+    expect(mutant.normalization, "the mutant must differ from the committed value").not.toBe(COMMITTED_MANIFEST.normalization);
+    expect(() => assertManifestDeclaresArmConstants(mutant)).toThrow(/normalization/);
+  });
+
+  it("CALIBRATION 2/5 — a THIRD, never-used normalization value throws too — this is an equality, not a two-value allowlist", () => {
+    const mutant = { ...COMMITTED_MANIFEST, normalization: "ws-collapse-v99-never-shipped" };
+    expect(mutant.normalization).not.toBe(COMMITTED_MANIFEST.normalization);
+    expect(mutant.normalization).not.toBe("ws-collapse-v1");
+    expect(() => assertManifestDeclaresArmConstants(mutant)).toThrow(/normalization/);
+  });
+
+  it("CALIBRATION 3/5 — a `schema_version` bump throws, by the SCHEMA_VERSION route", () => {
+    const mutant = { ...COMMITTED_MANIFEST, schema_version: (COMMITTED_MANIFEST.schema_version as number) + 1 };
+    expect(mutant.schema_version).not.toBe(COMMITTED_MANIFEST.schema_version);
+    expect(() => assertManifestDeclaresArmConstants(mutant)).toThrow(/schema_version/);
+  });
+
+  it("CALIBRATION 4/5 — a manifest missing the `normalization` key throws, rather than comparing `undefined` to agreement", () => {
+    const mutant: Record<string, unknown> = { ...COMMITTED_MANIFEST };
+    delete mutant.normalization;
+    expect("normalization" in mutant, "PRECONDITION: the key is really gone").toBe(false);
+    expect(() => assertManifestDeclaresArmConstants(mutant)).toThrow(/normalization/);
+  });
+
+  it("CALIBRATION 5/5 — an EMPTY object throws on the anti-vacuity guard specifically, not on a downstream equality", () => {
+    expect(() => assertManifestDeclaresArmConstants({})).toThrow(/ANTI-VACUITY GUARD/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.8.6-07] THE MANIFEST-SIDE HYGIENE LOOP RUNS ABOVE EVERY `return`.
+//
+// ⛔ THE DEFECT (TODOS 164.8.5-MANIFEST-SIDE-LOOP-DEAD). Section (2) of
+// `compareManifest` scans the COMMITTED manifest text for credentials. It used
+// to sit BELOW the empty-marker return, BELOW every `invalid()`, and BELOW the
+// marker-mismatch return — so ANY oracle drift that tripped one of those
+// returns silenced the scan entirely. MEASURED 2026-09-11 with the loop in its
+// old position: `normalization ws-collapse-v1 -> 0 manifest-side credential
+// defects`. A credential sitting in repo text stopped being reported because a
+// FIELD ELSEWHERE IN THE SAME FILE disagreed with the arm.
+//
+// ⭐ AND IT READ GREEN THE WHOLE TIME. PR #776's re-capture (`3412f3f9`, run
+// 34611594511) wrote `ws-collapse-v2` into `cron-manifest.json:3` and
+// re-animated the loop as a SIDE EFFECT — the control was alive again by luck,
+// not by design, and the next normalization or schema bump would have killed it
+// again with nothing failing. 164.8.6 fixes it by ORDERING; these tests are
+// what stop the next editor from putting it back below a return.
+//
+// ⭐ THREE `it()`s, ONE LEVER EACH (the ":1789-1796" rule: "a single test
+// covering all three would credit one RED to three controls"). The three levers
+// reach three DIFFERENT returns — `invalid()` by the normalization route,
+// `invalid()` by the schema_version route, and the marker-mismatch return — so
+// a hoist that cleared only one of them cannot read as three passes. Each test
+// ALSO asserts its own early-return defect, so a lever that quietly stopped
+// tripping its return fails here rather than passing vacuously.
+//
+// ⚠️ PROD rows are the CLEAN `prod-ok.json` ON PURPOSE. The only credential
+// finding these tests can possibly see is the manifest-side one, so section
+// (0)'s PROD-side loop cannot supply the defect section (2) is meant to.
+// ---------------------------------------------------------------------------
+describe("[164.8.6-07] manifest-side hygiene survives every early return (TODOS 164.8.5-MANIFEST-SIDE-LOOP-DEAD)", () => {
+  // `subject` is `string | null` on the module side (an unnamed row records
+  // `null`, not an absence), so the local shape must admit null or `tsc` refuses
+  // the assignment — the narrower spelling would have been a lie about the data.
+  type Defect = { kind: string; subject?: string | null; detail?: unknown };
+
+  const DRIFT_FIXTURES = join(PROBER_DIR, "fixtures", "cron-drift");
+  const INLINE_KEY = JSON.parse(readFileSync(join(DRIFT_FIXTURES, "manifest-inline-key.json"), "utf8"));
+  const PROD_OK = JSON.parse(readFileSync(join(DRIFT_FIXTURES, "prod-ok.json"), "utf8"));
+  const SUBJECT_JOB = "match_engine_cron";
+  const LIVE_MARKER: string = INLINE_KEY.database_marker;
+
+  /**
+   * Deep-copy the dirty oracle and mutate ONE field.
+   *
+   * ⛔ THROWS when the mutation changed nothing. A mutant identical to its
+   * original makes every assertion below a statement about the committed
+   * fixture rather than about the lever.
+   */
+  const mutated = (mutate: (copy: Record<string, unknown>) => void) => {
+    const copy = JSON.parse(JSON.stringify(INLINE_KEY));
+    mutate(copy);
+    if (JSON.stringify(copy) === JSON.stringify(INLINE_KEY)) {
+      throw new Error("the mutant is IDENTICAL to the original — the lever did nothing and every assertion below would be vacuous");
+    }
+    return copy;
+  };
+
+  const defectsFor = (manifest: object, liveMarker: string = LIVE_MARKER): Defect[] =>
+    compareManifest(manifest, PROD_OK, { liveMarker }).defects;
+
+  /**
+   * What every lever must show: the committed credential is STILL reported, it
+   * came from the manifest side and nowhere else, and the report never quotes
+   * the credential itself.
+   */
+  const assertCommittedCredentialSurvives = (defects: Defect[]) => {
+    expect(
+      defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === `manifest:${SUBJECT_JOB}`),
+      "a credential in COMMITTED manifest text is a finding about REPO TEXT — no oracle state can make it not one",
+    ).toBe(true);
+    expect(
+      defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === `prod:${SUBJECT_JOB}`),
+      "PRECONDITION: the PROD rows are CLEAN, so the finding above can only have come from section (2)",
+    ).toBe(false);
+    expect(
+      defects.every((d) => !String(d.detail).includes("FAKE-inline-key")),
+      "and the OFFENDING TEXT is never quoted — this repo is PUBLIC and the prober log is `cat`ed into a public Actions log",
+    ).toBe(true);
+  };
+
+  it("lever 1 — `normalization` drift reaches `invalid()`, and the committed credential is reported anyway", () => {
+    const defects = defectsFor(mutated((copy) => {
+      copy.normalization = "ws-collapse-v1";
+    }));
+    const invalids = defects.filter((d) => d.kind === "manifest-invalid");
+    expect(invalids.length, "PRECONDITION: the lever really does reach the `invalid()` return").toBe(1);
+    expect(String(invalids[0].detail), "and it is the NORMALIZATION route, not some other invalidity").toContain("ws-collapse-v1");
+    assertCommittedCredentialSurvives(defects);
+  });
+
+  it("lever 2 — a `schema_version` bump reaches `invalid()` by a DIFFERENT route, and the credential is reported anyway", () => {
+    const defects = defectsFor(mutated((copy) => {
+      copy.schema_version = (copy.schema_version as number) + 1;
+    }));
+    const invalids = defects.filter((d) => d.kind === "manifest-invalid");
+    expect(invalids.length, "PRECONDITION: the lever really does reach the `invalid()` return").toBe(1);
+    expect(String(invalids[0].detail), "and it is the SCHEMA_VERSION route — two levers, two returns, two controls").toContain(
+      "schema_version",
+    );
+    assertCommittedCredentialSurvives(defects);
+  });
+
+  it("lever 3 — a marker MISMATCH (oracle untouched) reaches the third return, and the credential is reported anyway", () => {
+    // ⭐ The manifest here is BYTE-IDENTICAL to the committed fixture: the lever
+    // is entirely on the reading side. `run.mjs:1985-2022` drives the same
+    // `otherMarker` lever with DIRTY prod rows and asserts the PROD credential
+    // survives; this is the manifest-side half that had no surface at all.
+    const OTHER_MARKER = "quantalyze-fixture-OTHER";
+    expect(LIVE_MARKER, "PRECONDITION: the two markers genuinely differ").not.toBe(OTHER_MARKER);
+    const defects = defectsFor(JSON.parse(JSON.stringify(INLINE_KEY)), OTHER_MARKER);
+    const markerFails = defects.filter((d) => d.kind === "measure-fail" && d.subject === "database marker");
+    expect(markerFails.length, "PRECONDITION: exactly one measure-fail on the database marker").toBe(1);
+    expect(String(markerFails[0].detail), "naming the marker the ORACLE carries").toContain(LIVE_MARKER);
+    expect(String(markerFails[0].detail), "and the one the READING came from").toContain(OTHER_MARKER);
+    expect(
+      defects.some((d) => d.kind === "manifest-invalid"),
+      "PRECONDITION: the oracle itself is untouched, so this lever is NOT lever 1 or 2 wearing a different hat",
+    ).toBe(false);
+    assertCommittedCredentialSurvives(defects);
+  });
+
+  it("a `null` element in `manifest.jobs` is SKIPPED, not thrown on — the live PROD credential report survives it", () => {
+    // ⛔ 164.8.6-REVIEW CR-02, MADE FALSIFIABLE. The hoist put the manifest-side
+    // loop ABOVE every return, where the eight shape checks have NOT run — so
+    // `jobs` may hold anything JSON can express. The loop guarded the CONTAINER
+    // (`Array.isArray(manifest?.jobs)`) but not the ELEMENT, and `null.command`
+    // threw from a position OUTSIDE `judgeRow`'s try. `compareManifest` collects
+    // into a LOCAL array returned only at the end, so the unwind reached the arm
+    // wrapper and collapsed everything to ONE generic measure-fail — DELETING
+    // section (0)'s live PROD credential finding. A refusal that REPLACES
+    // findings is the one thing this phase's invariant forbids.
+    //
+    // MEASURED against the pre-fix bytes, this exact input:
+    //   THROW TypeError: Cannot read properties of null (reading 'command')
+    //
+    // ⚠️ THE PROD ROW IS DIRTY ON PURPOSE — the opposite of the three levers
+    // above. What this case protects is the PROD-side finding, so a clean
+    // `prod-ok.json` would make it vacuous.
+    const leakyProd = [
+      ...PROD_OK,
+      { ...PROD_OK[0], jobid: 9001, jobname: "leaky_job", command: INLINE_KEY.jobs[0].command },
+    ];
+    const withNullRow = mutated((copy) => {
+      copy.jobs = [null];
+    });
+    let defects: Defect[] = [];
+    expect(() => {
+      defects = compareManifest(withNullRow, leakyProd, { liveMarker: LIVE_MARKER }).defects;
+    }, "a null manifest row must never throw out of compareManifest — the throw is what discards the findings").not.toThrow();
+    expect(
+      defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:leaky_job"),
+      "the LIVE PROD credential report survives a malformed manifest element — the refusal is ADDITIVE, never substitutive",
+    ).toBe(true);
+    expect(
+      defects.some((d) => d.kind === "manifest-invalid"),
+      "and the malformed row is still REPORTED, by section (1)'s own guard — skipping it in section (2) hides nothing",
+    ).toBe(true);
+    expect(
+      defects.every((d) => !String(d.detail).includes("FAKE-inline-key")),
+      "and the offending text is still never quoted into a public log",
+    ).toBe(true);
+  });
+
+  it("CALIBRATION — the UNTOUCHED inline-key pair trips NO early return and still yields exactly the manifest-side finding", () => {
+    // ⛔ WITHOUT THIS THE THREE TESTS ABOVE COULD PASS ON A FUNCTION THAT
+    // REPORTS THE CREDENTIAL AND NOTHING ELSE. Here no lever is pulled: there
+    // is no `manifest-invalid` and no marker `measure-fail`, the full
+    // comparison runs to the end, and the credential finding is the SAME one.
+    // It is also why a RED control against the pre-hoist file is readable —
+    // this case passes there too, so the three failures above are attributable
+    // to the LEVER and not to the fixture pair.
+    const result = compareManifest(JSON.parse(JSON.stringify(INLINE_KEY)), PROD_OK, { liveMarker: LIVE_MARKER });
+    const defects: Defect[] = result.defects;
+    expect(
+      defects.some((d) => d.kind === "manifest-invalid"),
+      "the committed fixture pair must reach the end or the three levers above prove nothing",
+    ).toBe(false);
+    expect(defects.some((d) => d.kind === "measure-fail" && d.subject === "database marker")).toBe(false);
+    expect(
+      `manifest:${SUBJECT_JOB}`,
+      "the subject spelling all four cases key on, pinned as a LITERAL: a rename would otherwise re-point every assertion above at a subject that never fires, and they would all still pass",
+    ).toBe("manifest:match_engine_cron");
+    assertCommittedCredentialSurvives(defects);
+    expect(
+      result.lines.every((l: unknown) => !String(l).includes("FAKE-inline-key")),
+      "and the printed diff withholds the text of a row that fails hygiene — the same rule, on the other output channel",
+    ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AUTO-ISSUE DEDUP — the publication path, proved KIND-INDEPENDENT.
+//
+// ⛔ THE PROOF THIS GATE MAKES DURABLE. Phase 164.8.3 adds `mt5-not-authorized`
+// to a roster that already had a `prod-prober`-labelled P1 issue OPEN. If issue
+// SELECTION read the defect kind, a new kind could be SUPPRESSED behind an old
+// kind's issue, or could open a SECOND parallel P1 beside it. It does neither,
+// and this is the expression that settles it, quoted verbatim from
+// `.github/workflows/prod-prober.yml`, step `Open or update the prod-prober
+// issue`:
+//
+//     const dedupLabel = "prod-prober";
+//     …
+//     const { data: existing } = await github.rest.issues.listForRepo({
+//       owner: context.repo.owner,
+//       repo: context.repo.repo,
+//       state: "open",
+//       labels: dedupLabel,
+//       per_page: 1,
+//     });
+//
+// The key is the CONSTANT STRING `"prod-prober"`. It is not derived from the
+// defect kind, the subject, the remedy, the defect count or the title. The
+// comment body is `["```", armsLine, "", table, "```"].join("\n")` where
+// `table = lines.slice(tableAt)` from the first `❌` line VERBATIM — so the
+// slicing is kind-agnostic too and a new kind's row reaches the operator whole,
+// remedy included.
+//
+// ⭐ The gate ranges over the EXPORTED `DEFECT_KINDS`, never a hand-typed list,
+// so it widened by itself the moment `mt5-not-authorized` was registered.
+//
+// ⚠️ ACCEPTED, RECORDED CONSEQUENCE — not a defect: while an issue is open the
+// step comments and returns, so the issue's TITLE and BODY keep whatever the
+// first filing said and only the newest COMMENT carries the new kind. Editing
+// that history is prohibited; the operator reads the newest comment.
+// ---------------------------------------------------------------------------
+
+const AUTO_ISSUE_ANCHOR = "- name: Open or update the prod-prober issue";
+
+/**
+ * The header of the NEXT step, at the job's step indent.
+ *
+ * ⚠️ ABSENT AT HEAD, ON PURPOSE. The auto-issue step is currently the LAST step
+ * in `prod-prober.yml`, so this anchor does not resolve and the last-step branch
+ * of `autoIssueStep` is the one that actually runs today. That is exactly why
+ * the branch is written out instead of being left implicit.
+ */
+const NEXT_STEP_ANCHOR = "\n      - name: ";
+
+/**
+ * The auto-issue step's slice, BOUNDED at the next step header. A missing START
+ * anchor THROWS by name — never `-1`.
+ *
+ * ⛔ THIS USED TO BE `text.slice(anchorIndex(text, AUTO_ISSUE_ANCHOR))`, i.e. to
+ * EOF, and it was correct only because the auto-issue step HAPPENS to be last.
+ * Appending any step after it would have silently widened the subject of every
+ * assertion documented as "the auto-issue step's slice" — including the
+ * load-bearing kind-independence one, which would then have been reporting a
+ * kind that belongs to somebody ELSE'S step while blaming issue selection.
+ * Step order is not a property this file should depend on.
+ *
+ * ⚠️ THE LAST-STEP CASE IS A DECISION, NOT A DEGENERATE SLICE. It is reached
+ * only when no further step header exists, and the start anchor is still
+ * `anchorIndex`-guarded, so neither branch can quietly become "nearly the whole
+ * file" the way a `-1` would.
+ */
+function autoIssueStep(text: string): string {
+  const start = anchorIndex(text, AUTO_ISSUE_ANCHOR);
+  const followingStep = text.indexOf(NEXT_STEP_ANCHOR, start + AUTO_ISSUE_ANCHOR.length);
+  return followingStep < 0
+    ? text.slice(start) // nothing follows this step — run to EOF, deliberately
+    : sliceBetweenAnchors(text, AUTO_ISSUE_ANCHOR, NEXT_STEP_ANCHOR);
+}
+
+/** Regex-escape, so a future kind carrying a metacharacter stays a LITERAL. */
+function reEscape(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Which defect kinds, if any, the given text mentions AS A STRING LITERAL.
+ * `[]` is the contract.
+ *
+ * ⛔ NOT `text.includes(k)`. Two members of the LIVE roster — `floor` and
+ * `absurdity` — are ORDINARY ENGLISH WORDS, and the step this runs over is
+ * largely comments. A substring scan therefore reds on innocuous future prose
+ * ("raise the floor", "an absurdity check") under a failure message reading
+ * *"selection has stopped being kind-independent"* — so whoever hit it would be
+ * told issue selection had broken when nothing had, with no way to tell that
+ * from the real thing. A gate that cannot distinguish a comment from a code
+ * path is not measuring what its own message names.
+ *
+ * WHAT IT MEASURES NOW: the kind appears with identifier boundaries on both
+ * sides (so `mt5-no-ipc` does not match inside `mt5-no-ipc-v2`) AND with a
+ * QUOTE or BACKTICK on at least one side — which is how a kind reaches the
+ * `actions/github-script` selection expression this gate is about.
+ *
+ * ⚠️ WHAT IT NO LONGER CATCHES, recorded rather than hidden: a kind pasted into
+ * an UNQUOTED YAML scalar (`labels: prod-prober-mt5-no-ipc`). That is a real
+ * narrowing against `includes`, accepted on two grounds — the selection this
+ * guards is JavaScript, where a kind is a string literal or it is nothing; and
+ * the false-positive class removed is live on two roster members TODAY while
+ * the narrowing is hypothetical.
+ */
+function kindsMentioned(text: string): string[] {
+  return DEFECT_KINDS.filter((k: string) =>
+    new RegExp(`["'\`](?:${reEscape(k)})(?![\\w-])|(?<![\\w-])(?:${reEscape(k)})["'\`]`).test(text),
+  );
+}
+
+describe("[164.8.3-01] AUTO-ISSUE DEDUP — issue selection cannot read a defect kind", () => {
+  it("AUTO-ISSUE DEDUP: the step selects on a CONSTANT label and mentions ZERO defect kinds", () => {
+    const slice = autoIssueStep(WORKFLOW_TEXT);
+    expect(slice.length, "the auto-issue step must be non-trivial for this to mean anything").toBeGreaterThan(1000);
+
+    // The key is declared once, as a constant, and passed as a VARIABLE to the
+    // selection call — not computed at the call site.
+    expect((slice.match(/const dedupLabel = "prod-prober";/g) || []).length).toBe(1);
+    expect((slice.match(/labels: dedupLabel,/g) || []).length).toBe(1);
+    expect(slice).toContain('state: "open",');
+
+    // ⛔ THE LOAD-BEARING ONE. An issue-selection path that reads a defect kind
+    // could suppress a NEW kind behind an OLD kind's open issue, or open a
+    // second parallel P1 beside it — and the operator would see neither the new
+    // row nor its remedy.
+    expect(
+      kindsMentioned(slice),
+      "the auto-issue step mentions a defect kind — selection has stopped being kind-independent",
+    ).toEqual([]);
+    expect(DEFECT_KINDS.length, "an emptied roster would make the filter above vacuous").toBeGreaterThanOrEqual(15);
+    expect(DEFECT_KINDS, "the roster this ranges over must cover the kind 164.8.3 added").toContain(
+      "mt5-not-authorized",
+    );
+  });
+
+  it("AUTO-ISSUE DEDUP: CALIBRATION — a kind-derived label is CAUGHT by the same predicate", () => {
+    const slice = autoIssueStep(WORKFLOW_TEXT);
+    const spliced = "mt5-no-ipc";
+    expect(DEFECT_KINDS, "the mutant must splice a REAL roster member").toContain(spliced);
+    const mutant = slice.replace(
+      'const dedupLabel = "prod-prober";',
+      `const dedupLabel = "prod-prober-" + "${spliced}";`,
+    );
+    expect(mutant, "the mutation must actually change the text").not.toBe(slice);
+    // Same predicate, mutated input: it reports exactly the kind that was spliced.
+    expect(kindsMentioned(mutant)).toEqual([spliced]);
+    expect((mutant.match(/const dedupLabel = "prod-prober";/g) || []).length).toBe(0);
+  });
+
+  it("AUTO-ISSUE DEDUP: CALIBRATION — the slice is BOUNDED, and the matcher does not fire on English prose", () => {
+    // ─── (1) THE BOUNDED SLICE ──────────────────────────────────────────────
+    // ⛔ CONSTRUCTED IN MEMORY. `prod-prober.yml` is BYTE-FROZEN for this phase
+    //    (criterion 5's sibling fence) and no test here ever writes it. The
+    //    appended step exists only in this string.
+    const APPENDED_NAME = "A step appended after the auto-issue step";
+    const appended = `${WORKFLOW_TEXT}\n      - name: ${APPENDED_NAME}\n        run: echo "mt5-no-ipc floor absurdity"\n`;
+    const unbounded = appended.slice(anchorIndex(appended, AUTO_ISSUE_ANCHOR));
+    const bounded = autoIssueStep(appended);
+
+    // The mutation has to reach the subject, or everything below is vacuous.
+    expect(unbounded, "the appended step must actually land inside an UNBOUNDED slice").toContain(APPENDED_NAME);
+    expect(bounded.length, "the bounded slice must still be the real step, not a stub").toBeGreaterThan(1000);
+    expect(bounded, "⛔ THE FINDING: the appended step must be EXCLUDED from the auto-issue slice").not.toContain(
+      APPENDED_NAME,
+    );
+
+    // ⛔ THE LOAD-BEARING CONSEQUENCE. Unbounded, a kind in somebody else's
+    //    step is reported as though issue selection had started reading kinds.
+    expect(
+      kindsMentioned(unbounded),
+      "unbounded, the assertion would have blamed issue selection for a foreign step's text",
+    ).toContain("mt5-no-ipc");
+    expect(kindsMentioned(bounded), "bounded, the foreign step is not this assertion's business").toEqual([]);
+
+    // And the last-step fallback is the branch that runs at HEAD: the real file
+    // has no following step, so the anchor is genuinely absent.
+    expect(
+      WORKFLOW_TEXT.indexOf(NEXT_STEP_ANCHOR, anchorIndex(WORKFLOW_TEXT, AUTO_ISSUE_ANCHOR)),
+      "at HEAD the auto-issue step is LAST — if this ever resolves, the bounded branch is live and that is fine, but say so here",
+    ).toBe(-1);
+
+    // ─── (2) THE MATCHER vs ENGLISH PROSE ───────────────────────────────────
+    expect(DEFECT_KINDS, "this calibration only means something while the roster carries a bare English word").toContain(
+      "floor",
+    );
+    const prose = "          // raise the floor when the absurdity budget is exceeded\n";
+    expect(prose.includes("floor"), "the predicate this replaced really did fire on this prose").toBe(true);
+    expect(
+      kindsMentioned(prose),
+      "⛔ THE FINDING: innocuous prose naming a floor is NOT a defect-kind mention",
+    ).toEqual([]);
+    // ⚠️ AND IT STILL CATCHES THE REAL SHAPE — otherwise the fix above would be
+    //    a scan narrowed into measuring nothing, which is worse than the noise.
+    expect(kindsMentioned('const k = "floor";'), "a quoted kind IS a mention").toEqual(["floor"]);
+    expect(kindsMentioned("const k = `absurdity`;"), "a backticked kind IS a mention").toEqual(["absurdity"]);
+    expect(kindsMentioned('"mt5-no-ipc-v2"'), "a LONGER identifier is not a mention of the shorter kind").toEqual([]);
+  });
+
+  it("AUTO-ISSUE DEDUP: criterion 8 was MET BEFORE THIS PHASE — both status captures and the one `cat`, PINNED", () => {
+    // ⭐ THIS IS A PIN, NOT A NEW REQUIREMENT. Criterion 8 asked for the probe
+    // step's output to survive a failing run. Commit `604d655f` already shipped
+    // it — every branch captures its own status on the same line via
+    // `|| status=$?`, and the `cat "$RUNNER_LOG"` is UNCONDITIONAL and outside
+    // both branches — and narrowed dispatch `34706551355` exercised it. No code
+    // is owed; this test is what stops the claim from rotting.
+    //
+    // ⛔ THE COMMENT FILTER IS LOAD-BEARING AND WAS MEASURED. The workflow's own
+    // 20-line argument QUOTES the idiom it mandates, so an UNFILTERED count
+    // reads 3 and would be satisfied by prose. Counting MATCHES rather than
+    // lines also stops two matches on one line from hiding as one.
+    const code = WORKFLOW_TEXT.split("\n")
+      .filter((l) => !/^\s*#/.test(l))
+      .join("\n");
+    expect(code.length, "the filter must not have eaten the file").toBeGreaterThan(1000);
+    expect(
+      (code.match(/\|\| status=\$\?/g) || []).length,
+      "both probe-step branches must capture their own status ON THE SAME LINE (criterion 8)",
+    ).toBe(2);
+    expect(
+      (code.match(/cat .{0,2}RUNNER_LOG/g) || []).length,
+      "exactly one UNCONDITIONAL `cat \"$RUNNER_LOG\"`, outside both branches (criterion 8)",
+    ).toBe(1);
+    // The filter is a reading, not a formality: unfiltered, the same count is 3.
+    expect((WORKFLOW_TEXT.match(/\|\| status=\$\?/g) || []).length).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.8.3-04] THE `-6` BRANCH CAN FAIL — OBSERVED, NOT ASSERTED.
+//
+// ⛔ A CONTROL ONLY EVER APPLIED TO PASSING INPUT IS NOT EVIDENCE. Phase 164.8.3
+// added `mt5-not-authorized` so a real -6 reading stops falling into the
+// residual `mt5-terminal-error`, whose remedy sends the operator to the MT5
+// error table — a WRONG INSTRUCTION that cost two investigations (2026-09-09 and
+// 2026-09-10). Everything else in this repo pins that the new branch EXISTS.
+// These three tests pin that REMOVING it changes the verdict, which is the only
+// statement that distinguishes a live gate from a decorative one.
+//
+// ⭐ THREE `it()`s ON PURPOSE, one property each — the same discipline the
+// `[164.8.5-02] compareManifest totality` block states in its own "FOUR
+// SEPARATE `it()`s ON PURPOSE" note: a single test covering all three would
+// credit ONE red to THREE controls.
+//   #1 CONTROL   — the SHIPPING module classifies `6.txt` as mt5-not-authorized.
+//   #2 FALSIFIER — the mutant, with the `-6` branch excised, falls back to
+//                  mt5-terminal-error. This is the defect, demonstrated.
+//   #3 SURGICAL  — the SAME mutant still reads -10005 and -10004 correctly, so
+//                  #2's red cannot have come from having deleted a region.
+//
+// ⚠️ NOTHING IS WRITTEN INTO THE WORKING TREE. The mutant lives in a
+// `mkdtempSync` directory and is removed in a `finally`, so the `git checkout --`
+// hazard — which restores to HEAD and silently destroys uncommitted work — never
+// arises here at all. That is why this idiom carries the DURABLE half of the
+// proof, and why it re-runs on every CI shard rather than once in a transcript.
+// ---------------------------------------------------------------------------
+
+/** What `classifyProbe` returns. Restated here because the arm is plain `.mjs`. */
+type Mt5Verdict = {
+  kind: string | null;
+  subject: string | null;
+  detail: string | null;
+  info: string | null;
+};
+
+/** The one export the mutant copy is driven through. */
+type MutantMt5Arm = { classifyProbe: (result: unknown) => Mt5Verdict };
+
+/**
+ * The driver that loads the mutant, written beside it in the same temp dir.
+ *
+ * ⚠️ WHY A CHILD PROCESS RATHER THAN `await import()` — MEASURED 2026-09-13,
+ * both failures observed here before this shape was chosen:
+ *   `await import(pathToFileURL(f).href)` -> Cannot find module 'file:///…/T/…/
+ *       mt5-mutant.mjs' imported from …/prod-prober-wiring.test.ts
+ *   `new Function("url", "return import(url)")` -> TypeError: A dynamic import
+ *       callback was not specified.
+ * Vitest rewrites every dynamic import into its own module runner, which
+ * resolves against the Vite project graph and cannot see a file outside the
+ * repo root; escaping that transform lands in a VM context with no import
+ * callback. ⛔ The remedy is NOT to write the mutant somewhere Vite can resolve
+ * — that is the working tree, and this whole idiom exists to stay out of it.
+ * ⭐ Spawning `process.execPath` on the temp file is the STRONGER property
+ * anyway: the mutant is parsed and linked by the SAME Node that runs the real
+ * arm in CI, with no bundler anywhere in the path.
+ */
+const MUTANT_DRIVER_SRC = [
+  'import { classifyProbe } from "./mt5-mutant.mjs";',
+  "process.stdout.write(JSON.stringify(classifyProbe(JSON.parse(process.argv[2]))));",
+  "",
+].join("\n");
+
+// ---------------------------------------------------------------------------
+// THE OTHER HALF OF CRITERION 6 — TWO ON-DISK LEVERS, OBSERVED RED THROUGH THE
+// REAL `--self-test`, EACH DROPPED ALONE.
+//
+// ⭐ The falsifier below proves the CLASSIFIER can fail. It does not prove the
+// SELF-TEST SCENARIO can, and those are different claims: the scenario is what
+// CI actually runs. So each lever was dropped on disk, the runner's own output
+// READ, and the file restored from a `cp` byte backup. ⛔ NEVER `git checkout --`
+// in that harness — it restores to HEAD and silently destroys uncommitted work;
+// byte backups only, re-taken between levers because a backup goes stale the
+// moment the file changes again.
+//
+// MEASURED 2026-09-13, `node scripts/prod-prober/run.mjs --self-test`, exit 1
+// both times. Pasted verbatim — these are the runner's own lines, not a
+// paraphrase, and each lever was run with the OTHER one left live so no single
+// red is credited to two controls.
+//
+//   LEVER 1 — the `-6` branch DELETED from `arms/mt5.mjs` (630 bytes), REMEDIES
+//   left untouched:
+//     === SELF-TEST 24/80: mt5-not-authorized fires on 6.txt, and NOTHING else does ===
+//       ok — 6.txt exits 1 (got 1)
+//       ok — 6.txt ISOLATES exactly one defect (got 1: mt5-terminal-error)
+//     SELF-TEST FAIL: the defect kind is mt5-not-authorized (got mt5-terminal-error)
+//   and, further down, the criterion-2 row check corroborating the same cause:
+//     SELF-TEST FAIL: (a) the -6 fixture's ROW is mt5-not-authorized on subject -6 (got mt5-terminal-error / -6)
+//     === SELF-TEST FAILED ===
+//   RESTORE-CMP-OK (lever 1) — `cmp` against the pristine backup was silent —
+//   then `=== SELF-TEST PASSED: 80/80 scenarios, …` before lever 2 was applied.
+//
+//   LEVER 2 — the `-6` branch left LIVE (verified present, count 1);
+//   `REMEDIES["mt5-not-authorized"]` pointed at the EXACT string
+//   `REMEDIES["mt5-terminal-error"]` already holds (1 -> 2 occurrences):
+//     ok — every mt5 kind carries a REMEDIES entry of at least 40 chars — a defect row that says what broke but not what to do is an alert nobody acts on
+//     SELF-TEST FAIL: no two mt5 remedies are the same string — two kinds with one remedy is two kinds pretending to be one
+//   and, further down, the criterion-2 remedy check corroborating the same cause:
+//     SELF-TEST FAIL: (b) ⛔ SUCCESS CRITERION 2: the -6 ROW's remedy names all FOUR required elements — VNC console=false, "Save password"=false, Expert Advisors=false, Journal=false
+//     === SELF-TEST FAILED ===
+//   RESTORE-CMP-OK (lever 2) — `cmp` silent again — then
+//     === SELF-TEST PASSED: 80/80 scenarios, every arm's kinds fired on their own fixtures and nowhere else ===
+//   with `git status --porcelain -- scripts/` silent, so the working tree is
+//   byte-identical to what it was before the harness ran.
+//
+// ⚠️ STATED LIMIT. Nothing in CI re-runs the two levers; a gate can only prove
+// this RECORD exists, not that it was observed. That asymmetry is exactly why
+// the three `it()`s below carry the re-running half of the proof.
+// ---------------------------------------------------------------------------
+
+describe("[164.8.3-04] the -6 branch is load-bearing (criterion 6)", () => {
+  const MT5_ARM_PATH = join(PROBER_DIR, "arms", "mt5.mjs");
+  const MT5_FIXTURES = join(PROBER_DIR, "fixtures", "mt5");
+  const MT5_ARM_TEXT = readFileSync(MT5_ARM_PATH, "utf8");
+
+  /** The `-6` branch's opening line, and the block terminator that closes it. */
+  const MINUS_SIX_ANCHOR = "  if (code === -6 && probe.initialize !== true) {";
+  const BLOCK_TERMINATOR = "\n  }\n";
+
+  /**
+   * One fixture transcript, shaped exactly as the arm's own caller shapes a
+   * `seams.ssh` result (`arms/mt5.mjs` `run()` → `classifyProbe(result)`).
+   */
+  const probeResultFor = (fixture: string) => ({
+    status: 0,
+    stdout: readFileSync(join(MT5_FIXTURES, fixture), "utf8"),
+    stderr: "",
+    timedOut: false,
+    measureFail: null,
+  });
+
+  /**
+   * The arm with the `-6` branch — and NOTHING else — removed.
+   *
+   * ⛔ `anchorIndex`, never `indexOf`. On a miss `indexOf` returns `-1`, and
+   * `slice(0, -1)` is nearly the WHOLE string, so a RENAMED or MOVED branch
+   * would yield a mutant that is a near-copy of the original and a falsifier
+   * that passes for the wrong reason. `anchorIndex` throws and names the anchor
+   * (ANCHOR DISCIPLINE — see the `⛔ ANCHOR DISCIPLINE` block above
+   * `anchorIndex`'s own definition at the head of this file).
+   */
+  function exciseMinusSixBranch(text: string): string {
+    const start = anchorIndex(text, MINUS_SIX_ANCHOR);
+    const end = anchorIndex(text, BLOCK_TERMINATOR, start) + BLOCK_TERMINATOR.length;
+    return text.slice(0, start) + text.slice(end);
+  }
+
+  /**
+   * Build the mutant in a temp directory, drive `fn` through it, and remove the
+   * directory in a `finally`. The mutant NEVER lands under `scripts/`.
+   */
+  function withMutantArm<T>(fn: (arm: MutantMt5Arm) => T): T {
+    // ⭐ THE PROPERTY THAT MAKES THIS WHOLE IDIOM POSSIBLE: the arm has ZERO
+    // `import`/`require` statements, so a copy of it stands alone in a temp
+    // directory with no module graph to resolve. Pinned rather than assumed, so
+    // a future import added to the arm reveals itself HERE, by name, instead of
+    // as a puzzling module-not-found inside a mutant nobody is looking at.
+    expect(
+      MT5_ARM_TEXT.split("\n").filter((l) => /^\s*import\s/.test(l) || /\brequire\s*\(/.test(l)),
+      "arms/mt5.mjs has acquired a module dependency — the standalone mutant copy below can no longer resolve it",
+    ).toEqual([]);
+
+    const mutant = exciseMinusSixBranch(MT5_ARM_TEXT);
+    expect(mutant, "the excision must actually change the text, or every assertion below is vacuous").not.toBe(
+      MT5_ARM_TEXT,
+    );
+    expect(
+      mutant.includes(MINUS_SIX_ANCHOR),
+      "the mutant must no longer contain the -6 branch it was built to remove",
+    ).toBe(false);
+    expect(
+      MT5_ARM_TEXT.length - mutant.length,
+      "the excision must be BRANCH-SIZED — a huge delta means the block terminator matched far past the branch",
+    ).toBeLessThan(1200);
+
+    const dir = mkdtempSync(join(tmpdir(), "mt5-minus-six-falsifier-"));
+    try {
+      writeFileSync(join(dir, "mt5-mutant.mjs"), mutant, "utf8");
+      const driver = join(dir, "drive.mjs");
+      writeFileSync(driver, MUTANT_DRIVER_SRC, "utf8");
+      const arm: MutantMt5Arm = {
+        classifyProbe: (result: unknown) => {
+          // `execFileSync` — no shell, so the JSON argument is passed as ONE
+          // argv entry and nothing in it is ever interpreted.
+          const out = execFileSync(process.execPath, [driver, JSON.stringify(result)], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          return JSON.parse(out) as Mt5Verdict;
+        },
+      };
+      return fn(arm);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("164.8.3 FALSIFIER — CONTROL: the SHIPPING arm reads 6.txt as mt5-not-authorized on subject -6", () => {
+    const verdict = classifyProbe(probeResultFor("6.txt"));
+    expect(verdict.kind, "the shipped classifier must name the -6 state as its own kind").toBe("mt5-not-authorized");
+    expect(verdict.subject, "carrying the raw code, so a PUBLIC log stays greppable by what the operator saw").toBe(
+      "-6",
+    );
+  });
+
+  it("164.8.3 FALSIFIER — with the `-6` branch EXCISED, the same transcript falls back to mt5-terminal-error", () => {
+    withMutantArm((arm) => {
+      const verdict = arm.classifyProbe(probeResultFor("6.txt"));
+      expect(
+        verdict.kind,
+        "WITHOUT the -6 branch a real live -6 reading lands in the unguarded tail, whose remedy tells the " +
+          "operator to read the code against the MT5 error table — the WRONG INSTRUCTION this phase removed. " +
+          "This test going green is what proves the branch is load-bearing rather than decorative.",
+      ).toBe("mt5-terminal-error");
+    });
+  });
+
+  it("164.8.3 FALSIFIER — SURGICAL: the SAME mutant still reads -10005 and -10004 correctly", () => {
+    withMutantArm((arm) => {
+      // ⭐ SEPARATE STATEMENTS, not one `&&` chain: a first failure must not
+      // mask the second reading.
+      expect(
+        arm.classifyProbe(probeResultFor("10005.txt")).kind,
+        "the excision must have removed ONE branch, not the classifier tail — otherwise the falsifier above " +
+          "would go green just as well on a mutant that classifies nothing at all",
+      ).toBe("mt5-ipc-timeout");
+      expect(
+        arm.classifyProbe(probeResultFor("10004.txt")).kind,
+        "and the branch ABOVE the excision is equally untouched",
+      ).toBe("mt5-no-ipc");
+    });
+  });
+});
+
+describe("[164.5.1-REVIEW IN-03] a CLI flag that does not apply to the selected verb is REFUSED, never dropped", () => {
+  // ⛔ THE DEFECT. `--arm x --preflight-repoint` ran the gate and threw
+  // `onlyArm` away; `--capture-manifest --out p --manifest q` accepted and
+  // ignored `--manifest`. The operator reads an exit code believing they
+  // scoped an invocation that was never scoped — the same shape the
+  // capture/preflight mutual-exclusion guard already refuses.
+  //
+  // ⛔ EVERY CASE HERE RETURNS BEFORE ANY SEAM IS BUILT, so none of these
+  // calls can reach the network or a database. A case that ever did would
+  // show up as a hang or a credential error, never as a silent pass.
+  const cases: Array<{ argv: string[]; message: string }> = [
+    { argv: ["--arm", "pyapi06", "--preflight-repoint"], message: "--arm narrows the live prober run only" },
+    { argv: ["--arm", "pyapi06", "--capture-manifest", "--out", "/tmp/nope"], message: "--arm narrows the live prober run only" },
+    { argv: ["--capture-manifest", "--out", "/tmp/nope", "--manifest", "/tmp/nope"], message: "--manifest only applies to --preflight-repoint" },
+    { argv: ["--manifest", "/tmp/nope"], message: "--manifest only applies to --preflight-repoint" },
+    { argv: ["--out", "/tmp/nope"], message: "--out only applies to --capture-manifest" },
+    { argv: ["--preflight-repoint", "--out", "/tmp/nope"], message: "--out only applies to --capture-manifest" },
+  ];
+
+  for (const { argv, message } of cases) {
+    it(`refuses ${argv.join(" ")} with exit 3 and says why`, async () => {
+      const errors: string[] = [];
+      const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+        errors.push(args.map(String).join(" "));
+      });
+      try {
+        expect(await main(argv)).toBe(3);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(errors.join("\n")).toContain(message);
+      // Every refusal in this CLI carries the same sentence, so an operator
+      // never has to infer whether a rejected invocation left something behind.
+      expect(errors.join("\n")).toContain("Nothing was written.");
+    });
+  }
+
+  it("CALIBRATION: the guards do NOT fire on the applicable pairings — a guard that rejected everything would be indistinguishable here", async () => {
+    // Parsed-and-accepted, then refused for its OWN reason (a manifest path
+    // that does not exist / the two verbs together), which is a DIFFERENT
+    // message from the applicability guards above. That difference is the
+    // proof the flag reached its verb rather than being rejected as
+    // inapplicable.
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    });
+    try {
+      expect(await main(["--capture-manifest", "--preflight-repoint"])).toBe(3);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(errors.join("\n")).toContain("mutually exclusive");
+    expect(errors.join("\n")).not.toContain("only applies to");
+    expect(errors.join("\n")).not.toContain("narrows the live prober run only");
+  });
+});
+
+describe("[164.1-fix] psql must not print its command tag into the row count", () => {
+  // ⛔ THE DEFECT THIS PINS, measured in production on 2026-09-18.
+  // `recordProberContact` tells a written row from a silently-dropped one by
+  // COUNTING non-empty stdout lines from `... RETURNING 1`. psql writes the
+  // COMMAND TAG of a non-SELECT to stdout too — `INSERT 0 1` — and `-At` does
+  // NOT suppress it. So a correctly written row counted as TWO, and the prober
+  // reported a false `measure-fail` on every hourly run (issue #773, first at
+  // 2026-09-18T16:50Z; the 12:30Z run the same day was clean). `-q` is what
+  // suppresses the tag while leaving RESULT rows untouched.
+  const sqlRunnerArgv = (text: string): string[] => {
+    const m = text.match(/const argv = \[url,([\s\S]*?)\];/);
+    if (!m) return [];
+    return [...m[1].matchAll(/"([^"]*)"/g)].map((x) => x[1]);
+  };
+
+  it("the real sql runner passes -q, so a command tag can never be counted as a returned row", () => {
+    const argv = sqlRunnerArgv(readFileSync(SEAMS_PATH, "utf8"));
+    expect(argv.length, "the argv array literal must be found at all").toBeGreaterThan(0);
+    expect(argv).toContain("-At");
+    expect(argv).toContain("-q");
+  });
+
+  it("CALIBRATION: the same predicate FAILS on a copy with -q removed", () => {
+    const text = readFileSync(SEAMS_PATH, "utf8");
+    const without = text.replace('"-At", "-q",', '"-At",');
+    expect(without, "the mutation must actually change the text").not.toBe(text);
+    const argv = sqlRunnerArgv(without);
+    expect(argv).toContain("-At");
+    expect(argv).not.toContain("-q");
+  });
+
+  it("countReturnedRows treats a psql command tag as a row — which is WHY -q is required", () => {
+    // The counter is deliberately left dumb (any non-empty line is a row) so a
+    // zero-row INSERT is still a defect. This asserts the exact shape psql 18
+    // emits without -q, so the reason for the flag is pinned next to the flag.
+    expect(countReturnedRows("1\n")).toBe(1);
+    expect(countReturnedRows("1\nINSERT 0 1\n")).toBe(2);
+  });
+});
+
+describe("[164.6.5-03] D-09: the -10005 remedy names both causes and asserts neither", () => {
+  // ⛔ THE DEFECT THIS PINS. Before D-09 the `mt5-ipc-timeout` remedy told the
+  // operator ONE cause (a modal login dialog) and asserted a redeploy would
+  // NOT help — both measured FALSE for the 2026-09-21 incident (VNC console
+  // clean, Alerts tab empty, a 2.0 s process recycle fixed it). The remedy
+  // must now name BOTH known causes, assert neither as the cause of the
+  // reading in hand, and give the ordered procedure that is correct under
+  // both.
+  const remedy = MT5_ARM.REMEDIES["mt5-ipc-timeout"];
+
+  it("names both causes and the ordered procedure (recycle before VNC)", () => {
+    const dialogAt = remedy.indexOf("modal-login-dialog");
+    const accountSwitchAt = remedy.indexOf("account-switch");
+    const recycleAt = remedy.indexOf("recycle");
+    const vncAt = remedy.indexOf("VNC");
+    expect(dialogAt, `the remedy names the persisted modal-login-dialog cause (${JSON.stringify(remedy)})`).toBeGreaterThan(-1);
+    expect(accountSwitchAt, `the remedy names the process-state account-switch cause (${JSON.stringify(remedy)})`).toBeGreaterThan(
+      -1,
+    );
+    expect(recycleAt, "the ordered procedure names the process recycle").toBeGreaterThan(-1);
+    expect(vncAt, "the ordered procedure names the VNC console for the dialog cause").toBeGreaterThan(-1);
+    expect(recycleAt, "the recycle step comes BEFORE the VNC step — cheap and unattended first").toBeLessThan(vncAt);
+  });
+
+  it("⛔ EXPRESSED AS A PROPERTY OF THE REMEDY'S OWN CONTENT: it affirmatively states the reading cannot distinguish the two causes, rather than merely lacking the old single-cause sentence", () => {
+    // A gate that only checks a word is GONE goes green the moment someone
+    // rewords the old sentence without adding the new disclaimer. This checks
+    // for the POSITIVE presence of the ambiguity statement instead.
+    expect(
+      remedy.includes("cannot tell them apart"),
+      `the remedy must affirmatively state that this reading alone cannot distinguish the two causes (${JSON.stringify(remedy)})`,
+    ).toBe(true);
+  });
+
+  it("points at the runbook's -10005 differential section BY SYMBOL, never re-deriving the procedure inline", () => {
+    expect(remedy).toContain("docs/runbooks/mt5-go-live.md");
+    expect(remedy).toContain("differential-diagnosis");
+  });
+
+  it("CALIBRATION: a single-cause revert (the pre-D-09 shape) FAILS the ambiguity-property assertion", () => {
+    // The mutant is DERIVED FROM THE SHIPPED REMEDY's own bytes, not retyped:
+    // it is `MT5_ARM.REMEDIES["mt5-ipc-timeout"]` with the D-09 sentence that
+    // names both causes and disclaims telling them apart removed, the shape a
+    // revert to the pre-D-09 single-cause remedy leaves behind. A retyped copy
+    // of the old sentence could not fail (SRO-01); this subject moves with the
+    // arm, so the calibration proves the ambiguity assertion above is a
+    // reading of the arm, not a predicate only ever shown passing input.
+    const sentences = remedy.split(/(?<=\.)\s+/);
+    const singleCause = sentences.filter((s) => !s.includes("cannot tell them apart")).join(" ");
+    expect(singleCause, "the revert must actually remove a sentence from the shipped remedy").not.toBe(remedy);
+    expect(singleCause, "the revert keeps the rest of the shipped remedy").toContain("(-10005)");
+    expect(singleCause.includes("cannot tell them apart")).toBe(false);
+    expect(singleCause.includes("account-switch")).toBe(false);
+  });
+});
+
+describe("[164.6.5 review round 1] the mt5 operator remedies state measured figures and the real trigger", () => {
+  // IN-04. The -10005 remedy called the recycle "measured at 2.0 s". That is
+  // the 2026-09-21 MANUAL restart. The 2026-09-25 spike — the mechanism the
+  // shipped recycle uses — measured 86 s from kill to logged in (run 1) and
+  // about 4m45s to a relaunched terminal when the relaunch waited for the
+  // next caller (run 2), per deploy/mt5-gateway/railway-gateway.md. An
+  // operator told "2.0 s" who waits two minutes concludes the recycle failed.
+  // The remedy also named no way to perform the recycle; it is automatic.
+  it("IN-04: the -10005 remedy cites every measured recycle figure and says the recycle is automatic", () => {
+    const remedy = MT5_ARM.REMEDIES["mt5-ipc-timeout"];
+    for (const figure of ["2.0 s", "86 s", "4m45s"]) {
+      expect(remedy, `the remedy omits the measured figure ${figure}`).toContain(figure);
+    }
+    expect(remedy).toContain("automatically");
+    expect(remedy).not.toContain("measured at 2.0 s,");
+  });
+
+  // The not-authorized remedy said "MT5 re-clears those options on every
+  // account change" — unconditionally. It does so only while "Disable
+  // algorithmic trading when the account has been changed" is ticked, and that
+  // box was founder-read UNCHECKED on 2026-09-24 (164.6.5-06 corrected the same
+  // sentence in the Python sources). Expected text is typed here, not imported.
+  it("the -6 remedy states the account-change re-clear as CONDITIONAL on the option being ticked", () => {
+    const remedy = MT5_ARM.REMEDIES["mt5-not-authorized"];
+    expect(remedy).toContain(
+      "Disable algorithmic trading when the account has been changed",
+    );
+    expect(remedy).toContain("only while");
+    expect(remedy).not.toContain("MT5 re-clears those options on every account change");
+  });
+});
+
+describe("[164.6.5-03] D-10: the mt5 arm's declared environment and the workflow's supplied environment agree", () => {
+  /**
+   * The `Probe production` step — the ONLY step that actually RUNS the arm
+   * (the credential-assert step above is a pre-flight, not the run). Sliced
+   * from its own `- name:` anchor to its `run: |`, exactly like
+   * `credentialStepText` above.
+   */
+  function probeStepEnvText(text: string): string {
+    return sliceBetweenAnchors(text, "- name: Probe production", "\n        run: |");
+  }
+
+  /**
+   * Every RAILWAY_-prefixed env NAME the workflow supplies to that step.
+   *
+   * ⛔ NAMES ONLY — this reads the KEY on the left of each `KEY: value` line
+   * and never the value on the right, so no secret and no scope claim ever
+   * reaches this test. mt5 is the only arm in this workflow that consumes a
+   * RAILWAY_-prefixed var (the others use ANALYTICS_ / SUPABASE_ vars), so
+   * scoping by that prefix reads exactly mt5's slice of a step that aggregates the
+   * env for all four arms — without typing a list of names that could drift
+   * from either real source.
+   */
+  function suppliedMt5EnvNames(text: string): string[] {
+    const block = probeStepEnvText(text);
+    const names = Array.from(block.matchAll(/^\s+([A-Z0-9_]+):/gm)).map((m) => m[1]);
+    return [...new Set(names.filter((n) => n.startsWith("RAILWAY_")))].sort();
+  }
+
+  it("ARM.requiredEnv and the Probe production step's supplied RAILWAY_ names are the SAME SET", () => {
+    const declared = [...MT5_ARM.requiredEnv].sort();
+    const supplied = suppliedMt5EnvNames(WORKFLOW_TEXT);
+    const missing = declared.filter((n) => !supplied.includes(n));
+    const extra = supplied.filter((n) => !declared.includes(n));
+    expect(
+      missing.length === 0 && extra.length === 0,
+      `the mt5 arm's requiredEnv and the workflow's supplied names disagree — missing from the workflow: [${missing.join(", ")}], supplied but not declared by the arm: [${extra.join(", ")}]. A dropped or renamed name here does not fail loudly at run time: it makes the arm credential-blocked, or makes every hourly run report mt5-ssh-transport — a transport verdict that measured NOTHING about the terminal — which is exactly the state D-10 found and exactly the state that let the unproven MT5-WEDGE-OBS-01 classification be treated as proven. declared=[${declared.join(", ")}] supplied=[${supplied.join(", ")}]`,
+    ).toBe(true);
+  });
+
+  it("CALIBRATION: the same predicate reports the removed member BY NAME", () => {
+    // ⛔ THE SAME LINE ALSO APPEARS in the credential-assert pre-flight step
+    // above `Probe production`, so a plain `WORKFLOW_TEXT.replace(...)` would
+    // silently remove the WRONG occurrence (the pre-flight's, not the run
+    // step's) and this calibration would prove nothing. Scoped to the probe
+    // step's OWN slice, exactly like `probeStepEnvText` reads it, so the
+    // mutation lands on the occurrence that actually feeds the arm.
+    const start = anchorIndex(WORKFLOW_TEXT, "- name: Probe production");
+    const end = anchorIndex(WORKFLOW_TEXT, "\n        run: |", start);
+    const block = WORKFLOW_TEXT.slice(start, end);
+    const mutatedBlock = block.replace('          RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}\n', "");
+    expect(mutatedBlock, "the removal must actually change the probe step's own slice").not.toBe(block);
+    const mutated = WORKFLOW_TEXT.slice(0, start) + mutatedBlock + WORKFLOW_TEXT.slice(end);
+    expect(mutated, "the removal must actually change the full text").not.toBe(WORKFLOW_TEXT);
+    const declared = [...MT5_ARM.requiredEnv].sort();
+    const supplied = suppliedMt5EnvNames(mutated);
+    expect(supplied).not.toContain("RAILWAY_ENVIRONMENT");
+    const missing = declared.filter((n) => !supplied.includes(n));
+    expect(missing, "the removed member is named in the diff").toEqual(["RAILWAY_ENVIRONMENT"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.6-R2 WR-02] cron-obs's ledger fan-out constants are BOUND to their
+// sources of truth.
+//
+// ⛔ THE DEFECT. The self-test answers LEDGER_FANOUT_SQL from a fixture routed
+// on two substrings, so nothing in the SQL predicate is ever executed. A typo in
+// a constant, or a future rename of the SQL function, would make every count
+// read 0 on PROD forever while the self-test stayed green. Each assertion below
+// reads the SOURCE (the committed manifest, the function snapshots) and fails
+// on drift.
+// ---------------------------------------------------------------------------
+describe("[164.6-R2 WR-02] cron-obs ledger fan-out constants match the manifest and the SQL", () => {
+  const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
+  const jobs: Array<{ jobname: string; command: string; active: boolean }> = manifest.jobs;
+  const snapshot = (fn: string) => readFileSync(join(FUNCTIONS_DIR, `${fn}.sql`), "utf8");
+  const FAILURE_ROW_RE = (cronName: string, error: string) =>
+    new RegExp(`INSERT INTO public\\.cron_runs[^;]*?VALUES\\s*\\(\\s*'${cronName}'\\s*,\\s*'error'\\s*,\\s*now\\(\\)\\s*,\\s*'${error}'`);
+
+  it("LEDGER_FANOUT_JOB is an ACTIVE manifest job whose command calls public.<LEDGER_FANOUT_FUNCTION>()", () => {
+    expect(Array.isArray(jobs) && jobs.length > 0, "PRECONDITION: the manifest lists jobs").toBe(true);
+    const entry = jobs.find((j) => j.jobname === LEDGER_FANOUT_JOB);
+    expect(entry, `no manifest job is named ${LEDGER_FANOUT_JOB}`).toBeDefined();
+    expect(entry!.active).toBe(true);
+    expect(entry!.command).toContain(`public.${LEDGER_FANOUT_FUNCTION}()`);
+  });
+
+  it("the function snapshot DEFINES public.<LEDGER_FANOUT_FUNCTION>() and writes its failure row under the arm's two literals", () => {
+    const body = snapshot(LEDGER_FANOUT_FUNCTION);
+    expect(body).toMatch(new RegExp(`CREATE OR REPLACE FUNCTION public\\.${LEDGER_FANOUT_FUNCTION}\\(\\)`));
+    expect(body).toMatch(FAILURE_ROW_RE(LEDGER_FANOUT_FAILURE_CRON_NAME, LEDGER_FANOUT_FAILURE_ERROR));
+  });
+
+  it("the COMPOSITE fan-out writes its failure row under the same two literals, so failure_rows counts it too", () => {
+    expect(snapshot("enqueue_ledger_composite_refresh")).toMatch(
+      FAILURE_ROW_RE(LEDGER_FANOUT_FAILURE_CRON_NAME, LEDGER_FANOUT_FAILURE_ERROR),
+    );
+  });
+
+  it("LEDGER_FANOUT_SQL quotes every constant, and never names metadata or a status column", () => {
+    for (const lit of [LEDGER_FANOUT_JOB, LEDGER_FANOUT_FUNCTION, LEDGER_FANOUT_FAILURE_CRON_NAME, LEDGER_FANOUT_FAILURE_ERROR]) {
+      expect(LEDGER_FANOUT_SQL).toContain(`'${lit}'`);
+    }
+    expect(LEDGER_FANOUT_SQL).not.toMatch(/\bmetadata\b/);
+    expect(LEDGER_FANOUT_SQL).not.toMatch(/\bstatus\b/);
+  });
+
+  it("CALIBRATION: a renamed function or a drifted failure literal is caught", () => {
+    const body = snapshot(LEDGER_FANOUT_FUNCTION);
+    expect(body).not.toMatch(FAILURE_ROW_RE(LEDGER_FANOUT_FAILURE_CRON_NAME, "candidate_enqueue_failure"));
+    expect(body).not.toMatch(FAILURE_ROW_RE("ledger_refresh_fan_out", LEDGER_FANOUT_FAILURE_ERROR));
+    const entry = jobs.find((j) => j.jobname === LEDGER_FANOUT_JOB)!;
+    expect(entry.command).not.toContain(`public.${LEDGER_FANOUT_FUNCTION}_v2()`);
+    expect(jobs.find((j) => j.jobname === `${LEDGER_FANOUT_JOB}_x`)).toBeUndefined();
+  });
+});

@@ -1,0 +1,50 @@
+The successor `successor-not-sql.red.sql` points at — and why it is a .txt
+===========================================================================
+
+This file is the TARGET of that fixture's `successor:` field. It is plain text,
+it is readable, and it is emphatically not a migration.
+
+⛔ IT CONTAINS ZERO APP-GUC READS, AND THAT IS LOAD-BEARING — MEASURED
+------------------------------------------------------------------------
+The defect this fixture closes (164.7-REVIEW WR-06, threat T-164.7-02) is that
+a successor merely had to EXIST and to hold zero app-GUC reads. Any file that
+is not SQL trivially holds zero, so the second half of the old check was free
+and `successor: notes.txt` PASSED.
+
+So the fixture only demonstrates that closure if this file would have passed
+the OLD check. If it carried a read-shaped line, the fixture would go red on
+the CONTENT arm instead, and the red could not be attributed to the TYPE arm
+at all.
+
+MEASURED 2026-09-11, with an earlier draft of this file that did carry one:
+disabling the type arm left `lint-app-guc.mjs --self-test` at `exit 0`, fully
+GREEN — the fixture kept firing through the content arm and proved nothing
+about the arm that had just been deleted. That is a control that cannot fail,
+which is the exact defect class this phase exists to remove.
+
+⛔ Do NOT add an app-GUC read to this file to make it "look like SQL". Doing so
+re-creates that vacuity. The refusal must happen on the NAME, before this
+file's bytes are ever read — which is also why the type arm short-circuits.
+
+⛔ AND THE ZERO IS NOW ASSERTED, NOT MERELY WRITTEN DOWN HERE
+------------------------------------------------------------------------
+Everything above this line shipped in 7021f661 as PROSE, in this file and in
+one comment block inside the fixture — and a note cannot fail. MEASURED
+2026-09-11, in two steps: appending one app-GUC read to this file left both
+`lint-app-guc.mjs --self-test` and the corpus scan at `exit 0`, noticing
+nothing; THEN also neutering the type arm left the self-test fully GREEN. The
+exact vacuity 7021f661's message says it measured and removed was re-openable
+by a one-line edit to a file no test read.
+
+`selfTest()` now re-measures this property for EVERY red fixture's named
+successor, not just for this filename, and fails with
+`SELF-TEST FAIL: … names successor "notes.txt", and that target … holds N
+app-GUC read(s)`. So the paragraph above is now a description of a checked
+fact rather than a request to the next author.
+
+⚠️ This is still a `.txt`, and therefore still outside `sqlFilesUnder`'s
+corpus and outside the self-test's `*.red.sql` / `*.green.sql` sweeps — it is
+never scanned as a corpus entry, and under the shipped check the gate itself
+does not read it at all, because the type arm short-circuits first. The
+assertion above is what reaches it. Its sibling `unreadable-marker.txt`
+documents the conditions that cannot be a committed `.sql` file at all.

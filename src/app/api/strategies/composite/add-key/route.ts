@@ -1,13 +1,56 @@
 import { NextRequest, NextResponse } from "next/server";
 import { validateKey, encryptKey } from "@/lib/analytics-client";
-import { createClient } from "@/lib/supabase/server";
+// PHASE 156 / CONNECT-02 — the ONLY supabase client this file has. The
+// user-scoped `@/lib/supabase/server` import that used to sit here was deleted
+// with the RPC swap: the `.rpc` was its sole consumer, and leaving an unused
+// user-scoped client next to an admin one is how the next reader re-wires the
+// wrong door. ⚠️ The single-key twin KEEPS its user-scoped binding — there it
+// still serves the idempotency fence, the venue-identity resolve and the
+// asset_class derive. Deadness was confirmed by grep, per file, never assumed
+// from the mirror.
+import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { STRATEGY_NAMES } from "@/lib/constants";
 import { isUuid } from "@/lib/utils";
-import { isSupportedExchange, isSfoxEnabledServer } from "@/lib/closed-sets";
+import {
+  isSupportedExchange,
+  isSfoxEnabledServer,
+  isMt5EnabledServer,
+} from "@/lib/closed-sets";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
-import { classifyKeyValidationError } from "@/lib/wizardErrors";
+import {
+  pgConstraintName,
+  VENUE_IDENTITY_CONSTRAINT,
+  WIZARD_SESSION_CONSTRAINTS,
+} from "@/lib/api/pgConstraintName";
+import {
+  classifyKeyValidationError,
+  OUR_DEFECT_KEY_ERROR_CODES,
+} from "@/lib/wizardErrors";
+import { scrubSeamError } from "@/lib/seam-redaction";
+// 140.3-13b / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
+// capture policy written out IN FULL in `src/app/api/admin/match/eval/route.ts`
+// by `140.3-13a`. Cited, never restated.
+//
+// ⚠️ SECRET-BEARING, exactly like `create-with-key`, and DIVERGENCE-FREE from it
+// by design: every capture below names the same three per-request values
+// `[api_key, apiSecretNormalized, passphraseOrNull]` at the same four arms. The
+// two routes share `classifyKeyValidationError` precisely so the single-key and
+// "+ Add another key" paths cannot drift; their observability must not drift
+// either, or a multi-key outage becomes invisible while the single-key one is
+// reported. `140.3-13a`'s M78b is the receipt for omitting `secrets`: the
+// env-derived token still redacts, so the obvious assertion stays GREEN while
+// the raw exchange credential ships verbatim.
+import { captureToSentry } from "@/lib/sentry-capture";
+// 161-06 / WIZERR-05 — the ONE decision about whether this failure response may
+// advertise a wait, and whose it is. SHARED with this route's twin so the pair
+// cannot diverge on it. `CircuitOpenError` moved in there with the branch that
+// reads it, and the reason it must be imported from the dependency-free leaf
+// rather than through `analytics-client`'s re-export moved with it: the route
+// test files mock that module wholesale, where `instanceof` against an
+// undefined binding throws.
+import { keyRouteFailureHeaders } from "@/lib/api/seam-retry-after";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -37,7 +80,49 @@ import type { User } from "@supabase/supabase-js";
  * ordering (validate BEFORE spending a token), validateKey read-only
  * enforcement, encryptKey reuse, uniform { code } error classification, and the
  * H-0305 no-raw-upstream-strings posture — mirrors the analog verbatim.
+ *
+ * ⭐ PHASE 156 / CONNECT-02 — THE SERVICE-ROLE WRITER IS **NOT** A FOURTH
+ * DIVERGENCE, and that is the point of naming it here. `add_wizard_composite_key`
+ * is reached through `createAdminClient()`, a missing service key answers 503
+ * SEAM_MISCONFIGURED before any RPC attempt, and both are shape-identical to the
+ * sibling — a plan that fixed only the famous single-key route would have
+ * shipped the instance and left the class, which is the defect 153.6 already
+ * cost this repo once.
+ *
+ * ⚠️ The DELETED user-scoped `@/lib/supabase/server` binding is likewise not a
+ * new divergence: it follows from (1) and (3). With no app-layer draft SELECT
+ * and no asset_class force-derive, the `.rpc` was this file's ONLY consumer of
+ * that client, so the swap left it dead. The sibling's identical-looking binding
+ * has three live consumers and stays.
+ *
+ * ⭐ AND THE DOOR IS SHUT ON THIS TWIN TOO — which is the whole point of having
+ * written it here as well. Migration A
+ * (`20260813150106_wizard_rpcs_service_role_writer.sql`) only ADMITTED a
+ * `service_role` caller; Migration B
+ * (`20260814120000_wizard_rpcs_revoke_authenticated.sql`) WITHDREW
+ * `authenticated`'s EXECUTE on `add_wizard_composite_key`, and the body's own
+ * gate refuses any caller whose `auth.role()` is not `service_role`, so a direct
+ * PostgREST call answers 42501 and mints nothing. This route is now the only
+ * POSSIBLE writer, not merely the sanctioned one. The SQL gates that prove it
+ * are the composite-specific 5f/5g in
+ * `supabase/tests/test_api_keys_exchange_not_user_writable.sql` — minted by this
+ * phase precisely because 5d alone closed one of two identical doors.
+ * ⛔ THE CEILING: the venue is the one this server observed a successful
+ * read-only authentication at. NEVER "the venue cannot be forged" — any server
+ * route holding `createAdminClient()` can still pass any uid and any venue
+ * string, the standing `service_role` trust boundary (ADR-0001/ADR-0003).
  */
+
+/**
+ * Phase 140 / SEAM-04. The Vercel default (and the project's dashboard setting
+ * on 2026-07-25) already exceeds this, so declaring it cannot RAISE this route's
+ * worst-case lambda hold — it exists so the headroom invariant has an in-repo
+ * source of truth instead of a dashboard-changeable assumption. This route
+ * spends at most two seam budgets back to back (`validate-key` then
+ * `encrypt-key`), so the function deadline must comfortably exceed their sum;
+ * 300s matches the create-with-key mirror.
+ */
+export const maxDuration = 300;
 
 function pickPlaceholderCodename(): string {
   // The codename is overwritten at finalize time, so collisions during
@@ -50,7 +135,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const body = await req.json().catch(() => null);
   if (!body || typeof body !== "object") {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "Invalid request body" },
+      { code: "KEY_MISSING_REQUIRED_FIELD", error: "Invalid request body" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -66,14 +151,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   if (typeof exchange !== "string" || !isSupportedExchange(exchange)) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "Unsupported exchange" },
-      { status: 400, headers: NO_STORE_HEADERS },
-    );
-  }
-
-  if (typeof api_key !== "string" || api_key.length < 8) {
-    return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "api_key is required" },
+      { code: "KEY_UNSUPPORTED_VENUE", error: "Unsupported exchange" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -85,10 +163,32 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // every ccxt exchange (binance/okx/bybit/deribit) keeps the byte-identical <8-char
   // KEY_INVALID_FORMAT rejection below. Security-reviewed (T-119-08/09/11). The empty
   // secret flows through the SAME trim/validate/encrypt chokepoint
-  // (analytics-client.ts:169; trimCredential("") === ""), not a parallel path.
+  // (`trimCredential` in analytics-client.ts; trimCredential("") === ""), not a parallel path.
   // Mirrors the create-with-key sibling and this file's `exchange.toLowerCase() ===
   // "okx"` convention.
   const isSfox = exchange.toLowerCase() === "sfox";
+  // Computed BEFORE the api_key/api_secret shape checks (RED-TEAM): mt5's slots are
+  // login/investor-password/broker-server, not ccxt-shaped.
+  const isMt5 = exchange.toLowerCase() === "mt5";
+
+  // ccxt API keys are long secrets; an MT5 login is a short broker ACCOUNT NUMBER
+  // (commonly 5-8 digits), so mt5 requires only a NON-BLANK login, mirroring the
+  // validate-and-encrypt + create-with-key mt5 shape. Without this carve-out a
+  // legitimate short MT5 login is wrongly rejected as a missing api_key — the
+  // three routes MUST NOT diverge (RED-TEAM). sfox + every ccxt venue keep the
+  // byte-identical <8 rejection.
+  // (142.2-07 / MT5-04: this guard's code is now KEY_MISSING_REQUIRED_FIELD.
+  // The sentence named the old bucket code — mirroring the create-with-key
+  // sibling's correction, since the two comments were copies of each other.)
+  if (
+    typeof api_key !== "string" ||
+    (isMt5 ? api_key.trim().length === 0 : api_key.length < 8)
+  ) {
+    return NextResponse.json(
+      { code: "KEY_MISSING_REQUIRED_FIELD", error: "api_key is required" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
 
   // F2 (Phase 122 — STRUCTURAL server gate): sFOX is founder-gated until go-live.
   // The client flag NEXT_PUBLIC_SFOX_ENABLED only hides the wizard card; this
@@ -99,12 +199,43 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // sibling verbatim; ccxt paths are unaffected.
   if (isSfox && !isSfoxEnabledServer()) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "sFOX integration is not yet available." },
+      { code: "KEY_VENUE_NOT_ENABLED", error: "sFOX integration is not yet available." },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
-  if (!isSfox && (typeof api_secret !== "string" || api_secret.length < 8)) {
+  // Phase 135 (MT5SRC-03) — STRUCTURAL server gate, mirroring the sfox arm above
+  // and the create-with-key sibling. Add-to-composite is a second connect path;
+  // without the gate, an mt5 add in the client-on/server-off half-state falls
+  // through to the Python MT5_DISABLED_DETAIL gate → UNKNOWN → 500. The clean 400
+  // fails CLOSED before any live probe. isMt5EnabledServer() is strict
+  // `MT5_ENABLED === "true"`; ccxt/sfox paths are unaffected (isMt5 false).
+  if (isMt5 && !isMt5EnabledServer()) {
+    return NextResponse.json(
+      { code: "KEY_VENUE_NOT_ENABLED", error: "MT5 integration is not yet available." },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  // MT5 three-credential defense-in-depth (RED-TEAM — mirror of validate-and-encrypt
+  // + create-with-key): mt5 requires ALL THREE non-blank slots (login/api_key,
+  // investor password/api_secret, broker server/passphrase). The generic <8 secret
+  // check below is ccxt-shaped and skipped for mt5 (an investor password is
+  // broker-set and can be short); this is the mt5 presence enforcement instead.
+  if (
+    isMt5 &&
+    (typeof api_secret !== "string" ||
+      api_secret.trim().length === 0 ||
+      typeof passphrase !== "string" ||
+      passphrase.trim().length === 0)
+  ) {
+    return NextResponse.json(
+      { code: "KEY_MISSING_REQUIRED_FIELD", error: "api_secret is required" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  if (!isSfox && !isMt5 && (typeof api_secret !== "string" || api_secret.length < 8)) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "api_secret is required" },
       { status: 400, headers: NO_STORE_HEADERS },
@@ -120,33 +251,33 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     (typeof passphrase !== "string" || passphrase.length === 0)
   ) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "OKX requires a passphrase" },
+      { code: "KEY_MISSING_REQUIRED_FIELD", error: "OKX requires a passphrase" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
   if (!isUuid(wizard_session_id)) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "wizard_session_id required" },
+      { code: "KEY_MISSING_REQUIRED_FIELD", error: "wizard_session_id required" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
   if (api_key.length > 512 || apiSecretNormalized.length > 512) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "Key or secret too long" },
+      { code: "KEY_INPUT_TOO_LONG", error: "Key or secret too long" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   if (typeof passphrase === "string" && passphrase.length > 512) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "Passphrase too long" },
+      { code: "KEY_INPUT_TOO_LONG", error: "Passphrase too long" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   if (typeof label === "string" && label.length > 100) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "Label too long" },
+      { code: "KEY_INPUT_TOO_LONG", error: "Label too long" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -161,13 +292,43 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     `strategies-composite-add-key:${user.id}`,
   );
   if (!rl.success) {
-    return NextResponse.json(
-      { code: "KEY_RATE_LIMIT", error: "Too many requests" },
-      {
-        status: 429,
-        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+    // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
+    // misconfiguration answers 503 instead of the 429 below.
+    //
+    // ⚠️ THE 429 BODY'S SHAPE IS UNCHANGED, `{code, error}` IN THAT ORDER.
+    //
+    // ⭐ 164.2-05 / criterion 4 — THE DEBT THIS BLOCK RECORDED IS PAID. It read:
+    //
+    //     "`KEY_RATE_LIMIT` is a live contract: `MultiKeyConnectStep`'s
+    //      KNOWN_ADD_KEY_CODES admits it, and its copy calls the throttle
+    //      'exchange-side'. That sentence is FALSE for our own limiter and
+    //      honestly rewording it is plan 140.4-12's change, not this one — but
+    //      it is only ever reached on a GENUINE throttle now, because a
+    //      misconfiguration no longer arrives here at all."
+    //
+    // 140.4-12 never made that change, and the last clause was the reason it
+    // felt survivable. ⛔ IT IS ALSO THE PART THAT WAS WRONG. Routing the
+    // MISCONFIGURATION to 503 removed one false attribution and left the other
+    // standing: a GENUINE deny on this arm is our own `userActionLimiter`
+    // bucket, keyed `strategies-composite-add-key:<uid>` — per USER, with no
+    // exchange consulted. "The exchange asked us to slow down" is false on
+    // every path that reaches this line, and `fix[1]`'s "try a different
+    // exchange account" is a remedy no exchange account can perform.
+    //
+    // The answer needed no new copy: `RATE_LIMITED` already said *"the cap is
+    // ours, not your exchange's"*. Wiring, not authoring.
+    //
+    // ⛔ `KEY_RATE_LIMIT` STAYS IN `KNOWN_ADD_KEY_CODES` — unlike this route's
+    // own source, `classifyKeyValidationError` still returns it at 503 for a
+    // GENUINE venue throttle, which is the one place its sentence is true.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { code: "RATE_LIMITED", error: "Too many requests" },
+      misconfiguredBody: {
+        code: "SEAM_MISCONFIGURED",
+        error: "Rate limiter unavailable",
       },
-    );
+    });
   }
 
   // DIVERGENCE (1): NO existing-draft short-circuit. create-with-key does a
@@ -177,7 +338,11 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // mint a NEW key (ONB-03), so that short-circuit is intentionally omitted. The
   // RPC's 'wizcomposite:' advisory-lock + select-existing fence supplies the
   // DRAFT dedup (double-click safety) without blocking the per-key add.
-  const supabase = await createClient();
+  //
+  // ⛔ PHASE 156 — the user-scoped `supabase` binding that used to sit on the
+  // line below is GONE, not moved. See the header block: divergences (1) and (3)
+  // leave this file with no app-layer SELECT and no asset_class derive, so once
+  // the RPC moved to the service-role writer nothing was left for it to serve.
 
   const exchangeNormalized = exchange.toLowerCase();
   const passphraseOrNull =
@@ -194,6 +359,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       api_key,
       apiSecretNormalized,
       passphraseOrNull ?? undefined,
+      // TS-04 / SC7 — the SERVER-derived identity from withAuth's session, so
+      // the Python limiter buckets this call to this tenant. Never a body field.
+      { userId: user.id },
     );
 
     if (!validation.read_only) {
@@ -226,6 +394,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       api_key,
       apiSecretNormalized,
       passphraseOrNull ?? undefined,
+      // TS-04 / SC7 — same server-derived identity. Key-connect spends TWO
+      // tokens per attempt, so both halves must land in the same tenant bucket.
+      { userId: user.id },
     );
 
     // Railway returns the encrypted payload using DB-native column
@@ -241,10 +412,25 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // Envelope-encryption contract: the Python service stores all credentials
     // (api_key + api_secret + passphrase) inside `api_key_encrypted` as a single
     // ciphertext blob, and intentionally returns `api_secret_encrypted: null`
-    // (analytics-service/services/encryption.py:80-82). Migration 031 makes the
+    // (the envelope-encryption return in analytics-service/services/encryption.py). Migration 031 makes the
     // matching DB column nullable to accept this. Only `api_key_encrypted` is
     // required here.
     if (!api_key_encrypted) {
+      // 140.3-13b / SEAMUX-08 — CONTRACT VIOLATION (a 2xx whose body cannot be
+      // used). Byte-for-byte the same disposition as `create-with-key`'s
+      // encrypt arm; only the `surface` tag differs, so the two paths are
+      // distinguishable in Sentry without being governed by two rules.
+      captureToSentry(
+        new Error("composite/add-key: encrypt 2xx returned no api_key_encrypted"),
+        {
+          tags: {
+            surface: "strategies-composite-add-key",
+            step: "encrypt-contract",
+          },
+          extra: { returned_keys: Object.keys(encrypted) },
+          secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+        },
+      );
       console.error(
         "[strategies/composite/add-key] Railway returned unexpected encrypted payload shape",
         Object.keys(encrypted),
@@ -253,6 +439,48 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         // H-0305 consistency: uniform { code } body; detail is in the server log above.
         { code: "UNKNOWN" },
         { status: 502, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    /**
+     * ⭐ PHASE 156 / CONNECT-02 — THE WRITE LEAVES THE BROWSER'S CREDENTIAL.
+     *
+     * Shape-identical to the single-key sibling's `rpcAdmin` block, deliberately:
+     * `add_wizard_composite_key` became a service-role writer in the SAME
+     * Migration A as its twin, and the value written as `p_exchange` is only a
+     * guarantee if the server is the one that wrote it.
+     *
+     * ⛔ FAIL-HARD, WITH NO FALLBACK. There is no backstop for a write that never
+     * happened, and falling back to a user-scoped client would re-open the exact
+     * door Phase 156 exists to close — and make every gate in it pass vacuously.
+     * (The sibling additionally carries a FAIL-SOFT admin client for its
+     * venue-identity fence; this file has no fence, so the ambiguity that forced
+     * a distinct name over there does not exist here. The name is kept anyway so
+     * the two diffs read as one change.)
+     *
+     * 503 `SEAM_MISCONFIGURED` is the code this route already emits for a
+     * server-side misconfiguration (the limiter arm above), so no new member is
+     * minted into the wizard code union. It does not blame the user's key, and
+     * its copy's promise — nothing submitted, nothing changed — is literally
+     * true: this returns BEFORE any RPC attempt.
+     */
+    let rpcAdmin: ReturnType<typeof createAdminClient>;
+    try {
+      rpcAdmin = createAdminClient();
+    } catch (adminErr) {
+      // Rule 12 — fail LOUD, scrubbed with this request's own secrets, the same
+      // three values every other log site in this file names.
+      console.error(
+        "[strategies/composite/add-key] no service-role credential for the wizard write; refusing the submit (nothing was written):",
+        scrubSeamError(adminErr, [
+          api_key,
+          apiSecretNormalized,
+          passphraseOrNull,
+        ]),
+      );
+      return NextResponse.json(
+        { code: "SEAM_MISCONFIGURED", error: "Service credential unavailable" },
+        { status: 503, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -270,7 +498,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // strategies + api_keys not yet user-visible. The user-visible creation is
     // audited at finalize time in
     // src/app/api/strategies/finalize-wizard/route.ts.
-    const { data, error } = await supabase.rpc("add_wizard_composite_key", {
+    const { data, error } = await rpcAdmin.rpc("add_wizard_composite_key", {
       p_user_id: user.id,
       p_exchange: exchangeNormalized,
       p_label: labelOrDefault,
@@ -287,14 +515,94 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     if (error) {
       console.error(
         "[strategies/composite/add-key] RPC error:",
-        error.message,
+        scrubSeamError(error),
         error.code,
       );
       if (error.code === "23505") {
+        /**
+         * 154-06 / WIZCONT-02 — TWIN-8, CLOSED AT BOTH COPIES.
+         *
+         * This arm and `create-with-key/route.ts`'s were the SAME
+         * undifferentiated 23505 → DRAFT_ALREADY_EXISTS mapping. Fixing only
+         * the instance the bug was reported against is how this repo grows
+         * divergent twins, so the discrimination lands here too — through the
+         * same `pgConstraintName` leaf, so the two copies cannot drift.
+         *
+         * ⭐ WHY THE VENUE ARM IS ALARM-ONLY HERE, AND WHY THAT IS A DECISION
+         * RATHER THAN A GAP. `api_keys_user_exchange_venue_account_uniq` is
+         * UNREACHABLE on this path today: it only fires on a row carrying a
+         * non-NULL `venue_account_id`, `add_wizard_composite_key` does not
+         * write that column (migration 20260812083206 deliberately left the
+         * composite RPC untouched — TWIN-7), and MT5 — the only venue with an
+         * identity to write — cannot be a composite member anyway (the stitch
+         * worker has no mt5 arm; ROADMAP 153.6 records it as out of scope).
+         *
+         * So seeing it here means a PREMISE HAS CHANGED — the composite path
+         * started writing venue identities — and that is worth an alarm, not a
+         * silent 409. ⛔ It deliberately does NOT get create-with-key's
+         * resolve-toward-the-existing-row arm: that arm's whole justification
+         * is a fence this route does not have, and inventing a dedup here
+         * against an unreachable constraint would be shape without a reason.
+         *
+         * ⛔ 161-05 / WIZERR-03 — AND FOR THE SAME REASON THIS ROUTE DOES NOT
+         * MINT `KEY_ORPHANED`, THOUGH ITS PLAN ASKED FOR THE MIRROR. The orphan
+         * refusal is reachable only from the venue-identity constraint, which
+         * the paragraph above measures as unreachable HERE. Mirroring would have
+         * meant building a resolver this route has no fence for, pointing it at
+         * a constraint that cannot fire, and — the part that actually costs
+         * something — converting THIS deliberate premise-changed alarm into a
+         * silent 409, deleting the one signal that would tell us the premise
+         * moved. `KNOWN_ADD_KEY_CODES` in `MultiKeyConnectStep.tsx` is left
+         * without the member to match: a roster row for a code this route cannot
+         * put on the wire is the same kind of false claim in the client's
+         * vocabulary. ⚠️ IF `add_wizard_composite_key` EVER STARTS WRITING
+         * `venue_account_id`, the mirror becomes both reachable and owed — and
+         * the alarm below is what will tell you that day has come.
+         */
+        const constraint = pgConstraintName(error);
+
+        if (
+          constraint !== null &&
+          !WIZARD_SESSION_CONSTRAINTS.has(constraint)
+        ) {
+          // Both the unreachable venue-identity constraint and any other
+          // unrecognised name land here: report the fact that HAPPENED, never
+          // the one that is merely most common. The name comes from `message`,
+          // which Postgres composes from catalog names only, so it is safe to
+          // log and to tag (`details` — which carries the offending row's
+          // values — is never read; see the leaf).
+          console.error(
+            constraint === VENUE_IDENTITY_CONSTRAINT
+              ? "[strategies/composite/add-key] 23505 named the VENUE-IDENTITY constraint, which this path cannot reach today — add_wizard_composite_key has started writing venue_account_id:"
+              : "[strategies/composite/add-key] 23505 named an UNRECOGNISED constraint:",
+            constraint,
+          );
+          captureToSentry(error, {
+            tags: {
+              surface: "strategies-composite-add-key",
+              step:
+                constraint === VENUE_IDENTITY_CONSTRAINT
+                  ? "draft-rpc-venue-identity-unreachable"
+                  : "draft-rpc-unknown-constraint",
+            },
+            extra: { pg_code: error.code, constraint },
+            secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+          });
+          return NextResponse.json(
+            { code: "UNKNOWN", error: "Could not add composite key" },
+            { status: 500, headers: NO_STORE_HEADERS },
+          );
+        }
+
         // The session already holds a SINGLE-KEY draft (api_key_id set) — the
         // composite draft predicate can't match it, so the INSERT trips
         // strategies_user_wizard_session_uniq. Surface it loud (never silently
         // convert a single-key session into a composite).
+        //
+        // ⭐ BYTE-IDENTICAL to the pre-154 body, and it also catches the
+        // no-name-parseable case: an absent constraint name is the UNKNOWN
+        // case, and the honest answer to "we cannot tell" is the behaviour that
+        // already shipped — not a new one invented from an absence.
         return NextResponse.json(
           {
             code: "DRAFT_ALREADY_EXISTS",
@@ -312,6 +620,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           { status: 403, headers: NO_STORE_HEADERS },
         );
       }
+      // 140.3-13b / SEAMUX-08 — THE TERMINAL, UNCLASSIFIED RPC ARM. 23505 and
+      // 42501 above are Postgres conditions we recognise and answer with their
+      // own status; anything else is a fault in a SECURITY DEFINER function
+      // only we can fix. Mirrors `create-with-key`.
+      captureToSentry(error, {
+        tags: {
+          surface: "strategies-composite-add-key",
+          step: "draft-rpc-error",
+        },
+        extra: { pg_code: error.code },
+        secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+      });
       return NextResponse.json(
         { code: "UNKNOWN", error: "Could not add composite key" },
         { status: 500, headers: NO_STORE_HEADERS },
@@ -320,6 +640,26 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
     const row = Array.isArray(data) ? data[0] : data;
     if (!row?.strategy_id || !row?.api_key_id) {
+      // 140.3-13b / SEAMUX-08 — CONTRACT VIOLATION: the RPC reported SUCCESS and
+      // returned a body we cannot use, after the caller already spent both seam
+      // budgets on validate + encrypt. Mirrors `create-with-key`.
+      captureToSentry(
+        new Error(
+          "composite/add-key: add_wizard_composite_key succeeded with no usable row",
+        ),
+        {
+          tags: {
+            surface: "strategies-composite-add-key",
+            step: "draft-rpc-contract",
+          },
+          extra: {
+            row_present: row !== null && row !== undefined,
+            has_strategy_id: Boolean(row?.strategy_id),
+            has_api_key_id: Boolean(row?.api_key_id),
+          },
+          secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+        },
+      );
       return NextResponse.json(
         { code: "UNKNOWN", error: "RPC returned no rows" },
         { status: 500, headers: NO_STORE_HEADERS },
@@ -344,11 +684,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       { headers: NO_STORE_HEADERS },
     );
   } catch (err) {
-    // Log the raw message server-side only — never forward it to the client.
-    // Raw Railway/exchange strings can contain partial secrets or internal
-    // service details (H-0305).
-    const message = err instanceof Error ? err.message : "Validation failed";
-    console.error("[strategies/composite/add-key] caught exception:", message);
+    // SEAMCORE-06 / HI-02 — THROUGH THE LEAF, with this route's PER-REQUEST
+    // secrets named. Identical reasoning to `create-with-key`'s catch, and
+    // deliberately identical in shape: these two routes share
+    // `classifyKeyValidationError` precisely so the single-key and "+ Add
+    // another key" paths cannot drift, and their redaction must not drift
+    // either.
+    console.error(
+      "[strategies/composite/add-key] caught exception:",
+      scrubSeamError(err, [api_key, apiSecretNormalized, passphraseOrNull]),
+    );
 
     // Classify into a stable wizardErrors code so the client never sees the raw
     // Railway message (H-0305). The mapping is the SHARED
@@ -356,7 +701,60 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // create-with-key uses — so the "+ Add another key" multi-key path and the
     // single-key path can never drift, and its HTTP status distinguishes client
     // faults (400) from upstream faults (502/503) for SLO consumers (H-0310).
-    const { code, status } = classifyKeyValidationError(message);
-    return NextResponse.json({ code }, { status, headers: NO_STORE_HEADERS });
+    //
+    // Phase 140 / SEAM-04: pass the caught VALUE, not `message` — the classifier
+    // branches on `err instanceof CircuitOpenError` before its substring
+    // cascade, and pre-stringifying here would send a breaker trip to the
+    // terminal UNKNOWN/500 instead of the retryable 503. DIVERGENCE-FREE: this
+    // is byte-identical to the create-with-key catch by design.
+    const { code, status } = classifyKeyValidationError(err);
+
+    // 140.3-13b / SEAMUX-08 — THE OUR-DEFECT ARM. The shared classifier IS this
+    // route's ladder of typed branches, so "matched no typed branch" is exactly
+    // its terminal verdict `UNKNOWN`. Most of what it DID recognise is excluded
+    // for the policy's own reasons: `SERVICE_UNAVAILABLE_RETRY` is the breaker
+    // short-circuit, `KEY_NETWORK_TIMEOUT` the timeout, and the
+    // signature / auth / MT5 verdicts are caller faults.
+    //
+    // ⭐ 153.7 review WR-02 — the predicate is `OUR_DEFECT_KEY_ERROR_CODES`, not
+    // `code === "UNKNOWN"`, because 153.7-02 made "recognised" stop meaning "not
+    // ours": `INTERNAL` and `ADAPTER_INIT_FAILED` now resolve to
+    // `SEAM_INTERNAL_FAULT` and both are our own defect, where before that
+    // commit they resolved to `UNKNOWN` and paged. See the shared set's docblock
+    // in `wizardErrors.ts` for the full reasoning — it is ONE set precisely so
+    // this twin and `create-with-key` cannot drift apart on it.
+    //
+    // ⚠️ Placement AFTER the classify call and BEFORE the `headers` computation,
+    // identical to `create-with-key`: the caught VALUE still reaches the shared
+    // classifier unmodified, the status still comes from the classifier, and the
+    // conditional `Retry-After` still branches on the same instanceof.
+    if (OUR_DEFECT_KEY_ERROR_CODES.has(code)) {
+      captureToSentry(err, {
+        tags: {
+          surface: "strategies-composite-add-key",
+          step: "unclassified-key-error",
+        },
+        extra: { exchange: exchangeNormalized },
+        secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+      });
+    }
+
+    // Mirror the `Retry-After` the resilience core already publishes on its own
+    // 503 envelope — AND, since 161-06 / WIZERR-05, relay the wait the UPSTREAM
+    // itself advertised when it was the upstream and not the breaker that
+    // failed. WIZERR-05 says BOTH key-route catches, and this is the one that
+    // gets forgotten: `create-with-key` is where a new arm is written and this
+    // twin is where it is not mirrored.
+    //
+    // ⭐ ONE SHARED FUNCTION, NOT A SECOND HAND-COPIED TERNARY. Both halves,
+    // their precedence (the breaker wins — nothing left this process) and
+    // TRAP-3's absence rule live in `keyRouteFailureHeaders`' docblock. The two
+    // catches previously carried the same ternary twice, kept in step by a
+    // comment in each file pointing at the other — the arrangement
+    // `strategyGate.ts` records diverging anyway.
+    //
+    // ⚠️ Placement unchanged: AFTER the classify call, BEFORE the return.
+    const headers = keyRouteFailureHeaders(err);
+    return NextResponse.json({ code }, { status, headers });
   }
 });

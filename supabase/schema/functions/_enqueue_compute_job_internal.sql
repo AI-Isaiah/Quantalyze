@@ -135,12 +135,33 @@ BEGIN
 END;
 $$;
 
--- source migration: 20260716090000_retire_compute_analytics_kind_rpc_guard.sql
+-- source migration: 20260924230827_fanin_initial_status_10param.sql
 -- --------------------------------------------------------------------------
--- 10-param overload — verbatim from 20260420073003:330 with ONLY the
--- retired-kind guard inserted after the p_kind NULL guard.
+-- 10-param overload — verbatim from 20260826150000's ten-arg CREATE, with ONLY
+-- the four initial-status edits listed in the header, edit (4) being the
+-- parent FOR SHARE lock and its refusals (NULL element, missing parent,
+-- failed_final parent).
+--
+-- ⚠️ GATE-TOKEN HYGIENE (T-163-16), carried forward from 20260826150000.
+-- `pg_get_functiondef` returns a body's COMMENTS as well as its statements, so
+-- every arm of the DO block below matches a COMMENT-STRIPPED copy, stripping
+-- BOTH plpgsql comment syntaxes. The comments inside the body below say "the
+-- strict re-read", never the statement form, and name the initial status in
+-- prose only. ⛔ For the 7-PARAM overload the strip is the ONLY layer and it is
+-- load-bearing on PROD alone: PROD's 7-param body quotes the strict construct
+-- in a line comment (20260716090000's lost-race note), so regressing the strip
+-- makes arm (c) match that comment and ABORT THE PROD DEPLOY, while on TEST
+-- there is nothing to strip and CI stays GREEN. Do not "simplify" the strip on
+-- the evidence of a green CI run.
+--
+-- ⚠️ SCHEMA-QUALIFIED DELIBERATELY, as in 20260826150000. An unqualified
+-- CREATE OR REPLACE resolves against the SESSION search_path, so under a
+-- search_path that does not put public first it CREATES a second function in
+-- another schema — and a create arrives with default privileges, which on a
+-- Supabase project is where the default-grant event trigger recorded in
+-- 20260515130001 hands EXECUTE to anon and authenticated.
 -- --------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION _enqueue_compute_job_internal(
+CREATE OR REPLACE FUNCTION public._enqueue_compute_job_internal(
   p_strategy_id     UUID,
   p_portfolio_id    UUID,
   p_kind            TEXT,
@@ -161,6 +182,10 @@ DECLARE
   v_existing_id UUID;
   v_new_id UUID;
   v_target_count INT;
+  v_initial_status TEXT;
+  v_parents_found  INT;
+  v_parents_failed INT;
+  v_parents_open   INT;
 BEGIN
   -- 4-way XOR guard (CHECK mirrors this; the function raises earlier with a
   -- clearer error message — defense in depth).
@@ -186,6 +211,70 @@ BEGIN
   IF p_kind = 'compute_analytics' THEN
     RAISE EXCEPTION '_enqueue_compute_job_internal: kind compute_analytics is retired (Phase 106) — no enqueue path remains'
       USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Phase 164.9.1 (mig 109 P12 intent, mirrored from the 7-param overload in
+  -- 20260716090000): rows with parents start as done_pending_children so the
+  -- fan-in advance in mark_compute_job_done holds them until a parent
+  -- completes. Leaf rows (no parents) start as pending.
+  --
+  -- Round-1 review (silent-failure-hunter HIGH-2): the fan-in advance releases
+  -- a child only when a parent is marked done AND every listed parent is
+  -- 'done'. A child whose parents cannot all reach 'done' through a later
+  -- mark-done would sit in done_pending_children forever, holding its
+  -- (target, kind) in-flight slot, and every later enqueue for that target
+  -- and kind would be handed its id. So the parents are READ here:
+  --   * a NULL element, or an id with no row   -> refused, loudly;
+  --   * a parent that already ended failed_final -> refused, loudly;
+  --   * every parent already 'done'           -> no mark-done will ever
+  --     release the child, and nothing needs to hold it: it starts pending;
+  --   * otherwise a parent is still open       -> done_pending_children.
+  -- The parents are locked FOR SHARE, in id order, BEFORE they are counted.
+  -- mark_compute_job_done flips its parent with an UPDATE, which waits on
+  -- that lock, and runs its fan-in advance as a LATER statement, which sees
+  -- this child once this transaction commits. Without the lock a parent could
+  -- commit 'done' between this read and the INSERT below, and its fan-in
+  -- advance would miss a child it never saw.
+  IF p_parent_job_ids IS NOT NULL
+     AND array_length(p_parent_job_ids, 1) IS NOT NULL
+     AND array_length(p_parent_job_ids, 1) > 0 THEN
+    IF array_position(p_parent_job_ids, NULL) IS NOT NULL THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: p_parent_job_ids contains a NULL element; a fan-in child must name real parent jobs'
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    PERFORM 1
+       FROM compute_jobs pj
+      WHERE pj.id = ANY(p_parent_job_ids)
+      ORDER BY pj.id
+      FOR SHARE;
+
+    SELECT count(*),
+           count(*) FILTER (WHERE pj.status = 'failed_final'),
+           count(*) FILTER (WHERE pj.status <> 'done')
+      INTO v_parents_found, v_parents_failed, v_parents_open
+      FROM compute_jobs pj
+     WHERE pj.id = ANY(p_parent_job_ids);
+
+    IF v_parents_found <> cardinality(ARRAY(SELECT DISTINCT unnest(p_parent_job_ids))) THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: p_parent_job_ids names % parent job(s) with no compute_jobs row; a child of a missing parent could never be released by the fan-in advance',
+        cardinality(ARRAY(SELECT DISTINCT unnest(p_parent_job_ids))) - v_parents_found
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_parents_failed > 0 THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: % parent job(s) in p_parent_job_ids already ended failed_final; a child of a failed parent could never be released by the fan-in advance',
+        v_parents_failed
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_parents_open > 0 THEN
+      v_initial_status := 'done_pending_children';
+    ELSE
+      v_initial_status := 'pending';
+    END IF;
+  ELSE
+    v_initial_status := 'pending';
   END IF;
 
   -- Optimistic look-up per target type.
@@ -227,13 +316,13 @@ BEGIN
   INSERT INTO compute_jobs (
     strategy_id, portfolio_id, allocator_id, api_key_id,
     kind, parent_job_ids, idempotency_key, exchange, metadata,
-    next_attempt_at
+    next_attempt_at, status
   )
   VALUES (
     p_strategy_id, p_portfolio_id, p_allocator_id, p_api_key_id,
     p_kind, COALESCE(p_parent_job_ids, '{}'::uuid[]), p_idempotency_key,
     p_exchange, p_metadata,
-    COALESCE(p_run_at, now())
+    COALESCE(p_run_at, now()), v_initial_status
   )
   ON CONFLICT DO NOTHING
   RETURNING id INTO v_new_id;
@@ -242,35 +331,84 @@ BEGIN
     RETURN v_new_id;
   END IF;
 
-  -- Lost the race — re-read the winner's row.
+  -- Lost the race — re-read the winner's row. Plain SELECT INTO, because
+  -- between the conflict and the re-read the winner may have advanced past
+  -- the in-flight statuses (done / failed_*). That is a legitimate race
+  -- outcome, but the strict re-read this replaced raised NO_DATA_FOUND with
+  -- no domain-specific message and surfaced as an opaque 500 to the
+  -- user-facing request. (Phase 163 OPS-08; the 7-param overload got the same
+  -- treatment as mig 109 P3 — this is parity, not a new policy.)
   IF p_strategy_id IS NOT NULL THEN
-    SELECT id INTO STRICT v_new_id
+    SELECT id INTO v_new_id
       FROM compute_jobs
      WHERE strategy_id = p_strategy_id
        AND kind = p_kind
        AND status IN ('pending', 'running', 'done_pending_children')
      LIMIT 1;
   ELSIF p_portfolio_id IS NOT NULL THEN
-    SELECT id INTO STRICT v_new_id
+    SELECT id INTO v_new_id
       FROM compute_jobs
      WHERE portfolio_id = p_portfolio_id
        AND kind = p_kind
        AND status IN ('pending', 'running', 'done_pending_children')
      LIMIT 1;
   ELSIF p_allocator_id IS NOT NULL THEN
-    SELECT id INTO STRICT v_new_id
+    SELECT id INTO v_new_id
       FROM compute_jobs
      WHERE allocator_id = p_allocator_id
        AND kind = p_kind
        AND status IN ('pending', 'running', 'done_pending_children')
      LIMIT 1;
   ELSE
-    SELECT id INTO STRICT v_new_id
+    SELECT id INTO v_new_id
       FROM compute_jobs
      WHERE api_key_id = p_api_key_id
        AND kind = p_kind
        AND status IN ('pending', 'running', 'done_pending_children')
      LIMIT 1;
+  END IF;
+
+  IF v_new_id IS NULL THEN
+    -- Winner already advanced past in-flight. Classify the outcome: ERRCODE
+    -- serialization_failure (40001) is the canonical Postgres class for "MVCC
+    -- race, retry safe", and the SQLSTATE is the WHOLE signal. A caller that
+    -- wants to retry branches on the code, never on this string.
+    --
+    -- ⛔ THIS MESSAGE IS OPERATOR TEXT AND IT STILL REACHES A USER-VISIBLE
+    -- COLUMN. An earlier version of this note said the remedy was to keep the
+    -- message SHORT. That is the WRONG PROPERTY and the phase-163 review
+    -- (WR-07) was right to say so: the property that matters is NOT OPERATOR
+    -- JARGON, and shortness does not deliver it.
+    --
+    -- The path, re-measured at HEAD 2026-08-26 (the old note's :2012 was
+    -- stale):
+    --   src/app/api/strategies/csv-finalize/route.ts:2035 builds
+    --     `compute job enqueue failed: ${enqueueErrMessage}`
+    --   then writeFailedStrategyAnalyticsPlaceholder (:1868) writes it to
+    --   strategy_analytics.computation_error (:1928), which renders VERBATIM
+    --   to the strategy's OWNER in the wizard failure envelope.
+    --
+    -- ⚠️ AND THAT PREFIX IS BUILT ON THE TS SIDE, UNCONDITIONALLY, with no
+    -- SQLSTATE branch in front of it. So NO message this function can raise
+    -- keeps operator jargon out of that column: the user reads "compute job
+    -- enqueue failed: ..." whatever follows the colon. SQL can choose WHICH
+    -- jargon appears; it cannot remove jargon. Rewording this string into
+    -- curated user copy would be cosmetic, and it would additionally push user
+    -- copy into the operator log line for the allocator / portfolio / api_key
+    -- callers, which are not user-facing at all. The fix is a TS change, and it
+    -- HAS LANDED (2026-08-26): csv-finalize now branches on SQLSTATE 40001 and
+    -- writes curated copy instead of prefixing this sentence. So this string
+    -- stays operator-shaped ON PURPOSE and is now correct to do so — the user
+    -- no longer reads it, while the allocator / portfolio / api_key callers
+    -- still get the precise operator wording they need.
+    --
+    -- What the old note got RIGHT, and what therefore stays: naming the
+    -- internal SECDEF function and the four internal UUIDs here would make the
+    -- leak strictly worse, and nothing diagnostic is lost by omitting them —
+    -- the caller already knows which target it asked for, and the server log's
+    -- CONTEXT line still names this function for operators.
+    RAISE EXCEPTION 'enqueue race lost: the winning job already advanced past the in-flight statuses'
+      USING ERRCODE = 'serialization_failure';
   END IF;
 
   RETURN v_new_id;

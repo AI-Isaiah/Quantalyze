@@ -285,6 +285,39 @@ describe("POST /api/strategies/composite/set-members — B15 limiter ordering", 
     );
 
     expect(res.status).toBe(429);
+    // ⚠️ 164.2-05 / criterion 4 — THE BODY WAS NOT ASSERTED AT ALL BEFORE THIS
+    // PLAN, and that silence is why the misattribution survived here longest.
+    // This case pinned the STATUS and the limiter KEY; the code inside could
+    // have been anything.
+    //
+    // It was `KEY_RATE_LIMIT`, whose copy says the exchange asked us to slow
+    // down and whose second fix line offers "try a different exchange account".
+    // ⭐ `set-members` NEVER TOUCHES AN EXCHANGE ON ANY PATH — it persists date
+    // windows and does not call `classifyKeyValidationError` at all (its own
+    // `KNOWN_SET_MEMBERS_CODES` docblock says so) — so that sentence named a
+    // venue provably not involved. `RATE_LIMITED` already carried the true one:
+    // "the cap is ours, not your exchange's".
+    //
+    // ⚠️ BYTE-WISE, `code` FIRST. `toEqual` on parsed JSON does not compare key
+    // order (the WR-03 measurement), and this route writes the OLDER shape — a
+    // bare `NextResponse.json({ code, error }, { status: 429, … })` rather than
+    // `rateLimitDenyJson`. ⛔ That shape is deliberately LEFT ALONE here (Rule
+    // 3, surgical): routing this deny through the chokepoint is a posture
+    // change with its own guard in `seam-ratelimit-posture.invariant.test.ts`,
+    // not a copy fix. The one live consequence is recorded in
+    // `wizardErrors.invariant.test.ts`'s `[164.2-05]` describe: of the three
+    // routes moved by this plan, only this one's 429 is VISIBLE to `emitterRe`.
+    expect(await res.clone().text()).toBe(
+      '{"code":"RATE_LIMITED","error":"Too many requests"}',
+    );
+    expect(await res.json()).toEqual({
+      code: "RATE_LIMITED",
+      error: "Too many requests",
+    });
+    expect(res.headers.get("Retry-After")).toBe("42");
+    // NO_STORE_HEADERS survives the deny arm — a throttle response must not be
+    // cached and handed to the next request as a refusal.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const [, limiterKey] = checkLimitMock.mock.calls[0];
     expect(limiterKey).toContain("composite-set-members");
     expect(limiterKey).toContain(MOCK_USER.id);

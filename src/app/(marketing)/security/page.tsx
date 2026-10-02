@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { isSfoxEnabledServer } from "@/lib/closed-sets";
+import { isSfoxEnabledServer, isMt5EnabledServer } from "@/lib/closed-sets";
 
 /**
  * `/security` — public security practices page.
@@ -523,6 +523,49 @@ export default function SecurityPage() {
                         </a>{" "}
                         for the current IP — we rotate infrequently and will notify
                         ahead of any change. Then paste the token into the wizard.
+                      </li>
+                    </ol>
+                  </SubAnchor>
+                )}
+
+                {/* Phase 138 (MT5UI-01): the MT5 investor-password guide is
+                    founder-gated until go-live. Render it ONLY when the server
+                    go-live flag MT5_ENABLED is on (isMt5EnabledServer). Pre-launch
+                    there is no MT5 wizard card to point at, so the page must stay
+                    byte-identical to its pre-mt5 baseline. Gate on the SERVER flag
+                    (backend availability — the connect is admitted exactly when
+                    MT5_ENABLED is on), never the client NEXT_PUBLIC_MT5_ENABLED:
+                    the guide is a Server Component read at render time, and a
+                    client-flag gate would desynchronize the guide from the
+                    backend the wizard actually connects to. Steady-state guidance,
+                    so muted voice — no amber/red, no ⚠ glyph (DESIGN.md
+                    Semantic-color gate). No IP / gateway / hosting claim: that
+                    surface is Phase 139 founder ops and is not real yet. */}
+                {isMt5EnabledServer() && (
+                  <SubAnchor id="mt5-readonly" title="MT5">
+                    <ol className="mt-2 list-decimal space-y-1 pl-5 text-body text-text-secondary">
+                      <li>
+                        Connect with this account&rsquo;s{" "}
+                        <strong>investor (read-only) password</strong> — never the
+                        master password. A master password can place and modify
+                        trades, so we refuse it at connect time and store nothing;
+                        only the read-only investor login is accepted.
+                      </li>
+                      <li>
+                        The investor password is separate from the master password
+                        you sign in with. If you do not have one, ask your broker to
+                        issue or reset the investor (read-only) password for this
+                        account.
+                      </li>
+                      <li>
+                        Open your MT5 terminal&rsquo;s login window and copy the
+                        server name exactly as it appears there. It is
+                        broker-specific and often carries a region or a Demo/Live
+                        suffix, so watch for trailing spaces or the wrong variant.
+                      </li>
+                      <li>
+                        Enter the login (account number), the investor password, and
+                        the broker server in the wizard.
                       </li>
                     </ol>
                   </SubAnchor>

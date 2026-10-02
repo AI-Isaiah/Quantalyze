@@ -3753,3 +3753,429 @@ async def test_allocated_path_spot_sell_excluded(monkeypatch: Any) -> None:
     )
     assert pd.Timestamp("2025-07-12") not in ledger.native_pnl["BTC"].index
     assert "USDC" not in ledger.native_pnl  # the +60,000 cash leg dropped too
+
+
+# ===========================================================================
+# 131-01a Task 1: fetch_deribit_option_daily_marks — greenfield clone of the
+# perp-index fetcher (deribit_ingest.py:597-691). Same public
+# get_tradingview_chart_data 1D endpoint, same transient-retry →
+# DeribitTransientReadError, same {}-on-structural-no-data, same tick→UTC-day
+# dedupe. Differences: takes the instrument name VERBATIM (no suffix synthesis)
+# and an EXPLICIT expiry-capped `newest_day` (never fetch past expiry). The
+# function stays an HONEST fetch — the fail-loud hole decision is the caller's.
+# ===========================================================================
+
+
+async def test_option_daily_marks_parses_maps_days_and_verbatim_instrument() -> None:
+    stub = _ChartDataStub(
+        [_chart_ok([("2025-06-01", 0.0210), ("2025-06-02", 0.0185)])]
+    )
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27JUN25-100000-C",
+        oldest_day="2025-06-01",
+        newest_day="2025-06-02",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {"2025-06-01": 0.0210, "2025-06-02": 0.0185}
+    # The instrument name is passed VERBATIM — no suffix synthesis.
+    assert stub.calls[0]["instrument_name"] == "BTC-27JUN25-100000-C"
+    assert stub.calls[0]["resolution"] == "1D"
+
+
+async def test_option_daily_marks_bounds_from_oldest_and_newest_day() -> None:
+    import pandas as pd
+
+    stub = _ChartDataStub([_chart_ok([("2025-06-01", 0.02)])])
+    await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27JUN25-100000-C",
+        oldest_day="2025-06-01",
+        newest_day="2025-06-27",
+        sleep=_SleepSpy(),
+    )
+    # Bounds derive from oldest_day / newest_day — never `now()`. newest_day caps
+    # the span at expiry (never fetch past it). CR-01: the END bound is
+    # newest_day + 24h, NOT newest_day 00:00 — Deribit stamps 1D bars at 08:00
+    # UTC (M7 evidence), so a midnight end bound would exclude newest_day's OWN
+    # bar and a single open position could never be marked on its last held day.
+    assert stub.calls[0]["start_timestamp"] == int(
+        pd.Timestamp("2025-06-01", tz="UTC").timestamp() * 1000
+    )
+    assert stub.calls[0]["end_timestamp"] == int(
+        pd.Timestamp("2025-06-27", tz="UTC").timestamp() * 1000
+    ) + 24 * 3600 * 1000
+
+
+class _RangeRespectingChartStub:
+    """A chart stub that RESPECTS start_timestamp/end_timestamp — bars stamped at
+    08:00 UTC exactly as Deribit does (M7 evidence: `bar_stamp_utc: 08:00`). The
+    original scripted stubs ignored the requested range, which is precisely how
+    the CR-01 end-bound bug stayed test-blessed."""
+
+    def __init__(self, day_price: dict[str, float]) -> None:
+        import pandas as pd
+
+        self._bars = {
+            int(
+                pd.Timestamp(f"{d}T08:00:00", tz="UTC").timestamp() * 1000
+            ): p
+            for d, p in day_price.items()
+        }
+        self.calls: list[dict[str, Any]] = []
+
+    async def public_get_get_tradingview_chart_data(
+        self, params: dict[str, Any]
+    ) -> Any:
+        self.calls.append(dict(params))
+        start = int(params["start_timestamp"])
+        end = int(params["end_timestamp"])
+        ticks = sorted(ts for ts in self._bars if start <= ts <= end)
+        if not ticks:
+            return {"result": {"status": "no_data", "ticks": [], "close": []}}
+        return {
+            "result": {
+                "status": "ok",
+                "ticks": ticks,
+                "close": [self._bars[ts] for ts in ticks],
+            }
+        }
+
+
+async def test_option_daily_marks_newest_day_0800_bar_included() -> None:
+    """CR-01 regression: Deribit ticks 1D bars at 08:00 UTC, so the bar for
+    ``newest_day`` itself lives at ``newest_day 08:00`` — PAST a midnight end
+    bound. Against a range-RESPECTING stub, a single-day window ``[T, T]`` (one
+    open position, no later events) must still return day T's bar; under the old
+    ``newest_day 00:00`` bound it returned ZERO bars and the D-07 hole guard
+    hard-failed a healthy account."""
+    stub = _RangeRespectingChartStub({"2026-07-20": 0.031})
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27MAR26-50000-C",
+        oldest_day="2026-07-20",
+        newest_day="2026-07-20",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {"2026-07-20": 0.031}
+
+
+async def test_option_daily_marks_keeps_zero_close_drops_negative() -> None:
+    """WR-04: unlike the perp-INDEX sibling (where a non-positive price is
+    nonsense), a 0.0 daily close on a deep-OTM option near expiry is
+    economically legitimate — dropping it would delete the day from the marks
+    map and the D-07 guard would hard-fail a held WORTHLESS position as a
+    'structural hole' (a spurious fail-loud with a misleading message). Keep
+    0.0; only a NEGATIVE close (impossible for an option price) is dropped."""
+    stub = _ChartDataStub(
+        [_chart_ok([("2025-06-01", 0.02), ("2025-06-02", 0.0), ("2025-06-03", -1.0)])]
+    )
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27JUN25-100000-C",
+        oldest_day="2025-06-01",
+        newest_day="2025-06-03",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {"2025-06-01": 0.02, "2025-06-02": 0.0}  # 0.0 kept, <0 dropped
+
+
+async def test_option_daily_marks_dedupe_keeps_first_per_day() -> None:
+    # Two bars stamped on the SAME UTC day → keep the FIRST (defensive vs a dupe),
+    # exactly the sibling's setdefault dedupe.
+    stub = _ChartDataStub([_chart_ok([("2025-06-01", 0.02), ("2025-06-01", 0.03)])])
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27JUN25-100000-C",
+        oldest_day="2025-06-01",
+        newest_day="2025-06-01",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {"2025-06-01": 0.02}
+
+
+async def test_option_daily_marks_status_not_ok_returns_empty() -> None:
+    stub = _ChartDataStub([{"result": {"status": "no_data", "ticks": [], "close": []}}])
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27JUN25-100000-C",
+        oldest_day="2025-06-01",
+        newest_day="2025-06-02",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {}
+
+
+async def test_option_daily_marks_structural_nodata_returns_empty() -> None:
+    # The exchange RESPONDED (BadSymbol) → benign structural no-data → {} (NOT
+    # retried). The caller decides whether a hole is a fail-loud structural gap.
+    stub = _ChartDataStub([ccxt.BadSymbol("no such instrument")])
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27JUN25-100000-C",
+        oldest_day="2025-06-01",
+        newest_day="2025-06-02",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {}
+    assert len(stub.calls) == 1  # structural → NOT retried
+
+
+def test_option_expiry_iso_locale_independent() -> None:
+    """IN-02: ``strptime(%d%b%y)`` parses the LOCALE's month abbreviations —
+    under a non-C ``LC_TIME`` (de_DE: MAR/OCT/DEC fail) the expiry silently
+    parses to ``None``, the pre-retention partition can never bucket, and old
+    wholly-empty instruments hard-fail instead of warning. The parser must use
+    an explicit month map (no other services/ code uses ``%b``)."""
+    import locale
+
+    saved = locale.setlocale(locale.LC_TIME)
+    chosen = None
+    for cand in ("de_DE.UTF-8", "de_DE.utf8", "de_DE"):
+        try:
+            locale.setlocale(locale.LC_TIME, cand)
+            chosen = cand
+            break
+        except locale.Error:
+            continue
+    if chosen is None:
+        pytest.skip("no de_DE locale installed to prove locale-independence")
+    try:
+        assert di._option_expiry_iso("BTC-27MAR26-50000-C") == "2026-03-27"
+        assert di._option_expiry_iso("BTC-31OCT25-60000-P") == "2025-10-31"
+        assert di._option_expiry_iso("BTC-19DEC25-90000-C") == "2025-12-19"
+    finally:
+        locale.setlocale(locale.LC_TIME, saved)
+
+
+def test_option_expiry_iso_all_months_and_rejections() -> None:
+    """IN-02 companion (runs everywhere): all 12 month tokens parse, 1- and
+    2-digit days parse, and a nonsense token / impossible date / non-dated
+    instrument stays ``None`` (never raises on untrusted input)."""
+    months = [
+        "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+        "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    ]
+    for i, mon in enumerate(months, start=1):
+        assert di._option_expiry_iso(f"BTC-15{mon}26-50000-C") == f"2026-{i:02d}-15"
+    assert di._option_expiry_iso("BTC-1SEP25-90000-P") == "2025-09-01"
+    assert di._option_expiry_iso("BTC-30FEB26-50000-C") is None  # impossible date
+    assert di._option_expiry_iso("BTC-15XXX26-50000-C") is None  # unknown month
+    assert di._option_expiry_iso("BTC-PERPETUAL") is None  # no dated segment
+
+
+async def test_option_daily_marks_transient_raises_retryable() -> None:
+    # A NetworkError is RETRYABLE: retry with backoff, then raise
+    # DeribitTransientReadError on budget exhaustion — never a silently-partial map.
+    stub = _ChartDataStub([ccxt.RequestTimeout("blip")] * 3)
+    spy = _SleepSpy()
+    with pytest.raises(DeribitTransientReadError):
+        await di.fetch_deribit_option_daily_marks(
+            stub,
+            "BTC-27JUN25-100000-C",
+            oldest_day="2025-06-01",
+            newest_day="2025-06-02",
+            sleep=spy,
+            max_retries=2,
+        )
+    assert len(stub.calls) == 3  # initial + 2 retries
+    assert spy.waits == [1.0, 2.0]  # exponential backoff
+
+
+# ===========================================================================
+# GLB-4 hardening — a FLAKY HTTP-200 (rate-limit / maintenance / truncated
+# body) must NOT be treated as a benign no-data {}: that silently-empty map
+# would flow into the caller's D-07 hole guard and PERMANENTLY fail a held-
+# position options strategy, with no retry ever seeing the healthy response.
+# A flaky 200 is retried on the SAME transient budget as a thrown network
+# error; only the EXPLICIT ``status == "no_data"`` marker stays benign.
+# ===========================================================================
+
+
+async def test_option_daily_marks_malformed_status_200_raises_retryable() -> None:
+    """GLB-4: a 200 whose ``status`` is present but neither ``ok`` nor ``no_data``
+    (a rate-limit / maintenance / error payload) is FLAKY, not a business no-data
+    answer — it is retried on the transient budget and, on exhaustion, raises
+    DeribitTransientReadError (retryable) rather than silently returning {}."""
+    bad = {"result": {"status": "error", "ticks": [], "close": []}}
+    stub = _ChartDataStub([bad, bad, bad])
+    spy = _SleepSpy()
+    with pytest.raises(DeribitTransientReadError):
+        await di.fetch_deribit_option_daily_marks(
+            stub,
+            "BTC-27JUN25-100000-C",
+            oldest_day="2025-06-01",
+            newest_day="2025-06-02",
+            sleep=spy,
+            max_retries=2,
+        )
+    assert len(stub.calls) == 3  # initial + 2 retries (NOT one silent {})
+    assert spy.waits == [1.0, 2.0]  # exponential backoff, shared budget
+
+
+async def test_option_daily_marks_malformed_ok_shape_raises_retryable() -> None:
+    """GLB-4: an ``ok`` body whose ticks/close arrays are mismatched (truncated
+    payload) is a corrupt 200 — retried, then DeribitTransientReadError, never a
+    silent {}."""
+    bad = {"result": {"status": "ok", "ticks": [1, 2], "close": [0.1]}}  # len mismatch
+    stub = _ChartDataStub([bad, bad, bad])
+    with pytest.raises(DeribitTransientReadError):
+        await di.fetch_deribit_option_daily_marks(
+            stub,
+            "BTC-27JUN25-100000-C",
+            oldest_day="2025-06-01",
+            newest_day="2025-06-02",
+            sleep=_SleepSpy(),
+            max_retries=2,
+        )
+    assert len(stub.calls) == 3
+
+
+async def test_option_daily_marks_flaky_200_then_healthy_recovers() -> None:
+    """GLB-4 payoff: a flaky 200 followed by a HEALTHY 200 within budget returns
+    the real marks — proving the retry actually re-fetches and SEES the healthy
+    response (the whole point vs. a silently-empty {})."""
+    bad = {"result": {"status": "error"}}
+    good = _chart_ok([("2025-06-01", 0.021)])
+    stub = _ChartDataStub([bad, good])
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27JUN25-100000-C",
+        oldest_day="2025-06-01",
+        newest_day="2025-06-02",
+        sleep=_SleepSpy(),
+        max_retries=2,
+    )
+    assert marks == {"2025-06-01": 0.021}
+    assert len(stub.calls) == 2  # retried once, then the healthy response
+
+
+async def test_option_daily_marks_no_data_benign_not_retried() -> None:
+    """GLB-4 boundary: a GENUINE ``no_data`` 200 stays benign — returns {} WITHOUT
+    retrying (the second scripted item is never popped), so a legitimately empty
+    instrument is not needlessly re-fetched or escalated to a transient error."""
+    stub = _ChartDataStub(
+        [
+            {"result": {"status": "no_data", "ticks": [], "close": []}},
+            _chart_ok([("2025-06-01", 9.9)]),  # sentinel: popped only if retried
+        ]
+    )
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27JUN25-100000-C",
+        oldest_day="2025-06-01",
+        newest_day="2025-06-02",
+        sleep=_SleepSpy(),
+        max_retries=2,
+    )
+    assert marks == {}
+    assert len(stub.calls) == 1  # no_data → NOT retried
+
+
+# ===========================================================================
+# GLB-5 hardening — the mark-retention horizon is (a) operator-tunable via
+# DERIBIT_OPTION_MARK_RETENTION_DAYS and (b) softened by a tolerance band so a
+# wholly-empty instrument whose expiry sits JUST inside the probed 913d horizon
+# buckets to cash (pre-retention) rather than hard-failing D-07 — the horizon
+# is an UNCONTRACTED one-probe estimate, so a still-green key should not fail
+# spontaneously as its history ages into the uncertain band. A still-recent
+# wholly-empty expiry (past the band) and a partial straddler STILL fail loud.
+# ===========================================================================
+
+_GLB5_MONTHS = [
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+    "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+]
+
+
+def _iso_days_from_today(delta_days: int) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (
+        datetime.now(timezone.utc).date() + timedelta(days=delta_days)
+    ).isoformat()
+
+
+def _opt_name_expiring(delta_days: int, *, strike: int = 50000, right: str = "C") -> str:
+    """A Deribit option instrument name whose parsed expiry is ``delta_days`` from
+    today (negative = past), e.g. ``BTC-15MAR26-50000-C``."""
+    from datetime import datetime, timedelta, timezone
+
+    exp = datetime.now(timezone.utc).date() + timedelta(days=delta_days)
+    token = f"{exp.day:02d}{_GLB5_MONTHS[exp.month - 1]}{exp.year % 100:02d}"
+    return f"BTC-{token}-{strike}-{right}"
+
+
+def _held_option_rows(instrument: str, trade_day_iso: str) -> list[dict[str, Any]]:
+    """One option ``trade`` row opening a held (nonzero terminal) BTC position."""
+    import pandas as pd
+
+    ts = int(pd.Timestamp(f"{trade_day_iso}T10:00:00", tz="UTC").timestamp() * 1000)
+    return [
+        {
+            "type": "trade",
+            "instrument_name": instrument,
+            "currency": "BTC",
+            "change": -0.01,
+            "commission": 0.0,
+            "position": 1.0,
+            "timestamp": ts,
+            "id": 1,
+        }
+    ]
+
+
+def test_option_mark_retention_days_env_override(monkeypatch: Any) -> None:
+    """GLB-5(a): the horizon defaults to 913 but honours a positive-int
+    DERIBIT_OPTION_MARK_RETENTION_DAYS; a non-positive / non-int override is
+    ignored (falls back to the default) so a fat-fingered env can never silently
+    disable the retention partition."""
+    monkeypatch.delenv("DERIBIT_OPTION_MARK_RETENTION_DAYS", raising=False)
+    assert di._option_mark_retention_days() == 913
+    monkeypatch.setenv("DERIBIT_OPTION_MARK_RETENTION_DAYS", "400")
+    assert di._option_mark_retention_days() == 400
+    monkeypatch.setenv("DERIBIT_OPTION_MARK_RETENTION_DAYS", "0")
+    assert di._option_mark_retention_days() == 913  # non-positive ignored
+    monkeypatch.setenv("DERIBIT_OPTION_MARK_RETENTION_DAYS", "-5")
+    assert di._option_mark_retention_days() == 913  # negative ignored
+    monkeypatch.setenv("DERIBIT_OPTION_MARK_RETENTION_DAYS", "notanint")
+    assert di._option_mark_retention_days() == 913  # non-int ignored
+
+
+async def test_near_cutoff_wholly_empty_buckets_pre_retention(
+    monkeypatch: Any,
+) -> None:
+    """GLB-5(b): a WHOLLY-EMPTY marks response for a held instrument whose expiry
+    is NEWER than the hard cutoff but within the tolerance band buckets to
+    cash-basis pre-retention (no D-07). retention=100d → cutoff today-100,
+    soft_cutoff today-70; expiry today-85 sits in the band."""
+    monkeypatch.setenv("DERIBIT_OPTION_MARK_RETENTION_DAYS", "100")
+    instrument = _opt_name_expiring(-85)
+    trade_day = _iso_days_from_today(-90)  # first_day <= expiry
+    rows = _held_option_rows(instrument, trade_day)
+    stub = _ChartDataStub(
+        [{"result": {"status": "no_data", "ticks": [], "close": []}}]
+    )
+    delta_mtm, terminal_book, pre_retention = await di._build_smoothed_option_mtm(
+        stub, rows, sleep=_SleepSpy()
+    )
+    # Bucketed (cash-basis), NOT a D-07 fail-loud.
+    assert ("BTC", trade_day) in pre_retention
+    assert delta_mtm == {}  # nothing kept for the pure MTM core
+    assert terminal_book == {}
+
+
+async def test_recent_wholly_empty_still_fails_loud(monkeypatch: Any) -> None:
+    """GLB-5 guardrail: the softening does NOT over-reach — a WHOLLY-EMPTY response
+    for an instrument whose expiry is NEWER than the tolerance band (a genuine
+    structural hole, not aged retention) STILL fails loud via the D-07 guard.
+    retention=100d → soft_cutoff today-70; expiry today-50 is past the band."""
+    monkeypatch.setenv("DERIBIT_OPTION_MARK_RETENTION_DAYS", "100")
+    instrument = _opt_name_expiring(-50)
+    trade_day = _iso_days_from_today(-55)
+    rows = _held_option_rows(instrument, trade_day)
+    stub = _ChartDataStub(
+        [{"result": {"status": "no_data", "ticks": [], "close": []}}]
+    )
+    with pytest.raises(LedgerValuationError):
+        await di._build_smoothed_option_mtm(stub, rows, sleep=_SleepSpy())

@@ -44,6 +44,23 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_set_compute_job_progress.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, REDUNDER-BACKFILL). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+-- ⚠️ 20260712130000 is the ONLY definition of set_compute_job_progress — no
+-- later migration re-issues it — so both twins target it. The five identities
+-- collapse to TWO sections (`Part 1`, and `2` covering 2a-2d), and the section
+-- 2 twin is anchored at 2b: it is the identity the fence removal makes the
+-- FIRST failure, because 2a's matching-token write still succeeds, while 2c
+-- and 2d stay guarded by the separate `claim_token IS NOT NULL` and
+-- `status = 'running'` terms the same mutation leaves standing.
+-- ⚠️ `claim_token` is added by 20260515114555, not by the migration under test,
+-- so that migration is in the apply list below — without it the gate aborts
+-- with a raw 42703 before any assertion runs.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260712130000_set_compute_job_progress.sql"]}
 
 -- ==========================================================================
 -- Part 1 — structural: anon/authenticated must NOT hold EXECUTE; service_role
@@ -53,6 +70,19 @@
 -- ==========================================================================
 DO $$
 BEGIN
+  -- RED-UNDER: in migration 20260712130000, widen the final GRANT to
+  --            `TO service_role, authenticated`. The REVOKE on the line above
+  --            it still runs and still names authenticated, so the function is
+  --            revoked and then re-granted — the exact "REVOKE missing"
+  --            end-state this arm names (T-95-04), reached the way it would
+  --            really happen: someone adds a role to a GRANT without noticing
+  --            the REVOKE it contradicts. `anon` is untouched, so the anon
+  --            branch above still passes and the authenticated branch is the
+  --            FIRST failure. Granting explicitly rather than shortening the
+  --            REVOKE is deliberate: it does not lean on the pg-lane's
+  --            ALTER DEFAULT PRIVILEGES stand-in (fixture 07) to do the work,
+  --            so the arm is falsified by the migration, not by the fixture.
+  -- RED-UNDER-M: {"arm":"Part 1","apply":[{"kind":"edit","file":"supabase/migrations/20260712130000_set_compute_job_progress.sql","find":"GRANT EXECUTE ON FUNCTION set_compute_job_progress(UUID, UUID, JSONB) TO service_role;","replace":"GRANT EXECUTE ON FUNCTION set_compute_job_progress(UUID, UUID, JSONB) TO service_role, authenticated;","occurrences":1}]}
   IF has_function_privilege('anon',
        'public.set_compute_job_progress(uuid,uuid,jsonb)', 'EXECUTE') THEN
     RAISE EXCEPTION 'TEST FAILED (Part 1): anon can EXECUTE set_compute_job_progress — REVOKE missing (T-95-04)';
@@ -145,6 +175,18 @@ BEGIN
   END IF;
 
   -- ---- 2b: mismatched token → false + no write ----------------------------
+  -- RED-UNDER: in migration 20260712130000, replace the UPDATE's
+  --            `AND claim_token IS NOT DISTINCT FROM p_claim_token` fence term
+  --            with `AND TRUE`. The claim fence is then gone while every other
+  --            guard survives, so a worker holding a STALE token — one whose
+  --            job the watchdog already reclaimed and handed to a second
+  --            worker — can overwrite the live worker's member_progress. That
+  --            is T-95-03, and it is invisible to 2a (a matching token still
+  --            writes), to 2c (the separate `claim_token IS NOT NULL` term
+  --            still rejects a reclaimed row) and to 2d (the `status =
+  --            'running'` term still rejects a terminal row), which is why 2b
+  --            is the one identity that can name this regression.
+  -- RED-UNDER-M: {"arm":"2b","apply":[{"kind":"edit","file":"supabase/migrations/20260712130000_set_compute_job_progress.sql","find":"     AND claim_token IS NOT DISTINCT FROM p_claim_token","replace":"     AND TRUE","occurrences":1}]}
   v_ret := public.set_compute_job_progress(v_job_stale, v_wrong, v_progress);
   IF v_ret IS DISTINCT FROM FALSE THEN
     RAISE EXCEPTION 'TEST FAILED (2b): stale-token write returned % (expected false)', v_ret;

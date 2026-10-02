@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
-import { pearson } from "@/lib/correlation-math";
+import { pearson } from "@/lib/return-stats";
 
 interface CompareItem {
   strategy: Strategy;

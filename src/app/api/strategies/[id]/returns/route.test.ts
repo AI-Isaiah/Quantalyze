@@ -38,6 +38,25 @@ import { NextRequest } from "next/server";
  *         imported/called (the mock exposes only the RLS createClient; an admin
  *         import would not resolve to anything wired here).
  *
+ * Phase 147 / SCEN-01 — the bug proper. 0/27 real (service-computed) strategies
+ * have `daily_returns`; the analytics-service writes the cumprod equity curve to
+ * `returns_series`. This route read ONLY `daily_returns`, so EVERY such strategy
+ * added from the composer's Browse drawer got `[]` and was warm-up-gated out of
+ * the blend. R12-R18 pin the fix and the additive `series_state` discriminator:
+ *   R12 — SC1: a returns_series-ONLY analytics row yields the real DIFFERENCED
+ *         series (N−1 points, hand-computed literals) + series_state 'available'
+ *   R13 — SC3: a wealth index starting at exactly 1.0 is NEVER forwarded raw —
+ *         day one is not ≈ +100%, and the length is N−1, not N
+ *   R14 — the analytics select is widened to carry returns_series +
+ *         computation_status (the SC-1(route) mutation target)
+ *   R15 — empty series + computation_status pending/computing → 'computing'
+ *   R16 — empty series + a TERMINAL status (complete / complete_with_warnings /
+ *         failed) → 'empty'. Absence is never an error envelope (UI-SPEC §3)
+ *   R17 — P5 permanent-spinner guard: NO analytics row at all is age-bounded —
+ *         a strategy created 1h ago → 'computing', 17h ago → 'empty'
+ *   R18 — a populated daily_returns column still wins (resolver's direct-first
+ *         contract) → the CSV-ingest path is byte-unchanged
+ *
  * The supabase mock drives `from('profiles')` (so withAllocatorAuth runs
  * end-to-end), `from('strategies')` (the published-existence probe), and
  * `from('strategy_analytics')` (the series read). Mirrors the browse/route.test
@@ -84,9 +103,28 @@ const STATE = vi.hoisted(() => ({
   // The strategy_analytics row the series read resolves. `null` models an
   // absent analytics row → honest empty []. data_quality_flags is the source of
   // the server-coerced is_composite boolean (strict === true, T-111-04).
+  // Phase 147 / SCEN-01: `returns_series` (the analytics-service cumprod equity
+  // curve — the column 27/27 real strategies actually populate) and
+  // `computation_status` (the series_state discriminator) join the row shape.
   analyticsRow: { daily_returns: [] as unknown } as
-    | { daily_returns: unknown; data_quality_flags?: unknown }
+    | {
+        daily_returns: unknown;
+        returns_series?: unknown;
+        computation_status?: unknown;
+        data_quality_flags?: unknown;
+        // Phase 162 / HONEST-05: the co-served headline scalars. Absent from a
+        // fixture models a row whose columns are unset → null on the body.
+        cagr?: unknown;
+        sharpe?: unknown;
+      }
     | null,
+  // Phase 147 / P5 — the strategies.created_at the route's SEPARATE lazy age
+  // read resolves. It fires ONLY on the empty-series + missing-analytics-row
+  // branch (the probe select stays byte-pinned by phase-84). `undefined` models
+  // a read that resolves no row; `strategyCreatedAtError` models a failed read
+  // (both degrade to the honest 'empty', never a permanent spinner).
+  strategyCreatedAt: undefined as string | null | undefined,
+  strategyCreatedAtError: null as { code: string; message: string } | null,
   // When set, the strategy_analytics read resolves with this error so the
   // route's 500 branch + redaction can be pinned.
   analyticsQueryError: null as { code: string; message: string } | null,
@@ -106,6 +144,10 @@ const STATE = vi.hoisted(() => ({
     // SELECT column lists, per table.
     strategiesSelect: null as string | null,
     analyticsSelect: null as string | null,
+    // Phase 147 — the SEPARATE lazy `created_at` read's select, recorded apart
+    // from `strategiesSelect` so the second `from("strategies")` call cannot
+    // clobber the phase-84-pinned probe assertions.
+    strategiesCreatedAtSelect: null as string | null,
   },
   // True whenever the mock observes a call against EITHER catalog table. R1
   // and R2 assert this stays FALSE — bad-uuid / non-allocator must
@@ -155,14 +197,28 @@ vi.mock("@/lib/supabase/server", () => ({
         // .eq('status','published'); the mock evaluates the row against WHICHEVER
         // predicate the route applied, so the widening is a genuine RED proof.)
         STATE.strategiesQueried = true;
+        // Phase 147 — this table now serves TWO distinct reads: the pinned
+        // visibility probe, and the lazy `created_at` age read on the
+        // missing-analytics-row branch. Each builder remembers its OWN select,
+        // so the age read routes to its own maybeSingle arm and never rewrites
+        // the probe's observed filters.
+        let selectedCols: string | null = null;
+        const isAgeRead = () => selectedCols?.includes("created_at") === true;
         const builder = {
           select: (cols: string) => {
-            STATE.observedFilters.strategiesSelect = cols;
+            selectedCols = cols;
+            if (cols.includes("created_at")) {
+              STATE.observedFilters.strategiesCreatedAtSelect = cols;
+            } else {
+              STATE.observedFilters.strategiesSelect = cols;
+            }
             return builder;
           },
           eq: (col: string, val: string) => {
             if (col === "status") STATE.observedFilters.status = val;
-            if (col === "id") STATE.observedFilters.strategiesEqId = val;
+            if (col === "id" && !isAgeRead()) {
+              STATE.observedFilters.strategiesEqId = val;
+            }
             return builder;
           },
           or: (filter: string) => {
@@ -170,6 +226,18 @@ vi.mock("@/lib/supabase/server", () => ({
             return builder;
           },
           maybeSingle: async () => {
+            if (isAgeRead()) {
+              if (STATE.strategyCreatedAtError) {
+                return { data: null, error: STATE.strategyCreatedAtError };
+              }
+              return {
+                data:
+                  STATE.strategyCreatedAt === undefined
+                    ? null
+                    : { created_at: STATE.strategyCreatedAt },
+                error: null,
+              };
+            }
             // No row with this id exists at all → null (genuine 404, not a
             // visibility miss).
             if (!STATE.publishedExists) {
@@ -221,7 +289,27 @@ vi.mock("@/lib/supabase/server", () => ({
             if (STATE.analyticsQueryError) {
               return { data: null, error: STATE.analyticsQueryError };
             }
-            return { data: STATE.analyticsRow, error: null };
+            if (STATE.analyticsRow === null) return { data: null, error: null };
+            // PROJECT to the selected columns, exactly as PostgREST does. Phase
+            // 147: without this the fixture's `returns_series` would reach the
+            // route even if the select never asked for it, making the SC-1
+            // mutation (drop the column from the select) unfalsifiable — the
+            // select-width assertion would go red but the BEHAVIOUR test would
+            // stay green, which is the "tested the helper, not the wiring"
+            // failure mode. A narrowed select must starve the series.
+            const cols = (STATE.observedFilters.analyticsSelect ?? "")
+              .split(",")
+              .map((c) => c.trim())
+              .filter(Boolean);
+            const projected: Record<string, unknown> = {};
+            for (const col of cols) {
+              if (col in STATE.analyticsRow) {
+                projected[col] = (
+                  STATE.analyticsRow as Record<string, unknown>
+                )[col];
+              }
+            }
+            return { data: projected, error: null };
           },
         };
         return builder;
@@ -302,6 +390,8 @@ beforeEach(() => {
   });
   STATE.analyticsRow = { daily_returns: [] };
   STATE.analyticsQueryError = null;
+  STATE.strategyCreatedAt = undefined;
+  STATE.strategyCreatedAtError = null;
   STATE.observedFilters = {
     status: null,
     ownerOrFilter: null,
@@ -309,6 +399,7 @@ beforeEach(() => {
     analyticsEqStrategyId: null,
     strategiesSelect: null,
     analyticsSelect: null,
+    strategiesCreatedAtSelect: null,
   };
   STATE.strategiesQueried = false;
   STATE.checkLimitResult = { success: true, retryAfter: 0 };
@@ -364,7 +455,13 @@ describe("GET /api/strategies/[id]/returns", () => {
       { date: "2022-01-10", value: -0.007462 },
       { date: "2022-01-11", value: 0.0031 },
     ];
-    STATE.analyticsRow = { daily_returns: series };
+    // STALE-01: the row carries a TERMINAL-SUCCESS status. The column is
+    // projected by this route and is NOT NULL in the schema, so a status-less
+    // analytics row was never a shape the DB could return; since the route
+    // withholds the series of a run that did not finish, the fixture has to say
+    // which run wrote it. The series-resolution contract under test is
+    // unchanged.
+    STATE.analyticsRow = { daily_returns: series, computation_status: "complete" };
     const { GET } = await import("./route");
     const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
     expect(res.status).toBe(200);
@@ -385,6 +482,8 @@ describe("GET /api/strategies/[id]/returns", () => {
       daily_returns: {
         "2022": { "01-11": 0.0031, "01-10": -0.007462 },
       },
+      // STALE-01: terminal-success status — see the note on R4's fixture.
+      computation_status: "complete",
     };
     const { GET } = await import("./route");
     const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
@@ -591,7 +690,13 @@ describe("GET /api/strategies/[id]/returns", () => {
       { date: "2026-07-10", value: 0.0012 },
       { date: "2026-07-11", value: -0.0004 },
     ];
-    STATE.analyticsRow = { daily_returns: series };
+    // STALE-01: the row carries a TERMINAL-SUCCESS status. The column is
+    // projected by this route and is NOT NULL in the schema, so a status-less
+    // analytics row was never a shape the DB could return; since the route
+    // withholds the series of a run that did not finish, the fixture has to say
+    // which run wrote it. The series-resolution contract under test is
+    // unchanged.
+    STATE.analyticsRow = { daily_returns: series, computation_status: "complete" };
     const { GET } = await import("./route");
     const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
     expect(res.status).toBe(200);
@@ -616,4 +721,443 @@ describe("GET /api/strategies/[id]/returns", () => {
     // No series (and no existence detail) leaks on the cross-tenant 404 path.
     expect(JSON.stringify(body)).not.toContain("daily_returns");
   });
+
+  // ── Phase 147 / SCEN-01 — the bare-reader fix + series_state ───────────────
+  // The analytics-service writes a cumprod EQUITY curve to `returns_series` and
+  // leaves `daily_returns` NULL. This route read only `daily_returns`, so every
+  // service-computed strategy added from the Browse drawer contributed [] to the
+  // blend. The fixture below is that exact production shape.
+  //
+  // Oracle independence: the expected returns are hand-computed literals typed
+  // here, NEVER re-derived by calling equityCurveToDailyReturns in the test.
+  //   1.05   / 1.0   − 1 = +0.05
+  //   0.945  / 1.05  − 1 = −0.10
+  //   1.0395 / 0.945 − 1 = +0.10
+  const WEALTH_INDEX = [
+    { date: "2026-01-01", value: 1.0 },
+    { date: "2026-01-02", value: 1.05 },
+    { date: "2026-01-03", value: 0.945 },
+    { date: "2026-01-04", value: 1.0395 },
+  ];
+
+  it("R12 — SC1: returns_series-ONLY analytics row → the real DIFFERENCED series (N−1) + series_state 'available'", async () => {
+    STATE.analyticsRow = {
+      daily_returns: null,
+      returns_series: WEALTH_INDEX,
+      computation_status: "complete",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // Differencing consumes the first point: N wealth values → N−1 returns.
+    // Asserted as N−1 of the fixture length, never a hard-coded day count.
+    expect(body.daily_returns).toHaveLength(WEALTH_INDEX.length - 1);
+    expect(body.daily_returns[0].value).toBeCloseTo(0.05, 10);
+    expect(body.daily_returns[1].value).toBeCloseTo(-0.1, 10);
+    expect(body.daily_returns[2].value).toBeCloseTo(0.1, 10);
+    // The date axis is the LATER date of each ratio (day one drops out).
+    expect(body.daily_returns.map((p: { date: string }) => p.date)).toEqual([
+      "2026-01-02",
+      "2026-01-03",
+      "2026-01-04",
+    ]);
+    // A resolved non-empty series is 'available' regardless of the job status.
+    expect(body.series_state).toBe("available");
+  });
+
+  it("R12b — PRODUCTION shape (no 1.0 base row): N stored points → N−1 returns, day-one's return is UNRECOVERABLE", async () => {
+    // The writer's first element is (1 + r_0) over the returns' own date index —
+    // it never prepends a 1.0 base row (metrics.py:654 cumprod; :1250-1257
+    // documents the day-0-exclusion semantics). WEALTH_INDEX above carries a
+    // test-convenience 1.0 anchor that makes ALL its returns recoverable; this
+    // companion drops it so the oracle pins what production data delivers:
+    // differencing recovers only N−1 returns, the return baked into element 0
+    // (+5% here) is permanently absent, and the derived series starts one day
+    // LATER than the stored curve.
+    const PROD_WEALTH_INDEX = WEALTH_INDEX.slice(1); // head 1.05 = (1 + 0.05)
+    STATE.analyticsRow = {
+      daily_returns: null,
+      returns_series: PROD_WEALTH_INDEX,
+      computation_status: "complete",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.daily_returns).toHaveLength(PROD_WEALTH_INDEX.length - 1);
+    expect(body.daily_returns[0].value).toBeCloseTo(-0.1, 10);
+    expect(body.daily_returns[1].value).toBeCloseTo(0.1, 10);
+    // Day one's +5% never surfaces as an emitted return.
+    for (const p of body.daily_returns as Array<{ value: number }>) {
+      expect(p.value).not.toBeCloseTo(0.05, 10);
+    }
+    // The date axis starts at the SECOND stored day (day one drops).
+    expect(body.daily_returns.map((p: { date: string }) => p.date)).toEqual([
+      "2026-01-03",
+      "2026-01-04",
+    ]);
+    expect(body.series_state).toBe("available");
+  });
+
+  it("R13 — SC3: a wealth index starting at exactly 1.0 is NEVER forwarded raw (no +100% day one)", async () => {
+    // The failure mode this pins: forwarding the cumprod curve as if it were a
+    // return series makes day one read as +100% (value 1.0 = "the strategy
+    // doubled today") and inflates every downstream metric. The economic
+    // invariant — a wealth curve hovering near 1.0 is a series of SMALL daily
+    // returns — is what the assertion encodes, not the helper's own formula.
+    STATE.analyticsRow = {
+      daily_returns: null,
+      returns_series: WEALTH_INDEX,
+      computation_status: "complete",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    const body = await res.json();
+    // Day one is a return, not a wealth level: nowhere near +100%.
+    expect(body.daily_returns[0].value).not.toBeCloseTo(1.0, 2);
+    expect(Math.abs(body.daily_returns[0].value)).toBeLessThan(0.5);
+    // Raw forwarding would keep all N points; differencing yields N−1.
+    expect(body.daily_returns).not.toHaveLength(WEALTH_INDEX.length);
+    // And no emitted point is a wealth LEVEL (every |r| stays sub-100%).
+    for (const p of body.daily_returns as Array<{ value: number }>) {
+      expect(Math.abs(p.value)).toBeLessThan(1.0);
+    }
+  });
+
+  it("R14 — the analytics select carries returns_series + computation_status (SC-1 mutation target)", async () => {
+    const { GET } = await import("./route");
+    await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    // Dropping either column from the select is the SC-1(route) / series_state
+    // mutation — this assertion is what goes red.
+    expect(STATE.observedFilters.analyticsSelect).toContain("returns_series");
+    expect(STATE.observedFilters.analyticsSelect).toContain("computation_status");
+    // The pre-147 columns stay (no accidental narrowing).
+    expect(STATE.observedFilters.analyticsSelect).toContain("daily_returns");
+    expect(STATE.observedFilters.analyticsSelect).toContain("data_quality_flags");
+  });
+
+  it("R15 — empty series + a LIVE job (pending/computing) → series_state 'computing'", async () => {
+    for (const status of ["pending", "computing"]) {
+      STATE.analyticsRow = {
+        daily_returns: null,
+        returns_series: null,
+        computation_status: status,
+      };
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.daily_returns).toEqual([]);
+      expect(body.series_state).toBe("computing");
+    }
+  });
+
+  it("R16 — empty series + a TERMINAL status → series_state 'empty' (absence is not an error)", async () => {
+    for (const status of ["complete", "complete_with_warnings", "failed"]) {
+      STATE.analyticsRow = {
+        daily_returns: null,
+        returns_series: null,
+        computation_status: status,
+      };
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+      // A finished job with nothing to show is a 200 with an honest empty
+      // series — never a 4xx/5xx envelope (UI-SPEC §3: 'failed' renders a muted
+      // "No data", not a red error).
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.daily_returns).toEqual([]);
+      expect(body.series_state).toBe("empty");
+    }
+  });
+
+  it("R17 — P5: a MISSING analytics row is age-bounded — young → 'computing', 17h old → 'empty'", async () => {
+    // No trigger creates a strategy_analytics row on strategy INSERT, and no
+    // cron backstops a MISSING row, so an un-enqueued strategy would otherwise
+    // spin "Syncing" forever — the permanent-spinner class Phase 142 killed.
+    const hoursAgo = (h: number) =>
+      new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
+
+    STATE.analyticsRow = null;
+    STATE.strategyCreatedAt = hoursAgo(1);
+    const { GET } = await import("./route");
+    let res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    let body = await res.json();
+    expect(body.daily_returns).toEqual([]);
+    expect(body.series_state).toBe("computing");
+    // The age came from a SEPARATE read — the phase-84-pinned probe select is
+    // untouched (asserted byte-for-byte by R8/R4c and phase-84 itself).
+    expect(STATE.observedFilters.strategiesCreatedAtSelect).toContain("created_at");
+    expect(STATE.observedFilters.strategiesSelect).toBe("id, asset_class");
+
+    // Past the 16h window the honest answer is absence, not a spinner.
+    STATE.strategyCreatedAt = hoursAgo(17);
+    res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    body = await res.json();
+    expect(body.series_state).toBe("empty");
+
+    // Unknown age (no row / unparseable / failed read) degrades to 'empty' —
+    // never an unbounded spinner.
+    STATE.strategyCreatedAt = undefined;
+    res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    body = await res.json();
+    expect(body.series_state).toBe("empty");
+
+    STATE.strategyCreatedAt = hoursAgo(1);
+    STATE.strategyCreatedAtError = { code: "PGRST301", message: "age read down" };
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.series_state).toBe("empty");
+    consoleSpy.mockRestore();
+  });
+
+  it("R18 — a populated daily_returns still wins over returns_series (resolver direct-first contract)", async () => {
+    // The CSV-ingest path is byte-unchanged: when the cheap column is present it
+    // is used as-is and the equity curve is never derived from.
+    const csvSeries = [
+      { date: "2026-01-02", value: 0.001 },
+      { date: "2026-01-03", value: -0.002 },
+    ];
+    STATE.analyticsRow = {
+      daily_returns: csvSeries,
+      returns_series: WEALTH_INDEX,
+      computation_status: "complete",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    const body = await res.json();
+    expect(body.daily_returns).toEqual(csvSeries);
+    expect(body.series_state).toBe("available");
+    // The lazy age read never fires on the happy path (zero added cost).
+    expect(STATE.observedFilters.strategiesCreatedAtSelect).toBeNull();
+  });
+
+  /**
+   * STALE-01 — a NON-EMPTY series belonging to a run that did not finish.
+   *
+   * R15/R16 above pin what the route says about a series that is ALREADY empty.
+   * They could never catch this: `computation_status` was read only inside the
+   * `daily_returns.length === 0` branch, so the discriminator ran on every case
+   * EXCEPT the one that needed it. A `failed` row keeps the PREVIOUS run's
+   * `daily_returns` / `returns_series` untouched — the analytics writer stamps
+   * the status and the error, not the data — so the series arrived full, the
+   * length gate was false, and the route answered `series_state: "available"`:
+   * a positive claim that this is the strategy's current track, contradicted by
+   * the status column sitting in the same row.
+   *
+   * Re-LABELLING would not have been enough. The consumer is arithmetic — the
+   * ScenarioComposer BLENDS this array into a portfolio projection — so a
+   * "computing"/"empty" label beside a usable array is ignored by the maths and
+   * the dead track still moves the blend. The series itself has to be withheld,
+   * which routes the row into the SAME shared `deriveEmptySeriesState` ladder
+   * and the chips the composer already renders.
+   *
+   * The `complete` control below carries the IDENTICAL series and asserts it
+   * flows, so neither direction can pass on an unusable fixture.
+   */
+  it("R19 — STALE-01: a NON-EMPTY series on a `failed` row is withheld, not served as 'available'", async () => {
+    const series = [
+      { date: "2026-01-02", value: 0.021 },
+      { date: "2026-01-03", value: -0.014 },
+      { date: "2026-01-04", value: 0.033 },
+    ];
+    STATE.analyticsRow = {
+      daily_returns: series,
+      returns_series: null,
+      computation_status: "failed",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.daily_returns).toEqual([]);
+    // `failed` is terminal absence, deliberately NOT an error envelope and NOT
+    // a red state (UI-SPEC §3) — the composer renders its muted "no series".
+    expect(body.series_state).toBe("empty");
+  });
+
+  it("R19b — STALE-01: a live `computing` run withholds its series and says so", async () => {
+    STATE.analyticsRow = {
+      daily_returns: [
+        { date: "2026-01-02", value: 0.021 },
+        { date: "2026-01-03", value: -0.014 },
+        { date: "2026-01-04", value: 0.033 },
+      ],
+      returns_series: null,
+      computation_status: "computing",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    const body = await res.json();
+    expect(body.daily_returns).toEqual([]);
+    expect(body.series_state).toBe("computing");
+  });
+
+  it("R19c — STALE-01: the derived `returns_series` path is gated too, not just the direct column", async () => {
+    // A service-computed strategy leaves `daily_returns` NULL and writes the
+    // cumprod wealth index. Gating only the direct column would leave the
+    // fallback arm serving a dead track — the SAME defect one branch over.
+    STATE.analyticsRow = {
+      daily_returns: null,
+      returns_series: WEALTH_INDEX_STALE,
+      computation_status: "failed",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    const body = await res.json();
+    expect(body.daily_returns).toEqual([]);
+    expect(body.series_state).toBe("empty");
+  });
+
+  it("R19d — CONTROL: the identical series on a `complete` row still flows as 'available'", async () => {
+    const series = [
+      { date: "2026-01-02", value: 0.021 },
+      { date: "2026-01-03", value: -0.014 },
+      { date: "2026-01-04", value: 0.033 },
+    ];
+    for (const status of ["complete", "complete_with_warnings"]) {
+      STATE.analyticsRow = {
+        daily_returns: series,
+        returns_series: null,
+        computation_status: status,
+      };
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+      const body = await res.json();
+      // Non-empty here is what proves R19/R19b/R19c are not vacuous.
+      expect(body.daily_returns, `status ${status} lost its series`).toEqual(series);
+      expect(body.series_state).toBe("available");
+    }
+  });
+
+  /**
+   * HONEST-05 (Phase 162) — the route now CO-SERVES the headline scalars
+   * (`cagr` / `sharpe`) from the same analytics row, so a drawer-added leg can
+   * render the metric pair a book row already shows.
+   *
+   * This is a new door into the surface STALE-01 part 2 just closed. R19–R19d
+   * above pin that the SERIES of an unfinished run is withheld; they say
+   * nothing about scalars, so without R-B a `failed` row's best-in-class
+   * leftover CAGR would ship on a 200 body and render as a live KPI — the exact
+   * class the 11-surface hotfix removed. R-B carries the corpse in the fixture
+   * and pins both scalars null; R-A is its non-vacuity control (identical
+   * values, terminal-success status, both flow).
+   */
+  it("R-A — HONEST-05: a terminal-success row co-serves its cagr + sharpe", async () => {
+    for (const status of ["complete", "complete_with_warnings"]) {
+      STATE.analyticsRow = {
+        daily_returns: [
+          { date: "2026-01-02", value: 0.021 },
+          { date: "2026-01-03", value: -0.014 },
+        ],
+        computation_status: status,
+        cagr: 0.1842,
+        sharpe: 1.63,
+      };
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.cagr, `status ${status} lost its cagr`).toBe(0.1842);
+      expect(body.sharpe, `status ${status} lost its sharpe`).toBe(1.63);
+      // The scalars are read from the SAME projection as the series — proving
+      // the widening is real and not a second query.
+      expect(STATE.observedFilters.analyticsSelect).toContain("cagr");
+      expect(STATE.observedFilters.analyticsSelect).toContain("sharpe");
+    }
+  });
+
+  it("R-B — HONEST-05/STALE-01: a `failed` row's leftover scalars are WITHHELD (null), never served", async () => {
+    // The corpse is deliberately flattering: a run that did not finish still
+    // holds the previous run's best-in-class numbers, because the analytics
+    // writer stamps the status and the error, not the data. Serving these is
+    // the dead-KPI defect, and it looks like success on screen.
+    for (const status of ["failed", "failed_final", "computing", "pending"]) {
+      STATE.analyticsRow = {
+        daily_returns: [
+          { date: "2026-01-02", value: 0.021 },
+          { date: "2026-01-03", value: -0.014 },
+        ],
+        computation_status: status,
+        cagr: 0.9412,
+        sharpe: 3.87,
+      };
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.cagr, `status ${status} leaked a dead cagr`).toBeNull();
+      expect(body.sharpe, `status ${status} leaked a dead sharpe`).toBeNull();
+      // Withheld means ABSENT, never zeroed — a 0 would render as a real
+      // metric (0.0% CAGR / 0.00 Sharpe) rather than an em-dash.
+      expect(body.cagr).not.toBe(0);
+      expect(body.sharpe).not.toBe(0);
+    }
+  });
+
+  it("R-C — HONEST-05: the widening is additive — the existing consumer contract is unchanged", async () => {
+    const series = [
+      { date: "2026-01-02", value: 0.021 },
+      { date: "2026-01-03", value: -0.014 },
+    ];
+    STATE.publishedAssetClass = "crypto";
+    STATE.publishedTrustTier = "api_verified";
+    STATE.analyticsRow = {
+      daily_returns: series,
+      computation_status: "complete",
+      data_quality_flags: { composite: true },
+      cagr: 0.1842,
+      sharpe: 1.63,
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    const body = await res.json();
+    // Every pre-existing field keeps its pre-existing value under the widening.
+    expect(body.daily_returns).toEqual(series);
+    expect(body.series_state).toBe("available");
+    expect(body.asset_class).toBe("crypto");
+    expect(body.trust_tier).toBe("api_verified");
+    expect(body.is_composite).toBe(true);
+    // ...and the body gained EXACTLY the two new keys, nothing else (a raw
+    // data_quality_flags / computation_status passthrough would show up here).
+    expect(Object.keys(body).sort()).toEqual([
+      "asset_class",
+      "cagr",
+      "daily_returns",
+      "is_composite",
+      "series_state",
+      "sharpe",
+      "trust_tier",
+    ]);
+  });
+
+  it("R-D — HONEST-05: a rankable row with unset/non-finite scalar columns → null, never 0", async () => {
+    // A stale build predating the widened select, a genuinely unset column, or
+    // a NaN that reached the DB. All three are absence, and absence is an
+    // em-dash downstream — synthesising 0 would be an invented metric.
+    for (const value of [undefined, null, "1.5", Number.NaN, Number.POSITIVE_INFINITY]) {
+      STATE.analyticsRow = {
+        daily_returns: [{ date: "2026-01-02", value: 0.021 }],
+        computation_status: "complete",
+        cagr: value,
+        sharpe: value,
+      };
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+      const body = await res.json();
+      expect(body.cagr, `cagr for ${String(value)}`).toBeNull();
+      expect(body.sharpe, `sharpe for ${String(value)}`).toBeNull();
+    }
+  });
 });
+
+/** The cumprod wealth index used by R19c — a real, differenceable curve. */
+const WEALTH_INDEX_STALE = {
+  "2026-01-02": 1.0,
+  "2026-01-03": 1.021,
+  "2026-01-04": 1.0067,
+};

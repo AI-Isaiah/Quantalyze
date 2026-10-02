@@ -1,0 +1,2 @@
+# fixture allowlist — zero-span.green
+20260101000000_fx_a.sql	public.fx_other	1	# consumer: the extractor self-test

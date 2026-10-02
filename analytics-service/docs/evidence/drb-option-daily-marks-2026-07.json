@@ -40,6 +40,34 @@
     "disposition": "day inside [first_held, last_held] where the instrument's position is nonzero and its mark map has NO bar -> LedgerValuationError naming instrument + day (D-07). NO interpolation, NO session-lump fallback (that lump IS the bug being removed).",
     "pre_retention_only_fallback": "The only remaining cash-basis era is pre-retention/pre-listing (an instrument whose entire life predates the venue's ~2.5yr chart retention): a WHOLLY-EMPTY marks response whose last_held_day is older than the retention horizon -> that instrument contributes NO MTM; its days stay cash-basis `change` + the pre_summary_rollout_option_dailies warning (reused key). A wholly-empty response for an instrument INSIDE the retention horizon -> fail loud (structural)."
   },
+  "M7_live_probe_2026_07_22": {
+    "_confirms": "Independent re-probe (2026-07-22, Phase 131 reframe session) run from the Railway prod worker (whitelisted egress) — re-verifies M1 concretely and adds the Apr-2026 delivery-mechanics note. Encode, do NOT re-derive.",
+    "chart_data_expired_options": {
+      "endpoint": "public/get_tradingview_chart_data resolution=1D",
+      "instruments_probed": 4,
+      "instrument_kind": "expired BTC options",
+      "expiry_span": "Dec-2024 … Sep-2025",
+      "per_instrument": {
+        "status": "ok",
+        "daily_bars": 401,
+        "closes": "real, positive",
+        "bar_stamp_utc": "08:00 (Deribit settlement boundary)"
+      },
+      "finding": "The plan's assumed mark source is now independently confirmed: 1D chart data serves daily closes for long-expired option instruments at status=ok with dense per-day bars."
+    },
+    "rejected_alternatives_reconfirmed": {
+      "get_mark_price_history": "[] / HTTP-400 for options (DVOL-constituents only) — dead end.",
+      "get_last_settlements_by_instrument": "refuses expired instruments — dead end.",
+      "public_trades": "refuses expired instruments — dead end."
+    },
+    "position_semantics_reconfirmed": "signed post-trade `position` — shorts negative, deliveries zero the position (verified live).",
+    "telescoping_identity_reconfirmed": "Sum_d native_pnl[c][d] = Sigma_change[c] + Book[c][last_settlement].",
+    "retention_horizon_years": 2.5,
+    "apr_2026_delivery_change": {
+      "finding": "As of Apr-2026 an ITM option settles PHYSICALLY into a future, and the future then delivers to cash — a two-step near expiry (two log rows). Final P&L is UNCHANGED; tolerate the two rows near expiry.",
+      "consequence": "The replay must accept the option->future->cash two-step without a special case: the option delivery row zeroes the option position; the resulting future is a NON-OPTION classification and is IGNORED by replay_option_positions (its cash lands via the future's own delivery.change on the cash channel)."
+    }
+  },
   "spike_collapse_regression": {
     "day_2025_07_14_spike": "drops to |daily| < 10% (was part of the 94%/day insanity)",
     "day_2025_08_28_spike": "drops to |daily| < 10%",

@@ -51,14 +51,27 @@ _SFOX_BOUNDARY_MIGRATION = (
     / "migrations"
     / "20260718182056_sfox_exchange_boundary_checks.sql"
 )
+# Phase 135 (MT5SRC-03) — the mt5 constraint-widen migration cloning the sfox
+# precedent above. Pinned the same way (byte-parity read of the ADD CONSTRAINT
+# CHECK bodies) so a future drop of mt5 from any of the four boundary CHECKs
+# reds this test.
+_MT5_BOUNDARY_MIGRATION = (
+    _REPO_ROOT
+    / "supabase"
+    / "migrations"
+    / "20260723172032_mt5_exchange_boundary_checks.sql"
+)
 _PROCESS_KEY = (
     Path(__file__).resolve().parents[1] / "routers" / "process_key.py"
 )
 
-# The canonical 5-value key-save allowlist — the pydantic mirror of the TS
-# SUPPORTED_EXCHANGES single source of truth. Phase 119 (SFOX-04) added 'sfox'.
-# Drift on either side breaks the set-equality pin below.
-_KEY_SAVE_EXCHANGES = {"binance", "okx", "bybit", "deribit", "sfox"}
+# The canonical key-save allowlist — the pydantic mirror of the TS
+# SUPPORTED_EXCHANGES single source of truth. Phase 119 (SFOX-04) added 'sfox';
+# Phase 135 (MT5SRC-01) added 'mt5'. Drift on either side breaks the set-equality
+# pin below. (The mt5 SQL-migration byte-parity class is NOT added here — the
+# constraint migration file lands in plan 135-02; adding it now would red-read a
+# non-existent file.)
+_KEY_SAVE_EXCHANGES = {"binance", "okx", "bybit", "deribit", "sfox", "mt5"}
 
 # The four canonical `<table>_<column>_check` constraint names the Phase 68
 # migration widens (LOAD-BEARING: the vitest resolveColumnCheck resolves these
@@ -126,6 +139,30 @@ class TestPydanticLiteralsContainDeribit:
         assert "sfox" in get_args(Source), (
             "ingestion.adapter.Source must admit 'sfox' now that Phase 120 ships "
             "the sfox ingestion factory (keeps Source == SUPPORTED_SOURCES parity)."
+        )
+
+    def test_verify_request_exchange_literal_contains_mt5(self) -> None:
+        args = get_args(VerifyStrategyRequest.model_fields["exchange"].annotation)
+        assert "mt5" in args, (
+            "VerifyStrategyRequest.exchange Literal must admit 'mt5' (Phase 135 "
+            "MT5SRC-01) — the pydantic key-verify boundary mirroring TS "
+            "SUPPORTED_EXCHANGES."
+        )
+
+    def test_broker_literal_contains_mt5(self) -> None:
+        assert "mt5" in get_args(Broker), (
+            "debug_key_flow.Broker Literal must admit 'mt5' (Phase 135 MT5SRC-01)."
+        )
+
+    def test_source_literal_includes_mt5(self) -> None:
+        # Phase 135 (MT5SRC-01, 135-01) SHIPS the mt5 ingestion factory, so 'mt5'
+        # joins the ingestion Source Literal + the registry TOGETHER (the lockstep
+        # pinned by test_source_literal_and_registry_agree — the factory landed in
+        # the same change, no Literal-ahead-of-registry split). Membership pin
+        # (Source also carries 'csv').
+        assert "mt5" in get_args(Source), (
+            "ingestion.adapter.Source must admit 'mt5' now that Phase 135 ships "
+            "the mt5 ingestion factory (keeps Source == SUPPORTED_SOURCES parity)."
         )
 
 
@@ -197,6 +234,39 @@ class TestSfoxMigrationWidensEveryKeyBoundaryCheck:
             )
             assert "'sfox'" in m.group(1), (
                 f"{name} CHECK must admit 'sfox' but its IN-list does not: "
+                f"{m.group(1).strip()}"
+            )
+
+
+class TestMt5MigrationWidensEveryKeyBoundaryCheck:
+    """Phase 135 (MT5SRC-03) — the mt5 constraint-widen migration admits 'mt5'
+    at each of the four canonical key-save boundary CHECKs. Mirrors the deribit
+    / sfox migration-parity pattern above against the new migration file.
+    """
+
+    def test_mt5_migration_file_exists(self) -> None:
+        assert _MT5_BOUNDARY_MIGRATION.is_file(), (
+            f"Phase 135 mt5 boundary migration missing: {_MT5_BOUNDARY_MIGRATION}"
+        )
+
+    def test_each_widened_constraint_admits_mt5_exactly_once(self) -> None:
+        sql = _MT5_BOUNDARY_MIGRATION.read_text(encoding="utf-8")
+        for name in _WIDENED_CONSTRAINTS:
+            add_count = sql.count(f"ADD CONSTRAINT {name}")
+            assert add_count == 1, (
+                f"expected exactly 1 'ADD CONSTRAINT {name}' in the Phase 135 "
+                f"mt5 migration, found {add_count}"
+            )
+            m = re.search(
+                rf"ADD CONSTRAINT {name}\s+CHECK\s*\((.*?)\)\s*;",
+                sql,
+                re.DOTALL,
+            )
+            assert m is not None, (
+                f"could not locate the CHECK body for {name} in the mt5 migration"
+            )
+            assert "'mt5'" in m.group(1), (
+                f"{name} CHECK must admit 'mt5' but its IN-list does not: "
                 f"{m.group(1).strip()}"
             )
 

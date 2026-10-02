@@ -1,5 +1,24 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { NextRequest } from "next/server";
+// Phase 140 / SEAM-04: the REAL breaker error, taken from the dependency-free
+// leaf. It must NEVER be picked up through `@/lib/analytics-client` — this file
+// mocks that module wholesale (a full factory, no importActual), so the class
+// read through it would be `undefined` and `err instanceof undefined` throws a
+// TypeError from inside the route's own catch block (threat T-140-30). Nothing
+// mocks the leaf, and this file never calls vi.resetModules(), so a static
+// import here is the same class object the route narrows against.
+import { CircuitOpenError } from "@/lib/seam-errors";
+// 160 review F1 — the encrypt contract, read as DATA (`.shape`) so the persist
+// tracer can assert the INSERT writes every field it declares rather than the
+// two this file happened to hand-pick. Not mocked anywhere in this file, so
+// this is the same object the route projects its `encryptedColumns` from.
+import { EncryptKeyResponseSchema } from "@/lib/analytics-schemas";
+// 161-09 / WIZERR-08 — the SAME comment-stripper every coverage law in this
+// repo uses, so a source pin here and a population there cannot disagree about
+// what is code and what is prose.
+import { stripCommentsPreserveLines } from "@/lib/source-scan";
 
 /**
  * H-0281 — real route coverage for POST /api/keys/validate-and-encrypt.
@@ -32,11 +51,36 @@ const {
   mockValidateKey,
   mockEncryptKey,
   rateLimitResult,
+  PERSIST_STATE,
 } = vi.hoisted(() => ({
   TEST_USER: { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" },
   mockValidateKey: vi.fn(),
   mockEncryptKey: vi.fn(),
-  rateLimitResult: { success: true as boolean, retryAfter: 0 },
+  // 140.4-13 / SEAMRIM-05 — `reason` is the THIRD outcome: absent is a genuine
+  // throttle (429), "ratelimit_misconfigured" is OUR store being unreachable
+  // and must answer 503.
+  rateLimitResult: {
+    success: true as boolean,
+    retryAfter: 0,
+    reason: undefined as "ratelimit_misconfigured" | undefined,
+  },
+  /**
+   * 160-02 / RANK-03 — STATE capture for the persist arm's admin-client write,
+   * mirroring the finalize-wizard test harness idiom.
+   *
+   * `inserts` is the whole point: the route's INSERT payload is recorded here
+   * so a test can assert what the SERVER decided to write (both venue columns,
+   * the tenant id) rather than what the caller asked for. An EMPTY `inserts`
+   * array is itself an oracle — it is how the legacy-arm tests prove that a
+   * body without the strict boolean discriminator mints no row at all.
+   */
+  PERSIST_STATE: {
+    inserts: [] as Record<string, unknown>[],
+    /** The `{ data, error }` the `.single()` terminal resolves to. */
+    insertResult: null as { data: unknown; error: unknown } | null,
+    /** When set, `createAdminClient()` THROWS this — the missing-service-key arm. */
+    adminFactoryError: null as Error | null,
+  },
 }));
 
 // audit + supabase server modules import "server-only" which throws under
@@ -51,20 +95,87 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: null,
-  checkLimit: async () => rateLimitResult,
+/**
+ * 160-02 / RANK-03 — the service-role writer the persist arm uses.
+ *
+ * The chain is modelled exactly as the route calls it —
+ * `.from(table).insert(payload).select(cols).single()` — and the payload is
+ * pushed into PERSIST_STATE.inserts BEFORE the terminal resolves, so a test can
+ * read what was written even on the arms where the insert then fails.
+ *
+ * `from` records the table too: the assertion "the row went into api_keys" is
+ * worth nothing if the mock would have accepted any table name.
+ */
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => {
+    if (PERSIST_STATE.adminFactoryError) throw PERSIST_STATE.adminFactoryError;
+    return {
+      from: (table: string) => ({
+        insert: (payload: Record<string, unknown>) => {
+          PERSIST_STATE.inserts.push({ ...payload, __table: table });
+          return {
+            select: (_cols?: string) => ({
+              single: async () =>
+                PERSIST_STATE.insertResult ?? {
+                  data: { id: "persisted-key-id" },
+                  error: null,
+                },
+            }),
+          };
+        },
+      }),
+    };
+  },
 }));
+
+// ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). See the note in
+// `src/__tests__/csv-validate-route.test.ts`: the pure helpers come from
+// `importActual` so this mock cannot drift from the real 503-vs-429 decision.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    userActionLimiter: null,
+    checkLimit: async () => rateLimitResult,
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 vi.mock("@/lib/analytics-client", () => {
   // Real-shape error classes so the route's `err instanceof AnalyticsUpstreamError`
   // narrowing resolves against the same constructor identity (F5b R8).
   class AnalyticsUpstreamError extends Error {
     readonly status: number;
-    constructor(message: string, status: number) {
+    // 140.3-G4 / SEAMUX-03 — the stable machine code the seam envelope carried,
+    // or null. Additive + optional so every 2-arg construction site keeps null,
+    // exactly like the real class (analytics-client.ts:119). The route's
+    // 4xx-forward arm reads it (`code: err.seamCode ?? "UNKNOWN"`).
+    readonly seamCode: string | null;
+    // 161-06 / WIZERR-05 — the 4th and 5th, mirroring the real class
+    // (`analytics-client.ts`) parameter-for-parameter. `dependency` was added
+    // there by 140.3-11 and this double never picked it up; `retryAfterSeconds`
+    // is 161-06's. Both are additive and optional, so every pre-existing
+    // construction in this file keeps passing fewer args and keeps defaulting.
+    // ⚠️ ORDER IS THE POINT, not just presence: with `dependency` missing, a
+    // 4th positional argument would be the WAIT here and the DEPENDENCY NAME in
+    // production. `analytics-upstream-error.parity.invariant.test.ts` is what
+    // makes that a failure instead of a convention — it is why this block can
+    // no longer drift in silence.
+    readonly dependency: string | null;
+    readonly retryAfterSeconds: number | null;
+    constructor(
+      message: string,
+      status: number,
+      seamCode: string | null = null,
+      dependency: string | null = null,
+      retryAfterSeconds: number | null = null,
+    ) {
       super(message);
       this.name = "AnalyticsUpstreamError";
       this.status = status;
+      this.seamCode = seamCode;
+      this.dependency = dependency;
+      this.retryAfterSeconds = retryAfterSeconds;
     }
   }
   class AnalyticsTimeoutError extends Error {
@@ -98,18 +209,45 @@ function makeReq(body: Record<string, unknown> = {}): NextRequest {
   });
 }
 
+/**
+ * 160-05 / RANK-03 — `persist: true` is part of the VALID body now, not an
+ * opt-in. The legacy arm is retired: a body without the discriminator is
+ * refused with `STALE_CLIENT`, so a fixture that omitted it would measure that
+ * refusal instead of the arm it names — on every case that REACHES the
+ * handler, i.e. past the sfox/mt5 venue gates and the presence check, which
+ * all sit ABOVE the discriminator gate and short-circuit before it.
+ *
+ * ⭐ WHY THE GATE CASES BELOW CARRY IT TOO (160-05 review F1). A gate test's
+ * load-bearing oracle is `expect(mockValidateKey).not.toHaveBeenCalled()` — "no
+ * live credential probe was spent". That oracle is only falsifiable when the
+ * gate under test is the LAST thing between the request and the probe. Send a
+ * discriminator-less body and the `STALE_CLIENT` gate catches it further down
+ * regardless, so the pin passes whether or not the gate under test still
+ * exists. MEASURED: with the sfox gate deleted from route.ts, the
+ * discriminator-less cases failed only on `expected 409 to be 400` and
+ * `validateKey` was still never called. With `persist: true` they fail on
+ * `expected 200 to be 400` with `validateKey` CALLED — the gate's absence is
+ * what reddens them.
+ *
+ * The retired-arm suite builds its own discriminator-less body.
+ */
 const VALID_BODY = {
   exchange: "okx",
   api_key: "okx-api-key",
   api_secret: "okx-api-secret",
   passphrase: "pp",
+  persist: true,
 };
+
+/** VALID_BODY as a pre-160-02 client would have sent it: no discriminator. */
+const { persist: _omitPersist, ...LEGACY_BODY } = VALID_BODY;
 
 describe("POST /api/keys/validate-and-encrypt", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({
       api_key_encrypted: "ct-blob",
@@ -138,10 +276,44 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     expect(mockEncryptKey).not.toHaveBeenCalled();
   });
 
+  // ── (1b) 140.4-13 / SEAMRIM-05 — our own limiter's outage → 503 ──────
+  it("ratelimit_misconfigured → 503, not a 429 that reads as the caller's fault", async () => {
+    rateLimitResult.success = false;
+    rateLimitResult.retryAfter = 60;
+    rateLimitResult.reason = "ratelimit_misconfigured";
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(
+      res.status,
+      "A missing/unreachable Upstash store is OUR misconfiguration. Answering " +
+        "429 tells the user to slow down and hides the outage from the canary.",
+    ).toBe(503);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(res.headers.get("Retry-After")).toBe("60");
+    // 140.3-G4 / SEAMUX-03: the misconfigured deny body carries the same code
+    // keys/sync uses — SEAM_MISCONFIGURED — with the builder's default sentence
+    // byte-kept. The exact-match oracle reddens if the code is dropped.
+    expect(await res.json()).toEqual({
+      error: "Rate limiter unavailable",
+      code: "SEAM_MISCONFIGURED",
+    });
+    expect(mockValidateKey).not.toHaveBeenCalled();
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+
+    rateLimitResult.reason = undefined;
+  });
+
   // ── (2) Missing required fields → 400 ───────────────────────────────
   it("returns 400 when exchange is missing", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ api_key: "k12345678", api_secret: "s12345678" }));
+    // `persist: true` — see VALID_BODY. Without it the STALE_CLIENT gate would
+    // refuse this body further down and the not-called pin below would hold
+    // even with the presence check deleted.
+    const res = await POST(
+      makeReq({ api_key: "k12345678", api_secret: "s12345678", persist: true }),
+    );
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toBe("Missing required fields");
@@ -150,14 +322,18 @@ describe("POST /api/keys/validate-and-encrypt", () => {
 
   it("returns 400 when api_key is missing", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ exchange: "okx", api_secret: "s12345678" }));
+    const res = await POST(
+      makeReq({ exchange: "okx", api_secret: "s12345678", persist: true }),
+    );
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("Missing required fields");
   });
 
   it("returns 400 when api_secret is missing", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ exchange: "okx", api_key: "k12345678" }));
+    const res = await POST(
+      makeReq({ exchange: "okx", api_key: "k12345678", persist: true }),
+    );
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("Missing required fields");
   });
@@ -246,32 +422,121 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     expect(mockEncryptKey).not.toHaveBeenCalled();
   });
 
-  // ── (5) Happy path → 200 with encryptKey payload + valid/read_only ──
-  it("returns the encryptKey payload spread with valid:true, read_only:true on success", async () => {
+  // ── (4d) Breaker open → 503 + Retry-After, no probe, no Sentry ──────
+  // Phase 140 / SEAM-04 (SC-5c). Before this arm a breaker trip fell through
+  // to the generic 500 "Key validation failed. Please try again." — which tells
+  // the user their KEY is at fault when in fact no request ever left Vercel,
+  // and invites an immediate retry against a service known to be down.
+  it("returns 503 + Retry-After when the Railway breaker is open (SC-5c)", async () => {
+    // 5, deliberately NOT the 30s breaker default (which is simultaneously
+    // BREAKER_COOLDOWN_S and DEFAULT_RETRY_AFTER_S): a hardcoded "30" in the
+    // route would pass a 30-second fixture but fails this one.
+    mockValidateKey.mockRejectedValue(new CircuitOpenError(5));
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("5");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    const body = await res.json();
+    expect(body.error).toBe(
+      "The analytics service is temporarily unavailable. Please try again in a moment.",
+    );
+    // T-140-17: the copy names no infrastructure, and must not blame the key.
+    expect(body.error).not.toMatch(/circuit|breaker|upstash|railway|http/i);
+    expect(body.error).not.toMatch(/key validation failed/i);
+    // A breaker trip is a shared infrastructure state, not a per-request
+    // defect: capturing it would emit one Sentry event per request for the
+    // whole cooldown window (mirrors the 4xx-forward / 504 no-Sentry stance).
+    expect(captureSpy).not.toHaveBeenCalled();
+    // Never encrypt a key we could not validate.
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+  });
+
+  // ── HI-03: a SHORT per-request credential must not reach either sink ──
+  it("HI-03: a short api_key and a 6-char passphrase are redacted from BOTH console.error and Sentry", async () => {
+    // ⚠️ THE WIRING, NOT THE HELPER. The leaf's own test pins that a short
+    // per-request secret is redacted; this pins that THIS route — the one whose
+    // request body carries the raw exchange credentials — actually reaches that
+    // behaviour at both sinks. Sentry is a third party, so the leaf is the last
+    // control before the value leaves our infrastructure.
+    //
+    // Both values are hand-typed and both are BELOW the 12-char env floor.
+    // Neither length is hypothetical: an MT5 `api_key` is the 8-digit account
+    // login number, and an OKX passphrase is user-chosen — this route validates
+    // only `passphrase.trim().length !== 0`. Driven here on the `okx` shape so
+    // the case does not depend on the MT5_ENABLED server gate.
+    const shortApiKey = "26547876";
+    const shortPassphrase = "hunter";
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockValidateKey.mockRejectedValue(
+      new Error(
+        `upstream rejected api_key=${shortApiKey} passphrase=${shortPassphrase} — connect ECONNREFUSED 10.0.0.1:8002`,
+      ),
+    );
+
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({
+        exchange: "okx",
+        api_key: shortApiKey,
+        api_secret: "okx-api-secret-long-enough",
+        passphrase: shortPassphrase,
+        persist: true,
+      }),
+    );
+    expect(res.status).toBe(500);
+
+    const logged = consoleErr.mock.calls
+      .map((args) => args.map((a) => String(a)).join(" "))
+      .join("\n");
+    expect(logged).toContain("validation failed");
+    expect(logged).not.toContain(shortApiKey);
+    expect(logged).not.toContain(`passphrase=${shortPassphrase}`);
+    // The preserve side on the same line: redacting must not eat the syscall
+    // token, which is the most valuable thing an operator has here.
+    expect(logged).toContain("ECONNREFUSED");
+
+    // The Sentry sink takes the SAME leaf, but it is MOCKED in this file, so
+    // this half asserts the ROUTE's obligation only: that it HANDS both short
+    // values to the sink as `secrets`. Asserting the spy's recorded args do not
+    // CONTAIN them would be backwards — the route is supposed to pass them, so
+    // the sink can redact them.
+    //
+    // The other half ("the sink actually redacts a SHORT per-request secret")
+    // is owned by sentry-capture.test.ts, where the real leaf runs.
+    expect(captureSpy).toHaveBeenCalled();
+    const sentrySecrets = captureSpy.mock.calls[0][1].secrets;
+    expect(sentrySecrets).toContain(shortApiKey);
+    expect(sentrySecrets).toContain(shortPassphrase);
+
+    consoleErr.mockRestore();
+  });
+
+  // ── (5) Happy path → 200 with the persist envelope + valid/read_only ──
+  it("returns the persisted row id with valid:true, read_only:true on success — and NO ciphertext", async () => {
     const { POST } = await import("./route");
     const res = await POST(makeReq(VALID_BODY));
 
     expect(res.status).toBe(200);
-    // Block D / P1947: the success body carries the caller's ENCRYPTED
-    // credential ciphertext (dek_encrypted/nonce/api_*_encrypted). It must
-    // never be absorbed by a shared cache and served to another tenant.
+    // Block D / P1947, restated for 160-05: the ciphertext this header was
+    // minted for no longer leaves the server, but the header still earns its
+    // place — the body names a tenant-scoped row id, and the REQUEST that
+    // produced it carried raw exchange credentials. A shared cache must not
+    // hold either end of that exchange.
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const body = await res.json();
     expect(body).toEqual({
-      api_key_encrypted: "ct-blob",
-      api_secret_encrypted: null,
-      passphrase_encrypted: null,
-      dek_encrypted: "dek-ct",
-      nonce: "nonce-b64",
-      kek_version: 3,
+      api_key_id: "persisted-key-id",
       valid: true,
       read_only: true,
     });
 
     // validate-then-encrypt ordering: validation runs before encryption
     // (TOCTOU-safe back-to-back) and both received the same credentials.
-    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp");
-    expect(mockEncryptKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp");
+    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp", { userId: TEST_USER.id });
+    expect(mockEncryptKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp", { userId: TEST_USER.id });
   });
 });
 
@@ -290,6 +555,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     vi.clearAllMocks();
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
     // F2 (Phase 122): the carve-out only runs when the server go-live flag is
     // ON. These tests exercise the ENABLED path, so pin SFOX_ENABLED=true; the
     // disabled default is covered by the dedicated fail-closed block below.
@@ -313,13 +579,13 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
 
   it("accepts sfox with NO api_secret and calls validateKey/encryptKey with api_secret '' (shared chokepoint)", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ exchange: "sfox", api_key: SFOX_TOKEN }));
+    const res = await POST(makeReq({ exchange: "sfox", api_key: SFOX_TOKEN, persist: true }));
 
     expect(res.status).toBe(200);
     // The absent secret is normalized to "" and flows through the SAME funnel the
     // ccxt path uses — NOT a parallel branch. trimCredential("") === "".
-    expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
-    expect(mockEncryptKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
+    expect(mockEncryptKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
   });
 
   it.each([
@@ -327,14 +593,14 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     ["null", null],
     ["empty string", ""],
   ])("normalizes sfox api_secret=%s identically to '' through validateKey", async (_label, secret) => {
-    const body: Record<string, unknown> = { exchange: "sfox", api_key: SFOX_TOKEN };
+    const body: Record<string, unknown> = { exchange: "sfox", api_key: SFOX_TOKEN, persist: true };
     if (secret !== undefined) body.api_secret = secret;
 
     const { POST } = await import("./route");
     const res = await POST(makeReq(body));
 
     expect(res.status).toBe(200);
-    expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
   });
 
   // ── WR-01: mixed-case sfox is handled IDENTICALLY to the sibling routes ──
@@ -342,7 +608,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     "accepts mixed-case %s (case-insensitive carve-out) and normalizes the exchange to canonical 'sfox' downstream",
     async (exchange) => {
       const { POST } = await import("./route");
-      const res = await POST(makeReq({ exchange, api_key: SFOX_TOKEN }));
+      const res = await POST(makeReq({ exchange, api_key: SFOX_TOKEN, persist: true }));
 
       expect(res.status).toBe(200);
       // WR-01: the case-sensitive `exchange === "sfox"` used to 400 this input
@@ -350,14 +616,14 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
       // accepted it. The empty secret is admitted AND the value forwarded to the
       // worker + stored in the DB is the canonical lowercase 'sfox' (the DB CHECK
       // admits only lowercase 'sfox'), never the raw mixed-case string.
-      expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
-      expect(mockEncryptKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+      expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
+      expect(mockEncryptKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
     },
   );
 
   it("rejects sfox with NO api_key — the carve-out relaxes ONLY api_secret, never api_key", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ exchange: "sfox" }));
+    const res = await POST(makeReq({ exchange: "sfox", persist: true }));
 
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("Missing required fields");
@@ -371,7 +637,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     );
 
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ exchange: "sfox", api_key: SFOX_TOKEN }));
+    const res = await POST(makeReq({ exchange: "sfox", api_key: SFOX_TOKEN, persist: true }));
 
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe(
@@ -386,7 +652,12 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     "STILL rejects %s with NO api_secret — byte-identical 400 'Missing required fields'",
     async (exchange) => {
       const { POST } = await import("./route");
-      const res = await POST(makeReq({ exchange, api_key: "ccxt-key-123456" }));
+      // `persist: true` — see VALID_BODY. It is what makes the not-called pin
+      // below bite: with it, the presence check is the ONLY thing standing
+      // between this body and a live credential probe.
+      const res = await POST(
+        makeReq({ exchange, api_key: "ccxt-api-key", persist: true }),
+      );
 
       expect(res.status).toBe(400);
       expect((await res.json()).error).toBe("Missing required fields");
@@ -397,7 +668,12 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
   it("STILL rejects binance with an EMPTY api_secret (carve-out is sfox-only)", async () => {
     const { POST } = await import("./route");
     const res = await POST(
-      makeReq({ exchange: "binance", api_key: "ccxt-key-123456", api_secret: "" }),
+      makeReq({
+        exchange: "binance",
+        api_key: "ccxt-api-key",
+        api_secret: "",
+        persist: true,
+      }),
     );
 
     expect(res.status).toBe(400);
@@ -418,6 +694,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox server gate (F2, SFOX_ENA
     vi.clearAllMocks();
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
     delete process.env.SFOX_ENABLED;
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({ api_key_encrypted: "ct-blob" });
@@ -427,8 +704,13 @@ describe("POST /api/keys/validate-and-encrypt — sfox server gate (F2, SFOX_ENA
     "fails closed for %s with no live probe when SFOX_ENABLED is unset",
     async (exchange) => {
       const { POST } = await import("./route");
+      // `persist: true` — see VALID_BODY (review F1). MEASURED: without it, a
+      // deleted sfox gate left this body refused by the STALE_CLIENT gate
+      // (`expected 409 to be 400`) with `validateKey` still never called, so
+      // the two not-called pins below held regardless of the gate's existence.
+      // With it, the sfox gate is the LAST thing before the live probe.
       const res = await POST(
-        makeReq({ exchange, api_key: "sfox-bearer-token-value" }),
+        makeReq({ exchange, api_key: "sfox-bearer-token-value", persist: true }),
       );
 
       expect(res.status).toBe(400);
@@ -445,7 +727,11 @@ describe("POST /api/keys/validate-and-encrypt — sfox server gate (F2, SFOX_ENA
       process.env.SFOX_ENABLED = flag;
       const { POST } = await import("./route");
       const res = await POST(
-        makeReq({ exchange: "sfox", api_key: "sfox-bearer-token-value" }),
+        makeReq({
+          exchange: "sfox",
+          api_key: "sfox-bearer-token-value",
+          persist: true,
+        }),
       );
 
       expect(res.status).toBe(400);
@@ -460,6 +746,1777 @@ describe("POST /api/keys/validate-and-encrypt — sfox server gate (F2, SFOX_ENA
     const res = await POST(makeReq(VALID_BODY));
 
     expect(res.status).toBe(200);
-    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp");
+    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp", { userId: TEST_USER.id });
+  });
+});
+
+/**
+ * Phase 135 (MT5SRC-03) — MT5 is the MIRROR-IMAGE of the sfox carve-out.
+ *
+ * (a) Server gate: with MT5_ENABLED unset (the default), an mt5 connect FAILS
+ *     CLOSED with an honest "not yet available" 400 and NO live probe — the
+ *     dark-until-go-live (Phase 139) posture the worker's mt5_enabled_server()
+ *     gate enforces behind it.
+ * (b) Three-credential defense: where sfox RELAXES api_secret, mt5 REQUIRES all
+ *     three non-blank slots (login/api_key, investor password/api_secret, broker
+ *     server/passphrase). A missing/blank slot is a 400 BEFORE any worker call.
+ * (c) Gate-on happy path: all three slots forward to validateKey then encryptKey.
+ */
+const MT5_BODY = {
+  exchange: "mt5",
+  api_key: "5001234",
+  api_secret: "investor-password-123",
+  passphrase: "MetaQuotes-Demo",
+  // 160-05 — see VALID_BODY: for every case that REACHES the handler (past the
+  // mt5 venue gate and the presence check, both of which sit above the
+  // discriminator gate), a body without `persist: true` would measure the
+  // STALE_CLIENT refusal instead of the arm it names — and, on the gate cases,
+  // would neuter their `not.toHaveBeenCalled()` pins.
+  persist: true,
+};
+
+describe("POST /api/keys/validate-and-encrypt — mt5 server gate (MT5_ENABLED off)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    delete process.env.MT5_ENABLED;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({ api_key_encrypted: "ct-blob" });
+  });
+
+  it.each(["mt5", "MT5", "Mt5"])(
+    "fails closed for %s with no live probe when MT5_ENABLED is unset",
+    async (exchange) => {
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ ...MT5_BODY, exchange }));
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("MT5 integration is not yet available.");
+      // No live probe, no encryption of a key we refuse to admit while dark.
+      expect(mockValidateKey).not.toHaveBeenCalled();
+      expect(mockEncryptKey).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["1", "TRUE", "on", ""])(
+    "stays fail-closed for a non-exact MT5_ENABLED=%s (strict === 'true')",
+    async (flag) => {
+      process.env.MT5_ENABLED = flag;
+      const { POST } = await import("./route");
+      const res = await POST(makeReq(MT5_BODY));
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("MT5 integration is not yet available.");
+      expect(mockValidateKey).not.toHaveBeenCalled();
+      delete process.env.MT5_ENABLED;
+    },
+  );
+
+  it("does NOT gate ccxt exchanges — okx runs normally with MT5_ENABLED unset", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp", { userId: TEST_USER.id });
+  });
+});
+
+describe("POST /api/keys/validate-and-encrypt — mt5 three-credential defense (MT5_ENABLED on)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    process.env.MT5_ENABLED = "true";
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      kek_version: 3,
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.MT5_ENABLED;
+  });
+
+  it.each([
+    ["api_key missing", { api_secret: "investor-password-123", passphrase: "MetaQuotes-Demo" }],
+    ["api_secret missing", { api_key: "5001234", passphrase: "MetaQuotes-Demo" }],
+    ["passphrase (broker server) missing", { api_key: "5001234", api_secret: "investor-password-123" }],
+    ["passphrase blank/whitespace", { api_key: "5001234", api_secret: "investor-password-123", passphrase: "   " }],
+    ["api_secret blank/whitespace", { api_key: "5001234", api_secret: "  ", passphrase: "MetaQuotes-Demo" }],
+  ])(
+    "rejects mt5 with %s BEFORE any worker call (three-cred defense, mirror of sfox relaxation)",
+    async (_label, partial) => {
+      const { POST } = await import("./route");
+      // `persist: true` — see MT5_BODY / VALID_BODY (review F1). The
+      // three-credential gate must be the LAST thing before the live probe, or
+      // the two not-called pins below pass on the STALE_CLIENT refusal instead.
+      const res = await POST(makeReq({ exchange: "mt5", ...partial, persist: true }));
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Missing required fields");
+      // The mirror-image of sfox: mt5 flows the api_secret-REQUIRED path AND
+      // additionally requires the broker server — no sfox-style relaxation leaks.
+      expect(mockValidateKey).not.toHaveBeenCalled();
+      expect(mockEncryptKey).not.toHaveBeenCalled();
+    },
+  );
+
+  it("forwards all THREE mt5 slots to validateKey then encryptKey on the happy path", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(MT5_BODY));
+
+    expect(res.status).toBe(200);
+    // Canonical lowercase 'mt5' + login/api_key, investor pw/api_secret, broker
+    // server/passphrase — the exact slot mapping the worker's is_mt5 branch reads.
+    expect(mockValidateKey).toHaveBeenCalledWith(
+      "mt5",
+      "5001234",
+      "investor-password-123",
+      "MetaQuotes-Demo",
+      { userId: TEST_USER.id },
+    );
+    expect(mockEncryptKey).toHaveBeenCalledWith(
+      "mt5",
+      "5001234",
+      "investor-password-123",
+      "MetaQuotes-Demo",
+      { userId: TEST_USER.id },
+    );
+  });
+
+  it("normalizes mixed-case MT5 to canonical lowercase 'mt5' downstream", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ ...MT5_BODY, exchange: "MT5" }));
+
+    expect(res.status).toBe(200);
+    expect(mockValidateKey).toHaveBeenCalledWith(
+      "mt5",
+      "5001234",
+      "investor-password-123",
+      "MetaQuotes-Demo",
+      { userId: TEST_USER.id },
+    );
+  });
+});
+
+/**
+ * B-13 (Phase 140.2 / SEAMCORE-08, ROADMAP SC6 clause c) — the dormant
+ * handler's budget-key pin.
+ *
+ * `_unifiedValidateAndEncryptHandler` is module-private and has ZERO callers:
+ * the exported POST always takes the legacy branch, because `/process-key` has
+ * no encrypt step yet and delegating would write all-NULL ciphertext to
+ * api_keys. So there is no way to DRIVE this binding, and every behavioural pin
+ * in the phase's thirteen is unavailable here. Reading the source is the only
+ * honest oracle left.
+ *
+ * Pinning it anyway is the whole point of routing a dormant call through the
+ * core in the first place: whoever revives this handler inherits a budget and
+ * the breaker automatically. If the key silently drifts while the handler
+ * sleeps, they inherit the WRONG budget instead — 60s of a Vercel concurrency
+ * slot versus 15s — and nothing would have said so.
+ *
+ * ⚠️ This is a DISK read, deliberately, not an assertion through this file's
+ * mocks. Every mock above replaces `@/lib/analytics-client`; a pin that read
+ * the binding through a wholesale mock would prove only that the mock returns
+ * what the mock was told to return.
+ *
+ * The pattern requires the call syntax and both literals adjacent, so an
+ * explanatory comment mentioning either string cannot satisfy it (this repo has
+ * hit prose-defeats-the-guard three times).
+ */
+describe("[SEAMCORE-08 / B-13] the dormant unified handler's budget key", () => {
+  it("binds process-key-unified-dormant to /process-key at the core call", () => {
+    const src = readFileSync(
+      join(process.cwd(), "src/app/api/keys/validate-and-encrypt/route.ts"),
+      "utf8",
+    );
+
+    expect(
+      /resilientFetch\(\s*"process-key-unified-dormant"\s*,\s*"\/process-key"/.test(
+        src,
+      ),
+      "The dormant unified handler no longer binds the " +
+        '"process-key-unified-dormant" budget to "/process-key". This handler ' +
+        "cannot be driven by a test (it is private and has no callers), so this " +
+        "source pin is the ONLY thing standing between a silent key swap and a " +
+        "revived handler running on someone else's deadline. It is also one of " +
+        "the thirteen bindings the roster in " +
+        "src/lib/resilient-fetch.wiring.test.ts keeps closed — update both.",
+    ).toBe(true);
+  });
+});
+
+/**
+ * Phase 140.3-G4 / SEAMUX-03 — a machine `code` on every error arm THIS route
+ * itself emits, so a client discriminates the fault on a stable token instead
+ * of sniffing prose. At HEAD this route emitted ZERO coded arms
+ * (140.3-VERIFICATION §3.1: 0/10). Mirrors 140.3-10's pass on keys/sync and the
+ * sibling create-with-key's deny-body precedent (KEY_RATE_LIMIT + SEAM_MISCONFIGURED).
+ *
+ * ⚠️ This route's request body carries RAW key material (SEAMCORE-06); these
+ * assertions read RESPONSE bodies only.
+ *
+ * ORACLE INDEPENDENCE: every expected code is a hand-typed literal.
+ */
+describe("[140.3-G4 / SEAMUX-03] POST /api/keys/validate-and-encrypt — a machine code on every arm", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({ api_key_encrypted: "ct-blob" });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // ── the input 400 arm ──
+  // 161-09 / WIZERR-08: was KEY_INVALID_FORMAT. A blank required slot is not a
+  // format failure — nothing here examined the shape of any value. The full
+  // per-arm code+sentence inventory is the WIZERR-08 suite at the foot of this
+  // file; this line stays because this describe's job is "a code on EVERY arm"
+  // and it is the arm-presence pin for this one.
+  it("400 missing required fields → code KEY_MISSING_REQUIRED_FIELD", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ exchange: "okx", api_key: "k" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("KEY_MISSING_REQUIRED_FIELD");
+  });
+
+  // ── the deny arm: two bodies, two tokens ──
+  //
+  // ⚠️ 164.2-05 / criterion 4 — INVERTED PIN, and the history is the point.
+  //
+  // This case read `429 throttle carries the EXACT { error, code:
+  // KEY_RATE_LIMIT } pair`, and its own comment gave the rationale:
+  //
+  //     "KEY_RATE_LIMIT (not RATE_LIMITED): this is the key-connect family and
+  //      its two already-coded siblings both chose KEY_RATE_LIMIT."
+  //
+  // ⛔ THAT RATIONALE IS EXACTLY THE DEFECT. It is an argument for CONSISTENCY
+  // WITHIN A FAMILY, applied to a sentence that was FALSE in every member of
+  // the family: `KEY_RATE_LIMIT`'s copy says "The exchange asked us to slow
+  // down … a transient, exchange-side throttle", and its second fix line offers
+  // "try a different exchange account". The bucket that denied here is
+  // `userActionLimiter` keyed `keys-validate-encrypt:<uid>` — OURS, per USER.
+  // No exchange was consulted and no other exchange account can clear it. One
+  // token across the family is a good rule; it is not a reason to pick the
+  // token that lies. 164.2-04 moved `create-with-key`'s two arms first, so the
+  // family is once again consistent — on the TRUE sentence.
+  //
+  // `RATE_LIMITED` was not authored for this: it already said "the cap is ours,
+  // not your exchange's" (`wizardErrors.ts`). This is WIRING.
+  //
+  // The `{ error, code }` KEY ORDER is preserved byte-for-byte — this route
+  // spells its deny body in that order while `composite/add-key` spells it
+  // `{ code, error }`, and neither order is a contract worth churning here.
+  it("429 throttle carries the EXACT { error, code: RATE_LIMITED } pair", async () => {
+    rateLimitResult.success = false;
+    rateLimitResult.retryAfter = 12;
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(429);
+    // ⚠️ BYTE-WISE, because `toEqual` on parsed JSON does NOT compare key
+    // order (the WR-03 measurement: a swap left every receipt green). This
+    // route's order is `error` first; the assertion below fixes that as well as
+    // the token.
+    expect(await res.clone().text()).toBe(
+      '{"error":"Too many requests","code":"RATE_LIMITED"}',
+    );
+    expect(await res.json()).toEqual({
+      error: "Too many requests",
+      code: "RATE_LIMITED",
+    });
+  });
+
+  // (the misconfigured deny body → SEAM_MISCONFIGURED is pinned by the
+  //  exact-match assertion in the SEAMRIM-05 case above.)
+
+  // ── the read-only rejection ──
+  it("400 could-not-verify-read-only → code KEY_NOT_READ_ONLY", async () => {
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: false });
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("KEY_NOT_READ_ONLY");
+  });
+
+  // ── the breaker 503 ──
+  it("503 breaker open → code CIRCUIT_OPEN (the wire token process-key-client emits)", async () => {
+    mockValidateKey.mockRejectedValue(new CircuitOpenError(5));
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("CIRCUIT_OPEN");
+    // The breaker copy and Retry-After stay byte-unchanged.
+    expect(res.headers.get("Retry-After")).toBe("5");
+  });
+
+  // ── the 4xx forward: preserve the upstream's own code ──
+  it("4xx forward PRESERVES the upstream's own seamCode when it carried one", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("Invalid API credentials", 400, "KEY_AUTH_FAILED"),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    // Never overwrite an upstream-carried code.
+    expect(body.code).toBe("KEY_AUTH_FAILED");
+    expect(body.error).toBe("Invalid API credentials");
+  });
+
+  // ⚠️ 164.2-05 / WIZFORM-02 — INVERTED FIXTURE, same claim, and the history is
+  // recorded rather than dropped.
+  //
+  // This case used to construct `AnalyticsUpstreamError("Key has IP
+  // restrictions", 403)` and assert `UNKNOWN`, because a bare status carried no
+  // classification at all. 164.2-05 gave the route
+  // `UPSTREAM_STATUS_TO_SEAM_CODE`, and **403 is now a mapped status** —
+  // `SEAM_MISCONFIGURED`, asserted in the `[164.2-05]` describe at the foot of
+  // this file. Leaving the old fixture here would have made this case assert
+  // the opposite of the route's behaviour; changing only the expectation would
+  // have DELETED the claim ("UNKNOWN when nothing classified it") that the case
+  // exists for.
+  //
+  // So the CLAIM is kept and the FIXTURE moved to a status the map does not
+  // carry. 418 is deliberate: it is a real HTTP status, it is not in the map,
+  // and it stands for the honest residue — an upstream 4xx we cannot name is
+  // UNCLASSIFIED, and `UNKNOWN` is the true answer for it rather than a
+  // failure. ⛔ Do not "complete" the map by adding a row for whatever status
+  // this case is pointed at; that would make this assertion unsatisfiable and
+  // the residue invisible.
+  it("4xx forward falls back to UNKNOWN when the upstream carried NO code AND the status is unmapped", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("I'm a teapot", 418),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(418);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  // ── the timeout 504 ──
+  it("504 timeout → code UPSTREAM_TIMEOUT (OUR analytics hop, not the exchange)", async () => {
+    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsTimeoutError("/api/validate-key", 30000),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(504);
+    expect((await res.json()).code).toBe("UPSTREAM_TIMEOUT");
+  });
+
+  // ── the terminal 500 ──
+  it("500 terminal unclassified → code UNKNOWN", async () => {
+    mockValidateKey.mockRejectedValue(new Error("crypto: internal failure"));
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBe("Key validation failed. Please try again.");
+    expect(body.code).toBe("UNKNOWN");
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 161-08 / WIZERR-06 — the terminal arm forwards the CODE and still refuses
+  // the MESSAGE.
+  //
+  // ⚠️ ORACLE INDEPENDENCE. The static sentence is HAND-TRANSCRIBED below,
+  // never imported from the route.
+  //
+  // ⭐ THIS IS THE CREDENTIAL-BEARING ROUTE. Case (a) additionally re-pins that
+  // the edited arm is still wrapped by the per-request secret list at the
+  // Sentry sink — the widening moved `code` and nothing else, and the raw
+  // `api_key` / `api_secret` / `passphrase` this request body carries must
+  // still be handed to the sink so it can redact them.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** Transcribed by hand from the route's terminal arm. Do NOT import it. */
+  const VALIDATE_TERMINAL_SENTENCE = "Key validation failed. Please try again.";
+
+  /**
+   * Shaped like what F5b keeps off the wire: a crypto internal, a Python
+   * source location and a service base URL.
+   *
+   * ⚠️ Every token here is deliberately DISJOINT from the static sentence and
+   * from the forwarded code. "failed" and "unavailable" were both rejected as
+   * corpus words for exactly that reason — a token the honest body legitimately
+   * contains would make case (d) fail against a correct tree, which is the
+   * mirror-image error of a test that cannot fail.
+   */
+  const LEAKY_5XX_MESSAGE =
+    "RuntimeError: KEK derivation aborted inside crypto_kek.py:77 — upstream base http://analytics.invalid:8000";
+
+  it("WIZERR-06 (a) — a 5xx seam error carrying a code forwards THAT code, sentence unchanged, secrets still scrubbed", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    // `encrypt_key`'s first statement is `get_kek()`; its RuntimeError is a
+    // real 500 with `retryable=False`.
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("KEK unavailable", 500, "KEK_UNAVAILABLE"),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("KEK_UNAVAILABLE");
+    expect(body.error).toBe(VALIDATE_TERMINAL_SENTENCE);
+
+    // The per-request secret list still reaches the Sentry sink from THIS arm.
+    // Same obligation, same shape, as the ECONNREFUSED case above: the route
+    // hands the values over so the sink can redact them.
+    expect(captureSpy).toHaveBeenCalled();
+    const sentrySecrets = captureSpy.mock.calls[0][1].secrets;
+    expect(sentrySecrets).toContain(VALID_BODY.api_key);
+    expect(sentrySecrets).toContain(VALID_BODY.api_secret);
+    expect(sentrySecrets).toContain(VALID_BODY.passphrase);
+  });
+
+  it("WIZERR-06 (b) — a 5xx seam error with a NULL code still answers UNKNOWN, sentence unchanged", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("upstream traceback", 502),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(VALIDATE_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (c) — a NON-SEAM throwable answers UNKNOWN, sentence unchanged", async () => {
+    mockValidateKey.mockRejectedValue(new Error("ECONNREFUSED"));
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(VALIDATE_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (d) — NEGATIVE CONTROL: no substring of the thrown message reaches the body", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError(LEAKY_5XX_MESSAGE, 500, "KEK_UNAVAILABLE"),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    const serialized = JSON.stringify(await res.json());
+
+    // ⚠️ VACUITY GUARD, FIRST — `"anything".includes("")` is `true`.
+    expect(LEAKY_5XX_MESSAGE.trim().length).toBeGreaterThan(40);
+    const tokens = LEAKY_5XX_MESSAGE.split(/\s+/).filter((t) => t.length >= 4);
+    expect(
+      tokens.length,
+      "the leak corpus produced too few usable tokens to be a real control",
+    ).toBeGreaterThan(5);
+
+    for (const token of tokens) {
+      expect(
+        serialized,
+        `the 5xx body leaked "${token}" out of err.message`,
+      ).not.toContain(token);
+    }
+    expect(serialized).not.toContain(LEAKY_5XX_MESSAGE);
+    expect(serialized).toContain("KEK_UNAVAILABLE");
+
+    // ...and no raw credential from the request body crossed either.
+    expect(serialized).not.toContain(VALID_BODY.api_key);
+    expect(serialized).not.toContain(VALID_BODY.api_secret);
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 160-02 / RANK-03 — THE PERSIST ARM
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * WHY THIS EXISTS, IN ECONOMIC TERMS. `api_keys.exchange` decides how a
+ * strategy is annualized downstream: a crypto venue annualizes on √365, a
+ * traditional venue on √252. Those differ by ~1.20×, and the number they
+ * inflate is the Sharpe ratio a prospective allocator reads on a public
+ * factsheet. Until this phase the row was composed by the BROWSER, so the
+ * venue on it was whatever the client said — a value the server had no reason
+ * to believe and every reason not to. The persist arm moves the write to the
+ * server and stamps both venue columns from the venue THIS ROUTE authenticated
+ * against.
+ *
+ * WHAT WOULD REDDEN EACH ORACLE is named per-test. The load-bearing ones:
+ * change `attested_venue: exchangeNormalized` to read the body's raw
+ * `exchange`, and the normalization test goes red. Relax `body.persist ===
+ * true` to a truthy check, and the string-"true" skew test goes red. Spread
+ * `...encrypted` into the persist response, and the no-ciphertext invariant
+ * goes red.
+ */
+describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK-03)", () => {
+  /** Every ciphertext-shaped key name the encrypt payload can carry. */
+  const CIPHERTEXT_KEY_PATTERN = /encrypt|cipher|secret|nonce|dek|kek/i;
+
+  function persistBody(overrides: Record<string, unknown> = {}) {
+    return { ...VALID_BODY, persist: true, label: "My OKX key", ...overrides };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    PERSIST_STATE.inserts.length = 0;
+    PERSIST_STATE.insertResult = null;
+    PERSIST_STATE.adminFactoryError = null;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      kek_version: 3,
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.MT5_ENABLED;
+  });
+
+  // ── (1) THE RANK-03 ORACLE: both venue columns, server-decided ────────────
+  it("stamps exchange AND attested_venue from the SERVER-validated venue, and takes user_id from the session — never the body", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({
+        ...persistBody({ exchange: "deribit" }),
+        // A hostile caller naming a DIFFERENT tenant. The route must never read
+        // it: `userId` reaches the INSERT only from the withAuth session
+        // (threat T-160-05). Neuter that threading and this line goes red.
+        user_id: "00000000-0000-0000-0000-ffffffffffff",
+        // …and naming a DIFFERENT venue than the one it submitted credentials
+        // for. `attested_venue` must follow the validated venue, not this.
+        attested_venue: "mt5",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    const row = PERSIST_STATE.inserts[0];
+    expect(row.__table).toBe("api_keys");
+    // BOTH columns against the SAME hand-typed venue. That is also what pins
+    // the coupling the DB CHECK enforces (a divergence caught in CI rather than
+    // as a 23514 in production) — and it pins it INDEPENDENTLY. A bare
+    // `expect(row.attested_venue).toBe(row.exchange)` stood here and could not
+    // fail once these two passed; worse, on its own it is satisfied by a row
+    // whose columns were BOTH forged to the same wrong venue (review F3).
+    expect(row.exchange).toBe("deribit");
+    expect(row.attested_venue).toBe("deribit");
+    expect(row.user_id).toBe(TEST_USER.id);
+    expect(row.user_id).not.toBe("00000000-0000-0000-0000-ffffffffffff");
+    // The ciphertext still reaches the ROW (it has to — that is the key), it
+    // simply stops reaching the browser. See the response oracle below.
+    expect(row.api_key_encrypted).toBe("ct-blob");
+    expect(row.dek_encrypted).toBe("dek-ct");
+    // ⭐ 160 review F1 — TOTALITY, not a sample. The two assertions above pin
+    // 2 of the 6 fields the encrypt contract declares; `nonce`, `kek_version`,
+    // `api_secret_encrypted` and `passphrase_encrypted` were asserted NOWHERE,
+    // so deleting any of them from the route's projection was invisible to this
+    // suite. That is not a cosmetic gap: `kek_version` is INTEGER NOT NULL
+    // DEFAULT 1, so its omission INSERTs successfully and mislabels the KEK the
+    // blob is wrapped under — the row decrypts nowhere, in another service,
+    // days later, with no error anywhere. Driven off `.shape` rather than a
+    // second hand-written list so it grows with the contract: a seventh schema
+    // field the route forgets to write reddens HERE as well as at `tsc`.
+    for (const field of Object.keys(EncryptKeyResponseSchema.shape)) {
+      expect(row, `the insert projection dropped ${field}`).toHaveProperty(field);
+    }
+  });
+
+  // ── (1b) THE SECOND FORGERY VECTOR: the encryptKey RESPONSE, not the body ──
+  // 160 review WR-01. The oracle above pins the REQUEST body. It says nothing
+  // about the upstream analytics-service response, which is spread into the same
+  // INSERT — and a spread that lands AFTER the provenance columns would overwrite
+  // the tenant and both venue columns. The only thing that stood between a
+  // compromised/regressed upstream and a forged row was `EncryptKeyResponseSchema`
+  // being strip-mode Zod, two modules away in a file with a sanctioned
+  // `.passthrough()` sibling. RANK-03 is precisely the claim "the venue the server
+  // validated is the venue that gets written", so it must not rest on a distant
+  // schema's mode — it now rests on the object literal's own key order.
+  //
+  // ⚠️ ANTI-VACUITY, AND THE RECEIPT IS MEASURED (160-05 review F3). This test
+  // poisons the mock at the seam the schema guards, so it exercises the ordering
+  // DIRECTLY. Move the `...encrypted` spread back below the explicit columns in
+  // route.ts and the poisoned `user_id` lands in the row: the
+  // `expect(row.user_id).toBe(TEST_USER.id)` assertion reddens FIRST and vitest
+  // aborts the test there. Both venue assertions would redden too if reached,
+  // because each is pinned to the hand-typed EXPECTED_VENUE — the poisoned
+  // "mt5" cannot satisfy either. The `api_key_encrypted` assertion is the
+  // preserve side and stays green under that neuter by design.
+  //
+  // ⛔ The previous fourth assertion was `expect(row.attested_venue).toBe(
+  // row.exchange)` — two fields of the SAME row compared to each other. Under
+  // the exact regression this test exists to catch, the poisoned response sets
+  // BOTH to "mt5", so that oracle PASSED. Self-referential oracles are not
+  // oracles; both columns are now compared to an independent expectation.
+  it("a poisoned encryptKey RESPONSE cannot override user_id or either venue column (spread order)", async () => {
+    // Hand-typed, and deliberately NOT read back off the row: this is the venue
+    // the caller submitted credentials for and the one the server validated.
+    const EXPECTED_VENUE = "deribit";
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      // Hostile extras, as if the schema had been loosened to passthrough.
+      user_id: "00000000-0000-0000-0000-eeeeeeeeeeee",
+      exchange: "mt5",
+      attested_venue: "mt5",
+      label: "forged-by-upstream",
+    });
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody({ exchange: EXPECTED_VENUE })));
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    const row = PERSIST_STATE.inserts[0];
+    expect(row.user_id).toBe(TEST_USER.id);
+    // BOTH venue columns against the SAME independent expectation — never
+    // against each other. The DB CHECK's equality is a CONSEQUENCE of each
+    // column carrying the venue this server authenticated against; asserting
+    // only the equality would be satisfied by a row where BOTH were forged to
+    // the poisoned "mt5" above.
+    expect(row.exchange).toBe(EXPECTED_VENUE);
+    expect(row.attested_venue).toBe(EXPECTED_VENUE);
+    // The ciphertext from the same response still lands — the guard is scoped to
+    // the provenance columns, it does not discard the payload we asked for.
+    expect(row.api_key_encrypted).toBe("ct-blob");
+  });
+
+  // ── (2) NORMALIZATION: the CANONICAL venue lands, not the raw body string ──
+  it("writes the NORMALIZED venue to both columns for a mixed-case 'MT5' (not the raw body string)", async () => {
+    process.env.MT5_ENABLED = "true";
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ ...MT5_BODY, exchange: "MT5", persist: true, label: "Broker" }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    // The api_keys CHECK admits lowercase venue codes only. If either column
+    // were written from `body.exchange` instead of the route's own
+    // `exchangeNormalized`, this row would carry "MT5" and 23514 in production.
+    expect(PERSIST_STATE.inserts[0].exchange).toBe("mt5");
+    expect(PERSIST_STATE.inserts[0].attested_venue).toBe("mt5");
+  });
+
+  // ── (2b) 164.5.3-02 — venue_account_id: populated for MT5, null otherwise ──
+  //
+  // Phase 154/WIZCONT-02's `venue_account_id` column was populated ONLY by the
+  // wizard's `create_wizard_strategy` RPC before this plan — this route's own
+  // persist arm (the one both founder-visible "Add Key" surfaces call) never
+  // stamped it, so every MT5 key connected here stayed permanently NULL on the
+  // card. These two cases pin the fix at the one place it can be observed: the
+  // literal row this route hands to `.insert()`.
+  it("stamps venue_account_id with the TRIMMED MT5 login on the INSERT row", async () => {
+    process.env.MT5_ENABLED = "true";
+    const { POST } = await import("./route");
+    // Padded deliberately: proves the route trims rather than forwarding the
+    // raw body value, mirroring create-with-key/route.ts's exact derivation
+    // (`const venueAccountId = isMt5 ? api_key.trim() : null;`). "5001234" is
+    // a synthetic placeholder login, never a real MT5 account number.
+    const res = await POST(
+      makeReq({ ...MT5_BODY, api_key: "  5001234  ", persist: true, label: "Broker" }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe("5001234");
+  });
+
+  // 167.1.2 (c): a ccxt validation WITHOUT an id still connects, with NULL.
+  // A missing id is venue schema drift, and blocking the connect on it would
+  // turn drift into an outage; the key is stamped later instead.
+  it("leaves venue_account_id NULL for a ccxt persist whose validation carried no id, and still connects", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody({ exchange: "okx" })));
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(PERSIST_STATE.inserts[0].exchange).toBe("okx");
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBeNull();
+  });
+
+  // 167.1.2 (a) — D-01. The id the validator read from THIS credential is what
+  // the venue-identity unique index keys on; without it on the row, a second
+  // live key on the same OKX account is never refused and the account is
+  // summed twice everywhere keys are added together. "100000001" is synthetic.
+  it("stamps venue_account_id with the id /api/validate-key read, for a ccxt (okx) persist", async () => {
+    mockValidateKey.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      venue_account_id: "100000001",
+    });
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody({ exchange: "okx" })));
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(PERSIST_STATE.inserts[0].exchange).toBe("okx");
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe("100000001");
+    // The id is written, never echoed back to the browser.
+    expect(JSON.stringify(await res.json())).not.toContain("100000001");
+  });
+
+  // ── (3) NO CIPHERTEXT LEAVES THE SERVER ON THE PERSIST PATH ───────────────
+  it("returns api_key_id and NO ciphertext-named field of any kind", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody()));
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      api_key_id: "persisted-key-id",
+      valid: true,
+      read_only: true,
+    });
+    // The exact-match above already pins this, but the pattern assertion is
+    // what survives a future field being ADDED to the response: whoever adds
+    // one has to justify a name that is not ciphertext-shaped.
+    expect(Object.keys(body).filter((k) => CIPHERTEXT_KEY_PATTERN.test(k))).toEqual([]);
+    // Ciphertext is per-tenant even in its absence — the id is too.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  // ── (4) THE LABEL becomes server-written text ─────────────────────────────
+  it("falls back to the server default label when none is supplied", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody({ label: undefined })));
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts[0].label).toBe("okx key");
+  });
+
+  it("falls back to the server default when the label is whitespace-only", async () => {
+    const { POST } = await import("./route");
+    await POST(makeReq(persistBody({ label: "   " })));
+
+    expect(PERSIST_STATE.inserts[0].label).toBe("okx key");
+  });
+
+  it("CAPS an over-long label at 120 chars rather than failing an already-validated connect", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody({ label: "L".repeat(500) })));
+
+    // The connect SUCCEEDS — a cosmetic display string must not cost the user
+    // a live venue round-trip they already passed.
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts[0].label).toBe("L".repeat(120));
+  });
+
+  it("ignores a non-string label (server default), never coercing it into the row", async () => {
+    const { POST } = await import("./route");
+    await POST(makeReq(persistBody({ label: { evil: true } })));
+
+    expect(PERSIST_STATE.inserts[0].label).toBe("okx key");
+  });
+});
+
+/**
+ * 160-05 / RANK-03 — THE LEGACY ARM IS RETIRED (threat T-160-06).
+ *
+ * The skew window these cases were born in is closed: `REVOKE INSERT` withdrew
+ * `api_keys` INSERT from `anon`/`authenticated`, so the stale tab that sends
+ * the OLD body can no longer write the row it was being handed ciphertext for.
+ * Absent-discriminator bodies now get a coded `STALE_CLIENT` refusal, and the
+ * route has NO arm that returns key material to a caller.
+ *
+ * Two properties are pinned here and they fail differently:
+ *
+ *   1. NO CIPHERTEXT ON THE WIRE — the SECOND line of defence, not the first.
+ *      Restore the legacy `return NextResponse.json({ ...encrypted, … })` and
+ *      the refusal becomes a 200 carrying key material.
+ *
+ *      ⚠️ 160-05 review F2 — THE REDDEN PATH, CORRECTED. This docblock used to
+ *      claim `expectsNoCipherText` reddens on every case under that neuter. It
+ *      did not, and could not: with a HARD `expect(res.status).toBe(409)` the
+ *      restored arm threw `expected 200 to be 409` two lines earlier and vitest
+ *      aborted the test, so the helper never ran. Its only reachable failure was
+ *      the literal `{ error, code: "STALE_CLIENT" }` object growing a
+ *      ciphertext-named key — something this route cannot produce, since
+ *      `encrypted` is not even in scope at the gate. So the helper was a false
+ *      receipt.
+ *
+ *      It is now genuinely falsifiable, by two deliberate choices below: the
+ *      status pin is `expect.soft` (the test still FAILS on a wrong status — it
+ *      just fails after the remaining oracles have run), and
+ *      `expectsNoCipherText` is the FIRST body assertion, ahead of anything that
+ *      could throw and abort. A restored legacy arm therefore reaches the helper
+ *      with the ciphertext body in hand. The helper asserts over KEY NAMES, not
+ *      fixture values, so a renamed ciphertext field cannot slip past it.
+ *
+ *      The 200 persist path is NOT policed here — it has its own primary
+ *      oracles: the persist arm's "returns api_key_id and NO ciphertext-named
+ *      field of any kind" case, and the "NO persist-mode response — success or
+ *      any error arm — carries a ciphertext-named field" sweep. This suite owns
+ *      the REFUSAL path only, and does not duplicate them.
+ *   2. STRICTNESS still discriminates. Relax `body.persist !== true` to a
+ *      falsy check and the `"true"` / `1` / `"1"` / `{}` probes stop refusing —
+ *      they would reach the WRITER, which is the double-write threat wearing a
+ *      different hat now that the server is the only writer.
+ *
+ * `PERSIST_STATE.inserts` staying EMPTY remains the anti-double-write pin.
+ */
+describe("POST /api/keys/validate-and-encrypt — the retired legacy arm refuses, and serves no ciphertext", () => {
+  /** Every ciphertext-shaped key the legacy envelope used to carry. */
+  const CIPHERTEXT_KEYS = [
+    "api_key_encrypted",
+    "api_secret_encrypted",
+    "passphrase_encrypted",
+    "dek_encrypted",
+    "nonce",
+    "kek_version",
+  ];
+
+  function expectsNoCipherText(body: Record<string, unknown>) {
+    expect(
+      Object.keys(body).filter((k) => CIPHERTEXT_KEYS.includes(k)),
+      "the refusal envelope carries a ciphertext-shaped key — the legacy arm " +
+        "is back, or a new arm started echoing encryptKey's result",
+    ).toEqual([]);
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    PERSIST_STATE.inserts.length = 0;
+    PERSIST_STATE.insertResult = null;
+    PERSIST_STATE.adminFactoryError = null;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      kek_version: 3,
+    });
+  });
+
+  it("a body with NO persist field is REFUSED with STALE_CLIENT and mints ZERO rows", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(LEGACY_BODY));
+
+    // SOFT ON PURPOSE (review F2 — see the suite docblock): a restored legacy
+    // arm answers 200 with ciphertext, and a hard status assertion would abort
+    // the test before the ciphertext oracle could look at the body. Soft still
+    // fails this test on a wrong status; it just fails it last.
+    expect.soft(res.status).toBe(409);
+    const body = await res.json();
+    // FIRST among the body assertions, ahead of anything that could throw: this
+    // is the oracle a restored legacy arm has to trip.
+    expectsNoCipherText(body);
+    expect(body.code).toBe("STALE_CLIENT");
+    // The message is what a stale tab actually shows its user, so it has to
+    // name the remedy (reload) rather than blame the key.
+    expect(body.error).toMatch(/reload/i);
+    // Review F4 — the 409 is the one coded arm on this route with no
+    // behavioural header pin. `src/__tests__/no-store-coverage.test.ts` is a
+    // TOTAL-REMOVAL tripwire only, so deleting `headers: NO_STORE_HEADERS` from
+    // THIS arm reddened nothing. The refusal names a tenant's client state and
+    // the request that produced it carried raw exchange credentials.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(PERSIST_STATE.inserts).toEqual([]);
+  });
+
+  it("the refusal happens BEFORE any live venue call — no validate, no encrypt", async () => {
+    const { POST } = await import("./route");
+    await POST(makeReq(LEGACY_BODY));
+
+    // A doomed request must not spend a credential probe against the exchange
+    // or a KMS round-trip. Move the gate below the handler call and both of
+    // these redden.
+    expect(mockValidateKey).not.toHaveBeenCalled();
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["the STRING \"true\"", "true"],
+    ["the number 1", 1],
+    ["the string \"1\"", "1"],
+    ["an object", {}],
+    ["null", null],
+    ["false", false],
+  ])(
+    "persist as %s is NOT the discriminator — refused, zero server-side inserts",
+    async (_label, persistValue) => {
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeReq({ ...VALID_BODY, persist: persistValue, label: "ignored" }),
+      );
+
+      // Soft + oracle-first, same reason as the case above (review F2).
+      expect.soft(res.status).toBe(409);
+      const body = await res.json();
+      // No key material (the arm that used to hand that out is gone) …
+      expectsNoCipherText(body);
+      expect(body.code).toBe("STALE_CLIENT");
+      // … and no id, because it never reached the writer.
+      expect(body.api_key_id).toBeUndefined();
+      expect(PERSIST_STATE.inserts).toEqual([]);
+    },
+  );
+});
+
+/**
+ * 160-02 / RANK-03 Task 2 — THE PERSIST ARM'S FAILURE SURFACE.
+ *
+ * The tracer proved the happy path. These pin the arms a happy path never
+ * visits: the limiter must police BOTH arms identically (a persist arm that
+ * skipped it would be a brand-new unthrottled entry point into a live
+ * credential probe — threat T-160-09); an upstream validation failure must
+ * mint nothing; and an INSERT fault must be honest about what happened without
+ * echoing raw Postgres text at the user or raw credentials at the log sinks.
+ */
+describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (160-02 Task 2)", () => {
+  const CIPHERTEXT_KEY_PATTERN = /encrypt|cipher|secret|nonce|dek|kek/i;
+
+  function persistBody(overrides: Record<string, unknown> = {}) {
+    return { ...VALID_BODY, persist: true, label: "My OKX key", ...overrides };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    PERSIST_STATE.inserts.length = 0;
+    PERSIST_STATE.insertResult = null;
+    PERSIST_STATE.adminFactoryError = null;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      kek_version: 3,
+    });
+  });
+
+  // ── Test 1: limiter parity ────────────────────────────────────────────────
+  it("the rate limiter polices the persist arm identically — same coded envelope, same headers, zero inserts", async () => {
+    rateLimitResult.success = false;
+    rateLimitResult.retryAfter = 17;
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody()));
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("17");
+    // ⚠️ 164.2-05 / criterion 4 — INVERTED with the arm above it, and it has to
+    // move in the SAME commit. This case's whole subject is PARITY: "the
+    // limiter polices the persist arm identically". The limiter sits above the
+    // arm split, so there is exactly ONE deny body; if this pin still said
+    // `KEY_RATE_LIMIT` while the other said `RATE_LIMITED`, the parity claim
+    // would be asserting a difference that cannot exist and would red for a
+    // reason that has nothing to do with the persist arm.
+    expect(await res.json()).toEqual({
+      error: "Too many requests",
+      code: "RATE_LIMITED",
+    });
+    // The limiter sits ABOVE the arm split, so a persist request cannot become
+    // an unthrottled path to a live credential probe.
+    expect(mockValidateKey).not.toHaveBeenCalled();
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+    expect(PERSIST_STATE.inserts).toEqual([]);
+  });
+
+  // ── Test 2: upstream validation failure ⇒ nothing is minted ───────────────
+  it("an upstream credential rejection forwards the curated 4xx and mints NO row", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("Invalid API credentials", 400, "KEY_AUTH_FAILED"),
+    );
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody()));
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toEqual({ error: "Invalid API credentials", code: "KEY_AUTH_FAILED" });
+    // A key that did not authenticate must never become an ATTESTED row — the
+    // attestation is precisely the claim "this server saw this key work here".
+    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+    expect(Object.keys(body).filter((k) => CIPHERTEXT_KEY_PATTERN.test(k))).toEqual([]);
+  });
+
+  it("a read_only:false verdict mints NO row (the honest backstop copy, persist mode)", async () => {
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: false });
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody()));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("KEY_NOT_READ_ONLY");
+    expect(PERSIST_STATE.inserts).toEqual([]);
+  });
+
+  // ── Test 3: the INSERT itself rejects ─────────────────────────────────────
+  it("an INSERT rejection answers a coded 500 that does NOT echo the raw Postgres text, and scrubs credentials at BOTH sinks", async () => {
+    const RAW_PG =
+      'new row for relation "api_keys" violates check constraint ' +
+      '"api_keys_attested_venue_matches_exchange" (SQLSTATE 23514) ' +
+      "DETAIL: Failing row contains (okx-api-key, okx-api-secret)";
+    PERSIST_STATE.insertResult = { data: null, error: { message: RAW_PG, code: "23514" } };
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody()));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    // (a) The USER gets curated copy that is honest about the split outcome —
+    // the key validated, the save did not — and carries no DB internals.
+    expect(body.error).toBe(
+      "Your key was verified but couldn't be saved. Please try again.",
+    );
+    expect(body.error).not.toContain("SQLSTATE");
+    expect(body.error).not.toContain("api_keys");
+    expect(body.error).not.toContain("check constraint");
+    expect(Object.keys(body).filter((k) => CIPHERTEXT_KEY_PATTERN.test(k))).toEqual([]);
+
+    // (b) The OPERATOR gets the fault — silence here is how a never-saved key
+    // becomes undiagnosable (Rule 12) …
+    //
+    // ⚠️ THE SERIALIZER IS LOAD-BEARING, AND THIS COMMENT IS THE RECEIPT.
+    // Written first as `args.map(String)`, this assertion was VACUOUS: a
+    // PostgREST error is a PLAIN OBJECT, `String({...})` is "[object Object]",
+    // and so `not.toContain("okx-api-key")` passed no matter what the route
+    // did. Measured — deleting `scrubSeamError` from the route left all 77
+    // tests green. JSON-stringifying non-string args is what makes the
+    // un-scrubbed object's contents visible to the assertion, so removing the
+    // scrub now reddens this test. Do not "simplify" this back to String().
+    const serializeArg = (a: unknown): string => {
+      if (typeof a === "string") return a;
+      try {
+        return JSON.stringify(a) ?? String(a);
+      } catch {
+        return String(a);
+      }
+    };
+    const logged = consoleErr.mock.calls
+      .map((args) => args.map(serializeArg).join(" "))
+      .join("\n");
+    expect(logged).toContain("persist INSERT failed");
+    // The scrub must not eat the diagnosis: the constraint name is how an
+    // operator identifies WHICH invariant the write violated.
+    expect(logged).toContain("api_keys_attested_venue_matches_exchange");
+    // … but the DETAIL clause echoed the caller's raw credentials back, and a
+    // PostgREST error routinely does exactly that. They must not survive to the
+    // log line.
+    expect(logged).not.toContain("okx-api-key");
+    expect(logged).not.toContain("okx-api-secret");
+
+    // (c) Sentry is a THIRD PARTY, so the per-request secret list must be named
+    // at that sink too — no module-level env list can know these values.
+    expect(captureSpy).toHaveBeenCalled();
+    const sentrySecrets = captureSpy.mock.calls[0][1].secrets;
+    expect(sentrySecrets).toContain("okx-api-key");
+    expect(sentrySecrets).toContain("okx-api-secret");
+
+    consoleErr.mockRestore();
+  });
+
+  // ── Test 3b: 164.5.3-02 Task 2 — the newly-reachable venue-identity 23505 ──
+  //
+  // Before this plan, this route's INSERT never wrote `venue_account_id`, so
+  // `api_keys_user_exchange_venue_account_uniq` (migration 20260812083206)
+  // could never fire here — Task 1 makes it reachable for the first time.
+  // The constraint name is hand-typed (never imported from
+  // `@/lib/api/pgConstraintName`), matching the sibling fixture in
+  // `composite/add-key/route.test.ts`: an oracle that imports the constant it
+  // is asserting about cannot fail if that constant silently changes.
+  it("a 23505 naming the venue-identity constraint answers a distinct KEY_VENUE_ALREADY_CONNECTED/409, not the generic fallback", async () => {
+    const RAW_PG =
+      'duplicate key value violates unique constraint ' +
+      '"api_keys_user_exchange_venue_account_uniq" (SQLSTATE 23505) ' +
+      "DETAIL: Key (user_id, exchange, venue_account_id)=(…, mt5, 5551234) already exists.";
+    PERSIST_STATE.insertResult = {
+      data: null,
+      error: { message: RAW_PG, code: "23505" },
+    };
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody()));
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    // code FIRST, per this route's own load-bearing key-order rule
+    // (Pitfall 4) — the coverage laws derive their population with a
+    // `code:`-first predicate.
+    expect(body).toEqual({
+      code: "KEY_VENUE_ALREADY_CONNECTED",
+      error:
+        "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
+    });
+    // Never the generic fallback this same PERSIST_STATE shape answers one
+    // test above for a DIFFERENT constraint name.
+    expect(body.code).not.toBe("UNKNOWN");
+    expect(Object.keys(body).filter((k) => CIPHERTEXT_KEY_PATTERN.test(k))).toEqual([]);
+    // Never captureToSentry — this is an expected, user-actionable fact (the
+    // founder already connected this account), not an anomaly.
+    expect(captureSpy).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  // 167.1.2 (b) — D-01 for a ccxt key, and T-167.1.2-11. Now that the persist
+  // arm stamps an OKX uid, a second live key on the same OKX account trips the
+  // venue-identity index. The refusal must be the named 409, and the uid must
+  // appear NOWHERE the user or the logs can see it: not in the body, and not in
+  // the console line, even though Postgres' DETAIL echoes it. "100000001" is a
+  // synthetic uid.
+  it("a ccxt (okx) key whose uid is already connected is refused 409 KEY_VENUE_ALREADY_CONNECTED, and the uid is in no body or log line", async () => {
+    const UID = "100000001";
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true, venue_account_id: UID });
+    const RAW_PG =
+      'duplicate key value violates unique constraint ' +
+      '"api_keys_user_exchange_venue_account_uniq" (SQLSTATE 23505) ' +
+      `DETAIL: Key (user_id, exchange, venue_account_id)=(…, okx, ${UID}) already exists.`;
+    PERSIST_STATE.insertResult = {
+      data: null,
+      error: { message: RAW_PG, code: "23505" },
+    };
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody({ exchange: "okx" })));
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toEqual({
+      code: "KEY_VENUE_ALREADY_CONNECTED",
+      error:
+        "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
+    });
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(UID);
+    expect(JSON.stringify(body)).not.toContain(UID);
+    // The collision WAS logged (the arm ran), and the logged line is scrubbed.
+    const logged = JSON.stringify(consoleErr.mock.calls);
+    expect(logged).toContain("venue-identity collision");
+    expect(logged).not.toContain(UID);
+    expect(captureSpy).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  it("a 23505 naming a DIFFERENT/unparseable constraint keeps the existing generic UNKNOWN/500 fallback, unchanged", async () => {
+    const RAW_PG =
+      'duplicate key value violates unique constraint ' +
+      '"strategies_user_wizard_session_source_uniq" (SQLSTATE 23505)';
+    PERSIST_STATE.insertResult = {
+      data: null,
+      error: { message: RAW_PG, code: "23505" },
+    };
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody()));
+
+    // Byte-identical to the pre-existing generic INSERT-failure arm.
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body).toEqual({
+      code: "UNKNOWN",
+      error: "Your key was verified but couldn't be saved. Please try again.",
+    });
+    consoleErr.mockRestore();
+  });
+
+  it("an INSERT that returns no row (no error either) is still a failure, not a silent success", async () => {
+    // The shape that makes a false success possible: PostgREST answered without
+    // an error but handed back nothing. Reporting 200 here would tell the user
+    // the key was saved and hand the component an undefined id.
+    PERSIST_STATE.insertResult = { data: null, error: null };
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody()));
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
+
+    consoleErr.mockRestore();
+  });
+
+  // ── The missing service credential ────────────────────────────────────────
+  it("a missing service-role credential answers SEAM_MISCONFIGURED — never a sentence blaming the user's key", async () => {
+    PERSIST_STATE.adminFactoryError = new Error(
+      "Missing SUPABASE_SERVICE_ROLE_KEY for admin operations",
+    );
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody()));
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body).toEqual({
+      error: "Service credential unavailable",
+      code: "SEAM_MISCONFIGURED",
+    });
+    // OUR missing config must not surface as the user's key being at fault —
+    // the same distinction the 503-vs-429 limiter arm draws above.
+    expect(body.error).not.toMatch(/key validation failed/i);
+    expect(body.error).not.toContain("SUPABASE");
+    expect(PERSIST_STATE.inserts).toEqual([]);
+
+    consoleErr.mockRestore();
+  });
+
+  // ── Test 4: the invariant across EVERY persist-mode arm ───────────────────
+  it("NO persist-mode response — success or any error arm — carries a ciphertext-named field", async () => {
+    const { POST } = await import("./route");
+    const { AnalyticsUpstreamError, AnalyticsTimeoutError } = await import(
+      "@/lib/analytics-client"
+    );
+
+    // Each entry: a label, the setup that drives that arm, and nothing else.
+    const arms: Array<[string, () => void]> = [
+      ["success", () => {}],
+      [
+        "insert fault",
+        () => {
+          PERSIST_STATE.insertResult = {
+            data: null,
+            error: { message: "boom", code: "XX000" },
+          };
+        },
+      ],
+      [
+        "no service credential",
+        () => {
+          PERSIST_STATE.adminFactoryError = new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
+        },
+      ],
+      [
+        "upstream 4xx",
+        () => {
+          mockValidateKey.mockRejectedValue(
+            new AnalyticsUpstreamError("Invalid API credentials", 400, "KEY_AUTH_FAILED"),
+          );
+        },
+      ],
+      [
+        "read_only false",
+        () => {
+          mockValidateKey.mockResolvedValue({ valid: true, read_only: false });
+        },
+      ],
+      [
+        "upstream timeout",
+        () => {
+          mockValidateKey.mockRejectedValue(
+            new AnalyticsTimeoutError("/api/validate-key", 30000),
+          );
+        },
+      ],
+      [
+        "terminal unclassified",
+        () => {
+          mockValidateKey.mockRejectedValue(new Error("crypto: internal failure"));
+        },
+      ],
+      [
+        "rate limited",
+        () => {
+          rateLimitResult.success = false;
+          rateLimitResult.retryAfter = 5;
+        },
+      ],
+    ];
+
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const [label, setup] of arms) {
+      // Reset to the happy baseline, then drive exactly one arm.
+      PERSIST_STATE.inserts.length = 0;
+      PERSIST_STATE.insertResult = null;
+      PERSIST_STATE.adminFactoryError = null;
+      rateLimitResult.success = true;
+      rateLimitResult.retryAfter = 0;
+      mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+      setup();
+
+      const res = await POST(makeReq(persistBody()));
+      const body = await res.json();
+      expect(
+        Object.keys(body).filter((k) => CIPHERTEXT_KEY_PATTERN.test(k)),
+        `persist-mode arm "${label}" leaked a ciphertext-named field`,
+      ).toEqual([]);
+    }
+    consoleErr.mockRestore();
+  });
+});
+
+/**
+ * ⭐ 161-09 / WIZERR-08 — THE FOUR REQUEST-SHAPE ARMS ANSWER FOUR TRUE FACTS.
+ *
+ * Until this plan all four of this route's request-shape rejections answered
+ * `KEY_INVALID_FORMAT`, whose copy reads "This does not look like a valid API
+ * key for the selected exchange … Binance secrets are 64 hex characters". Two
+ * of the four are VENUE gates (we support the venue, it is not switched on
+ * here) and two are PRESENCE guards (a required slot arrived blank). On none
+ * of the four did anything examine the format of any value, so a founder who
+ * submitted a complete MT5 form while MT5 was dark was told their key format
+ * was wrong. 142.2 split the vocabulary at the two wizard connect routes; this
+ * route was the third carrier and kept saying the collapsed thing.
+ *
+ * ⛔ THE SENTENCES DO NOT MOVE. Each case below asserts the code AND the
+ * byte-identical sentence, and every sentence here is HAND-TYPED from the
+ * pre-161-09 source read at `git show HEAD:…` — never imported and never
+ * copied out of the current file. An oracle that imports the string it is
+ * asserting about cannot fail when the string changes; that is the
+ * self-referential shape three money bugs survived six review passes behind.
+ *
+ * ⛔ AND THE STATUS AND HEADERS DO NOT MOVE EITHER. These are structural gates
+ * (ASVS V5): a refusal that starts answering 200, or that loses NO_STORE_HEADERS
+ * on a per-tenant body, is a weakened gate wearing an honest code. Pinned per
+ * arm rather than inherited.
+ */
+describe("[161-09 / WIZERR-08] the four request-shape arms carry codes true of their own facts", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    delete process.env.SFOX_ENABLED;
+    delete process.env.MT5_ENABLED;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({ api_key_encrypted: "ct-blob" });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.SFOX_ENABLED;
+    delete process.env.MT5_ENABLED;
+  });
+
+  /**
+   * HAND-TYPED. One row per arm: how to reach it, the code it must now answer,
+   * and the sentence that must NOT have moved.
+   *
+   * ⚠️ `no-store` is asserted as a lowercased HEADER READ, not against an
+   * imported constant, for the same oracle-independence reason as the
+   * sentences: `NO_STORE_HEADERS` changing would move both sides together.
+   */
+  const ARMS: readonly {
+    label: string;
+    body: Record<string, unknown>;
+    code: string;
+    sentence: string;
+  }[] = [
+    {
+      label: "sfox is a venue we support that is not switched on here",
+      body: { exchange: "sfox", api_key: "sfox-bearer-token-value", persist: true },
+      code: "KEY_VENUE_NOT_ENABLED",
+      sentence: "sFOX integration is not yet available.",
+    },
+    {
+      label: "mt5 is a venue we support that is not switched on here",
+      body: {
+        exchange: "mt5",
+        api_key: "5001234",
+        api_secret: "investor-password-123",
+        passphrase: "MetaQuotes-Demo",
+        persist: true,
+      },
+      code: "KEY_VENUE_NOT_ENABLED",
+      sentence: "MT5 integration is not yet available.",
+    },
+    {
+      label: "the mt5 three-credential guard: the broker server slot arrived blank",
+      body: {
+        exchange: "mt5",
+        api_key: "5001234",
+        api_secret: "investor-password-123",
+        passphrase: "   ",
+        persist: true,
+      },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      sentence: "Missing required fields",
+    },
+    {
+      label: "the generic presence check: api_secret absent on a ccxt venue",
+      body: { exchange: "okx", api_key: "okx-api-key", persist: true },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      sentence: "Missing required fields",
+    },
+  ];
+
+  // Positive control FIRST. A table that shrank to nothing would report no
+  // failures and pass this suite for the worst possible reason.
+  it("the arm table is the four MEASURED arms, not however many survived an edit", () => {
+    expect(ARMS.length).toBe(4);
+  });
+
+  it.each(ARMS.map((a) => [a.label, a] as const))(
+    "%s → its own code, with the sentence, status and no-store header byte-identical",
+    async (_label, arm) => {
+      // The mt5 three-credential guard lives BEHIND the mt5 venue gate, so it
+      // is only reachable with the server flag on. The two venue-gate arms need
+      // it off. Set per arm rather than globally: a single global setting would
+      // make one pair of arms unreachable and they would pass by never running.
+      if (arm.code === "KEY_MISSING_REQUIRED_FIELD" && arm.body.exchange === "mt5") {
+        process.env.MT5_ENABLED = "true";
+      }
+      const { POST } = await import("./route");
+      const res = await POST(makeReq(arm.body));
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.code).toBe(arm.code);
+      expect(body.error).toBe(arm.sentence);
+      expect(res.headers.get("cache-control")?.toLowerCase()).toContain("no-store");
+      // No live credential probe is spent on any of the four.
+      expect(mockValidateKey).not.toHaveBeenCalled();
+      expect(mockEncryptKey).not.toHaveBeenCalled();
+    },
+  );
+
+  it("KEY_INVALID_FORMAT has NO emitter left on this route — the split is complete, not partial", () => {
+    // ⛔ SOURCE-DERIVED, COMMENT-STRIPPED. The route's own docblock DESCRIBES
+    // the retired code by name, so a raw `grep -c` would report the class open
+    // forever. Only the emitters count: a `code: "KEY_INVALID_FORMAT"` literal.
+    // Same discipline as `KEY_INVALID_FORMAT`'s own copy docblock.
+    const src = stripCommentsPreserveLines(
+      readFileSync(join(process.cwd(), "src/app/api/keys/validate-and-encrypt/route.ts"), "utf-8"),
+      "ts",
+    );
+    // Positive control on the SCANNER before the negative claim: a stripper
+    // that blanked the whole file would report zero emitters of everything.
+    expect(
+      src.match(/code:\s*"KEY_VENUE_NOT_ENABLED"/g)?.length,
+      "the comment-stripper blanked real code — every negative claim below is vacuous",
+    ).toBe(2);
+    expect(src.match(/code:\s*"KEY_MISSING_REQUIRED_FIELD"/g)?.length).toBe(2);
+    expect(
+      src.match(/code:\s*"KEY_INVALID_FORMAT"/g),
+      "an arm answers KEY_INVALID_FORMAT again. This route runs NO format check " +
+        "of its own — the `api_secret.length < 8` ccxt guard that makes that " +
+        "code's copy true lives on create-with-key and composite/add-key. " +
+        "⛔ The remedy is a code true of the arm's own fact, never this one back.",
+    ).toBeNull();
+  });
+
+  /**
+   * ⛔ PITFALL 6 — THE PERSIST ARM IS NOT TOUCHED, AND THAT IS ENFORCED HERE
+   * RATHER THAN ASSERTED IN A COMMENT.
+   *
+   * `persist: true`'s first real PROD connect is an owed deferred verification
+   * from Phase 160. If this plan had changed anything on that path, a failure
+   * observed at that smoke could no longer be attributed to 160 rather than to
+   * 161. All four re-coded sites sit UPSTREAM of the `body.persist !== true`
+   * discriminator — verified at HEAD by the ordering pin below and by this
+   * behavioural case.
+   */
+  it("PITFALL 6: a persist request still reaches the writer and still returns the row id, unchanged", async () => {
+    PERSIST_STATE.inserts.length = 0;
+    PERSIST_STATE.insertResult = null;
+    PERSIST_STATE.adminFactoryError = null;
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      kek_version: 3,
+    });
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ ...VALID_BODY, persist: true, label: "My OKX key" }),
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ api_key_id: expect.any(String), valid: true, read_only: true });
+    // The writer really ran — a 200 with no INSERT would satisfy the shape
+    // assertion above while proving the persist path was skipped entirely.
+    expect(PERSIST_STATE.inserts.length).toBe(1);
+  });
+
+  it("PITFALL 6: all four re-coded arms sit UPSTREAM of the persist discriminator, in source order", () => {
+    const src = stripCommentsPreserveLines(
+      readFileSync(join(process.cwd(), "src/app/api/keys/validate-and-encrypt/route.ts"), "utf-8"),
+      "ts",
+    );
+    const discriminator = src.indexOf("body.persist !== true");
+    expect(
+      discriminator,
+      "the persist discriminator moved or was renamed — this ordering pin is measuring nothing",
+    ).toBeGreaterThan(0);
+    for (const marker of [
+      'code: "KEY_VENUE_NOT_ENABLED", error: "sFOX integration is not yet available."',
+      'code: "KEY_VENUE_NOT_ENABLED", error: "MT5 integration is not yet available."',
+    ]) {
+      const at = src.indexOf(marker);
+      expect(at, `arm not found in source: ${marker}`).toBeGreaterThan(0);
+      expect(at).toBeLessThan(discriminator);
+    }
+    // Both presence guards are the same two-line literal, so index them by
+    // LAST occurrence: if either one drifted below the discriminator this reds.
+    const lastMissing = src.lastIndexOf('code: "KEY_MISSING_REQUIRED_FIELD"');
+    expect(lastMissing).toBeGreaterThan(0);
+    expect(lastMissing).toBeLessThan(discriminator);
+  });
+});
+
+/**
+ * [164.2-05 / WIZFORM-02 — the TRACER instance] a bare upstream 4xx status is
+ * CLASSIFIED, not discarded.
+ *
+ * ── THE MEASUREMENT THIS DESCRIBE EXISTS FOR ────────────────────────────────
+ *
+ * On 2026-08-25 PRODUCTION answered a key-connect attempt with
+ *
+ *     {"error":"Unauthorized","code":"UNKNOWN"}
+ *
+ * from this route. The Railway analytics service had rejected OUR service key
+ * and answered a bare 401: no seam envelope, so `AnalyticsUpstreamError.seamCode`
+ * was `null`, and the 4xx-forward arm's `err.seamCode ?? "UNKNOWN"` had nothing
+ * left to say. WIZFORM-02's criterion is *"no wizard failure renders UNKNOWN
+ * when the server DID classify it"* — and a 401 IS a classification. It was
+ * discarded one line before it could be used, because the only channel the arm
+ * read was the envelope's.
+ *
+ * ⛔ A ROSTER ROW CANNOT CLOSE THIS, and that is why the fix is at the seam
+ * rather than in `KNOWN_VALIDATE_AND_ENCRYPT_CODES`. There was no code to
+ * roster: the wire carried the string "UNKNOWN". Every roster, alias table and
+ * coverage law in this repo operates on a code that already exists. The status
+ * is the only classification present on this path, so the status is what has to
+ * be read.
+ *
+ * ── WHY 401/403 IS `SEAM_MISCONFIGURED` AND NOT AN AUTH REFUSAL ─────────────
+ *
+ * The caller here is OUR server, not the user. This route reaches the analytics
+ * service with the service key held in our own environment (PYAPI-06); the
+ * user's exchange credentials are the request BODY, never the authorization.
+ * So a 401 or a 403 on this hop means our own service rejected our own key —
+ * a configuration fault on our side, which is precisely what
+ * `SEAM_MISCONFIGURED`'s copy already says: *"We could not send this request —
+ * our own configuration is wrong."* Reading it as "your key was rejected" would
+ * be a fresh false attribution, the exact class this phase closes.
+ *
+ * 422 is the analytics service's own shape refusal → `VALIDATION_FAILED`, whose
+ * copy is authored to serve both producers ("a request was refused on its shape
+ * before any work ran"). 429 is a throttle on that hop → `RATE_LIMITED`.
+ *
+ * ⛔ AND AN UNMAPPED STATUS STILL ANSWERS `UNKNOWN`. The map is a hand-typed
+ * closed vocabulary, not a rule for turning any integer into a sentence. A 4xx
+ * we have not reasoned about is genuinely unclassified, and UNKNOWN is the
+ * honest answer for it — see the `418` cases here and in the SEAMUX-03 describe
+ * above.
+ */
+describe("[164.2-05 / WIZFORM-02] keys/validate-and-encrypt — a bare upstream status is classified", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({ api_key_encrypted: "ct-blob" });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * HAND-TYPED, and deliberately NOT read out of the route. An expectation
+   * derived from its own subject cannot fail: drop the map and both sides go
+   * empty together. The route's copy of this table is checked against a
+   * hand-typed one — and against `SEAM_CODE_TO_WIZARD_CODE`'s key set — in
+   * `wizardErrors.invariant.test.ts`.
+   */
+  /**
+   * ⭐ 164.2 review B2 — the third column is the CURATED SENTENCE the mapped
+   * code owns, hand-typed from `WIZARD_ERROR_COPY`'s `title` in
+   * `src/lib/wizardErrors.ts`. It is deliberately NOT read out of that module:
+   * an expectation derived from the same table the route reads cannot fail if
+   * the route stops substituting at all in a way that still resolves copy.
+   * Hand-typing makes this pin bite on BOTH halves — the substitution
+   * happening, and the sentence being the one that was authored.
+   */
+  const MAPPED: ReadonlyArray<readonly [number, string, string]> = [
+    [401, "SEAM_MISCONFIGURED", "We could not send this request — our own configuration is wrong."],
+    [403, "SEAM_MISCONFIGURED", "We could not send this request — our own configuration is wrong."],
+    [422, "VALIDATION_FAILED", "We could not read that request."],
+    [429, "RATE_LIMITED", "You have reached our request limit."],
+  ];
+
+  it("THE PROD REPRODUCTION (2026-08-25): a bare 401 answers SEAM_MISCONFIGURED, never UNKNOWN", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    // Byte-for-byte the shape PROD produced: our service key rejected, no seam
+    // envelope, so `seamCode` is null.
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("Unauthorized", 401),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(
+      body.code,
+      "the 2026-08-25 PROD body `{\"error\":\"Unauthorized\",\"code\":\"UNKNOWN\"}` " +
+        "is back. The upstream DID classify this failure — 401 — and the arm " +
+        "discarded it because the classification arrived on the status channel " +
+        "rather than in a seam envelope. That is WIZFORM-02 by its own words.",
+    ).toBe("SEAM_MISCONFIGURED");
+    expect(body.code).not.toBe("UNKNOWN");
+    // ⭐ 164.2 review B2 — AND THE TWO FIELDS NO LONGER CONTRADICT EACH OTHER.
+    //
+    // ⚠️ THIS REPLACES AN EARLIER `expect(body.error).toBe("Unauthorized")`,
+    // which pinned the defect rather than the contract: every consumer of this
+    // route renders `error` and ignores `code`
+    // (`AllocatorExchangeManager.tsx:583`, `ApiKeyManager.tsx:245`,
+    // `StrategyForm.tsx:187`), so shipping the upstream's bare "Unauthorized"
+    // told the user THEIR key was refused while `code` said OUR configuration
+    // was wrong. On the status-MAPPED arm the sentence is now the curated copy
+    // the code owns.
+    expect(
+      body.error,
+      "the upstream's raw status text is on the wire again. Consumers render " +
+        "`error` and ignore `code`, so \"Unauthorized\" on a key-connect form " +
+        "blames the user's key for OUR stale service key.",
+    ).not.toBe("Unauthorized");
+    expect(body.error).toBe(
+      "We could not send this request — our own configuration is wrong.",
+    );
+  });
+
+  it.each(MAPPED)(
+    "a bare %i (no seamCode) answers %s with ITS curated sentence, not the upstream's text",
+    async (status, expected, sentence) => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      mockValidateKey.mockRejectedValue(
+        new AnalyticsUpstreamError("upstream said no", status),
+      );
+      const { POST } = await import("./route");
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status).toBe(status);
+      const body = await res.json();
+      expect(
+        body.code,
+        `a bare ${status} fell through to the \`?? "UNKNOWN"\` terminal. The ` +
+          "status IS the classification on this path — the map lookup is not " +
+          "wired into the `code:` expression, or this row is missing from it.",
+      ).toBe(expected);
+      // ⭐ 164.2 review B2 — REPLACES `toBe("upstream said no")`, which pinned
+      // the leak: the upstream's own text is not shown for a code WE inferred
+      // from the status channel.
+      expect(
+        body.error,
+        `the ${status} arm forwarded the upstream's raw text beside a code the ` +
+          "status map supplied. The message and the code then describe " +
+          "different failures, and consumers render only the message.",
+      ).toBe(sentence);
+    },
+  );
+
+  it("an UNMAPPED 4xx still answers UNKNOWN — the residue is honest, not a hole", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("I'm a teapot", 418),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(418);
+    // An UNMAPPED status supplies no code, so it triggers no substitution
+    // either: F5b's forward is what still governs the sentence here.
+    expect((await res.clone().json()).error).toBe("I'm a teapot");
+    expect(
+      (await res.json()).code,
+      "an unmapped 4xx got a named code. The map is a hand-typed CLOSED " +
+        "vocabulary; a status nobody reasoned about is unclassified, and " +
+        "inventing a sentence for it is the false-attribution class this phase " +
+        "exists to close. ⛔ Do not 'fix' this by widening the fallback.",
+    ).toBe("UNKNOWN");
+  });
+
+  it.each(MAPPED)(
+    "an upstream-CARRIED seamCode beats the %i row — the map never overwrites it",
+    async (status) => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      mockValidateKey.mockRejectedValue(
+        new AnalyticsUpstreamError("Invalid API credentials", status, "KEY_AUTH_FAILED"),
+      );
+      const { POST } = await import("./route");
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status).toBe(status);
+      // ⭐ 164.2 review B2 — F5a IS BYTE-UNCHANGED ON THIS ARM. When the
+      // upstream carried its own code, its `detail` is CURATED copy about the
+      // USER's key and still forwards verbatim; the B2 substitution is scoped
+      // to the arm where the code came from the status map, and this is the
+      // case that would red if that scoping were lost.
+      expect(
+        (await res.clone().json()).error,
+        "the curated upstream detail was replaced. B2's substitution must " +
+          "apply ONLY where the STATUS MAP supplied the code — an " +
+          "upstream-carried seamCode means the service classified this failure " +
+          "itself and its sentence is the true one.",
+      ).toBe("Invalid API credentials");
+      expect(
+        (await res.json()).code,
+        "the status map overwrote a code the upstream actually sent. The `??` " +
+          "chain must read `err.seamCode` FIRST: the envelope's own code is a " +
+          "classification the service made about THIS failure, while the " +
+          "status is our inference from a channel that carries less. Getting " +
+          "the order wrong replaces a specific true verdict with a generic one.",
+      ).toBe("KEY_AUTH_FAILED");
+    },
+  );
+
+  it("the 500 terminal arm is UNTOUCHED — a bare 5xx is not a bare 4xx", async () => {
+    // ⛔ The map is bounded to the `>= 400 && < 500` arm by construction. The
+    // 500 arm below it is reached by TRANSPORT failures and untyped throws as
+    // well as by `AnalyticsUpstreamError`, so a status→code inference there
+    // would be naming a fault we did not observe — and its own comment says so.
+    // A 502 carries no seamCode here and must still answer the terminal.
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("upstream traceback", 502),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    // And the 5xx REDACTION is intact — the raw upstream text never crosses.
+    expect(body.error).toBe("Key validation failed. Please try again.");
   });
 });

@@ -8,6 +8,22 @@ name: Migration Drift Check
 # env: blocks (mirrors migration-policy.yml + supabase-migrate.yml). The
 # only PR-derived data is file paths, regex-validated by the `paths:`
 # filter and re-validated via the 14-digit-prefix grep in the script.
+#
+# Phase 164.3 / VAC-04 — this workflow now ALSO hosts the repo-vs-PROD
+# function-body drift gate (scripts/prod-body-drift-check.sh). D-12: it rides
+# THIS job and THIS credential rather than minting a second copy of production
+# access. The secret is already in this job's blast radius on every migrations
+# PR, so adding a step widens nothing.
+#
+# ⛔ D-13 — THIS MUST NEVER BECOME A MAIN-PUSH WORKFLOW. Two independent
+# reasons, and the second is the expensive one:
+#   (a) The requirement is "no whole-body CREATE OR REPLACE MERGES without a
+#       diff", which is inherently pre-merge. `pull_request` is the correct
+#       trigger on its own terms.
+#   (b) Railway WAITS on main CI and SKIPS the analytics-service deploy when it
+#       is red. Moving this gate onto main-push would couple a body-drift
+#       finding to a DEPLOY FREEZE. A red PR board was accepted; halted deploys
+#       were not. Do not "improve" this into a push trigger.
 
 on:
   pull_request:
@@ -15,6 +31,29 @@ on:
     paths:
       - 'supabase/migrations/**'
       - '.github/workflows/migration-drift-check.yml'
+      # VAC-04's own implementation: edits to the gate must re-run the gate.
+      # ⚠️ These entries are the subject of an OPEN founder decision recorded in
+      # TODOS.md: a PR touching only them runs with SUPABASE_DB_PASSWORD in env,
+      # executing script content from the PR head. Fork PRs are excluded by the
+      # same-repo `if:` below, so the blast radius is push-access collaborators
+      # and the mitigation is required reviewers on the `Production`
+      # environment. Adding a name to this list does NOT widen that radius — a
+      # collaborator who can edit any one of them can already trigger the run —
+      # but it must not be extended to non-VAC-04 paths.
+      - 'scripts/prod-body-drift-check.sh'
+      - 'scripts/sql-body-normalize.mjs'
+      - 'scripts/sql-function-names-naive.mjs'
+      # DRIFT-05 gate (b)'s SUBJECT, and the trade is TAKEN rather than left to
+      # omission. Regenerating this dump from PROD is the remedy gate (b)'s own
+      # failure text demands; without this entry the remedy PR is the one PR
+      # that never re-runs the gate that demanded it, and the operator learns
+      # whether it worked on someone else's later migration PR.
+      # It does NOT widen the "PR-head content executing under
+      # SUPABASE_DB_PASSWORD" radius the paragraph above bounds: it is DATA read
+      # by the scripts already listed here, never executed. That is why the
+      # "must not be extended to non-VAC-04 paths" rule above is not breached —
+      # this path IS gate (b)'s subject, and it is inert.
+      - 'supabase/schema/baseline.sql'
 
 concurrency:
   group: migration-drift-check-${{ github.event.pull_request.number }}
@@ -25,32 +64,87 @@ permissions:
 
 jobs:
   check:
+    # D-17b — FORK CARVE-OUT, and it is load-bearing for the hard failure below.
+    # GitHub withholds secrets and environment secrets from fork-PR
+    # `pull_request` runs, so with the skip converted to `exit 1` an
+    # unconditional job would redden every fork PR for a reason no contributor
+    # could fix. Gating the JOB instead makes a fork PR show a visibly SKIPPED
+    # job — an honest state, and a categorically different one from
+    # green-having-checked-nothing. A fork PR cannot merge a migration without a
+    # maintainer branch anyway. Same-repo precedent: ci.yml's `sql-tests` job.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     environment: Production
+    # `packages: read` is for the ghcr.io login step (164.4.2-08). A job-level
+    # block REPLACES the workflow-level one, so the workflow's scopes are
+    # restated here unchanged - nothing but `packages: read` is added.
+    permissions:
+      contents: read
+      packages: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0  # need merge-base for the PR-additions diff below
-      - name: Check secrets are configured
-        id: check
+      # Phase 164.3 / D-17 — THIS STEP USED TO BE A SKIP THAT READ AS A PASS.
+      #
+      # It emitted `configured=false` plus a `::notice:: ... skipped`, and every
+      # later step carried `if: steps.check.outputs.configured == 'true'`. An
+      # unconfigured run therefore reported GREEN having checked nothing — on
+      # the workflow that guards PRODUCTION migrations. That is SKIP-01's exact
+      # shape, and SKIP-01 is on this phase's own defect list.
+      #
+      # Classified honestly when found: LATENT, not live. Measured 2026-08-29 on
+      # run 33167385035, the job reaches its real conclusion ("Pending
+      # migrations match this PR's additions - no drift"), so the secrets ARE
+      # configured and the skip branch was dormant. It was a hole that opens the
+      # day a secret is rotated away, not one that was open then.
+      #
+      # It is now a HARD FAILURE. The `configured` output and the three `if:`
+      # conditions that consumed it are DELETED rather than left in place: an
+      # `if:` that can no longer be false is dead code shaped exactly like the
+      # skip mechanism this phase exists to remove, and the next reader would
+      # have to re-derive that it cannot fire.
+      - name: Assert secrets are configured (D-17 — a skip is not a pass)
         env:
           SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
-          if [ -z "$SUPABASE_PROJECT_REF" ] || [ -z "$SUPABASE_ACCESS_TOKEN" ] || [ -z "$SUPABASE_DB_PASSWORD" ]; then
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Migration Drift Check skipped - secrets not configured."
-          else
-            echo "configured=true" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          missing=""
+          [ -n "${SUPABASE_PROJECT_REF:-}" ] || missing="${missing} vars.SUPABASE_PROJECT_REF"
+          [ -n "${SUPABASE_ACCESS_TOKEN:-}" ] || missing="${missing} secrets.SUPABASE_ACCESS_TOKEN"
+          [ -n "${SUPABASE_DB_PASSWORD:-}" ] || missing="${missing} secrets.SUPABASE_DB_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::Migration Drift Check cannot run - not configured:${missing}"
+            echo "::error::This is a HARD FAILURE, not a skip (Phase 164.3 / D-17). This job"
+            echo "::error::guards production migrations; reporting success while unable to reach"
+            echo "::error::production would be green-having-checked-nothing. Fork PRs never get"
+            echo "::error::here - the job-level same-repo condition skips them visibly instead."
+            exit 1
           fi
+          echo "::notice::Drift-check credentials present."
       - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
-        if: steps.check.outputs.configured == 'true'
         with:
           version: 2.98.2
+      - name: Log in to ghcr.io before the CLI pulls its images
+        # 164.4.2-08 checkpoint RED -> fix (2026-09-23). VAC-04 below runs
+        # `supabase db dump`, which pulls supabase/postgres; run 35911761546 failed
+        # there on `toomanyrequests`.
+        # Same step and same reasons as ci.yml's `frontend-local-stack` login: the CLI
+        # pulls from ghcr.io (setup-cli sets SUPABASE_INTERNAL_IMAGE_REGISTRY), anonymous
+        # GHCR pulls from shared runners are throttled, and the CLI reads credentials
+        # from the docker config this writes. A failed login FAILS THE JOB - it never
+        # degrades into the anonymous pull. Pinned by
+        # `src/__tests__/contracts/ghcr-login-before-image-pull.contract.test.ts`.
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
       - name: Drift check (db push dry-run)
-        if: steps.check.outputs.configured == 'true'
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
@@ -95,3 +189,132 @@ jobs:
             exit 1
           fi
           echo "::notice::Pending migrations match this PR's additions - no drift."
+
+      # ── Phase 164.3 / VAC-04 — repo-snapshot-vs-PROD FUNCTION BODY drift ────
+      #
+      # The step above answers "is the repo's migration SET the applied set?".
+      # It cannot see a body that was patched directly into PROD out of band,
+      # which is exactly DRIFT-02's shape — a near-GDPR-regression caught by a
+      # human reading a diff, not by any machine. This step is that machine.
+      #
+      # ⛔ It deliberately carries NO `if:` of its own (D-17a). Its FIRST act is
+      # its own credential assertion, and an absent credential is `exit 1`. It
+      # must never inherit a condition that could make it silently not run.
+      #
+      # Redaction (T-164.3-04, public repo): the dump is written to a workspace
+      # file and never echoed; the gate prints function names, argument counts,
+      # sha256 hashes and differing-line counts only.
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+      - name: VAC-04 - repo-vs-PROD function body drift
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          # FETCHER MECHANISM: one schema-only dump through the CLI's linked
+          # connection, then a text extract per function. Chosen over a
+          # hand-built psql DSN because this job ALREADY proves connectivity
+          # with these exact secrets via `supabase link` above, and because a
+          # constructed DSN is one more string that must never be echoed in a
+          # public log. Never `cat` this file.
+          supabase link --project-ref "$SUPABASE_PROJECT_REF"
+          DUMP="${RUNNER_TEMP}/prod-schema.sql"
+          supabase db dump --linked --schema public -f "$DUMP"
+          # A dump we cannot read functions out of is NOT a pass. Fail loud
+          # rather than let the gate sail through comparing nothing.
+          if ! grep -acE '^\s*CREATE (OR REPLACE )?FUNCTION' "$DUMP" >/dev/null 2>&1; then
+            echo "::error::VAC-04: the PROD schema dump contains no function definitions."
+            echo "::error::Either the dump failed or its shape changed. This gate refuses to"
+            echo "::error::report a pass for a comparison it could not perform."
+            exit 1
+          fi
+          export BODY_FETCH_CMD="node scripts/sql-body-normalize.mjs --extract-fn ${DUMP}"
+          # The fetcher exits 0 with EMPTY stdout for a name it cannot find, and
+          # the gate used to read that as "new function — pass". The index makes
+          # absence a measurement instead: a name that IS in this list but
+          # yields no body is an extractor failure and the gate exits 1 (WR-01).
+          export BODY_NAME_INDEX_CMD="node scripts/sql-body-normalize.mjs --function-names ${DUMP}"
+          # ⛔ SP-C05 — the index above and the fetcher above it are the SAME
+          # function (`extractFunctionDefs`) over the SAME dump, and it silently
+          # skips a definition it cannot parse. So a dropped definition was
+          # missing from BOTH, they agreed by construction, and the gate printed
+          # "measured absent — Treated as a NEW function (pass)". MEASURED
+          # 2026-08-29 on `CREATE OR REPLACE FUNCTION public.sanitize_user$v2(p
+          # uuid)`: the whole gate exited 0 having compared nothing. This second
+          # index is a different derivation — a line-anchored regex, no lexer,
+          # `$` in the identifier charset, importing nothing from the normalizer.
+          # The gate unions them, so absence needs BOTH readings to agree.
+          export BODY_NAME_INDEX_XCHECK_CMD="node scripts/sql-function-names-naive.mjs ${DUMP}"
+          # Must stay in step with the --schema flag on the dump above. The gate
+          # refuses any migration that defines a function outside these schemas,
+          # because such a function is absent from this dump for a reason that
+          # has nothing to do with it being new.
+          export PROD_DUMP_SCHEMAS="public"
+          # Mode identity (Pitfall 2): this is the exact command a developer runs.
+          bash scripts/prod-body-drift-check.sh
+
+      # ── Phase 164.5 / DRIFT-05 gate (b) — COMMITTED BASELINE vs LIVE PROD ───
+      #
+      # The step above compares function BODIES, and only for the functions THIS
+      # PR's migrations name — so a function that exists in PROD under NO
+      # migration is never in its name list and is never looked at. That is
+      # DRIFT-04 (`create_allocator_connected_strategy`), which sat in production
+      # unowned until a human went looking.
+      #
+      # ⛔ DRIFT-05 IS TWO GATES. Gate (a) is hermetic and lives in
+      # `scripts/dump-sql-functions.ts --check`: it diffs the committed dump
+      # `supabase/schema/baseline.sql` against the migration replay, on every PR,
+      # with no credential. But `baseline.sql` is a DATED capture, so (a) can only
+      # see the DRIFT-04 class as of the last refresh. THIS step is gate (b), the
+      # live direction. Neither covers the other, and a green (a) is not evidence
+      # about (b).
+      #
+      # D-12, unchanged and restated because it is what makes this admissible: it
+      # rides THIS job, THIS credential and THE DUMP THE STEP ABOVE ALREADY TOOK.
+      # No second dump, no second copy of production access. The secret is already
+      # in this job's blast radius on every migrations PR, so this step widens
+      # nothing.
+      #
+      # ⛔ It deliberately carries no step-level condition of its own — the same
+      # choice the D-17a comment above records for the VAC-04 step, for the same
+      # reason: the script's FIRST act is its own credential assertion, and an
+      # absent credential is `exit 1`. A step that could inherit a condition
+      # making it silently not run is the forbidden shape.
+      #
+      # ⚠️ STATED, not hidden: GitHub skips a step when an earlier one in the job
+      # fails, so a VAC-04 failure above short-circuits this one. That is a
+      # LOUDLY RED job, not a green one that skipped a check — categorically
+      # different from the SKIP-01 shape. It is not "fixed" with a condition of
+      # its own, which would reintroduce exactly the mechanism forbidden above.
+      #
+      # Redaction (T-164.3-04, public repo): the dump is never `cat`ted and its
+      # path is never logged; this leg prints function names and counts only.
+      - name: DRIFT-05 (b) - committed baseline vs LIVE PROD function-name set
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          DUMP="${RUNNER_TEMP}/prod-schema.sql"
+          # Never infer from an absent measurement: a missing dump is a gate that
+          # could not read PROD, not a PROD that matches the committed baseline.
+          # The path is deliberately not echoed.
+          if [ ! -s "$DUMP" ]; then
+            echo "::error::DRIFT-05 (b): the PROD schema dump written by the VAC-04 step is absent or"
+            echo "::error::empty in the runner temp directory. This leg compares the committed baseline"
+            echo "::error::against that dump; without it there is nothing to compare, and a pass here"
+            echo "::error::would be a verdict over bytes this run never read."
+            exit 1
+          fi
+          # The SAME two independent name readers the step above unions, over the
+          # SAME dump (SP-C05): a lexer and a line-anchored regex that imports
+          # nothing from it. One reading would agree with itself by construction,
+          # and agreement is this leg's entire pass condition.
+          export BODY_NAME_INDEX_CMD="node scripts/sql-body-normalize.mjs --function-names ${DUMP}"
+          export BODY_NAME_INDEX_XCHECK_CMD="node scripts/sql-function-names-naive.mjs ${DUMP}"
+          # Mode identity (Pitfall 2): this is the exact command a developer runs.
+          bash scripts/prod-body-drift-check.sh --baseline-live

@@ -1,0 +1,533 @@
+"""Phase 135 / MT5SRC-02 — the ONE seam holding every [ASSUMED] investor-vs-master
+rule + login-error classification for MT5 validate.
+
+Consumed by ``services/ingestion/mt5.py`` (plan 135-01) and the FastAPI ``is_mt5``
+router branch (plan 135-03). Concentrating the unproven rules here means the
+Phase-134 live-spike refinement (MT5SPIKE-01 leg 2) is a ONE-LINE follow-up in a
+single file, never a scatter of hand-copied retcode literals across the worker +
+router (the closed-set discipline this module family exists to enforce).
+
+The rules below are DEFENSIVE and fail-CLOSED: an ambiguous login error is
+NEVER classified as an auth failure (which would falsely blame the user's
+credentials). ⭐ 164.5.4 / D-02 SHARPENED it — an UNRECOGNISED message no longer
+degrades to *"wrong-server or transient"* either, because wrong-server is itself
+a permanent user-attributed verdict. It degrades to ``"transient"`` and nothing
+else; see the refusal rule on ``classify_mt5_login_error``.
+
+The capability rule (``classify_trade_capability``) is TRI-state, not boolean:
+
+  * ``"trade_capable"`` — a positive signal from EITHER the account snapshot OR
+    the order_check probe rejects the login (Pitfall 4 — a master password must
+    never be persisted as read-only).
+  * ``"read_only"`` — reachable ONLY when the terminal itself reports connected
+    AND trade-permitting, so an account-level refusal is attributable to the
+    ACCOUNT rather than to our terminal's own settings.
+  * ``"undetermined"`` — a REFUSAL, never a fallback to read-only. It means the
+    two negative signals prove nothing (D-31 / EVIDENCE §C12 Correction C-5:
+    whenever the terminal's own trade permission is off, a MASTER password
+    produces exactly the negatives an investor password produces). Refusing a
+    legitimate investor key is the correct trade against storing a master key
+    stamped read-only.
+
+    ⚠️ 161-02: TWO independent settings can put it off — the Expert-Advisors
+    *"Allow algorithmic trading"* option (``Enabled`` in ``[Experts]``, which is
+    what ``trade_allowed`` actually reports) and MetaQuotes' separate *"Disable
+    automatic trading through the external Python API"* checkbox (``Api``,
+    reported as ``tradeapi_disabled``). ⛔ CORRECTED 2026-09-25 (164.6.5-06): this
+    paragraph said the gateway re-sets the first option off on EVERY account
+    change. It does so only while *"Disable algorithmic trading when the account
+    has been changed"* is ticked, and that box was founder-read UNCHECKED on
+    2026-09-24 — see ``ACCOUNT_CHANGE_ALGO_DISABLE_OPTION`` below. The VERDICT is the same either way; only the operator
+    copy differs, which is why the cause is chosen at ONE seam
+    (``mt5_probe.mt5_gateway_misconfigured_detail``) rather than assumed.
+
+NEVER references the forbidden trade method by its call form — the grep gate
+scans for the call token (the trade method name followed by an open paren), so
+this module names that method only in prose, without call parentheses.
+"""
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, Final, Literal
+
+from services.mt5_client import Mt5ClientError, Mt5LoginRefusedError
+
+# MT5 order_check retcode meaning "the order request is valid and would be
+# accepted" (TRADE_RETCODE_DONE). A login that can pass an order_check probe is
+# trade-capable — i.e. a master, not an investor, password. [ASSUMED] pending
+# MT5SPIKE-01 leg 2: the live spike confirms the exact investor-vs-master retcode
+# signal; if it refines this, it is a one-line change HERE, not a rewrite.
+_TRADE_RETCODE_DONE = 10009  # [ASSUMED]
+
+# The DOCUMENTED investor-rejection signal: `TRADE_RETCODE_TRADE_DISABLED` from
+# `enum_trade_return_codes` (EVIDENCE Correction C-6 —
+# https://www.mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes).
+# It is deliberately NOT a branch of its own: under rule 6 of
+# classify_trade_capability a 10017 already yields "read_only". Naming it makes
+# the expected value legible and lets the suite pin it.
+#
+# RESIDUAL, stated honestly: rule 6 accepts ANY non-10009 retcode as read_only,
+# so an order_check rejected for an UNRELATED reason — e.g. `EURUSD` not being in
+# the broker's symbol list, and `mt5_probe_request` hardcodes EURUSD below — is
+# still classified read_only rather than undetermined. Tightening rule 6 to
+# demand a trade-disabled-class retcode would REFUSE legitimate investor keys at
+# such brokers, so it stays [ASSUMED]. Owner: **Phase 155 (MT5-VERIFY)**, to be
+# resolved against a live master AND investor login.
+_TRADE_RETCODE_TRADE_DISABLED = 10017  # [ASSUMED — documented, unverified live]
+
+# MT5's IPC-transport failure codes — the terminal bridge itself is unreachable,
+# which is OUR infrastructure, never the user's broker server and never their
+# credentials. BOTH carry "ipc" in their text, and the pre-164.5.4 token table
+# carried the bare word "ipc" — which is WHY both are code-gated in
+# ``classify_mt5_login_error`` BEFORE any text matching (see there). ⚠️ The
+# anchored phrase tables below no longer carry "ipc" at all, so the code-gate is
+# now the ONLY thing that classifies these two. It stays FIRST regardless: a
+# transport verdict must not depend on broker-supplied text.
+#
+#   * ``-10004`` "No IPC connection" — the bridge isn't attached at all (gateway
+#     down / mid-redeploy).
+#   * ``-10005`` "IPC timeout" — the TIMEOUT sibling: the bridge is attached but
+#     the terminal stopped answering. Observed LIVE on 2026-08-12 against a wedged
+#     gateway terminal, where the wizard told the user "We could not find that
+#     broker server." for a server string that was byte-for-byte CORRECT.
+_IPC_TRANSPORT_CODES: tuple[int, ...] = (-10004, -10005)
+
+# Broker-server LOOKUP failures — the login named a trade server the terminal
+# could not RESOLVE. That string is the user's own wizard input, so naming it is
+# honest. [ASSUMED] phrase table pending the live spike.
+#
+# ⛔ ANCHORED PHRASES, NEVER BARE WORDS (164.5.4 / D-02). Until this rewrite the
+# table held the bare tokens "server", "connect", "ipc", "network", "terminal"
+# and "not found", substring-matched against the whole error text — and every one
+# of them OVER-matched. `Mt5ClientError(5, "terminal pipe broke")` is OUR bridge
+# dying, yet it carried "terminal" and came back as a PERMANENT 400 telling the
+# user their BROKER SERVER was wrong. That is the 2026-08-12 wedged-gateway
+# incident recorded on ``_IPC_TRANSPORT_CODES`` above, reached by a SECOND route
+# the code-gate cannot cover: a bridge fault that arrives with some other code.
+# The phrases below name the server LOOKUP explicitly, so a bridge/terminal fault
+# and a broker-server fault are no longer confusable by substring.
+#
+# ⛔ The remedy for a message this table MISSES is a measured ``(code, text)``
+# pair appended to ``tests/fixtures/mt5_login_rejection_observations.json``,
+# never a broader member. A missed message degrades to ``"transient"`` and costs
+# a retry; a broad member blames a working credential permanently.
+_WRONG_SERVER_PHRASES: tuple[str, ...] = (
+    "trade server not found",  # [ASSUMED] — the one observed corpus string
+)
+
+# Genuine authentication failures — only a rejection that NAMES the credential it
+# rejected may blame the credential (fail-CLOSED honesty). [ASSUMED] phrase table
+# pending the live spike.
+#
+# ⛔ Same rewrite, same reason (164.5.4 / D-02). This table held "authoriz",
+# "account", "invalid", "password" and "login" as bare tokens, so the ROADMAP's
+# own observed rejection — `Mt5ClientError(0, "Invalid account")` — matched TWICE
+# over and could never reach the ``"transient"`` default: a working key was
+# stamped PERMANENTLY auth-failed and the founder was sent to change a password
+# that was fine. An unattended-login TIMEOUT matched "login" the same way. Every
+# member below names the credential pair or the password rejection outright, so a
+# message that merely MENTIONS an account is no longer an accusation.
+_AUTH_PHRASES: tuple[str, ...] = (
+    "invalid account or password",  # [ASSUMED] — the observed corpus string
+    "account or password is invalid",  # [ASSUMED] — same claim, other word order
+    "invalid password",  # [ASSUMED]
+    "wrong password",  # [ASSUMED]
+    "incorrect password",  # [ASSUMED]
+    "password is invalid",  # [ASSUMED]
+    "password is incorrect",  # [ASSUMED]
+)
+
+
+class Mt5ValidationError(Exception):
+    """Fail-CLOSED classification of an OFFLINE pre-probe credential-shape failure.
+
+    ``kind`` is the login-failure class that BOTH call sites — the FastAPI
+    ``_validate_mt5_key`` router branch (plan 135-03) and the
+    ``Mt5Adapter.validate`` worker branch (plan 135-01) — map onto their own
+    transport (an ``HTTPException`` detail / a ``ValidationResult``), so a
+    missing/blank credential combination classifies IDENTICALLY on both paths.
+    This is the single-seam guarantee WR-01 exists to enforce: the guard set and
+    ordering live HERE, once, and cannot drift between the two hand-written
+    copies they replaced.
+    """
+
+    def __init__(self, kind: Literal["auth", "wrong_server"]) -> None:
+        self.kind = kind
+        super().__init__(kind)
+
+
+def parse_mt5_credentials(
+    api_key: str | None, api_secret: str | None, passphrase: str | None
+) -> tuple[int, str, str]:
+    """Fail-CLOSED OFFLINE parse of the reused MT5 credential slots into
+    ``(login: int, investor_pw: str, server: str)``.
+
+    Credential-slot reuse (the one MT5 wrinkle, documented LOUDLY at the encrypt
+    chokepoint): login -> ``api_key``, investor password -> ``api_secret``,
+    broker server -> ``passphrase``. Raises ``Mt5ValidationError(kind)`` for any
+    structurally-invalid request so NO live RPyC probe is burned on a request
+    that can be rejected offline.
+
+    The check ORDERING is the HTTP-boundary router's (server -> login ->
+    password): the wizard copy + the 135-03/135-04 tests are aligned to it, so it
+    is the canonical ordering both call sites defer to (WR-01 — the adapter was
+    reconciled TO this ordering, not vice-versa).
+
+      * blank/missing broker server -> ``"wrong_server"`` (a login without a
+        server cannot resolve; distinct from a bad-password failure — F4 honesty)
+      * blank/missing/non-numeric login -> ``"auth"`` (a bad credential, never
+        our env; the SAME AUTH_FAILED classification a bad ccxt key emits)
+      * blank investor password -> ``"auth"``
+
+    The password is returned VERBATIM (never trimmed — MT5 passwords may be
+    space-significant; the wizard client trims at submit); only its blank-ness is
+    tested via ``.strip()``. Login and server ARE trimmed (the v1.11
+    credential-trim convention)."""
+    server = (passphrase or "").strip()
+    if not server:
+        raise Mt5ValidationError("wrong_server")
+    raw_login = (api_key or "").strip()
+    if not raw_login:
+        raise Mt5ValidationError("auth")
+    try:
+        login = int(raw_login)
+    except ValueError:
+        raise Mt5ValidationError("auth") from None
+    investor_pw = api_secret or ""
+    if not investor_pw.strip():
+        raise Mt5ValidationError("auth")
+    return login, investor_pw, server
+
+
+def mt5_probe_request(symbol: str = "EURUSD") -> dict[str, Any]:
+    """A minimal market-order-shaped request for ``order_check`` (PROBE ONLY —
+    never submitted). ``order_check`` validates margin/funds and does NOT place an
+    order. Mirrors ``scripts/mt5_spike.py:124`` ``_probe_request`` (the shape the
+    134 spike leg-2 exercised); the numeric constants are the well-known MT5
+    request enums (TRADE_ACTION_DEAL / ORDER_TYPE_BUY / ORDER_FILLING_IOC)."""
+    return {
+        "action": 1,  # TRADE_ACTION_DEAL — immediate market execution shape
+        "symbol": symbol,
+        "volume": 0.01,
+        "type": 0,  # ORDER_TYPE_BUY
+        "type_filling": 1,  # ORDER_FILLING_IOC
+    }
+
+
+def classify_trade_capability(
+    account_info: dict[str, Any],
+    order_check_result: dict[str, Any],
+    terminal_info: dict[str, Any] | None,
+) -> Literal["trade_capable", "read_only", "undetermined"]:
+    """Tri-state, fail-CLOSED capability verdict for a logged-in MT5 session.
+
+    Replaces the two-signal ``is_trade_capable`` boolean, which concluded
+    "investor / read-only" from two NEGATIVE signals and therefore failed OPEN:
+    per EVIDENCE §C12 / Correction C-5 both signals are ALSO negative for a
+    **MASTER** password whenever the terminal's own trade permission is off. A
+    trade-capable password then passed the investor probe and was persisted
+    stamped ``read_only`` (D-31).
+
+    ⚠️ 161-02 CORRECTION — TWO INDEPENDENT SETTINGS, not one. ``trade_allowed``
+    is governed by the Expert-Advisors *"Allow algorithmic trading"* option
+    (``Enabled`` in ``Config/terminal.ini`` ``[Experts]``). MetaQuotes'
+    *"Disable automatic trading through the external Python API"* (``Api`` in the
+    same block) is a SEPARATE checkbox, reported separately as
+    ``tradeapi_disabled``, and it can be OFF while ``trade_allowed`` is still
+    false. Founder-measured on the live gateway 2026-08-13: ``Api=0, Enabled=0``.
+    Either one produces the identical two negatives, so the refusal is correct
+    under both — but naming the wrong one to an operator sends them to a setting
+    that is already right.
+
+    The terminal signal is a REQUIRED argument, not an optional one: a callable
+    two-signal form that can conclude ``read_only`` is exactly the defect, so no
+    such form is left reachable in the tree.
+
+    Returns:
+      * ``"trade_capable"`` — reject (master password; never persist).
+      * ``"read_only"``     — accept (investor password).
+      * ``"undetermined"``  — REFUSE. We cannot classify, so we do not. Refusing
+        a legitimate investor key is the correct trade against storing a master
+        key we believe is read-only.
+    """
+    # 1. A POSITIVE account signal is conclusive and wins before any terminal
+    #    reasoning — [DOC] ACCOUNT_TRADE_ALLOWED "Allowed trade for the current
+    #    account". This preserves the pre-D-31 master-reject behaviour exactly.
+    if account_info.get("trade_allowed"):
+        return "trade_capable"
+    # 2. An order_check the server WOULD accept is likewise conclusive.
+    #    [DOC] TRADE_RETCODE_DONE = 10009. Still [ASSUMED] as the master signal
+    #    pending the live spike, and it keeps its marker.
+    retcode = order_check_result.get("retcode")
+    if retcode == _TRADE_RETCODE_DONE:  # [ASSUMED]
+        return "trade_capable"
+    # 3. No terminal read (unreadable, wrong shape, or missing either field) →
+    #    the two negatives above prove NOTHING, because we cannot rule out that
+    #    our own terminal caused them. EVIDENCE §C12: "Anything else is 'cannot
+    #    determine' and must fail closed".
+    if (
+        not isinstance(terminal_info, Mapping)
+        or "connected" not in terminal_info
+        or "trade_allowed" not in terminal_info
+    ):
+        return "undetermined"
+    # 4. Terminal detached from the trade server. [DOC] MQL5 "Trade permission"
+    #    lists "no connection to the trade server" as a SIBLING cause of the
+    #    account-level refusal, so the negative is not attributable to investor
+    #    mode.
+    if not terminal_info.get("connected"):
+        return "undetermined"
+    # 5. ⭐ THE FIX (D-31). Terminal-level trade permission is OFF. Under it a
+    #    MASTER password produces the identical two negatives an investor
+    #    password produces, so NO read-only conclusion is available and we must
+    #    refuse.
+    #
+    #    ⚠️ 161-02: this flag reports the Expert-Advisors "Allow algorithmic
+    #    trading" option (`Enabled` in [Experts]) — NOT MetaQuotes' separate
+    #    "Disable automatic trading through the external Python API" checkbox
+    #    (`Api`, surfaced as `tradeapi_disabled`), which was founder-measured OFF
+    #    on the live gateway while this flag was still false. Either one forces
+    #    the refusal; the CAUSE is chosen for the operator elsewhere, once.
+    if not terminal_info.get("trade_allowed"):
+        return "undetermined"
+    # 6. The terminal itself WOULD permit trading and the account still says no,
+    #    so the refusal is attributable to the ACCOUNT — the composition EVIDENCE
+    #    §C12 prescribes. The documented value here is
+    #    _TRADE_RETCODE_TRADE_DISABLED (10017); see its residual note above for
+    #    why an unrecognized retcode is admitted rather than refused.
+    return "read_only"
+
+
+#: 164.6.5 / D-15 — THE SETTINGS LANDMINE, by its exact on-screen label.
+#:
+#: WHAT IT IS. An option on the gateway terminal's Tools -> Options -> Expert
+#: Advisors tab. When it is ticked, MT5 switches *"Allow algorithmic trading"*
+#: off every time the terminal's logged-in account changes.
+#:
+#: WHY VALIDATION TRIPS IT. Validating an MT5 key LOGS THE SHARED TERMINAL IN as
+#: that key's account, so every validation is an account change. With this box
+#: ticked, one validation silently disables algo trading on the terminal serving
+#: EVERY client. ⛔ It must stay UNTICKED, and nothing in this repo may write a
+#: terminal option to "fix" it — D-15 pins it, it does not tick it.
+#:
+#: WHY IT IS NOT READ DIRECTLY. The option lives in the terminal's own config
+#: (``[Experts] Account=1`` when ticked), which reaches disk only on a CLEAN
+#: terminal exit, so a file read can disagree with the running terminal. Only its
+#: CONSEQUENCE is observable: ``terminal_info()['trade_allowed']`` false on a
+#: connected terminal, which :func:`terminal_trade_permission_off` already judges.
+#: This name exists so the call sites can NAME that cause — it adds no second
+#: judge.
+#:
+#: MEASURED. Founder-read over VNC 2026-09-24: this box UNCHECKED, *"Allow
+#: algorithmic trading"* CHECKED, every other "Disable ..." option on the tab
+#: UNCHECKED. ⚠️ A point-in-time reading, not a guarantee: the bridge has since
+#: relaunched the terminal with ``/portable`` (164.6.5-02), whose settings live
+#: in the install folder, so the LIVE state is only what ``terminal_info()``
+#: reports.
+ACCOUNT_CHANGE_ALGO_DISABLE_OPTION: Final[str] = (
+    "Disable algorithmic trading when the account has been changed"
+)
+
+
+def terminal_trade_permission_off(terminal_info: dict[str, Any] | None) -> bool:
+    """True iff the terminal WAS read, IS connected, and its OWN trade permission
+    is off — i.e. branch 5 of ``classify_trade_capability`` produced the
+    ``"undetermined"`` verdict.
+
+    This is the CAUSE predicate both call sites branch on to route an
+    ``"undetermined"`` refusal, and it lives HERE rather than being re-derived at
+    each site for the same reason the capability rule does: a four-condition shape
+    test copied twice drifts, and the drift would be silent (an unreadable
+    terminal routed to the operator arm looks identical in tests to a
+    trade-disabled one until an operator is paged for a network blip).
+
+      * ``True``  -> a setting in OUR gateway terminal. No retry can clear it;
+        the remedy is an operator changing that setting (see the go-live
+        runbook). Route to the PERMANENT operator-fault arm. ⚠️ 161-02: WHICH
+        setting is not decided here — this predicate answers "is it ours?", and
+        ``mt5_probe.mt5_gateway_misconfigured_detail`` answers "which one?" from
+        the same dict. The measured default cause is the Expert-Advisors "Allow
+        algorithmic trading" option being off. ⭐ 164.6.5 / D-15: a ``True`` here
+        is ALSO the only observable symptom of ``ACCOUNT_CHANGE_ALGO_DISABLE_OPTION``
+        being ticked, because every validation is an account change — which is
+        why the router's operator arm logs above an ordinary verdict.
+        ⛔ CORRECTED 2026-09-25 (164.6.5-06): this bullet said the gateway re-sets
+        the option off on EVERY account change, so the fault RECURS after an
+        operator clears it (dated 2026-08-13). That holds only while
+        ``ACCOUNT_CHANGE_ALGO_DISABLE_OPTION`` is ticked; it was founder-read
+        UNCHECKED on 2026-09-24, and a real login on 2026-09-16 left the options
+        byte-identical (164.6.4-UAT). The old sentence is kept here as lineage.
+      * ``False`` -> the terminal was unreadable, malformed, or detached from the
+        trade server. That is our bridge blipping and it clears on retry. Route
+        to the TRANSIENT arm.
+    """
+    if not isinstance(terminal_info, Mapping) or "trade_allowed" not in terminal_info:
+        return False  # unreadable / malformed shape -> transient, not operator
+    if not terminal_info.get("connected"):
+        return False  # detached from the trade server -> transient
+    return not terminal_info.get("trade_allowed")
+
+
+def classify_mt5_login_error(
+    err: Mt5ClientError,
+) -> Literal["auth", "wrong_server", "transient"]:
+    """Map an ``Mt5ClientError`` to a login-failure class.
+
+    ⭐ THE REFUSAL RULE (164.5.4 / D-02). Of the three classes, exactly TWO —
+    ``"auth"`` and ``"wrong_server"`` — become a PERMANENT, USER-ATTRIBUTED
+    verdict at every call site (HTTP 400 / a ``failed`` analytics stamp). Only
+    ``"transient"`` is blame-free: the caller PROPAGATES it untouched (HTTP 424
+    ``recoverable=True``), never auth-failed and never valid. So an unrecognised
+    or AMBIGUOUS message must never reach either permanent class — it degrades to
+    ``"transient"``. We refuse to guess rather than default to blame, because a
+    wrong blame sends the founder to change a credential that was fine while the
+    real cause goes uninvestigated.
+
+    Fail-CLOSED ordering, and each step is pinned by an executing test rather than
+    by this sentence:
+
+      1. ``_IPC_TRANSPORT_CODES`` by CODE — our own bridge, before any text is
+         looked at at all.
+      2. ``_WRONG_SERVER_PHRASES`` — a server/bridge signal beats an auth signal,
+         so a message matching BOTH tables classifies ``"wrong_server"``. A
+         bridge fault attributed to the user's broker server is bad; one
+         attributed to their password is worse.
+      3. ``_AUTH_PHRASES`` — only a rejection that names the credential.
+      4. ``"transient"`` — the default, i.e. the refusal.
+
+    Both tables hold ANCHORED PHRASES, not bare words, precisely so a
+    bridge/terminal fault and a broker-server fault cannot be confused: the bare
+    token "terminal" used to fold `Mt5ClientError(5, "terminal pipe broke")` into
+    ``"wrong_server"``, which is the 2026-08-12 wedged-gateway incident recorded
+    on ``_IPC_TRANSPORT_CODES`` above, where the wizard told the user "We could
+    not find that broker server." for a server string that was byte-for-byte
+    CORRECT. The phrase tables are [ASSUMED] pending the live spike."""
+    # _IPC_TRANSPORT_CODES — -10004 "No IPC connection" (the terminal bridge isn't
+    # attached: gateway down / mid-redeploy) and its TIMEOUT sibling -10005 "IPC
+    # timeout" (the bridge is attached but the terminal stopped answering; observed
+    # live on 2026-08-12 against a wedged gateway terminal). NEITHER is a wrong
+    # broker server. Code-gate them BEFORE any text matching — this arm must stay
+    # FIRST and must keep its own branch: a code-gated verdict cannot be reached by
+    # the phrase tables, which no longer carry "ipc" at all. Both are infra faults
+    # → transient (the caller propagates untouched, never a user-blame stamp).
+    if err.code in _IPC_TRANSPORT_CODES:
+        return "transient"
+    text = str(err).lower()
+    if any(phrase in text for phrase in _WRONG_SERVER_PHRASES):
+        return "wrong_server"
+    if any(phrase in text for phrase in _AUTH_PHRASES):
+        return "auth"
+    # ⭐ THE REFUSAL. Unrecognised == transient, NEVER a permanent user-blame
+    # stamp. ⛔ Do not "improve" this into a best-guess arm.
+    return "transient"
+
+
+def is_ipc_transport_fault(err: Mt5ClientError) -> bool:
+    """True iff ``err`` is one of MT5's IPC-transport failure codes.
+
+    164.6.5 / criterion 5 (D-12/D-13). A narrow, single-purpose predicate
+    answering ONE question from the CODE alone — REUSES ``_IPC_TRANSPORT_CODES``
+    above, the same tuple ``classify_mt5_login_error`` code-gates on, rather than
+    re-spelling or duplicating it (a shape test copied twice drifts, and the
+    drift is silent — this module's own comment on that tuple says so).
+
+    ⛔ DELIBERATELY NOT a fourth class of ``classify_mt5_login_error``. That
+    function's three-way ``auth`` / ``wrong_server`` / ``transient`` contract is
+    pinned by executing tests at two call sites (the FastAPI router and the
+    worker adapter), and its own REFUSAL RULE docstring is explicit that exactly
+    two of the three classes become a permanent, user-attributed verdict.
+    Widening it to carry a disposition only ONE caller needs is how a shared
+    classifier acquires that caller's concerns — the initial-validate router is
+    currently the only site that must distinguish "our own terminal bridge
+    stopped answering" from the rest of the ``"transient"`` bucket, so the
+    distinction lives here, beside the classifier, never inside it.
+
+    MEASURED 2026-09-21: a wedged gateway terminal answered -10005 ("IPC
+    timeout") across two retries 45s and 55s apart, one with CORRECT
+    credentials, and stayed wedged for 1h39m. The wizard told the user this was
+    "a temporary exchange issue" and to try again — false, because the fault was
+    ours and no retry from the wizard could ever have cleared it. The caller
+    (``routers/exchange.py``) uses this predicate to raise a distinct, honest,
+    non-retryable verdict for exactly that case, while every other
+    ``"transient"`` cause classify_mt5_login_error returns keeps its existing
+    disposition untouched.
+
+    ⚠️ MERGE NOTE 2026-09-23 (164.6.5 integrated with Phase 167 CREDTRUST, which
+    shipped first). This predicate is code-only and does NOT see the stage, so
+    it also answers True for a login-stage ``-10005`` — the one input Phase
+    167's ``is_mt5_login_refusal`` (below) claims as a refused sign-in (167
+    D-17). The router therefore consults ``is_mt5_login_refusal`` FIRST and
+    this predicate SECOND, so 167's shipped ``SIGN_IN_FAILED`` answer wins that
+    overlap. What this predicate still decides is every IPC-coded fault that is
+    NOT a login-stage refusal: an ``initialize()`` failure (where an
+    already-wedged terminal answers), a login-stage ``-10004``, and a post-login
+    read that times out. The overlap is recorded, for a founder decision, in the
+    body of the merge commit that integrated the two phases."""
+    return err.code in _IPC_TRANSPORT_CODES
+
+
+# Phase 167 D-17 — the login-stage codes that are NOT a sign-in refusal. This is
+# its OWN set, deliberately not ``_IPC_TRANSPORT_CODES``: that constant is the
+# 164.5.4 classifier's code-gate, locked for every caller of
+# ``classify_mt5_login_error``, and it answers a different question.
+#
+#   * ``-10000`` … ``-10004`` — MetaQuotes' RES_E_INTERNAL_FAIL family (internal
+#     fail, send, receive, init, connect). Each one says OUR bridge failed to
+#     carry the call, so even when ``login()`` itself returned falsy the terminal
+#     told us nothing about the credential. This repo already reads ``-10003`` as
+#     an IPC fault (``Mt5Client.assert_session_authorized``,
+#     ``services/mt5_relogin.py``); the round-2 review measured ``-10000`` …
+#     ``-10003`` being reported as a refused sign-in before this set existed.
+#   * ``1`` — RES_S_OK, "success". A falsy ``login()`` carrying a success code is
+#     not an answer of "no", so it is not a refusal either.
+#
+# ⭐ ``-10005`` (RES_E_INTERNAL_FAIL_TIMEOUT) is deliberately ABSENT. D-08 names it
+# as the measured wrong-password mechanism: a MODAL LOGIN DIALOG that blocks IPC
+# after the terminal received the credential. The marker is only raised after
+# ``initialize()`` succeeded and the credentialed ``login()`` round trip returned,
+# so a terminal that is already wedged fails at ``initialize()``, as a plain
+# ``Mt5ClientError``, and never reaches this predicate as the marker. A login-stage ``-10005`` is therefore the
+# sign-in refusal the phase was written about, and D-17 routes it to
+# ``SIGN_IN_FAILED`` / ``sign_in_failed``.
+_LOGIN_STAGE_NOT_A_REFUSAL_CODES: tuple[int, ...] = (
+    -10000,  # RES_E_INTERNAL_FAIL
+    -10001,  # RES_E_INTERNAL_FAIL_SEND
+    -10002,  # RES_E_INTERNAL_FAIL_RECEIVE
+    -10003,  # RES_E_INTERNAL_FAIL_INIT
+    -10004,  # RES_E_INTERNAL_FAIL_CONNECT ("No IPC connection")
+    1,  # RES_S_OK
+)
+
+
+def is_mt5_login_refusal(err: Mt5ClientError) -> bool:
+    """True only when ``err`` is a SIGN-IN the terminal answered and refused.
+
+    ⭐ THE ONE DEFINITION of "sign-in failed" (Phase 167 CR-01 / WR-01, the code
+    set decided by D-17). Both surfaces that make that claim consult it — the
+    wizard's ``validate_key`` MT5 arm and the holdings poll's MT5 arm — so they
+    cannot disagree about it.
+
+    Two conditions, both required:
+
+      1. **The login stage answered.** ``err`` is ``Mt5LoginRefusedError``, which
+         ``Mt5Client.login`` raises from its falsy-return arm and from nowhere
+         else. An ``initialize()`` failure (no credential sent yet), a transport
+         raise mid-login, a ``last_error()`` answer that was missing or
+         malformed, and every post-login read (``account_info``,
+         ``order_check``) arrive as a plain ``Mt5ClientError``. None of them is a
+         sign-in verdict: the key may be fine and the gateway wedged.
+      2. **The code is not in ``_LOGIN_STAGE_NOT_A_REFUSAL_CODES``** — the
+         ``-10000`` … ``-10004`` IPC-infrastructure family and the success code
+         ``1``. A login-stage ``-10005`` IS a refusal (D-08 / D-17); see the
+         constant for why.
+
+    ⚠️ This predicate does not replace ``classify_mt5_login_error``. The wizard
+    runs the classifier FIRST, so a message that names the credential or the
+    server still gets its confident 400. The classifier's own ``-10005``
+    code-gate answers ``"transient"``, which is exactly the tail this predicate
+    then splits.
+    """
+    return (
+        isinstance(err, Mt5LoginRefusedError)
+        and err.code not in _LOGIN_STAGE_NOT_A_REFUSAL_CODES
+    )

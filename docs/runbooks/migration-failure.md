@@ -17,9 +17,15 @@ PRs touching migrations also run `migration-drift-check.yml` (a
 ## Failure mode 1 — auto-apply workflow fails
 
 1. Read the failed `Supabase Migrate` run log. Two common stop points:
-   - **Secrets missing** → the apply step no-ops with a `::notice::` (not a real
-     failure). Set `SUPABASE_PROJECT_REF` (var) + `SUPABASE_ACCESS_TOKEN` /
-     `SUPABASE_DB_PASSWORD` (secrets).
+   - **Secrets missing** → behaviour now splits on the trigger (changed
+     v0.52.0.0). On a **push to `main`** the step **fails the job** and names each
+     missing value in a `::error::`, because a push run means migrations
+     genuinely merged and prod genuinely needs them — a green no-op there is a
+     silent schema/code divergence (the worker then meets an old prod schema and
+     answers `PGRST204`), not a skip. On a **`workflow_dispatch`** run (e.g. an
+     unconfigured clone) the tolerant `::notice::` skip is kept. Either way the
+     fix is the same: set `SUPABASE_PROJECT_REF` (var) + `SUPABASE_ACCESS_TOKEN`
+     / `SUPABASE_DB_PASSWORD` (secrets) and re-run.
    - **SQL error mid-apply** → the offending statement is in the log. Fix it with
      a **forward** migration (see "Never edit a merged migration" below); never
      re-edit the failed file in place.

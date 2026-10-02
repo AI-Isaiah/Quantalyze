@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { renderHook, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
-import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
-import { BasisProvider, useBasis, useBasisSeriesView } from "./basis-context";
+import { deriveSeriesBundle, fixtureBenchmarkPrices } from "@/lib/factsheet/build-payload";
+import { BasisProvider, useBasis, useBasisSeriesView, leverageEligibleFor } from "./basis-context";
 import { LeverageProvider, useLeverage } from "./leverage-context";
 
 /**
@@ -38,7 +38,12 @@ function makeReturns(seed: number): number[] {
 function makeDates(): string[] {
   // 48 consecutive weekdays-ish (calendar days are fine for this hook).
   const out: string[] = [];
-  const start = Date.UTC(2023, 0, 2);
+  // Inside the bundled BTC price history (it starts 2023-04-26), so the BTC
+  // comparator leg really moves. Before Phase 166.2's D7 fix this started
+  // 2023-01-02, BEFORE that history: the aligned BTC leg was all zeros, beta was
+  // 0 at both leverages and Test C's "β scales ×2" held as 0 = 2·0. Beta now
+  // reads NaN ("—") on a leg with no dispersion, which exposed it.
+  const start = Date.UTC(2024, 0, 2);
   for (let i = 0; i < N; i++) {
     const d = new Date(start + i * 86400000);
     out.push(d.toISOString().slice(0, 10));
@@ -83,6 +88,9 @@ function makePayload(o: PayloadOverrides = {}): FactsheetPayload {
     periodsPerYear: periodsPerYear ?? undefined,
     missingSegments,
     dataQuality: composite ? { composite: true } : undefined,
+    // Phase 169.5 (D-21): both builders always carry the BTC series; a payload
+    // without it re-derives BTC as unavailable.
+    benchmarkPrices: fixtureBenchmarkPrices([STRAT.map((r, i) => ({ date: DATES[i], value: r }))]),
   };
   if (periodsPerYear == null) delete p.periodsPerYear;
   if (withMtmBundle) {
@@ -95,6 +103,7 @@ function makePayload(o: PayloadOverrides = {}): FactsheetPayload {
           markets: ["BTC"],
           strategyName: "Test Strategy",
           missingSegments,
+          benchmarkPrices: fixtureBenchmarkPrices([mtmRets.map((r, i) => ({ date: DATES[i], value: r }))]),
         },
       ),
     };
@@ -154,7 +163,13 @@ describe("useBasisSeriesView — leverage layer (Phase 107 LEV-BB)", () => {
     // dailies) to compare ann_vol against.
     const baseBundle = deriveSeriesBundle(
       STRAT.map((r, i) => ({ date: DATES[i], value: r })),
-      { periodsPerYear: 252, isArithmetic: false, markets: ["BTC"], strategyName: "Test Strategy" },
+      {
+        periodsPerYear: 252,
+        isArithmetic: false,
+        markets: ["BTC"],
+        strategyName: "Test Strategy",
+        benchmarkPrices: fixtureBenchmarkPrices([STRAT.map((r, i) => ({ date: DATES[i], value: r }))]),
+      },
     );
     act(() => result.current.lev.setLeverage(2));
     const v = result.current.view;
@@ -174,13 +189,21 @@ describe("useBasisSeriesView — leverage layer (Phase 107 LEV-BB)", () => {
     const { result } = renderHook(() => useViewProbe(payload), { wrapper: bothWrapper });
     const baseBundle = deriveSeriesBundle(
       STRAT.map((r, i) => ({ date: DATES[i], value: r })),
-      { periodsPerYear: 252, isArithmetic: false, markets: ["BTC"], strategyName: "Test Strategy" },
+      {
+        periodsPerYear: 252,
+        isArithmetic: false,
+        markets: ["BTC"],
+        strategyName: "Test Strategy",
+        benchmarkPrices: fixtureBenchmarkPrices([STRAT.map((r, i) => ({ date: DATES[i], value: r }))]),
+      },
     );
     const baseJoint = baseBundle.comparators.btc.joint;
     act(() => result.current.lev.setLeverage(2));
     const levJoint = result.current.view.comparators.btc.joint;
     expect(baseJoint).not.toBeNull();
     expect(levJoint).not.toBeNull();
+    // A real beta, so the scaling below cannot hold vacuously as 0 = 2·0.
+    expect(Number.isFinite(baseJoint!.beta) && baseJoint!.beta !== 0).toBe(true);
     expect(levJoint!.beta).toBeCloseTo(2 * baseJoint!.beta, 8);
     expect(levJoint!.alpha).toBeCloseTo(2 * baseJoint!.alpha, 8);
     expect(levJoint!.corr).toBeCloseTo(baseJoint!.corr, 8);
@@ -284,5 +307,115 @@ describe("useBasisSeriesView — leverage layer (Phase 107 LEV-BB)", () => {
     for (let i = 0; i < N; i++) {
       expect(result.current.view.strategyReturns[i]).toBeCloseTo(3 * payload.strategyReturns[i], 12);
     }
+  });
+});
+
+/**
+ * Phase 133 (SMTM-01) — the smoothed-basis leverage sibling: the :325 persisted-scalar
+ * re-pin and the :417-427 eligibility clause, exact structural mirrors of the MTM ones.
+ */
+describe("SMTM-01 useBasisSeriesView + leverageEligibleFor — smoothed leverage arm", () => {
+  const SMOOTHED_SCALARS = {
+    cumulative_return: 0.31,
+    volatility: 0.19,
+    max_drawdown: -0.07,
+    cagr: 0.28,
+    sharpe: 1.44, // the re-pin target (leverage-invariant)
+    sortino: 1.88, // the re-pin target (leverage-invariant)
+    calmar: 3.1,
+  };
+
+  function makeSmoothedPayload(o: { withBundle?: boolean } = {}): FactsheetPayload {
+    const { withBundle = true } = o;
+    const smRets = makeReturns(9);
+    const p: Record<string, unknown> = {
+      ingestSource: "csv",
+      strategyName: "Test Strategy",
+      markets: ["BTC"],
+      strategyMetrics: BASE_METRICS,
+      strategyReturns: STRAT,
+      dates: DATES,
+      periodsPerYear: 252,
+    };
+    if (withBundle) {
+      p.seriesByBasis = {
+        smoothed_mtm: deriveSeriesBundle(
+          smRets.map((r, i) => ({ date: DATES[i], value: r })),
+          {
+            periodsPerYear: 252,
+            isArithmetic: false,
+            markets: ["BTC"],
+            strategyName: "Test Strategy",
+            benchmarkPrices: fixtureBenchmarkPrices([smRets.map((r, i) => ({ date: DATES[i], value: r }))]),
+          },
+        ),
+      };
+      p.metricsByBasis = { smoothed_mtm: SMOOTHED_SCALARS };
+    }
+    return p as unknown as FactsheetPayload;
+  }
+
+  it("leverageEligibleFor: smoothed eligible ⇔ BOTH the smoothed bundle AND smoothed scalars present", () => {
+    // Both present → eligible.
+    expect(leverageEligibleFor(makeSmoothedPayload({ withBundle: true }), "smoothed_mtm")).toBe(true);
+    // Bundle absent → INeligible (never re-pin against a missing series).
+    const noBundle = {
+      dataQuality: undefined,
+      periodsPerYear: 252,
+      metricsByBasis: { smoothed_mtm: SMOOTHED_SCALARS }, // scalars but no series
+    } as unknown as FactsheetPayload;
+    expect(leverageEligibleFor(noBundle, "smoothed_mtm")).toBe(false);
+    // Scalars absent → INeligible (would fabricate the withheld headline).
+    const noScalars = {
+      dataQuality: undefined,
+      periodsPerYear: 252,
+      seriesByBasis: {
+        smoothed_mtm: deriveSeriesBundle(
+          makeReturns(9).map((r, i) => ({ date: DATES[i], value: r })),
+          {
+            periodsPerYear: 252,
+            isArithmetic: false,
+            markets: ["BTC"],
+            strategyName: "Test Strategy",
+            benchmarkPrices: fixtureBenchmarkPrices([makeReturns(9).map((r, i) => ({ date: DATES[i], value: r }))]),
+          },
+        ),
+      },
+    } as unknown as FactsheetPayload;
+    expect(leverageEligibleFor(noScalars, "smoothed_mtm")).toBe(false);
+  });
+
+  it("levered smoothed re-pins the persisted Sharpe/Sortino (no L=1↔L≠1 jump)", () => {
+    const payload = makeSmoothedPayload({ withBundle: true });
+    const { result } = renderHook(() => useViewProbe(payload), { wrapper: bothWrapper });
+    act(() => result.current.basis.setBasis("smoothed_mtm"));
+    act(() => result.current.lev.setLeverage(2));
+    const v = result.current.view;
+    // Sharpe/Sortino are leverage-invariant at rf=0 → re-pinned to the PERSISTED
+    // smoothed values (continuous across the L=1 boundary), NOT the client recompute.
+    expect(v.strategyMetrics.sharpe).toBe(SMOOTHED_SCALARS.sharpe);
+    expect(v.strategyMetrics.sortino).toBe(SMOOTHED_SCALARS.sortino);
+  });
+
+  it("L=0 under smoothed yields the honest derived values (persisted non-zero NOT pinned)", () => {
+    const payload = makeSmoothedPayload({ withBundle: true });
+    const { result } = renderHook(() => useViewProbe(payload), { wrapper: bothWrapper });
+    act(() => result.current.basis.setBasis("smoothed_mtm"));
+    act(() => result.current.lev.setLeverage(0));
+    const v = result.current.view;
+    // At L=0 the returns are all-zeros → no Sharpe (NaN, rendered "—": an all-zero
+    // series has no dispersion, founder decision D7) and no Sortino (NaN: no losing
+    // day, review round 2 HI-02), never the persisted 1.44/1.88 next to flat charts
+    // (the B-1 carve-out).
+    expect(Number.isNaN(v.strategyMetrics.sharpe)).toBe(true);
+    expect(Number.isNaN(v.strategyMetrics.sortino)).toBe(true);
+  });
+
+  it("smoothed WITHOUT a bundle at L=2 returns base BY REFERENCE (no fabrication)", () => {
+    const payload = makeSmoothedPayload({ withBundle: false });
+    const { result } = renderHook(() => useViewProbe(payload), { wrapper: bothWrapper });
+    act(() => result.current.basis.setBasis("smoothed_mtm"));
+    act(() => result.current.lev.setLeverage(2));
+    expect(result.current.view).toBe(payload);
   });
 });

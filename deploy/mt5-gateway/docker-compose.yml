@@ -1,0 +1,53 @@
+# MT5 Gateway — cheap-VPS FALLBACK (docker-compose + Tailscale)
+#
+# Use this on a cheap amd64 VPS (Hetzner CX22 / Contabo, ~EUR 4-6/mo [ASSUMED cost])
+# when the Railway dual-stack env is unavailable, or when the broker requires a single
+# clean static egress IP for allowlisting. This is the FALLBACK host; the PRIMARY is
+# the Railway co-locate service (see railway-gateway.md). Full decision matrix in
+# docs/runbooks/mt5-go-live.md Step 0.
+#
+# ============================================================================
+# HARD CONSTRAINT - PRIVATE NETWORK ONLY.
+# The RPyC bridge (:8001) is an UNAUTHENTICATED arbitrary-remote-code channel
+# (Phase-134 T-134-03). BOTH ports below bind to 127.0.0.1 (loopback) ONLY - RPyC
+# NEVER on the public interface. Cross-host reachability to the Railway worker is via
+# the Tailscale tunnel (see the note at the bottom), never a public port.
+# ============================================================================
+#
+# The MetaTrader terminal self-updates from the broker independently of this image and
+# CANNOT be frozen - only the image tag+digest below is pinnable. The soak window is
+# the parity-break detector for a terminal-update regression.
+
+services:
+  mt5:
+    # gmag11/metatrader5_vnc:2.3 = latest, linux/amd64 ONLY (~1.57 GB compressed).
+    # PIN the digest at stand-up: replace with gmag11/metatrader5_vnc:2.3@sha256:<digest>
+    # (record the sha256 in docs/runbooks/mt5-go-live.md provenance line).
+    image: gmag11/metatrader5_vnc:2.3
+    restart: unless-stopped
+    environment:
+      CUSTOM_USER: "${VNC_USER}"          # from host env / secret store, NEVER in git
+      PASSWORD: "${VNC_PASSWORD}"         # gateway secret, NEVER in git
+      mt5server_port: "8001"
+    volumes:
+      - mt5_config:/config                # persistent Wine prefix + saved investor login
+    ports:
+      - "127.0.0.1:3000:3000"             # noVNC bound to LOOPBACK; reach via SSH tunnel only, tear down after one-time install
+      - "127.0.0.1:8001:8001"             # RPyC NEVER on 0.0.0.0 of the public iface
+
+volumes:
+  mt5_config:                             # named volume: Wine prefix + terminal + saved login survive restarts
+
+# ── Tailscale sidecar / host-daemon pattern (required to reach the Railway worker) ──
+# Any off-Railway gateway is cross-provider, so there is NO shared private net with the
+# Railway worker - a Tailscale/WireGuard tunnel is mandatory:
+#   1. Install tailscaled on the VPS host (or run a tailscale sidecar container joined
+#      to the same tailnet as the Railway worker).
+#   2. The Railway worker joins the tailnet; it reaches the gateway at the gateway's
+#      TAILSCALE IP (set MT5_GATEWAY_HOST to that tailnet address, MT5_GATEWAY_PORT=8001).
+#   3. Expose RPyC :8001 ONLY on the tailscale interface. Firewall (ufw/nftables) DROPS
+#      :8001 on the public NIC - the loopback bind above already prevents public exposure,
+#      the firewall is defence-in-depth.
+# Broker allowlisting (Pitfall 4): the broker sees the VPS public IP (one clean static
+# IP) - whitelist THAT, not the worker's Railway egress. Most brokers do NOT IP-restrict
+# investor logins [ASSUMED A1 - confirm with the chosen broker].

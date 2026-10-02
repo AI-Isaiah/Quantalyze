@@ -69,6 +69,35 @@ describe("<WhatWedDoCard>", () => {
     expect(container.firstChild).toBeNull();
   });
 
+  // 166.1 D7 (founder 2026-09-26) / round-1 SFH HIGH-1: the optimizer emits a
+  // null correlation when the portfolio does not disperse (a constant-yield
+  // book). Coerced to 0 it rendered "reduce average correlation toward 0.00",
+  // a perfect-diversifier claim about a statistic that does not exist.
+  it("states no correlation sentence when corr_with_portfolio is null", () => {
+    render(
+      <WhatWedDoCard
+        suggestions={[suggestion({ corr_with_portfolio: null, sharpe_lift: 0.2 })]}
+      />,
+    );
+    expect(screen.getByText(/lift Sharpe by/)).toBeInTheDocument();
+    expect(screen.queryByText(/average correlation/)).toBeNull();
+    expect(screen.queryByText(/toward 0\.00/)).toBeNull();
+  });
+
+  it("keeps the card but states no Sharpe sentence when sharpe_lift is null", () => {
+    render(
+      <WhatWedDoCard
+        suggestions={[
+          suggestion({ sharpe_lift: null, corr_with_portfolio: null, dd_improvement: 0.012 }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("Vega Volatility Harvester")).toBeInTheDocument();
+    expect(screen.queryByText(/lift Sharpe/)).toBeNull();
+    expect(screen.queryByText(/average correlation/)).toBeNull();
+    expect(screen.getByText(/improve drawdown by/)).toBeInTheDocument();
+  });
+
   it("hides the card when sharpe_lift is non-finite", () => {
     const { container } = render(
       <WhatWedDoCard

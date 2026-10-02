@@ -26,12 +26,20 @@ from pathlib import Path
 # `SUPABASE_URL`: it names the app/prod env var and appears in ~10 offline unit
 # files that never touch the shared DB — grouping them would pin the bulk to one
 # worker and defeat the parallelism.
+#
+# Phase 164.9 plan 05 (`[164.9-SHARED-TEST-TRANSPORT-FLAKE]`): "live_db_transport"
+# joins the vocabulary too. A future test module that imports ONLY the retry
+# helper (not `_need_supabase` directly, e.g. a thin module built on a shared
+# fixture) still executes RPCs against the shared TEST project through the
+# wrapped client, so it must still land on the single serialized worker — the
+# same hazard the other four sentinels above exist to catch, one layer up.
 _DB_MODULE_SENTINELS = (
     "SUPABASE_TEST_URL",
     "SUPABASE_TEST_SERVICE_KEY",
     "_need_supabase",
     "TEST_SUPABASE_DB_URL",
     "HAS_LIVE_DB",
+    "live_db_transport",
 )
 
 
@@ -72,6 +80,23 @@ def _reset_fail_loud_traceback_dedupe():
     _reset_fail_loud_traceback_dedupe_for_tests()
     yield
     _reset_fail_loud_traceback_dedupe_for_tests()
+
+
+# Phase 134 (smoothed_mtm kill-switch): the v1.14 smoothed THIRD pass ships DARK
+# behind SMOOTHED_MTM_ENABLED (services.closed_sets.is_smoothed_mtm_enabled),
+# default OFF. The Phase 131-133 tests were written when the pass ran
+# unconditionally, so they assert smoothed runs. Rather than silently defaulting
+# the flag ON in tests (which would hide the gate), the smoothed-assuming modules
+# opt in EXPLICITLY via `pytestmark = pytest.mark.usefixtures("smoothed_mtm_enabled")`
+# — making the gate VISIBLE at the top of each such module. A dark-launch test can
+# still `monkeypatch.delenv("SMOOTHED_MTM_ENABLED")` in its own body to override
+# (the flag is read per-call at job-run time), which is how the kill-switch's
+# flag-OFF assertions run inside those same modules.
+@pytest.fixture
+def smoothed_mtm_enabled(monkeypatch):
+    """Enable the SMOOTHED_MTM_ENABLED worker kill-switch for the duration of a
+    test (auto-reverted by monkeypatch). See the module note above."""
+    monkeypatch.setenv("SMOOTHED_MTM_ENABLED", "true")
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -216,3 +241,83 @@ def golden_252d_input() -> dict:
 def golden_252d_expected() -> dict:
     """Read the committed expected metrics output (metrics_json + sibling kinds)."""
     return json.loads((FIXTURES_DIR / "golden_252d_expected.json").read_text())
+
+
+# ── live-DB transport retries: visible on a GREEN run ────────────────────────
+#
+# Phase 164.9 plan 05 review. `tests/live_db_transport.py`'s bounded retry logs a
+# WARNING per retry, and its stated contract is that "a run that retried is
+# DISTINGUISHABLE from one that did not" — the whole justification for a retry
+# over a bare re-run. But pytest CAPTURES log records and renders them only in the
+# report of a FAILING test, and this repo's `pytest.ini` sets no `log_cli`. So on
+# exactly the run where it matters — a shared-TEST transport fault absorbed by
+# attempt 2, suite GREEN — the warning printed nothing and the degrading gateway
+# was laundered into a slow pass.
+#
+# The summary line below is emitted UNCONDITIONALLY, including the "0" case, so
+# the absence of retries is itself a measurement rather than an absence of output.
+# Chosen over turning `log_cli` on in `pytest.ini`, which would change the
+# rendering of the whole ~6k-test suite for one module's benefit.
+#
+# xdist: retries happen in WORKER processes, whose terminal writes are never
+# shown. Each worker ships its counters through `config.workeroutput` at
+# sessionfinish; the controller accumulates them as each node goes down. In a
+# serial run `pytest_testnodedown` never fires and the controller's own counters
+# are the whole story, so the two paths never double-count.
+_LIVE_DB_RETRY_FROM_WORKERS = {"retries": 0, "calls": 0}
+
+
+def pytest_sessionfinish(session, exitstatus):
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is None:
+        return  # controller (or a serial run): counted in the summary hook below
+    from tests.live_db_transport import retry_stats
+
+    retries, calls = retry_stats()
+    workeroutput["live_db_retries"] = retries
+    workeroutput["live_db_retry_calls"] = calls
+
+
+class _LiveDbRetryNodeCollector:
+    """`pytest_testnodedown` is an XDIST hookspec. Declaring it unconditionally in
+    a conftest makes pluggy raise `PluginValidationError: unknown hook` whenever
+    xdist is absent or switched off (`-p no:xdist`), so it is registered only when
+    xdist is actually active."""
+
+    def pytest_testnodedown(self, node, error):
+        workeroutput = getattr(node, "workeroutput", None) or {}
+        _LIVE_DB_RETRY_FROM_WORKERS["retries"] += workeroutput.get("live_db_retries", 0)
+        _LIVE_DB_RETRY_FROM_WORKERS["calls"] += workeroutput.get(
+            "live_db_retry_calls", 0
+        )
+
+
+def pytest_configure(config):
+    if config.pluginmanager.hasplugin("xdist"):
+        config.pluginmanager.register(_LiveDbRetryNodeCollector(), "live-db-retry-nodes")
+
+
+def live_db_retry_summary_line() -> str:
+    """The exact line `pytest_terminal_summary` writes. Split out so it can be
+    asserted against a REAL run's stdout rather than re-spelled in a test."""
+    from tests.live_db_transport import retry_stats
+
+    retries, calls = retry_stats()
+    retries += _LIVE_DB_RETRY_FROM_WORKERS["retries"]
+    calls += _LIVE_DB_RETRY_FROM_WORKERS["calls"]
+    return f"live-db transport: {retries} retry/retries across {calls} call(s)"
+
+
+def pytest_terminal_summary(terminalreporter):
+    terminalreporter.write_line(live_db_retry_summary_line())
+    # Phase 166 D-07: the quantstats AST gate's census, printed on EVERY run. A
+    # print() inside a passing test is captured and never reaches a green CI log
+    # (166-RESEARCH Pitfall 5), so the census is written here. It is a pure
+    # function of source text, so the controller computes it directly; no xdist
+    # aggregation is needed. Extend THIS hook: a second definition in this file
+    # would silently shadow it. `safe_census_lines` turns a census that cannot be
+    # built into one named line instead of an INTERNALERROR (review IN-06).
+    from tests.qstats_gate import safe_census_lines
+
+    for line in safe_census_lines():
+        terminalreporter.write_line(line)

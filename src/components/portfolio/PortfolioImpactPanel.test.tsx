@@ -45,7 +45,11 @@ function buildResponse(
 }
 
 function mockFetch(impl: () => Promise<Response>) {
-  globalThis.fetch = vi.fn(impl) as unknown as typeof fetch;
+  // stubGlobal, not `globalThis.fetch = …`: only a stub is undone by
+  // `unstubGlobals: true` (vitest.config.ts) / the `vi.unstubAllGlobals()`
+  // below. A direct assignment leaks this mock to every later file in the
+  // worker.
+  vi.stubGlobal("fetch", vi.fn(impl) as unknown as typeof fetch);
 }
 
 describe("<PortfolioImpactPanel>", () => {
@@ -55,6 +59,11 @@ describe("<PortfolioImpactPanel>", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    // A leaked global stub is this repo's known CI-only failure mode (CI Node 22
+    // vs local Node 25). This fence used to be inert prose — the file assigned
+    // `globalThis.fetch` directly, which `vi.unstubAllGlobals()` cannot see —
+    // so `mockFetch` now installs a real stub and this line does real work.
+    vi.unstubAllGlobals();
   });
 
   it("renders the loading skeleton while the fetch is in flight", () => {
@@ -294,6 +303,185 @@ describe("<PortfolioImpactPanel>", () => {
     const retryButton = await screen.findByRole("button", { name: "Retry" });
     expect(retryButton).toBeDisabled();
     expect(screen.getByText(/Try again in 2 min/)).toBeInTheDocument();
+  });
+
+  // ---------------------------------------------------------------------------
+  // 140.3-09 / SEAMUX-06 (B-23) — the breaker's 503 drives the countdown too.
+  //
+  // The `Retry-After` read used to sit INSIDE `if (res.status === 429)`, so every
+  // wait `/api/simulator` published on a 503 (the breaker short-circuit's
+  // `String(err.retryAfterS)`, and the fail-CLOSED limiter-misconfigured arm) was
+  // discarded. Re-gating the read on `res.status === 429` must redden the 503
+  // cases below WHILE the 429 cases above stay green — that is mutation M65, and
+  // it is what proves the two statuses are independently covered rather than one
+  // shared assertion standing in for both.
+  //
+  // ⚠️ This component is the ONLY seam-route `Retry-After` reader on the client.
+  // The complete reader class is three sites; the other two — `useMandateAutoSave`
+  // (/api/preferences) and `StarToggle` (/api/watchlist/*) — do not call a seam
+  // route and are deliberately untouched.
+  // ---------------------------------------------------------------------------
+  it("[140.3-09] a breaker 503 carrying Retry-After disables retry and drives the countdown", async () => {
+    // The exact shape `/api/simulator`'s CircuitOpenError arm emits: a 503 whose
+    // wait lives ONLY in the header — there is no body `retryAfter` on that path.
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify({
+          error: "Our service is temporarily unavailable.",
+          code: "CIRCUIT_OPEN",
+        }),
+        {
+          status: 503,
+          headers: {
+            "Content-Type": "application/json",
+            "Retry-After": "30",
+          },
+        },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Breaker open"
+        onClose={() => {}}
+      />,
+    );
+
+    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    expect(retryButton).toBeDisabled();
+    expect(screen.getByText(/Try again in 30s/)).toBeInTheDocument();
+    // The server's own sentence still reaches the user — the wait is additive
+    // to the copy, it does not replace it with the throttle sentence.
+    expect(
+      screen.getByText("Our service is temporarily unavailable."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Too many simulations/)).toBeNull();
+  });
+
+  it("[140.3-09] a 503 with an HTTP-DATE Retry-After yields a finite wait, not NaN", async () => {
+    // The ONE parser handles the RFC 9110 date form against the response's own
+    // Date header. A raw `Number(header)` here would be NaN, `isRateLimited`
+    // would be false, and the Retry button would stay ENABLED during an outage
+    // the server had already dated — the B20 defect, re-opened at a new status.
+    mockFetch(async () =>
+      new Response(JSON.stringify({ error: "Service unavailable." }), {
+        status: 503,
+        headers: {
+          "Content-Type": "application/json",
+          Date: "Wed, 21 Oct 2026 07:28:00 GMT",
+          "Retry-After": "Wed, 21 Oct 2026 07:30:00 GMT", // +120s
+        },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Breaker open, dated"
+        onClose={() => {}}
+      />,
+    );
+
+    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    expect(retryButton).toBeDisabled();
+    expect(screen.getByText(/Try again in 2 min/)).toBeInTheDocument();
+    expect(screen.queryByText(/NaN/)).toBeNull();
+  });
+
+  it("[140.3-09] a 503 with NO Retry-After renders the error state with retry ENABLED and no countdown", async () => {
+    // TRAP-3: absence of a header must not become a fabricated duration. The
+    // surface must say nothing about timing rather than invent a wait — and the
+    // Retry control stays usable, because nobody told us to wait.
+    mockFetch(async () =>
+      new Response(JSON.stringify({ error: "Service unavailable." }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Breaker open, no header"
+        onClose={() => {}}
+      />,
+    );
+
+    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    expect(retryButton).toBeEnabled();
+    expect(screen.getByText("Service unavailable.")).toBeInTheDocument();
+    expect(screen.queryByText(/Try again in/)).toBeNull();
+    // Specifically NOT a zero-countdown, which is what a `?? 0` default would
+    // have produced and would read as "retry now" beside a dead service.
+    expect(screen.queryByText(/Try again in 0/)).toBeNull();
+  });
+
+  it("[140.3-09] ANTI-REGRESSION: the 429 path keeps body-over-header precedence", async () => {
+    // Hoisting the read must not disturb B20's precedence rule. The body says
+    // 300s and the header says 30s; the body must win, exactly as before.
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify({ error: "Too many simulations.", retryAfter: 300 }),
+        {
+          status: 429,
+          headers: {
+            "Content-Type": "application/json",
+            "Retry-After": "30",
+          },
+        },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Body wins"
+        onClose={() => {}}
+      />,
+    );
+
+    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    expect(retryButton).toBeDisabled();
+    expect(screen.getByText(/Try again in 5 min/)).toBeInTheDocument();
+    expect(screen.queryByText(/Try again in 30s/)).toBeNull();
+  });
+
+  it("[140.3-09] ANTI-REGRESSION: a 500 with no wait still throws to the generic error path", async () => {
+    // The new `retryAfter !== undefined` arm must not swallow ordinary failures.
+    // A 500 with no header still reaches the outer catch and its operator log.
+    const consoleSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    mockFetch(async () =>
+      new Response(JSON.stringify({ error: "Simulation failed." }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Plain 500"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText("Simulation failed.")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Retry" }),
+    ).toBeEnabled();
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "[PortfolioImpactPanel] simulate impact failed",
+      expect.anything(),
+    );
+    consoleSpy.mockRestore();
   });
 
   it("renders the insufficient_data empty state", async () => {
@@ -544,6 +732,45 @@ describe("<PortfolioImpactPanel>", () => {
     );
     const status = screen.getByRole("status");
     expect(status.textContent).toMatch(/Sharpe unchanged/);
+  });
+
+  // 166.1 D7 (founder 2026-09-26) / round-1 SFH HIGH-2: a constant-yield or
+  // all-zero candidate (or book) leaves the correlation or the Sharpe delta
+  // undefined. The producer now emits null there instead of 0.0, and the panel
+  // must say "not computable" and show "—", never "unchanged".
+  it("166.1 D7: a null Sharpe and Correlation delta read 'not computable', never 'unchanged'", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            deltas: {
+              sharpe_delta: null,
+              dd_delta: 0.01,
+              corr_delta: null,
+              concentration_delta: 0.05,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Constant Yield"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText(/Sharpe not computable/)).toBeInTheDocument(),
+    );
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/Correlation not computable/);
+    expect(status.textContent).not.toMatch(/Sharpe unchanged|Correlation unchanged/);
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
   });
 
   // -------------------------------------------------------------------------
@@ -1256,5 +1483,184 @@ describe("<PortfolioImpactPanel>", () => {
       "[PortfolioImpactPanel] simulate impact failed",
       expect.any(SyntaxError),
     );
+  });
+});
+
+/**
+ * [140.3-01 / TS-05 + TS-08] Class-5 member 3 of 3 — `PortfolioImpactPanel`.
+ *
+ * ⚠️ THIS FILE WAS CITED AS THE FIX-SHAPE TEMPLATE IN THREE DOCUMENTS. It is
+ * the DEFECT (correction C-3, verified first-hand at the 140.3 planning gate).
+ * `ErrorResponseSchema.safeParse(raw)` ran two lines above the panel's `typeof
+ * body.detail === "string"` check, and `src/lib/api/errorSchema.ts` declares
+ * `detail: z.string().optional()` — so a nested `service_error` body FAILED the
+ * parse outright, collapsed to `{}` through `parsedError.success ?
+ * parsedError.data : {}`, and `error`, `retryAfter` and `detail` were all
+ * discarded before the `typeof` check was ever reached. On the exact envelope
+ * this plan exists to render, the named template threw the whole error body
+ * away and rendered `"HTTP 500"`.
+ *
+ * The fix is the leaf applied to the RAW parsed body, ABOVE the narrowing
+ * schema. `src/lib/api/errorSchema.ts` is deliberately NOT widened: narrowing
+ * (or widening) an error-body schema for one consumer is the documented
+ * Pitfall-3 hazard, and its `{}` fallback is correct for the `{error,
+ * retryAfter}` fields it was designed for.
+ *
+ * ⚠️ Out of scope here, deliberately (TRAP-8): the `if (res.status === 429)`
+ * gate that hides `Retry-After` from the breaker's 503 is B-23 / SEAMUX-06.
+ */
+describe("[140.3-01 / TS-05] <PortfolioImpactPanel> reads the seam error body through the ONE discriminator", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("CONTRACT A — a `service_error` 500 (OBJECT detail): renders `body.detail.detail`, not 'HTTP 500'", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // §2 envelope. `/api/simulator` is a seam route, so this is the body this
+    // component actually receives from a deliberate 5xx — and it is now the
+    // EXECUTED constructor's output rather than a hand-typed approximation.
+    //
+    // ⚠️ 140.5-06 / WP-14 — WHAT THIS FIXTURE USED TO BE AND WHY IT WAS A LIE.
+    // It carried `{code:"SEAM_DEGRADED", dependency:"supabase", retryable:true}`
+    // at status 500, byte-identically to two other suites. `error_contract.
+    // _validate` REFUSES to construct it: a 500 is SERVICE-PERMANENT (rule R-1),
+    // so `retryable:true` there is the self-sustaining retry loop R-1 exists to
+    // stop. The fixture was certifying a body no raise site can emit.
+    //
+    // The replacement is this component's OWN upstream, executed:
+    // `routers/simulator.py`'s permanent 500 for a failed simulation. It names
+    // no dependency — the fault is ours but not attributable to one of our named
+    // dependencies, which the 500 arm permits — and `dependency: null` is the
+    // key the constructor really puts on the wire in that case.
+    //
+    //   cd analytics-service && python3 -c "from services.error_contract import \
+    //     service_error; print(service_error(500,'SIMULATION_FAILED', \
+    //     retryable=False, detail='Portfolio impact simulation failed').detail)"
+    //   → {'code': 'SIMULATION_FAILED', 'dependency': None,
+    //      'retryable': False, 'detail': 'Portfolio impact simulation failed'}
+    //
+    // The R-1 rule this fixture now obeys is pinned in Python by
+    // `tests/test_error_contract_r1_permanent_500.py`.
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "SIMULATION_FAILED",
+            dependency: null,
+            retryable: false,
+            detail: "Portfolio impact simulation failed",
+          },
+        }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Nested seam envelope"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("Portfolio impact simulation failed"),
+      ).toBeInTheDocument(),
+    );
+    // The pre-plan render. `ErrorResponseSchema` rejected the nested body, the
+    // cascade saw `{}`, and the user got a bare status code.
+    expect(screen.queryByText("HTTP 500")).toBeNull();
+    expect(screen.queryByText(/\[object Object\]/)).toBeNull();
+    // The drift signal must NOT fire: the leaf read the body successfully, so
+    // reporting "unrecognized error body shape" would be a false alarm on the
+    // one shape the seam is contractually guaranteed to send.
+    expect(
+      errorSpy.mock.calls.some(
+        (call) => call[0] === "[PortfolioImpactPanel] unrecognized error body shape",
+      ),
+      "The drift log fires only when the LEAF also returned null. A nested " +
+        "service_error envelope is a recognised shape, not drift.",
+    ).toBe(false);
+    errorSpy.mockRestore();
+  });
+
+  it("CONTRACT B — an app-global 429 (SCALAR detail): the rendered string is BYTE-IDENTICAL to its pre-plan value (TS-07 is negative)", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify({
+          ok: false,
+          code: "RATE_LIMITED",
+          human_message: "Too many requests.",
+          detail: "Too many simulations. Try again in 60 seconds.",
+          correlation_id: "cid-429-simulator",
+          recoverable: true,
+          retry_after_seconds: 60,
+        }),
+        {
+          status: 429,
+          headers: {
+            "Content-Type": "application/json",
+            "Retry-After": "60",
+          },
+        },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Flat app-global 429"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("Too many simulations. Try again in 60 seconds."),
+      ).toBeInTheDocument(),
+    );
+    // The flat shape parsed cleanly through the schema BEFORE this plan and
+    // rendered exactly this sentence. If the literal moved, the 429 path was
+    // "fixed" and TS-07's NEGATIVE obligation was violated.
+    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    expect(retryButton).toBeDisabled();
+  });
+
+  it("a body matching neither the seam nor the three-key cascade still logs drift and falls back to `HTTP <status>`", async () => {
+    // The drift signal is a live contract-drift detector (TRAP-9) — it is
+    // re-pointed by this plan, never deleted.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockFetch(async () =>
+      new Response(JSON.stringify({ errors: ["nested", "array"] }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Neither shape"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("HTTP 500")).toBeInTheDocument(),
+    );
+    expect(
+      errorSpy.mock.calls.some(
+        (call) => call[0] === "[PortfolioImpactPanel] unrecognized error body shape",
+      ),
+    ).toBe(true);
+    errorSpy.mockRestore();
   });
 });

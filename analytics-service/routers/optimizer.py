@@ -16,19 +16,33 @@ documented in routers/process_key.py.
 """
 
 import logging
+from functools import partial
 
 from fastapi import APIRouter, Request
 
 from models.schemas import OptimizeWeightsRequest, OptimizeWeightsResponse
 from services.optimizer import optimize_weights
-from services.rate_limit import limiter
+from services.rate_limit import limiter, tenant_or_platform_key
 
 router = APIRouter(prefix="/api", tags=["optimizer"])
 logger = logging.getLogger("quantalyze.analytics")
 
 
+# PYAPI-03 / L-9 ⭐ — the `key_func=` here is the whole fix for this route, and it
+# is the one the "three routers declare a private Limiter" framing MISSES: this
+# module always imported the canonical limiter correctly and simply never
+# overrode its key, so it inherited `get_remote_address` by OMISSION. Behind
+# Railway's edge that is the proxy ip, making 20/MINUTE a platform-wide ceiling —
+# the tightest number on the seam, and two concurrent Scenario Composer users
+# could 429 each other on it (RESEARCH X-4 / TRAP-5, G-10/G-11).
+#
+# `partial` is safe: slowapi decides whether to pass the request by looking for a
+# parameter literally named `request` on the key function
+# (slowapi/extension.py `__evaluate_limits`), and partial preserves it.
 @router.post("/optimize-weights")
-@limiter.limit("20/minute")
+@limiter.limit(
+    "20/minute", key_func=partial(tenant_or_platform_key, scope="optimize_weights")
+)
 async def optimize_weights_endpoint(
     request: Request, req: OptimizeWeightsRequest
 ) -> OptimizeWeightsResponse:

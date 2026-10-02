@@ -1,8 +1,8 @@
 [tool.mypy]
-# B-mypy: the analytics-service --strict type-safety floor. mypy auto-discovers
-# this table when invoked with cwd=analytics-service (which CI uses,
-# ci.yml working-directory: analytics-service), so `mypy <paths>` reads the
-# same settings locally and in CI — local == CI by construction. These mirror
+# B-mypy: the analytics-service --strict type-safety floor. Both the ci.yml
+# gate and the Makefile `typecheck` recipe run with cwd=analytics-service and
+# pass --config-file=pyproject.toml, so they read THIS table and no other
+# config file — local == CI by construction. These mirror
 # the flags the CI gate passed on the command line (--strict
 # --follow-imports=silent) so the gate's behaviour is unchanged when it widens
 # from services/ingestion/ to the full surface (see ci.yml mypy step).

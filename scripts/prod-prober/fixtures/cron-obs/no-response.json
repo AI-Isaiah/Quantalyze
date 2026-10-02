@@ -1,0 +1,9 @@
+{
+  "_comment": "RED — cron-no-observation. The run started at 11:57:59Z, which is 121s before now: one second PAST the 120s in-flight grace, so its missing response IS evidence. Pairs with recent-run-pending.json, which is one second inside it.",
+  "now": "2026-09-05T12:00:00Z",
+  "ttl": "6 hours",
+  "jobCount": 1,
+  "rows": [
+    ["901004", "2026-09-05T11:57:59Z", "", "", "", "", "", ""]
+  ]
+}

@@ -1,0 +1,1177 @@
+"""PYAPI-03 — the IP-keyed limiter class, pinned closed.
+
+Phase 140.1 plan 07. The defect: behind Railway's edge proxy
+``slowapi.util.get_remote_address`` returns the EDGE ip, so a "per-IP" bucket is
+in fact PLATFORM-WIDE (RESEARCH G-10/G-11). Nine decorated routes had it. Two
+users running Scenario Composer could 429 each other on L-9's 20/minute.
+
+**TEN, as of SEC-05 (Phase 163).** ``routers/simulator.py`` was the tenth by
+behaviour all along — FINDING-10 said so — but it was left in place behind a
+one-entry ``IP_KEYED_QUARANTINE`` AND a bare ``continue`` inside gate 3's
+behavioural sweep. Two concealments for one route, and the second was not
+discoverable from the first. Both are gone: the route keys on
+``partial(tenant_or_platform_key, scope="simulator")``, the quarantine is
+``frozenset()``, the carve-out is deleted, and the class enumeration is total at
+``EXPECTED_CLASS_SIZE = 10``. Gate 5 below drives the repaired route with real
+HTTP and proves two tenant claims do NOT share its counter.
+
+**The class is IP KEYING (behaviour), not "private ``Limiter()``" (syntax).**
+Enumerating by the syntax finds 3 modules / 8 routes and misses
+``routers/optimizer.py``, which imports the shared limiter correctly and inherits
+its default ``key_func`` by omission (RESEARCH X-4 / TRAP-5 — an under-count that
+was latent inside the finding documenting TRAP-5).
+
+Every assertion below pins a **literal**: the route path, the registry name, the
+limit string, the scope, the bucket string. Nothing is read back out of the
+limiter and compared to itself (programme non-negotiable #3 — 10 simultaneous
+semantic mutations once produced a byte-identical green because every oracle was
+self-referential).
+
+Five gates:
+
+1. :class:`TestPerRouteKeyIdentity` — the wiring. For each of L-1..L-10, the
+   limit REGISTERED on the endpoint carries the shared tenant-or-platform key
+   function bound to that route's scope. Asserting the module-level helper is
+   the right shape would not prove any decorator invokes it.
+2. :class:`TestBucketBehaviour` — the behaviour. A verified claim buckets to a
+   tenant; a claimless caller buckets to the documented platform ceiling.
+3. :class:`TestClassClosure` — the count. NO source token ``get_remote_address``
+   survives anywhere under ``routers/`` (no exemptions, since SEC-05), and the
+   set of rate-limited routes is a literal.
+4. :class:`TestDefaultKeyBehaviour` — Phase 140.1.1 / PYAPIFIX-05, review
+   survivors **#3** and **#4**. Gate 3's
+   ``assert rl.limiter._key_func is rl.default_platform_key`` is an object
+   IDENTITY assertion: it holds for *any* body, including ``return ""`` (which
+   makes slowapi skip the limit entirely — see below) and including a
+   per-request-unique value (which gives every caller a private bucket). Gate 4
+   drives real HTTP requests through a route that inherits the default key and
+   asserts throttling actually happens.
+5. :class:`TestSimulatorTenantBucketBehaviour` — SEC-05 (Phase 163), the
+   BEHAVIOURAL half of the tenth route's repair. Gates 1-3 above are structural:
+   they read what the decorator carries. Every one of them would pass against a
+   ``partial(tenant_or_platform_key, scope="simulator")`` whose counter was
+   nonetheless shared — and, more to the point, a drive-to-429 on its own proves
+   nothing here either, because under ``TestClient`` the OLD IP key returned one
+   constant for every caller and would 429 at exactly the same call. So gate 5
+   asserts the property the rekey actually bought: one tenant claim exhausting
+   ``20/hour`` does NOT throttle a DIFFERENT tenant claim.
+"""
+
+from __future__ import annotations
+
+import functools
+import hashlib
+import hmac
+import pathlib
+import time
+import tokenize
+import uuid
+from typing import Any
+
+import pytest
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+
+# Import every router that registers a limit, so `limiter._route_limits` is
+# fully populated no matter which tests pytest collected first.
+import routers.csv  # noqa: F401
+import routers.exchange  # noqa: F401
+import routers.match  # noqa: F401
+import routers.optimizer  # noqa: F401
+import routers.portfolio  # noqa: F401
+import routers.simulator  # noqa: F401
+from services import rate_limit as rl
+
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _reset_limiter_buckets():
+    """Ship-review fix: the claimless platform bucket is PATH-keyed and shared
+    across every test in the process; without a reset, this module's 31-call
+    drive-to-429 probe drains platform:/api/match/recompute for later files
+    (measured: TestRecomputeSerializationLock reds when run in-process after
+    the probe). Reset before AND after so ordering never matters."""
+    rl.limiter.reset()
+    yield
+    rl.limiter.reset()
+
+
+# ---------------------------------------------------------------------------
+# The class, enumerated. LITERALS — copied from RESEARCH Q1.4's L-table, not
+# derived from the code under test.
+#
+# (L-row, route path, slowapi registry name, limit string, expected scope)
+#
+# Limit strings are pinned so this file also proves PYAPI-03 changed IDENTITY
+# ONLY. The value audit is RATE-04 / Phase 146; a plan that "fixed" the keying
+# and quietly loosened a ceiling would go red here.
+# ---------------------------------------------------------------------------
+
+IP_KEYED_CLASS: list[tuple[str, str, str, str, str]] = [
+    ("L-1", "/api/validate-key", "routers.exchange.validate_key", "100 per 1 hour", "validate_key"),
+    ("L-2", "/api/encrypt-key", "routers.exchange.encrypt_key", "100 per 1 hour", "encrypt_key"),
+    ("L-3", "/api/fetch-trades", "routers.exchange.fetch_trades", "10 per 1 hour", "fetch_trades"),
+    ("L-4", "/api/csv/validate", "routers.csv.csv_validate", "30 per 1 hour", "csv_validate"),
+    ("L-5", "/api/portfolio-analytics", "routers.portfolio.portfolio_analytics", "10 per 1 hour", "portfolio_analytics"),
+    ("L-6", "/api/portfolio-optimizer", "routers.portfolio.portfolio_optimizer", "10 per 1 hour", "portfolio_optimizer"),
+    ("L-7", "/api/portfolio-bridge", "routers.portfolio.portfolio_bridge", "10 per 1 hour", "portfolio_bridge"),
+    ("L-8", "/api/verify-strategy", "routers.portfolio.verify_strategy", "5 per 1 hour", "verify_strategy"),
+    ("L-9", "/api/optimize-weights", "routers.optimizer.optimize_weights_endpoint", "20 per 1 minute", "optimize_weights"),
+    # L-10 — SEC-05 (Phase 163). FINDING-10's quarantined route, REPAIRED and
+    # folded into the class it always belonged to by behaviour. It joins here
+    # rather than living on as an exemption because every assertion parametrized
+    # over this table is one that used to skip it.
+    ("L-10", "/api/simulator", "routers.simulator.portfolio_simulator", "20 per 1 hour", "simulator"),
+]
+
+#: The count, as a literal. If an ELEVENTH route joins the class, the enumeration
+#: above is stale and a checker must be told rather than the number being quietly
+#: padded.
+#:
+#: MOVED DELIBERATELY, 9 -> 10 (SEC-05, Phase 163), per this constant's own
+#: instruction: a tenth route joined, so the number moves in the same commit as
+#: the row above and as the behaviour in ``routers/simulator.py``. It is not
+#: padding — the class grew by a repair, not by a discovery.
+EXPECTED_CLASS_SIZE = 10
+
+#: EMPTY, and that is the point (SEC-05, Phase 163).
+#:
+#: This used to read ``frozenset({"simulator.py"})``. FINDING-10 recorded that
+#: ``routers/simulator.py:_simulator_rate_limit_key`` returned
+#: ``f"simulator:ip:{get_remote_address(request)}"`` — by BEHAVIOUR a TENTH
+#: IP-keyed route — and plan 140.1-07's scope fence left it in place, quarantined
+#: by a literal one-file allow-list with the standing instruction: "if simulator
+#: is ever repaired this list must SHRINK".
+#:
+#: It was repaired. The list shrank to zero. The equality at
+#: :meth:`TestClassClosure.test_no_router_source_references_get_remote_address`
+#: therefore now asserts that NOTHING under ``routers/`` references the request
+#: address — the strongest form this gate can take, and the form it could not
+#: take while it was carrying an exemption.
+#:
+#: ⛔ Do not re-populate this to make a new route pass. An entry here is a
+#: statement that a route is KNOWN to be IP-keyed and is being tolerated; the
+#: only honest way to add one is with the finding that justifies it and a dated
+#: instruction to shrink it again.
+IP_KEYED_QUARANTINE: frozenset[str] = frozenset()
+
+ROUTERS_DIR = pathlib.Path(__file__).resolve().parent.parent / "routers"
+
+
+def _registered_limits(registry_name: str) -> list[Any]:
+    """Every slowapi ``Limit`` registered for one endpoint."""
+    return list(rl.limiter._route_limits.get(registry_name, []))
+
+
+def _mint_claim(payload: str, secret: str, ttl: int = 300) -> str:
+    """An INDEPENDENT X-Tenant-Claim minter.
+
+    Deliberately re-implements the wire format from
+    ``services/rate_limit.py``'s docstring rather than calling any helper the
+    verifier also uses — an oracle that signs with the code under test proves
+    only that the code agrees with itself.
+    """
+    exp = int(time.time()) + ttl
+    mac = hmac.new(
+        secret.encode("utf-8"), f"{payload}.{exp}".encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return f"{payload}.{exp}.{mac}"
+
+
+class _FakeRequest:
+    """Minimal Request stand-in: headers plus ``url.path``.
+
+    A key function may read headers only — the body is still un-awaited when
+    slowapi calls it (RESEARCH G-7) — so this is the whole surface.
+    """
+
+    def __init__(self, path: str, headers: dict[str, str] | None = None) -> None:
+        self.headers = dict(headers or {})
+        self.url = type("_U", (), {"path": path})()
+
+
+def _source_name_tokens(path: pathlib.Path) -> set[str]:
+    """Every NAME token in a Python file.
+
+    Tokenising rather than grepping is deliberate. The plan asks for a
+    "non-comment" count, and ``grep -v '#'`` is both too weak (it drops whole
+    lines that merely contain a ``#``) and too strong (a docstring naming the
+    banned symbol — like the ones this repair *adds* to explain itself — would
+    register as a live reference). NAME tokens are exactly the real references:
+    comments and strings are other token types.
+    """
+    with path.open("rb") as fh:
+        return {
+            tok.string
+            for tok in tokenize.tokenize(fh.readline)
+            if tok.type == tokenize.NAME
+        }
+
+
+# ---------------------------------------------------------------------------
+# Gate 1 — per-route key_func identity (the WIRING)
+# ---------------------------------------------------------------------------
+
+
+class TestPerRouteKeyIdentity:
+    """One assertion per L-row, each naming its route path as a literal.
+
+    These read the limit slowapi ACTUALLY REGISTERED for the endpoint. A test
+    that inspected ``services.rate_limit.tenant_or_platform_key`` instead would
+    stay green through a refactor that dropped every ``key_func=`` argument —
+    the exact shape of L-9, where the helper existed and the decorator did not
+    use it.
+    """
+
+    @pytest.mark.parametrize(
+        "row,path,registry_name,limit_str,scope",
+        IP_KEYED_CLASS,
+        ids=[r[0] for r in IP_KEYED_CLASS],
+    )
+    def test_route_is_registered_at_its_literal_path(
+        self, row: str, path: str, registry_name: str, limit_str: str, scope: str
+    ) -> None:
+        """The registry name and the URL path are the same endpoint.
+
+        Without this the literal paths above would be decoration: every other
+        assertion keys on ``registry_name``, and a renamed route would silently
+        detach the two.
+        """
+        module_name, _, func_name = registry_name.rpartition(".")
+        module = __import__(module_name, fromlist=["router"])
+        matches = [r for r in module.router.routes if getattr(r, "name", None) == func_name]
+        assert matches, f"{row}: no route named {func_name!r} in {module_name}"
+        assert [r.path for r in matches] == [path], (
+            f"{row}: {registry_name} is mounted at {[r.path for r in matches]}, "
+            f"not the expected {path!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "row,path,registry_name,limit_str,scope",
+        IP_KEYED_CLASS,
+        ids=[r[0] for r in IP_KEYED_CLASS],
+    )
+    def test_route_key_func_is_not_get_remote_address(
+        self, row: str, path: str, registry_name: str, limit_str: str, scope: str
+    ) -> None:
+        """PYAPI-03's headline: no decorated route keys on the request address."""
+        from slowapi.util import get_remote_address
+
+        limits = _registered_limits(registry_name)
+        assert limits, f"{row} {path}: no limit registered at all"
+        # EVERY registration, not just the first. slowapi appends to
+        # `_route_limits[name]` on each decoration, and sibling suites reload
+        # router modules to swap in a no-op limiter, so the list can hold N
+        # copies of the same limit within one pytest session. Asserting over all
+        # of them is strictly stronger than indexing [0] — a second, WRONGLY
+        # keyed decorator would hide behind a correct first one.
+        for limit in limits:
+            key_func = limit.key_func
+            assert key_func is not get_remote_address, (
+                f"{row} {path} still keys on get_remote_address. Behind Railway's "
+                "edge proxy that is the EDGE ip, so this 'per-IP' bucket is "
+                "platform-wide (G-10/G-11)."
+            )
+            # Also reject the singleton's default: reaching this key by OMISSION
+            # is how L-9 happened, and the default is no longer IP-derived, so
+            # `is not get_remote_address` alone would now pass vacuously for it.
+            assert key_func is not rl.default_platform_key, (
+                f"{row} {path} inherits the shared limiter's DEFAULT key rather "
+                "than declaring one. That is L-9's exact failure mode — an "
+                "identity decision acquired by omission."
+            )
+
+    @pytest.mark.parametrize(
+        "row,path,registry_name,limit_str,scope",
+        IP_KEYED_CLASS,
+        ids=[r[0] for r in IP_KEYED_CLASS],
+    )
+    def test_route_key_func_is_shared_tenant_or_platform_with_its_scope(
+        self, row: str, path: str, registry_name: str, limit_str: str, scope: str
+    ) -> None:
+        """The key is the SHARED function bound to this route's literal scope.
+
+        Nine private copies of the same logic is the instances-vs-classes
+        failure mode the repair programme exists to close, so "not IP-keyed" is
+        not sufficient — it must be the one function.
+        """
+        limits = _registered_limits(registry_name)
+        assert limits, f"{row} {path}: no limit registered at all"
+        for key_func in (limit.key_func for limit in limits):
+            assert isinstance(key_func, functools.partial), (
+                f"{row} {path}: expected functools.partial(tenant_or_platform_key, "
+                f"scope={scope!r}), got {key_func!r}"
+            )
+            assert key_func.func is rl.tenant_or_platform_key, (
+                f"{row} {path} keys on {key_func.func!r}, not the shared "
+                "services.rate_limit.tenant_or_platform_key"
+            )
+            assert key_func.keywords == {"scope": scope}, (
+                f"{row} {path} is bound to {key_func.keywords!r}, expected "
+                f"{{'scope': {scope!r}}}"
+            )
+
+    @pytest.mark.parametrize(
+        "row,path,registry_name,limit_str,scope",
+        IP_KEYED_CLASS,
+        ids=[r[0] for r in IP_KEYED_CLASS],
+    )
+    def test_limit_value_is_unchanged_by_the_rekey(
+        self, row: str, path: str, registry_name: str, limit_str: str, scope: str
+    ) -> None:
+        """PYAPI-03 changes bucket IDENTITY only.
+
+        The limit VALUE audit is RATE-04 / Phase 146. A rekey that also loosened
+        a ceiling — the easiest way to make a throttling complaint go away —
+        would be invisible without this.
+
+        The DISTINCT set is asserted, not the list: reloading a router in a
+        sibling suite re-registers the identical limit, but a route may still
+        only ever carry ONE limit VALUE. A second, different decorator — the way
+        a stacked ceiling would be added without saying so — makes this set grow.
+        """
+        registered = {str(limit.limit) for limit in _registered_limits(registry_name)}
+        assert registered == {limit_str}, (
+            f"{row} {path}: registered limit values are {sorted(registered)}; "
+            f"PYAPI-03 must leave exactly {limit_str!r} (RATE-04 owns values)."
+        )
+
+    def test_scopes_are_distinct_so_no_two_routes_share_a_bucket(self) -> None:
+        """Ten routes, ten scopes.
+
+        (Was "Nine routes, nine scopes" until SEC-05 added L-10; the sentence
+        counted the table and so had to move with it.)
+
+        slowapi already namespaces buckets by endpoint (G-2), so a duplicated
+        scope would NOT collapse two counters today — it would be a latent trap
+        that fires the moment anything reads the key string on its own (a Redis
+        migration, a metric, a log-based alert).
+        """
+        scopes = [row[4] for row in IP_KEYED_CLASS]
+        assert len(set(scopes)) == len(scopes), f"duplicate scope in {scopes}"
+
+
+# ---------------------------------------------------------------------------
+# Gate 2 — bucket behaviour (the CONTRACT), driven through the REGISTERED
+# key functions so it proves the decorators, not just the helper.
+# ---------------------------------------------------------------------------
+
+_L1_KEY_NAME = "routers.exchange.validate_key"
+_L9_KEY_NAME = "routers.optimizer.optimize_weights_endpoint"
+_SECRET = "identity-oracle-secret"
+
+
+class TestBucketBehaviour:
+    """The plan's behavioural oracle on L-9 and L-1, bucket strings as literals.
+
+    Every expected value below is written out in full. Deriving one by calling
+    ``tenant_or_platform_key`` and comparing would assert only that the function
+    equals itself — the failure mode that let 10 simultaneous semantic mutations
+    ship a byte-identical green (programme non-negotiable #3).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _secret(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("INTERNAL_API_TOKEN", _SECRET)
+
+    def test_l9_verified_claim_buckets_to_its_tenant(self) -> None:
+        key_func = _registered_limits(_L9_KEY_NAME)[0].key_func
+        req = _FakeRequest(
+            "/api/optimize-weights",
+            {"X-Tenant-Claim": _mint_claim("tenant-alpha", _SECRET)},
+        )
+        assert key_func(req) == "optimize_weights:t:tenant-alpha"
+
+    def test_l9_claimless_caller_buckets_to_the_documented_platform_ceiling(self) -> None:
+        """The literal the plan names.
+
+        This is a CEILING and it is spelled like one. Until
+        ``src/lib/analytics-client.ts`` mints ``X-Tenant-Claim`` (a 140.2
+        obligation) every real Scenario-Composer request lands here — which is
+        the same width it had before PYAPI-03, minus the per-client disguise.
+        """
+        key_func = _registered_limits(_L9_KEY_NAME)[0].key_func
+        assert key_func(_FakeRequest("/api/optimize-weights")) == "platform:/api/optimize-weights"
+
+    def test_l9_anonymous_claim_buckets_to_anon(self) -> None:
+        key_func = _registered_limits(_L9_KEY_NAME)[0].key_func
+        req = _FakeRequest(
+            "/api/optimize-weights", {"X-Tenant-Claim": _mint_claim("public", _SECRET)}
+        )
+        assert key_func(req) == "optimize_weights:anon"
+
+    def test_l1_verified_claim_buckets_to_its_tenant(self) -> None:
+        key_func = _registered_limits(_L1_KEY_NAME)[0].key_func
+        req = _FakeRequest(
+            "/api/validate-key", {"X-Tenant-Claim": _mint_claim("tenant-alpha", _SECRET)}
+        )
+        assert key_func(req) == "validate_key:t:tenant-alpha"
+
+    def test_l1_claimless_caller_buckets_to_the_documented_platform_ceiling(self) -> None:
+        key_func = _registered_limits(_L1_KEY_NAME)[0].key_func
+        assert key_func(_FakeRequest("/api/validate-key")) == "platform:/api/validate-key"
+
+    def test_two_tenants_do_not_share_a_bucket_on_l9(self) -> None:
+        """The whole point: one tenant can no longer 429 another.
+
+        Pinned as two literals rather than ``!=`` so a key function that
+        returned a constant per request would still be caught.
+        """
+        key_func = _registered_limits(_L9_KEY_NAME)[0].key_func
+        alpha = _FakeRequest(
+            "/api/optimize-weights", {"X-Tenant-Claim": _mint_claim("tenant-alpha", _SECRET)}
+        )
+        beta = _FakeRequest(
+            "/api/optimize-weights", {"X-Tenant-Claim": _mint_claim("tenant-beta", _SECRET)}
+        )
+        assert key_func(alpha) == "optimize_weights:t:tenant-alpha"
+        assert key_func(beta) == "optimize_weights:t:tenant-beta"
+
+    def test_forged_claim_cannot_reach_a_tenant_bucket(self) -> None:
+        """A claim minted with the WRONG secret falls to the platform ceiling.
+
+        Separates "we parsed the shape" from "we checked the MAC". Without this,
+        a verifier that skipped ``compare_digest`` entirely would pass every
+        other test in this class.
+        """
+        key_func = _registered_limits(_L9_KEY_NAME)[0].key_func
+        req = _FakeRequest(
+            "/api/optimize-weights",
+            {"X-Tenant-Claim": _mint_claim("tenant-victim", "the-wrong-secret")},
+        )
+        assert key_func(req) == "platform:/api/optimize-weights"
+
+    def test_expired_claim_cannot_reach_a_tenant_bucket(self) -> None:
+        """A captured claim is not a permanent credential."""
+        key_func = _registered_limits(_L9_KEY_NAME)[0].key_func
+        req = _FakeRequest(
+            "/api/optimize-weights",
+            {"X-Tenant-Claim": _mint_claim("tenant-victim", _SECRET, ttl=-10)},
+        )
+        assert key_func(req) == "platform:/api/optimize-weights"
+
+    def test_platform_buckets_are_per_route_not_one_global_bucket(self) -> None:
+        """L-1 and L-9 claimless traffic must not share a counter.
+
+        slowapi namespaces by endpoint anyway (G-2), so this pins the KEY
+        STRING — the thing a Redis migration, a metric or a log alert would
+        read on its own.
+        """
+        l1 = _registered_limits(_L1_KEY_NAME)[0].key_func(_FakeRequest("/api/validate-key"))
+        l9 = _registered_limits(_L9_KEY_NAME)[0].key_func(_FakeRequest("/api/optimize-weights"))
+        assert l1 == "platform:/api/validate-key"
+        assert l9 == "platform:/api/optimize-weights"
+
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            {},
+            {"X-Tenant-Claim": ""},
+            {"X-Tenant-Claim": "a.b"},
+            {"X-Tenant-Claim": "x." * 400},
+            {"X-Tenant-Claim": "payload.not-a-number.deadbeef"},
+            {"X-Tenant-Claim": "payload.9999999999.zz"},
+        ],
+        ids=["absent", "empty", "too-few-parts", "oversized", "non-numeric-exp", "bad-mac"],
+    )
+    def test_key_func_never_raises_on_hostile_input(self, headers: dict[str, str]) -> None:
+        """G-8: slowapi re-raises whatever a key function throws.
+
+        It escapes as a bodyless ``500 text/plain`` that 140.2's discriminator
+        cannot classify and that feeds the breaker — turning a throttling
+        concern into an outage signal.
+        """
+        key_func = _registered_limits(_L9_KEY_NAME)[0].key_func
+        result = key_func(_FakeRequest("/api/optimize-weights", headers))
+        assert isinstance(result, str) and result, "an empty key makes slowapi SKIP the limit"
+
+    def test_key_func_never_raises_when_the_secret_is_unset(self, monkeypatch: Any) -> None:
+        """An unset INTERNAL_API_TOKEN degrades to the ceiling, it does not 500."""
+        monkeypatch.delenv("INTERNAL_API_TOKEN", raising=False)
+        key_func = _registered_limits(_L9_KEY_NAME)[0].key_func
+        req = _FakeRequest(
+            "/api/optimize-weights", {"X-Tenant-Claim": _mint_claim("tenant-alpha", _SECRET)}
+        )
+        assert key_func(req) == "platform:/api/optimize-weights"
+
+
+# ---------------------------------------------------------------------------
+# Gate 3 — class closure (the COUNT). Enumerate by BEHAVIOUR, state the count,
+# and say how you searched, so a checker can reproduce it.
+# ---------------------------------------------------------------------------
+
+
+class TestClassClosure:
+    """Nothing under ``routers/`` may key on the request address again.
+
+    Counting gates, not spot checks: the standing programme lesson is that
+    under-counts come from enumerating by the SYNTAX of a known instance rather
+    than by BEHAVIOUR. A gate that only re-checked the ten known rows would
+    have the same blind spot that missed L-9 — and, later, L-10.
+    """
+
+    def test_the_enumerated_class_is_exactly_ten_routes(self) -> None:
+        assert len(IP_KEYED_CLASS) == EXPECTED_CLASS_SIZE
+        assert len({row[0] for row in IP_KEYED_CLASS}) == EXPECTED_CLASS_SIZE
+        assert {row[0] for row in IP_KEYED_CLASS} == {
+            f"L-{n}" for n in range(1, EXPECTED_CLASS_SIZE + 1)
+        }
+
+    def test_no_router_source_references_get_remote_address(self) -> None:
+        """The behavioural gate, by source token — now with NO exemption.
+
+        SEC-05 (Phase 163): ``routers/simulator.py`` was the documented FINDING-10
+        quarantine, a route plan 140.1-07's do-not-touch list called "correctly
+        user-keyed" while its key function returned ``simulator:ip:<address>``.
+        It has been repaired, so — following the standing instruction on
+        ``IP_KEYED_QUARANTINE`` — the allow-list shrank to EMPTY and this gate now
+        says the absolute thing: nothing under ``routers/`` references the request
+        address at all.
+
+        ⚠️ The comparison stays an EQUALITY against the (now empty) quarantine
+        rather than becoming ``assert offenders == set()``. Same reason it was an
+        equality before: the constant is where the exemption policy is written
+        down, and routing the assertion through it means re-populating the
+        quarantine cannot silently detach from the gate that enforces it.
+        """
+        offenders = {
+            p.name
+            for p in sorted(ROUTERS_DIR.glob("*.py"))
+            if "get_remote_address" in _source_name_tokens(p)
+        }
+        assert offenders == IP_KEYED_QUARANTINE, (
+            "routers/ get_remote_address references changed. The quarantine is "
+            f"{sorted(IP_KEYED_QUARANTINE) or 'EMPTY'} — no router may key on the "
+            f"request address — but found {sorted(offenders)}."
+        )
+
+    def test_shared_limiter_module_no_longer_references_get_remote_address(self) -> None:
+        """The singleton's default is where L-9 came from.
+
+        Removing the symbol from ``services/rate_limit.py`` is what makes the
+        omission un-makeable: a future undecorated route inherits
+        ``default_platform_key``, not an IP.
+        """
+        module_path = ROUTERS_DIR.parent / "services" / "rate_limit.py"
+        assert "get_remote_address" not in _source_name_tokens(module_path)
+
+    def test_shared_limiter_default_key_is_not_ip_derived(self) -> None:
+        from slowapi.util import get_remote_address
+
+        assert rl.limiter._key_func is rl.default_platform_key
+        assert rl.limiter._key_func is not get_remote_address
+
+    def test_no_router_constructs_its_own_limiter(self) -> None:
+        """Zero private ``Limiter()`` instances — by AST, not by grep.
+
+        Each private instance also had its own isolated ``memory://`` storage
+        (G-3), invisible to ``app.state.limiter``.
+        """
+        import ast
+
+        constructions: list[str] = []
+        for p in sorted(ROUTERS_DIR.glob("*.py")):
+            for node in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = (
+                    func.id
+                    if isinstance(func, ast.Name)
+                    else func.attr if isinstance(func, ast.Attribute) else None
+                )
+                if name == "Limiter":
+                    constructions.append(f"{p.name}:{node.lineno}")
+        assert constructions == [], (
+            f"private Limiter() construction(s) reintroduced: {constructions}"
+        )
+
+    def test_every_router_limiter_is_the_one_singleton(self) -> None:
+        """Same Python object, not merely an equal one (API-5 invariant)."""
+        for module in (routers.exchange, routers.csv, routers.portfolio,
+                       routers.optimizer, routers.simulator):
+            assert module.limiter is rl.limiter, f"{module.__name__} has a different Limiter"
+
+    def test_app_state_limiter_is_the_same_object_the_decorators_use(self) -> None:
+        """The API-5 invariant, actually asserted.
+
+        ⚠️ Written here because the test that claims to cover it does not:
+        ``test_simulator_router.py::TestG15_004_LimiterIsCanonicalSingleton
+        ::test_main_app_state_limiter_is_same_singleton`` says in its docstring
+        that it checks ``app.state.limiter``, but its body is a verbatim copy of
+        its sibling's ``simulator_router.limiter is rate_limit_module.limiter``
+        and never touches ``app.state`` at all. Pre-existing and NOT introduced
+        by PYAPI-03 — but PYAPI-03 raises the stakes, because nine more routes
+        now depend on that object being the one ``main.py`` registers. Reported
+        rather than edited: that file is outside this plan's scope.
+
+        slowapi resolves rate-limit STORAGE via the decorator's Limiter, not via
+        ``app.state.limiter``; if the two ever drift, a Redis migration silently
+        applies to neither, and the ``RateLimitExceeded`` handler is keyed to an
+        instance that never counts anything.
+        """
+        import main
+
+        assert main.app.state.limiter is rl.limiter
+
+    def test_rate_limited_route_set_is_a_literal(self) -> None:
+        """A new rate-limited route cannot join the surface unnoticed.
+
+        Registered STATIC limits only: ``/process-key`` uses slowapi's callable
+        limit provider and therefore lives in ``_dynamic_route_limits``, which
+        plan 140.1-06 owns and this file must not re-litigate.
+        """
+        expected = {row[2] for row in IP_KEYED_CLASS} | {
+            # SEC-05 (Phase 163): `routers.simulator.portfolio_simulator` was
+            # listed HERE, as a hand-added extra, with the note "FINDING-10,
+            # quarantined: still IP-keyed, still not this plan's". It is now an
+            # ordinary L-10 row in IP_KEYED_CLASS, so it arrives through the
+            # comprehension above and the hand-added entry is DELETED. Keeping
+            # both would have made this set silently tolerant of the row being
+            # dropped from the class table.
+            # RATE-03 / TS-21 (146-02, D-146-2): the Phase 146 gap CLOSED —
+            # both match routes joined the shared tenant-keyed surface
+            # (scopes ``match_recompute`` / ``match_eval``, 30/minute). NOT
+            # added to IP_KEYED_CLASS: that table is the enumerated IP-keyed
+            # defect class with an asserted size of 10 (9 from PYAPI-03 plus
+            # SEC-05's L-10), and these routes were
+            # never IP-keyed — they had no limiter at all.
+            "routers.match.recompute",
+            "routers.match.eval_metrics",
+        }
+        registered = {
+            name for name in rl.limiter._route_limits if name.startswith("routers.")
+        }
+        assert registered == expected, (
+            "the set of statically rate-limited routes changed: "
+            f"unexpected={sorted(registered - expected)}, "
+            f"missing={sorted(expected - registered)}"
+        )
+
+    def test_every_registered_router_limit_is_shared(self) -> None:
+        """Behavioural sweep: EVERY registered router limit keys on the shared
+        tenant-or-platform function. No exemptions.
+
+        Independent of ``IP_KEYED_CLASS``, so it also covers a route someone
+        adds without updating the table above.
+
+        ⛔ WHAT WAS DELETED HERE, AND WHY IT MATTERED (SEC-05, Phase 163). This
+        loop used to carry, between the two assertions below::
+
+            if name == "routers.simulator.portfolio_simulator":
+                continue  # FINDING-10 — reported, not fixed here
+
+        That `continue` sat AFTER the weak `is not get_remote_address` check and
+        BEFORE the two strong ones, so simulator was exempted from the only
+        assertions that could see what it actually keyed on — and it passed the
+        weak one trivially, because its key func was a module-private wrapper
+        that CALLED `get_remote_address` rather than being it. The route was
+        IP-keyed, the sweep named itself a behavioural sweep, and the sweep said
+        nothing. A carve-out inside the loop is strictly worse than an entry in
+        ``IP_KEYED_QUARANTINE``: the constant is greppable and carries a shrink
+        instruction, while a bare `continue` is invisible to anyone reading the
+        constant to find out what is exempt.
+        """
+        from slowapi.util import get_remote_address
+
+        for name, limits in rl.limiter._route_limits.items():
+            if not name.startswith("routers."):
+                continue
+            for limit in limits:
+                assert limit.key_func is not get_remote_address, f"{name} keys on the address"
+                assert isinstance(limit.key_func, functools.partial), name
+                assert limit.key_func.func is rl.tenant_or_platform_key, name
+
+    def test_match_recompute_actually_throttles(self, monkeypatch: Any) -> None:
+        """RATE-03 / TS-21 (146-02) behavioural oracle: a direct hit past
+        30/min on a match route answers 429.
+
+        Replaces ``test_match_routes_still_have_no_limiter`` — that tripwire's
+        docstring ordered its own deletion the day the gap closed, and 146-02
+        closed it. Mirrors ``test_default_keyed_route_actually_throttles``:
+        real requests through the REAL ``routers.match`` router, driven until
+        a 429 arrives. ``_is_allocator_profile`` is stubbed to return ``None``
+        so every budget-spending call answers a fast deterministic 503 (the
+        Supabase-down arm) instead of touching a live DB — slowapi's
+        check-and-hit runs BEFORE the handler body, so budget is consumed
+        either way.
+        """
+        import routers.match as match_mod
+
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda _aid: None)
+
+        app = FastAPI()
+        app.state.limiter = rl.limiter
+        app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+        app.include_router(match_mod.router)
+
+        # NOTE (ship-review 2026-08-18): a unique X-Service-Key does NOT isolate —
+# the claimless arm of tenant_or_platform_key keys on request PATH only
+# (rate_limit.py _platform_bucket), so every claimless call shares ONE
+# platform:<path> bucket. Isolation comes from the autouse limiter reset
+# below, not from the credential. Original (false) rationale: unique
+# per-run credential → private bucket. Without it
+        # this drive exhausts the shared unverified-credential bucket and a
+        # sibling file's match POSTs (test_match_router.py drives ~23 of them)
+        # inherit a spent budget for the next 60 seconds.
+        probe_credential = f"rate03-probe-{uuid.uuid4()}"
+
+        throttled = None
+        with TestClient(app) as client:
+            # BOUNDED-AND-DRIVEN, same rationale as _drive_until_throttled:
+            # the registered limit is 30/minute, so 31 calls pin the bound.
+            for _ in range(31):
+                resp = client.post(
+                    "/api/match/recompute",
+                    json={"allocator_id": str(uuid.uuid4())},
+                    headers={"X-Service-Key": probe_credential},
+                )
+                if resp.status_code == 429:
+                    throttled = resp
+                    break
+                assert resp.status_code == 503, (
+                    "harness: a budget-spending call must reach the stubbed "
+                    f"handler. Got {resp.status_code}: {resp.text[:300]}"
+                )
+
+        assert throttled is not None, (
+            "/api/match/recompute never answered 429 within 31 calls — the "
+            "RATE-03 slowapi floor is not enforced."
+        )
+        assert throttled.status_code == 429
+
+
+# ---------------------------------------------------------------------------
+# Gate 4 — the DEFAULT key's BEHAVIOUR (Phase 140.1.1 / PYAPIFIX-05, review
+# survivors #3 and #4).
+#
+# `TestClassClosure.test_shared_limiter_default_key_is_not_ip_derived` asserts
+# `rl.limiter._key_func is rl.default_platform_key` — object identity, which is
+# true for ANY body. Two single-line mutations of `default_platform_key`
+# therefore shipped green through the whole of Phase 140.1:
+#
+#   #3  `return ""`      — slowapi's `__evaluate_limits` builds
+#                          `args = [limit_key, limit_scope]` and only counts the
+#                          hit `if all(args)`; an empty key takes the `else`
+#                          branch, logs "Skipping limit", and `continue`s. The
+#                          route is then UNLIMITED, silently, forever
+#                          (slowapi 0.1.10 extension.py:506-527 — the CI pin;
+#                          `services/rate_limit.py:152-154` and `:164-166`
+#                          document the hazard in prose, and nothing enforced it).
+#   #4  a per-request-unique value — every caller gets a private bucket, which
+#                          is the same outcome by a different route.
+#
+# Neither is observable from a key STRING assertion alone, so this gate does
+# both: it pins the returned key as a LITERAL and against a second, distinct
+# request object (killing #4), and it drives real HTTP requests through a route
+# that DECLARES NO `key_func` and asserts a 429 actually arrives (killing #3 —
+# an empty key produces no 429 ever).
+# ---------------------------------------------------------------------------
+
+#: A path that exists nowhere in `routers/`, so its `platform:<path>` bucket
+#: cannot collide with a production counter.
+_DEFAULT_KEY_PROBE_PATH = "/pyapifix05-default-key-probe"
+
+#: Literals. The limit VALUE is this file's, not a production constant.
+_DEFAULT_KEY_PROBE_LIMIT = 3
+_DEFAULT_KEY_PROBE_LIMIT_TEXT = "3/minute"
+
+#: The bucket `default_platform_key` must return for the probe path — written
+#: out in full rather than derived by calling `_platform_bucket`, which would
+#: assert only that the module agrees with itself.
+_DEFAULT_KEY_PROBE_BUCKET = "platform:/pyapifix05-default-key-probe"
+
+
+async def _default_key_probe(request: Request) -> dict[str, bool]:
+    """A rate-limited route that declares NO ``key_func``.
+
+    That omission is the whole point: it is L-9's exact shape, so the limit it
+    carries is keyed by whatever `rl.limiter._key_func` — i.e.
+    :func:`services.rate_limit.default_platform_key` — returns.
+    """
+    return {"ok": True}
+
+
+# Decorated exactly ONCE, at module import, deliberately. slowapi APPENDS to
+# `_route_limits[name]` on every decoration and all copies share one bucket, so
+# decorating inside a test body would make one request cost N tokens on the Nth
+# run. The registered name is `test_limiter_identity._default_key_probe`, which
+# does not start with "routers." and so is invisible to every closure gate above.
+_default_key_probe_limited = rl.limiter.limit(_DEFAULT_KEY_PROBE_LIMIT_TEXT)(
+    _default_key_probe
+)
+
+
+def _probe_app() -> FastAPI:
+    """A throwaway app mounting the probe route.
+
+    Deliberately NOT `main.app`: every production route declares an explicit
+    `key_func`, so none of them exercises the singleton's default at all. A
+    dedicated app is the only way to drive the default through real requests
+    without mutating the production app object.
+    """
+    app = FastAPI()
+    app.state.limiter = rl.limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_api_route(
+        _DEFAULT_KEY_PROBE_PATH, _default_key_probe_limited, methods=["GET"]
+    )
+    return app
+
+
+def _drive_until_throttled(client: TestClient, cap: int) -> Any:
+    """Request until a 429 arrives, or ``None`` if the cap is exhausted.
+
+    BOUNDED-AND-DRIVEN, never a fixed call count: sibling suites reload router
+    modules, which re-runs `@limiter.limit` against this same singleton, so the
+    per-request token cost is not knowable from this file. The cap still pins an
+    UPPER bound on the quota (a route that never throttles inside
+    ``limit + 1`` calls is not limited at all), and the limit's exact value is
+    pinned separately by :func:`test_default_keyed_probe_carries_its_literal_limit`.
+    """
+    for _ in range(cap):
+        resp = client.get(_DEFAULT_KEY_PROBE_PATH)
+        if resp.status_code == 429:
+            return resp
+        assert resp.status_code == 200, (
+            "harness: a budget-spending call must reach the handler. Got "
+            f"{resp.status_code}: {resp.text[:300]}"
+        )
+    return None
+
+
+class TestDefaultKeyBehaviour:
+    """Survivors #3 / #4 — the singleton default, pinned by consequence.
+
+    Measured on the CI-pinned **slowapi 0.1.10** (`requirements.txt:226`); the
+    original mutation evidence was taken on 0.1.9 and the `if all(args)` skip is
+    a slowapi internal a patch release could have moved.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_limiter(self) -> Any:
+        """`rl.limiter` is a process-wide singleton over `memory://` (G-3)."""
+        rl.limiter.reset()
+        yield
+        rl.limiter.reset()
+
+    def test_default_key_is_never_the_empty_string(self) -> None:
+        """#3. An empty key is not "no bucket" — it is NO LIMIT AT ALL.
+
+        Pinned as an equality against a literal, plus the `!= ""` inequality
+        spelled out separately so the failure message names the actual hazard.
+        """
+        key = rl.default_platform_key(_FakeRequest(_DEFAULT_KEY_PROBE_PATH))
+        assert key != "", (
+            "default_platform_key returned the empty string. slowapi's "
+            "__evaluate_limits only counts a hit `if all(args)`, so an empty key "
+            "SKIPS the limit entirely and every route inheriting this default "
+            "becomes silently unlimited."
+        )
+        assert key == _DEFAULT_KEY_PROBE_BUCKET
+
+    def test_default_key_is_stable_across_two_distinct_requests(self) -> None:
+        """#4. A per-request key gives every caller a private bucket.
+
+        Two SEPARATE `_FakeRequest` objects for the same path must produce the
+        same string. Both are also compared to the literal, so a mutant that
+        returned one constant per process would be caught too.
+        """
+        first = rl.default_platform_key(_FakeRequest(_DEFAULT_KEY_PROBE_PATH))
+        second = rl.default_platform_key(_FakeRequest(_DEFAULT_KEY_PROBE_PATH))
+        assert first == second, (
+            "default_platform_key is not stable across requests — a key that "
+            "varies per request hands every caller a private bucket, so the "
+            "limit can never be reached."
+        )
+        assert first == _DEFAULT_KEY_PROBE_BUCKET
+        assert second == _DEFAULT_KEY_PROBE_BUCKET
+
+    def test_default_keyed_route_actually_throttles(self) -> None:
+        """The behavioural oracle: real requests, a real 429.
+
+        This is what neither the identity assertion nor a key-string assertion
+        can give. Under mutation #3 the loop below runs to its cap and NO 429
+        ever arrives; under #4 the same, for a different reason.
+        """
+        with TestClient(_probe_app()) as client:
+            throttled = _drive_until_throttled(client, _DEFAULT_KEY_PROBE_LIMIT + 1)
+
+        assert throttled is not None, (
+            f"{_DEFAULT_KEY_PROBE_PATH} never answered 429 within "
+            f"{_DEFAULT_KEY_PROBE_LIMIT + 1} calls. The route inherits the shared "
+            "limiter's DEFAULT key function, so either that key is empty "
+            "(slowapi skips the limit) or it varies per request (every caller "
+            "gets a private bucket). Either way the limit is not enforced."
+        )
+        assert throttled.status_code == 429
+
+    def test_default_keyed_probe_carries_its_literal_limit(self) -> None:
+        """The driven loop pins an upper bound; this pins the value.
+
+        Together they mean "throttles, and at 3" rather than "throttles at some
+        number the test cannot see".
+        """
+        registered = {
+            str(limit.limit)
+            for limit in rl.limiter._route_limits.get(
+                f"{_default_key_probe.__module__}.{_default_key_probe.__name__}", []
+            )
+        }
+        assert registered == {"3 per 1 minute"}, (
+            f"probe limit registrations are {sorted(registered)}"
+        )
+
+    def test_default_keyed_probe_inherits_the_singleton_default(self) -> None:
+        """The probe is only evidence if it really carries the default key.
+
+        A probe that had silently acquired an explicit `key_func` would throttle
+        happily while `default_platform_key` was broken — the same
+        proves-nothing shape as the identity assertion it exists to reinforce.
+        """
+        limits = rl.limiter._route_limits.get(
+            f"{_default_key_probe.__module__}.{_default_key_probe.__name__}", []
+        )
+        assert limits, "the probe route registered no limit at all"
+        for limit in limits:
+            assert limit.key_func is rl.default_platform_key
+
+
+# ---------------------------------------------------------------------------
+# Gate 5 — SEC-05 (Phase 163): the TENTH route's repair, proved by CONSEQUENCE.
+#
+# ⚠️ WHY A PLAIN DRIVE-TO-429 WOULD BE VACUOUS HERE, stated up front because it
+# is the trap this whole gate is shaped around. Under `TestClient`,
+# `get_remote_address` returns the SAME value ("testclient") for every request,
+# so the OLD IP-keyed decorator also put all callers in one bucket and also
+# answered 429 on the 21st call. A test that only drove one caller to 429 would
+# be byte-for-byte green against the defect it claims to pin.
+#
+# The property the rekey actually bought is ISOLATION: two DIFFERENT verified
+# tenant claims get two different counters. That is what
+# `test_one_tenants_exhausted_bucket_does_not_throttle_another` asserts, and it
+# is the assertion that goes red when the key func is reverted.
+#
+# The `20/hour` drive is still here as the FLOOR half — "the limit is enforced at
+# all" — because isolation between two buckets that never fill would be equally
+# empty evidence. The pair is the oracle; neither half is.
+#
+# RED DEMONSTRATIONS. Both were EXECUTED (2026-08-26) and the counts below are
+# the observed pytest output, not a prediction. Reproduce with, from
+# `analytics-service/`:
+#
+#     python3 -m pytest tests/test_limiter_identity.py
+#
+# whose GREEN baseline for this file is `76 passed`. Each neuter was restored
+# immediately after, and each restore was verified by grepping for the restored
+# `partial(tenant_or_platform_key, scope="simulator")` call and the `20/hour`
+# literal AND by confirming an empty `git diff` against HEAD — never by file
+# hash alone, which cannot distinguish "restored" from "restored to the wrong
+# thing".
+#
+# (a) NEUTER: revert `routers/simulator.py` to the IP form — re-import
+#     `get_remote_address`, restore `_simulator_rate_limit_key` returning
+#     `f"simulator:ip:{get_remote_address(request)}"`, point the decorator at it.
+#     OBSERVED: 6 failed, 70 passed —
+#       * `TestClassClosure::test_no_router_source_references_get_remote_address`
+#         "The quarantine is EMPTY — no router may key on the request address —
+#         but found ['simulator.py']."
+#       * `TestClassClosure::test_every_registered_router_limit_is_shared`
+#         "routers.simulator.portfolio_simulator" (the assertion the deleted
+#         `continue` used to skip)
+#       * `test_route_key_func_is_shared_tenant_or_platform_with_its_scope[L-10]`
+#       * `test_one_tenants_exhausted_bucket_does_not_throttle_another`
+#         "tenant-sim-beta was throttled by tenant-sim-alpha's exhausted budget
+#         (got 429: {"error":"Rate limit exceeded: 20 per 1 hour"})"
+#       * both key-STRING tests
+#
+#     ⭐ AND `test_a_tenant_claimed_caller_is_throttled_at_the_decorator` PASSED.
+#     That is the measured proof of the vacuity warning above: had this gate been
+#     written as the obvious "drive the repaired route to 429", it would have been
+#     GREEN against the exact defect it exists to pin.
+#
+# (b) NEUTER: raise the decorator's ceiling, `20/hour` -> `100000/hour`.
+#     OBSERVED: 3 failed, 73 passed — `test_limit_value_is_unchanged_by_the_rekey
+#     [L-10]` ("registered limit values are ['100000 per 1 hour']"), plus BOTH
+#     behavioural tests ("/api/simulator never answered 429 within 21 calls").
+#     The floor half and the value pin fail independently, so a rekey that also
+#     quietly loosened the ceiling cannot pass.
+#
+# HANDLER SHORT-CIRCUIT: `routers.simulator.get_supabase` is stubbed to raise a
+# deterministic 404, so every budget-spending call is fast and touches no DB.
+# slowapi's check-and-hit runs BEFORE the handler body, so the budget is consumed
+# either way (same rationale as `test_match_recompute_actually_throttles`).
+#
+# ⚠️ EVERY REQUEST CARRIES A FRESH `user_id`. `_check_simulator_user_rate` is an
+# IN-HANDLER 20/hour-per-user quota that would ALSO answer 429 on the 21st
+# identical call — from a different mechanism, with a different body. Varying the
+# id keeps that check permanently under budget so every 429 observed below is
+# unambiguously slowapi's. The assertions additionally reject the in-handler
+# envelope by name.
+# ---------------------------------------------------------------------------
+
+_SIMULATOR_PATH = "/api/simulator"
+_SIMULATOR_REGISTRY_NAME = "routers.simulator.portfolio_simulator"
+
+#: The decorator's literal, restated. `20/hour` -> 21 calls pins the bound.
+_SIMULATOR_LIMIT = 20
+
+
+def _simulator_app() -> FastAPI:
+    """A throwaway app mounting the REAL simulator router.
+
+    Not `main.app`: that carries `verify_service_key`, which is a different
+    trust boundary and not what this gate is about.
+    """
+    import routers.simulator as simulator_mod
+
+    app = FastAPI()
+    app.state.limiter = rl.limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.include_router(simulator_mod.router)
+    return app
+
+
+def _simulator_call(client: TestClient, claim: str) -> Any:
+    """One budget-spending POST under a given `X-Tenant-Claim`."""
+    return client.post(
+        _SIMULATOR_PATH,
+        json={
+            "portfolio_id": str(uuid.uuid4()),
+            "candidate_strategy_id": str(uuid.uuid4()),
+            # Fresh per call — see the in-handler-quota note above.
+            "user_id": str(uuid.uuid4()),
+        },
+        headers={"X-Tenant-Claim": claim},
+    )
+
+
+def _assert_not_the_in_handler_429(resp: Any) -> None:
+    """The 429 under test must be slowapi's, not `_check_simulator_user_rate`'s.
+
+    The in-handler quota answers through `services.error_contract.service_error`
+    with `code: "RATE_LIMITED"` nested under `detail`; slowapi's
+    `_rate_limit_exceeded_handler` answers a flat "Rate limit exceeded" body.
+    Naming the discriminator here means a future change that made the in-handler
+    check fire first would redden rather than quietly re-point this gate at the
+    wrong mechanism.
+    """
+    assert "RATE_LIMITED" not in resp.text, (
+        "the 429 came from the IN-HANDLER per-user quota "
+        f"(`_check_simulator_user_rate`), not from the slowapi decorator: {resp.text[:300]}"
+    )
+
+
+class TestSimulatorTenantBucketBehaviour:
+    """L-10's repair, driven through real HTTP against the real router."""
+
+    @pytest.fixture(autouse=True)
+    def _harness(self, monkeypatch: Any) -> Any:
+        import routers.simulator as simulator_mod
+        from fastapi import HTTPException
+
+        monkeypatch.setenv("INTERNAL_API_TOKEN", _SECRET)
+
+        def _no_db() -> Any:
+            raise HTTPException(status_code=404, detail="harness: no DB in this gate")
+
+        monkeypatch.setattr(simulator_mod, "get_supabase", _no_db)
+        # Module-level per-user state; cleared so a sibling suite's calls cannot
+        # pre-spend the in-handler quota for the ids this gate mints.
+        simulator_mod._simulator_user_attempts.clear()
+        yield
+        simulator_mod._simulator_user_attempts.clear()
+
+    def test_a_tenant_claimed_caller_is_throttled_at_the_decorator(self) -> None:
+        """The FLOOR half: the `20/hour` ceiling is actually enforced.
+
+        BOUNDED-AND-DRIVEN at limit + 1. On its own this is NOT evidence that the
+        route is tenant-keyed (see the gate header) — it is evidence that there
+        is a counter to be isolated in the first place.
+        """
+        claim = _mint_claim("tenant-sim-alpha", _SECRET)
+        throttled = None
+        with TestClient(_simulator_app()) as client:
+            for _ in range(_SIMULATOR_LIMIT + 1):
+                resp = _simulator_call(client, claim)
+                if resp.status_code == 429:
+                    throttled = resp
+                    break
+                assert resp.status_code == 404, (
+                    "harness: a budget-spending call must reach the stubbed "
+                    f"handler. Got {resp.status_code}: {resp.text[:300]}"
+                )
+
+        assert throttled is not None, (
+            f"{_SIMULATOR_PATH} never answered 429 within {_SIMULATOR_LIMIT + 1} "
+            "calls — the slowapi floor on the repaired route is not enforced."
+        )
+        assert throttled.status_code == 429
+        _assert_not_the_in_handler_429(throttled)
+
+    def test_one_tenants_exhausted_bucket_does_not_throttle_another(self) -> None:
+        """⭐ THE DISCRIMINATOR — T-163-17, asserted as a consequence.
+
+        Drive tenant-alpha to 429, then make ONE call as tenant-beta. Beta must
+        be served.
+
+        Under the pre-fix key func every caller shared the single
+        `simulator:ip:testclient` bucket, so beta inherited alpha's spent budget
+        and answered 429. That is the NAT-collapse starvation this repair exists
+        to end, and it is the only assertion in this file that can see it.
+        """
+        alpha = _mint_claim("tenant-sim-alpha", _SECRET)
+        beta = _mint_claim("tenant-sim-beta", _SECRET)
+
+        with TestClient(_simulator_app()) as client:
+            alpha_throttled = None
+            for _ in range(_SIMULATOR_LIMIT + 1):
+                resp = _simulator_call(client, alpha)
+                if resp.status_code == 429:
+                    alpha_throttled = resp
+                    break
+
+            assert alpha_throttled is not None, (
+                "harness: tenant-alpha never reached 429, so there is no "
+                "exhausted bucket for this test to be about."
+            )
+            _assert_not_the_in_handler_429(alpha_throttled)
+
+            beta_resp = _simulator_call(client, beta)
+
+        assert beta_resp.status_code != 429, (
+            "tenant-sim-beta was throttled by tenant-sim-alpha's exhausted "
+            f"budget (got {beta_resp.status_code}: {beta_resp.text[:300]}). The "
+            "two tenants share one counter — the decorator is keyed on something "
+            "that does not distinguish them (the request address is the classic "
+            "one: behind an egress NAT it is identical for every tenant)."
+        )
+        assert beta_resp.status_code == 404, (
+            "harness: beta's call should have reached the stubbed handler; got "
+            f"{beta_resp.status_code}: {beta_resp.text[:300]}"
+        )
+
+    def test_the_registered_simulator_key_buckets_to_its_tenant(self) -> None:
+        """The key STRING, as a literal, read off the REGISTERED limit.
+
+        Gate 1 proves the decorator carries `partial(tenant_or_platform_key,
+        scope="simulator")`; this proves what that produces, written out in full
+        rather than derived by calling the function (which would assert only that
+        it equals itself).
+        """
+        key_func = _registered_limits(_SIMULATOR_REGISTRY_NAME)[0].key_func
+        req = _FakeRequest(
+            _SIMULATOR_PATH, {"X-Tenant-Claim": _mint_claim("tenant-alpha", _SECRET)}
+        )
+        assert key_func(req) == "simulator:t:tenant-alpha"
+
+    def test_the_claimless_simulator_caller_buckets_to_the_platform_ceiling(self) -> None:
+        """Until `analytics-client.ts` mints claims (the 140.2 obligation) this
+        is where every real request lands — the same width it had before, minus
+        the per-client disguise the `simulator:ip:` prefix gave it.
+        """
+        key_func = _registered_limits(_SIMULATOR_REGISTRY_NAME)[0].key_func
+        assert key_func(_FakeRequest(_SIMULATOR_PATH)) == "platform:/api/simulator"

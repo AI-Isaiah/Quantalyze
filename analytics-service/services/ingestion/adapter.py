@@ -42,7 +42,21 @@ FlowType = Literal["teaser", "onboard", "internal_report", "csv", "resync"]
 # metrics (``SfoxAdapter.compute_metrics`` is intentionally fail-loud). The
 # key-save EXCHANGE boundary (VerifyStrategyRequest.exchange, debug_key_flow.
 # Broker, the four SQL CHECKs) already admitted 'sfox' in Phase 119.
-Source = Literal["okx", "binance", "bybit", "csv", "deribit", "sfox"]
+#
+# Phase 135 (MT5SRC-01, 135-01) SHIPS the mt5 ingestion path: the ingestion
+# registry (``SUPPORTED_SOURCES`` / ``_FACTORIES`` in
+# services/ingestion/__init__.py) now admits 'mt5' and get_adapter("mt5")
+# resolves an ``Mt5Adapter``. 'mt5' joins this ``Source`` Literal + the registry
+# TOGETHER here (the pinned lockstep — test_source_literal_and_registry_agree);
+# because the factory (``Mt5Adapter``) lands in the SAME change there is no
+# Literal-ahead-of-registry split (the SFOX-01 pin precedent). This is the
+# ingestion CAPABILITY only (mirroring the deribit/sfox landings): MT5 returns
+# flow through the broker-dailies ONE backbone via the deal-ledger daily-NAV
+# reconstruction (combine_mt5_deal_ledger, Phase 136), never fill-based
+# process_key metrics (``Mt5Adapter.compute_metrics`` is intentionally
+# fail-loud). The read-only validate/encrypt branch is Phase 135 (MT5SRC-02); the
+# onboarding UI is Phase 138; go-live is Phase 139.
+Source = Literal["okx", "binance", "bybit", "csv", "deribit", "sfox", "mt5"]
 TrustTier = Literal["api_verified", "csv_uploaded", "self_reported"]
 Status = Literal[
     "draft",
@@ -116,6 +130,39 @@ class ValidationResult:
     # CsvUploadStep.tsx; the success envelope in csv_validator.py.
     preview: dict[str, Any] | None = None
     daily_returns_series: list[dict[str, Any]] | None = None
+    # PYAPIFIX2-02 (Phase 140.1.2) — the ADAPTER's own permanence verdict on a
+    # rejection, consumed by the retry classifier in
+    # services/ingestion/long_fetch.py. TRI-STATE, and the third state is the
+    # point:
+    #   True  -> "this rejection can never clear by retrying" (bad broker
+    #            server; a trade-capable master password we refuse by design).
+    #   False -> "retrying may succeed" (an explicit transient verdict). This
+    #            OVERRIDES the consumer's own permanent-code list — an adapter
+    #            that can tell a genuine bad key from a venue-side auth blip may
+    #            state False on the blip while still tagging it AUTH_FAILED for
+    #            copy reuse, and the blip is then retried. Suppressing the list
+    #            is safe in this direction only: it can move a rejection
+    #            permanent -> transient (bounded by max_attempts), never
+    #            transient -> permanent (a user locked out of a working key).
+    #   None  -> "this adapter states no verdict" — the DEFAULT, and what every
+    #            adapter other than MT5 returns today. Consumers MUST fall
+    #            through to their existing classification logic on None so this
+    #            field changes no behaviour it does not explicitly opt into.
+    # All three states are LIVE at the one consumer that reads the field
+    # (services/ingestion/long_fetch.py): a stated verdict is authoritative in
+    # both directions, and only None falls through. A consumer that honours
+    # True but silently ignores False would make this docstring a lie and drop
+    # the author's explicit statement on the floor.
+    # Why provenance instead of a longer code list: the consumers' permanent-code
+    # sets are structurally uncompletable — services/ingestion/csv_adapter.py
+    # mints error_code from a pandera rule name (``first_rule.upper()``), an open
+    # code space no enumeration can close. Only the adapter that minted a code
+    # knows whether it can clear. This field is the seed of the backlogged
+    # four-vocabulary unification (OB-11/OB-12); that unification is NOT proposed
+    # here and no existing set is re-pointed at it.
+    # A default is mandatory: this dataclass is constructed in ≥6 modules and
+    # ``mypy --strict`` is a CI gate.
+    permanent: bool | None = None
 
 
 # ---------------------------------------------------------------------------

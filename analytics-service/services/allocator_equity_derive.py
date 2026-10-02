@@ -116,6 +116,22 @@ class DegradeReason(str, Enum):
     EXCLUSIVE_FILL = "exclusive_fill"
     OUT_OF_WINDOW_FLOW = "out_of_window_flow"
     DROPPED_KEY = "dropped_key"
+    # 167.1.2 C2 silent-failure SFH-10: a book-return day whose level, return or
+    # sum was non-finite. It was reported under the benign
+    # skipped_nonpositive_denominator flag; a non-finite input is not benign.
+    NONFINITE_RETURN = "nonfinite_return"
+    # 167.1.2 C2 round 2 (SFH-R2-03): a shared account whose counted member's
+    # series starts later than an older member's, where the older history could
+    # not be joined honestly (``stitch_shared_account`` refused). The curve then
+    # starts at the counted member's first day, so the book's window is shorter
+    # than its history. Round 1 marked this with a benign flag; it is not.
+    SHARED_ACCOUNT_HISTORY_TRUNCATED = "shared_account_history_truncated"
+    # 167.1.2 C2 round 2 (SFH-R2-04): a shared account none of whose keys works.
+    # It is counted once, but its series stopped the day its keys began failing
+    # and is carried flat at r = 0 while the rest of the book moves, diluting the
+    # book's return with frozen capital. Round 1 raised a benign flag of the
+    # same name that nothing reads, so the book read "ready".
+    SHARED_ACCOUNT_NO_WORKING_KEY = "shared_account_no_working_key"
 
 
 # The BLOCKING subset: any of these present -> ``is_trustworthy`` is False.
@@ -125,6 +141,9 @@ _BLOCKING_REASONS: frozenset[DegradeReason] = frozenset(
         DegradeReason.EXCLUSIVE_FILL,
         DegradeReason.OUT_OF_WINDOW_FLOW,
         DegradeReason.DROPPED_KEY,
+        DegradeReason.NONFINITE_RETURN,
+        DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED,
+        DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY,
     }
 )
 
@@ -201,6 +220,144 @@ def eligible_key_predicate(key_row: Mapping[str, Any]) -> bool:
     disconnected_at = key_row.get("disconnected_at")
     # IS DISTINCT FROM 'revoked' — NULL/anything-but-'revoked' passes.
     return is_active and sync_status != "revoked" and disconnected_at is None
+
+
+# D-18 (founder, 2026-09-27). The last-sync statuses that make a key NOT
+# working. Twin of NOT_WORKING_SYNC_STATUSES in src/lib/account-share-note.ts and
+# of the tuple in set_departed_key_history_inclusion (migration 20260927180000);
+# a parity test pins all three.
+NOT_WORKING_SYNC_STATUSES: frozenset[str] = frozenset({"revoked", "sign_in_failed", "error"})
+
+# The two account_share_kind values that mean "this key reads the same exchange
+# account as the key named in account_shared_with_api_key_id" (D-01, D-04).
+SHARED_ACCOUNT_KINDS: frozenset[str] = frozenset({"duplicate", "composite_member"})
+
+
+def working_holder_predicate(key_row: Mapping[str, Any] | None) -> bool:
+    """D-18: the READER RULE in COMMENT ON COLUMN api_keys.account_share_kind
+    (migration 20260927180000). A key is WORKING when it is active, not
+    disconnected, and its last sync is NULL or not revoked / sign_in_failed /
+    error. A marked key counts through its holder only while that holder is
+    working; otherwise the account is counted by a working sibling instead of
+    by nobody. The NULL leg keeps a never-synced key working, as
+    ``eligible_key_predicate`` does. A missing row is not working.
+
+    Twin of ``isWorkingHolder`` in src/lib/account-share-note.ts. Every working
+    key is eligible; an ``error`` or ``sign_in_failed`` key is eligible but not
+    working, which is why a writer that swaps this rule in must also drop such a
+    holder from its sum (see ``account_groups``)."""
+    if key_row is None:
+        return False
+    sync_status = key_row.get("sync_status")
+    return (
+        key_row.get("is_active") is True
+        and key_row.get("disconnected_at") is None
+        and (sync_status is None or sync_status not in NOT_WORKING_SYNC_STATUSES)
+    )
+
+
+def account_groups(
+    key_rows: Sequence[Mapping[str, Any]],
+) -> list[list[Mapping[str, Any]]]:
+    """The allocator's keys grouped by the exchange account they read.
+
+    A group is a holder plus every key whose ``account_shared_with_api_key_id``
+    points at it with a SHARED_ACCOUNT_KINDS marker, followed transitively (a key
+    stamped against a holder that was itself once marked). A key that is
+    unmarked, carries another kind, points at itself, or points at a key that is
+    not among ``key_rows`` is a group of one: an unresolvable marker never merges
+    or removes an account.
+
+    Both allocator writers count each group ONCE (Phase 167.1.2 D-01, D-04,
+    D-18), so which key of a group is counted is a property of the group, never
+    of the order in which the stamper met the keys (C1 review WR-03: the marker's
+    direction follows stamp order, not seniority). Deterministic: members sorted
+    by id, groups by their first member's id."""
+    ids = [str(r.get("id")) for r in key_rows if r.get("id") is not None]
+    by_id = {str(r.get("id")): r for r in key_rows if r.get("id") is not None}
+    parent = {key_id: key_id for key_id in ids}
+
+    def _find(key_id: str) -> str:
+        while parent[key_id] != key_id:
+            parent[key_id] = parent[parent[key_id]]
+            key_id = parent[key_id]
+        return key_id
+
+    for key_id in ids:
+        row = by_id[key_id]
+        if row.get("account_share_kind") not in SHARED_ACCOUNT_KINDS:
+            continue
+        holder_id = row.get("account_shared_with_api_key_id")
+        if holder_id is None or str(holder_id) == key_id or str(holder_id) not in by_id:
+            continue
+        left, right = _find(key_id), _find(str(holder_id))
+        if left != right:
+            parent[max(left, right)] = min(left, right)
+
+    grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for key_id in sorted(ids):
+        grouped[_find(key_id)].append(by_id[key_id])
+    return [grouped[root] for root in sorted(grouped, key=lambda r: str(grouped[r][0].get("id")))]
+
+
+def stitch_shared_account(
+    links: Sequence[tuple[pd.Series, Sequence[Any]]],
+) -> tuple[pd.Series, list[Any]] | None:
+    """One exchange account read by several keys, as ONE return series.
+
+    Phase 167.1.2 C2 round 2 (SFH-R2-03). ``links`` is the account's members,
+    each as ``(returns, flows)``, ordered by first return day with the COUNTED
+    member last. D-09 case (2) ordering: each earlier member owns the days from
+    its own first return day up to, not including, the next member's first
+    return day; the last member owns every day from its own first day on. A
+    member's flows are taken for the days it owns (the first member keeps its
+    flows dated before its first day, as any key's pre-window flow). One
+    account is one series, so nothing is counted twice, and the flows of a day
+    come from one key only: a newer key's crawl that reaches back over an older
+    key's days lists the same transfers, and taking both would double them.
+
+    Returns ``None`` when the join is not honest, and the caller then keeps the
+    counted member alone under a BLOCKING reason:
+      * a member has no returns;
+      * an earlier member's series ends before the day before its successor's
+        first day, so the days between hold nobody's returns (per-key dailies
+        are dense calendar-daily, so a series that reaches that day covers the
+        whole window it owns).
+    Pure; the ISO-day index contract is asserted on every link."""
+    if len(links) < 2:
+        return None
+    firsts: list[str] = []
+    for index, (series, _flows) in enumerate(links):
+        _assert_iso_day_index(series.index, f"stitch_shared_account[{index}]")
+        if len(series) == 0:
+            return None
+        firsts.append(min(str(d) for d in series.index))
+    days: list[str] = []
+    values: list[float] = []
+    flows_out: list[Any] = []
+    for index, (series, flows) in enumerate(links):
+        own_first = firsts[index]
+        is_last = index == len(links) - 1
+        next_first = None if is_last else firsts[index + 1]
+        if next_first is not None:
+            day_before = (date.fromisoformat(next_first) - timedelta(days=1)).isoformat()
+            if max(str(d) for d in series.index) < day_before:
+                return None
+        for day, value in sorted(
+            ((str(d), float(v)) for d, v in series.items()), key=lambda item: item[0]
+        ):
+            if day < own_first or (next_first is not None and day >= next_first):
+                continue
+            days.append(day)
+            values.append(value)
+        for flow in flows or ():
+            flow_day = str(flow[0])
+            if next_first is not None and flow_day >= next_first:
+                continue
+            if index > 0 and flow_day < own_first:
+                continue
+            flows_out.append(flow)
+    return pd.Series(values, index=days, dtype="float64"), flows_out
 
 
 def blend_concurrent_returns(

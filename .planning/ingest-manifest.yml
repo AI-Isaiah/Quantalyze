@@ -1,0 +1,37 @@
+docs:
+  - path: docs/architecture/adr-0001-rls-primary-authorization.md
+    type: ADR
+  - path: docs/architecture/adr-0002-nextjs-16-conventions.md
+    type: ADR
+  - path: docs/architecture/adr-0003-three-client-supabase.md
+    type: ADR
+  - path: docs/architecture/adr-0004-mutation-api-contract.md
+    type: ADR
+  - path: docs/architecture/adr-0005-admin-authorization.md
+    type: ADR
+  - path: docs/architecture/adr-0006-analytics-service-boundary.md
+    type: ADR
+  - path: docs/architecture/adr-0008-cron-architecture.md
+    type: ADR
+  - path: docs/architecture/adr-0009-caching-strategy.md
+    type: ADR
+  - path: docs/architecture/adr-0010-observability.md
+    type: ADR
+  - path: docs/architecture/adr-0014-secret-handling.md
+    type: ADR
+  - path: docs/architecture/adr-0017-deployment-topology.md
+    type: ADR
+  - path: docs/architecture/adr-0018-error-handling.md
+    type: ADR
+  - path: docs/architecture/adr-0020-multitenancy-disclosure.md
+    type: ADR
+  - path: docs/architecture/adr-0021-cicd-and-schedules.md
+    type: ADR
+  - path: docs/architecture/adr-0022-two-layer-auth-gate.md
+    type: ADR
+  - path: docs/architecture/adr-0023-audit-event-taxonomy.md
+    type: ADR
+  - path: docs/architecture/adr-0024-data-retention.md
+    type: ADR
+  - path: docs/architecture/adr-0025-scenario-peer-carveout.md
+    type: ADR

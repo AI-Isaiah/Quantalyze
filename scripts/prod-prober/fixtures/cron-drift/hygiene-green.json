@@ -1,0 +1,40 @@
+[
+  {
+    "jobname": "match_engine_cron",
+    "command": "DO $$ DECLARE k text; u text; BEGIN SELECT decrypted_secret INTO k FROM vault.decrypted_secrets WHERE name = 'analytics_service_key'; SELECT decrypted_secret INTO u FROM vault.decrypted_secrets WHERE name = 'analytics_base_url'; PERFORM net.http_post(url := u || '/api/match/cron-recompute', headers := jsonb_build_object('Content-Type', 'application/json', 'X-Service-Key', k), body := '{}'::jsonb, timeout_milliseconds := 60000); END $$"
+  },
+  {
+    "jobname": "fixture_bearer_concat_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('Authorization', 'Bearer ' || (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'analytics_service_key')), body := '{}'::jsonb)"
+  },
+  {
+    "jobname": "fixture_apikey_var_job",
+    "command": "DO $$ DECLARE v_key text; BEGIN SELECT decrypted_secret INTO v_key FROM vault.decrypted_secrets WHERE name = 'anon_key'; PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('apikey', v_key), body := '{}'::jsonb); END $$"
+  },
+  {
+    "jobname": "fixture_content_type_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('Content-Type', 'application/json'), body := '{}'::jsonb)"
+  },
+  {
+    "jobname": "fixture_sweep_job",
+    "command": "SELECT retention_sweep()"
+  },
+  {
+    "jobname": "fixture_do_language_job",
+    "command": "DO LANGUAGE plpgsql $$ DECLARE k text; BEGIN SELECT decrypted_secret INTO k FROM vault.decrypted_secrets WHERE name = 'analytics_service_key'; PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', k), body := '{}'::jsonb); END $$"
+  },
+  {
+    "jobname": "fixture_short_split_headers_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('Content-Type', 'application/' || 'json', 'X-Trace', 'FAKE-' || '01'), body := '{}'::jsonb)"
+  },
+  {
+    "jobname": "fixture_raise_prose_job",
+    "note": "NEAR-MISS CALIBRATION 1 of 2, lifted from the committed corpus token census: `retention_notification_dispatches:` is THIRTY-FOUR characters — OVER TOKEN_MIN — and clean only because it carries no digit. Rename that job with a numeric suffix and the hourly prober starts crying wolf; the false-positive-budget scenario is the tripwire.",
+    "command": "DO $$ BEGIN RAISE NOTICE 'retention_notification_dispatches: nothing to do for this window, orphaned_running_reaped:%', 0; END $$"
+  },
+  {
+    "jobname": "fixture_bare_url_job",
+    "note": "NEAR-MISS CALIBRATION 2 of 2: a ninety-character URL that DOES carry digits, clean only because BARE_URL_RE exempts it. Add a ?query, a #fragment or user:pw@ and it stops being bare — the wiring test calibrates that in both directions.",
+    "command": "SELECT net.http_post(url := 'https://quantalyze-analytics-production.up.railway.app/api/match/cron-recompute-0123456789')"
+  }
+]

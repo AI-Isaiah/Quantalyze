@@ -87,8 +87,11 @@ def test_get_adapter_unknown_source() -> None:
 
     from services.ingestion import get_adapter
 
+    # 'mt5' became a first-class Source in Phase 135 (MT5SRC-01); use a
+    # genuinely-unsupported value (matching the 'kraken' convention used across
+    # the ingestion suites) to pin the unknown-source rejection.
     with pytest.raises(ValueError) as exc_info:
-        get_adapter("mt5")
+        get_adapter("kraken")
 
     assert "Unsupported source" in str(exc_info.value)
 
@@ -209,6 +212,8 @@ def test_literal_types() -> None:
     # in lockstep with the TS allowlist + SQL CHECKs (test_boundary_literals_parity
     # pins this). Phase 120 (SFOX-05) adds 'sfox' in lockstep with the ingestion
     # registry (SUPPORTED_SOURCES/_FACTORIES) — resolving the 119 deferral.
+    # Phase 135 (MT5SRC-01) adds 'mt5' in lockstep with the ingestion registry +
+    # the Mt5Adapter factory (test_source_literal_and_registry_agree pins parity).
     assert set(typing.get_args(Source)) == {
         "okx",
         "binance",
@@ -216,6 +221,7 @@ def test_literal_types() -> None:
         "csv",
         "deribit",
         "sfox",
+        "mt5",
     }
     assert set(typing.get_args(TrustTier)) == {
         "api_verified",

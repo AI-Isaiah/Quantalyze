@@ -21,6 +21,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrategyTable } from "./StrategyTable";
+import { EMPTY_ADVANCED_FILTERS, StrategyFilters } from "./StrategyFilters";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
 
@@ -39,6 +40,7 @@ function makeAnalytics(
     id: "an-1",
     strategy_id: "s-1",
     computed_at: "2026-01-01T00:00:00Z",
+    computing_started_at: null,
     computation_status: "complete",
     computation_error: null,
     benchmark: null,
@@ -223,9 +225,10 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     ).toBeDefined();
     // The table contains the strategy name link cells; once empty-watchlist
     // takes over, those links are gone.
-    expect(screen.queryByText("Alpha Stellar")).toBeNull();
-    expect(screen.queryByText("Beta Voyager")).toBeNull();
-    expect(screen.queryByText("Gamma Pioneer")).toBeNull();
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(screen.queryByRole("link", { name: "Alpha Stellar" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Beta Voyager" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Gamma Pioneer" })).toBeNull();
   });
 
   it("Case 6: scope='watchlist' with initialWatchedSet of 2 strategies renders only those 2", async () => {
@@ -242,9 +245,10 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
 
     // Table is still rendered (watchedSet is non-empty); only the two
     // starred strategies appear.
-    expect(screen.getByText("Alpha Stellar")).toBeDefined();
-    expect(screen.getByText("Beta Voyager")).toBeDefined();
-    expect(screen.queryByText("Gamma Pioneer")).toBeNull();
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(screen.getByRole("link", { name: "Alpha Stellar" })).toBeDefined();
+    expect(screen.getByRole("link", { name: "Beta Voyager" })).toBeDefined();
+    expect(screen.queryByRole("link", { name: "Gamma Pioneer" })).toBeNull();
     // EmptyWatchlist is NOT rendered when the set is non-empty.
     expect(screen.queryByText("Your watchlist is empty")).toBeNull();
   });
@@ -290,9 +294,10 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     render(
       <StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />,
     );
-    expect(screen.getByText("Alpha Stellar")).toBeDefined();
-    expect(screen.getByText("Beta Voyager")).toBeDefined();
-    expect(screen.getByText("Gamma Pioneer")).toBeDefined();
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(screen.getByRole("link", { name: "Alpha Stellar" })).toBeDefined();
+    expect(screen.getByRole("link", { name: "Beta Voyager" })).toBeDefined();
+    expect(screen.getByRole("link", { name: "Gamma Pioneer" })).toBeDefined();
   });
 
   it("Save preferences applies the new hide_examples value to the rendered table immediately", async () => {
@@ -319,10 +324,11 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     );
 
     // After hydration the example strategy is hidden (hide_examples=true).
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
     await waitFor(() => {
-      expect(screen.queryByText("Example Demo Strategy")).toBeNull();
+      expect(screen.queryByRole("link", { name: "Example Demo Strategy" })).toBeNull();
     });
-    expect(screen.getByText("Alpha Stellar")).toBeDefined();
+    expect(screen.getByRole("link", { name: "Alpha Stellar" })).toBeDefined();
 
     // Open the Customize drawer.
     fireEvent.click(
@@ -341,7 +347,8 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
 
     // The example strategy is now visible without a reload.
     await waitFor(() => {
-      expect(screen.getByText("Example Demo Strategy")).toBeDefined();
+      // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+      expect(screen.getByRole("link", { name: "Example Demo Strategy" })).toBeDefined();
     });
   });
 
@@ -648,7 +655,8 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
 
   it("the sticky first DATA column stays solid bg-surface and does NOT take the translucent row hover (Pitfall 5)", () => {
     render(<StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />);
-    const nameLink = screen.getByText("Alpha Stellar");
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    const nameLink = screen.getByRole("link", { name: "Alpha Stellar" });
     const firstCell = nameLink.closest("td");
     expect(firstCell).not.toBeNull();
     expect(firstCell!.className).toContain("sticky");
@@ -907,5 +915,275 @@ describe("StrategyTable — v1.11 sign-restricted color policy", () => {
     const cell = screen.getByText("—").closest("td")!;
     expect(cell.className).not.toContain("text-positive");
     expect(cell.className).not.toContain("text-negative");
+  });
+});
+
+// --- Phase 159 (159-03 / RANK-02) projection-shape render guard -------------
+//
+// Threat T-159-10: an over-narrow projection is a SILENT visual regression —
+// no crash, no type error, just blank sparklines and a permanently-"Syncing"
+// chip. The other pins for this work assert the `.select()` STRING; this one
+// asserts the CONSEQUENCE, by rendering a row carrying ONLY the columns
+// `getStrategiesByCategory` actually projects.
+//
+// The key list below is not invented: it is the shape MEASURED coming back
+// from the TEST project through the ANONYMOUS key on 2026-08-21 —
+//   cagr, calmar, sharpe, volatility, computed_at, three_month, max_drawdown,
+//   six_month_return, cumulative_return, sparkline_returns,
+//   computation_status, sparkline_drawdown
+// — with `metrics_json`, `daily_returns` and `data_quality_flags` ABSENT
+// (not null: absent). Every other StrategyAnalytics field is deliberately
+// left off so this fixture cannot pass by borrowing a column the projection
+// no longer fetches.
+function makeProjectedRow(id: string, name: string): StrategyWithAnalytics {
+  const base = makeStrategy({ id, name });
+  const projectedAnalytics = {
+    computed_at: "2026-01-01T00:00:00Z",
+    computation_status: "complete",
+    cumulative_return: 0.42,
+    cagr: 0.18,
+    sharpe: 1.5,
+    calmar: 1.1,
+    max_drawdown: -0.12,
+    volatility: 0.22,
+    six_month_return: 0.21,
+    sparkline_returns: [0, 0.05, 0.1],
+    sparkline_drawdown: [0, -0.1, -0.2, -0.05, 0],
+    three_month: 0.09,
+  };
+  return {
+    ...base,
+    // Cast mirrors production: PostgREST returns exactly the projected keys,
+    // and queries.ts hands that partial row through as StrategyAnalytics.
+    analytics: projectedAnalytics as unknown as StrategyAnalytics,
+  };
+}
+
+describe("StrategyTable — renders correctly on the RANK-02 projected row shape", () => {
+  it("still draws BOTH sparklines when metrics_json/daily_returns are absent", () => {
+    render(
+      <StrategyTable
+        strategies={[makeProjectedRow(STRATEGY_ID_A, "Alpha Stellar")]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    // A blank sparkline is the exact failure T-159-10 describes, and it is
+    // invisible to a type checker.
+    expect(getStrokeOnSparkline("sparkline-cell-returns")).toBe(
+      "var(--color-accent)",
+    );
+    expect(getStrokeOnSparkline("sparkline-cell-drawdown")).not.toBeNull();
+  });
+
+  it("renders real metric values, not em-dashes, for every projected KPI", () => {
+    render(
+      <StrategyTable
+        strategies={[makeProjectedRow(STRATEGY_ID_A, "Alpha Stellar")]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(screen.getByRole("link", { name: "Alpha Stellar" })).toBeInTheDocument();
+    // Each of these is a rendered cell fed by ONE projected column. Drop that
+    // column from the projection and the cell degrades to "—" — the quiet
+    // failure mode, since nothing throws. Asserted by VALUE for that reason.
+    expect(screen.getByText("1.50")).toBeInTheDocument(); // sharpe
+    expect(screen.getByText("+42.00%")).toBeInTheDocument(); // cumulative_return
+    expect(screen.getByText("+18.00%")).toBeInTheDocument(); // cagr
+    expect(screen.getByText("-12.00%")).toBeInTheDocument(); // max_drawdown
+  });
+});
+
+// --- Phase 159 (159-03 / RANK-02) 3M advanced-filter, BOTH row shapes --------
+//
+// RANK-02 changed the 3M filter to `s.analytics.three_month ?? mj?.three_month`:
+// the aliased JSONB key FIRST (the anon list read projects
+// `three_month:metrics_json->three_month` so the whole blob never reaches an
+// anonymous reader), the `metrics_json` blob as FALLBACK (the owner-scoped
+// `getMyStrategies` keeps its wildcard embed under the D-02 exemption and so
+// carries the blob, not the alias). Two surfaces, one expression, and each half
+// is load-bearing for exactly one of them:
+//   * revert to blob-only  → /browse + /discovery show an EMPTY table whenever
+//     a 3M range is set;
+//   * drop the fallback    → /my-strategies empties instead.
+// Neither half had a test. Both failures are SILENT — `matchesRange` coerces a
+// missing value to 0 (`value ?? 0`), so a broken read does not throw, it just
+// filters the row on a fabricated zero.
+//
+// ⭐ THAT COERCION IS WHY BOTH ARMS BELOW ARE NEEDED, and why the "dropped"
+// arm's range is bounded ABOVE rather than below. Each arm is red under a
+// different failure, and neither is satisfiable by the 0 a broken read yields:
+//   KEEP arm, range 5–15%: the real 9% is inside it, the fabricated 0% is not.
+//   DROP arm, range ≤5%:   the real 9% is outside it, the fabricated 0% is IN.
+// A "dropped by a range above the value" arm would have been vacuous — 0 fails
+// it for the same reason the real value does.
+
+/** Anon/list shape: the aliased key ONLY, `metrics_json` absent (not null). */
+function makeAliasOnlyRow(id: string, name: string): StrategyWithAnalytics {
+  const base = makeStrategy({ id, name });
+  const { metrics_json: _dropped, ...withoutBlob } = base.analytics;
+  return {
+    ...base,
+    analytics: { ...withoutBlob, three_month: 0.09 } as unknown as StrategyAnalytics,
+  };
+}
+
+/** Owner shape: the `metrics_json` blob ONLY, no alias key. */
+function makeBlobOnlyRow(id: string, name: string): StrategyWithAnalytics {
+  const base = makeStrategy({ id, name });
+  return {
+    ...base,
+    analytics: makeAnalytics({
+      strategy_id: id,
+      metrics_json: { three_month: 0.09 },
+    }),
+  };
+}
+
+/** Open "All Filters", type a 3M range, Apply. The filter has no prop seam —
+ *  `advancedFilters` is StrategyTable's own state — so it is driven through the
+ *  real UI, which also pins the StrategyFilters → StrategyTable handoff. */
+async function applyThreeMonthRange(from: string, to: string) {
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: /All Filters/i }));
+  // RangeInput renders a bare <span> label, not a <label for>, so scope to the
+  // row by its text and take its two number inputs positionally (from, to).
+  const row = screen.getByText("3M %").parentElement!;
+  const [fromInput, toInput] = within(row).getAllByRole("spinbutton");
+  if (from !== "") fireEvent.change(fromInput!, { target: { value: from } });
+  if (to !== "") fireEvent.change(toInput!, { target: { value: to } });
+  await user.click(screen.getByRole("button", { name: /Apply filters/i }));
+}
+
+describe("StrategyTable — RANK-02 3M filter reads the alias AND the blob", () => {
+  const rows = () => [
+    makeAliasOnlyRow(STRATEGY_ID_A, "Alias Only Row"),
+    makeBlobOnlyRow(STRATEGY_ID_B, "Blob Only Row"),
+  ];
+
+  it("KEEPS both row shapes when the range brackets their real 3M value", async () => {
+    render(<StrategyTable strategies={rows()} categorySlug="crypto-sma" />);
+    await applyThreeMonthRange("5", "15");
+
+    // 0.09 → 9%, inside 5–15. A row whose 3M read broke reads as 0% and is
+    // dropped here, so each expectation names the branch it guards.
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(
+      screen.queryByRole("link", { name: "Alias Only Row" }),
+      "the aliased three_month key must be read (anon /browse + /discovery)",
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Blob Only Row" }),
+      "the metrics_json fallback must be read (owner /my-strategies)",
+    ).toBeInTheDocument();
+  });
+
+  it("DROPS both row shapes when the range excludes their real 3M value", async () => {
+    render(<StrategyTable strategies={rows()} categorySlug="crypto-sma" />);
+    await applyThreeMonthRange("", "5");
+
+    // 9% > 5%, so both go. A broken read (0%) would satisfy `to: 5` and SURVIVE
+    // — which is what makes this arm a real detector and not a restatement of
+    // the arm above.
+    // 2026-09-28 AD-13: name links are per-word spans, so getByText(name) no longer matches.
+    expect(screen.queryByRole("link", { name: "Alias Only Row" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Blob Only Row" })).not.toBeInTheDocument();
+  });
+});
+
+describe("StrategyTable — N-TABLE sticky header and whole words (170-10)", () => {
+  it("isolates the table so its sticky header z-index stays local", () => {
+    // WHY: the sticky th z-20/z-30 painted over the Sort selects. isolate
+    // keeps that stacking context inside the table (N-TABLE).
+    render(<StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />);
+    const root = document.querySelector("[data-strategy-table]");
+    expect(root).not.toBeNull();
+    expect(root!.className.split(/\s+/)).toContain("isolate");
+  });
+
+  it("keeps the name link's text equal to the name, each word nowrap", () => {
+    // WHY: a hyphenated word must not break at the hyphen (AD-13), and
+    // textContent must stay equal to the name (PC-5 / noteOf).
+    const name = "Alpha Long-Short Beta";
+    render(
+      <StrategyTable
+        strategies={[
+          makeStrategy({
+            id: STRATEGY_ID_A,
+            name,
+            strategy_types: ["Long-Short"],
+          }),
+        ]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    const link = screen.getByRole("link", { name });
+    expect(link.textContent).toBe(name);
+    expect(
+      [...link.querySelectorAll("span")].map((span) => ({
+        text: span.textContent,
+        nowrap: span.className.split(/\s+/).includes("whitespace-nowrap"),
+      })),
+    ).toEqual([
+      { text: "Alpha", nowrap: true },
+      { text: "Long-Short", nowrap: true },
+      { text: "Beta", nowrap: true },
+    ]);
+  });
+
+  it("wraps the tag row and keeps each tag badge on one line", () => {
+    // WHY: tags move whole to the next line, the same rule as /strategies (l).
+    render(
+      <StrategyTable
+        strategies={[
+          makeStrategy({
+            id: STRATEGY_ID_A,
+            name: "Alpha Stellar",
+            strategy_types: ["Long-Short", "Market Neutral"],
+          }),
+        ]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    const nameCell = screen.getByRole("link", { name: "Alpha Stellar" }).closest("td")!;
+    const badges = ["Long-Short", "Market Neutral"].map((label) =>
+      within(nameCell).getByText(label),
+    );
+    const tagRow = badges[0].parentElement!;
+    expect(badges[1].parentElement).toBe(tagRow);
+    expect(tagRow.className.split(/\s+/)).toEqual(
+      expect.arrayContaining(["flex", "flex-wrap", "gap-1"]),
+    );
+    for (const badge of badges) {
+      expect(badge.className.split(/\s+/)).toContain("whitespace-nowrap");
+    }
+  });
+
+  it("sticks the filter bar under the 48px mobile top bar, and at the top from md", () => {
+    // WHY: MobileTopBar is h-12 sticky z-20 below md. A bare top-0 bar
+    // slides under it and the Sort selects stop receiving clicks (N-TABLE).
+    render(
+      <StrategyFilters
+        search=""
+        onSearchChange={() => {}}
+        showExamples
+        onToggleExamples={() => {}}
+        sortKey="sharpe"
+        onSortKeyChange={() => {}}
+        sortDir="desc"
+        onSortDirChange={() => {}}
+        viewMode="table"
+        onViewModeChange={() => {}}
+        advancedFilters={EMPTY_ADVANCED_FILTERS}
+        onAdvancedFiltersChange={() => {}}
+      />,
+    );
+    const sort = screen.getByRole("combobox", { name: "Sort by" });
+    const bar = sort.closest(".sticky") as HTMLElement | null;
+    expect(bar).not.toBeNull();
+    const tokens = bar!.className.split(/\s+/);
+    expect(tokens).toContain("top-12");
+    expect(tokens).toContain("md:top-0");
+    expect(tokens).not.toContain("top-0");
   });
 });

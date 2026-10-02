@@ -30,7 +30,7 @@
  * testDir = "./e2e"), NOT tests/e2e/, per RESEARCH Pitfall 2.
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { seedStrategyWithHistory } from "./helpers/seed-test-project";
 
 const HAS_SEED_ENV =

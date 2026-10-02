@@ -1,15 +1,20 @@
 // SECURITY BOUNDARY:
-// This is a PUBLIC, sessionless route. Two Supabase reads happen here, both on
+// This is a PUBLIC, sessionless route. Three Supabase reads happen here, all on
 // the admin (service_role) transport: (1) the token-scoped `get_shared_scenario`
 // SECURITY DEFINER RPC — the gate — which self-scopes on `token_hash +
 // revoked_at IS NULL` and returns ONLY name/draft/schema_version + the draft's
-// addedStrategies[].id PUBLISHED series; and (2) a Phase-84 sibling read of
+// addedStrategies[].id PUBLISHED series; (2) a Phase-84 sibling read of
 // `strategies(id, asset_class)` bounded to those RPC-returned series ids and
 // `status='published'` (via withPublishedOnly), purely for the blend
-// annualization basis. NEVER add a query that reads an arbitrary id, NEVER call
-// the allocator-dashboard query helper, and NEVER read holdings / AUM / api_keys
-// / portfolios on this page. The recipient sees the scenario in return /
-// percentage form only, never an allocator identity.
+// annualization basis; and (3) a Phase-147 sibling read of
+// `strategy_analytics(strategy_id, returns_series)` bounded to the SAME
+// RPC-returned ids, purely to recover the real return series for
+// analytics-service-only legs (whose `daily_returns` is null). Reads (2) and (3)
+// are BOUNDED BY CONSTRUCTION to the RPC's own id output, so neither can widen
+// what the share token already exposes. NEVER add a query that reads an
+// arbitrary id, NEVER call the allocator-dashboard query helper, and NEVER read
+// holdings / AUM / api_keys / portfolios on this page. The recipient sees the
+// scenario in return / percentage form only, never an allocator identity.
 
 import { notFound } from "next/navigation";
 import { headers } from "next/headers";
@@ -29,11 +34,7 @@ import { hashShareToken } from "@/lib/scenario-share-token";
 // client" boundary error (a 500 on every valid share link). The bogus-token
 // 404 path never reaches the toWealth() call, so this only surfaces for a
 // link that actually resolves a scenario.
-import {
-  computeStrategyCurve,
-  toWealth,
-  type DailyPoint,
-} from "@/lib/scenario";
+import { toWealth } from "@/lib/scenario";
 import { methodologyLine } from "@/lib/scenario-history";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { Card } from "@/components/ui/Card";
@@ -41,6 +42,11 @@ import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
 import { EquityChart } from "@/app/(dashboard)/allocations/widgets/performance/EquityChart";
 import { ScenarioBenchmarkSection } from "@/app/(dashboard)/allocations/components/ScenarioBenchmarkSection";
+import {
+  btcLevelsFromCloses,
+  parseBtcCloses,
+  type BtcCloses,
+} from "@/app/(dashboard)/allocations/lib/scenario-benchmark";
 import {
   resolveSharedScenario,
   type SharedScenarioRow,
@@ -56,7 +62,7 @@ export const runtime = "nodejs";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
-// WR-03 — bound the benchmark self-fetch so a slow/hung /api/benchmark/btc
+// WR-03 — bound the benchmark self-fetch so a slow/hung /api/benchmark/btc/prices
 // cannot stall every anonymous render of this force-dynamic, sessionless public
 // page (the phase's only anon entry point — a cheap DoS-amplification surface).
 // Without a timeout the plain catch below only handles a thrown/!res.ok result,
@@ -69,31 +75,49 @@ const BENCHMARK_FETCH_TIMEOUT_MS = 2500;
 // prefixes "Shared scenario · ").
 const PROJECTED_LABEL = "PROJECTED — hypothetical, not a live book";
 
-/** Fetch the public BTC daily-return series for the benchmark overlay. The
- *  route is shared market data and stays cacheable — we do NOT add no-store to
- *  it. A failed / empty / TIMED-OUT fetch degrades the benchmark section to its
- *  honest "unavailable" empty state ([] → benchmarkAvailable=false), never an
- *  error and never a stalled page (WR-03). */
-async function fetchBtcDaily(): Promise<DailyPoint[]> {
+/** Fetch the public BTC closes (`{ prices, dropped, through }`, Phase 169.4
+ *  D-67) for the benchmark overlay and the vs-BTC section. The route is shared
+ *  market data and stays cacheable — we do NOT add no-store to it. A failed /
+ *  TIMED-OUT fetch, a body of any other shape (`parseBtcCloses`, so a stale
+ *  returns array is refused, never misread) or a body with no close degrades
+ *  the benchmark section to its honest "unavailable" empty state (null), never
+ *  an error and never a stalled page (WR-03). */
+async function fetchBtcCloses(): Promise<BtcCloses | null> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), BENCHMARK_FETCH_TIMEOUT_MS);
+  // 169.4 review SFH MEDIUM-3: every failure branch is logged, as the
+  // composer's client twin does (F-08). Without it an outage, a wrong
+  // NEXT_PUBLIC_APP_URL, a 429 and a contract drift all read the same
+  // "unavailable" with nothing server-side to tell them apart. The lines carry
+  // the route path and a discriminator only, never the share token.
   try {
-    const res = await fetch(`${APP_URL}/api/benchmark/btc`, { signal: ctrl.signal });
-    if (!res.ok) return [];
-    const json = (await res.json()) as unknown;
-    if (!Array.isArray(json)) return [];
-    return json.filter(
-      (p): p is DailyPoint =>
-        p !== null &&
-        typeof p === "object" &&
-        typeof (p as DailyPoint).date === "string" &&
-        typeof (p as DailyPoint).value === "number" &&
-        Number.isFinite((p as DailyPoint).value),
-    );
-  } catch {
-    // A timeout (AbortError), a thrown fetch, or a non-ok response all degrade
+    const res = await fetch(`${APP_URL}/api/benchmark/btc/prices`, { signal: ctrl.signal });
+    if (!res.ok) {
+      console.warn("[scenario-share] /api/benchmark/btc/prices non-ok response", {
+        status: res.status,
+      });
+      return null;
+    }
+    const body = (await res.json()) as unknown;
+    const closes = parseBtcCloses(body);
+    if (closes === null) {
+      console.warn("[scenario-share] /api/benchmark/btc/prices unexpected body shape");
+      return null;
+    }
+    return closes.prices.length > 0 ? closes : null;
+  } catch (err) {
+    // A timeout (AbortError), a thrown fetch or an unparsable body all degrade
     // to the honest benchmark-unavailable empty state — never a thrown page.
-    return [];
+    if (err instanceof Error && err.name === "AbortError") {
+      console.warn("[scenario-share] /api/benchmark/btc/prices timed out", {
+        timeoutMs: BENCHMARK_FETCH_TIMEOUT_MS,
+      });
+    } else {
+      console.warn("[scenario-share] /api/benchmark/btc/prices fetch failed", {
+        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
+    }
+    return null;
   } finally {
     clearTimeout(timer);
   }
@@ -160,6 +184,11 @@ export default async function ScenarioSharePage({
   //     to an empty lookup → the √252 default (honest), never a throw on this
   //     public page.
   const assetClassById: Record<string, string | null> = {};
+  // Phase 147 (SCEN-01) — raw `strategy_analytics.returns_series` per leg, read
+  // below. Declared here so it is in scope at the resolve call regardless of the
+  // seriesIds guard; an empty lookup is the conservative default (the resolver
+  // then falls back to the RPC's own daily_returns alone, i.e. pre-147).
+  const returnsSeriesById: Record<string, unknown> = {};
   const seriesIds = (row.series ?? []).map((s) => s.strategy_id);
   if (seriesIds.length > 0) {
     try {
@@ -195,14 +224,69 @@ export default async function ScenarioSharePage({
         message: (e as { message?: string }).message,
       });
     }
+
+    // 3c. Phase 147 (SCEN-01) — the per-leg RETURN SERIES. The RPC's `series`
+    //     jsonb carries only `strategy_analytics.daily_returns`, which CSV
+    //     ingest alone populates: an analytics-service-only strategy leaves it
+    //     null and writes its real track to `returns_series` as a cumprod wealth
+    //     index. Pre-147 those legs resolved EMPTY here, so a recipient saw a
+    //     silently zeroed blend while the owner's composer showed the real one.
+    //
+    //     (a) This is the SAME Phase-84 sibling-read pattern as the block above,
+    //         and for the same reason: the phase-29 frozen-spine gate
+    //         (phase-29-frozen-spine-guards.test.ts:141, FORBIDDEN_MIGRATION_RE
+    //         = /scenario|share/i) fails the build on ANY new scenarios/share
+    //         migration, so `get_shared_scenario` cannot be widened to project
+    //         returns_series. The data must arrive caller-side.
+    //     (b) DISCLOSURE BOUND: the read is `.in("strategy_id", seriesIds)`,
+    //         where seriesIds is the RPC's OWN output — the id universe IS the
+    //         RPC's, so this read can never widen what the share token already
+    //         exposes. Those ids were published-gated inside the SECURITY
+    //         DEFINER function itself (migration 20260622120000:205), which is
+    //         why `withPublishedOnly` is NOT applied here: it is a `strategies`-
+    //         table predicate (status column) and `strategy_analytics` has no
+    //         such column, so wrapping this read would be a type-level lie, not
+    //         a gate. Reading an ARBITRARY strategy_id on this page would be a
+    //         disclosure bug — the `.in()` bound is what prevents it.
+    //     The projection stays narrow (strategy_id + returns_series only) and
+    //     the raw index NEVER reaches the client: resolveSharedScenario consumes
+    //     it server-side and emits only resolved DailyPoint arrays.
+    try {
+      const { data: rsRows, error: rsError } = await admin
+        .from("strategy_analytics")
+        .select("strategy_id, returns_series")
+        .in("strategy_id", seriesIds);
+      if (rsError) {
+        // error-absent ≠ legit-absent (same rule as the asset_class arm above):
+        // a PostgREST error returns {data:null,error} WITHOUT throwing, and a
+        // silent empty lookup would re-create the exact zeroed-blend defect this
+        // read exists to fix — with no signal. Log; still degrade to empty.
+        console.error("[scenario-share/page] returns_series read failed", {
+          message: (rsError as { message?: string }).message,
+        });
+      }
+      for (const r of (rsRows ?? []) as Array<{
+        strategy_id: string;
+        returns_series: unknown;
+      }>) {
+        returnsSeriesById[r.strategy_id] = r.returns_series;
+      }
+    } catch (e) {
+      // Transport/throw path degrades to the empty lookup (→ daily_returns
+      // alone, the pre-147 projection). This public page never throws on an
+      // enrichment read; log the breadcrumb.
+      console.error("[scenario-share/page] returns_series read threw", {
+        message: (e as { message?: string }).message,
+      });
+    }
   }
 
-  // 4. Public BTC benchmark series (cacheable — NOT no-store). 5. Resolve.
-  // The resolve layer no longer consumes btcDaily (the benchmark is recomputed
-  // inside ScenarioBenchmarkSection from portfolioDaily + btcDaily); the page
-  // still fetches it here to feed the chart overlay + the section directly.
-  const btcDaily = await fetchBtcDaily();
-  const resolved = resolveSharedScenario(row, assetClassById);
+  // 4. Public BTC closes (cacheable — NOT no-store). 5. Resolve.
+  // The resolve layer does not consume BTC (the benchmark is recomputed inside
+  // ScenarioBenchmarkSection from portfolioDaily + the closes); the page fetches
+  // them here to feed the chart overlay + the section directly.
+  const btc = await fetchBtcCloses();
+  const resolved = resolveSharedScenario(row, assetClassById, returnsSeriesById);
 
   // DI-23-01 — a version-ahead / undecodable / dangling-ref draft is honest
   // absence, NEVER a live-book substitution and NEVER a 404 (the link IS valid).
@@ -223,16 +307,19 @@ export default async function ScenarioSharePage({
 
   const { name, metrics, portfolioDaily, strategyNames, isMixed, periodsPerYear, leveraged } =
     resolved;
-  const btcAvailable = btcDaily.length > 0;
 
   // EquityChart needs cumulative-WEALTH form (start ~1.0). The engine's
   // `equity_curve` is cumulative RETURN (0.18 = +18%); convert via `+1` then
   // brand with toWealth (24-RESEARCH / Pitfall 1). The benchmark overlay is the
-  // BTC wealth curve (computeStrategyCurve), shown when the series is available.
+  // BTC close LEVEL (`btcLevelsFromCloses`, Phase 169.4 D-66: never compounded
+  // returns), shown when the closes are available. It is based on the last
+  // close on or before the scenario's first date (169.4 review WR-01), so BTC
+  // starts at 1.0 with the portfolio, not at the served series' first close.
   const scenarioWealth = toWealth(
     metrics.equity_curve.map((p) => ({ date: p.date, value: p.value + 1 })),
   );
-  const btcWealth = btcAvailable ? computeStrategyCurve(btcDaily) : undefined;
+  const btcWealth =
+    btc !== null ? btcLevelsFromCloses(btc.prices, portfolioDaily[0]?.date) : undefined;
 
   // KPI strip — RETURN / PERCENTAGE form only. No USD, no AUM. Null/non-finite
   // metrics render the em-dash "—" via the shared formatters (never a 0).
@@ -321,8 +408,7 @@ export default async function ScenarioSharePage({
       <Card className="mt-8">
         <ScenarioBenchmarkSection
           portfolioDaily={portfolioDaily}
-          btcDaily={btcDaily}
-          benchmarkAvailable={btcAvailable}
+          btc={btc}
           // Phase 84 (BLEND-01): ride the SAME basis the projection used, so the
           // vs-BTC TE/IR/alpha risk math matches the KPI strip's clock.
           periodsPerYear={periodsPerYear}

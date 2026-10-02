@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { normalizeDailyReturns, type DailyPoint } from "@/lib/portfolio-math-utils";
-import { mean } from "@/lib/portfolio-math-utils";
+import { pearson } from "@/lib/return-stats";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
 import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 
@@ -14,27 +14,18 @@ import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 // pairwise Pearson correlations from strategy daily returns. Rendered as an
 // HTML table with teal (positive) / red (negative) / white (neutral) cells
 // and a color legend gradient bar below.
+//
+// A correlation that cannot be measured (a flat or constant-yield leg, fewer
+// than 2 aligned points, or a missing precomputed cell) is null and renders
+// "—" on the neutral background with the title "Insufficient data", as the
+// /compare matrix does (founder decision D7, 2026-09-26; the G11.E.5 contract:
+// "no correlation" and "correlation cannot be measured" are different
+// answers). It used to read "0.00", which says "uncorrelated".
 // ---------------------------------------------------------------------------
 
-/** Pearson correlation between two equal-length numeric arrays. */
-function pearson(a: number[], b: number[]): number {
-  const n = Math.min(a.length, b.length);
-  if (n < 2) return 0;
-  const ma = mean(a.slice(0, n));
-  const mb = mean(b.slice(0, n));
-  let cov = 0;
-  let varA = 0;
-  let varB = 0;
-  for (let i = 0; i < n; i++) {
-    const da = a[i] - ma;
-    const db = b[i] - mb;
-    cov += da * db;
-    varA += da * da;
-    varB += db * db;
-  }
-  const denom = Math.sqrt(varA * varB);
-  return denom > 0 ? cov / denom : 0;
-}
+/** The neutral cell background: white, the colour a 0 correlation also maps to. */
+const NEUTRAL_BG = "rgb(255,255,255)";
+const NEUTRAL_FG = "#1A1A2E";
 
 /** Map correlation value [-1, 1] to a CSS color. */
 function correlationColor(v: number): string {
@@ -61,8 +52,20 @@ function textColorForCorr(v: number): string {
   return Math.abs(v) > 0.5 ? "#FFFFFF" : "#1A1A2E";
 }
 
-interface StrategyReturns {
+/**
+ * Phase 169.4 D-75: a matrix row/column. `id` is the strategy's (or connected
+ * key's) stable id and is the React key; `name` is the FULL display label, the
+ * visible text and the `title`. Names are never cut in code: the header and
+ * row-label cells truncate with CSS (`truncate` + `maxWidth`) and keep the full
+ * name as the title. A code-side cut collapsed two keys on one exchange
+ * ("Binance — Main" / "Binance — Hedge") into one name and one React key.
+ */
+interface Label {
+  id: string;
   name: string;
+}
+
+interface StrategyReturns extends Label {
   // M-0215: keep dates so pairwise correlation aligns same-day returns.
   // normalizeDailyReturns returns date-sorted points, so `dates` is sorted.
   dates: string[];
@@ -99,10 +102,11 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
     if (precomputed && typeof precomputed === "object") {
       const keys = Object.keys(precomputed);
       if (keys.length > 0) {
-        const m: number[][] = keys.map((row) =>
+        const m: (number | null)[][] = keys.map((row) =>
           keys.map((col) => {
             const v = (precomputed as Record<string, Record<string, number>>)[row]?.[col];
-            return typeof v === "number" ? v : 0;
+            // A missing or non-finite precomputed cell is the same absence (D7).
+            return typeof v === "number" && Number.isFinite(v) ? v : null;
           }),
         );
         // Build name map from strategies
@@ -115,7 +119,7 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
             if (id && name) nameMap[id] = name;
           }
         }
-        const n = keys.map((k) => (nameMap[k] ?? k).slice(0, 10));
+        const n: Label[] = keys.map((k) => ({ id: k, name: nameMap[k] ?? k }));
         return { names: n, matrix: m };
       }
     }
@@ -123,39 +127,43 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
     // Compute from daily returns
     const strategies: StrategyReturns[] = [];
     if (data?.strategies && Array.isArray(data.strategies)) {
-      for (const s of data.strategies) {
+      for (const [idx, s] of data.strategies.entries()) {
         const dr = normalizeDailyReturns(
           s?.strategy?.strategy_analytics?.daily_returns,
         );
         if (dr.length > 0) {
-          const name = (
-            s?.alias ??
-            s?.strategy?.codename ??
-            s?.strategy?.name ??
-            "?"
-          ).slice(0, 10);
+          const name =
+            s?.alias ?? s?.strategy?.codename ?? s?.strategy?.name ?? "?";
+          // The row index backs a row with no id, so a key is never shared.
+          const id = s?.strategy_id ?? s?.strategy?.id ?? `row-${idx}`;
           const dates: string[] = [];
           const dateMap = new Map<string, number>();
           for (const d of dr as DailyPoint[]) {
             dates.push(d.date);
             dateMap.set(d.date, d.value);
           }
-          strategies.push({ name, dates, dateMap });
+          strategies.push({ id, name, dates, dateMap });
         }
       }
     }
 
-    if (strategies.length === 0) return { names: [], matrix: [] };
+    if (strategies.length === 0) return { names: [] as Label[], matrix: [] as (number | null)[][] };
 
     const n = strategies.length;
-    const m: number[][] = Array.from({ length: n }, (_, i) =>
+    const m: (number | null)[][] = Array.from({ length: n }, (_, i) =>
       Array.from({ length: n }, (_, j) => {
         if (i === j) return 1;
         const [av, bv] = alignedPair(strategies[i], strategies[j]);
+        // The shared pearson answers null when a leg has no real dispersion
+        // (an exact constant, or a compounding constant yield's float residue)
+        // or the overlap is under 2 points; the cell keeps that null (D7).
         return pearson(av, bv);
       }),
     );
-    return { names: strategies.map((s) => s.name), matrix: m };
+    return {
+      names: strategies.map((s): Label => ({ id: s.id, name: s.name })),
+      matrix: m,
+    };
   }, [data]);
 
   if (names.length === 0) {
@@ -178,42 +186,60 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
               <th className="p-1" />
               {names.map((n) => (
                 <th
-                  key={n}
+                  key={n.id}
                   className="truncate p-1 font-sans font-medium"
                   style={{ color: "#4A5568", maxWidth: 80 }}
-                  title={n}
+                  title={n.name}
                 >
-                  {n}
+                  {n.name}
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
             {matrix.map((row, i) => (
-              <tr key={names[i]}>
+              <tr key={names[i].id}>
                 <td
                   className="truncate p-1 text-right font-sans font-medium"
                   style={{ color: "#4A5568", maxWidth: 80 }}
-                  title={names[i]}
+                  title={names[i].name}
                 >
-                  {names[i]}
+                  {names[i].name}
                 </td>
-                {row.map((val, j) => (
-                  <td
-                    key={`${i}-${j}`}
-                    className="p-1 font-metric tabular-nums"
-                    data-testid="corr-cell"
-                    style={{
-                      backgroundColor: correlationColor(val),
-                      color: textColorForCorr(val),
-                      minWidth: 40,
-                      borderRadius: 2,
-                    }}
-                    aria-label={`${names[i]} and ${names[j]}: ${val.toFixed(2)} correlation`}
-                  >
-                    {val.toFixed(2)}
-                  </td>
-                ))}
+                {row.map((val, j) =>
+                  val === null ? (
+                    <td
+                      key={`${i}-${j}`}
+                      className="p-1 font-metric tabular-nums"
+                      data-testid="corr-cell"
+                      style={{
+                        backgroundColor: NEUTRAL_BG,
+                        color: NEUTRAL_FG,
+                        minWidth: 40,
+                        borderRadius: 2,
+                      }}
+                      title="Insufficient data"
+                      aria-label={`${names[i].name} and ${names[j].name}: no data`}
+                    >
+                      —
+                    </td>
+                  ) : (
+                    <td
+                      key={`${i}-${j}`}
+                      className="p-1 font-metric tabular-nums"
+                      data-testid="corr-cell"
+                      style={{
+                        backgroundColor: correlationColor(val),
+                        color: textColorForCorr(val),
+                        minWidth: 40,
+                        borderRadius: 2,
+                      }}
+                      aria-label={`${names[i].name} and ${names[j].name}: ${val.toFixed(2)} correlation`}
+                    >
+                      {val.toFixed(2)}
+                    </td>
+                  ),
+                )}
               </tr>
             ))}
           </tbody>

@@ -69,6 +69,98 @@ def sfox_enabled_server() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# MT5 server/worker go-dark gate + cross-plan error-detail contract (Phase 135
+# / MT5SRC — the Q-C go-dark decision; verbatim clone of the sfox seam above).
+#
+# These three detail strings are the SHARED cross-plan contract consumed by the
+# Phase-135 validate branch (plan 135-01 Mt5Adapter.validate) and the FastAPI
+# `is_mt5` router branch + Next.js key routes (plans 03/04). They are defined
+# HERE (the single closed-set source) so the copy cannot be silently re-worded
+# or hand-forked across the worker + router.
+#
+# STRING-SAFETY INVARIANT (D: Q-B resolved): the wizardErrors.ts
+# classifyKeyValidationError matcher is SUBSTRING-based. These three strings
+# were collision-checked against every substring branch in that matcher
+# ("signature", "invalid secret", "authentication failed", "invalid_credentials",
+# "ip"+"allow", "rate", "429", "timeout", "could not verify", "permission scope",
+# "probe", "trading", "withdraw") and collide with NONE. Any reword MUST re-run
+# that collision check before landing — a stray "rate"/"trading"/"timeout"
+# substring would silently mis-classify the MT5 failure.
+#
+# mt5_enabled_server() mirrors sfox_enabled_server byte-for-byte: fail-CLOSED
+# strict lower-cased "true" (unset / "" / "1" / "on" / "TRUE " all read OFF), read
+# per-call (never a module-load const) so a go-live env flip takes effect without
+# a reimport. The seam ships DARK (Q-C) until the founder sets MT5_ENABLED=true at
+# go-live (Phase 139), in lockstep with the Vercel server env of the same name.
+# ---------------------------------------------------------------------------
+MT5_DISABLED_DETAIL = "MT5 integration is not yet available."
+MT5_MASTER_PASSWORD_DETAIL = (
+    "MT5 master password detected — this login can place trades. Reconnect "
+    "using your read-only investor password."
+)
+MT5_WRONG_SERVER_DETAIL = (
+    "Broker server not found — check the exact server name shown in your MT5 "
+    "terminal login window."
+)
+
+
+def mt5_enabled_server() -> bool:
+    """True iff MT5_ENABLED is set to "true" (fail-closed; see module note)."""
+    return (os.getenv("MT5_ENABLED") or "").strip().lower() == "true"
+
+
+# ---------------------------------------------------------------------------
+# WR-14 (Phase 164.6.4 round 3) — the kill-switch MISCONFIGURATION detector.
+#
+# mt5_enabled_server() above is fail-CLOSED on any value that is not exactly
+# "true" — by design, and correct for the go-live gate it serves. But that
+# means "1", "on" and "yes" read OFF exactly like a deliberate "" or "false":
+# an operator who typed one of those MEANT to switch MT5 ON and got the kill
+# switch instead. That is a MISCONFIGURATION, not a decision, and the ONE call
+# site that classifies the difference (the session monitor's tick, which
+# records a `not_measured` reading either way) needs to tell them apart so
+# only a genuine decision is exempt from the blind-run escalation. This does
+# NOT widen mt5_enabled_server() itself — every OTHER caller (the go-live
+# gate in routers/exchange.py, routers/process_key.py,
+# services/allocator_positions.py, services/job_worker.py,
+# services/ingestion/long_fetch.py) keeps the strict fail-closed "true" match
+# unchanged.
+# ---------------------------------------------------------------------------
+def mt5_enabled_is_deliberate() -> bool:
+    """True only when MT5_ENABLED names a value the reader RECOGNISES as off.
+
+    ⛔ `1`, `on`, `yes` are MISCONFIGURATIONS, not decisions: they read OFF
+    (see `mt5_enabled_server`) and the operator meant ON. Only absent, blank
+    or an explicit `false` is a DECISION.
+    """
+    return (os.getenv("MT5_ENABLED") or "").strip().lower() in ("", "false")
+
+
+# ---------------------------------------------------------------------------
+# smoothed_mtm worker kill-switch (Phase 134 — SAFE ROLLOUT of the v1.14 basis).
+#
+# The worker computes a THIRD factsheet basis (`smoothed_mtm`) at derive time for
+# every options book (Phases 131-133). A STRUCTURAL mark-hole in that pass
+# (`LedgerValuationError`) fails the WHOLE job — cash + MTM headlines included.
+# This flag lets the smoothed pass ship DARK: gated OFF (the default), the
+# smoothed THIRD pass is SKIPPED ENTIRELY in both the single-key and composite
+# derive routes (no ledger build, no dense-marks fetch, no assert_ledger_complete,
+# no persist, no metrics_json_by_basis["smoothed_mtm"] key), so a structural
+# mark-hole can NEVER fail a real prod job until the founder flips it on after
+# monitoring. Flag ON → behavior is exactly as v1.14 built it.
+#
+# Read per-call (never a module-load const) so a test / go-live env change takes
+# effect without a reimport. Fail-CLOSED with the SAME .strip().lower() == "true"
+# normalization as sfox_enabled_server above: unset / "" / "1" / "on" / "TRUE "
+# all read OFF; only an explicit "true" enables (the ENABLE-only tolerance is safe
+# — it can only turn the dark basis on, the founder's explicit go-live intent).
+# ---------------------------------------------------------------------------
+def is_smoothed_mtm_enabled() -> bool:
+    """True iff SMOOTHED_MTM_ENABLED is set to "true" (fail-closed; see note)."""
+    return (os.getenv("SMOOTHED_MTM_ENABLED") or "").strip().lower() == "true"
+
+
+# ---------------------------------------------------------------------------
 # Trade side — the {buy, sell} fill action.
 # Mirror of the DB CHECK on ``trades.side`` (migration 112). This is the
 # action taken on a fill; it is NOT the resulting position direction (a
@@ -145,6 +237,33 @@ STABLECOINS_LONGEST_FIRST: tuple[str, ...] = tuple(
 CRYPTO_VENUES: frozenset[str] = frozenset(
     {"deribit", "binance", "okx", "bybit", "sfox"}
 )
+
+
+# ---------------------------------------------------------------------------
+# Non-ccxt venues — the "this venue is NOT a ccxt.Exchange" set (Phase 151 /
+# AUM-02).
+#
+# MD-01 discipline (mirroring CRYPTO_VENUES above): this set MIRRORS the
+# non-ccxt dispatch branches of ``job_worker._make_exchange_client`` — the
+# SINGLE preflight construction chokepoint. That factory hands back a
+# ``SfoxClient`` or an ``Mt5Session`` for these venues, neither of which has a
+# ``fetch_balance`` / ``fetch_positions`` / ``id`` surface.
+#
+# ⚠️ A venue added to that factory WITHOUT being added here re-opens the AUM-02
+# crash class: the object gets built, reaches the holdings consumer
+# (``allocator_positions.fetch_allocator_holdings``), falls through to the ccxt
+# body, and raises a raw ``AttributeError`` that the worker then stamps into the
+# USER-VISIBLE ``api_keys.sync_error`` column. That is exactly the PROD defect
+# (census 2026-08-05: all three founder MT5 keys carried
+# "'Mt5Session' object has no attribute 'fetch_balance'"). Keep them in lockstep
+# — ``tests/test_allocator_positions_non_ccxt.py`` asserts set equality against
+# the factory's own source, so drift fails CI rather than PROD.
+#
+# Membership here means "do not use the ccxt path", NOT "cannot sync": a venue
+# in this set with a registered fetcher in
+# ``allocator_positions._NON_CCXT_HOLDINGS_FETCHERS`` syncs through that fetcher;
+# one without a fetcher yet skips HONESTLY with end-user copy.
+NON_CCXT_VENUES: frozenset[str] = frozenset({"mt5", "sfox"})
 
 
 # ---------------------------------------------------------------------------

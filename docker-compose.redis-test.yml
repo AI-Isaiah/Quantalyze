@@ -1,0 +1,68 @@
+# Local provisioning for the seam-breaker real-Redis lane (SEAMCORE-09).
+#
+# WHY THIS EXISTS
+# ---------------
+# `src/test/helpers/upstash-breaker.ts` is a FIXED-window fake anchored at the
+# first call, with no previous bucket, no weighted carry-over, and it INCREMENTS
+# ON DENIAL. The deployed `@upstash/ratelimit@2.0.8` sliding window is
+# epoch-aligned, carries over a weighted count from the previous bucket, and
+# does NOT increment on denial. `recordSeamFailure()` reads BOTH `success` and
+# `remaining`, so both divergences change behaviour. A better fake is still a
+# fake that cannot execute the deployed Lua.
+#
+# SRH (serverless-redis-http) speaks Upstash's HTTP REST protocol in front of a
+# real Redis, so the UNMODIFIED `@upstash/redis` + `@upstash/ratelimit` clients
+# execute the REAL Lua on a REAL Redis. Nothing in the test path is a double.
+#
+# USAGE
+#   docker compose -f docker-compose.redis-test.yml up -d
+#   npm run test:redis
+#   docker compose -f docker-compose.redis-test.yml down -v
+#
+# This lane is deliberately OUTSIDE the default `vitest run` include globs
+# (see vitest.redis.config.ts) — a developer without Docker is never blocked.
+#
+# SUPPLY CHAIN (threats T-140.2-01-01 / -02)
+# ------------------------------------------
+# BOTH images are pinned by sha256 DIGEST, never by tag. A mutable tag on a CI
+# service image is an unreviewed input to a gate. The digests below are the
+# multi-arch INDEX digests, so the same pin resolves on an arm64 laptop and on
+# an amd64 GitHub runner. They MUST match the digests in
+# `.github/workflows/ci.yml`'s `frontend-seam-redis` job.
+#
+#   redis:7-alpine                      -> sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+#   hiett/serverless-redis-http:latest  -> sha256:5b0bb9239fce53abf87b2018a7a0deb9ec7bd900c5360738fe5fbeeb426f9150
+#
+# `redis` is a Docker Official Image. `hiett/serverless-redis-http` is a
+# single-maintainer community image, so its digest pin is the control that
+# matters. To re-resolve after a deliberate bump:
+#   docker buildx imagetools inspect redis:7-alpine
+#   docker buildx imagetools inspect hiett/serverless-redis-http:latest
+#
+# SRH_TOKEN is a FIXED NON-SECRET literal (threat T-140.2-01-03, disposition
+# accept). It is scoped to an ephemeral container that holds only test keys and
+# is deliberately NOT a repository secret: a secret would make the CI job skip
+# on fork PRs, which is exactly the silent-green this lane exists to eliminate.
+
+services:
+  redis:
+    image: redis@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  srh:
+    image: hiett/serverless-redis-http@sha256:5b0bb9239fce53abf87b2018a7a0deb9ec7bd900c5360738fe5fbeeb426f9150
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      SRH_MODE: env
+      SRH_TOKEN: ci-seam-breaker-token
+      SRH_CONNECTION_STRING: "redis://redis:6379"
+    ports:
+      - "8079:80"

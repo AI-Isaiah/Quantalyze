@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, cleanup, within, act } from "@testing-library/react";
 import { AllocatorMatchQueue } from "./AllocatorMatchQueue";
 
 /**
@@ -30,6 +30,27 @@ import { AllocatorMatchQueue } from "./AllocatorMatchQueue";
  * `/api/admin/intro/...` URL. The read-only GET to `/api/demo/match`
  * IS expected — that's how the queue loads.
  */
+
+
+/**
+ * [140.4-05 / SEAMRIM-10] A failure sentence now appears TWICE in the error
+ * render: once in the visible card, and once in the sr-only `<LiveRegion>` that
+ * announces it. (This surface renders the SAME error card for a failed initial
+ * load and for a failed recompute — `if (error || !data)` returns early for
+ * both — so every recompute-failure case below sees the announcement too.)
+ *
+ * Strictly STRONGER than the `getByText(…)` it replaces: the exact count pins
+ * the visible copy AND the announcement together, so it fails if either is
+ * dropped. Deleting the announcement is exactly Falsifiability row M96.
+ */
+function visibleAndAnnounced(text: string): HTMLElement[] {
+  const nodes = screen.getAllByText(text);
+  expect(
+    nodes,
+    `"${text}" must appear exactly twice \u2014 the visible card + the sr-only LiveRegion`,
+  ).toHaveLength(2);
+  return nodes;
+}
 
 const ALLOCATOR_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -406,5 +427,647 @@ describe("<AllocatorMatchQueue> — @container parent/child structural guard", (
 
     const tabular = container.querySelectorAll('[class*="tabular-nums"]');
     expect(tabular.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Phase 140.3 plan 08 / SEAMUX-05 (B-05 / B-17) — `handleRecompute` must observe
+ * the HTTP outcome before it does anything with the body.
+ *
+ * The defect: `const body = await res.json();` with **no `res.ok` and no
+ * `res.status`**. `/api/admin/match/recompute` answers a breaker trip with
+ * `{ error: <the breaker sentence> }` and a 503; that body has no `disabled`
+ * field, so it fell to the `else` branch and called `load()`. The queue
+ * refetched, re-rendered the SAME batch it already had, and the founder read a
+ * tripped breaker as a COMPLETED recompute — with the batch's own "Computed Nh
+ * ago" stamp beside it as apparent corroboration.
+ *
+ * The fix shape was already in this file, twenty lines below the defect:
+ * `handleDecision` does `if (!res.ok) throw new Error(await res.text());`.
+ *
+ * ⚠️ This is the SECOND member of the observe-the-outcome class (ledger row
+ * M63). `ApiKeyManager` is the first. Mutating this one is the class test — a
+ * green M63 would mean the class had been fixed at the instance.
+ *
+ * Also pinned here: the `r` shortcut's in-flight guard. `recomputing` is React
+ * state, so two presses inside one frame both observe `false` and both POST —
+ * duplicate recomputes against a service that is already struggling is exactly
+ * the shape an outage produces.
+ */
+describe("<AllocatorMatchQueue> — SEAMUX-05: handleRecompute observes the outcome", () => {
+  // Hand-typed, never imported: `src/lib/seam-copy.ts` holds the production
+  // declaration and a test that read it could not detect it changing (C-1).
+  const BREAKER_SENTENCE =
+    "The analytics service is temporarily unavailable. Please try again in a moment.";
+
+  const QUEUE_URL = `/api/admin/match/${ALLOCATOR_ID}`;
+  const RECOMPUTE_URL = "/api/admin/match/recompute";
+
+  function countCalls(mock: ReturnType<typeof vi.fn>, url: string) {
+    return mock.mock.calls.filter((c) => c[0] === url).length;
+  }
+
+  /**
+   * Mount the WRITE surface (not the demo lane) with the queue loaded, and route
+   * the recompute POST to `recomputeResponse`.
+   */
+  async function mountLoaded(recomputeResponse: () => Promise<Response>) {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === RECOMPUTE_URL) return recomputeResponse();
+      return Promise.resolve(
+        new Response(JSON.stringify(buildPayload()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    // On the WRITE surface the name renders twice (breadcrumb + header h1), so
+    // anchor on the heading rather than the ambiguous text.
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+    return fetchMock;
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal("alert", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("a breaker 503 does NOT call load() and DOES render the error state (B-05/B-17)", async () => {
+    const fetchMock = await mountLoaded(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: BREAKER_SENTENCE }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    // One GET so far: the mount load.
+    expect(countCalls(fetchMock, QUEUE_URL)).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+
+    // The failure surfaces on the component's own error-first card …
+    await waitFor(() => {
+      expect(visibleAndAnnounced(BREAKER_SENTENCE)[0]).toBeInTheDocument();
+    });
+    // … and the queue it invalidates nothing about is NOT refetched. A refetch
+    // is what made a trip read as a completed recompute.
+    expect(countCalls(fetchMock, QUEUE_URL)).toBe(1);
+    // The error card replaces the queue (`if (error || !data) return`), so the
+    // founder cannot mistake the pre-existing batch for a fresh one.
+    expect(
+      screen.queryByRole("heading", { name: /Demo Allocator/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+  });
+
+  it("a 500 with no JSON body still reaches the error state, not load()", async () => {
+    // A gateway HTML page: `res.json()` on it throws. Before the fix that
+    // SyntaxError was the caught value and `alert`ed as "Recompute failed:
+    // Unexpected token" — a parse error standing in for the real failure.
+    const fetchMock = await mountLoaded(() =>
+      Promise.resolve(
+        new Response("<html>502</html>", {
+          status: 502,
+          headers: { "content-type": "text/html" },
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+    });
+    expect(countCalls(fetchMock, QUEUE_URL)).toBe(1);
+    // No parse-error text reached the DOM in place of the failure.
+    expect(document.body.textContent).not.toMatch(/SyntaxError|Unexpected token/);
+  });
+
+  it("ANTI-REGRESSION: a 200 with disabled:true still renders the disabled path", async () => {
+    const alertMock = vi.fn();
+    vi.stubGlobal("alert", alertMock);
+    const fetchMock = await mountLoaded(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ disabled: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+
+    await waitFor(() => {
+      expect(alertMock).toHaveBeenCalledWith(
+        expect.stringContaining("Engine is disabled"),
+      );
+    });
+    // The disabled reply is a SUCCESS, not a failure — no refetch, no error card.
+    expect(countCalls(fetchMock, QUEUE_URL)).toBe(1);
+    expect(
+      screen.getByRole("heading", { name: /Demo Allocator/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("ANTI-REGRESSION: a plain 200 still calls load()", async () => {
+    const fetchMock = await mountLoaded(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+
+    await waitFor(() => {
+      expect(countCalls(fetchMock, QUEUE_URL)).toBe(2);
+    });
+    expect(
+      screen.getByRole("heading", { name: /Demo Allocator/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("the `r` shortcut pressed twice in flight issues ONE request", async () => {
+    // A recompute that never settles, so both presses land inside the in-flight
+    // window. `recomputing` is state and does not update between two synchronous
+    // keydowns — only a synchronously-written ref can hold here.
+    const fetchMock = await mountLoaded(() => new Promise<Response>(() => {}));
+
+    (document.body as HTMLElement).focus();
+    fireEvent.keyDown(window, { key: "r" });
+    fireEvent.keyDown(window, { key: "r" });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(countCalls(fetchMock, RECOMPUTE_URL)).toBe(1);
+  });
+});
+
+/**
+ * 140.3-11 / TS-18 + SEAMUX-04 — a 424 renders as the CALLER'S venue failing.
+ *
+ * `STATUS_CONTRACT.md` §1/§6 O-1: a 424 is CALLER'S EXCHANGE — the third party
+ * the caller named is at fault, it is recoverable, and it never counts against
+ * our own health. Reported to an admin as OUR failure it is the theme-2 lie
+ * (copy that asserts something false); reported as an un-retryable dead end it
+ * is the B-01/B-22 shape O-1 exists to forbid.
+ *
+ * A SEPARATE describe from the SEAMUX-05 block above, with its own mount
+ * helper, on purpose. That block asserts the OUTCOME IS OBSERVED; this one
+ * asserts WHICH outcome it is. Sharing a helper across two obligations is how a
+ * green run stops telling you which one it was green for.
+ *
+ * Every expected string is hand-typed. Nothing is imported from
+ * `venueOutageCopy.ts` — a test that read the sentence out of the module that
+ * declares it could not detect the sentence changing (C-1).
+ */
+describe("<AllocatorMatchQueue> — TS-18: a 424 is the caller's venue, named", () => {
+  const QUEUE_URL = `/api/admin/match/${ALLOCATOR_ID}`;
+  const RECOMPUTE_URL = "/api/admin/match/recompute";
+
+  /** The pre-424 answers, hand-typed so a change to either reddens here. */
+  const BREAKER_SENTENCE =
+    "The analytics service is temporarily unavailable. Please try again in a moment.";
+  const GENERIC_500 = "Match recompute failed. Please try again.";
+
+  async function mountLoaded(recomputeResponse: () => Promise<Response>) {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === RECOMPUTE_URL) return recomputeResponse();
+      return Promise.resolve(
+        new Response(JSON.stringify(buildPayload()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+    return fetchMock;
+  }
+
+  /** The body shape `/api/admin/match/recompute` forwards on a typed 4xx. */
+  function routeBody(error: string, dependency: string | null) {
+    return new Response(JSON.stringify({ error, dependency }), {
+      status: 424,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal("alert", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("a 424 naming a venue renders THAT venue and a retry control", async () => {
+    const fetchMock = await mountLoaded(() =>
+      Promise.resolve(routeBody("Binance is not responding.", "binance")),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+    });
+    // The venue the WIRE named, not one this component knows about.
+    expect(document.body.textContent).toContain("Binance isn't responding");
+    // A 424 is recoverable and non-counting, so a retry is honest here.
+    expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+    // The stale queue is gone — the error-first guard still holds.
+    expect(countCalls(fetchMock, QUEUE_URL)).toBe(1);
+  });
+
+  it("a SECOND venue renders too — no exchange is special-cased", async () => {
+    // A component that recognised one venue and not another would render a real
+    // outage as no outage for every exchange its author did not think of.
+    await mountLoaded(() =>
+      Promise.resolve(routeBody("Bybit is not responding.", "bybit")),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("Bybit isn't responding");
+    });
+  });
+
+  it("a 424 with a MISSING dependency degrades truthfully and renders no `undefined`", async () => {
+    // This is the COMMON case, not the corner: the flat
+    // `VenueTransientHTTPException` 424 that 140.3-06 put on the wire carries no
+    // `dependency` key at all.
+    await mountLoaded(() =>
+      Promise.resolve(routeBody("A venue is not responding.", null)),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+    });
+    expect(document.body.textContent).toContain("An exchange isn't responding");
+    // The literal, which is what an interpolated absent value renders as.
+    expect(document.body.textContent).not.toContain("undefined");
+    expect(document.body.textContent).not.toContain("null");
+  });
+
+  it("the 424 copy never says OUR service is degraded (SEAMUX-04)", async () => {
+    await mountLoaded(() =>
+      Promise.resolve(routeBody("Binance is not responding.", "binance")),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("Binance isn't responding");
+    });
+    // The two sentences this surface answers with when the fault IS ours.
+    expect(document.body.textContent).not.toContain(BREAKER_SENTENCE);
+    expect(document.body.textContent).not.toContain(GENERIC_500);
+    expect(document.body.textContent).not.toMatch(
+      /analytics service is (temporarily )?(unavailable|degraded|down)/i,
+    );
+  });
+
+  it("ANTI-REGRESSION: a 500 still renders the route's own generic copy, unchanged", async () => {
+    await mountLoaded(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: GENERIC_500 }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+
+    await waitFor(() => {
+      expect(visibleAndAnnounced(GENERIC_500)[0]).toBeInTheDocument();
+    });
+    // The 424 arm did not swallow every failure into a venue state.
+    expect(document.body.textContent).not.toContain("isn't responding");
+  });
+
+  it("ANTI-REGRESSION: a breaker 503 still renders the breaker sentence", async () => {
+    await mountLoaded(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: BREAKER_SENTENCE }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+    await waitFor(() => {
+      expect(visibleAndAnnounced(BREAKER_SENTENCE)[0]).toBeInTheDocument();
+    });
+  });
+
+  function countCalls(mock: ReturnType<typeof vi.fn>, url: string) {
+    return mock.mock.calls.filter((c) => c[0] === url).length;
+  }
+});
+
+/**
+ * [140.4-05 / SEAMRIM-10] The load failure is ANNOUNCED, not only drawn.
+ *
+ * This surface is the SECOND member of the converted class (the first is
+ * `PortfolioOptimizer`), and it is the member the Falsifiability Ledger row
+ * M96 mutates — mutating the second member is what distinguishes a class fix
+ * from an instance fix.
+ *
+ * Why the announcement is the only channel here: the queue's primary action is
+ * bound to the `r` keyboard shortcut, and this surface regressed from a modal
+ * `alert()` (which assistive tech always announces) to a silent inline card.
+ * The error branch is an early `return` — the loaded tree never mounts — so
+ * there is no focus event either.
+ */
+describe("<AllocatorMatchQueue> — [140.4-05] the load failure is announced", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  /** The message the route hands back, hand-typed so a copy change reddens here. */
+  const ROUTE_MESSAGE = "Match queue is unavailable.";
+
+  it("ANNOUNCES the load failure through role=alert, carrying the card's own message", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: ROUTE_MESSAGE }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(ROUTE_MESSAGE);
+
+    // The visible card is unchanged — the announcement is purely additive.
+    expect(visibleAndAnnounced(ROUTE_MESSAGE)[0]).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+  });
+
+  it("ANNOUNCES the static fallback when the route sends no message", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response("not json", { status: 500 }),
+    );
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+
+    // `error || "Failed to load"` — the announcement carries whichever of the
+    // two the card is showing, never a third string invented for the region.
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Failed to load match queue");
+  });
+
+  it("NEGATIVE CONTROL: the loaded queue exposes NO role=alert", async () => {
+    // Without this the assertions above are satisfied by a component that
+    // announces unconditionally, which would fire on every successful load.
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(buildPayload()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+
+    // `findByRole("heading", …)` not `findByText` — the allocator name appears
+    // in BOTH the breadcrumb span and the h1, so a bare text query is ambiguous.
+    expect(
+      await screen.findByRole("heading", { name: /Demo Allocator/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+/**
+ * N-MATCH (170-06, AD-07). Below md the queue is read-only in the handlers,
+ * not only in the banner: Recompute, KEEP/SKIP, Send intro and the
+ * preferences-panel recompute request must not leave the browser, and every
+ * write control carries `hidden` plus an `md:` display class. The server
+ * snapshot of useMediaQuery is false, so visibility is CSS — these cases
+ * drive the JS guard by stubbing matchMedia.
+ *
+ * A real viewport below 768 is also below 1024, so both queries are false.
+ * `!/min-width: 768px/.test(query)` alone would report lg as matching.
+ */
+function installMatchMedia(initial: { md: boolean; lg: boolean }) {
+  const state = { ...initial };
+  const listeners = new Set<() => void>();
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    configurable: true,
+    value: (query: string) => ({
+      get matches() {
+        if (/min-width:\s*768px/.test(query)) return state.md;
+        if (/min-width:\s*1024px/.test(query)) return state.lg;
+        return false;
+      },
+      media: query,
+      onchange: null,
+      addEventListener: (_event: string, cb: () => void) => {
+        listeners.add(cb);
+      },
+      removeEventListener: (_event: string, cb: () => void) => {
+        listeners.delete(cb);
+      },
+      addListener: (cb: () => void) => {
+        listeners.add(cb);
+      },
+      removeListener: (cb: () => void) => {
+        listeners.delete(cb);
+      },
+      dispatchEvent: () => false,
+    }),
+  });
+  return {
+    set(next: Partial<{ md: boolean; lg: boolean }>) {
+      if (next.md !== undefined) state.md = next.md;
+      if (next.lg !== undefined) state.lg = next.lg;
+      for (const cb of listeners) cb();
+    },
+  };
+}
+
+function mutationCalls(mock: { mock: { calls: unknown[][] } }, needle: string) {
+  return mock.mock.calls.filter((call) => String(call[0]).includes(needle));
+}
+
+describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
+  function jsonResponse(body: unknown, status = 200) {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  it("below md, action-bar and empty-state Recompute now issue no request and Edit preferences opens no panel", async () => {
+    installMatchMedia({ md: false, lg: false });
+    const payload = { ...buildPayload(), batch: null, candidates: [] };
+    const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue(jsonResponse(payload));
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+
+    const recomputes = screen.getAllByRole("button", { name: /Recompute now/i });
+    expect(recomputes).toHaveLength(2);
+    for (const button of recomputes) fireEvent.click(button);
+    fireEvent.click(screen.getByRole("button", { name: /Edit preferences/i }));
+
+    expect(mutationCalls(fetchMock, "/api/admin/match/recompute")).toHaveLength(0);
+    expect(screen.queryByRole("heading", { name: /CRM-style editor/i })).toBeNull();
+  });
+
+  it("below md, shortlist Send intro and detail KEEP / SKIP / Send intro issue no request and open no panel", async () => {
+    installMatchMedia({ md: false, lg: false });
+    const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue(jsonResponse(buildPayload()));
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+
+    fireEvent.click(screen.getByRole("button", { name: "KEEP" }));
+    fireEvent.click(screen.getByRole("button", { name: "SKIP" }));
+    for (const button of screen.getAllByRole("button", { name: /Send intro/i })) {
+      if (button.tagName === "BUTTON") fireEvent.click(button);
+    }
+
+    expect(mutationCalls(fetchMock, "/api/admin/match/decisions")).toHaveLength(0);
+    expect(mutationCalls(fetchMock, "/api/admin/match/send-intro")).toHaveLength(0);
+    expect(document.querySelector(".fixed.inset-0")).toBeNull();
+
+    // s/u/d/r. Below md is also below lg, and the handlers must still not fetch.
+    (document.body as HTMLElement).focus();
+    for (const key of ["s", "u", "d", "r"]) {
+      fireEvent.keyDown(window, { key });
+    }
+    expect(mutationCalls(fetchMock, "/api/admin/match/recompute")).toHaveLength(0);
+    expect(mutationCalls(fetchMock, "/api/admin/match/decisions")).toHaveLength(0);
+    expect(document.querySelector(".fixed.inset-0")).toBeNull();
+  });
+
+  // SFH-170-05 replaced the case that stood here. It submitted the form below
+  // md and waited for the post-save confirm, which only fires after a
+  // successful PUT, so it asserted the defect (Save still wrote below md) as
+  // the expected path. The two cases below split what it was reaching for.
+  function prefsFetch() {
+    return vi.spyOn(global, "fetch").mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("/preferences/")) return Promise.resolve(jsonResponse({ ok: true }));
+      return Promise.resolve(jsonResponse(buildPayload()));
+    });
+  }
+
+  it("SFH-170-05: preferences opened at md then narrowed below md disable Save, say why, and write nothing", async () => {
+    const media = installMatchMedia({ md: true, lg: false });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const fetchMock = prefsFetch();
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+    fireEvent.click(screen.getByRole("button", { name: /Edit preferences/i }));
+    const editor = screen.getByRole("heading", { name: /CRM-style editor/i });
+    const save = screen.getByRole("button", { name: "Save preferences" });
+    expect(save).not.toBeDisabled();
+
+    act(() => {
+      media.set({ md: false });
+    });
+
+    expect(save).toBeDisabled();
+    const panel = editor.closest(".fixed") as HTMLElement;
+    expect(within(panel).getByRole("status").textContent).toMatch(
+      /Read-only on mobile\..*768px or wider.*save preferences/,
+    );
+
+    // A disabled button does not stop a scripted or implicit submit.
+    fireEvent.submit(save.closest("form")!);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+    expect(mutationCalls(fetchMock, "/preferences/")).toHaveLength(0);
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(mutationCalls(fetchMock, "/api/admin/match/recompute")).toHaveLength(0);
+  });
+
+  it("SFH-170-05: a confirmed recompute after narrowing below md mid-save is refused visibly, not dropped", async () => {
+    const media = installMatchMedia({ md: true, lg: false });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const fetchMock = prefsFetch();
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+    fireEvent.click(screen.getByRole("button", { name: /Edit preferences/i }));
+
+    // Save at md: the PUT goes out and its success arms the 100 ms confirm.
+    fireEvent.submit(screen.getByRole("button", { name: "Save preferences" }).closest("form")!);
+    await waitFor(() => {
+      expect(mutationCalls(fetchMock, "/preferences/")).toHaveLength(1);
+    });
+
+    // The viewport crosses below md before the confirm runs.
+    act(() => {
+      media.set({ md: false });
+    });
+
+    await waitFor(() => {
+      expect(confirmSpy).toHaveBeenCalled();
+    });
+    const notice = await screen.findByText(
+      "Recompute did not run. Open on a tablet or desktop (768px or wider) to recompute the match queue.",
+    );
+    expect(notice.closest('[role="status"]')).not.toBeNull();
+    // Visible at every width: no `hidden` / `md:hidden` on the notice.
+    expect(notice.closest('[role="status"]')!.className).not.toMatch(/(^|\s)(md:)?hidden(\s|$)/);
+    expect(mutationCalls(fetchMock, "/api/admin/match/recompute")).toHaveLength(0);
+  });
+
+  it("hides every write control with hidden plus an md display class, and the banner names 768px or wider", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(jsonResponse(buildPayload()));
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+
+    for (const name of [/Recompute now/i, /Edit preferences/i]) {
+      const classes = screen.getByRole("button", { name }).className.split(/\s+/);
+      expect(classes, String(name)).toContain("hidden");
+      expect(classes, String(name)).toContain("md:inline-flex");
+      // Button's base `inline-flex` is emitted after `.hidden` in Tailwind v4
+      // and would keep the control visible. The unprefixed display must be gone.
+      expect(classes, String(name)).not.toContain("inline-flex");
+    }
+
+    const shortlist = screen.getByText("Shortlist").parentElement;
+    expect(shortlist).not.toBeNull();
+    // The card itself is role="button" and its name includes "Send intro".
+    // The write control is the nested <button>.
+    const nestedSend = within(shortlist!)
+      .getAllByRole("button", { name: /Send intro/i })
+      .find((el) => el.tagName === "BUTTON");
+    if (!nestedSend) throw new Error("shortlist Send intro button missing");
+    const sendClasses = nestedSend.className.split(/\s+/);
+    expect(sendClasses).toContain("hidden");
+    expect(sendClasses).toContain("md:inline-flex");
+
+    const bar = screen.getByRole("button", { name: "KEEP" }).parentElement;
+    expect(bar).not.toBeNull();
+    const barClasses = bar!.className.split(/\s+/);
+    expect(barClasses).toContain("hidden");
+    expect(barClasses).toContain("md:flex");
+    expect(barClasses).not.toContain("flex");
+
+    const banner = screen.getByText(/768px or wider/);
+    expect(banner.textContent).not.toContain("1024px");
+    expect(banner.closest("div")?.className).toContain("md:hidden");
+    expect(banner.closest("div")?.className).toContain("border-accent/30");
+    expect(banner.closest("div")?.className).toContain("bg-accent/5");
   });
 });

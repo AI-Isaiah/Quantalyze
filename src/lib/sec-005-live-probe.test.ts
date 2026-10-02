@@ -445,37 +445,120 @@ describe("SEC-005 live probe — migration 027 ground truth", () => {
   it.skipIf(!HAS_LIVE_DB)(
     "API_KEY_USER_COLUMNS matches the live GRANT — no drift",
     async () => {
-      // Project every column in the allowlist tuple against the live DB.
-      // If any column is missing from the GRANT (or doesn't exist in the
-      // schema), PostgREST returns an error. This catches drift between
-      // constants.ts and migration 027's GRANT list.
+      // ⛔ CALIBRATED FIX (164.5.3-REVIEW.md finding 2, sibling fixer
+      // 164.5.3-fix-migration). This probe previously ran through
+      // createLiveAdminClient() (service_role). service_role holds
+      // table-level SELECT already, so it structurally CANNOT detect a
+      // missing `authenticated` column GRANT — the exact property this
+      // test's own name claims to check. It was the only automated thing
+      // standing between this repo's GRANT-extension migrations (066, 068,
+      // 075, 20260920120000) and a silent drift, and it could not fail on
+      // that drift. Fixed by probing as an AUTHENTICATED test user instead
+      // — the same createTestUser + signInWithPassword + JWT-bearing-client
+      // idiom the first test in this file already uses — so a missing
+      // GRANT now surfaces as a genuine PostgREST error here.
       const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const email = `sec005-cols-probe-${ts}@test.sec`;
+      const password = `Sec005ColsProbe${ts}!`;
+      const userId = await createTestUser(admin, email, password);
+      let keyId: string | null = null;
 
-      const { data, error } = await admin
-        .from("api_keys")
-        .select(API_KEY_USER_COLUMNS)
-        .limit(0);
-
-      expect(
-        error,
-        `API_KEY_USER_COLUMNS projection failed — at least one column in ` +
-          `the constant does not exist or is not granted. Error: ${error?.message}`,
-      ).toBeNull();
-      expect(data).toBeDefined();
-
-      // Also verify each column in the tuple individually, so a typo in
-      // the constant surfaces as a clear per-column error rather than a
-      // single aggregate failure.
-      for (const col of API_KEY_USER_COLUMNS_ARR) {
-        const { error: colErr } = await admin
+      try {
+        // Insert a row this user owns, service-role, purely as fixture setup
+        // — the assertions below exercise the AUTHENTICATED client's SELECT,
+        // not this insert.
+        const { data: keyData, error: keyErr } = await admin
           .from("api_keys")
-          .select(col)
-          .limit(0);
+          .insert({
+            user_id: userId,
+            exchange: "binance",
+            label: "sec005-cols-probe",
+            api_key_encrypted: "PROBE_CIPHERTEXT",
+            dek_encrypted: "PROBE_DEK",
+          })
+          .select("id")
+          .single();
+        if (keyErr || !keyData) {
+          throw new Error(`Failed to insert test api_keys row: ${keyErr?.message}`);
+        }
+        keyId = keyData.id;
+
+        // Sign in AS that user to get a user-scoped JWT.
+        const signinClient = createClient(LIVE_DB_URL!, LIVE_DB_SERVICE_ROLE_KEY!);
+        const { data: session, error: signInErr } =
+          await signinClient.auth.signInWithPassword({ email, password });
+        if (signInErr || !session.session) {
+          throw new Error(`Sign in failed: ${signInErr?.message}`);
+        }
+
+        // Authenticated client using the user's JWT. PostgREST derives the
+        // effective DB role from the JWT's `role` claim, so this query runs
+        // as the `authenticated` Postgres role and is subject to migration
+        // 027's (and every GRANT-extension migration's) column grants —
+        // unlike the service-role admin client this test used before.
+        const authClient = createClient(LIVE_DB_URL!, LIVE_DB_SERVICE_ROLE_KEY!, {
+          global: {
+            headers: {
+              Authorization: `Bearer ${session.session.access_token}`,
+              apikey: LIVE_DB_SERVICE_ROLE_KEY!,
+            },
+          },
+          auth: { persistSession: false },
+        });
+
+        // Project every column in the allowlist tuple against the live DB AS
+        // authenticated. If any column is missing from the GRANT (or doesn't
+        // exist in the schema), PostgREST returns an error. This catches
+        // drift between constants.ts and the live GRANT list — and, because
+        // the probe now runs as authenticated rather than service_role, it
+        // can actually fail on a missing GRANT.
+        const { data, error } = await authClient
+          .from("api_keys")
+          .select(API_KEY_USER_COLUMNS)
+          .eq("user_id", userId);
+
         expect(
-          colErr,
-          `Column "${col}" from API_KEY_USER_COLUMNS_ARR is not readable — ` +
-            `drift between constants.ts and migration 027. Error: ${colErr?.message}`,
+          error,
+          `API_KEY_USER_COLUMNS projection failed for the authenticated role ` +
+            `— at least one column in the constant is not granted to ` +
+            `authenticated. Error: ${error?.message}`,
         ).toBeNull();
+        expect(data).toBeDefined();
+        // Non-vacuity: the probe inserted a row for userId above, so the
+        // authenticated owner MUST see it. Zero rows would let every
+        // assertion below pass on an empty result set rather than a proven
+        // read — the same H-0511 escape hatch the encrypted-column probe
+        // above (Probe 1) is calibrated against.
+        expect(
+          (data ?? []).length,
+          `Authenticated client read zero rows projecting ` +
+            `API_KEY_USER_COLUMNS for its own user — the GRANT assertions ` +
+            `above would pass vacuously. RLS scope, JWT role claim, or ` +
+            `session propagation is broken.`,
+        ).toBeGreaterThan(0);
+
+        // Also verify each column in the tuple individually, so a typo in
+        // the constant — or a single missing per-column GRANT, such as the
+        // one this test was calibrated against — surfaces as a clear
+        // per-column error rather than a single aggregate failure.
+        for (const col of API_KEY_USER_COLUMNS_ARR) {
+          const { error: colErr } = await authClient
+            .from("api_keys")
+            .select(col)
+            .eq("user_id", userId);
+          expect(
+            colErr,
+            `Column "${col}" from API_KEY_USER_COLUMNS_ARR is not readable ` +
+              `by authenticated — drift between constants.ts and the live ` +
+              `GRANT. Error: ${colErr?.message}`,
+          ).toBeNull();
+        }
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          apiKeyIds: keyId ? [keyId] : [],
+          userIds: [userId],
+        });
       }
     },
     30_000,

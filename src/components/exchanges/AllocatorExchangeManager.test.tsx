@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, act, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, act, fireEvent, waitFor, within } from "@testing-library/react";
 import { AllocatorExchangeManager } from "./AllocatorExchangeManager";
+import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 
 /**
  * Phase 06 Plan 04 Task 2 — AllocatorExchangeManager extension tests.
@@ -41,14 +42,28 @@ vi.mock("next/navigation", () => ({
   }),
 }));
 
-// Supabase client mock. Tests override `insertMock` to simulate success vs.
-// error on the `api_keys` table insert. `.select(...).single()` returns the
-// inserted row by default. `rpcMock` + `holdingsCountMock` support the
-// Phase 08 Disconnect flow (allocator_holdings count probe + RPC call).
+// Supabase client mock. `rpcMock` + `holdingsCountMock` support the Phase 08
+// Disconnect flow (allocator_holdings count probe + RPC call).
+//
+// 160-03 / RANK-03: `insertMock` no longer backs any production path — the
+// api_keys row is written SERVER-side by /api/keys/validate-and-encrypt in
+// persist mode. The insert branch is deliberately KEPT so a reintroduced
+// browser insert is OBSERVABLE (a recorded call) rather than masked by an
+// "unexpected from()" throw a future reader could mistake for a mock gap.
+// Specs assert `insertMock` was never called.
+//
+// `apiKeysRefetchMock` backs the replacement: the component re-reads the
+// server-written row by id through the migration-027 SELECT allowlist, which
+// is what feeds the optimistic render.
 const insertMock = vi.fn();
 const getUserMock = vi.fn();
 const rpcMock = vi.fn();
 const holdingsCountMock = vi.fn();
+const apiKeysRefetchMock = vi.fn();
+// Records the projection + filter the api_keys re-fetch actually used, so the
+// spec can pin BOTH (a projection drifting off the allowlist silently 42501s
+// in production; a missing/wrong filter would hand back another tenant's row).
+let apiKeysRefetchCall: { cols: string; col: string; val: string } | null = null;
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -56,7 +71,7 @@ vi.mock("@/lib/supabase/client", () => ({
       getUser: () => getUserMock(),
     },
     rpc: (name: string, args: unknown) => rpcMock(name, args),
-    from: (_table: string) => ({
+    from: (table: string) => ({
       insert: (row: unknown) => {
         const result = insertMock(row);
         return {
@@ -68,15 +83,50 @@ vi.mock("@/lib/supabase/client", () => ({
           }),
         };
       },
-      // Phase 08 Plan 02 Task 1 — allocator_holdings count probe used by
-      // openDeleteConfirm. Shape matches the call:
-      //   .from("allocator_holdings").select("*", {count:"exact", head:true}).eq("api_key_id", keyId)
-      select: (_cols: string, _opts?: unknown) => ({
-        eq: (_col: string, _val: string) =>
-          Promise.resolve(
-            holdingsCountMock() ?? { count: 0, error: null },
-          ),
-      }),
+      select: (cols: string, _opts?: unknown) => {
+        // 160-03: the api_keys re-fetch —
+        //   .from("api_keys").select(API_KEY_USER_COLUMNS).eq("id", id).single()
+        if (table === "api_keys") {
+          return {
+            eq: (col: string, val: string) => {
+              apiKeysRefetchCall = { cols, col, val };
+              return {
+                single: () =>
+                  Promise.resolve(
+                    apiKeysRefetchMock() ?? {
+                      data: null,
+                      error: { message: "no apiKeysRefetchMock" },
+                    },
+                  ),
+              };
+            },
+          };
+        }
+        // Phase 167.1.2 plan 09 — the departed-history reads a departed key's
+        // card makes (first/last returns day, its key_inputs anchor). Answered
+        // empty here, and kept off the holdings probe below so they can never
+        // consume a holdingsCountMock value a delete test queued. The overview
+        // itself is tested in AllocatorExchangeManager.departed-history.test.tsx.
+        if (table === "csv_daily_returns") {
+          return {
+            eq: () => ({
+              order: () => ({
+                limit: () => Promise.resolve({ data: [], error: null }),
+              }),
+            }),
+          };
+        }
+        if (table === "allocator_equity_derived") {
+          return { in: () => Promise.resolve({ data: [], error: null }) };
+        }
+        // Phase 08 Plan 02 Task 1 — allocator_holdings count probe used by
+        // openDeleteConfirm. Shape matches the call:
+        //   .from("allocator_holdings").select("*", {count:"exact", head:true}).eq("api_key_id", keyId)
+        return {
+          eq: (_col: string, _val: string) =>
+            Promise.resolve(holdingsCountMock() ?? { count: 0, error: null }),
+        };
+      },
     }),
   }),
 }));
@@ -136,6 +186,7 @@ function makeKey(overrides: Partial<Record<string, unknown>> = {}) {
     created_at: "2026-04-01T00:00:00Z",
     sync_error: null,
     last_429_at: null as string | null,
+    venue_account_id: null as string | null,
     ...overrides,
   };
 }
@@ -184,6 +235,85 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
     expect(screen.queryByText("SFO")).not.toBeInTheDocument();
     // Existing venue is byte-unchanged.
     expect(screen.getByText("BNB")).toBeInTheDocument();
+  });
+
+  // 138-03 / MT5UI-02 — the connected mt5 key row renders the mono tag from the
+  // EXCHANGE_TAGS map. NOTE: "mt5".slice(0,3).toUpperCase() === "MT5", so the
+  // generic fallback yields the SAME label — the map entry is distinguished only
+  // by its neutral-slate near-black navy fg (#0F172A) vs the fallback's slate-600
+  // (#475569). This asserts the map entry's fg colour (SFOX-09 provenance
+  // precedent, unconditional), so it FAILS RED on the fallback despite the
+  // coincident label, while proving an existing venue (binance → "BNB") is
+  // unchanged.
+  it("renders the MT5 mono tag (neutral-slate navy fg) for an mt5 key, binance unchanged (138-03)", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-mt5-1", exchange: "mt5", label: "My MT5" }),
+          makeKey({ id: "key-bnb-1", exchange: "binance", label: "My Binance" }),
+        ]}
+      />,
+    );
+    // mt5 renders the canonical mono tag with the neutral-slate navy fg — the
+    // fallback would use #475569, so this fg pins the EXCHANGE_TAGS entry.
+    const mt5Tag = screen.getByLabelText("mt5");
+    expect(mt5Tag).toHaveTextContent("MT5");
+    expect(mt5Tag).toHaveStyle({ color: "#0F172A", backgroundColor: "#F1F5F9" });
+    // Existing venue is byte-unchanged.
+    expect(screen.getByText("BNB")).toBeInTheDocument();
+  });
+
+  // Phase 164.5.3 (MT5CREDS) — venue_account_id (migration 20260920120000)
+  // renders in the active-keys section so a founder can tell which MT5
+  // account a key belongs to. Synthetic placeholder id per the phase's
+  // non-negotiable (never a real-looking MT5 login/account number).
+  it("renders the MT5 account identifier in .font-metric, un-separated, for an active mt5 row with a value", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-active",
+            exchange: "mt5",
+            label: "My MT5",
+            venue_account_id: "synth1234",
+          }),
+        ]}
+      />,
+    );
+    const identifier = screen.getByText("MT5 account synth1234");
+    expect(identifier).toBeInTheDocument();
+    expect(identifier).toHaveClass("font-metric");
+    expect(identifier.textContent).not.toMatch(/,/);
+  });
+
+  it("renders an em-dash for an active mt5 row with a NULL venue_account_id (never 0, never blank)", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-active-null",
+            exchange: "mt5",
+            label: "My MT5",
+            venue_account_id: null,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("MT5 account —")).toBeInTheDocument();
+    expect(screen.queryByText("MT5 account 0")).not.toBeInTheDocument();
+  });
+
+  it("renders NO account-identifier line for an active non-MT5 row", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[makeKey({ id: "key-bnb-active", exchange: "binance" })]}
+      />,
+    );
+    expect(screen.queryByText(/MT5 account/)).not.toBeInTheDocument();
   });
 
   it("clicking Sync now POSTs to /api/allocator/holdings/sync with { api_key_id }", async () => {
@@ -266,6 +396,62 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
     });
   });
 
+  // ⭐ Phase 164.9.1 round-1 review (silent-failure-hunter HIGH-1). The route
+  // answers 409 when the key is disconnected on the server (a stale tab, or a
+  // disconnect from another device). Retrying can never succeed, so the
+  // generic "click Sync now to retry" would loop the user forever. The row must
+  // move to the Disconnected section, where its Reconnect button is, and show
+  // the route's own sentence. Fails if a 409 is folded back into the generic
+  // non-OK branch.
+  it("handleSync on 409 (key disconnected) moves the row to Disconnected with the route's reason, never the retry helper", async () => {
+    const reason = "This API key is disconnected. Reconnect it before syncing holdings.";
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: reason }),
+    });
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Sync binance now/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: /Sync binance now/i }),
+      "a disconnected key still offers Sync now, the action that just failed",
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("allocator-disconnected-helper").textContent).toBe(reason);
+    expect(document.body.textContent).not.toContain("Sync request failed");
+    expect(routerRefreshMock).toHaveBeenCalled();
+  });
+
+  it("handleSync on 409 with no usable body still says the key is disconnected", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: async () => {
+        throw new Error("not json");
+      },
+    });
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Sync binance now/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("allocator-disconnected-helper").textContent,
+      ).toMatch(/disconnected.*Reconnect/);
+    });
+    expect(document.body.textContent).not.toContain("Sync request failed");
+  });
+
   it("handleSync on network error (rejected fetch) surfaces 'Sync request failed' helper_override", async () => {
     fetchMock.mockRejectedValueOnce(new Error("network down"));
     render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
@@ -323,6 +509,8 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
     routerRefreshMock.mockReset();
     insertMock.mockReset();
     getUserMock.mockReset();
+    apiKeysRefetchMock.mockReset();
+    apiKeysRefetchCall = null;
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -359,19 +547,17 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
   }
 
   it("handleAddKey awaits POST and on 200 success leaves new row at sync_status='syncing' with no error helper", async () => {
-    // First fetch: validate-and-encrypt → 200. Second fetch: first-run sync → 200.
+    // First fetch: validate-and-encrypt in persist mode → 200 { api_key_id }.
+    // Second fetch: first-run sync → 200.
     fetchMock.mockImplementation((url: string) => {
       if (url === "/api/keys/validate-and-encrypt") {
         return Promise.resolve({
           ok: true,
           status: 200,
           json: async () => ({
-            api_key_encrypted: "enc",
-            api_secret_encrypted: "sec",
-            passphrase_encrypted: null,
-            dek_encrypted: "dek",
-            nonce: "nonce",
-            kek_version: 1,
+            api_key_id: "new-key",
+            valid: true,
+            read_only: true,
           }),
         });
       }
@@ -384,7 +570,7 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
       }
       throw new Error(`unexpected fetch ${url}`);
     });
-    insertMock.mockReturnValue({
+    apiKeysRefetchMock.mockReturnValue({
       data: makeKey({ id: "new-key", sync_status: "idle" }),
       error: null,
     });
@@ -405,19 +591,17 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
   });
 
   it("handleAddKey_shows_error_when_first_run_sync_fails_with_403", async () => {
-    // First fetch: validate-and-encrypt → 200. Second fetch: first-run sync → 403.
+    // First fetch: validate-and-encrypt in persist mode → 200 { api_key_id }.
+    // Second fetch: first-run sync → 403.
     fetchMock.mockImplementation((url: string) => {
       if (url === "/api/keys/validate-and-encrypt") {
         return Promise.resolve({
           ok: true,
           status: 200,
           json: async () => ({
-            api_key_encrypted: "enc",
-            api_secret_encrypted: "sec",
-            passphrase_encrypted: null,
-            dek_encrypted: "dek",
-            nonce: "nonce",
-            kek_version: 1,
+            api_key_id: "new-key-403",
+            valid: true,
+            read_only: true,
           }),
         });
       }
@@ -432,7 +616,7 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
       }
       throw new Error(`unexpected fetch ${url}`);
     });
-    insertMock.mockReturnValue({
+    apiKeysRefetchMock.mockReturnValue({
       data: makeKey({ id: "new-key-403", sync_status: "idle" }),
       error: null,
     });
@@ -457,138 +641,69 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
     ).toContain("Sync request failed");
   });
 
-  // M-0407 (audit-2026-05-07) — handleAddKey inserts the encryption-critical
-  // fields with `?? `-fallbacks: dek_encrypted/nonce ?? null, kek_version ?? 1.
-  // The existing two handleAddKey tests above only assert downstream UI (pill /
-  // helper text) and happen to mock kek_version:1 — IDENTICAL to the fallback
-  // default — so the source could drop `result.kek_version` entirely and both
-  // still pass (non-discriminating coverage of an at-rest-credential field:
-  // a wrong KEK version = decrypt failure / encrypt under the wrong key). These
-  // three tests assert the row sent to .insert() carries the validate-and-encrypt
-  // RESULT values and exercises each fallback branch, including the nullish-vs-
-  // falsy `?? 1` (kek_version 0 is a valid version that must survive).
-  it("propagates the validate-and-encrypt ciphertext + kek_version into the api_keys insert (M-0407)", async () => {
+  // Phase 164.9.1 round-1 review (HIGH-1): the first-run sync of a just-added
+  // key answering 409 means the key is already disconnected on the server.
+  // Same treatment as Sync now: the row goes where its Reconnect button is,
+  // with the reason, never the retry helper.
+  it("handleAddKey first-run sync answering 409 lands the new row in Disconnected with the reason", async () => {
+    const reason = "This API key is disconnected. Reconnect it before syncing holdings.";
     fetchMock.mockImplementation((url: string) => {
       if (url === "/api/keys/validate-and-encrypt") {
         return Promise.resolve({
           ok: true,
           status: 200,
           json: async () => ({
-            api_key_encrypted: "CT_KEY",
-            api_secret_encrypted: "CT_SEC",
-            passphrase_encrypted: "CT_PASS",
-            dek_encrypted: "DEK_3",
-            nonce: "N_3",
-            kek_version: 3,
+            api_key_id: "new-key-409",
+            valid: true,
+            read_only: true,
           }),
         });
       }
       if (url === "/api/allocator/holdings/sync") {
         return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ ok: true, job_id: "job-1" }),
+          ok: false,
+          status: 409,
+          json: async () => ({ error: reason }),
         });
       }
       throw new Error(`unexpected fetch ${url}`);
     });
-    insertMock.mockReturnValue({ data: makeKey({ id: "new-key" }), error: null });
-
-    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
-    await submitAddKeyForm();
-
-    await waitFor(() => expect(insertMock).toHaveBeenCalledTimes(1));
-    // Neuter: `kek_version: result.kek_version ?? 1` -> `kek_version: 1` fails
-    // this (expects 3) while the two existing handleAddKey tests still pass.
-    expect(insertMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        user_id: "user-a",
-        api_key_encrypted: "CT_KEY",
-        api_secret_encrypted: "CT_SEC",
-        passphrase_encrypted: "CT_PASS",
-        dek_encrypted: "DEK_3",
-        nonce: "N_3",
-        kek_version: 3,
-      }),
-    );
-  });
-
-  it("applies the ?? fallbacks when validate-and-encrypt omits kek_version/dek_encrypted/nonce (M-0407)", async () => {
-    fetchMock.mockImplementation((url: string) => {
-      if (url === "/api/keys/validate-and-encrypt") {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          // Partial server response: only the two required ciphertexts.
-          json: async () => ({
-            api_key_encrypted: "CT",
-            api_secret_encrypted: "CT2",
-          }),
-        });
-      }
-      if (url === "/api/allocator/holdings/sync") {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ ok: true, job_id: "job-1" }),
-        });
-      }
-      throw new Error(`unexpected fetch ${url}`);
+    apiKeysRefetchMock.mockReturnValue({
+      data: makeKey({ id: "new-key-409", sync_status: "idle" }),
+      error: null,
     });
-    insertMock.mockReturnValue({ data: makeKey({ id: "new-key-2" }), error: null });
 
     render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
     await submitAddKeyForm();
 
-    await waitFor(() => expect(insertMock).toHaveBeenCalledTimes(1));
-    // Neuter: `result.dek_encrypted ?? null` -> `result.dek_encrypted` fails
-    // this (null vs undefined); same for nonce/passphrase_encrypted/kek_version.
-    expect(insertMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kek_version: 1,
-        dek_encrypted: null,
-        nonce: null,
-        passphrase_encrypted: null,
-      }),
-    );
-  });
-
-  it("preserves kek_version:0 from validate-and-encrypt (nullish ?? 1, not falsy || 1) (M-0407)", async () => {
-    fetchMock.mockImplementation((url: string) => {
-      if (url === "/api/keys/validate-and-encrypt") {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({
-            api_key_encrypted: "CT",
-            api_secret_encrypted: "CT2",
-            dek_encrypted: "d",
-            nonce: "n",
-            kek_version: 0,
-          }),
-        });
-      }
-      if (url === "/api/allocator/holdings/sync") {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ ok: true, job_id: "job-1" }),
-        });
-      }
-      throw new Error(`unexpected fetch ${url}`);
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("allocator-disconnected-helper").textContent,
+      ).toBe(reason);
     });
-    insertMock.mockReturnValue({ data: makeKey({ id: "new-key-3" }), error: null });
-
-    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
-    await submitAddKeyForm();
-
-    await waitFor(() => expect(insertMock).toHaveBeenCalledTimes(1));
-    // The discriminating case: kek_version 0 is a VALID version that must
-    // survive. Neuter: `?? 1` -> `|| 1` corrupts 0 to 1 (re-encrypt under the
-    // wrong KEK) and fails this assertion.
-    const row = insertMock.mock.calls[0][0] as { kek_version: number };
-    expect(row.kek_version).toBe(0);
+    expect(
+      screen.getByRole("button", { name: /Reconnect binance key/i }),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Sync request failed");
   });
+
+  // 160-03 / RANK-03 — the three M-0407 (audit-2026-05-07) specs that lived
+  // here are RETIRED. They asserted that handleAddKey's own INSERT carried the
+  // validate-and-encrypt ciphertext and exercised its `?? `-fallback branches
+  // (`dek_encrypted ?? null`, the nullish-vs-falsy `kek_version ?? 1` that
+  // preserved a valid version 0). Every one of those expressions was DELETED
+  // with the browser insert: the route now spreads its own `encrypted` object
+  // into the row it writes, so there is no client-side fallback left to get
+  // wrong, and the ciphertext never reaches the browser to be mishandled.
+  //
+  // Where the surviving obligation is pinned — "the ciphertext the route
+  // encrypted reaches the ROW": `route.test.ts` (160-02) asserts
+  // `row.api_key_encrypted` and `row.dek_encrypted` on the captured INSERT.
+  // ⚠️ HONEST DELTA: `kek_version` is NOT individually asserted on that row.
+  // It arrives by the same single `...encrypted` spread as the two fields that
+  // ARE asserted — there is no per-field expression that could single it out —
+  // so it is covered structurally rather than by name. Recorded in
+  // 160-03-SUMMARY.md rather than silently dropped.
 });
 
 describe("AllocatorExchangeManager — 5s polling (D-11)", () => {
@@ -1064,7 +1179,11 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
         headers: { "Content-Type": "application/json" },
       }),
     );
-    globalThis.fetch = fetchMockReconnect as unknown as typeof fetch;
+    // stubGlobal, not `globalThis.fetch = …` — only a stub is undone by
+    // `unstubGlobals: true` (vitest.config.ts), and this describe (unlike its
+    // siblings above) has no afterEach of its own. A direct assignment leaks
+    // this mock to every later file in the worker.
+    vi.stubGlobal("fetch", fetchMockReconnect as unknown as typeof fetch);
   });
 
   it("disconnected key renders in the Disconnected section with a Reconnect button (no Sync / Disconnect)", () => {
@@ -1124,6 +1243,80 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
     });
   });
 
+  // ⭐ Phase 164.9.1 round-1 review (HIGH-1): the reconnect RPC answered OK but
+  // the sync POST says the key is still disconnected. The row goes back where
+  // its Reconnect button is, with the reason, not to an active row that
+  // invites a Sync now that cannot succeed.
+  it("reconnect whose sync answers 409 puts the row back in Disconnected with the route's reason", async () => {
+    const reason = "This API key is disconnected. Reconnect it before syncing holdings.";
+    rpcMock.mockResolvedValue({ data: true, error: null });
+    fetchMockReconnect.mockResolvedValue(
+      new Response(JSON.stringify({ error: reason }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[
+          makeKey({
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("allocator-disconnected-helper").textContent,
+      ).toBe(reason);
+    });
+    expect(
+      screen.getByRole("button", { name: /Reconnect binance key/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Sync binance now/i }),
+    ).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Sync request failed");
+  });
+
+  // Same class, pre-existing: "Reconnect failed — try again" was set on a row
+  // that renders in the Disconnected section, which had no helper line, so the
+  // user never saw it. The row now shows it.
+  it("a failed reconnect RPC shows 'Reconnect failed — try again' on the disconnected row", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "XX000", message: "boom", hint: null },
+    });
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[
+          makeKey({
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("allocator-disconnected-helper").textContent,
+      ).toBe("Reconnect failed — try again");
+    });
+    errSpy.mockRestore();
+  });
+
   it("successful reconnect moves the row back into the active Exchange connections list", async () => {
     rpcMock.mockResolvedValue({ data: true, error: null });
     render(
@@ -1155,6 +1348,196 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
       screen.queryByRole("heading", { name: /Disconnected/i }),
     ).not.toBeInTheDocument();
   });
+
+  // Phase 164.5.3 (MT5CREDS) — venue_account_id (migration 20260920120000)
+  // renders in the DISCONNECTED section too, same idiom as active — D-06
+  // requires the card to identify the account regardless of connection
+  // state. Synthetic placeholder id per the phase's non-negotiable.
+  it("renders the MT5 account identifier in .font-metric, un-separated, for a disconnected mt5 row with a value", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-disc",
+            exchange: "mt5",
+            label: "My MT5",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+            venue_account_id: "synth5678",
+          }),
+        ]}
+      />,
+    );
+    const identifier = screen.getByText("MT5 account synth5678");
+    expect(identifier).toBeInTheDocument();
+    expect(identifier).toHaveClass("font-metric");
+    expect(identifier.textContent).not.toMatch(/,/);
+  });
+
+  it("renders an em-dash for a disconnected mt5 row with a NULL venue_account_id (never 0, never blank)", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-disc-null",
+            exchange: "mt5",
+            label: "My MT5",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+            venue_account_id: null,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("MT5 account —")).toBeInTheDocument();
+    expect(screen.queryByText("MT5 account 0")).not.toBeInTheDocument();
+  });
+
+  it("renders NO account-identifier line for a disconnected non-MT5 row", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-bnb-disc",
+            exchange: "binance",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.queryByText(/MT5 account/)).not.toBeInTheDocument();
+  });
+
+  // Phase 164.5.3 (MT5CREDS) Plan 05 — the "Update password" affordance,
+  // distinct from Reconnect everywhere it appears (RESEARCH.md Open
+  // Question 4): available on EVERY mt5 row regardless of connection state,
+  // never gated to the disconnected/error section.
+  it("an active mt5 row shows Update password alongside Sync now/Disconnect, distinct from Reconnect", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-mt5-active", exchange: "mt5", label: "My MT5" }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Update password for mt5 key" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Sync mt5 now/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Disconnect mt5 key/i }),
+    ).toBeInTheDocument();
+    // Reconnect never appears on an active (non-disconnected) row.
+    expect(
+      screen.queryByRole("button", { name: /Reconnect mt5 key/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("a disconnected mt5 row shows Update password alongside Reconnect — clicking Update password does NOT call the reconnect RPC", async () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-disc-update",
+            exchange: "mt5",
+            label: "My MT5",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    const updateButton = screen.getByRole("button", {
+      name: "Update password for mt5 key",
+    });
+    expect(updateButton).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Reconnect mt5 key/i }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(updateButton);
+    });
+
+    // Update password never touches disconnected_at directly (D-05 is the
+    // route's job) — the reconnect RPC must not have fired.
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("shows NO Update password button for a non-MT5 row, in either section", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-bnb-active", exchange: "binance" }),
+          makeKey({
+            id: "key-bnb-disc-2",
+            exchange: "binance",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /Update password/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opening the dialog from a DISCONNECTED row and completing a successful update triggers router.refresh() (callback wiring, not the route's own DB behavior)", async () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-disc-refresh",
+            exchange: "mt5",
+            label: "My MT5",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Update password for mt5 key" }),
+      );
+    });
+    fireEvent.change(screen.getByLabelText("New password"), {
+      target: { value: "corrected-investor-password" },
+    });
+
+    const refreshCallsBefore = routerRefreshMock.mock.calls.length;
+
+    await act(async () => {
+      const matches = screen.getAllByRole("button", {
+        name: "Update password",
+      });
+      fireEvent.click(matches[matches.length - 1]);
+    });
+
+    await waitFor(() => {
+      expect(fetchMockReconnect).toHaveBeenCalledWith(
+        "/api/keys/key-mt5-disc-refresh/rotate-secret",
+        expect.objectContaining({ method: "PATCH" }),
+      );
+    });
+    await waitFor(() => {
+      expect(routerRefreshMock.mock.calls.length).toBeGreaterThan(
+        refreshCallsBefore,
+      );
+    });
+  });
 });
 
 describe("AllocatorExchangeManager — initialKeys prop→state merge (Landmine 8)", () => {
@@ -1182,6 +1565,123 @@ describe("AllocatorExchangeManager — initialKeys prop→state merge (Landmine 
     expect(screen.getByTestId("allocator-sync-pill").textContent).toContain(
       "Synced",
     );
+  });
+
+  // ⭐ Phase 164.9.1 round-1 review (silent-failure-hunter LOW-1). The RPC's
+  // `already_inflight` answer does not restate api_keys.sync_status, so the
+  // next refresh hands back the stored `complete`. Server truth winning there
+  // made the Queued helper vanish while the job was still queued. The merge now
+  // holds the optimistic `syncing` until the job has had its turn.
+  describe("a queued (already_inflight) row survives a refresh until its job runs", () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+    beforeEach(() => {
+      fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+    });
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    async function queueRow(nextAttemptAt: string, expectQueuedHelper = true) {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          already_inflight: true,
+          next_attempt_at: nextAttemptAt,
+        }),
+      });
+      const view = render(
+        <AllocatorExchangeManager
+          hasHoldings={true} initialKeys={[makeKey({ sync_status: "complete" })]}
+        />,
+      );
+      await act(async () => {
+        fireEvent.click(
+          screen.getByRole("button", { name: /Sync binance now/i }),
+        );
+      });
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+      if (expectQueuedHelper) {
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("allocator-sync-helper").textContent,
+          ).toMatch(/Queued/);
+        });
+      }
+      return view;
+    }
+
+    it("a refresh that still reports the stored `complete` keeps the pill Syncing and the Queued helper", async () => {
+      const { rerender } = await queueRow(
+        new Date(Date.now() + 90_000).toISOString(),
+      );
+      rerender(
+        <AllocatorExchangeManager
+          hasHoldings={true} initialKeys={[makeKey({ sync_status: "complete" })]}
+        />,
+      );
+      expect(screen.getByTestId("allocator-sync-pill").textContent).toContain(
+        "Syncing\u2026",
+      );
+      expect(screen.getByTestId("allocator-sync-helper").textContent).toMatch(
+        /Queued/,
+      );
+    });
+
+    it("the hold ends as soon as last_sync_at moves (the job ran)", async () => {
+      const { rerender } = await queueRow(
+        new Date(Date.now() + 90_000).toISOString(),
+      );
+      rerender(
+        <AllocatorExchangeManager
+          hasHoldings={true} initialKeys={[
+            makeKey({
+              sync_status: "complete",
+              last_sync_at: new Date().toISOString(),
+            }),
+          ]}
+        />,
+      );
+      expect(screen.getByTestId("allocator-sync-pill").textContent).toContain(
+        "Synced",
+      );
+    });
+
+    it("the hold never masks a server error", async () => {
+      const { rerender } = await queueRow(
+        new Date(Date.now() + 90_000).toISOString(),
+      );
+      rerender(
+        <AllocatorExchangeManager
+          hasHoldings={true} initialKeys={[
+            makeKey({ sync_status: "error", sync_error: "exchange said no" }),
+          ]}
+        />,
+      );
+      expect(
+        screen.getByTestId("allocator-sync-pill").getAttribute("data-sync-status"),
+      ).toBe("error");
+    });
+
+    it("the hold ends once the job's turn is long past", async () => {
+      // next_attempt_at far in the past: the grace window has closed, so the
+      // stored status is believed again.
+      const { rerender } = await queueRow(
+        new Date(Date.now() - 10 * 60_000).toISOString(),
+        false,
+      );
+      rerender(
+        <AllocatorExchangeManager
+          hasHoldings={true} initialKeys={[makeKey({ sync_status: "complete" })]}
+        />,
+      );
+      expect(screen.getByTestId("allocator-sync-pill").textContent).toContain(
+        "Synced",
+      );
+    });
   });
 });
 
@@ -1272,80 +1772,99 @@ describe("AllocatorExchangeManager — M1 (red-team) Reconnect replica-lag guard
     rpcMock.mockReset();
   });
 
-  it("M1: re-rendering with a stale server snapshot (non-null disconnected_at) does NOT revert a reconnect-in-progress row back to the Disconnected section", async () => {
-    // Scenario: handleReconnect optimistically sets disconnected_at=null +
-    // sync_status="syncing". Before the replica propagates the RPC update,
-    // router.refresh() fires and the server snapshot still shows the old
-    // disconnected_at. Pre-fix: normalizeInitialKey would overwrite
-    // disconnected_at with the server value → row moved back to Disconnected
-    // section with Reconnect button re-enabled.
-    // Post-fix: the merge detects the in-flight state and preserves local null.
-    //
-    // We simulate the race by: (1) render with disconnected key, (2) simulate
-    // the optimistic state by re-rendering with the LOCAL optimistic state,
-    // then (3) rerender with the stale server snapshot and assert the row
-    // stays in the active section.
-    //
-    // The cleanest way to test normalizeInitialKey's guard without driving the
-    // full handleReconnect flow is to rerender the component with a key that
-    // was already in "reconnecting" local state. We do this by rendering the
-    // component twice:
-    //   - First with the row already showing sync_status="syncing" +
-    //     disconnected_at=null (simulating the state AFTER the optimistic
-    //     update has been applied in handleReconnect).
-    //   - Then rerender with the stale server snapshot (disconnected_at
-    //     non-null, sync_status="idle") and assert the row stays in the
-    //     active section.
-    //
-    // This is falsifiable: deleting the isReconnectInFlight guard from
-    // normalizeInitialKey causes the row to revert to the Disconnected section.
+  // Round-2 review (R2-3): this test used to seed a row that was merely
+  // `syncing` with a null disconnected_at and call that "a reconnect in
+  // progress". That inference was the defect: the same shape is a row whose
+  // key was disconnected elsewhere during a sync, and the guard pinned it
+  // active for good. The guard now keys on a flag handleReconnect sets, so the
+  // test drives the real Reconnect click and holds its RPC open.
+  it("M1: a stale server snapshot arriving while this tab's reconnect is running does NOT move the row back to Disconnected", async () => {
+    let resolveRpc!: (v: unknown) => void;
+    rpcMock.mockReturnValueOnce(
+      new Promise((r) => {
+        resolveRpc = r;
+      }),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, job_id: "j1" }),
+      }),
+    );
+    const staleSnapshot = () => [
+      makeKey({ sync_status: "idle", disconnected_at: "2026-04-22T09:00:00Z" }),
+    ];
+    const { rerender } = render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={staleSnapshot()} />,
+    );
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      );
+    });
+    // The optimistic update moved the row to the active list.
+    expect(
+      screen.getByRole("button", { name: /Sync binance now/i }),
+    ).toBeInTheDocument();
 
-    // Start: row is in active state with sync_status="syncing" and
-    // disconnected_at=null — this mimics the post-optimistic-update state
-    // that handleReconnect stamps before the RPC.
+    // A refresh taken before the reconnect RPC committed still reports the
+    // old disconnected_at. Local truth wins while the reconnect runs.
+    rerender(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={staleSnapshot()} />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /Reconnect binance key/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Sync binance now/i }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      resolveRpc({ data: true, error: null });
+    });
+    vi.unstubAllGlobals();
+  });
+
+  // The flag ends with handleReconnect: once it has returned, a snapshot that
+  // says the key is disconnected is believed (a disconnect made elsewhere).
+  it("M1: after the reconnect has finished, a snapshot reporting the key disconnected is believed", async () => {
+    rpcMock.mockResolvedValueOnce({ data: true, error: null });
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, job_id: "j1" }),
+    });
+    vi.stubGlobal("fetch", fetchSpy);
     const { rerender } = render(
       <AllocatorExchangeManager
         hasHoldings={true} initialKeys={[
-          makeKey({
-            sync_status: "syncing",
-            // disconnected_at is absent (undefined → normalized to null)
-          }),
+          makeKey({ sync_status: "idle", disconnected_at: "2026-04-22T09:00:00Z" }),
         ]}
       />,
     );
-
-    // The Reconnect button must NOT be in the DOM (row is in the active list).
-    expect(
-      screen.queryByRole("button", { name: /Reconnect binance key/i }),
-    ).not.toBeInTheDocument();
-    // The row IS in the active Exchange connections card.
-    expect(
-      screen.getByRole("button", { name: /Sync binance now/i }),
-    ).toBeInTheDocument();
-
-    // Simulate the stale server snapshot arriving: server still reports the
-    // old disconnected_at timestamp and sync_status="idle".
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(routerRefreshMock).toHaveBeenCalled();
+    });
     rerender(
       <AllocatorExchangeManager
         hasHoldings={true} initialKeys={[
-          makeKey({
-            sync_status: "idle",
-            disconnected_at: "2026-04-22T09:00:00Z",
-          }),
+          makeKey({ sync_status: "idle", disconnected_at: "2026-09-25T10:00:00Z" }),
         ]}
       />,
     );
-
-    // M1 post-fix: the row must STILL be in the active section (Reconnect
-    // button absent, Sync now present), because the merge recognised that
-    // local state had disconnected_at=null + sync_status="syncing" and
-    // preserved it against the stale snapshot.
-    expect(
-      screen.queryByRole("button", { name: /Reconnect binance key/i }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /Sync binance now/i }),
-    ).toBeInTheDocument();
+    const reconnect = screen.getByRole("button", { name: /Reconnect binance key/i });
+    expect(reconnect).not.toBeDisabled();
+    vi.unstubAllGlobals();
   });
 });
 
@@ -1515,28 +2034,32 @@ describe("AllocatorExchangeManager — DOGFOOD-2 subtitle gated on holdings", ()
   });
 });
 
-// F6 (phase-119 fold-in) — the CLIENT composes the api_keys INSERT directly, so a
-// mixed-case exchange ("sFOX") passes the server validate route (burning a live
-// probe) then 23514s on the DB lowercase-only CHECK. handleAddKey must
-// canonicalize to lowercase and use that value for BOTH the validate-and-encrypt
-// fetch body AND the insert. These tests drive the REAL handleAddKey (via the
-// captured onSubmit) with the mixed-case vector and assert the wiring at the call
-// site — a helper-only test would not prove the insert receives the canonical
-// value. Neuter `data.exchange.trim().toLowerCase()` back to `data.exchange` and
-// the sFOX case fails on both the fetch body and the insert payload.
-describe("AllocatorExchangeManager — F6 canonical-lowercase exchange at the add-key insert", () => {
+// F6 (phase-119 fold-in) — a mixed-case exchange ("sFOX") used to pass the
+// server validate route (burning a live probe) and then 23514 on the DB
+// lowercase-only CHECK when the CLIENT composed the INSERT. handleAddKey must
+// canonicalize to lowercase before the value leaves the browser.
+//
+// 160-03: the insert half of this assertion is gone with the insert. The
+// canonical value's SOLE consumer is now the validate-and-encrypt request body,
+// which is exactly what these tests pin — and the route re-normalizes
+// independently at its own chokepoint, so the DB CHECK is defended twice.
+// Neuter `data.exchange.trim().toLowerCase()` back to `data.exchange` and the
+// sFOX case fails on the fetch body.
+describe("AllocatorExchangeManager — F6 canonical-lowercase exchange in the add-key request", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     routerRefreshMock.mockReset();
     insertMock.mockReset();
     getUserMock.mockReset();
+    apiKeysRefetchMock.mockReset();
+    apiKeysRefetchCall = null;
     capturedAddKeyOnSubmit = null;
     getUserMock.mockResolvedValue({
       data: { user: { id: "user-a" } },
       error: null,
     });
-    insertMock.mockReturnValue({
+    apiKeysRefetchMock.mockReturnValue({
       data: makeKey({ id: "new-key", sync_status: "idle" }),
       error: null,
     });
@@ -1546,12 +2069,9 @@ describe("AllocatorExchangeManager — F6 canonical-lowercase exchange at the ad
           ok: true,
           status: 200,
           json: async () => ({
-            api_key_encrypted: "enc",
-            api_secret_encrypted: "sec",
-            passphrase_encrypted: null,
-            dek_encrypted: "dek",
-            nonce: "nonce",
-            kek_version: 1,
+            api_key_id: "new-key",
+            valid: true,
+            read_only: true,
           }),
         });
       }
@@ -1598,25 +2118,814 @@ describe("AllocatorExchangeManager — F6 canonical-lowercase exchange at the ad
     });
   }
 
-  it("canonicalizes a mixed-case 'sFOX' to 'sfox' in BOTH the validate body and the insert", async () => {
+  it("canonicalizes a mixed-case 'sFOX' to 'sfox' in the validate-and-encrypt body", async () => {
     await openFormAndSubmit("sFOX");
 
-    // (a) validate-and-encrypt fetch body carries the canonical lowercase value.
+    // The validate-and-encrypt fetch body carries the canonical lowercase
+    // value — the ONLY place this value now flows, and the string the route
+    // stamps into BOTH `exchange` and `attested_venue`.
     expect(validateBody().exchange).toBe("sfox");
-    // (b) the api_keys insert payload carries the canonical lowercase value —
-    // the row that hits the DB lowercase-only CHECK.
-    expect(insertMock).toHaveBeenCalledWith(
-      expect.objectContaining({ exchange: "sfox" }),
-    );
+    // And no browser-composed row exists to carry a display casing to the DB.
+    expect(insertMock).not.toHaveBeenCalled();
   });
 
   it("leaves an already-lowercase 'binance' byte-identical (no regression)", async () => {
     await openFormAndSubmit("binance");
 
     expect(validateBody().exchange).toBe("binance");
-    expect(insertMock).toHaveBeenCalledWith(
-      expect.objectContaining({ exchange: "binance" }),
-    );
+    expect(insertMock).not.toHaveBeenCalled();
   });
 });
 
+/**
+ * 160-03 / RANK-03 — AllocatorExchangeManager is the THIRD browser api_keys
+ * INSERT site. 160-CONTEXT.md listed only two; RESEARCH found this one at
+ * :591. That matters concretely: plan 160-05 REVOKEs the `authenticated`
+ * INSERT grant, so an unconverted site here would not degrade — the allocator
+ * connect flow would simply DIE with a 42501 at that merge.
+ *
+ * The conversion is not a like-for-like swap. The old insert used
+ * `.select(API_KEY_USER_COLUMNS).single()` to get the full row back for the
+ * optimistic render; the persist arm's response is deliberately minimal
+ * (`{ api_key_id, valid, read_only }` — no ciphertext ever returns to the
+ * browser again), so the component re-reads the row by id through the SAME
+ * migration-027 SELECT allowlist. These specs pin all three halves: the
+ * request, the re-fetch (projection AND tenant filter), and the optimistic
+ * render that consumes it.
+ */
+describe("AllocatorExchangeManager — 160-03 server-side persist + row re-fetch", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    insertMock.mockReset();
+    getUserMock.mockReset();
+    apiKeysRefetchMock.mockReset();
+    apiKeysRefetchCall = null;
+    capturedAddKeyOnSubmit = null;
+    fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          // The persist-arm contract as shipped in 160-02: an id, a verdict,
+          // and NO ciphertext of any name.
+          json: async () => ({
+            api_key_id: "new-key",
+            valid: true,
+            read_only: true,
+          }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, job_id: "job-1" }),
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function validateBody() {
+    const call = fetchMock.mock.calls.find(
+      (c) => c[0] === "/api/keys/validate-and-encrypt",
+    );
+    expect(call).toBeTruthy();
+    return JSON.parse(call![1].body as string) as Record<string, unknown>;
+  }
+
+  async function connect(exchange = "binance", label = "Test Key") {
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /\+ Connect exchange/i }),
+      );
+    });
+    expect(capturedAddKeyOnSubmit).not.toBeNull();
+    await act(async () => {
+      await capturedAddKeyOnSubmit!({
+        exchange,
+        label,
+        apiKey: "test-key",
+        apiSecret: "test-secret",
+        passphrase: "",
+      });
+    });
+  }
+
+  it("POSTs persist:true with the canonical exchange + label, issues NO insert, and re-fetches the row by api_key_id", async () => {
+    apiKeysRefetchMock.mockReturnValue({
+      data: makeKey({ id: "new-key", sync_status: "idle" }),
+      error: null,
+    });
+
+    await connect("sFOX", "My sFOX key");
+
+    const body = validateBody();
+    // Strict boolean — a non-boolean "true"/1 is REFUSED server-side with a 409
+    // STALE_CLIENT. This pins that the client sends the discriminator the server
+    // actually requires; without it every connect from this surface fails
+    // outright.
+    expect(body.persist).toBe(true);
+    // F6 canonicalization survives the conversion: the value that reaches the
+    // route is lowercase, never the display casing.
+    expect(body.exchange).toBe("sfox");
+    expect(body.label).toBe("My sFOX key");
+
+    // ⭐ The load-bearing negative: zero browser-composed inserts.
+    expect(insertMock).not.toHaveBeenCalled();
+
+    // The re-fetch reads through the migration-027 SELECT allowlist, filtered
+    // to the id the SERVER returned — not to a client-chosen value.
+    expect(apiKeysRefetchCall).toEqual({
+      cols: API_KEY_USER_COLUMNS,
+      col: "id",
+      val: "new-key",
+    });
+  });
+
+  it("feeds the optimistic render from the RE-FETCHED row (pending_insert stamping unchanged)", async () => {
+    // A row whose fields differ from anything the component could have guessed
+    // — if the optimistic render were fabricated client-side instead of read
+    // back, these values could not appear.
+    apiKeysRefetchMock.mockReturnValue({
+      data: makeKey({
+        id: "new-key",
+        label: "Refetched Label",
+        exchange: "binance",
+        account_balance_usdt: 98_765,
+        sync_status: "idle",
+      }),
+      error: null,
+    });
+
+    await connect();
+
+    // The re-fetched row is what rendered.
+    await waitFor(() => {
+      expect(screen.getByText("Refetched Label")).toBeInTheDocument();
+    });
+    // NEW-C29-02: the new row is stamped syncing (not the re-fetched 'idle'),
+    // which is the pending_insert optimistic overlay behaving exactly as it did
+    // when the INSERT returned the row.
+    expect(screen.getByTestId("allocator-sync-pill").textContent).toContain(
+      "Syncing…",
+    );
+    expect(insertMock).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a failed re-fetch through setFormError with curated copy — no raw Postgres text", async () => {
+    apiKeysRefetchMock.mockReturnValue({
+      data: null,
+      error: {
+        code: "42501",
+        message:
+          'permission denied for column "api_key_encrypted" of relation "api_keys"',
+      },
+    });
+
+    await connect();
+
+    // Curated. The pre-conversion code did `setFormError(insertErr?.message)`,
+    // which piped the raw PostgREST string — SQLSTATE, relation and column
+    // names — straight into the form banner (H-0405 class).
+    expect(
+      await screen.findByText(
+        "Your key was saved, but we couldn't load it here. Refresh the page to see it.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/permission denied/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/api_key_encrypted/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/42501/)).not.toBeInTheDocument();
+  });
+
+  it("fails LOUDLY when a 2xx carries no api_key_id — no phantom row, no re-fetch", async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        // A stale or misrouted 2xx (ciphertext, no id): the key was NOT saved.
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            valid: true,
+            read_only: true,
+            api_key_encrypted: "enc",
+          }),
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    await connect();
+
+    expect(
+      await screen.findByText(
+        "Your key was verified but not saved. Please try again.",
+      ),
+    ).toBeInTheDocument();
+    // No row was optimistically rendered off a non-existent id.
+    expect(apiKeysRefetchCall).toBeNull();
+    expect(insertMock).not.toHaveBeenCalled();
+  });
+});
+
+
+// ===========================================================================
+// ⭐ Phase 164.9.1 round-2 review (silent-failure-hunter R2-1, R2-2, R2-3).
+// The client-only helper, queued timestamp and optimistic `syncing` describe
+// the section a row is in. When the row changes section (a disconnect in this
+// tab, or a disconnect or reconnect made elsewhere and seen on a refresh), the
+// user must not be left with a message that points at a button the row does
+// not have, or with a row pinned "Syncing…" that no refresh can release.
+// ===========================================================================
+
+describe("AllocatorExchangeManager — round-2 review: state crossing sections", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  const DISCONNECTED_REASON =
+    "This API key is disconnected. Reconnect it before syncing holdings.";
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    rpcMock.mockReset();
+    holdingsCountMock.mockReset();
+    holdingsCountMock.mockReturnValue({ count: 0, error: null });
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function clickSyncNow() {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Sync binance now/i }));
+    });
+  }
+
+  // Opens the Disconnect modal and confirms the soft disconnect (no holdings,
+  // so no cascade checkbox): the migration-075 path.
+  async function softDisconnectInThisTab() {
+    rpcMock.mockResolvedValue({ data: true, error: null });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Disconnect binance key/i }),
+      );
+    });
+    const confirm = screen
+      .getAllByRole("button")
+      .filter(
+        (b) => b.textContent === "Disconnect" && b.className.includes("bg-negative"),
+      )
+      .at(-1)!;
+    await act(async () => {
+      fireEvent.click(confirm);
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      ).toBeInTheDocument();
+    });
+    expect(rpcMock).toHaveBeenCalledWith("disconnect_allocator_api_key", {
+      p_api_key_id: "key-binance-1",
+    });
+  }
+
+  async function queueRow() {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        already_inflight: true,
+        next_attempt_at: new Date(Date.now() + 90_000).toISOString(),
+      }),
+    });
+    const view = render(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[makeKey({ sync_status: "complete" })]}
+      />,
+    );
+    await clickSyncNow();
+    await waitFor(() => {
+      expect(screen.getByTestId("allocator-sync-helper").textContent).toMatch(
+        /Queued/,
+      );
+    });
+    return view;
+  }
+
+  // R2-1: a failed sync leaves "Sync request failed — click Sync now to
+  // retry". Disconnecting the key must not carry that invitation onto a row
+  // that has only Reconnect.
+  it("R2-1: a stale 'click Sync now' helper does not follow a same-tab disconnect", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: "boom" }),
+    });
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
+    await clickSyncNow();
+    await waitFor(() => {
+      expect(screen.getByTestId("allocator-sync-helper").textContent).toContain(
+        "Sync now",
+      );
+    });
+    await softDisconnectInThisTab();
+    expect(
+      screen.getByTestId("allocator-disconnected-helper").textContent,
+      "a disconnected row tells the user to press Sync now, which it does not have",
+    ).not.toContain("Sync now");
+  });
+
+  it("R2-1: a stale 'click Sync now' helper does not follow a disconnect made elsewhere (active → Disconnected on refresh)", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: "boom" }),
+    });
+    const { rerender } = render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />,
+    );
+    await clickSyncNow();
+    await waitFor(() => {
+      expect(screen.getByTestId("allocator-sync-helper").textContent).toContain(
+        "Sync now",
+      );
+    });
+    rerender(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[
+          makeKey({ sync_status: "idle", disconnected_at: "2026-09-25T09:00:00Z" }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Reconnect binance key/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("allocator-disconnected-helper").textContent,
+    ).not.toContain("Sync now");
+  });
+
+  // R2-2, the converse: a 409 moved the row to Disconnected with "Reconnect
+  // it". The key is then reconnected elsewhere and a refresh brings the row
+  // back to the active list, where there is no Reconnect button.
+  it("R2-2: a 409's 'Reconnect it' sentence does not follow a reconnect made elsewhere (Disconnected → active on refresh)", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: DISCONNECTED_REASON }),
+    });
+    const { rerender } = render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />,
+    );
+    await clickSyncNow();
+    await waitFor(() => {
+      expect(screen.getByTestId("allocator-disconnected-helper").textContent).toBe(
+        DISCONNECTED_REASON,
+      );
+    });
+    rerender(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[makeKey({ sync_status: "complete" })]}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Sync binance now/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("allocator-sync-helper").textContent,
+      "a connected row still says it is disconnected and must be reconnected",
+    ).not.toContain("Reconnect it");
+    expect(document.body.textContent).not.toContain(DISCONNECTED_REASON);
+  });
+
+  // The override set together with its section stays: a 409 row refreshed
+  // while still disconnected keeps its reason.
+  it("R2-2: the 409 sentence stays while the refreshed row is still disconnected", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: DISCONNECTED_REASON }),
+    });
+    const { rerender } = render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />,
+    );
+    await clickSyncNow();
+    await waitFor(() => {
+      expect(screen.getByTestId("allocator-disconnected-helper").textContent).toBe(
+        DISCONNECTED_REASON,
+      );
+    });
+    rerender(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[
+          makeKey({ sync_status: "idle", disconnected_at: "2026-09-25T09:00:00Z" }),
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("allocator-disconnected-helper").textContent).toBe(
+      DISCONNECTED_REASON,
+    );
+  });
+
+  // R2-3: during a queued hold the key is disconnected elsewhere. The first
+  // refresh that shows disconnected_at must move the row to Disconnected with
+  // Reconnect usable, and later refreshes must not pin it back.
+  it("R2-3: a remote disconnect during a queued hold moves the row to Disconnected with Reconnect enabled", async () => {
+    const { rerender } = await queueRow();
+    const disconnectedSnapshot = [
+      makeKey({ sync_status: "complete", disconnected_at: "2026-09-25T09:00:00Z" }),
+    ];
+    rerender(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={disconnectedSnapshot} />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /Sync binance now/i }),
+      "the row is still pinned active after the server reported it disconnected",
+    ).not.toBeInTheDocument();
+    const reconnect = screen.getByRole("button", { name: /Reconnect binance key/i });
+    expect(reconnect).not.toBeDisabled();
+    // A second refresh (a new array, as router.refresh() hands back) keeps it.
+    rerender(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[
+          makeKey({ sync_status: "complete", disconnected_at: "2026-09-25T09:00:00Z" }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Reconnect binance key/i }),
+    ).not.toBeDisabled();
+    expect(document.body.textContent).not.toMatch(/Queued/);
+  });
+
+  // R2-3, same tab: Disconnect clicked while the hold is active. The row must
+  // not show Reconnect disabled as "Reconnect in progress" for minutes.
+  it("R2-3: a same-tab disconnect during a queued hold leaves Reconnect enabled, before and after the refresh", async () => {
+    const { rerender } = await queueRow();
+    await softDisconnectInThisTab();
+    const reconnect = screen.getByRole("button", { name: /Reconnect binance key/i });
+    expect(
+      reconnect,
+      "Reconnect is disabled on a disconnected row with no reconnect running",
+    ).not.toBeDisabled();
+    rerender(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[
+          makeKey({ sync_status: "complete", disconnected_at: "2026-09-25T09:00:00Z" }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Reconnect binance key/i }),
+    ).not.toBeDisabled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 plan 04 (D-01, D-11) — the duplicate-account note and the
+// named reconnect refusal.
+//
+// Why: one exchange account behind two live keys is summed twice by every
+// consumer that adds keys together. The daily poll MARKS the second key
+// (`account_share_kind = 'duplicate'`) instead of acting on it, because the
+// founder's rule is "nothing is silently deleted". The card is the named
+// cleanup path: it must say which key already reads the account, next to the
+// Disconnect control the owner uses to fix it. And once ccxt keys carry an
+// account id, a Reconnect into an occupied account is refused by the database
+// (SQLSTATE 23505, plan 03's migration); that refusal must read as words, not
+// as a raw database error or a generic "try again" that can never succeed.
+// ---------------------------------------------------------------------------
+describe("AllocatorExchangeManager — duplicate-account note and reconnect refusal (167.1.2 plan 04)", () => {
+  const HOLDER = "key-binance-1";
+  const DUP = "key-binance-2";
+  const DUP_SENTENCE =
+    "This key reads the same exchange account as Binance — Primary Binance. Disconnect one of them.";
+  const RECONNECT_REFUSAL =
+    "This exchange account is already connected through another of your keys. Disconnect that key first, then reconnect this one.";
+
+  function holderKey(overrides: Partial<Record<string, unknown>> = {}) {
+    return makeKey({
+      id: HOLDER,
+      disconnected_at: null,
+      account_shared_with_api_key_id: null,
+      account_share_kind: null,
+      ...overrides,
+    });
+  }
+
+  function dupKey(overrides: Partial<Record<string, unknown>> = {}) {
+    return makeKey({
+      id: DUP,
+      label: "Second Binance",
+      disconnected_at: null,
+      account_shared_with_api_key_id: HOLDER,
+      account_share_kind: "duplicate",
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    rpcMock.mockReset();
+    holdingsCountMock.mockReset();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ ok: true, job_id: "j1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ) as unknown as typeof fetch,
+    );
+  });
+
+  it("names the holder on the duplicate's row, beside its Disconnect control", () => {
+    render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={[holderKey(), dupKey()]} />,
+    );
+    const note = screen.getByRole("note");
+    expect(note.textContent).toBe(DUP_SENTENCE);
+    // The note sits in the duplicate's own row, which carries the control the
+    // sentence asks the owner to use.
+    const row = note.closest("[data-testid='allocator-key-row']") as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(within(row).getByText("Second Binance")).toBeInTheDocument();
+    expect(
+      within(row).getByRole("button", { name: /Disconnect binance key/i }),
+    ).toBeInTheDocument();
+    // Only the marked key carries a note; the holder's row does not.
+    expect(screen.getAllByRole("note")).toHaveLength(1);
+    // Never an id: the holder is named by its own label.
+    expect(note.textContent).not.toContain(HOLDER);
+  });
+
+  it("shows nothing for a composite_member pair (D-04, a rotation inside a composite)", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[holderKey(), dupKey({ account_share_kind: "composite_member" })]}
+      />,
+    );
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  // The duplicate's own row. A holder in 'error' or 'sign_in_failed' renders a
+  // status line of its own, so the note is judged inside this row, by its text.
+  function dupRow(): HTMLElement {
+    const row = screen
+      .getByText("Second Binance")
+      .closest("[data-testid='allocator-key-row']") as HTMLElement | null;
+    expect(row).not.toBeNull();
+    return row as HTMLElement;
+  }
+
+  // D-18 (founder, 2026-09-27): a holder is WORKING only while it is active,
+  // connected, and its last sync is not revoked, sign_in_failed or error. A
+  // holder that is not working does not count the account, so the marked key
+  // counts on its own and must not be told to disconnect: telling the owner to
+  // drop the one key that still works would leave the account counted by nobody.
+  it.each([
+    ["disconnected", { disconnected_at: "2026-09-20T00:00:00Z" }],
+    ["revoked", { sync_status: "revoked" }],
+    ["sign_in_failed", { sync_status: "sign_in_failed" }],
+    ["error", { sync_status: "error" }],
+    ["inactive", { is_active: false }],
+  ])(
+    "shows nothing once the holder is %s (the reader rule: the marked key then counts on its own)",
+    (_name, holderOverrides) => {
+      render(
+        <AllocatorExchangeManager
+          hasHoldings={true}
+          initialKeys={[holderKey(holderOverrides), dupKey()]}
+        />,
+      );
+      // Neither the named sentence nor its 'another of your keys' fallback.
+      expect(within(dupRow()).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    ["idle", { sync_status: "idle" }],
+    ["complete", { sync_status: "complete" }],
+    ["never synced (NULL)", { sync_status: null }],
+  ])(
+    "names the holder while it is working, last sync %s",
+    (_name, holderOverrides) => {
+      render(
+        <AllocatorExchangeManager
+          hasHoldings={true}
+          initialKeys={[holderKey(holderOverrides), dupKey()]}
+        />,
+      );
+      expect(within(dupRow()).getByText(DUP_SENTENCE)).toBeInTheDocument();
+    },
+  );
+
+  // 167.1.2 REVIEW SF-L1: a holder this list does not carry cannot be judged
+  // working under D-18, and an unjudged holder is not grounds for asking the
+  // owner to disconnect a key. Unknown says nothing (this used to name
+  // "another of your keys").
+  it("shows nothing when the holder is not in the list", () => {
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[dupKey()]} />);
+    expect(within(dupRow()).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
+  });
+
+  // 167.1.2 REVIEW WR-02: an inactive row still renders in the active list, and
+  // a marked key that is itself not working (D-18 applied to the marked key)
+  // counts for nothing, so the note must not ask for a disconnect.
+  it("shows nothing on a marked key that is itself inactive", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[holderKey(), dupKey({ is_active: false })]}
+      />,
+    );
+    expect(within(dupRow()).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      "the named pre-check",
+      "KEY_VENUE_ALREADY_CONNECTED",
+    ],
+    [
+      "a raced index hit",
+      'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+    ],
+  ])(
+    "a Reconnect refused with 23505 (%s) shows the named refusal and keeps the row disconnected",
+    async (_name, message) => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: { code: "23505", message, hint: null },
+      });
+      render(
+        <AllocatorExchangeManager
+          hasHoldings={true}
+          initialKeys={[
+            holderKey({ disconnected_at: "2026-04-22T09:00:00Z", sync_status: "idle" }),
+          ]}
+        />,
+      );
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /Reconnect binance key/i }));
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("allocator-disconnected-helper").textContent).toBe(
+          RECONNECT_REFUSAL,
+        );
+      });
+      // Rolled back exactly as the existing error path does: the row is still
+      // in the Disconnected section, with its Reconnect button usable.
+      expect(screen.getByRole("heading", { name: /Disconnected/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Reconnect binance key/i })).not.toBeDisabled();
+      // The refusal is not followed by a sync request that could not succeed.
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+      // Never the raw database text.
+      expect(screen.queryByText(/duplicate key value/i)).not.toBeInTheDocument();
+      errSpy.mockRestore();
+    },
+  );
+
+  it("any other reconnect error keeps today's handling", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "permission denied", hint: null },
+    });
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[holderKey({ disconnected_at: "2026-04-22T09:00:00Z", sync_status: "idle" })]}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Reconnect binance key/i }));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("allocator-disconnected-helper").textContent).toBe(
+        "Reconnect failed — try again",
+      );
+    });
+    errSpy.mockRestore();
+  });
+});
+
+/**
+ * 2026-09-29, Phase 169 review round 1 IN-04. The key card's balance renders
+ * through the ONE money module (`formatUsd`, whole dollars), not a private
+ * compact copy that read "$12.3k". DESIGN.md's Currency row: amounts stay
+ * whole dollars, null and non-finite are the em-dash. Typed-literal oracles.
+ */
+describe("AllocatorExchangeManager — the key card's balance (169 IN-04)", () => {
+  it.each([
+    [12_345, "Balance $12,345"],
+    [2_500_000, "Balance $2,500,000"],
+    [null, "Balance —"],
+    [Number.NaN, "Balance —"],
+  ])("a balance of %s renders %s", (balance, expected) => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[makeKey({ account_balance_usdt: balance })]}
+      />,
+    );
+    const line = screen.getByText(/Read-only · Balance/);
+    expect(line.textContent).toContain(expected);
+  });
+});
+
+// SC2-PROFILE (N-PROFILE). A nowrap row inside overflow-hidden is clipped,
+// not scrolled, so Disconnect sits past a phone viewport. Both key rows wrap,
+// and each row's actions share one group that takes its own line below sm.
+describe("AllocatorExchangeManager — key rows wrap so Disconnect is reachable (SC2-PROFILE)", () => {
+  function surfaceRow(el: HTMLElement): HTMLElement {
+    let node: HTMLElement | null = el;
+    while (node && !/\bbg-surface\b/.test(node.className)) {
+      node = node.parentElement;
+    }
+    if (!node) throw new Error("key row not found");
+    return node;
+  }
+
+  function expectActionGroup(el: HTMLElement) {
+    for (const token of [
+      "basis-full",
+      "sm:basis-auto",
+      "sm:ml-auto",
+      "flex-wrap",
+      "gap-2",
+    ]) {
+      expect(el.className, token).toContain(token);
+    }
+  }
+
+  it("wraps active and disconnected rows, and groups Disconnect with Sync now", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey(),
+          makeKey({
+            id: "key-mt5-1",
+            exchange: "mt5",
+            label: "My MT5",
+            venue_account_id: "1001",
+          }),
+          makeKey({
+            id: "key-okx-gone",
+            exchange: "okx",
+            label: "Old OKX",
+            disconnected_at: "2026-04-22T09:00:00Z",
+          }),
+        ]}
+      />,
+    );
+
+    const disconnect = screen.getByRole("button", {
+      name: "Disconnect binance key",
+    });
+    const sync = screen.getByRole("button", { name: "Sync binance now" });
+    const group = disconnect.parentElement;
+    expect(group).not.toBeNull();
+    expectActionGroup(group!);
+    expect(sync.parentElement).toBe(group);
+
+    const activeRow = surfaceRow(disconnect);
+    expect(activeRow).not.toBe(group);
+    expect(activeRow.className).toContain("flex-wrap");
+
+    const update = screen.getByRole("button", {
+      name: "Update password for mt5 key",
+    });
+    const mt5Disconnect = screen.getByRole("button", {
+      name: "Disconnect mt5 key",
+    });
+    expect(update.parentElement).toBe(mt5Disconnect.parentElement);
+    expectActionGroup(mt5Disconnect.parentElement!);
+    expect(surfaceRow(mt5Disconnect).className).toContain("flex-wrap");
+
+    const reconnect = screen.getByRole("button", { name: "Reconnect okx key" });
+    const disconnectedGroup = reconnect.parentElement;
+    expect(disconnectedGroup).not.toBeNull();
+    expectActionGroup(disconnectedGroup!);
+    const disconnectedRow = surfaceRow(reconnect);
+    expect(disconnectedRow).not.toBe(disconnectedGroup);
+    expect(disconnectedRow.className).toContain("flex-wrap");
+    expect(disconnectedRow.className).toContain("opacity-75");
+
+    for (const button of [disconnect, sync, update, mt5Disconnect, reconnect]) {
+      expect(button.className).toContain("min-h-[44px]");
+      expect(button.className).toContain("px-4");
+      expect(button.className).toContain("py-2.5");
+      expect(button.className).toContain("text-body");
+    }
+  });
+});

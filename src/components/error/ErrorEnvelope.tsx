@@ -108,6 +108,27 @@ export function ErrorEnvelope({
   const showRetry = envelope.recoverable && Boolean(onRetry);
   const showCancel = Boolean(onCancel);
 
+  // 140.3-09 / SEAMUX-06 — the advertised wait, in SECONDS.
+  //
+  // TWO conditions, both load-bearing:
+  //   1. A wait must actually have been advertised. `undefined` means the
+  //      failure carried none, and a surface must NEVER invent a duration it
+  //      did not receive — naming a wait that no upstream stated turns a vague
+  //      error into a specific lie (TRAP-3). `> 0` also rejects a 0/negative
+  //      that reached us around the ONE parser, which never emits one.
+  //   2. The error must be recoverable AND have somewhere to retry to. A
+  //      countdown beside an error the user cannot retry is a false affordance
+  //      — it promises that waiting changes the outcome, which for a
+  //      non-recoverable code it does not.
+  //
+  // The value is ADVISORY and deliberately UNCLAMPED (a 42-minute server wait
+  // must read as 42 minutes) and it drives NO automated request — `recoverable`
+  // survives only as a render hint until Phase 141. The Retry control's own
+  // enabled/disabled state is intentionally unchanged by this line.
+  const waitSeconds = envelope.retry_after_seconds;
+  const showWait =
+    showRetry && typeof waitSeconds === "number" && waitSeconds > 0;
+
   return (
     <div
       role="alert"
@@ -136,6 +157,20 @@ export function ErrorEnvelope({
             <li key={i}>{step}</li>
           ))}
         </ul>
+      )}
+
+      {showWait && (
+        // Figures voice (DESIGN.md §Voice): state the fact, let the number
+        // carry the weight. The count uses the same `font-metric tabular-nums`
+        // idiom the correlation_id line below already uses — it is a figure,
+        // and a tabular figure does not reflow as it counts.
+        <p
+          className="mt-2 text-xs text-text-secondary"
+          data-testid="error-envelope-wait"
+        >
+          Try again in{" "}
+          <code className="font-metric tabular-nums">{waitSeconds}s</code>.
+        </p>
       )}
 
       {(showRetry || showCancel) && (

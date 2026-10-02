@@ -1,7 +1,11 @@
 import { createClient } from "@/lib/supabase/server";
 import { requireRolePage } from "@/lib/auth/requireRolePage";
 import { withPublishedOnly } from "@/lib/visibility";
-import { EMPTY_ANALYTICS } from "@/lib/queries";
+import {
+  COMPARE_ANALYTICS_COLUMNS,
+  EMPTY_ANALYTICS,
+  extractAnalytics,
+} from "@/lib/queries";
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { CompareTable } from "@/components/strategy/CompareTable";
@@ -43,13 +47,15 @@ export default async function ComparePage({
             missing + what to do (honest absence, neutral muted card — never a
             fabricated zero/count-up; STATE-02). The "Compare Strategies"
             PageHeader title is preserved verbatim — it is the 52-01 e2e
-            reflow-sweep anchor (h1:has-text("Compare Strategies")). */}
+            reflow-sweep anchor (h1:has-text("Compare Strategies")).
+            Phase 170, 2026-09-27: the old sentence named a control that does
+            not exist. */}
         <PageHeader
           title="Compare Strategies"
           breadcrumb={COMPARE_BREADCRUMB}
         />
         <p className="text-sm text-text-muted text-center py-16">
-          Pick two or more strategies from discovery to see them side by side. Add up to 4 strategies using the compare checkboxes.
+          Open a strategy&apos;s factsheet and choose &quot;Compare strategies&quot; to start a comparison. Adding strategies to a comparison from this page is not available yet.
         </p>
       </>
     );
@@ -65,7 +71,7 @@ export default async function ComparePage({
       ? withPublishedOnly(
           supabase
             .from("strategies")
-            .select("*, strategy_analytics (*)")
+            .select(`*, strategy_analytics (${COMPARE_ANALYTICS_COLUMNS})`)
             .in("id", strategyIds),
         )
       : Promise.resolve({ data: [], error: null }),
@@ -80,12 +86,41 @@ export default async function ComparePage({
     ),
   ]);
 
+  // Phase 167.1.2 review round 2 (SFH-R2-02): a failed strategies read used to
+  // fold into `data ?? []` and render "This comparison isn't available", which
+  // tells the allocator the strategies do not exist. Log the message only and
+  // throw to the route's error boundary (compare/error.tsx: digest-only, with a
+  // retry). D-15 is unchanged: an unpublished or unowned row is filtered out as
+  // ZERO rows, never as an error, so a query failure reveals nothing about it.
+  // The holding read throws HoldingCompareLoadError from the adapter for the
+  // same reason, which rejects the Promise.all above the same way.
+  const strategiesError = (strategiesRes as { error: { message: string } | null })
+    .error;
+  if (strategiesError) {
+    console.error("[compare/page] strategies query failed:", strategiesError.message);
+    throw new Error("compare strategies load failed");
+  }
+
   const strategyItems = ((strategiesRes as { data: unknown[] | null }).data ?? []).map((s) => {
     const strat = s as Strategy & { strategy_analytics: unknown };
+    const row = extractAnalytics(strat.strategy_analytics) as
+      | Partial<StrategyAnalytics>
+      | null;
     return {
       kind: "strategy" as const,
       strategy: strat as Strategy,
-      analytics: ((Array.isArray(strat.strategy_analytics) ? strat.strategy_analytics[0] : strat.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: strat.id }) as StrategyAnalytics,
+      // Phase 159 (159-03 / RANK-02): the read above is now a PARTIAL
+      // projection, so compose it over EMPTY_ANALYTICS — defaults first,
+      // fetched columns second. Downstream reads are typed `StrategyAnalytics`
+      // and would otherwise see `undefined` (not `null`) for any column the
+      // projection omits. This is the same fallback shape an ABSENT analytics
+      // row already produced; the spread simply also covers the present-row
+      // case. Fetched values always win — no fetched column is defaulted over.
+      analytics: {
+        ...EMPTY_ANALYTICS,
+        strategy_id: strat.id,
+        ...(row ?? {}),
+      } as StrategyAnalytics,
     };
   });
 
@@ -139,11 +174,17 @@ export default async function ComparePage({
         title={title}
         breadcrumb={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Compare" }]}
       />
-      {/* APPLY-01 / TYPE-03: compare is a DATA surface — fluid-fill toward
-          ~1920px then center with gutters beyond, so the comparison table
-          reads as a deliberate institutional layout at the wider measure
-          rather than stranded across an uncapped canvas. */}
-      <div className="mx-auto max-w-[1920px]">
+      {items.length === 1 ? (
+        <p className="text-caption text-text-muted">
+          One strategy selected. Adding a second strategy from this page is not available yet.
+        </p>
+      ) : null}
+      {/* APPLY-01 / TYPE-03: compare is a DATA surface. It fluid-filled
+          toward ~1920px until 2026-08-09, when the founder ruled that a fixed
+          px cap producing dead margin on zoom-out is the worse trade — a table
+          the user cannot widen is not "deliberate", it is clipped. Width is now
+          owned solely by DashboardChrome's `isWide` arm. */}
+      <div>
         <div className="space-y-8">
           <CompareTable items={items} />
           <CompareEquityOverlay items={strategyOnlyItems} />

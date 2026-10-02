@@ -10,6 +10,7 @@ from typing import Any, Literal, TypedDict
 
 from supabase import Client
 
+from services.account_identity import VENUES_WITH_ACCOUNT_ID, venue_account_id_from
 from services.closed_sets import is_trade_side
 from services.ingestion._timestamps import coerce_to_aware_utc
 from services.metrics import _safe_float
@@ -40,6 +41,24 @@ RATE_LIMITED_DETAIL = (
 NETWORK_ERROR_DETAIL = (
     "Network error reaching the exchange. Check connectivity "
     "and try again."
+)
+
+# 167-CREDTRUST (D-05, D-07) — the single source of truth for the
+# "sign-in did not complete" detail string. Sibling of AUTH_FAILED_DETAIL /
+# NETWORK_ERROR_DETAIL immediately above: it is the classifier's live input
+# on `POST /api/validate-key` (`classifyKeyValidationError`,
+# src/lib/wizardErrors.ts), a reword changes behaviour, and this is the
+# single source of truth for this arm's detail.
+#
+# It is reached through `VENUE_WIRE_CODE_TO_VERDICT`'s `SIGN_IN_FAILED` row
+# BEFORE the TS substring cascade ever sees it — but the row is the ONLY
+# thing standing between this string and the cascade, so it was still swept
+# against the cascade's needles (services/closed_sets.py's MT5 detail block
+# names the rule and the needle list) before it landed: 0 collisions across
+# every needle checked. Any reword MUST re-run that sweep.
+SIGN_IN_FAILED_DETAIL = (
+    "The sign-in attempt did not complete, and the venue did not confirm "
+    "the credential."
 )
 
 
@@ -915,6 +934,42 @@ async def aclose_exchange(exchange: "ccxt.Exchange | Any") -> None:
         await exchange.aclose()
         return
 
+    # MT5RECON-01: an Mt5Session owns a SYNCHRONOUS Mt5Client (blocking RPyC).
+    # Route its idempotent client.close() OFF the event loop (asyncio.to_thread)
+    # and BOUND it. Mt5Client.close() already swallows its own teardown errors,
+    # but the wait_for bound is the last-resort ceiling. Lazy import avoids an
+    # import cycle. Route + return BEFORE the ccxt close() below.
+    #
+    # ⚠️ WHY the bound stays, and why its REASON changed (153.3 / D-35, D-30).
+    # The ceiling used to be justified by a hanging teardown of the TERMINAL's IPC
+    # pipe. That reason is now false: `Mt5Client.close()` releases OUR rpyc transport and
+    # calls `mt5.shutdown()` ZERO times, so this arm can no longer tear the ONE
+    # shared IPC pipe down under a concurrent validate — which matters because
+    # `main.py:83-91` runs the worker loops INSIDE the API process, one `await`
+    # from a user's request. ⛔ The bound is NOT redundant: a blocking rpyc SOCKET
+    # close is still blocking, and a hung teardown in the dispatch epilogue would
+    # still wedge the SEQUENTIAL worker (the v1.11 WEDGE-01 class). The reason is
+    # corrected here rather than left standing, because a ceiling justified by a
+    # call that no longer exists is a ceiling the next author deletes.
+    from services.mt5_client import Mt5Session
+
+    if isinstance(exchange, Mt5Session):
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(exchange.client.close), timeout=_ACLOSE_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "aclose_exchange: mt5 client.close() exceeded %ss — abandoning",
+                _ACLOSE_TIMEOUT_S,
+            )
+        except Exception as exc:  # pragma: no cover - close swallows internally
+            logger.warning(
+                "aclose_exchange: mt5 client.close() failed (%s): %s",
+                type(exc).__name__, exc,
+            )
+        return
+
     task = asyncio.ensure_future(exchange.close())
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout=_ACLOSE_TIMEOUT_S)
@@ -951,6 +1006,70 @@ async def aclose_exchange(exchange: "ccxt.Exchange | Any") -> None:
         )
 
 
+# PYAPIFIX-02 (Phase 140.1.1) — the canonical ALLOW-LIST of PERMANENT
+# ``error_code`` values produced by ``validate_key_permissions`` below.
+#
+# THE RULE IS AN ALLOW-LIST OF PERMANENT, NOT A DENYLIST OF TRANSIENT. Any
+# probe ``error_code`` NOT in this set is a fault at the CALLER'S VENUE and
+# must be treated as retryable. An unknown future code therefore fails SAFE
+# (transient → the caller retries and succeeds) instead of failing terminal
+# (the caller is told to fix credentials that were never broken). A
+# caller-fault code must be NAMED here to become permanent — the reverse
+# default is the exact shape of the H-1 defect this constant closes, where
+# {PROBE_FAILED, DDOS_PROTECTION, RATE_LIMITED, EXCHANGE_UNAVAILABLE,
+# NETWORK_UNAVAILABLE} fell through a transient-denylist into a 403.
+#
+# ``VALIDATION_UNEXPECTED`` is deliberately ABSENT. It is permanent ONLY when
+# it is OUR OWN fallback — i.e. the adapter set no ``error_code`` at all, so a
+# write-capable key was confirmed with no scope code to name it. When the
+# ADAPTER itself sets ``VALIDATION_UNEXPECTED`` (an unexpected exception during
+# validate, e.g. a ccxt subclass outside the typed hierarchy) the failure may
+# be transient and must stay retryable. That distinction is not derivable from
+# the code string, so the CONSUMER carries the check —
+# ``services/ingestion/long_fetch.py``'s ``_is_unexpected_fallback`` is the
+# model, and ``routers/process_key.py`` mirrors it via ``val.error_code is
+# not None``.
+#
+# ``MISSING_SCOPE`` IS reachable and IS permanent: the ``if exchange.id ==
+# "deribit"`` / ``if scope_detail:`` arm inside ``validate_key_permissions``
+# below sets ``read_only=False`` + ``error_code="MISSING_SCOPE"`` and returns
+# WITHOUT ever setting ``valid=True``, so the consumers' scope gate fires with
+# that code. A permanently-missing read scope cannot be fixed by retrying, so
+# omitting it here would mint an infinitely-retried key — a NEW bug of exactly
+# the class this constant closes.
+#
+# (140.5-04) That reference used to be a bare ``:NNNN-NNNN`` coordinate "below",
+# and it had drifted well past the arm it names. ⚠️ A SELF-RELATIVE citation —
+# a line number with no path, naming a spot in the file it is written in — is
+# INVISIBLE to any path-based citation guard, so nothing could ever have caught
+# this one. That is why it is anchored on the branch condition instead of
+# re-numbered: for this variant the only durable fix is removing the coordinate.
+# The same variant appears throughout the repo and is named as a residual in
+# 140.5-04's SUMMARY.
+#
+# DELIBERATE DIVERGENCE (Phase 140.1.1, recorded not overlooked):
+# ``long_fetch.py``'s local ``permanent_codes`` is NOT re-pointed at this set
+# in this phase. It omits ``MISSING_SCOPE``, so re-pointing it would silently
+# flip the worker retry path transient→permanent — a production behaviour
+# change named in no requirement. Unifying the two is a correct follow-up.
+PERMANENT_VALIDATION_ERROR_CODES = frozenset(
+    {
+        "AUTH_FAILED",
+        "PERMISSION_DENIED",
+        "TRADE_SCOPE",
+        "WITHDRAW_SCOPE",
+        "MISSING_SCOPE",
+    }
+)
+# 167-CREDTRUST — `SIGN_IN_FAILED` is deliberately NOT a member. Membership
+# here means the venue asserted a PERMANENT rejection, which is exactly the
+# claim `classify_mt5_login_error`'s `transient` verdict refuses to make on
+# this arm (D-07). Its own raise site sets `recoverable=False` directly —
+# this set is not consulted for it, so adding it here would change nothing
+# for that raise site and would be a false membership if anything ever DID
+# read it for this code. Do not "fix" this omission.
+
+
 async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     """Validate that the API key is functional using safe read-only operations.
 
@@ -980,6 +1099,9 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     # derivation below can REUSE it instead of calling public/auth twice.
     # Stays None for every non-deribit exchange (their path is unchanged).
     deribit_perms: dict[str, object] | None = None
+    # Phase 167.1.2 (D-01): the account id read from the balance `info`
+    # (binance, deribit). None until the balance call succeeds.
+    balance_account_id: str | None = None
 
     try:
         try:
@@ -1036,7 +1158,22 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         # ExchangeNotAvailable, etc.) is intentionally allowed to propagate
         # to the outer handler so it lands in the right error_code branch
         # below — the outer handler is the single classification surface.
-        await exchange.fetch_balance()
+        # Phase 167.1.2 (D-01): the balance was fetched and discarded before;
+        # its `info` now also yields the venue account id for binance (spot
+        # GET /api/v3/account `uid`) and deribit (get_account_summaries `id`,
+        # present ONLY with `extended=true`: one query parameter on the call
+        # already made, no new request, and `account:read` is already required
+        # by the DRB-03 scope gate above). Every other venue's balance call is
+        # byte-unchanged.
+        if exchange.id == "deribit":
+            balance = await exchange.fetch_balance({"extended": True})
+        else:
+            balance = await exchange.fetch_balance()
+        balance_info = balance.get("info") if isinstance(balance, dict) else None
+        if isinstance(balance_info, dict):
+            balance_account_id = venue_account_id_from(exchange.id, balance_info)
+        else:
+            balance_account_id = None
         result["valid"] = True
     # IMPORTANT: order matters. ccxt's hierarchy is:
     #   PermissionDenied ⊂ AuthenticationError ⊂ ExchangeError
@@ -1186,6 +1323,32 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     elif has_trade:
         result["error"] = "Key has trading permissions. Please use a read-only key."
         result["error_code"] = "TRADE_SCOPE"
+
+    # Phase 167.1.2 (D-01): the venue account id, read from a response this
+    # function already fetched (never a new request). It exists so the
+    # connect routes can stamp `api_keys.venue_account_id`, which is what lets
+    # the venue-identity unique index refuse a second live key on one account.
+    # A missing id is None and NEVER fails validation: blocking a connect on an
+    # extra field would turn venue schema drift into an outage, while an
+    # unstamped key is backfilled later. The id is never logged; the warning
+    # below names the venue only.
+    # The detector's id (okx, bybit) wins; the balance's (binance, deribit)
+    # fills in. Neither ever changes `valid` or `read_only`.
+    account_id = perms.get("account_id")
+    if not isinstance(account_id, str):
+        account_id = balance_account_id
+    result["account_id"] = account_id
+    if (
+        result["account_id"] is None
+        and result["error"] is None
+        and exchange.id in VENUES_WITH_ACCOUNT_ID
+    ):
+        logger.warning(
+            "validate_key_permissions: %s returned no venue account id; the "
+            "key connects without one and a second key on the same account "
+            "cannot be refused until it is stamped",
+            exchange.id,
+        )
 
     return result
 
@@ -1824,6 +1987,33 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     "exc_class=%s scrubbed=%s",
                     type(exc).__name__, scrub_freeform_string(str(exc)),
                 )
+                # 164.5.1.4 SYNCCURSOR round-2 WR-01 — STAMP THE DQ FLAG HERE,
+                # BECAUSE THE OUTER HANDLER NEVER RUNS FOR THIS BRANCH.
+                #
+                # The comment above says "the outer handler already covers
+                # propagated errors". Nothing propagates: this handler swallows
+                # everything except `RateLimitExceeded`, so `fetch_daily_pnl`
+                # returns `[]` with NO `daily_pnl_fetch_error` set. MEASURED
+                # against the real function, one venue-level NetworkError each:
+                #
+                #     okx      rows=0 daily_pnl_fetch_error=True
+                #     binance  rows=0 daily_pnl_fetch_error=True
+                #     bybit    rows=0 daily_pnl_fetch_error=False
+                #
+                # ⛔ WHY IT IS A DATA-INTEGRITY DEFECT AND NOT A LOGGING ONE.
+                # The cron sync reads this flag as `fetch_degraded`. On Bybit a
+                # 502 therefore presents as "the venue genuinely had nothing":
+                # `fetch_degraded` is False, `not trades` is True, and EVERY
+                # held per-strategy marker on that key advances to now — the
+                # same permanent loss of the outstanding window the marker
+                # exists to preserve, arriving by another road, on a venue the
+                # cron path syncs.
+                #
+                # ⚠️ `_LAST_DQ_FLAGS` is reset at this function's entry seam, so
+                # stamping here cannot leak into another caller's view.
+                # `RateLimitExceeded` keeps re-raising above, unchanged, so the
+                # `_stamp_429` path is untouched.
+                _record_dq_flag("daily_pnl_fetch_error", True)
 
     except Exception as e:
         # NEW-C13-07: stamp a DQ flag before returning the partial series.

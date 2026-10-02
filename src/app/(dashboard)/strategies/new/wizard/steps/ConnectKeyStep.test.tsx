@@ -14,9 +14,13 @@
  * exact mapped code) so the test cannot be satisfied by an UNKNOWN
  * fallback masquerading as the right code.
  */
-import { render, screen, fireEvent } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { act, render, screen, fireEvent } from "@testing-library/react";
+import { useState } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ConnectKeyStep } from "./ConnectKeyStep";
+import { ConnectKeyStep, type PreselectedKey } from "./ConnectKeyStep";
 
 const trackMock = vi.fn();
 vi.mock("@/lib/for-quants-analytics", () => ({
@@ -86,7 +90,19 @@ describe("[H-0189] ConnectKeyStep — server code → wizard_error mapping", () 
     expect(payload.code).toBe("UNKNOWN");
   });
 
-  it("maps a thrown fetch (network failure) to KEY_NETWORK_TIMEOUT", async () => {
+  /**
+   * ⚠️ 140.5-03 / SEAMPROSE-03 — THIS CASE USED TO PIN `KEY_NETWORK_TIMEOUT`
+   * AND IT PINNED A FALSE ATTRIBUTION. A rejected `wizardFetch` means the
+   * request to OUR OWN route never completed; the exchange may never have been
+   * contacted at all. `KEY_NETWORK_TIMEOUT`'s copy is "We could not reach the
+   * exchange", so the funnel and the screen both blamed the venue for a fault
+   * on our hop — the rule `wizardErrors.ts` states by name beside that entry.
+   *
+   * The NEGATIVE half is the load-bearing one: a rename that left the old code
+   * anywhere in this catch (the state assignment OR the telemetry payload)
+   * satisfies only the positive assertion.
+   */
+  it("maps a thrown fetch (our own hop failing) to SERVICE_UNREACHABLE, never the venue-fault code", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
@@ -98,8 +114,15 @@ describe("[H-0189] ConnectKeyStep — server code → wizard_error mapping", () 
       (c) => (c as unknown[])[0] === "wizard_error",
     ) as unknown[] | undefined;
     const payload = call![1] as { code: string; step: string };
-    expect(payload.code).toBe("KEY_NETWORK_TIMEOUT");
+    expect(payload.code).toBe("SERVICE_UNREACHABLE");
+    expect(payload.code).not.toBe("KEY_NETWORK_TIMEOUT");
     expect(payload.step).toBe("connect_key");
+
+    // The RENDERED half — the copy the user reads, asserted as a hand-typed
+    // literal rather than by importing the table entry.
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveTextContent("We could not reach our own service.");
+    expect(envelope).not.toHaveTextContent("We could not reach the exchange.");
     errSpy.mockRestore();
   });
 
@@ -128,6 +151,131 @@ describe("[H-0189] ConnectKeyStep — server code → wizard_error mapping", () 
       (c) => (c as unknown[])[0] === "wizard_error",
     );
     expect(errorCall).toBeUndefined();
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 154-06 / WIZCONT-02 — the dedup marker is REPORTED UPWARD, not rendered here.
+ *
+ * ⚠️ WHY THERE IS NO STRIP ASSERTION IN THIS FILE. The dedup arrives on the
+ * SUCCESS path, and success calls `onSuccess`, which is `WizardClient`'s step
+ * advance (`setStep("sync_preview")`) — so this component unmounts in the same
+ * commit. A strip rendered here could not paint for a single frame, and a test
+ * asserting it WOULD STILL PASS, because the test's `onSuccess` is an inert
+ * `vi.fn()` that never advances anything. That is precisely the green-test-over-
+ * dead-UI trap, so the notice lives in `WizardClient`'s chrome beside its
+ * donor, and its rendering is pinned in `WizardClient.test.tsx`.
+ *
+ * What this file owns is the WIRE→PAYLOAD half: the marker the route sends must
+ * reach the parent, and nothing else about the payload may change.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[154-06 / WIZCONT-02] ConnectKeyStep — the dedup marker reaches the parent", () => {
+  const LOGIN = "AK_LIVE_xxx";
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("forwards deduped:true from the response into the onSuccess payload", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          strategy_id: "33333333-3333-3333-3333-333333333333",
+          api_key_id: "44444444-4444-4444-4444-444444444444",
+          deduped: true,
+        },
+        200,
+      ),
+    );
+    const onSuccess = vi.fn();
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await vi.waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    expect(onSuccess).toHaveBeenCalledWith({
+      strategyId: "33333333-3333-3333-3333-333333333333",
+      apiKeyId: "44444444-4444-4444-4444-444444444444",
+      exchange: "binance",
+      deduped: true,
+    });
+  });
+
+  it("does NOT invent the marker from a truthy-ish value (strict === true)", async () => {
+    // A screen decision must not be made by coercion: only the literal the
+    // route documents counts.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          strategy_id: "33333333-3333-3333-3333-333333333333",
+          api_key_id: "44444444-4444-4444-4444-444444444444",
+          deduped: "yes",
+        },
+        200,
+      ),
+    );
+    const onSuccess = vi.fn();
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await vi.waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    // The VACUITY FENCE for the case above: the ordinary payload is byte-for-
+    // byte the pre-154 one, with no `deduped` key at all.
+    expect(onSuccess).toHaveBeenCalledWith({
+      strategyId: "33333333-3333-3333-3333-333333333333",
+      apiKeyId: "44444444-4444-4444-4444-444444444444",
+      exchange: "binance",
+    });
+  });
+
+  it("⛔ never renders the submitted credential anywhere on the deduped path", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          strategy_id: "33333333-3333-3333-3333-333333333333",
+          api_key_id: "44444444-4444-4444-4444-444444444444",
+          deduped: true,
+        },
+        200,
+      ),
+    );
+    const { container } = render(
+      <ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />,
+    );
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    /**
+     * T-154-06-C, asserted on the surface where it actually means something.
+     *
+     * ⚠️ MEASURED, NOT ASSUMED: `innerHTML` DOES contain the login, because
+     * React serialises a controlled input's `value` attribute — that is the
+     * user's own field, holding what they just typed, and it is not what
+     * "echo" means here. Asserting against `innerHTML` would therefore fail on
+     * a correct implementation, which is a test that has to be weakened later
+     * and stops being believed.
+     *
+     * `textContent` is the honest surface: it covers every piece of COPY the
+     * component renders — headings, captions, error envelopes, any strip — and
+     * excludes form-field values. A route or component that echoed the
+     * credential into visible text reddens this; the user's own input does not.
+     */
+    expect(container.textContent).not.toContain(LOGIN);
+    // The field itself still holds it — proving the assertion above is scoped,
+    // not vacuous.
+    expect(
+      (screen.getByPlaceholderText("Paste the read-only key") as HTMLInputElement)
+        .value,
+    ).toBe(LOGIN);
   });
 });
 
@@ -167,6 +315,41 @@ describe("Phase 69 — Deribit wizard card (UX-01)", () => {
     // Contrast: OKX requires a passphrase → the assertion above can fail.
     fireEvent.click(screen.getByTestId("wizard-exchange-okx"));
     expect(screen.getByLabelText(/passphrase/i)).toBeInTheDocument();
+  });
+
+  /**
+   * MT5-03 / D-03 — the OKX half of the per-venue masking contract.
+   *
+   * MT5 reuses this EXACT passphrase slot to collect a broker SERVER NAME and
+   * unmasks it with `passphraseSecret: false`. OKX's passphrase is a genuine
+   * API credential, so it must stay masked at rest and the pre-existing
+   * Show/Hide toggle must keep working bit-for-bit. The founder rejected a
+   * global unmask precisely because it would leak this field.
+   *
+   * This is the load-bearing half of SC-7: flipping OKX to
+   * `passphraseSecret: false` — or deleting the `?? true` default that makes
+   * OKX byte-identical without editing its config entry — turns this RED.
+   * The `type` attribute is asserted directly, not via a snapshot, so the
+   * failure names the actual regression.
+   */
+  it("keeps the OKX passphrase MASKED at rest and Show-toggleable (D-03 byte-identity)", () => {
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-exchange-okx"));
+    expect(screen.getByLabelText("OKX Passphrase")).toHaveAttribute(
+      "type",
+      "password",
+    );
+    // The Show/Hide behaviour that existed before the flag is unchanged.
+    fireEvent.click(screen.getByRole("button", { name: "Show" }));
+    expect(screen.getByLabelText("OKX Passphrase")).toHaveAttribute(
+      "type",
+      "text",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Hide" }));
+    expect(screen.getByLabelText("OKX Passphrase")).toHaveAttribute(
+      "type",
+      "password",
+    );
   });
 
   it("swaps credential labels + placeholders per exchange (both directions)", () => {
@@ -293,11 +476,15 @@ describe("Phase 122 — sFOX wizard card (flag ON, SFOX-08)", () => {
     expect(body.passphrase).toBeNull();
   });
 
-  it("points the sFOX setup-guide link at /security#sfox-readonly", async () => {
+  // WR-01: sFOX's per-exchange #sfox-readonly SubAnchor is server-flag-gated
+  // (isSfoxEnabledServer), so it is dark in the card-visible / guide-dark
+  // half-state. The setup-guide link must target the UNCONDITIONAL #readonly-key
+  // Section anchor (always rendered) so it is never a dead link.
+  it("points the sFOX setup-guide link at the unconditional /security#readonly-key", async () => {
     await renderWithFlagOn();
     fireEvent.click(screen.getByTestId("wizard-exchange-sfox"));
     const link = screen.getByRole("link", { name: /sFOX setup guide/ });
-    expect(link).toHaveAttribute("href", "/security#sfox-readonly");
+    expect(link).toHaveAttribute("href", "/security#readonly-key");
   });
 
   it("renders the F3-honest read-only claim for sFOX — never a scope-verification claim", async () => {
@@ -393,5 +580,2014 @@ describe("Phase 122 — sFOX wizard card (flag ON, SFOX-08)", () => {
     expect(onSuccess).toHaveBeenCalledWith(
       expect.objectContaining({ exchange: "deribit" }),
     );
+  });
+});
+
+/**
+ * Phase 138 / MT5UI-01+02 — flag-gated MT5 wizard card (3-credential variant).
+ *
+ * With NEXT_PUBLIC_MT5_ENABLED === "true" the picker offers an MT5 card. MT5
+ * collects THREE credentials that map onto the existing {api_key, api_secret,
+ * passphrase} slots (the 135 chokepoint): login → api_key, investor password →
+ * api_secret, broker server → passphrase. The third (passphrase) field carries
+ * a per-exchange LABEL override ("Broker server", NOT "OKX Passphrase") and is
+ * REQUIRED, gating submit. The "What we reject" trust atom swaps to the MT5
+ * master-password-honest body. Three failure codes (KEY_AUTH_FAILED /
+ * KEY_MT5_WRONG_SERVER / KEY_MT5_MASTER_PASSWORD) each render their OWN
+ * distinguishable envelope. All copy is pre-authored (Phase 135) — ZERO new
+ * envelope strings.
+ *
+ * MT5_UI_ENABLED is a module-scope const, so each flag-ON render stubs the env,
+ * resets the registry, and dynamic-imports the step fresh. vi.unstubAllEnvs +
+ * vi.restoreAllMocks in afterEach prevent the stub/spy leaking into a sibling
+ * test (the Node22 stub-leak lesson).
+ */
+const MT5_STEER =
+  "Use your investor (read-only) password — not your master password. A master password can place trades, so we refuse it and store nothing.";
+const MT5_SERVER_HELPER =
+  "Open your MT5 terminal's login window and copy the server name exactly as it appears there — it is broker-specific and often carries a region or Demo/Live suffix.";
+const MT5_REJECT_ATOM =
+  "MT5 master passwords can place trades, so we reject them at connect time and store nothing — only a read-only investor login is accepted.";
+
+describe("Phase 138 — MT5 wizard card (MT5UI-01+02)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  async function renderWithMt5On(fetchImpl?: Response | Error) {
+    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.resetModules();
+    if (fetchImpl instanceof Error) {
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(fetchImpl);
+    } else if (fetchImpl) {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(fetchImpl);
+    }
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    const onSuccess = vi.fn();
+    render(<Fresh wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    return { onSuccess };
+  }
+
+  function fillMt5Fields() {
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    fireEvent.change(screen.getByLabelText("MT5 login"), {
+      target: { value: "5000123" },
+    });
+    fireEvent.change(screen.getByLabelText("Investor password"), {
+      target: { value: "investor-pw-xxx" },
+    });
+    fireEvent.change(screen.getByLabelText("Broker server"), {
+      target: { value: "MyBroker-Live" },
+    });
+  }
+
+  it("does NOT render an MT5 card when the flag is OFF (default) — byte-identical offer", () => {
+    // Static import reads the default (OFF) flag: exactly the four base cards.
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    expect(screen.getByTestId("wizard-exchange-binance")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-exchange-okx")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-exchange-bybit")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-exchange-deribit")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-exchange-mt5")).toBeNull();
+  });
+
+  it("renders an MT5 card with the pinned name + caption when the flag is ON", async () => {
+    await renderWithMt5On();
+    const card = screen.getByTestId("wizard-exchange-mt5");
+    expect(card).toHaveTextContent("MT5");
+    expect(card).toHaveTextContent(
+      "Live investor (read-only) login. Forex & CFD.",
+    );
+  });
+
+  it("shows exactly three labeled MT5 credential fields (broker-server override, not OKX)", async () => {
+    await renderWithMt5On();
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    expect(screen.getByLabelText("MT5 login")).toBeInTheDocument();
+    expect(screen.getByLabelText("Investor password")).toBeInTheDocument();
+    // The third (passphrase-slot) field carries the label override.
+    expect(screen.getByLabelText("Broker server")).toBeInTheDocument();
+    expect(screen.queryByLabelText("OKX Passphrase")).toBeNull();
+    // Generic labels are gone for MT5.
+    expect(screen.queryByLabelText("API Secret")).toBeNull();
+  });
+
+  /**
+   * MT5-03 / D-03 — the broker server renders as LEGIBLE TEXT.
+   *
+   * The founder was typing a server name into a dot-masked field and could not
+   * verify it, against helper copy that instructs "copy the server name exactly
+   * as it appears in your MT5 terminal" — an instruction that is unfollowable
+   * if you cannot read what you typed. The slot is a broker SERVER NAME, not a
+   * credential, so it is unmasked UNCONDITIONALLY: it does not ride the
+   * Show/Hide secret toggle in either direction.
+   *
+   * The same-render contrast on "Investor password" is what stops a blanket
+   * "unmask everything" regression from satisfying this case.
+   *
+   * (Display only — the value still POSTs on the `passphrase` key and is
+   * encrypted at rest; the slot-mapping case below pins that separately.)
+   */
+  it("renders Broker server as legible text, unconditionally, while the investor password stays masked", async () => {
+    await renderWithMt5On();
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    expect(screen.getByLabelText("Broker server")).toHaveAttribute(
+      "type",
+      "text",
+    );
+    // Same render, same form: a genuine credential IS still masked.
+    expect(screen.getByLabelText("Investor password")).toHaveAttribute(
+      "type",
+      "password",
+    );
+    // Independent of the Show/Hide toggle in BOTH directions.
+    fireEvent.click(screen.getByRole("button", { name: "Show" }));
+    expect(screen.getByLabelText("Broker server")).toHaveAttribute(
+      "type",
+      "text",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Hide" }));
+    expect(screen.getByLabelText("Broker server")).toHaveAttribute(
+      "type",
+      "text",
+    );
+    expect(screen.getByLabelText("Investor password")).toHaveAttribute(
+      "type",
+      "password",
+    );
+  });
+
+  it("renders the muted investor-password steer and the broker-server find-it helper", async () => {
+    await renderWithMt5On();
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    const steer = screen.getByText(MT5_STEER);
+    expect(steer).toBeInTheDocument();
+    // Muted neutral, NEVER amber/red on the resting form (DESIGN.md gate).
+    expect(steer.className).toContain("text-text-muted");
+    expect(steer.className).not.toMatch(/amber|red|negative/);
+    expect(screen.getByText(MT5_SERVER_HELPER)).toBeInTheDocument();
+  });
+
+  it("keeps submit disabled until the broker server (third field) is filled", async () => {
+    await renderWithMt5On();
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    const submit = screen.getByTestId("wizard-connect-submit");
+    fireEvent.change(screen.getByLabelText("MT5 login"), {
+      target: { value: "5000123" },
+    });
+    fireEvent.change(screen.getByLabelText("Investor password"), {
+      target: { value: "investor-pw-xxx" },
+    });
+    // Login + investor pw filled, broker server empty → still disabled.
+    expect(submit).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Broker server"), {
+      target: { value: "MyBroker-Live" },
+    });
+    expect(submit).not.toBeDisabled();
+  });
+
+  it("POSTs the 135 slot mapping: login→api_key, investor pw→api_secret, server→passphrase", async () => {
+    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.resetModules();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          strategy_id: "99999999-9999-9999-9999-999999999999",
+          api_key_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        },
+        200,
+      ),
+    );
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    const onSuccess = vi.fn();
+    render(<Fresh wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    fillMt5Fields();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await vi.waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    const body = JSON.parse(
+      (fetchSpy.mock.calls[0]![1] as RequestInit).body as string,
+    ) as Record<string, unknown>;
+    expect(body.exchange).toBe("mt5");
+    expect(body.api_key).toBe("5000123");
+    expect(body.api_secret).toBe("investor-pw-xxx");
+    expect(body.passphrase).toBe("MyBroker-Live");
+    expect(onSuccess).toHaveBeenCalledWith(
+      expect.objectContaining({ exchange: "mt5" }),
+    );
+  });
+
+  // WR-01: MT5's per-exchange #mt5-readonly SubAnchor is server-flag-gated
+  // (isMt5EnabledServer), so in the documented card-visible / guide-dark
+  // half-state (NEXT_PUBLIC_MT5_ENABLED set, MT5_ENABLED unset) it does not
+  // render and a deep link to it lands on /security top with no guide. The link
+  // must target the UNCONDITIONAL #readonly-key Section anchor (always rendered).
+  it("points the MT5 setup-guide link at the unconditional /security#readonly-key", async () => {
+    await renderWithMt5On();
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    const link = screen.getByRole("link", { name: /MT5 setup guide/ });
+    expect(link).toHaveAttribute("href", "/security#readonly-key");
+  });
+
+  it("swaps the 'What we reject' trust atom to the MT5-honest body (mt5 only)", async () => {
+    await renderWithMt5On();
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    expect(screen.getByText(MT5_REJECT_ATOM)).toBeInTheDocument();
+    // The generic ccxt scope-rejection claim must NOT render for mt5.
+    expect(screen.queryByText(/rejected before we store it/i)).toBeNull();
+    // Contrast: switching to binance restores the generic atom.
+    fireEvent.click(screen.getByTestId("wizard-exchange-binance"));
+    expect(screen.queryByText(MT5_REJECT_ATOM)).toBeNull();
+    expect(
+      screen.getByText(/rejected before we store it/i),
+    ).toBeInTheDocument();
+  });
+
+  it("leaves the sFOX trust-atom swap intact when both flags are ON", async () => {
+    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.stubEnv("NEXT_PUBLIC_SFOX_ENABLED", "true");
+    vi.resetModules();
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("wizard-exchange-sfox"));
+    expect(screen.getByText(/read-only by our adapter/i)).toBeInTheDocument();
+    expect(screen.getByText(/no per-key scope endpoint/i)).toBeInTheDocument();
+    // The MT5 atom must NOT bleed into the sfox selection.
+    expect(screen.queryByText(MT5_REJECT_ATOM)).toBeNull();
+  });
+
+  it.each([
+    ["KEY_AUTH_FAILED", "The exchange rejected these credentials."],
+    ["KEY_MT5_WRONG_SERVER", "We could not find that broker server."],
+    ["KEY_MT5_MASTER_PASSWORD", "This MT5 login can place trades."],
+  ])(
+    "surfaces a distinguishable envelope for %s (own data-error-code + title)",
+    async (code, title) => {
+      const { onSuccess } = await renderWithMt5On(
+        jsonResponse({ code }, 422),
+      );
+      fillMt5Fields();
+      fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+      const envelope = await screen.findByTestId("error-envelope");
+      expect(envelope).toHaveAttribute("data-error-code", code);
+      expect(envelope).toHaveTextContent(title);
+      expect(onSuccess).not.toHaveBeenCalled();
+    },
+  );
+
+  it("OKX regression: the passphrase field still labels 'OKX Passphrase' with today's helper", async () => {
+    // The label-override refactor must be byte-neutral for existing venues.
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("wizard-exchange-okx"));
+    expect(screen.getByLabelText("OKX Passphrase")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /OKX requires a passphrase in addition to key and secret/i,
+      ),
+    ).toBeInTheDocument();
+  });
+});
+
+/**
+ * 140.3-13a / SEAMUX-08 — the unvalidated `as WizardErrorCode` cast is now a
+ * membership check.
+ *
+ * Before this plan the step cast `data.code` with a bare `as WizardErrorCode`
+ * (widened with an optional, then defaulted to `"UNKNOWN"`) — a
+ * compile-time assertion applied to NETWORK DATA. Any string an upstream, a
+ * proxy or an edge/WAF layer put in `code` became a "typed" `WizardErrorCode`,
+ * was handed to `buildEnvelope`, and rendered `WIZARD_ERROR_COPY[code]` —
+ * `undefined` — while the funnel recorded a code outside our vocabulary.
+ *
+ * ⚠️ The POSITIVE case is the load-bearing one. A guard that rejected
+ * EVERYTHING would satisfy every unrecognised-code assertion below while
+ * silently collapsing the whole funnel to UNKNOWN — which is the defect
+ * SEAMUX-08 exists to close, recreated. Both directions are asserted.
+ */
+describe("[140.3-13a / SEAMUX-08] ConnectKeyStep — data.code is membership-checked, never cast", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function readWizardErrorPayload(): { code: string; step: string } {
+    const call = trackMock.mock.calls.find(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    ) as unknown[] | undefined;
+    expect(
+      call,
+      "no wizard_error event was emitted at all — the funnel cannot tell an outage from nobody trying",
+    ).toBeDefined();
+    return call![1] as { code: string; step: string };
+  }
+
+  it("an UNRECOGNISED code resolves to UNKNOWN rather than being admitted into the union", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "ZZ_NOT_A_WIZARD_CODE" }, 500),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    // Both surfaces, because they are set from the SAME local: an upstream
+    // string reaching either one is the defect.
+    expect(
+      envelope.getAttribute("data-error-code"),
+      "an upstream string was rendered as a wizard error code — WIZARD_ERROR_COPY has no entry for it, so the envelope renders undefined copy",
+    ).toBe("UNKNOWN");
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    expect(readWizardErrorPayload().code).toBe("UNKNOWN");
+  });
+
+  it("POSITIVE: a code from the route's classifier half is emitted UNCHANGED (a reject-everything guard would fail here)", async () => {
+    // SERVICE_UNAVAILABLE_RETRY is what classifyKeyValidationError returns for a
+    // CircuitOpenError, i.e. this is a breaker trip during key connect. It is
+    // the code an outage must be distinguishable BY.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "SERVICE_UNAVAILABLE_RETRY" }, 503),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute(
+      "data-error-code",
+      "SERVICE_UNAVAILABLE_RETRY",
+    );
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    const payload = readWizardErrorPayload();
+    expect(
+      payload.code,
+      "a breaker trip reported as UNKNOWN is indistinguishable from a bad key in the funnel — SEAMUX-08",
+    ).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(payload.step).toBe("connect_key");
+  });
+
+  it("a code belonging to a DIFFERENT route's contract is NOT admitted here", async () => {
+    // MULTI_KEY_WINDOWS_INVALID is a real WizardErrorCode — but it belongs to
+    // composite/set-members, which this step never calls. A totality check over
+    // the whole union would admit it and render "fix your key windows" on the
+    // single-key exchange form.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "MULTI_KEY_WINDOWS_INVALID" }, 400),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+});
+
+/**
+ * 140.4-15 / SEAMRIM-08 — the seam WIRE vocabulary is translated BEFORE the
+ * membership check, at this surface too.
+ *
+ * ⚠️ WHY THIS EXISTS AS A SEPARATE BLOCK, AND WHY IT IS NOT A ROSTER MEMBER.
+ * Plan `140.4-13` made `create-with-key/route.ts` answer a limiter
+ * MISCONFIGURATION with the wire code `SEAM_MISCONFIGURED` instead of the 429
+ * `KEY_RATE_LIMIT` it used to emit — our own outage had been blamed on the
+ * user's exchange. Plan `140.4-12` gave the kickoff arm (`SyncPreviewStep`) a
+ * translation hop so that code reaches its own copy, but the two key-entry
+ * steps never got one: each plan's SUMMARY assigned the edit to the other, and
+ * plan 12's GREEN commit landed BEFORE plan 13's. The code therefore arrived
+ * here, missed `KNOWN_CREATE_WITH_KEY_CODES`, and rendered `UNKNOWN` —
+ * *"Try the last action again."* with a Retry control — for a fault whose own
+ * authored copy says *"Retrying will not clear it."*
+ *
+ * The remedy is the ONE shared table (`SEAM_CODE_TO_WIZARD_CODE`, consulted
+ * through `recogniseSeamErrorCode`), NOT a new roster member: a roster member
+ * is coverage-law row 2 (hand-typed allow-list) and would have to be added
+ * again at every surface the next wire code reaches. The table is row 1.
+ *
+ * ⚠️ THE `recoverable` HALF IS LOAD-BEARING, NOT DECORATION. `recoverable` is
+ * DERIVED in `buildEnvelope` from the code's `actions` — `SEAM_MISCONFIGURED`
+ * carries neither `clear_and_retry` nor `try_another_key`, so it derives
+ * `false` and the Retry control does not render. `UNKNOWN` carries
+ * `clear_and_retry` and DOES render one. Asserting the absence alone would be
+ * satisfied by an envelope that renders no controls at all, so the UNKNOWN
+ * contrast below is the positive counterpart that keeps it discriminating.
+ */
+describe("[140.4-15 / SEAMRIM-08] ConnectKeyStep — a seam WIRE code is translated before the membership check", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("our own configuration fault (SEAM_MISCONFIGURED) reaches its own state and offers NO retry", async () => {
+    // The exact body `rateLimitDenyJson`'s misconfigured arm puts on the wire
+    // at create-with-key/route.ts — hand-typed from the route, not imported.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { code: "SEAM_MISCONFIGURED", error: "Rate limiter unavailable" },
+        503,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "the wire code collapsed to UNKNOWN — the user is told to try the last " +
+        "action again for a misconfiguration that retrying cannot clear, and " +
+        "the honest copy this phase authored is unreachable at this surface",
+    ).toHaveAttribute("data-error-code", "SEAM_MISCONFIGURED");
+
+    expect(
+      screen.getByText(
+        "We could not send this request — our own configuration is wrong.",
+      ),
+    ).toBeInTheDocument();
+
+    // The BEHAVIOURAL half: no retry affordance, because retrying is futile.
+    expect(
+      screen.queryByRole("button", { name: "Retry" }),
+      "a Retry control was offered for a fault that stays wrong until we " +
+        "redeploy — the control contradicts the sentence beside it",
+    ).toBeNull();
+
+    // The funnel must see the specific code too: a configuration fault
+    // recorded as UNKNOWN is indistinguishable from a drifted upstream string.
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    const payload = trackMock.mock.calls.find(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    )![1] as { code: string; step: string };
+    expect(payload.code).toBe("SEAM_MISCONFIGURED");
+    expect(payload.step).toBe("connect_key");
+  });
+
+  it("POSITIVE COUNTERPART: an unrecognised code still falls to UNKNOWN, which DOES render Retry", async () => {
+    // Without this the absence assertion above is satisfiable by a component
+    // that renders no controls at all.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "ZZ_NOT_A_WIZARD_CODE" }, 500),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(
+      screen.getByRole("button", { name: "Retry" }),
+    ).toBeInTheDocument();
+  });
+
+  it("[140.4-16 / WR-09] the NESTED python envelope's code is read here too", async () => {
+    // `body.detail.code` is the shape every `service_error()` answer carries.
+    // A top-level-only reader answers `undefined` on it — byte-identical to a
+    // body that carried no code at all, which is how 21 codes stay invisible.
+    // `SyncPreviewStep` and `SubmitStep` have read through the leaf since
+    // 140.3-05 / 140.4-12; the two key-entry surfaces claimed to "mirror
+    // SyncPreviewStep exactly" while reading `data.code` directly. This case is
+    // what makes the claim true rather than aspirational.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          detail: {
+            code: "SEAM_MISCONFIGURED",
+            dependency: null,
+            retryable: false,
+            detail: "Rate limiter unavailable.",
+            correlation_id: "srv-nested-8b2d1f40-6c93-4a55-b027-1e5f9a3c7d64",
+          },
+        },
+        503,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "the nested envelope carried the code and this arm did not see it. The " +
+        "flat and nested shapes must produce the SAME state.",
+    ).toHaveAttribute("data-error-code", "SEAM_MISCONFIGURED");
+  });
+
+  it("the translation hop does not shadow the roster: a wire code with no table entry is still UNKNOWN", async () => {
+    // `SEAM_DEGRADED` is a real seam wire code that is deliberately ABSENT
+    // from SEAM_CODE_TO_WIZARD_CODE — the table is explicit, not an identity
+    // rule. A translation hop written as `code as WizardErrorCode` would
+    // admit it and render undefined copy.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "SEAM_DEGRADED" }, 503),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+});
+
+/**
+ * Phase 140.5-03 / SEAMPROSE-02 — `Retry-After` ARRIVES at this surface.
+ *
+ * ⭐ HARD PREREQUISITE FOR PHASE 141. This is the SECOND of the four actionable
+ * threads, which is why the Falsifiability Ledger's SC-RA-1 mutation targets it
+ * rather than the first one an author checks.
+ *
+ * The wait travels: route (or the analytics service, via the choke-point relay
+ * landed in this same plan) stamps `Retry-After` → `parseRetryAfterSeconds`
+ * reads the HEADER (never the body's `retry_after_seconds`, which would be a
+ * second extraction path for one fact) → component state →
+ * `buildEnvelope({retryAfterSeconds})` → `ErrorEnvelope`'s
+ * `data-testid="error-envelope-wait"`.
+ *
+ * ⚠️ `ErrorEnvelope` renders the wait only when `showRetry` — i.e. the code is
+ * recoverable AND an `onRetry` is supplied. Threading a wait onto a
+ * non-recoverable code reaches nothing, so the polarity is re-derived here:
+ * `KEY_RATE_LIMIT` is `clear_and_retry` and this step always passes `onRetry`.
+ */
+describe("[140.5-03 / SEAMPROSE-02] ConnectKeyStep — the advertised wait reaches the envelope", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function rateLimited(retryAfter?: string) {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (retryAfter !== undefined) headers["Retry-After"] = retryAfter;
+    return new Response(JSON.stringify({ code: "KEY_RATE_LIMIT" }), {
+      status: 429,
+      headers,
+    });
+  }
+
+  async function submit() {
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    return screen.findByTestId("error-envelope");
+  }
+
+  it("a 429 carrying `Retry-After: 30` renders the wait", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(rateLimited("30"));
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    await submit();
+
+    const wait = await screen.findByTestId("error-envelope-wait");
+    // 30 is the hand-typed literal from the fixture header, not a value read
+    // back out of the component.
+    expect(wait).toHaveTextContent("30s");
+  });
+
+  it("a 429 with NO header renders NO wait — absence is not zero (TRAP-3)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(rateLimited());
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    await submit();
+
+    expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+  });
+
+  it("a SECOND failure with no header does NOT render the FIRST one's wait", async () => {
+    // ⭐ THE CLEAR-ON-FRESH-ATTEMPT HALF — the one a copy-paste of the working
+    // thread drops. Without the reset, attempt 2's envelope names attempt 1's
+    // duration: a wait nobody advertised, for a failure that never mentioned
+    // one, which is worse than naming none because it is specific.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(rateLimited("30"))
+      .mockResolvedValueOnce(rateLimited());
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+
+    await submit();
+    expect(await screen.findByTestId("error-envelope-wait")).toHaveTextContent(
+      "30s",
+    );
+
+    // Dismiss and re-submit — the same handler, a fresh attempt.
+    fireEvent.click(screen.getByLabelText("Retry"));
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    await screen.findByTestId("error-envelope");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+  });
+});
+
+/**
+ * ⚠️ STOPGAP regression (hotfix 2026-08-06, incident 2026-08-05) — see the
+ * `KNOWN_CREATE_WITH_KEY_CODES` roster comment. The server classified a
+ * validate-key failure as `SERVICE_UNREACHABLE`, but the roster did not carry
+ * the code, so the membership check rejected the honest server code and the
+ * wizard rendered the UNKNOWN card ("Try the last action again.", with a
+ * Retry control) for a fault whose own copy says the request never got an
+ * answer. The two verify-key scope codes travel with it. The CLASS fix (a
+ * roster DERIVED from the route contract) stays with Phase 153 / WIZFORM-02.
+ */
+describe("[hotfix 2026-08-06] ConnectKeyStep — server-emitted SERVICE_UNREACHABLE + scope codes render their own copy, never UNKNOWN", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("a 502 body carrying code SERVICE_UNREACHABLE reaches its own envelope state", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { code: "SERVICE_UNREACHABLE", error: "validation never answered" },
+        502,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "the server's honest code collapsed to UNKNOWN — the 2026-08-05 " +
+        "incident rendering. The roster must admit SERVICE_UNREACHABLE.",
+    ).toHaveAttribute("data-error-code", "SERVICE_UNREACHABLE");
+    // The copy the user reads — hand-typed literals, not imports.
+    expect(envelope).toHaveTextContent("We could not reach our own service.");
+    expect(envelope).not.toHaveTextContent("Try the last action again.");
+
+    // The funnel sees the specific code too, not UNKNOWN.
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    const payload = trackMock.mock.calls.find(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    )![1] as { code: string };
+    expect(payload.code).toBe("SERVICE_UNREACHABLE");
+  });
+
+  it.each([
+    ["KEY_MISSING_READ_SCOPE", "This key is missing a read permission we need."],
+    ["KEY_PERMISSION_DENIED", "The exchange refused this key's permissions."],
+  ] as const)(
+    "the verify-key scope code %s is admitted and renders its own title",
+    async (code, title) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse({ code, error: "scope refused" }, 400),
+      );
+      render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+      fillKeyAndSecret();
+      fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+      const envelope = await screen.findByTestId("error-envelope");
+      expect(envelope).toHaveAttribute("data-error-code", code);
+      expect(envelope).toHaveTextContent(title);
+    },
+  );
+});
+
+/**
+ * Phase 153.4-04 / D-05 / WIZFORM-05 — THE HONEST LONG WAIT.
+ *
+ * 153.4-01/02 granted a serialized venue (MT5) a 120 000 ms validate budget.
+ * Before this plan that budget bought a two-minute disabled button reading
+ * `Validating...` and nothing else. Every assertion below is about the four
+ * promises the card makes in exchange for that silence: it appears (but not for
+ * a fast answer), it escalates, it can be abandoned for free, and it ENDS —
+ * with a stated verdict rather than an indefinite spinner.
+ *
+ * ⚠️ EVERY EXPECTED STRING IS HAND-TYPED, never imported from the component or
+ * from `validate-budget.ts`. Importing the constants would assert the component
+ * equals itself; the `120` in the copy below is the number the SEAM grants,
+ * pinned to `SEAM_BUDGETS` by the agreement pin in `seam-constants.pin.test.ts`,
+ * and a test that DERIVED it would go green on a budget that silently moved.
+ * A self-scan at the bottom of this block asserts that property about this file.
+ *
+ * ⚠️ FAKE TIMERS, and the fetch never resolves. The wait is the subject, so the
+ * clock has to be an input rather than a race: every threshold below is reached
+ * by advancing time, and the only thing that can end a wait in these cases is
+ * the abort the component itself fires.
+ */
+describe("[153.4-04 / WIZFORM-05] ConnectKeyStep — the honest long wait", () => {
+  // ── The two live budgets, in ms, hand-typed ────────────────────────────────
+  const SERIALIZED_BUDGET_MS = 120_000;
+  const DEFAULT_BUDGET_MS = 30_000;
+  // The ENCRYPT leg the route spends AFTER validate, hand-typed. The browser is
+  // aborting the ROUTE, and the route is `validateKey` → `encryptKey` → RPC.
+  const ENCRYPT_BUDGET_MS = 30_000;
+  // The BREAKER'S OWN STORE for the whole route in the FAILING state, hand-typed:
+  // 2 seam legs x 3 commands x 4 250 ms. The failing state is the one a route is
+  // in when a client deadline fires — a healthy seam never keeps the browser this
+  // long — so it, not the closed state's 8 500, is what the deadline must cover
+  // (153.6 / PARITY-03).
+  const BREAKER_STORE_FAILING_MS = 25_500;
+  // The browser's margin OVER the promise it made, hand-typed.
+  const ABORT_GRACE_MS = 15_000;
+  const MOUNT_DELAY_MS = 300;
+  /** When the browser gives up on the ROUTE, hand-typed on the serialized arm. */
+  const SERIALIZED_DEADLINE_MS =
+    SERIALIZED_BUDGET_MS +
+    ENCRYPT_BUDGET_MS +
+    BREAKER_STORE_FAILING_MS +
+    ABORT_GRACE_MS;
+
+  // ── The copy, hand-typed ───────────────────────────────────────────────────
+  const SIGNING_IN = "Signing in to your broker...";
+  const CHECKING_BINANCE = "Checking your key with Binance...";
+  const WAIT_PROMISE_120 = "We wait up to 120s for your broker to answer.";
+  const QUEUE_LINE =
+    "Still signing in. MetaTrader allows one sign-in at a time, so your check may be waiting behind another.";
+  const SLOW_LINE_120 =
+    "This is slower than usual. We will wait until 120s, then tell you what we found.";
+  const STOP_WAITING = "Stop waiting";
+  const CANCELLED_LINE =
+    "We stopped waiting for your broker. Your key details are still on this page — the check may still be finishing on our side, and connecting again picks up that key rather than storing a second one.";
+  const BUSY_LABEL = "Validating...";
+
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  /**
+   * A `fetch` that answers nothing and honours its `AbortSignal`.
+   *
+   * ⭐ THE SIGNAL CAPTURE IS THE LOAD-BEARING PART. A mock that merely never
+   * resolves would let `Stop waiting` look like it works while the request runs
+   * on: the card would unmount (local state), the sentence would render (local
+   * state), and the credential-carrying POST would still be in flight. The
+   * returned array is what the abort assertions read, and it stays EMPTY if the
+   * component ever stops passing a signal.
+   */
+  function mockAbortableFetch(): AbortSignal[] {
+    const signals: AbortSignal[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      const signal = (init as RequestInit | undefined)?.signal ?? null;
+      if (signal) signals.push(signal);
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          // The shape a real `fetch` rejects with on abort.
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+      });
+    });
+    return signals;
+  }
+
+  /** Render a fresh step; `mt5` stubs the flag the MT5 card is gated on. */
+  async function renderFresh(venue: "binance" | "mt5") {
+    if (venue === "mt5") vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.resetModules();
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    const onSuccess = vi.fn();
+    render(<Fresh wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    return { onSuccess };
+  }
+
+  /** Fill the credential fields for a venue and press submit. Timers are FAKE. */
+  function fillAndSubmit(venue: "binance" | "mt5") {
+    if (venue === "mt5") {
+      fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+      fireEvent.change(screen.getByLabelText("MT5 login"), {
+        target: { value: "5000123" },
+      });
+      fireEvent.change(screen.getByLabelText("Investor password"), {
+        target: { value: "investor-pw-xxx" },
+      });
+      fireEvent.change(screen.getByLabelText("Broker server"), {
+        target: { value: "MyBroker-Live" },
+      });
+    } else {
+      fillKeyAndSecret();
+    }
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+  }
+
+  /** Advance the fake clock and let every resulting update commit. */
+  async function advance(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  function card(): HTMLElement | null {
+    return screen.queryByTestId("validate-wait-card");
+  }
+
+  /** Every `class` attribute rendered inside an element, joined. */
+  function allClasses(el: HTMLElement): string {
+    return [el, ...Array.from(el.querySelectorAll("*"))]
+      .map((node) => node.getAttribute("class") ?? "")
+      .join(" ");
+  }
+
+  /**
+   * The module specifiers a source file actually IMPORTS — static `from "…"`
+   * edges and dynamic `import("…")` calls — read over comment-stripped source.
+   * A specifier mentioned in prose or held in a plain string is not an edge.
+   */
+  function importSpecifiers(source: string): string[] {
+    const stripped = source
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+      .split("\n")
+      .map((line) => (line.trim().startsWith("//") ? "" : line))
+      .join("\n");
+    return Array.from(
+      stripped.matchAll(
+        /\bfrom\s+["']([^"']+)["']|\bimport\(\s*["']([^"']+)["']\s*\)/g,
+      ),
+    ).map((m) => m[1] ?? m[2]!);
+  }
+
+  function wizardErrorCalls(): { code: string; step: string }[] {
+    return trackMock.mock.calls
+      .filter((c) => (c as unknown[])[0] === "wizard_error")
+      .map((c) => (c as unknown[])[1] as { code: string; step: string });
+  }
+
+  it("a sub-300ms answer never flashes a card — the gate is a TIMER, not a comparison", async () => {
+    mockAbortableFetch();
+    await renderFresh("binance");
+    fillAndSubmit("binance");
+
+    await advance(MOUNT_DELAY_MS - 1);
+    expect(
+      card(),
+      "the wait card mounted before 300ms. Most validates answer in well under " +
+        "that, and a card that appears and vanishes reads as a fault rather than " +
+        "as a wait (UI-SPEC Surface 1 §Render gate).",
+    ).toBeNull();
+
+    await advance(2);
+    expect(card()).not.toBeNull();
+  });
+
+  /**
+   * 153.4 review WR-04 — THE RENDER GATE MUST NOT OUTLIVE THE WAIT IT WAS ARMED FOR.
+   *
+   * The gate is a 300 ms macrotask, and the only thing that used to switch it off
+   * was the timer effect's CLEANUP — which React commits at its own priority, on
+   * the Scheduler's MessageChannel. For a request answering at ~250 ms on a loaded
+   * main thread the order `finally → setShowWaitCard(false)` … `gate →
+   * setShowWaitCard(true)` is reachable, and nothing afterwards turns the card off
+   * again until the next submit.
+   *
+   * ⭐ THE ORDERING IS THE TEST, so it is driven rather than hoped for: resolve the
+   * request, drain the microtasks its `finally` needs, then fire the gate with a
+   * SYNCHRONOUS timer advance — fake timers do not drive MessageChannel, so React
+   * provably has not committed the cleanup at that instant. Remove the
+   * `waitStartedAtRef` check from the gate and this case reds with a card mounted
+   * over a finished request, frozen at `0s`, whose `Stop waiting` would call
+   * `abort()` on a ref the `finally` already nulled.
+   */
+  it("a request that answers just under the gate cannot leave a ghost card behind", async () => {
+    let settle!: (res: Response) => void;
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const { onSuccess } = await renderFresh("binance");
+    fillAndSubmit("binance");
+
+    await advance(MOUNT_DELAY_MS - 50);
+    expect(card()).toBeNull();
+
+    // The answer lands at 250 ms. A hand-built response, not `new Response`, so the
+    // body is consumed on microtasks alone and the ordering below stays exact.
+    settle({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({
+        strategy_id: "33333333-3333-3333-3333-333333333333",
+        api_key_id: "44444444-4444-4444-4444-444444444444",
+      }),
+    } as unknown as Response);
+    for (let i = 0; i < 50; i += 1) await Promise.resolve();
+
+    // ...and the gate fires here, before React has committed the cleanup that
+    // would have cleared it.
+    vi.advanceTimersByTime(100);
+
+    // Now let every pending commit land — fake and real schedulers alike.
+    vi.useRealTimers();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(
+      onSuccess,
+      "the request never completed, so this case is not exercising the race it " +
+        "was written for.",
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      card(),
+      "the 300 ms render gate mounted a wait card over a request that had " +
+        "already answered. Nothing turns `showWaitCard` off again until the next " +
+        "submit, so the user is left with a frozen 0s card whose `Stop waiting` " +
+        "aborts a controller the `finally` already nulled (153.4 review WR-04).",
+    ).toBeNull();
+  });
+
+  it("a serialized venue names what is happening and the deadline it was granted", async () => {
+    mockAbortableFetch();
+    await renderFresh("mt5");
+    fillAndSubmit("mt5");
+    await advance(MOUNT_DELAY_MS + 1);
+
+    const shown = card()!;
+    expect(shown).toHaveTextContent(SIGNING_IN);
+    expect(
+      shown,
+      "the card promised no duration on the arm that waits two minutes. The " +
+        "figure must be the budget the seam will actually honour — read from the " +
+        "budget module, never typed into copy (UI-SPEC forbidden item #8).",
+    ).toHaveTextContent(WAIT_PROMISE_120);
+  });
+
+  it("a NON-serialized venue names the venue and promises no wait", async () => {
+    mockAbortableFetch();
+    await renderFresh("binance");
+    fillAndSubmit("binance");
+    await advance(MOUNT_DELAY_MS + 1);
+
+    const shown = card()!;
+    expect(shown).toHaveTextContent(CHECKING_BINANCE);
+    // A 30s promise for a call that usually answers in two is an invented
+    // expectation; the promise belongs to the arm that needs it.
+    expect(shown.textContent).not.toMatch(/We wait up to \d+s/);
+    expect(shown).not.toHaveTextContent(SIGNING_IN);
+  });
+
+  it("escalates at 40% and 75% of the venue's budget, and nothing goes red inside it", async () => {
+    mockAbortableFetch();
+    await renderFresh("mt5");
+    fillAndSubmit("mt5");
+    await advance(MOUNT_DELAY_MS + 1);
+
+    // Below the first rung: no queue disclosure, no escape control.
+    expect(card()).not.toHaveTextContent(QUEUE_LINE);
+    expect(screen.queryByRole("button", { name: STOP_WAITING })).toBeNull();
+
+    // 40% of 120 000 ms = 48 000 ms.
+    await advance(SERIALIZED_BUDGET_MS * 0.4);
+    expect(card()).toHaveTextContent(QUEUE_LINE);
+    expect(screen.getByRole("button", { name: STOP_WAITING })).toBeTruthy();
+    expect(allClasses(card()!)).not.toContain("text-negative");
+
+    // 75% of 120 000 ms = 90 000 ms.
+    await advance(SERIALIZED_BUDGET_MS * 0.35);
+    const slow = screen.getByText(SLOW_LINE_120, {
+      ignore: "script, style, [role='status']",
+    });
+    expect(slow.getAttribute("class")).toContain("text-warning");
+    expect(
+      allClasses(card()!),
+      "a negative (red) tone appeared while the wait is still INSIDE its budget. " +
+        "Red asserts a permanent failure; this check may still answer correctly.",
+    ).not.toContain("text-negative");
+  });
+
+  it("`Stop waiting` aborts the request, keeps every field, and says so in a NEUTRAL line", async () => {
+    const signals = mockAbortableFetch();
+    await renderFresh("binance");
+    fillAndSubmit("binance");
+    // 40% of the DEFAULT budget = 12 000 ms — the ladder is a fraction, so a
+    // ccxt user reaches the escape control at 12s, not at 48s.
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+
+    fireEvent.click(screen.getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+
+    // ⭐ THE REQUEST ACTUALLY STOPPED. Everything else here is local state and
+    // would look identical while the POST ran on.
+    expect(
+      signals[0]?.aborted,
+      "the in-flight request was not aborted. `Stop waiting` updated the screen " +
+        "while the credential-carrying POST stayed on the wire — the control " +
+        "would be a lie told in the user's favour.",
+    ).toBe(true);
+
+    expect(card()).toBeNull();
+    const line = screen.getByTestId("wizard-connect-wait-cancelled");
+    expect(line).toHaveTextContent(CANCELLED_LINE);
+    // ⭐ 153.4 review CR-02 — THE CLAIM THIS BROWSER CANNOT MAKE. The abort stops
+    // US listening; `create-with-key` runs on past validate into `encryptKey` and
+    // the create RPC and reads no `request.signal`, so on any run where validate
+    // then succeeds the key IS stored. A user cancelling at 48 s of a 120 s MT5
+    // validate was told nothing was saved while their credential was being
+    // written. Asserted as a PROPERTY (no server-outcome claim), not as the
+    // absence of one sentence, so a reworded version of the same lie also reds.
+    expect(
+      line.textContent,
+      "the cancelled line asserts a SERVER-SIDE outcome this browser cannot " +
+        "know. Aborting the fetch does not cancel the invocation, and the route " +
+        "continues into encryptKey + the create RPC.",
+    ).not.toMatch(/nothing (was|is) (saved|stored)|was not (saved|stored)/i);
+    // ⛔ NOT an error envelope and ⛔ not red: the user chose this and nothing
+    // failed (DESIGN.md §Semantic-color gates).
+    expect(screen.queryByTestId("error-envelope")).toBeNull();
+    expect(line.closest('[role="alert"]')).toBeNull();
+    expect(line.getAttribute("class")).not.toContain("text-negative");
+
+    // Nothing was lost: the typed credentials are still on the form.
+    expect(
+      (screen.getByPlaceholderText("Paste the read-only key") as HTMLInputElement)
+        .value,
+    ).toBe("AK_LIVE_xxx");
+    expect(
+      (screen.getByPlaceholderText("Paste the secret") as HTMLInputElement).value,
+    ).toBe("SECRET_xxx");
+
+    // Focus lands on the control the user will press next, not on <body>.
+    expect(document.activeElement).toBe(
+      screen.getByTestId("wizard-connect-submit"),
+    );
+  });
+
+  it("`Stop waiting` asks for no confirmation — there is nothing to confirm", async () => {
+    // ⚠️ NOT because "nothing is persisted": that was CR-02's category error —
+    // `validate-key` is pre-encrypt / pre-RPC, but what the user aborts is
+    // `create-with-key`, which runs on into `encryptKey` and the create RPC. The
+    // ground is that the request finishes or fails on its own either way, so a
+    // confirmation step on the one control whose purpose is escaping a stall
+    // protects nothing and is the opposite of the affordance.
+    mockAbortableFetch();
+    await renderFresh("binance");
+    fillAndSubmit("binance");
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+
+    fireEvent.click(screen.getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: /are you sure|confirm/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: STOP_WAITING })).toBeNull();
+  });
+
+  it("a user cancel is NOT recorded as a seam failure", async () => {
+    // The funnel and the screen must not be able to disagree. A deliberate
+    // cancel logged as `wizard_error` tells an operator MT5 is failing when a
+    // user simply chose not to wait (T-153.4-15).
+    mockAbortableFetch();
+    await renderFresh("binance");
+    fillAndSubmit("binance");
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+
+    fireEvent.click(screen.getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+
+    expect(wizardErrorCalls()).toEqual([]);
+  });
+
+  it("⭐ the browser does NOT give up while the route is still encrypting and storing the key", async () => {
+    // ⭐ 153.4 review CR-01 — THE ASSERTION THE SHIPPED DEADLINE FAILED.
+    //
+    // The browser aborts a ROUTE, not a seam call, and `create-with-key` spends
+    // `validateKey` THEN `encryptKey` THEN the create RPC — and reads no
+    // `request.signal`, so the abort has no server-side effect whatsoever. A
+    // deadline of `budget + grace` (135 000 ms here) sits BELOW the route's own
+    // worst case, which meant it was reachable almost exclusively in the window
+    // where validate had already SUCCEEDED and the route was storing the key. The
+    // user was then shown "Nothing was saved — your key was not stored", and the
+    // funnel recorded a seam deadline, for a request that was at that moment
+    // writing their `api_keys` row.
+    //
+    // 149 999 ms is inside that window: past the old deadline, short of the new
+    // one. Nothing may have happened yet.
+    mockAbortableFetch();
+    await renderFresh("mt5");
+    fillAndSubmit("mt5");
+    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+
+    expect(
+      screen.queryByTestId("error-envelope"),
+      "the browser gave up 30 seconds before the route it is waiting on does. " +
+        "Every second in this window is a request that has PASSED validate and " +
+        "is encrypting and storing the key — and the verdict rendered here " +
+        "tells the user nothing was saved.",
+    ).toBeNull();
+    expect(
+      wizardErrorCalls(),
+      "a seam deadline was reported to the funnel for a request that is still " +
+        "running INSIDE its route's budget. An operator reads this to decide " +
+        "whether the seam is healthy.",
+    ).toEqual([]);
+    // Still waiting, and still saying so.
+    expect(card()).not.toBeNull();
+    expect(screen.getByTestId("wizard-connect-submit")).toBeDisabled();
+  });
+
+  it("a wait past the budget ends in a STATED verdict that names the budget and offers no Retry", async () => {
+    mockAbortableFetch();
+    await renderFresh("mt5");
+    fillAndSubmit("mt5");
+    // The browser gives up LAST: after the whole ROUTE's budget (validate +
+    // encrypt) plus its own grace, never at the validate budget itself —
+    // aborting there could cut off a verdict already on the wire, or a key
+    // already being stored (153.4 review CR-01).
+    await advance(SERIALIZED_DEADLINE_MS + 1);
+
+    expect(card(), "the card outlived the request it describes").toBeNull();
+    const envelope = screen.getByTestId("error-envelope");
+    expect(envelope).toHaveAttribute(
+      "data-error-code",
+      "SEAM_DEADLINE_EXCEEDED",
+    );
+    // The budget WE granted, named — hand-typed here, read from the budget
+    // module there.
+    expect(envelope).toHaveTextContent(
+      "We gave your broker 120 seconds to answer and it did not.",
+    );
+    expect(envelope).toHaveTextContent("Nothing was saved");
+    // ⭐ THE ABSENCE IS THE FIX (PATTERNS Shared Pattern B). The code carries
+    // no recoverable action, so `buildEnvelope` derives `recoverable: false` and
+    // no Retry renders. A Retry here would offer to re-run a two-minute wait
+    // that just proved it does not fit.
+    expect(
+      screen.queryByRole("button", { name: "Retry" }),
+      "a Retry control was offered for a check that just spent its whole budget",
+    ).toBeNull();
+  });
+
+  it("the deadline path DOES record a wizard_error, carrying the code the screen shows", async () => {
+    // ⚠️ ITS OWN CASE, deliberately, and not an extra assertion on the envelope
+    // one above. Both must be able to red INDEPENDENTLY: an envelope assertion
+    // that throws first would hide a funnel still reporting SERVICE_UNREACHABLE,
+    // and the funnel is what an operator reads to decide whether the seam is
+    // healthy. The screen and the funnel must not be able to disagree.
+    mockAbortableFetch();
+    await renderFresh("mt5");
+    fillAndSubmit("mt5");
+    await advance(SERIALIZED_DEADLINE_MS + 1);
+
+    expect(wizardErrorCalls()).toEqual([
+      {
+        wizard_session_id: SESSION,
+        step: "connect_key",
+        code: "SEAM_DEADLINE_EXCEEDED",
+      },
+    ]);
+  });
+
+  it("⭐ the deadline verdict tells the user their key details are still on the page", async () => {
+    // ⛔ THE UNPAID GATE, PAID. That reassurance bullet declares
+    // REQUIRES_CONNECT_SURFACE and ABSENCE SUPPRESSES it, so a step that emits
+    // this code without passing `surface: "connect"` renders an envelope that is
+    // silent about the credentials the user just spent two minutes typing —
+    // the worst outcome this phase can produce, and a silent one.
+    mockAbortableFetch();
+    await renderFresh("mt5");
+    fillAndSubmit("mt5");
+    await advance(SERIALIZED_DEADLINE_MS + 1);
+
+    expect(screen.getByTestId("error-envelope")).toHaveTextContent(
+      "Your key details are still on this page.",
+    );
+  });
+
+  it("⭐ an MT5 failure never offers a remedy that presupposes another venue (D-17)", async () => {
+    // The `venue` half of the same call site. Absence renders the substitutable
+    // remedy unconditionally, so an MT5 user — whose broker account IS the venue
+    // — was told to "switch to a different exchange".
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_NETWORK_TIMEOUT" }, 504),
+    );
+    await renderFresh("mt5");
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    fireEvent.change(screen.getByLabelText("MT5 login"), {
+      target: { value: "5000123" },
+    });
+    fireEvent.change(screen.getByLabelText("Investor password"), {
+      target: { value: "investor-pw-xxx" },
+    });
+    fireEvent.change(screen.getByLabelText("Broker server"), {
+      target: { value: "MyBroker-Live" },
+    });
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveTextContent(
+      "This is your broker account, so there is no other venue to try.",
+    );
+    expect(
+      envelope,
+      "an unwinnable remedy reached a venue that IS the user's account",
+    ).not.toHaveTextContent("switch to a different exchange");
+  });
+
+  it("the submit button stays mounted reading ASCII `Validating...` for the whole wait", async () => {
+    // ⚠️ SWEPT BACKWARD against `e2e/` — the busy label is read by a Playwright
+    // assertion (`getByRole("button", { name: /Validating/i })`), which needs the
+    // button MOUNTED and still reading it. The long-wait card renders BESIDE it,
+    // never instead of it, and the spelling stays ASCII (D-21).
+    mockAbortableFetch();
+    await renderFresh("mt5");
+    fillAndSubmit("mt5");
+
+    for (const step of [MOUNT_DELAY_MS + 1, SERIALIZED_BUDGET_MS * 0.4, SERIALIZED_BUDGET_MS * 0.35]) {
+      await advance(step);
+      const submit = screen.getByTestId("wizard-connect-submit");
+      expect(submit).toBeInTheDocument();
+      expect(submit).toHaveTextContent(BUSY_LABEL);
+      expect(submit).toBeDisabled();
+    }
+    expect(screen.getByTestId("validate-wait-card").textContent).not.toContain(
+      "…",
+    );
+  });
+
+  it("the form reports aria-busy while in flight and drops it afterwards", async () => {
+    mockAbortableFetch();
+    const { container } = { container: document.body };
+    await renderFresh("binance");
+    fillAndSubmit("binance");
+    await advance(MOUNT_DELAY_MS + 1);
+
+    const form = container.querySelector("form")!;
+    expect(form.getAttribute("aria-busy")).toBe("true");
+
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+    fireEvent.click(screen.getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+
+    // Absent, not `"false"` — the attribute's absence and its false value are
+    // the same state to AT, and one of the two is noise.
+    expect(form.getAttribute("aria-busy")).toBeNull();
+  });
+
+  it("the FAST path is unchanged: no card, no cancelled line, the same success callback", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          strategy_id: "33333333-3333-3333-3333-333333333333",
+          api_key_id: "44444444-4444-4444-4444-444444444444",
+        },
+        200,
+      ),
+    );
+    const { onSuccess } = await renderFresh("binance");
+    fillAndSubmit("binance");
+    await advance(0);
+
+    expect(onSuccess).toHaveBeenCalledWith({
+      strategyId: "33333333-3333-3333-3333-333333333333",
+      apiKeyId: "44444444-4444-4444-4444-444444444444",
+      exchange: "binance",
+    });
+    // The mount timer was cleared by the completion, so time passing changes
+    // nothing.
+    await advance(5_000);
+    expect(card()).toBeNull();
+    expect(screen.queryByTestId("wizard-connect-wait-cancelled")).toBeNull();
+    expect(wizardErrorCalls()).toEqual([]);
+  });
+
+  it("⭐ unmounting mid-validate aborts the request", async () => {
+    // ⭐ 153.4 review CR-04. The reachable path is the composite wizard's
+    // "+ Add another key window", which is NOT disabled while a validate is in
+    // flight: clicking it unmounts this step. Before the fix nothing aborted
+    // `abortRef`, and the timer effect's cleanup cleared the client DEADLINE
+    // along with the tick — so the credential-carrying POST ran on with no
+    // controller holding it and no bound at all.
+    const signals = mockAbortableFetch();
+    vi.resetModules();
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    const { unmount } = render(
+      <Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />,
+    );
+    fillAndSubmit("binance");
+    await advance(MOUNT_DELAY_MS + 1);
+    expect(signals[0]?.aborted).toBe(false);
+
+    unmount();
+    await advance(0);
+
+    expect(
+      signals[0]?.aborted,
+      "the request survived the unmount. Nothing holds it now — not the " +
+        "controller, and not the client deadline the same cleanup just cleared — " +
+        "so a credential-carrying POST runs to whatever the platform allows.",
+    ).toBe(true);
+  });
+
+  it("⭐ a validate that RESOLVES after unmount does not advance the wizard", async () => {
+    // ⭐ 153.4 review CR-04, the half the abort alone does not close. A response
+    // already on the wire when the user left still reaches the success arm from a
+    // dead closure, and `onSuccess` is threaded straight into `WizardClient`'s
+    // step advance. In the composite wizard that means the wizard jumps past
+    // `connect_key` with a SINGLE-KEY strategy, discarding the member panels the
+    // user has been filling in since — up to two minutes after they left.
+    //
+    // The fetch here deliberately IGNORES its signal, which is what isolates the
+    // `mountedRef` guard from the abort above.
+    let resolveFetch!: (res: Response) => void;
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      () => new Promise<Response>((resolve) => (resolveFetch = resolve)),
+    );
+    vi.resetModules();
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    const onSuccess = vi.fn();
+    const { unmount } = render(
+      <Fresh wizardSessionId={SESSION} onSuccess={onSuccess} />,
+    );
+    fillAndSubmit("binance");
+    await advance(MOUNT_DELAY_MS + 1);
+
+    unmount();
+    resolveFetch(
+      jsonResponse(
+        {
+          strategy_id: "33333333-3333-3333-3333-333333333333",
+          api_key_id: "44444444-4444-4444-4444-444444444444",
+        },
+        200,
+      ),
+    );
+    await advance(0);
+
+    expect(
+      onSuccess,
+      "a request that resolved after the user left this surface advanced the " +
+        "wizard anyway. On the composite path that discards every member panel " +
+        "typed since, and the user never asked for any of it.",
+    ).not.toHaveBeenCalled();
+    expect(wizardErrorCalls()).toEqual([]);
+  });
+
+  it("⭐ this file's `120` is HAND-TYPED, not derived from the module under test", async () => {
+    // ⚠️ THE ORACLE-INDEPENDENCE GUARD. Every duration above is a hand-typed
+    // twin of a figure the SEAM grants. If this file ever imported
+    // `validate-budget.ts` — or divided a millisecond budget by 1000 — the copy
+    // assertions would follow a budget change silently, and a card promising a
+    // wait the seam no longer honours would ship green. The repo has paid for
+    // self-referential oracles before; this is the cheap fence.
+    const source = readFileSync(
+      join(
+        process.cwd(),
+        "src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.test.tsx",
+      ),
+      "utf8",
+    );
+    // Vacuity floor: the thing the guard is about must be present.
+    expect(source).toContain("120s");
+    expect(source.length).toBeGreaterThan(1_000);
+
+    // ⚠️ AN IMPORT-EDGE SCAN, NOT A SUBSTRING GREP — the house form for
+    // "module X must not import module Y" (`seam-ssr-exposure.pin.test.ts`, and
+    // `validate-budget.test.ts` for this very module). A substring check is
+    // satisfied FOREVER by its own assertion text: the sentence that names the
+    // forbidden module is itself an occurrence of it, and the natural "fix" is
+    // to weaken the guard until it stops complaining. This reads edges.
+    const specifiers = importSpecifiers(source);
+    expect(
+      specifiers.filter((s) => s.includes("validate-budget")),
+      "this test file imports the budget module. Its expectations would then " +
+        "assert the component equals itself, and a budget that moved would take " +
+        "the copy assertions along with it.",
+    ).toEqual([]);
+    // Self-test: the extractor sees an EDGE and not a mention. Without this, an
+    // extractor that matched nothing at all would pass the assertion above.
+    //
+    // ⚠️ THE POSITIVE FIXTURE IS BUILT, NOT WRITTEN OUT, and that is the same
+    // collision one level down: a literal `from "…budget"` sitting in this file
+    // IS an edge to the whole-file scan above, so spelling the fixture would
+    // make the guard fail on itself. Interpolating the quote keeps the fixture
+    // edge-shaped to the extractor and invisible to the scan.
+    const q = '"';
+    expect(
+      importSpecifiers(`import { x } from ${q}@/lib/wizard/validate-budget${q};`),
+    ).toEqual(["@/lib/wizard/validate-budget"]);
+    expect(
+      importSpecifiers('const s = "@/lib/wizard/validate-budget"; // a mention'),
+    ).toEqual([]);
+    // …and it really did read THIS file's edges.
+    expect(specifiers).toContain("@testing-library/react");
+    expect(specifiers).toContain("./ConnectKeyStep");
+
+    expect(
+      /\/\s*1_?000/.test(source),
+      "this test file converts milliseconds to seconds. The seconds figure in " +
+        "copy must be typed out, so a budget change is a visible, reviewed edit.",
+    ).toBe(false);
+  });
+});
+
+/**
+ * [154.1 / WIZCONT-02 review CR] ConnectKeyStep — the venue fence's REFUSAL half
+ * reaches its own copy, and brings the strategy's name with it.
+ *
+ * ⚠️ THE ROSTER IS THE WHOLE HAZARD HERE, and it bites SILENTLY. The route half
+ * of this fix can be perfect — an honest 409, an honest code, the name on the
+ * wire — and if `VENUE_ALREADY_CONNECTED` is missing from
+ * `KNOWN_CREATE_WITH_KEY_CODES` the membership check rejects it, the step falls
+ * to `UNKNOWN`, and the user reads "Try the last action again." beside a Retry
+ * control, for a submit that is refused identically every single time. Every
+ * route-side assertion stays green while the fix ships invisible. That trap has
+ * been walked into three times on this surface (140.3-01, 140.4-13, the
+ * 2026-08-06 hotfix), which is why this block asserts the RENDERED code and the
+ * RENDERED sentence rather than the response body.
+ */
+describe("[154.1 / WIZCONT-02] ConnectKeyStep — an already-connected account refuses honestly", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("the 409 renders its OWN copy, never the UNKNOWN dead end", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "VENUE_ALREADY_CONNECTED",
+          error: "This account is already connected to an existing strategy.",
+        },
+        409,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "the roster rejected the route's honest code — the user gets " +
+        '"Something went wrong." plus a Retry that cannot work.',
+    ).toHaveAttribute("data-error-code", "VENUE_ALREADY_CONNECTED");
+    // Hand-typed, never imported: the sentence the user actually reads.
+    expect(envelope).toHaveTextContent(
+      "This account is already connected to one of your strategies.",
+    );
+    expect(envelope).not.toHaveTextContent("Try the last action again.");
+    // ⛔ And NOT the sentence this code was split off, which would send them
+    // hunting for a draft that does not exist.
+    expect(envelope).not.toHaveTextContent(
+      "You already have a wizard session open for this key.",
+    );
+  });
+
+  it("NO Retry control renders — the account stays connected however many times you press it", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "VENUE_ALREADY_CONNECTED", error: "refused" }, 409),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await screen.findByTestId("error-envelope");
+    expect(screen.queryByLabelText("Retry")).toBeNull();
+  });
+
+  it("names the strategy that is in the way when the route told us which one", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "VENUE_ALREADY_CONNECTED",
+          error: "This account is already connected to an existing strategy.",
+          strategy_name: "Helios Momentum",
+        },
+        409,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "the name arrived on the wire and was dropped on the floor — the user " +
+        "is told an account of theirs is taken without being told by what, on " +
+        "a screen whose entire remedy is to go and open that strategy.",
+    ).toHaveTextContent('It is connected to "Helios Momentum".');
+  });
+
+  it("and says nothing extra when it did NOT (TRAP-3, and the vacuity fence for the case above)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "VENUE_ALREADY_CONNECTED",
+          error: "This account is already connected to an existing strategy.",
+        },
+        409,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).not.toHaveTextContent("It is connected to");
+    // The explanation still renders in full — an absent name withholds a fact,
+    // it does not blank the copy.
+    expect(envelope).toHaveTextContent("One account backs one strategy at a time.");
+  });
+
+  it("the funnel sees the specific code, not UNKNOWN", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "VENUE_ALREADY_CONNECTED", error: "refused" }, 409),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await screen.findByTestId("error-envelope");
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    const payload = trackMock.mock.calls.find(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    )![1] as { code: string; step: string };
+    expect(payload.code).toBe("VENUE_ALREADY_CONNECTED");
+    expect(payload.step).toBe("connect_key");
+  });
+
+  it("a stale name from a previous attempt cannot describe the next failure", async () => {
+    // PER-FAILURE state, the same rule `retryAfterSeconds` states. A name left
+    // over from attempt 1 rendered against attempt 2 points the user at a
+    // strategy that has nothing to do with what just happened.
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            code: "VENUE_ALREADY_CONNECTED",
+            error: "refused",
+            strategy_name: "Helios Momentum",
+          },
+          409,
+        ),
+      )
+      .mockResolvedValue(
+        jsonResponse({ code: "VENUE_ALREADY_CONNECTED", error: "refused" }, 409),
+      );
+
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    const first = await screen.findByTestId("error-envelope");
+    expect(first).toHaveTextContent('It is connected to "Helios Momentum".');
+
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(screen.getByTestId("error-envelope")).not.toHaveTextContent(
+        "Helios Momentum",
+      ),
+    );
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * [162-06 review / B-2] THE PRESELECT REFUSAL MAY ONLY NAME CONTROLS THAT ARE
+ * ON THE PRESELECT SCREEN.
+ *
+ * ⚠️ THE DEFECT THIS PINS SHIPPED GREEN, and it shipped green because the only
+ * guard was over the COPY TABLE. `KEY_REUSE_UNAVAILABLE`'s first remedy read
+ * "Connect this account here with its API credentials instead — the form on
+ * this step still works normally", which was TRUE the day 162-05 wrote it and
+ * FALSE by the end of the same branch: 162-06 added the preselect sub-state,
+ * which returns early — before the credential form exists in the tree at all.
+ * The measured loop was an owner clicking "Finish setup →" on a key another tab
+ * had disconnected: the server refuses 409, the copy points at a form that is
+ * not painted, Retry blanks the banner and changes nothing, and "Continue with
+ * this key" refuses identically. The one control that works was the one thing
+ * the copy did not mention.
+ *
+ * ⭐ SO THE ORACLE IS THE RENDERED SCREEN, NOT THE TABLE. The escape hatch's
+ * label is read OFF THE DOM and never typed here, so renaming the control
+ * without following the copy reddens this too — a string-vs-string assertion
+ * is exactly what let the defect ship.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[162-06 review / B-2] the preselect refusal points at a control that exists", () => {
+  const PRESELECT: PreselectedKey = {
+    id: "55555555-5555-5555-5555-555555555555",
+    exchange: "bybit",
+    exchangeLabel: "Bybit",
+    keyLabel: "Zavara main",
+  };
+
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** The measured refusal: the stored key is gone, so the reuse arm 409s. */
+  function mockReuseRefusal() {
+    return vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "KEY_REUSE_UNAVAILABLE",
+          error: "That stored key is not available to reuse.",
+        },
+        409,
+      ),
+    );
+  }
+
+  async function refuse(onUseDifferentKey = vi.fn()) {
+    mockReuseRefusal();
+    render(
+      <ConnectKeyStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        preselectKey={PRESELECT}
+        onUseDifferentKey={onUseDifferentKey}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("wizard-preselect-continue"));
+    const envelope = await screen.findByTestId("error-envelope");
+    return { envelope, onUseDifferentKey };
+  }
+
+  it("names the escape hatch that IS rendered — its label read off the DOM, not typed here", async () => {
+    const { envelope } = await refuse();
+
+    // The screen, MEASURED rather than assumed: there is no credential form
+    // behind this banner. If that stops being true the guard below is asking
+    // the wrong question, so it is asserted rather than narrated.
+    expect(
+      screen.queryByTestId("wizard-connect-submit"),
+      "the preselect branch has started rendering the credential form, so the " +
+        "premise of this whole describe has changed — re-derive it before " +
+        "touching the assertions.",
+    ).toBeNull();
+    expect(screen.queryByPlaceholderText("Paste the read-only key")).toBeNull();
+
+    const escapeHatch = screen.getByTestId("wizard-preselect-different");
+    const escapeLabel = escapeHatch.textContent?.trim() ?? "";
+    expect(
+      escapeLabel.length,
+      "the escape hatch rendered no label at all, so the containment check " +
+        "below would pass against an empty string and check nothing.",
+    ).toBeGreaterThan(3);
+
+    expect(
+      envelope.textContent,
+      "The refusal must name a control the reader can actually see. The only " +
+        "controls on this screen are 'Continue with this key' (refused " +
+        `identically every time) and "${escapeLabel}" — so that is the remedy, ` +
+        "and the copy has to say so.",
+    ).toContain(escapeLabel);
+  });
+
+  it("claims NO credential form is on the screen — the exact sentence that shipped", async () => {
+    const { envelope } = await refuse();
+
+    // Hand-typed PHRASE CLASS: present-tense claims that a form stands on THIS
+    // screen. ⚠️ Deliberately narrow — a sentence about where a control LEADS
+    // ("connect this account with its own API credentials") is honest and must
+    // stay green; only "the form is here" claims are banned.
+    const FORM_IS_ON_THIS_SCREEN = [
+      "the form on this step",
+      "the form on this screen",
+      "the form on this page",
+      "the form below",
+      "the form above",
+      "the form behind",
+      "still works normally",
+      "connect this account here",
+    ] as const;
+
+    const claimsIn = (haystack: string): string[] =>
+      FORM_IS_ON_THIS_SCREEN.filter((p) => haystack.toLowerCase().includes(p));
+
+    // ⛔ POSITIVE CONTROL — the literal sentence that shipped. If the predicate
+    // stops matching it, the assertion below has gone blind and passes for the
+    // wrong reason. Fix the list; never delete this.
+    expect(
+      claimsIn(
+        "Connect this account here with its API credentials instead — the " +
+          "form on this step still works normally.",
+      ),
+      "the form-claim predicate matched NOTHING in the very sentence B-2 was " +
+        "filed against, so it is no longer guarding anything.",
+    ).not.toEqual([]);
+
+    expect(
+      claimsIn(envelope.textContent ?? ""),
+      "The refusal tells the reader to use a form that this branch returns " +
+        "before rendering. That is the unwinnable loop 162-06 exists to close, " +
+        "one screen later: no form, Retry blanks the banner, and 'Continue " +
+        "with this key' is refused identically.",
+    ).toEqual([]);
+  });
+
+  it("Retry reaches the credential form the copy promises — asserted by RENDER, not by a spy", async () => {
+    // A host in miniature: the real one (`ContributionWizardOverlay`) drops the
+    // preselect and tears the step down by remount. The property under test is
+    // the same either way — after Retry, the reader is on the form.
+    function PreselectHost() {
+      const [dismissed, setDismissed] = useState(false);
+      return (
+        <ConnectKeyStep
+          wizardSessionId={SESSION}
+          onSuccess={vi.fn()}
+          preselectKey={dismissed ? null : PRESELECT}
+          onUseDifferentKey={() => setDismissed(true)}
+        />
+      );
+    }
+
+    mockReuseRefusal();
+    render(<PreselectHost />);
+    fireEvent.click(screen.getByTestId("wizard-preselect-continue"));
+    await screen.findByTestId("error-envelope");
+
+    // Recoverability is DERIVED from `try_another_key`; a Retry that is not
+    // offered at all is the other half of the same defect.
+    const retry = screen.getByRole("button", { name: "Retry" });
+    fireEvent.click(retry);
+
+    expect(
+      await screen.findByTestId("wizard-connect-submit"),
+      "Retry cleared the banner and left the reader on the identical screen — " +
+        "the same saved-key panel, the same refusal one click away. " +
+        "`try_another_key` means ANOTHER key, and the only control that " +
+        "delivers one is the escape hatch, so Retry is wired to it.",
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-preselect-summary")).toBeNull();
+  });
+
+  /**
+   * ⛔ THE OTHER HALF OF THE SAME WIRING, and the regression the B-2 fix could
+   * easily have caused. `SERVICE_UNREACHABLE` is reachable on this screen —
+   * the reuse arm's catch sets it when OUR OWN hop fails — and it carries
+   * `clear_and_retry`, whose whole meaning is "send the same thing again". Its
+   * copy says "try the same action again". A Retry that dropped the preselect
+   * there would take the key out from under a user whose only problem was a
+   * transient network fault, and hand them a credential form for a key we
+   * already hold — the very re-POST loop 162-06 exists to prevent.
+   */
+  it("a transient hop failure keeps the preselect — Retry there means 'again', not 'another key'", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const onUseDifferentKey = vi.fn();
+
+    render(
+      <ConnectKeyStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        preselectKey={PRESELECT}
+        onUseDifferentKey={onUseDifferentKey}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("wizard-preselect-continue"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveTextContent("We could not reach our own service.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(
+      onUseDifferentKey,
+      "Retry dropped the preselect on a code whose remedy is to re-send the " +
+        "SAME request. The user loses the key they chose over a network blip, " +
+        "and lands on a credential form for a key we already hold.",
+    ).not.toHaveBeenCalled();
+    // The banner clears and the saved key survives, so "Continue with this
+    // key" — the action its own copy tells them to repeat — is there to press.
+    expect(screen.queryByTestId("error-envelope")).toBeNull();
+    expect(screen.getByTestId("wizard-preselect-continue")).toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * [162 review / A-6] A BODY THAT WAS NOT JSON IS RECORDED AS SUCH.
+ *
+ * `res.json().catch(() => ({}))` collapsed "the route answered with an empty
+ * body" and "an intermediary answered with an HTML error page" into the same
+ * `{}`. `UNKNOWN` is the honest code for both — we genuinely do not know — so
+ * what was lost is DEBUGGABILITY, not truth: nothing anywhere recorded that a
+ * parse had been attempted and failed. The shape is the sibling surface's
+ * (`KeyPermissionBadge.tsx`): a sentinel, and the response's OWN metadata.
+ *
+ * ⛔ THE BODY ITSELF IS NEVER LOGGED. Unparseable bytes come from an
+ * intermediary we did not write; echoing them is how a proxy banner or an
+ * internal host ends up in a user-submitted screenshot. The negative assertion
+ * is as load-bearing as the positive one.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[162 review / A-6] an unparseable response body is distinguishable from an empty one", () => {
+  const PROXY_MARKER = "upstream-proxy-banner-do-not-log-me";
+
+  const PRESELECT: PreselectedKey = {
+    id: "66666666-6666-6666-6666-666666666666",
+    exchange: "bybit",
+    exchangeLabel: "Bybit",
+    keyLabel: "Zavara main",
+  };
+
+  function htmlErrorResponse() {
+    return new Response(`<html><body>${PROXY_MARKER}</body></html>`, {
+      status: 502,
+      statusText: "Bad Gateway",
+      headers: { "Content-Type": "text/html" },
+    });
+  }
+
+  function loggedText(spy: { mock: { calls: unknown[][] } }): string {
+    return spy.mock.calls
+      .map((c) => c.map((a) => String(a)).join(" "))
+      .join("\n");
+  }
+
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("credential arm: logs HTTP status + statusText, still renders UNKNOWN, never echoes the body", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(htmlErrorResponse());
+
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    const payload = trackMock.mock.calls.find(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    )![1] as { code: string };
+    expect(
+      payload.code,
+      "UNKNOWN is the honest code for a body we could not read — A-6 is a " +
+        "debuggability fix and must not invent a code from a transport fault.",
+    ).toBe("UNKNOWN");
+
+    const logged = loggedText(errSpy);
+    expect(
+      logged,
+      "A JSON-parse failure was laundered into an empty object: the screen " +
+        "says UNKNOWN and nothing anywhere records that there was no JSON to " +
+        "read. Support has nothing to correlate against the proxy/CDN logs.",
+    ).toContain("HTTP 502 (Bad Gateway)");
+    expect(logged).toContain("was not JSON");
+    expect(
+      logged,
+      "the unparseable BODY was echoed into the console — arbitrary bytes " +
+        "from an intermediary we did not write.",
+    ).not.toContain(PROXY_MARKER);
+  });
+
+  it("reuse arm: the same record, on the arm the preselect screen uses", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(htmlErrorResponse());
+
+    render(
+      <ConnectKeyStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        preselectKey={PRESELECT}
+        onUseDifferentKey={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("wizard-preselect-continue"));
+
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    const logged = loggedText(errSpy);
+    expect(logged).toContain("HTTP 502 (Bad Gateway)");
+    expect(logged).not.toContain(PROXY_MARKER);
+  });
+
+  it("a genuinely EMPTY-but-valid JSON body logs no parse failure — the two stay distinguishable", async () => {
+    // ⛔ THE HALF THAT MAKES THE OTHER TWO MEAN SOMETHING. A log fired on every
+    // non-2xx would satisfy both assertions above while recording nothing about
+    // parsing at all.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({}, 500));
+
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    expect(loggedText(errSpy)).not.toContain("was not JSON");
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 164.6.5-07 / D-14 (task 2) — THE ENVELOPE SHOWS THE ID OF THE ATTEMPT THAT
+ * FAILED, NOT THE ID OF THE PAGE LOAD.
+ *
+ * MEASURED in production: two key-validation retries 45s and 55s apart in one
+ * open tab rendered the IDENTICAL correlation id, because `wizardFetch` used
+ * to memoize one id for the whole page load. Plan 07 task 1 made
+ * `wizardFetch` mint a FRESH id per call and exposed it via an optional
+ * capture callback; this task wires that captured id into the envelope,
+ * preferring it over the page-load id.
+ *
+ * ⚠️ ASSERT ON THE ID THE ENVELOPE ACTUALLY CARRIES, not a mock's call count —
+ * a call-count assertion goes green while the wrong value renders.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[164.6.5-07 / D-14] ConnectKeyStep — the envelope shows the failed attempt's own id", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("credential submit: the envelope's correlation_id equals the id sent on THAT request", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse({ code: "TOTALLY_MADE_UP" }, 500));
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await screen.findByTestId("error-envelope");
+
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    const sentId = new Headers(init.headers).get("X-Correlation-Id");
+    expect(sentId).toMatch(/^wizard:[0-9a-f-]{36}$/);
+    expect(screen.getByText(sentId!)).toBeInTheDocument();
+  });
+
+  it("two failed credential submits render TWO DIFFERENT ids — the defect this task closes", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({ code: "TOTALLY_MADE_UP" }, 500))
+      .mockResolvedValueOnce(jsonResponse({ code: "TOTALLY_MADE_UP" }, 500));
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    await screen.findByTestId("error-envelope");
+    const firstInit = fetchSpy.mock.calls[0][1] as RequestInit;
+    const firstId = new Headers(firstInit.headers).get("X-Correlation-Id");
+    expect(screen.getByText(firstId!)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+    await screen.findByTestId("error-envelope");
+    const secondInit = fetchSpy.mock.calls[1][1] as RequestInit;
+    const secondId = new Headers(secondInit.headers).get("X-Correlation-Id");
+    expect(
+      secondId,
+      "the same id rendered across two distinct failed requests — support " +
+        "cannot tell which failure the id identifies",
+    ).not.toBe(firstId);
+    expect(screen.getByText(secondId!)).toBeInTheDocument();
+  });
+
+  it("reuse arm: the envelope's correlation_id equals the id sent on the reuse request, not the credential arm's", async () => {
+    const PRESELECT: PreselectedKey = {
+      id: "66666666-6666-6666-6666-666666666666",
+      exchange: "bybit",
+      exchangeLabel: "Bybit",
+      keyLabel: "Reuse test key",
+    };
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse({ code: "KEY_REUSE_UNAVAILABLE" }, 409));
+    render(
+      <ConnectKeyStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        preselectKey={PRESELECT}
+        onUseDifferentKey={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("wizard-preselect-continue"));
+    await screen.findByTestId("error-envelope");
+
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    const sentId = new Headers(init.headers).get("X-Correlation-Id");
+    expect(sentId).toMatch(/^wizard:[0-9a-f-]{36}$/);
+    expect(screen.getByText(sentId!)).toBeInTheDocument();
   });
 });

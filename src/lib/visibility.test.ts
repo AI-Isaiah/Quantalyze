@@ -37,6 +37,12 @@ describe("withPublishedOnly", () => {
 });
 
 describe("withPublishedOrOwner", () => {
+  // RANK-09 (159-07): the uid is now SHAPE-VALIDATED before interpolation, so
+  // every happy-path fixture must be a real UUID. `uid-123` used to work here
+  // only because nothing checked.
+  const OWNER = "00000000-0000-0000-0000-000000000001";
+  const OTHER_OWNER = "22222222-2222-4222-8222-222222222222";
+
   it("appends .or('status.eq.published,user_id.eq.<uid>') and returns the SAME builder (chain preserved)", () => {
     // Fake PostgrestFilterBuilder: .or returns the builder (mirrors the real
     // `this`-polymorphic return) so downstream .order()/.limit()/.single()
@@ -44,13 +50,13 @@ describe("withPublishedOrOwner", () => {
     const builder: { or: ReturnType<typeof vi.fn> } = {
       or: vi.fn(() => builder),
     };
-    const result = withPublishedOrOwner(builder, "uid-123");
+    const result = withPublishedOrOwner(builder, OWNER);
 
     expect(builder.or).toHaveBeenCalledTimes(1);
     // The predicate mirrors the strategies_read RLS shape exactly:
     // published OR the caller's own rows. The id is interpolated verbatim.
     expect(builder.or).toHaveBeenCalledWith(
-      "status.eq.published,user_id.eq.uid-123",
+      `status.eq.published,user_id.eq.${OWNER}`,
     );
     expect(result).toBe(builder);
   });
@@ -65,7 +71,7 @@ describe("withPublishedOrOwner", () => {
       order: vi.fn(() => builder),
       limit: vi.fn(() => builder),
     };
-    withPublishedOrOwner(builder, "uid-123");
+    withPublishedOrOwner(builder, OWNER);
     expect(builder.order).not.toHaveBeenCalled();
     expect(builder.limit).not.toHaveBeenCalled();
   });
@@ -77,10 +83,112 @@ describe("withPublishedOrOwner", () => {
     const builder: { or: ReturnType<typeof vi.fn> } = {
       or: vi.fn(() => builder),
     };
-    withPublishedOrOwner(builder, "session-owner");
+    withPublishedOrOwner(builder, OTHER_OWNER);
     const filter = builder.or.mock.calls[0][0] as string;
-    expect(filter).toBe("status.eq.published,user_id.eq.session-owner");
+    expect(filter).toBe(`status.eq.published,user_id.eq.${OTHER_OWNER}`);
     expect(filter).not.toContain("attacker");
+  });
+
+  /**
+   * RANK-09 (Phase 159-07, decision D-06) — SHAPE-VALIDATE BEFORE INTERPOLATING.
+   *
+   * `authUserId` is spliced verbatim into a PostgREST `.or()` filter STRING.
+   * PostgREST parses that string as filter syntax, so a value carrying its own
+   * commas / parens / operators is not data — it is grammar. Today's only
+   * callers hand over a session-derived uid, so this is defence in depth; the
+   * point is that the predicate must be safe by CONSTRUCTION rather than by the
+   * good behaviour of every present and future caller.
+   *
+   * D-06 fixes the direction of failure: a non-conforming uid is treated as
+   * ANONYMOUS (published-only), never as a permissive fallback. Fail CLOSED,
+   * and loudly.
+   */
+  describe("uid shape validation (RANK-09 / D-06)", () => {
+    /** Builder exposing BOTH spies so a test can prove which arm ran. */
+    function fakeBuilder() {
+      const builder: {
+        or: ReturnType<typeof vi.fn>;
+        eq: ReturnType<typeof vi.fn>;
+      } = {
+        or: vi.fn(() => builder),
+        eq: vi.fn(() => builder),
+      };
+      return builder;
+    }
+
+    it("never interpolates a malformed uid — an injection-shaped value takes the published-only arm", () => {
+      const builder = fakeBuilder();
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      // A value engineered to close the `user_id.eq.` term and open its own:
+      // if it ever reached `.or()`, PostgREST would parse the attacker's
+      // grammar, not a uid.
+      const result = withPublishedOrOwner(builder, "x) or (user_id.neq.z");
+
+      expect(builder.or).not.toHaveBeenCalled();
+      expect(builder.eq).toHaveBeenCalledTimes(1);
+      expect(builder.eq).toHaveBeenCalledWith("status", "published");
+      // The chain still survives — callers keep their builder + query type.
+      expect(result).toBe(builder);
+
+      spy.mockRestore();
+    });
+
+    it("fails LOUD — the rejection is logged under a stable, greppable prefix", () => {
+      const builder = fakeBuilder();
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      withPublishedOrOwner(builder, "x) or (user_id.neq.z");
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      const [message] = spy.mock.calls[0];
+      expect(String(message)).toContain("[visibility.withPublishedOrOwner]");
+      // The raw value may travel only as a separate console.error ARGUMENT —
+      // never spliced into the message template, and never into a filter.
+      expect(String(message)).not.toContain("user_id.neq.z");
+
+      spy.mockRestore();
+    });
+
+    it("fails CLOSED for every non-conforming shape (empty, undefined-coerced, near-miss UUID)", () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      for (const bad of [
+        "",
+        undefined as unknown as string,
+        null as unknown as string,
+        "undefined",
+        // A near-miss: right character count, wrong grouping.
+        "00000000000000000000000000000001",
+        // Right shape, but a non-hex character.
+        "0000000g-0000-0000-0000-000000000001",
+      ]) {
+        const builder = fakeBuilder();
+        withPublishedOrOwner(builder, bad);
+        expect(builder.or, `\`${String(bad)}\` must not reach .or()`).not
+          .toHaveBeenCalled();
+        expect(builder.eq).toHaveBeenCalledWith("status", "published");
+      }
+
+      spy.mockRestore();
+    });
+
+    it("leaves the happy path byte-identical — a valid UUID still produces the exact .or payload", () => {
+      const builder = fakeBuilder();
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      withPublishedOrOwner(builder, OWNER);
+
+      expect(builder.or).toHaveBeenCalledTimes(1);
+      expect(builder.or).toHaveBeenCalledWith(
+        `status.eq.published,user_id.eq.${OWNER}`,
+      );
+      expect(builder.eq).not.toHaveBeenCalled();
+      // A valid uid is not an incident: nothing is logged.
+      expect(spy).not.toHaveBeenCalled();
+
+      spy.mockRestore();
+    });
   });
 });
 

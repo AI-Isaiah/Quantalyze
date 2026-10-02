@@ -63,19 +63,25 @@
  * (sticky-footer right CTA) but routes the click to the callback prop.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import Link from "next/link";
 import {
   buildDateMapCache,
   computeScenario,
-  computeStrategyCurve,
   type ComputedMetrics,
   type DailyPoint,
   type StrategyForBuilder,
 } from "@/lib/scenario";
 import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
-import { blendPeriodsPerYear } from "@/lib/closed-sets";
+import { blendPeriodsPerYear, type SeriesState } from "@/lib/closed-sets";
 import {
   coverageSpanOf,
   covers,
@@ -118,7 +124,19 @@ import { InfoBanner } from "@/components/ui/InfoBanner";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { MAX_LEVERAGE, sanitizeLeverageMap } from "@/lib/leverage";
-import { formatCurrency, formatPercent } from "@/lib/utils";
+// Phase 152 SCEN-03 — `formatNumber` joins the pair already in use here for the
+// row-detail panel's Sharpe (HoldingDetail precedent: same module, same null
+// semantics as formatPercent — both return "—" for null/non-finite, so the panel
+// never needs an inline toFixed and can never render a fabricated 0.00).
+import { formatCurrency, formatNumber, formatPercent } from "@/lib/utils";
+// Phase 151 AUM-01 — the ONE money kit for NEW surfaces on this screen
+// (150-UI-SPEC / PATTERNS Correction 4): `isValidDollar` is the shared [0, 1e12)
+// bound and `formatUsd` the shared whole-dollar renderer (null → "—", never $0).
+// Deliberately NOT the file-local `formatCurrency` — a second money formatter on
+// a money surface is forbidden. Existing formatCurrency sites are left alone
+// (surgical change; migrating them is not this plan's job).
+import { isValidDollar, formatUsd } from "@/lib/dollar-validation";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { Button } from "@/components/ui/Button";
 import {
   computeHoldingsFingerprint,
@@ -140,10 +158,23 @@ import {
 } from "../lib/scenario-adapter";
 import { buildHoldingRef } from "../lib/holding-outcome-adapter";
 import {
+  buildKeyTrustClause,
+  capitalizeFirst,
+  holdingEquityContributionLocal,
+  managerSideKeyIds,
+  summarizeLiveHoldings,
+  type LiveHoldingsSummary,
+} from "../lib/live-holdings-summary";
+import {
   solveLeverageForMaxDD,
   type SolveLeverageResult,
 } from "../lib/solve-leverage";
 import { KpiStrip } from "./KpiStrip";
+import {
+  equityHistoryRebuildClass,
+  ExchangesPageLink,
+  type EquityHistoryRebuildClass,
+} from "./EquityHistoryRebuilding";
 // `toWealth` stays (the scenario wealth series builder, imported from
 // ../widgets/performance/EquityChart); EquityChart +
 // DrawdownChart are no longer rendered here — Phase 38-03 swaps the composer's
@@ -157,6 +188,11 @@ import { CustomRangePicker } from "./CustomRangePicker";
 import { BlendHeader } from "./BlendHeader";
 import { CoverageStateChip } from "./CoverageStateChip";
 import type { CoverageState } from "./CoverageStateChip";
+// Phase 152 SCEN-02 — the SHARED ownership chip (152-04), not a local span:
+// the browse drawer's own rows render this same leaf, and two hand-rolled
+// chips for one claim drift.
+import { YoursChip } from "./YoursChip";
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import type { ProvenanceTier } from "@/lib/design-tokens/trust-tier";
 import { deriveProvenance } from "../lib/provenance";
@@ -169,9 +205,18 @@ import { ScenarioFooter } from "./ScenarioFooter";
 import { ScenarioFlaggedHoldingsList } from "../ScenarioFlaggedHoldingsList";
 import { ScenarioBenchmarkSection } from "./ScenarioBenchmarkSection";
 import { StressVarSection } from "./StressVarSection";
+import {
+  btcLevelsFromCloses,
+  parseBtcCloses,
+  type BtcCloses,
+} from "../lib/scenario-benchmark";
 import { MonteCarloSection } from "./MonteCarloSection";
 import { WeightOptimizerSection } from "./WeightOptimizerSection";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import {
+  apiKeyLabelById as buildApiKeyLabelById,
+  dataSourceLabel,
+} from "@/lib/api-key-label";
 import type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
 // ---------------------------------------------------------------------------
@@ -608,77 +653,140 @@ function normalizeBookReturns(raw: unknown): DailyPoint[] | null {
 }
 
 /**
- * DSRC-02 (D2) — per-holding equity contribution, the per-key WEIGHT source.
+ * Phase 147 / SCEN-01 — the `series_state` trust-boundary narrowing, shared by
+ * BOTH supply lines (the lazy `/api/strategies/[id]/returns` body and the book
+ * payload row). ONE function so the two paths cannot drift into disagreeing
+ * about what an empty series means (147-UI-SPEC §3 / SC2).
  *
- * Mirrors the SSR `holdingEquityContribution` (queries.ts:2113) EXACTLY:
- *   - derivative → `unrealized_pnl_usd` (the actual equity at stake; `value_usd`
- *     is the leveraged NOTIONAL contract size, which would inflate the weight by
- *     the leverage factor), null/non-finite → 0.
- *   - spot       → `value_usd` (marked fair value = the equity contribution),
- *     non-finite → 0.
+ * Additive-field tolerance, exactly the BLEND-01 idiom the asset_class parse
+ * uses: accept ONLY the two literals that change the render, and collapse
+ * everything else — absent (a stale deploy that predates the widening), null,
+ * or malformed — to the conservative "available", which renders no chip and no
+ * note. Never a throw (a degraded field must not take down the composer), and
+ * never a FALSE "Syncing" (a permanent spinner is the exact class Phase 142
+ * exists to kill).
  *
- * Duplicated locally rather than imported: `@/lib/queries` is `server-only`, so
- * importing its export into this "use client" module crosses the client/server
- * boundary (and the per-key adapter sibling already duplicates the per-key loop
- * locally for the same reason — PATTERNS §"No Analog Found"). Keep this in
- * lockstep with the SSR helper so the client weight matches the server's.
+ * ⛔ This never inspects the series itself: an EMPTY returns array cannot
+ * distinguish "still computing" from "terminal absence", so the client does not
+ * get a vote — the server owns the discriminator.
  */
-function holdingEquityContributionLocal(
-  h: MyAllocationDashboardPayload["holdingsSummary"][number],
-): number {
-  if (h.holding_type === "derivative") {
-    const pnl = h.unrealized_pnl_usd ?? 0;
-    return Number.isFinite(pnl) ? pnl : 0;
-  }
-  return Number.isFinite(h.value_usd) ? h.value_usd : 0;
+function narrowSeriesState(raw: unknown): SeriesState {
+  return raw === "computing" || raw === "empty" ? raw : "available";
 }
 
 /**
- * DSRC-02 — exchange display-name lookup for the Data-sources row labels.
+ * Phase 162 / HONEST-05 — what the composer knows about a drawer-added leg's
+ * headline metric pair. THREE values, because there are three different things
+ * to know and only two of them are facts about the strategy:
  *
- * Copied locally from the SyncBadge recipe (SyncBadge.tsx:21-35): a lower-cased
- * lookup with `?? exchange` fallback. The shared `EXCHANGE_DISPLAY`
- * (closed-sets.ts) carries identical values but is typed
- * `Record<SupportedExchange, string>` — a CLOSED key union — so it cannot be
- * indexed by the arbitrary `string` exchange code without a cast that defeats
- * its narrowing; the open-keyed `?? fallback` recipe stays local, matching the
- * existing local copies in SyncBadge + VerificationForm + AllocatorSyncStatus
- * rather than introducing a cast or a new shared module (surgical-change rule,
- * PATTERNS §"No Analog Found").
+ *   · id ABSENT from the map      → "pending". Nobody has answered yet.
+ *   · `{cagr, sharpe}` (may be    → "settled". The route ANSWERED. Nulls here
+ *     both null)                    are the route withholding a non-rankable
+ *                                   row (`isRankableAnalyticsRow`) — a fact
+ *                                   about the STRATEGY, and the only state that
+ *                                   earns the "no computed metrics" claim.
+ *   · `"unavailable"`             → the SEAM failed. A non-ok response (which
+ *                                   includes our own route's 500 select-error
+ *                                   arm), a network throw, or a malformed body.
+ *
+ * ⭐ The third value exists because collapsing it into the settled pair made the
+ * app state a falsehood: a wedged PostgREST (a documented recurring failure mode
+ * here) would 500 every leg, and the panel would tell the viewer that three
+ * other people's strategies have no computed metrics — while their factsheets,
+ * one click away, show full CAGR and Sharpe. A failure to KNOW is not a settled
+ * absence of the thing; it is an absence of the ANSWER, and the copy must
+ * attribute nothing to the strategy. The series half of the very same response
+ * already draws this line (see the `!r.ok` throw in `fetchAddedReturns`, which
+ * deliberately leaves `addedReturnsById[id]` undefined because a non-ok response
+ * "is a FAILURE, not a genuine empty"); this type is what lets the metrics half
+ * agree with it instead of contradicting it about the same HTTP response.
  */
-const EXCHANGE_LABELS: Record<string, string> = {
-  binance: "Binance",
-  okx: "OKX",
-  bybit: "Bybit",
-};
+type AddedMetricsEntry =
+  | { cagr: number | null; sharpe: number | null }
+  | "unavailable";
+
+/** The render-facing projection of the above (see `AddedMetricsEntry`). */
+type AddedMetricsState = "pending" | "settled" | "unavailable";
 
 /**
- * DSRC-02 — resolve a connected exchange api_key to its row label
- * `{Exchange} — {nickname}`, falling back to `{Exchange} — ••••{id.slice(-4)}`
- * when the key has no nickname. The masked tail never reveals the full id and
- * never any secret/ciphertext (T-37-03-01). Returns the structured parts so the
- * caller can render the masked tail in font-mono per UI-SPEC.
+ * Phase 167.1 AUMTRUST — the composer's rendering of the ONE clause that names
+ * the parts of the live-holdings total sourced from keys needing attention and
+ * from keys whose sync status is unknown, lower-case, e.g.
+ * `includes $12,345 from keys needing attention`.
+ *
+ * One builder, so the standalone sentence beside the AUM field and the clause
+ * nested in the override note cannot word the same fact two ways, and (review
+ * round 2 WR-05) the Open Positions footer words it the same way too: the
+ * wording lives in `buildKeyTrustClause`. The composer supplies only its own
+ * renderer: `formatUsd`, the whole-dollar renderer the AUM figure uses, signed
+ * as it comes (D-07), and "value" per "holding", because a spot holding's
+ * missing figure is not a P&L.
+ *
+ * D-06 (b), founder answer 2026-09-24: the composer also passes D-20's `$Y`
+ * (`excludedUntrusted`), so the same one clause says what the modelled-book
+ * narrowing left OUT of the total ("excludes $Y from keys needing
+ * attention"). Open Positions passes no such part and is unchanged.
+ *
+ * Review round 3 WR-01 (2026-09-24): it also passes `excludedUnknownStatus`,
+ * dropped dollars whose key the key list does not carry (an unsupported
+ * exchange), so they are named ("excludes $Z from keys with an unknown sync
+ * status") instead of vanishing.
+ *
+ * Phase 167.1.2 SC-4: it also passes `excludedTrusted`, dropped dollars from a
+ * trusted key with no return series yet, which until then landed in no part
+ * at all ("excludes $X from connected keys with no return history yet").
+ *
+ * Review C2 WR-03: and `excludedNotConnected`, dropped dollars from a key that
+ * is not in the payload's eligible set (disconnected or inactive), which
+ * until then were called connected keys ("excludes $X from keys that are not
+ * connected").
  */
-function dataSourceLabel(k: { exchange: string; label: string; id: string }): {
-  exchange: string;
-  /** nickname when present, else null (caller renders the masked tail). */
-  nickname: string | null;
-  /** masked id tail (last 4) — only meaningful when nickname is null. */
-  maskedTail: string;
-} {
-  const exchange = EXCHANGE_LABELS[k.exchange.toLowerCase()] ?? k.exchange;
-  const nick = k.label?.trim();
-  return {
-    exchange,
-    nickname: nick ? nick : null,
-    maskedTail: `••••${k.id.slice(-4)}`,
-  };
+function buildUntrustedAumClause(summary: LiveHoldingsSummary): string {
+  return buildKeyTrustClause(
+    summary.untrusted,
+    summary.unknownStatus,
+    {
+      amount: formatUsd,
+      missing: "value",
+      unit: ["holding", "holdings"],
+    },
+    summary.excludedUntrusted,
+    summary.excludedUnknownStatus,
+    summary.excludedTrusted,
+    summary.excludedNotConnected,
+  );
 }
 
 /** The canonical connection-failure copy — honest for a genuine network drop
  *  (the `catch` path) or an opaque non-400 server failure. */
 const SAVE_ERROR_GENERIC =
   "Couldn't save this portfolio. Check your connection and try again.";
+
+/**
+ * Phase 151 AUM-03 — the AUM-zero commit refusal, in two variants.
+ *
+ * A refusal is only useful if the remedy it names EXISTS. The string these
+ * replaced offered two remedies, and BOTH were lies:
+ *   • the live-holding toggle — that control was DELIBERATELY never built
+ *     (CONSTIT-03: live holdings are read-only context; every interactive
+ *     gesture lives on added-strategy rows). The user could search the screen
+ *     forever and never find it.
+ *   • the connect-a-key instruction — the founder hit this refusal with FOUR
+ *     venues already connected, so it was not just useless, it was false about
+ *     the state of their account.
+ *
+ * Both phrasings are permanent never-strings on this surface and are asserted
+ * absent by a repo grep-gate (AUM-03), which is why this comment paraphrases
+ * them rather than quoting them. Both variants below name only real
+ * affordances: the AUM input this phase adds, plus the "From my book" segment
+ * in the variant used when that segment actually renders (`canEnterBook`).
+ * Kept as module consts so the copy is pinned in ONE place and the tests can
+ * assert it by equality.
+ */
+const AUM_REFUSAL_NO_BOOK =
+  "Can't record a scenario commit: portfolio AUM is not set. Set portfolio AUM before submitting.";
+const AUM_REFUSAL_BOOK_REACHABLE =
+  'Can\'t record a scenario commit: portfolio AUM is not set. Set portfolio AUM, or switch to "From my book", before submitting.';
 
 /** A single zod issue as it arrives in the save route's 400 body
  *  (`{ error: "Invalid request body", issues }` — saved/route.ts:102-106). */
@@ -780,6 +888,49 @@ function pruneLeverageToDraftRefs(
 // ScenarioComposer
 // ---------------------------------------------------------------------------
 
+/**
+ * Review C3 SFH-C3-01. The Scenario's one sentence about the withheld own-book
+ * comparison, keyed by the class the Overview's `equityHistoryRebuildClass`
+ * gives the same reason. A failed read says to reload, a key the owner must
+ * fix names the Exchanges page, and only a real wait says "being rebuilt".
+ * Review C3 round 2 WR-02: a hold that no wait heals (`held_back`) says the
+ * history is held back, the meaning of the Overview's "so it is not shown"
+ * lines, and names no wait. The Overview panel carries the per-reason detail.
+ * No sentence promises a date or a day count.
+ */
+const OWN_BOOK_REBUILDING_LINE: Record<EquityHistoryRebuildClass, ReactNode> = {
+  rebuilding: (
+    <>
+      Your book&apos;s own history is being rebuilt, so the comparison with
+      your current book is not shown.
+    </>
+  ),
+  read_failed: (
+    <>
+      We could not load your book&apos;s history just now, so the comparison
+      with your current book is not shown; reload the page to try again.
+    </>
+  ),
+  // "update your keys", not "fix a key": for duplicate_account the owner
+  // disconnects one of two working keys, and nothing is broken to fix.
+  needs_action: (
+    <>
+      Your book&apos;s own history is on hold until you update your keys on
+      the <ExchangesPageLink />, so the comparison with your current book is
+      not shown.
+    </>
+  ),
+  held_back: (
+    <>
+      We are holding back your book&apos;s own history, so the comparison with
+      your current book is not shown.
+    </>
+  ),
+};
+
+/** A stable empty own-book return series (a fresh `[]` would defeat the memo). */
+const NO_OWN_BOOK_RETURNS: MyAllocationDashboardPayload["equityDailyReturns"] = [];
+
 export function ScenarioComposer({
   payload,
   allocatorId,
@@ -803,6 +954,15 @@ export function ScenarioComposer({
     allKeysStale,
     minHistoryDepthMonths,
     activeVenues,
+    // Phase 167.1.2 / D-02: read below as fail-closed, matching the Overview.
+    equityHistoryState,
+    // Review C3 SFH-C3-01: why the history is withheld, classed by the
+    // Overview's own table so both surfaces give the same kind of answer.
+    equityHistoryRebuildReason = null,
+    // Phase 167.1.2 plan 11 (D-06): the book's persisted flow-neutral returns,
+    // the ONE source of the own-book delta below. A payload without the field
+    // reads as no returns.
+    equityDailyReturns = NO_OWN_BOOK_RETURNS,
   } = payload as MyAllocationDashboardPayload & {
     existingOutcomesByHoldingRef?: Record<string, unknown>;
   };
@@ -817,13 +977,67 @@ export function ScenarioComposer({
   // initial draft renders by gating which holdings flow into the hook/adapter/
   // composition below. The frozen adapter + engine path is untouched.
   const hasLiveBook = rawHoldingsSummary.length > 0;
-  // ENGINE-03 (Phase 63) — book mode requires BOTH a live book AND the per-key
-  // dailies gate. A gate=false holder has no per-source engine behind a book
-  // mode, so book entry is unavailable and the composer initializes to BLANK
-  // (added-only) with the DSRC-02 note repointed below so it still renders (D1
-  // locked; Pitfall 2). Landing this before the ENGINE-01 holdings-path deletion
-  // means no intermediate state ever shows a gate=false book mode with no engine.
-  const canEnterBook = hasLiveBook && payload.perKeyDailiesGateSatisfied;
+  // Phase 151 AUM-04 — book entry now keys on the SPLIT gate.
+  //
+  //   `bookEntryGateSatisfied` is SOME-semantics: >= 1 ALLOCATOR-eligible key
+  //   has a per-key series. Manager-side keys (linked to one of the owner's own
+  //   strategies) are subtracted SSR-side, so a manager's keys can no longer pin
+  //   the gate shut on the book they also allocate from. This is a SoT mirror —
+  //   the client reads the flag verbatim and never re-derives eligibility.
+  //
+  //   ENGINE-03's `perKeyDailiesGateSatisfied` (all-or-nothing) is UNCHANGED
+  //   HERE — this file reads only `bookEntryGateSatisfied`.
+  //
+  //   ⚠️ SETTLED (151 red-team G5, supersedes this note's earlier "do NOT
+  //   repoint `liveBaselineMetrics`"): queries.ts:~4112 now DOES gate
+  //   `liveBaselineMetrics` on `bookEntryGateSatisfied`, and that is the
+  //   decision, not an oversight — do not revert it on the strength of this
+  //   comment. The original worry ("a partial blend must never present as the
+  //   whole live book") was answered by NARROWING the basis rather than by
+  //   withholding the blend: the SSR arm now feeds `liveBaselineMetricsFrom-
+  //   PerKeyDailies` the CONTRIBUTING holdings and returns, so every field of
+  //   that object — `aum`, `drawdown`, `ytdTwr`, `sharpe`, `maxDd`, `avgRho`,
+  //   `equity` — describes ONE key set. Under the all-or-nothing flag a partial
+  //   book instead produced an all-null baseline while THIS composer rendered a
+  //   per-key projection beside it, so the compare panel's live column and the
+  //   scenario column disagreed about what the live book even was. Same key set
+  //   on both sides is the invariant; the gate that selects it is shared.
+  //
+  //   151 review CR-02 — the MEMBER-04 reopen/stamp seams DID move (they were
+  //   frozen by 151-05's plan and surfaced as DEF-151-05-B instead). Leaving
+  //   them on the old flag was a user-visible regression the moment book mode
+  //   became reachable under a partial book: a saved BOOK scenario reopened in
+  //   BLANK mode and persisted EMPTY membership, which compare reads as
+  //   "blank-authored" (`memberKeyIds.length > 0` is its per-key selector) — so
+  //   one screen showed two different projections of one portfolio. The
+  //   membership stamp's contract is now "the ids the engine ACTUALLY blends"
+  //   (review WR-07), which is `contributingApiKeyIds`, not the role-BLIND
+  //   `eligibleApiKeyIds` that still carries the owner's manager-side keys.
+  //
+  //   Root cause: an owner-manager's ~$460k book (8 keys, 6 strategy-linked)
+  //   pinned the old gate FALSE, so blank slate was FORCED, not chosen.
+  const canEnterBook = hasLiveBook && (payload.bookEntryGateSatisfied ?? false);
+  // Pitfall 5 (recorded asymmetry) — ⛔ SUPERSEDED by review round 2 F2. It read:
+  // "AUM is CUSTODY — the holdings of every active key, manager-side included —
+  // while this gate is MODELLING CAPABILITY (allocator keys that have a per-key
+  // history). The two sets deliberately differ, so no copy on this surface may
+  // claim the AUM is 'from these N keys'."
+  //
+  // That asymmetry WAS the defect: the composer renormalizes its weights across
+  // the contributing rows only, so a custody-wide denominator made one row's USD
+  // cell and its NOTIONAL cell two different dollar figures for the same
+  // position. The composer's AUM is now the MODELLED book (see `liveHoldingsSum`
+  // below), and the surface DOES say "models N of M keys" — because the claim is
+  // now true, and stating it is the price of narrowing a headline money figure.
+  // Custody's whole-book total remains the Overview/Holdings answer; it is no
+  // longer the scenario's denominator.
+  //
+  // Deliberate narrowing (RESEARCH Open Q4): a book with ZERO contributing keys
+  // still initializes BLANK. CONTEXT's "never force-initializes to blank" is
+  // narrowed to the >= 1 contributing case — an engineless "From my book" (an
+  // empty per-key unit set) is a worse dead end than blank mode, and 151-06's
+  // manual AUM input removes blank mode's residual harm (it can then size and
+  // commit). Any partial book — even 1 of 8 keys — reaches book mode.
   const [entryMode, setEntryMode] = useState<"book" | "blank">(
     canEnterBook ? "book" : "blank",
   );
@@ -846,11 +1060,25 @@ export function ScenarioComposer({
   // (empty-until-added) scenario overlay. Gate the baseline + stamps the same
   // single-switch way. A no-book allocator already renders with an empty
   // baseline, so blank mode just reproduces that already-handled state.
+  //
+  // Phase 167.1.2 / D-02 ("Hide it until correct"): the same switch withholds
+  // the own-book series and its returns while the equity history is rebuilt,
+  // which also leaves `scenarioOwnBookDelta` undefined (it needs >= 2 returns).
+  // The live-book KPIs (`liveBaselineMetrics`) are a separate field and stay
+  // (D-03).
   const isBlankMode = entryMode === "blank";
+  // Fail-closed: ONLY an explicit "ready" may show the own-book series. A
+  // missing field, null, "" or any later state all read as rebuilding.
+  const isOwnBookRebuilding = equityHistoryState !== "ready";
   const baselineEquityDailyPoints = useMemo(
-    () => (isBlankMode ? [] : equityDailyPoints),
-    [isBlankMode, equityDailyPoints],
+    () => (isBlankMode || isOwnBookRebuilding ? [] : equityDailyPoints),
+    [isBlankMode, isOwnBookRebuilding, equityDailyPoints],
   ) as typeof equityDailyPoints;
+  // The same switch gates the returns the own-book delta reads (plan 11).
+  const baselineEquityDailyReturns = useMemo(
+    () => (isBlankMode || isOwnBookRebuilding ? [] : equityDailyReturns),
+    [isBlankMode, isOwnBookRebuilding, equityDailyReturns],
+  );
 
   const scenario = useScenarioState({
     holdingsSummary: holdingsSummary as { symbol: string; venue: string; holding_type: string; value_usd: number }[],
@@ -960,6 +1188,17 @@ export function ScenarioComposer({
     setLeverageByRef({});
     setTargetModeByRef({});
     setSolveResultByRef({});
+    // 151 UAT / specialist SP-C1 — the AUM seed gate is a FOURTH per-open twin
+    // and belongs on this one seam, not at each call site. It was released only
+    // in `handleReset`, so `openSavedScenario` (which re-seeds every other twin:
+    // leverage here, the window via resetWindowToDefaultOnReopen) left it set.
+    // `hydrateFromSaved` REPLACES the draft, so a touched input kept DISPLAYING
+    // the previous draft's override while every dollar figure on screen came
+    // from the reopened draft — and a bare focus→blur (the WR-04 gesture, which
+    // compares against the COMMITTED text, not the displayed one) then wrote the
+    // stale figure onto the reopened scenario, which "Update portfolio"
+    // persisted. Folded in here so no future open seam can forget it.
+    aumTouchedRef.current = false;
   }, []);
 
   // CONSTIT-03 (Phase 111, locked 2026-07-16) — per-key data-source
@@ -1014,6 +1253,37 @@ export function ScenarioComposer({
   // Presentation-only — never threaded into the frozen engine (Pitfall 3).
   const [addedProvenanceById, setAddedProvenanceById] = useState<
     Record<string, { trust_tier: string | null; is_composite: boolean }>
+  >({});
+  // Phase 162 / HONEST-05 — the lazily-fetched headline metric pair (cagr +
+  // sharpe) for a drawer-added, NON-book strategy, keyed by id. Exactly the
+  // addedProvenanceById lifecycle: written by fetchAddedReturns' settle from the
+  // widened /api/strategies/[id]/returns response, purged in handleRemoveAdded
+  // (a re-add starts clean), presentation-only — NEVER threaded into the frozen
+  // engine (Pitfall 3). Before this, `addedStrategyMetadataLookup` sourced the
+  // pair from the BOOK payload alone, so a drawer-added leg's detail panel was
+  // a permanent em-dash pair no matter how much data the strategy had.
+  //
+  // ⭐ The three-way distinction is the whole contract (UI-SPEC C-4, as amended
+  // by the 162 silent-failure audit — see `AddedMetricsEntry`). An id ABSENT
+  // means "not asked / still answering" — em-dashes, SILENCE. An id PRESENT
+  // with a pair (even a null pair) is a settled claim about the STRATEGY and
+  // earns the absence note. An id present as `"unavailable"` is a claim about
+  // the SEAM — em-dashes plus a note that attributes nothing to the strategy.
+  // Collapsing pending into settled would flash a false claim on every load;
+  // collapsing unavailable into settled mints a false claim about somebody
+  // else's track record out of our own outage.
+  const [addedMetricsById, setAddedMetricsById] = useState<
+    Record<string, AddedMetricsEntry>
+  >({});
+  // Phase 147 / SCEN-01 — the lazily-fetched `series_state` discriminator for a
+  // drawer-added, NON-book strategy, keyed by id. Same lifecycle as
+  // addedAssetClassById (settle writer + purge on remove, so a re-add starts
+  // clean): the book payload carries series_state on book rows, but a
+  // drawer-added strategy's can only come from the widened /returns response.
+  // An id with NO entry is "available" — the conservative default that renders
+  // no chip, so an in-flight or degraded fetch never fabricates a Syncing row.
+  const [addedSeriesStateById, setAddedSeriesStateById] = useState<
+    Record<string, SeriesState>
   >({});
   // Ids whose lazy fetch is in flight — drives the honest "loading returns…"
   // affordance on the added row. While loading, the strategy contributes []
@@ -1077,16 +1347,17 @@ export function ScenarioComposer({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savePending, setSavePending] = useState(false);
 
-  // BENCH-01 — the BTC benchmark daily-returns series, fetched once from the
-  // shared market-data route. `btcAvailable` is false until a non-empty series
-  // arrives; a failed/empty fetch leaves it false so the benchmark section
+  // BENCH-01 — the BTC benchmark CLOSES, fetched once from the shared
+  // market-data route `/api/benchmark/btc/prices` (Phase 169.4 D-67). `btc` is
+  // null until a body of the closes shape with at least one close arrives; a
+  // failed / empty / wrong-shape fetch leaves it null so the benchmark section
   // renders the honest "unavailable" empty state and the overlay is suppressed
   // (24-RESEARCH Pitfall 5: a transport failure degrades to the empty state,
-  // never a red alert). The series is RAW daily returns — the section consumes
-  // them for the metrics, and the chart overlay derives a cumulative-WEALTH
-  // curve from the SAME series (Pitfall 3).
-  const [btcDaily, setBtcDaily] = useState<DailyPoint[]>([]);
-  const [btcAvailable, setBtcAvailable] = useState(false);
+  // never a red alert). The two sections pair the closes with the portfolio
+  // through the one pairing function (D-68), and the chart overlay is the close
+  // LEVEL (`btcLevelsFromCloses`, D-66) from the SAME closes.
+  const [btc, setBtc] = useState<BtcCloses | null>(null);
+  const btcAvailable = btc !== null;
   // Overlay toggle, default ON per UI-SPEC §Component Inventory.
   const [showBenchmark, setShowBenchmark] = useState(true);
 
@@ -1124,6 +1395,20 @@ export function ScenarioComposer({
   // re-snaps their choice.
   const windowTouchedRef = useRef(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+
+  // -------------------------------------------------------------------------
+  // Phase 151 AUM-01 — the Portfolio AUM input's text state.
+  //
+  // The DRAFT is the authority (`draft.manualAumUsd`); this holds only the raw
+  // keystrokes between commits, because the user must be able to type through
+  // intermediate states ("5", "50", "500000") that are not yet a value. It is
+  // SEEDED from the draft/live sum while untouched and never re-snapped after —
+  // the exact `windowTouchedRef` idiom (Pitfall 3): a controlled mirror would
+  // re-snap the allocator's override every time a holdings refresh moved the
+  // live sum.
+  // -------------------------------------------------------------------------
+  const [aumInputText, setAumInputText] = useState("");
+  const aumTouchedRef = useRef(false);
 
   function handleWeightChange(scopeRef: string, weight: number) {
     if (!Number.isFinite(weight)) {
@@ -1308,12 +1593,43 @@ export function ScenarioComposer({
       series: DailyPoint[],
       assetClass: string | null,
       provenance: { trust_tier: string | null; is_composite: boolean },
+      seriesState: SeriesState,
+      metrics: { cagr: number | null; sharpe: number | null },
     ) => {
       setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
       setAddedAssetClassById((prev) => ({ ...prev, [id]: assetClass }));
       // CONSTIT-02 — record the drawer-added leg's provenance beside asset_class.
       setAddedProvenanceById((prev) => ({ ...prev, [id]: provenance }));
+      // SCEN-01 — record what an EMPTY series means for this leg, so the row can
+      // say "Syncing" or "No data" instead of rendering 0.00 with no signal.
+      setAddedSeriesStateById((prev) => ({ ...prev, [id]: seriesState }));
+      // HONEST-05 — record the co-served metric pair. Written UNCONDITIONALLY,
+      // including when both are null: the WRITE is what turns "still asking"
+      // into the settled claim the absence note is allowed to make (C-4).
+      setAddedMetricsById((prev) => ({ ...prev, [id]: metrics }));
       clearInflight();
+    };
+    // HONEST-05 — record that the metrics question could not be ANSWERED,
+    // without settling a series and without claiming anything about the
+    // strategy.
+    //
+    // ⛔ This used to write `{cagr: null, sharpe: null}` — the same shape the
+    // route's genuine "this row has no computed analytics" answer produces —
+    // and the panel therefore printed "No computed metrics for this strategy"
+    // on the strength of a fetch that never observed the strategy at all. Three
+    // distinct things reach this writer: a non-ok response (INCLUDING our own
+    // /returns route's 500 select-error arm), a network throw, and a malformed
+    // body. None of them is evidence about the strategy; wedge PostgREST for
+    // 40s and the old code told the viewer that every leg they dragged in has
+    // no track record, contradicted by the factsheet one click away.
+    //
+    // `"unavailable"` still counts as "stop spinning" (the row must not sit on
+    // two undescribed em-dashes forever) while WR-01 still requires
+    // `addedReturnsById[id]` to stay undefined so a remove + re-add retries the
+    // series. Two different questions, two different answers — collapsing them
+    // would either strand a permanent spinner or poison the retry.
+    const markMetricsUnavailable = () => {
+      setAddedMetricsById((prev) => ({ ...prev, [id]: "unavailable" }));
     };
     fetch(`/api/strategies/${encodeURIComponent(id)}/returns`, {
       signal: controller.signal,
@@ -1335,6 +1651,9 @@ export function ScenarioComposer({
           asset_class?: unknown;
           trust_tier?: unknown;
           is_composite?: unknown;
+          series_state?: unknown;
+          cagr?: unknown;
+          sharpe?: unknown;
         }) => {
           // A 200 with a non-array body is a malformed/failed response, NOT a
           // genuine empty series — treat it as a retryable failure (WR-01).
@@ -1342,8 +1661,13 @@ export function ScenarioComposer({
             throw new Error("returns route body missing a daily_returns array");
           }
           // BLEND-01 — accept asset_class only when it is a string; anything else
-          // (absent from a stale deploy, null, or malformed) collapses to null →
-          // the leg keeps the conservative 252 blend default.
+          // (absent from a stale deploy, null, or malformed) collapses to null.
+          // RANK-06 then treats a NULLISH asset_class as crypto for the blend
+          // clock (`blendPeriodsPerYear`: any nullish or "crypto" leg ⇒ 365), so
+          // an unknown leg annualizes √365 — the CONSERVATIVE direction, since
+          // √252 on a crypto series inflates Sharpe. A non-matching STRING
+          // (e.g. "equities") still reads traditional √252; RANK-06 widened
+          // nullish, not matching.
           const assetClass =
             typeof d.asset_class === "string" ? d.asset_class : null;
           // CONSTIT-02 — accept trust_tier only when a string, is_composite only
@@ -1354,10 +1678,34 @@ export function ScenarioComposer({
             trust_tier: typeof d.trust_tier === "string" ? d.trust_tier : null,
             is_composite: d.is_composite === true,
           };
+          // SCEN-01 — narrow the additive discriminator through the SHARED
+          // boundary helper (the book merge below calls the same one). A stale
+          // deploy that omits it, or any malformed value, degrades to
+          // "available": no chip, no note, never a false Syncing.
+          const seriesState = narrowSeriesState(d.series_state);
+          // HONEST-05 — accept a metric only when it is a FINITE number. A
+          // stale deploy predating the widening omits both keys, and the route
+          // itself sends null for any row whose run did not finish
+          // (isRankableAnalyticsRow) — both land here as null, which the panel
+          // renders as an em-dash. A NaN/Infinity that somehow arrived is
+          // absence too; it must never reach a formatter as a "value".
+          const metrics = {
+            cagr: typeof d.cagr === "number" && Number.isFinite(d.cagr) ? d.cagr : null,
+            sharpe:
+              typeof d.sharpe === "number" && Number.isFinite(d.sharpe)
+                ? d.sharpe
+                : null,
+          };
           // A genuine 200 with a real array (including an empty one) settles. An
           // empty array here means the strategy legitimately has no published
           // returns yet — distinct from a failure, so it is cached, not retried.
-          settle(d.daily_returns as DailyPoint[], assetClass, provenance);
+          settle(
+            d.daily_returns as DailyPoint[],
+            assetClass,
+            provenance,
+            seriesState,
+            metrics,
+          );
         },
       )
       .catch((err: unknown) => {
@@ -1376,6 +1724,12 @@ export function ScenarioComposer({
           "[ScenarioComposer] /api/strategies/<id>/returns fetch failed",
           { id, err },
         );
+        // HONEST-05 (C-4 fetch-error row) — a failure is not an error message
+        // and it is not a settled absence either. The panel must not spin an
+        // em-dash pair forever with nothing said, so it records "we could not
+        // ask" (no red, no zeros, and NO claim about the strategy). The series
+        // stays unsettled and retryable (WR-01, above).
+        markMetricsUnavailable();
         clearInflight();
       });
   }, []);
@@ -1420,6 +1774,13 @@ export function ScenarioComposer({
     // replaced the draft with the windowless default.) The Phase-57 "sticky by
     // design" rationale covers deselect, not reset.
     resetWindowToDefaultOnReopen();
+    // Phase 151 AUM-01 — the AUM seed is released on the SAME seam, for the same
+    // reason as the window: `scenario.reset()` drops `draft.manualAumUsd`, so a
+    // touched input would keep DISPLAYING an override the fresh draft no longer
+    // holds. Un-touching lets the seed effect re-seed from the fresh live sum
+    // (or back to empty in blank mode). The write itself now lives in
+    // `resetAllTransientState()` (called below) so the two saved-scenario opens
+    // get it too — see SP-C1 there.
     // CONSTIT-03 — per-key exclusions now live in `scenario.draft.toggleByScopeRef`
     // and are cleared automatically by `scenario.reset()` (draft → default) /
     // `scenario.hydrateFromSaved()` (draft replaced), so no separate ephemeral-map
@@ -1457,11 +1818,14 @@ export function ScenarioComposer({
   const handleEntryModeSelect = useCallback(
     (mode: "book" | "blank") => {
       if (mode === entryMode) return;
-      // ENGINE-03 — refuse book entry when the per-key gate is not satisfied.
-      // The book segment is hidden in that case (see the radiogroup below), so
-      // this is defense-in-depth: no code path (arrow-key, a future re-show)
-      // can land the composer in an engineless book mode.
-      if (mode === "book" && !payload.perKeyDailiesGateSatisfied) return;
+      // ENGINE-03 — refuse book entry when the book gate is not satisfied. The
+      // book segment is hidden in that case (see the radiogroup below), so this
+      // is defense-in-depth: no code path (arrow-key, a future re-show) can land
+      // the composer in an engineless book mode.
+      // Phase 151 AUM-04 — repointed to the SPLIT gate, canEnterBook-adjacent:
+      // this guard and `canEnterBook` must agree or a partial book would render
+      // a segment its own click handler refuses.
+      if (mode === "book" && !(payload.bookEntryGateSatisfied ?? false)) return;
       if (scenario.diffCount > 0) {
         setPendingMode(mode);
         setResetModalOpen(true);
@@ -1469,7 +1833,7 @@ export function ScenarioComposer({
       }
       setEntryMode(mode);
     },
-    [entryMode, scenario.diffCount, payload.perKeyDailiesGateSatisfied],
+    [entryMode, scenario.diffCount, payload.bookEntryGateSatisfied],
   );
 
   // Open a saved scenario. The row's persisted draft is decoded through the
@@ -1572,13 +1936,20 @@ export function ScenarioComposer({
       // (membership already defined) hydrates UNCHANGED — its dropped members are
       // intersected out at compute and disclosed below. This is the gate-only
       // DERIVE, distinct from the entryMode-aware STAMP on the SAVE path.
+      //
+      // 151 review CR-02 — repointed onto the SPLIT gate + the CONTRIBUTING set.
+      // Under a partial book the old flag is false, so an underived draft was
+      // stamped `[]` — the schema's meaning for "blank-authored, no book
+      // members" — even though the composer was about to blend the contributing
+      // keys per-key. The derive must name what the engine actually blends, or
+      // the reopened draft describes a portfolio it does not model.
       const hydratedValue =
         decoded.value.memberKeyIds === undefined
           ? setMemberKeyIds(
               decoded.value,
               deriveMembershipFromGate(
-                payload.perKeyDailiesGateSatisfied ?? false,
-                payload.eligibleApiKeyIds ?? [],
+                payload.bookEntryGateSatisfied ?? false,
+                payload.contributingApiKeyIds ?? [],
               ),
             )
           : decoded.value;
@@ -1588,10 +1959,18 @@ export function ScenarioComposer({
       // stale session mode. A draft whose fingerprint matches the LIVE book was
       // authored in book mode (seeded from holdings); one carrying the empty-
       // holdings fingerprint was authored blank (added-only, `[]` seed). Book is
-      // only representable when the per-key gate is satisfied (it needs a per-
-      // source engine), so a book-authored draft under a gate-off session stays
-      // blank — the pinned forced-blank reopen (CR-01 case (a)) — and its
-      // persisted membership is then protected on save by `memberKeyIdsForUpdate`.
+      // only representable when a per-source engine exists, so a book-authored
+      // draft under an engineless session stays blank — the pinned forced-blank
+      // reopen (CR-01 case (a)) — and its persisted membership is then protected
+      // on save by `memberKeyIdsForUpdate`.
+      //
+      // 151 review CR-02 (discharges DEF-151-05-B) — "a per-source engine
+      // exists" is `bookEntryGateSatisfied`, NOT the all-or-nothing flag: a
+      // PARTIAL book has a per-source engine over its contributing keys, and
+      // `usePerKeySources` already runs on exactly that gate. Left frozen, a
+      // partial-book allocator who saved a BOOK draft reopened it in BLANK mode
+      // — `holdingsSummary` gated to `[]`, their book rows gone — while the
+      // engine basis and the membership stamp disagreed with what was on screen.
       //
       // Keyed on the FINGERPRINT, deliberately NOT the membership: a book draft
       // can legitimately carry EMPTY membership (a pre-STAMP save, or a book save
@@ -1607,7 +1986,7 @@ export function ScenarioComposer({
         liveBookFingerprint !== "" &&
         decoded.value.init_holdings_fingerprint === liveBookFingerprint;
       const targetEntryMode: "book" | "blank" =
-        draftIsBookAuthored && (payload.perKeyDailiesGateSatisfied ?? false)
+        draftIsBookAuthored && (payload.bookEntryGateSatisfied ?? false)
           ? "book"
           : "blank";
 
@@ -1785,12 +2164,16 @@ export function ScenarioComposer({
     // fingerprint. v1.6 MEMBER-04 also reads the live gate + eligible set
     // (DERIVE-AND-STAMP + ineligible disclosure), so re-create when they change —
     // a stale eligible set would misjudge dropped members.
+    // 151 review CR-02 — the mode-sync + DERIVE now read the SPLIT gate and the
+    // contributing set, so both join the dep list. `eligibleApiKeyIds` stays: it
+    // is still the basis of the ineligible-member disclosure below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       rawHoldingsSummary,
       holdingsSummary,
       scenario.hydrateFromSaved,
-      payload.perKeyDailiesGateSatisfied,
+      payload.bookEntryGateSatisfied,
+      payload.contributingApiKeyIds,
       payload.eligibleApiKeyIds,
     ],
   );
@@ -1815,60 +2198,50 @@ export function ScenarioComposer({
     onRegisterOpenBrowseRef.current?.(openBrowse);
   }, []);
 
-  // BENCH-01 — fetch the shared BTC daily-returns series once on mount. The
-  // route returns `[{date,value}]` (raw daily returns) and degrades to `[]` on
-  // its own read errors, so any non-2xx / non-array / empty / thrown result
-  // leaves `btcAvailable=false` → the benchmark section shows the honest empty
-  // state and the overlay is hidden (never a red alert).
+  // BENCH-01 — fetch the shared BTC closes once on mount. The route returns
+  // `{ prices, dropped, through }` (Phase 169.4 D-67) and answers a no-store 503
+  // on its own read errors (Phase 169.2), so any non-2xx / wrong-shape / no-close
+  // / thrown result leaves `btc` null → the benchmark section shows the honest
+  // empty state and the overlay is hidden (never a red alert). `parseBtcCloses`
+  // is the shape guard: the OLD returns body (an array) is null, never misread.
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/benchmark/btc")
+    fetch("/api/benchmark/btc/prices")
       .then((r) => {
         if (!r.ok) {
           // F-08: a persistent non-2xx (500 / CDN / route-contract break) is
           // otherwise invisible — the honest-degrade state hides it. Log so a
           // regression is visible in production console rather than silently
-          // swallowed. Keep the degrade (return [] → btcAvailable=false).
+          // swallowed. Keep the degrade (null → btc stays null).
           console.warn(
-            "[ScenarioComposer] /api/benchmark/btc non-ok response",
+            "[ScenarioComposer] /api/benchmark/btc/prices non-ok response",
             { status: r.status },
           );
-          return [];
+          return null;
         }
         return r.json();
       })
       .then((d) => {
         if (cancelled) return;
-        const series = Array.isArray(d) ? (d as DailyPoint[]) : [];
-        setBtcDaily(series);
-        setBtcAvailable(series.length > 0);
+        const closes = parseBtcCloses(d);
+        if (d !== null && closes === null) {
+          // F-08: a 2xx body of another shape (a stale cached returns array, a
+          // contract break) degrades like a failed fetch; log it so it is seen.
+          console.warn("[ScenarioComposer] /api/benchmark/btc/prices unexpected body shape");
+        }
+        setBtc(closes !== null && closes.prices.length > 0 ? closes : null);
       })
       .catch((err) => {
         if (cancelled) return;
         // F-08: a thrown fetch (network / abort / JSON parse) is also logged
         // so the silent degrade is observable. State stays honest.
-        console.warn("[ScenarioComposer] /api/benchmark/btc fetch failed", err);
-        setBtcDaily([]);
-        setBtcAvailable(false);
+        console.warn("[ScenarioComposer] /api/benchmark/btc/prices fetch failed", err);
+        setBtc(null);
       });
     return () => {
       cancelled = true;
     };
   }, []);
-
-  // BENCH-01 — the chart overlay series. `EquityChart.benchmark` runs
-  // `anchorFromFirstPositive` (divide-by-first), so it expects a CUMULATIVE-
-  // WEALTH curve (~1.0 base), NOT raw daily returns — derive it via
-  // `computeStrategyCurve` from the same BTC daily returns the metrics use
-  // (24-RESEARCH Pitfall 3). Suppressed (undefined) when the toggle is off or
-  // the benchmark is unavailable, which hides the overlay.
-  const btcWealth = useMemo(
-    () =>
-      showBenchmark && btcAvailable
-        ? computeStrategyCurve(btcDaily)
-        : undefined,
-    [showBenchmark, btcAvailable, btcDaily],
-  );
 
   // Validate the trimmed name against the SQL CHECK (1..120) mirrored in the
   // save route. Returns the trimmed name on success, or null after setting the
@@ -1888,16 +2261,31 @@ export function ScenarioComposer({
   }
 
   // MEMBER-04 (STAMP — entryMode-aware). The membership a NEW save persists.
-  // Book mode + the per-key gate satisfied ⇒ the eligible per-key ids; anything
-  // else (blank mode, OR a book without the gate) ⇒ [] EVEN when the gate is
-  // true — the F5 STAMP closure: a blank draft must never inherit the book
-  // members. This is DELIBERATELY the entryMode-aware rule, NOT the gate-only
+  // Book mode + a per-source engine ⇒ the ids that engine blends; anything else
+  // (blank mode, OR a book with no engine) ⇒ [] EVEN when the gate is true — the
+  // F5 STAMP closure: a blank draft must never inherit the book members. This is
+  // DELIBERATELY the entryMode-aware rule, NOT the gate-only
   // `deriveMembershipFromGate` (which ignores entryMode and is the upgrade-READ
   // rule); using derive here would re-open F5 by stamping book members onto a
   // blank draft whenever the live gate happens to be satisfied.
+  //
+  // 151 review CR-02 + WR-07 — the stamp names WHAT THE ENGINE BLENDS, on the
+  // same two signals `usePerKeySources` runs on:
+  //   • the gate is `bookEntryGateSatisfied` (not the all-or-nothing flag), so a
+  //     partial-book BOOK save stops persisting `[]`, the schema's meaning for
+  //     "blank-authored" — a saved row that lied about what it models, and which
+  //     compare then computed added-only while the composer blended per-key.
+  //   • the id set is `contributingApiKeyIds` (not the role-BLIND
+  //     `eligibleApiKeyIds`), which by construction still carries the owner's
+  //     MANAGER-side keys. Those keys are not engine units (151 AUM-04 narrowed
+  //     `perKeyAdapterOutput` to the contributing set), so stamping them would
+  //     over-claim membership the projection never blended — and the phase's own
+  //     partial-book note says a manager key "belongs to NEITHER count".
+  // For a pre-split allocator (no manager keys, all-or-nothing gate true) the
+  // two sets are identical, so nothing changes for the existing population.
   const memberKeyIdsForSave =
-    entryMode === "book" && payload.perKeyDailiesGateSatisfied
-      ? (payload.eligibleApiKeyIds ?? [])
+    entryMode === "book" && (payload.bookEntryGateSatisfied ?? false)
+      ? (payload.contributingApiKeyIds ?? [])
       : [];
 
   // F-1 (red-team) — the membership an UPDATE (PUT) of the loaded scenario
@@ -1905,20 +2293,79 @@ export function ScenarioComposer({
   // draft, `memberKeyIdsForSave` (the entryMode-aware stamp) already matches
   // what is modeled, so an Update round-trips membership faithfully. The ONE
   // exception is the ~0-user edge the mode-sync cannot represent: a reopened
-  // BOOK draft whose per-key gate is NOT satisfied. Book mode is unrenderable
-  // (no per-source engine), so the session is forced to blank and the blank
-  // stamp would be `[]` — silently converting the persisted book draft to
-  // blank-authored. Preserve the working draft's OWN existing membership
-  // instead: silent membership destruction must be impossible. Guarded on the
-  // gate (not on entryMode) so a genuinely blank-authored draft in a gate-off
-  // session — existing membership `[]` — still saves `[]`, never resurrecting
-  // members. NEW saves (POST) keep using `memberKeyIdsForSave` (MEMBER-04's
-  // entryMode-aware STAMP contract); this only affects the reopen→Update seam.
-  const memberKeyIdsForUpdate =
-    (scenario.draft.memberKeyIds ?? []).length > 0 &&
-    !payload.perKeyDailiesGateSatisfied
-      ? (scenario.draft.memberKeyIds ?? [])
-      : memberKeyIdsForSave;
+  // BOOK draft with NO per-source engine. Book mode is unrenderable there, so
+  // the session is forced to blank and the blank stamp would be `[]` — silently
+  // converting the persisted book draft to blank-authored. Preserve the working
+  // draft's OWN existing membership instead: silent membership destruction must
+  // be impossible. Guarded on the gate (not on entryMode) so a genuinely
+  // blank-authored draft in a gate-off session — existing membership `[]` —
+  // still saves `[]`, never resurrecting members. NEW saves (POST) keep using
+  // `memberKeyIdsForSave` (MEMBER-04's entryMode-aware STAMP contract); this
+  // only affects the reopen→Update seam.
+  //
+  // 151 review CR-02 — repointed to the SPLIT gate, in lockstep with the
+  // mode-sync above. "Unrepresentable" now means `!bookEntryGateSatisfied`: with
+  // the book gate TRUE and the all-or-nothing flag false (the partial book this
+  // phase enables) the reopen lands in BOOK mode and the stamp is honest, so
+  // freezing membership there would instead pin a stale member set — a key that
+  // has since earned its per-key series would never join the saved membership.
+  //
+  // Review [5] — CR-02 was right that a hard freeze is wrong, but replacing the
+  // freeze with a plain overwrite re-opened the hole it was guarding. Under the
+  // OLD all-or-nothing gate the freeze engaged whenever ANY eligible key lacked
+  // a series, which covered the transient case for free; under SOME-semantics
+  // the gate stays TRUE while one key contributes, so an Update wrote
+  // `contributingApiKeyIds` straight over the saved row. An allocator with 3
+  // keys in a saved book scenario, one of whose per-key series is momentarily
+  // empty (backfill lag, a sync gap, the derive-dailies backlog), reopens,
+  // nudges a weight, presses Update — and that key is silently gone. It does
+  // not come back when its series does: persisted membership is explicit, and
+  // `computeMetricsForDraft` intersects it against the live set rather than
+  // re-deriving it. No message, no undo.
+  //
+  // So: an Update may ADD, and may drop what is no longer ELIGIBLE, but may
+  // never drop a still-eligible member merely for being quiet today. Both
+  // failure modes close — the newly-earning key joins (it is in the
+  // contributing stamp) and the transiently-empty one survives (it is still
+  // eligible) — while a revoked or disconnected key still leaves, because
+  // eligibility is what it lost.
+  const memberKeyIdsForUpdate = (() => {
+    const existing = scenario.draft.memberKeyIds ?? [];
+    // A genuinely blank-authored draft has membership `[]` and must save `[]` —
+    // never resurrect members.
+    if (existing.length === 0) return memberKeyIdsForSave;
+    // Book mode unrenderable: the blank stamp would be `[]` and would silently
+    // convert a persisted book draft to blank-authored. Freeze (F-1).
+    if (!(payload.bookEntryGateSatisfied ?? false)) return existing;
+    // 151 red-team G2 — THE UNION IS A BOOK-MODE RULE, and only a book-mode
+    // rule. The two intents that meet on this line are genuinely different, and
+    // neither is a leftover:
+    //   • Review [5] (below): while the session is modelling the BOOK, an Update
+    //     may never drop a still-eligible member merely for being quiet today
+    //     (an empty per-key series from backfill lag is transient) — so the
+    //     union of "existing ∩ still-eligible" with the contributing stamp.
+    //   • MEMBER-04 / F5: converting to BLANK SLATE is an explicit act of
+    //     authorship — the allocator dropped the book off the screen (zero
+    //     `scenario-constituent-perkey` rows render) and the honest stamp for
+    //     what they are now modelling is `[]`. Union semantics can never SHRINK
+    //     membership, so before this the conversion silently persisted the old
+    //     book membership and `scenario-compare.ts:182`
+    //     (`usePerKeySources = memberKeyIds.length > 0`) then projected the row
+    //     as a per-key BOOK blend while the composer computed it added-only —
+    //     the CR-02 two-projections-of-one-portfolio defect, re-imported.
+    // They are reconciled by SCOPE, not by precedence: the union only speaks for
+    // a session still in book mode. A blank session's stamp wins outright —
+    // reachable only DELIBERATELY here, because the unrepresentable forced-blank
+    // case (gate false) already returned above.
+    if (entryMode !== "book") return memberKeyIdsForSave;
+    const stillEligible = new Set(payload.allocatorEligibleApiKeyIds ?? []);
+    return [
+      ...new Set([
+        ...existing.filter((id) => stillEligible.has(id)),
+        ...memberKeyIdsForSave,
+      ]),
+    ];
+  })();
 
   // POST a new scenario (first save OR "save as new"). On success adopt the
   // returned id as the loaded scenario (editable, not readonly).
@@ -2074,6 +2521,26 @@ export function ScenarioComposer({
     [scenario.draft.addedStrategies, strategyById, addedReturnsById],
   );
 
+  // Phase 147 / SCEN-01 — the per-row `series_state` the chip + note render
+  // from, merged across the SAME two supply lines as the returns lookup above
+  // and in the SAME precedence: the book payload wins when the strategy is in
+  // the book (that path never fires a lazy fetch), otherwise the lazily-fetched
+  // value, otherwise "available" (nothing has told us anything yet → no chip).
+  // Both branches narrow through the ONE shared helper, so the two paths cannot
+  // disagree about what an empty series means (UI-SPEC §3 / SC2). ⛔ No branch
+  // here consults the series itself — array length cannot tell computing from
+  // terminal-empty, so the server owns the discriminator.
+  const addedSeriesStateByRef = useMemo<Record<string, SeriesState>>(() => {
+    const map: Record<string, SeriesState> = {};
+    for (const a of scenario.draft.addedStrategies) {
+      const found = strategyById.get(a.id);
+      map[a.id] = found
+        ? narrowSeriesState(found.strategy.series_state)
+        : (addedSeriesStateById[a.id] ?? "available");
+    }
+    return map;
+  }, [scenario.draft.addedStrategies, strategyById, addedSeriesStateById]);
+
   // UNIFY-04 — the display names of added strategies whose lazy returns fetch
   // is still in flight, for the honest "loading returns…" affordance. Derived
   // from the loading-id set ∩ the current added strategies (an id that was
@@ -2084,6 +2551,36 @@ export function ScenarioComposer({
       .filter((a) => loadingReturnsIds.has(a.id))
       .map((a) => a.name);
   }, [loadingReturnsIds, scenario.draft.addedStrategies]);
+
+  // Phase 147 / SCEN-01 (RESEARCH P6) — the HYDRATION seam. `fetchAddedReturns`
+  // used to have exactly two call sites, both ADD seams (handleAddStrategy just
+  // below, and the BridgeDrawer onAdd) — so a strategy that entered the draft in
+  // a PREVIOUS session never got fetched. `addedReturnsById` starts empty on
+  // every fresh mount, so a page refresh or an `openSavedScenario` reopen left
+  // every added leg contributing [] again and the SCEN-01 symptom survived the
+  // phase's column fix one F5 later. This effect covers BOTH un-fixed entry
+  // paths (reopen and localStorage-draft hydration) because both land their
+  // strategies in `draft.addedStrategies` on a mount where `addedReturnsById` is
+  // empty.
+  //
+  // It reuses the add seam's guard predicate VERBATIM — not in the book, and not
+  // already resolved — and leans on `fetchAddedReturns`' own `lazyAbortRef`
+  // in-flight guard (:1315) for idempotence. ⛔ Deliberately NO second dedup
+  // mechanism (no ref flag, no mount-once latch): the fetch function already
+  // dedupes, and a parallel mechanism is exactly the drift this phase exists to
+  // prevent.
+  useEffect(() => {
+    for (const a of scenario.draft.addedStrategies) {
+      if (!strategyById.has(a.id) && addedReturnsById[a.id] === undefined) {
+        fetchAddedReturns(a.id);
+      }
+    }
+  }, [
+    scenario.draft.addedStrategies,
+    strategyById,
+    addedReturnsById,
+    fetchAddedReturns,
+  ]);
 
   // UNIFY-04 — the single add seam for catalog adds (empty-state drawer,
   // main-body drawer, Bridge). Appends to the draft via the hook mutator, THEN
@@ -2141,6 +2638,22 @@ export function ScenarioComposer({
         const { [id]: _dropProv, ...rest } = prev;
         return rest;
       });
+      // SCEN-01 — purge the fetched series_state identically, or a re-add would
+      // render a STALE "Syncing" against a retry that has not answered yet.
+      setAddedSeriesStateById((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _dropState, ...rest } = prev;
+        return rest;
+      });
+      // HONEST-05 — purge the fetched metric pair identically. Leaving it would
+      // make a re-add render the PREVIOUS answer as settled while the retry is
+      // still in flight — including a settled "no computed metrics" note over a
+      // strategy whose fetch simply had not returned yet (C-4's in-flight row).
+      setAddedMetricsById((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _dropMetrics, ...rest } = prev;
+        return rest;
+      });
       // LEV-02 (round-2 M-2) + WEIGHTS-04 / F1 — purge the removed leg's ENTIRE
       // transient trio (leverage overlay AND the Target-mode/solve twins) via the
       // unified reset, or it strands: leverageByRef is folded into the draft at
@@ -2171,6 +2684,13 @@ export function ScenarioComposer({
         // erases them from the engine-input type.
         trust_tier: string | null;
         is_composite: boolean;
+        // HONEST-05 — what happened to the metric pair for this leg: answered
+        // ("settled"), still asking ("pending"), or the fetch failed
+        // ("unavailable"). A book leg is answered by the SSR payload itself; a
+        // drawer-added leg only once its lazy fetch resolves one way or the
+        // other. Presentation-only, like trust_tier: it rides the lookup and is
+        // erased by the bare-Pick cast at every engine call site (Pitfall 3).
+        metricsState: AddedMetricsState;
       }
     >
   >(() => {
@@ -2179,10 +2699,22 @@ export function ScenarioComposer({
       Pick<
         StrategyForBuilder,
         "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
-      > & { trust_tier: string | null; is_composite: boolean }
+      > & {
+        trust_tier: string | null;
+        is_composite: boolean;
+        metricsState: AddedMetricsState;
+      }
     > = {};
     for (const a of scenario.draft.addedStrategies) {
       const found = strategyById.get(a.id);
+      // HONEST-05 — the lazily-fetched entry, and the PAIR narrowed out of it.
+      // `"unavailable"` carries no figures by construction, so it collapses to
+      // undefined here and every `?? …` below falls through to null exactly as
+      // an unanswered fetch does. The distinction is not lost — it is carried
+      // by `metricsState`, whose whole job is to keep the render from turning a
+      // seam fault into a claim.
+      const lazyMetrics = addedMetricsById[a.id];
+      const lazyPair = lazyMetrics === "unavailable" ? undefined : lazyMetrics;
       // BLEND-01 — build an entry for EVERY added strategy, book or drawer.
       // Previously only book strategies (`if (found)`) got an entry and a
       // non-book leg fell through to the adapter's default meta (public / null
@@ -2193,8 +2725,31 @@ export function ScenarioComposer({
       // non-book one via the `?? …` fallbacks.
       map[a.id] = {
         disclosure_tier: found?.strategy.disclosure_tier ?? "public",
-        cagr: found?.strategy.strategy_analytics?.cagr ?? null,
-        sharpe: found?.strategy.strategy_analytics?.sharpe ?? null,
+        // HONEST-05 — book payload wins; else the lazily-fetched pair from the
+        // widened /returns response; else null. The SAME book-wins precedence
+        // the asset_class and provenance lines below already use. The route
+        // withholds these under isRankableAnalyticsRow, so a dead run's
+        // leftovers can never arrive here to be rendered as live figures.
+        cagr:
+          found?.strategy.strategy_analytics?.cagr ?? lazyPair?.cagr ?? null,
+        sharpe:
+          found?.strategy.strategy_analytics?.sharpe ??
+          lazyPair?.sharpe ??
+          null,
+        // A book leg's pair is answered by the SSR payload, so it is settled
+        // whatever the lazy fetch did (the book-wins precedence above already
+        // ignored the fetch for the values). A non-book leg reports what its
+        // fetch achieved: no entry → still asking; `"unavailable"` → the seam
+        // failed; a pair → an answer, INCLUDING a pair of nulls, which is why
+        // this can never be a truthiness or null check on the values (C-4).
+        metricsState:
+          found != null
+            ? "settled"
+            : lazyMetrics === undefined
+              ? "pending"
+              : lazyMetrics === "unavailable"
+                ? "unavailable"
+                : "settled",
         // Book payload asset_class (84-03) wins; else the lazily-fetched value;
         // else null (unknown → the conservative 252 blend default).
         asset_class:
@@ -2218,6 +2773,7 @@ export function ScenarioComposer({
     strategyById,
     addedAssetClassById,
     addedProvenanceById,
+    addedMetricsById,
   ]);
 
   // CONSTIT-02 (wave-3 render) — the per-row provenance badge variant for each
@@ -2239,6 +2795,70 @@ export function ScenarioComposer({
     },
     [addedStrategyMetadataLookup],
   );
+
+  /**
+   * Phase 152 SCEN-03 — ref → the in-memory metrics the row-detail panel shows.
+   *
+   * A NARROW `{cagr, sharpe}` projection of `addedStrategyMetadataLookup`, not
+   * the lookup itself: the lookup's other fields (disclosure_tier, asset_class)
+   * are ENGINE inputs and have no business crossing into a presentation
+   * component (PATTERNS "Presentation-only props never reach the engine"; same
+   * isolation `addedProvenanceByRef` above applies to trust_tier/is_composite).
+   *
+   * ✅ Phase 162 / HONEST-05 — the WR-02 reachability problem this projection
+   * used to document is CLOSED, and the note that described it has been
+   * rewritten. The statement it carried was true when written: `strategyById`
+   * is built from `payload.strategies`, which is BOOK-ONLY (the
+   * portfolio_strategies join, :1075), and a strategy added from the Browse
+   * drawer is BY CONSTRUCTION one the allocator does not already hold — so for
+   * that entire population both values were null and the panel could only ever
+   * show its absence note. The fix logged in TODOS.md under Phase 152 has now
+   * landed: `/api/strategies/[id]/returns` co-serves `cagr` + `sharpe` from the
+   * SAME row it already reads (same RLS, no new round-trip), and
+   * `addedStrategyMetadataLookup` falls back to that settled pair.
+   *
+   * So: a book leg carries the SSR payload's values; a drawer-added leg carries
+   * the lazily-fetched pair once it settles; either may still be `null`, which
+   * the panel renders as honest absence — never a fabricated 0.
+   *
+   * `state` rides alongside because a null pair has THREE readings the values
+   * alone cannot separate (UI-SPEC C-4, as amended by the 162 silent-failure
+   * audit):
+   *
+   *   · "pending"     — no answer yet. Em-dashes, and SILENCE.
+   *   · "settled"     — the route answered and withheld the scalars of a run
+   *                     that did not finish (`isRankableAnalyticsRow`) or of a
+   *                     row with no analytics at all. Em-dashes + the claim
+   *                     "this strategy has no computed metrics", which is now
+   *                     something we actually observed.
+   *   · "unavailable" — the fetch FAILED. Em-dashes + a note that says only
+   *                     that we could not load them. This state used to be
+   *                     folded into "settled", which meant a 40-second
+   *                     PostgREST wedge printed a false claim about every
+   *                     strategy the allocator dragged in.
+   */
+  const addedMetricsByRef = useMemo<
+    Record<
+      string,
+      { cagr: number | null; sharpe: number | null; state: AddedMetricsState }
+    >
+  >(() => {
+    const out: Record<
+      string,
+      { cagr: number | null; sharpe: number | null; state: AddedMetricsState }
+    > = {};
+    for (const [id, meta] of Object.entries(addedStrategyMetadataLookup)) {
+      // HONEST-05 — `state` rides alongside the pair because the panel needs to
+      // tell "no metrics" from "no answer yet" from "we could not ask"; the
+      // VALUES alone cannot (all three are null).
+      out[id] = {
+        cagr: meta.cagr,
+        sharpe: meta.sharpe,
+        state: meta.metricsState,
+      };
+    }
+    return out;
+  }, [addedStrategyMetadataLookup]);
 
   // -------------------------------------------------------------------------
   // Build scenario projection via the series-space adapter + frozen scenario.ts
@@ -2269,6 +2889,23 @@ export function ScenarioComposer({
     return out;
   }, [rawHoldingsSummary]);
 
+  // CF-05 — api_key_id → friendly exchange/account label, built from the SAME
+  // `payload.apiKeys` + `dataSourceLabel` idiom the per-key constituent rows
+  // render (`${Exchange} — ${nickname|••••tail}`). No second label formatter.
+  // Phase 167.1.2 plan 07 (SC-5): moved above `perKeyAdapterOutput` and passed
+  // to buildPerKeyStrategyForBuilderSet as its label map, so each per-key unit
+  // is NAMED by its label at the one place units are built. Every consumer that
+  // reads `s.name` (the CorrelationHeatmap headers via `strategyNames`, the
+  // shortest-history caveat via `coverageShortestName`, the gantt) inherits the
+  // label; before, only the gantt resolved it and the other two showed
+  // `key <api_key_id>`.
+  // Phase 169.4-08 (D-69): the map comes from the shared helper, so the Risk
+  // tab and this composer name a key by one rule.
+  const apiKeyLabelById = useMemo(
+    () => buildApiKeyLabelById(payload.apiKeys ?? []),
+    [payload.apiKeys],
+  );
+
   // Per-key strategy set — wrapped in a useMemo on its inputs. One
   // StrategyForBuilder per api_key_id (id === api_key_id), RAW equity-share
   // weights, default selected=true.
@@ -2285,22 +2922,39 @@ export function ScenarioComposer({
     // in eligibleApiKeyIds. Without this filter that key would ride the engine
     // with no toggle row, letting "exclude all sources → honest empty" be
     // falsely satisfied by an undisclosed, untoggleable source.
-    const eligible = new Set(payload.eligibleApiKeyIds ?? []);
+    // Phase 151 AUM-04 — narrowed from `eligibleApiKeyIds` to
+    // `contributingApiKeyIds` so this invariant SURVIVES the row narrowing
+    // above. The legacy eligible set is role-BLIND: it still carries the owner's
+    // MANAGER-side keys, and those DO have a per-key series (that is what makes
+    // them manager-side). Left on the eligible set, they would ride the engine
+    // with no toggle row — the undisclosed, untoggleable source this filter
+    // exists to prevent. `contributingApiKeyIds` is `allocatorEligible ∩
+    // has-series`, so this drops exactly the manager keys and nothing else.
+    const contributing = new Set(payload.contributingApiKeyIds ?? []);
     const eligibleOnly = Object.fromEntries(
-      Object.entries(all).filter(([id]) => eligible.has(id)),
+      Object.entries(all).filter(([id]) => contributing.has(id)),
     );
-    return buildPerKeyStrategyForBuilderSet(eligibleOnly, equityByApiKeyId);
+    return buildPerKeyStrategyForBuilderSet(
+      eligibleOnly,
+      equityByApiKeyId,
+      apiKeyLabelById,
+    );
   }, [
     payload.perKeyReturnsByApiKeyId,
-    payload.eligibleApiKeyIds,
+    payload.contributingApiKeyIds,
     equityByApiKeyId,
+    apiKeyLabelById,
   ]);
 
-  // The per-key path is active only in book mode + D3 gate satisfied. When
+  // The per-key path is active only in book mode + the book gate satisfied. When
   // active, the per-key strategy set feeds the projectionState/engine pipeline;
   // otherwise the added-only set does.
+  // Phase 151 AUM-04 (RESEARCH Open Q4) — repointed to the SPLIT gate: a book
+  // mode running the ADDED-ONLY engine would be a "From my book" with none of
+  // the book in it, which is a worse dead end than the refusal. Book mode and
+  // the per-key engine must be reachable together or not at all.
   const usePerKeySources =
-    entryMode === "book" && payload.perKeyDailiesGateSatisfied;
+    entryMode === "book" && (payload.bookEntryGateSatisfied ?? false);
 
   // The strategy set actually fed to the engine this render — the per-key units
   // (merged with added units) when the per-source path is active, else the
@@ -2374,29 +3028,61 @@ export function ScenarioComposer({
   // when it is most needed. Keying on the RAW book (hasLiveBook) keeps the calm
   // note rendered for the forced-blank holder while the `!gate && eligible > 0`
   // conjuncts still suppress it for gate-satisfied books and no-key books.
+  // Phase 151 AUM-04 — the fallback now owns ONLY the zero-contributing state.
+  // Under a PARTIAL book its central sentence ("this projection blends your
+  // whole book") is false: the projection blends exactly the contributing keys.
+  // That state is owned by the partial-book note rendered below the charts.
   const showDataSourcesFallback =
     hasLiveBook &&
     !payload.perKeyDailiesGateSatisfied &&
+    !(payload.bookEntryGateSatisfied ?? false) &&
     (payload.eligibleApiKeyIds ?? []).length > 0;
 
   // The connected exchange keys eligible for per-source toggling — payload
   // apiKeys filtered to the SSR-computed eligible-key id set (SoT mirror; the
   // client never re-derives eligibility, RESEARCH §SoT-mirror). One row per key.
+  // Phase 151 AUM-04 (Pitfall 4) — NARROWED from `eligibleApiKeyIds` to
+  // `contributingApiKeyIds`. A non-contributing key has no per-key series and so
+  // no engine unit: rendering its toggle row would show a dead 0.000 weight the
+  // allocator cannot move. It would also skew the notional basis — `bookEquity`
+  // below sums `equityByApiKeyId` over exactly this set, so the basis narrows
+  // WITH the rows and stays consistent with what the engine actually blends.
   const dataSourceKeys = useMemo(() => {
-    const eligible = payload.eligibleApiKeyIds ?? [];
-    return (payload.apiKeys ?? []).filter((k) => eligible.includes(k.id));
-  }, [payload.apiKeys, payload.eligibleApiKeyIds]);
+    const contributing = payload.contributingApiKeyIds ?? [];
+    return (payload.apiKeys ?? []).filter((k) => contributing.includes(k.id));
+  }, [payload.apiKeys, payload.contributingApiKeyIds]);
 
-  // WEIGHTS-02 (Phase 112, Pitfall 1) — the eligible per-key `api_key_id`s that
-  // render a leverage input this render. Folded into `pruneLeverageToDraftRefs`
-  // at both Save call sites so a leverage-only edit on an INCLUDED per-key source
-  // (no weightOverride, no toggle entry) is NOT dropped at Save. Empty when the
-  // per-key path is inactive — no per-key leverage input renders, so the Save
-  // prune keeps its original stale-dropping behavior exactly.
+  // WEIGHTS-02 (Phase 112, Pitfall 1) — the per-key `api_key_id`s whose stored
+  // leverage must survive Save. Folded into `pruneLeverageToDraftRefs` at both
+  // Save call sites so a leverage-only edit on an INCLUDED per-key source (no
+  // weightOverride, no toggle entry) is NOT dropped at Save.
+  //
+  // Phase 151 AUM-04 — DELIBERATELY NOT narrowed with `dataSourceKeys`, and
+  // deliberately decoupled from `usePerKeySources`. The keep-set stays on the
+  // allocator-ELIGIBLE basis because "not YET contributing" is TEMPORARY: the
+  // key gets its series on the next sync, and the row returns. Narrowing the
+  // keep-set to the contributing set — or emptying it whenever the per-key path
+  // is momentarily inactive (a reopened book draft syncs to blank mode while
+  // `targetEntryMode` stays frozen on the old all-or-nothing gate) — would
+  // silently destroy leverage the allocator saved. That is the exact
+  // Phase-112 / WEIGHTS-02 defect class, and silent destruction must be
+  // impossible. Preserving an entry keyed to a LIVE allocator key is never
+  // stranding: `allocatorEligibleApiKeyIds` is by construction not stale.
   const eligiblePerKeyIds = useMemo(
-    () => (usePerKeySources ? dataSourceKeys.map((k) => k.id) : []),
-    [usePerKeySources, dataSourceKeys],
+    () => payload.allocatorEligibleApiKeyIds ?? [],
+    [payload.allocatorEligibleApiKeyIds],
   );
+
+  // Phase 151 AUM-04 — the partial-book note's counts. M = the allocator's own
+  // eligible keys, N = those without a per-key series yet. MANAGER-side keys are
+  // in NEITHER count: they are absent from `allocatorEligibleApiKeyIds` by
+  // construction, and "not yet contributing" must never describe a key that will
+  // never contribute (UI-SPEC partial-book invariant). Reading the role-blind
+  // `eligibleApiKeyIds` or `apiKeys` here would turn the founder's "0 of 2" into
+  // a bewildering "6 of 8".
+  const allocatorEligibleCount = (payload.allocatorEligibleApiKeyIds ?? []).length;
+  const notYetContributing =
+    allocatorEligibleCount - (payload.contributingApiKeyIds ?? []).length;
 
   // WEIGHTS-00 (A1 locked) — the allocator's real book equity: Σ equityByApiKeyId
   // (the canonical D2 per-key equity, NEVER re-derived from value_usd) over the
@@ -2421,6 +3107,11 @@ export function ScenarioComposer({
   // CONSTIT-03 — derived from the unified `toggleByScopeRef` channel (default
   // included), so re-including any source instantly flips this back to false and
   // restores the projection.
+  // Phase 151 AUM-04 — this trigger narrows WITH `dataSourceKeys` (accepted, not
+  // incidental): "every source excluded" must mean every source the allocator
+  // can actually see and toggle. A non-contributing key has no row and no toggle,
+  // so counting it here would make the honest-empty card unreachable — the
+  // untoggleable-source failure mode, mirrored.
   const hasLiveAddedStrategy = scenario.draft.addedStrategies.some(
     (s) => scenario.draft.toggleByScopeRef[s.id] !== false,
   );
@@ -2791,8 +3482,11 @@ export function ScenarioComposer({
   // selected leg is crypto (the blended daily series is then calendar-daily),
   // else √252. Unselected legs do NOT flip it. In book mode the per-key legs
   // carry asset_class 'crypto' (84-01), so every real book blend derives 365; a
-  // pure-CSV-tradfi / all-unknown added-only blend derives 252 (byte-identical
-  // to the pre-#597 default). Deps mirror engineState (the selected set + axis
+  // blend whose selected legs all STATE 'traditional' derives 252 (byte-identical
+  // to the pre-#597 default). RANK-06 (159-04): an added leg whose class never
+  // resolved (the lazy /returns probe returned no row → null) is a PROJECTION
+  // GAP, not a tradfi leg, and derives 365 — the conservative RISK clock.
+  // Deps mirror engineState (the selected set + axis
   // the engine sees). NOTE: this is the DISPLAY basis only — the peer-rank path
   // below stays on the engine's RAW annualized values (see the fence there).
   // KNOWN NUANCE (documented, spec-compliant): the basis reads the SELECTED set,
@@ -2945,6 +3639,14 @@ export function ScenarioComposer({
     for (const s of engineSet.strategies) {
       if (!engineSet.state.selected[s.id]) continue; // manual-off is NOT here
       if (coverageEligible[s.id]) continue; // in-blend
+      // Phase 147 SCEN-01 (review WR-02) — a row whose series is still syncing
+      // or terminally absent is not "outside the window": there is nothing to
+      // place in one. Its ONE signal is the main list's Syncing / No data chip
+      // (147-UI-SPEC §2 precedence — one signal per row); rendering it here too
+      // double-labels the row with a CONTRADICTORY caption ("no data — outside
+      // window" vs "First metrics arrive in ~10–15 min"). Non-added rows have
+      // no series_state entry → "available" → pre-147 behavior unchanged.
+      if ((addedSeriesStateByRef[s.id] ?? "available") !== "available") continue;
       const span = selectedSpanById.get(s.id) ?? null;
       out.push({
         id: s.id,
@@ -2954,7 +3656,13 @@ export function ScenarioComposer({
       });
     }
     return out;
-  }, [engineSet, coverageWindow, coverageEligible, selectedSpanById]);
+  }, [
+    engineSet,
+    coverageWindow,
+    coverageEligible,
+    selectedSpanById,
+    addedSeriesStateByRef,
+  ]);
 
   // Phase 58 (COVERAGE-01) — the mini-gantt rows: one per SELECTED strategy,
   // carrying its coverage span + the in-blend/auto-excluded flag read from the
@@ -2964,24 +3672,10 @@ export function ScenarioComposer({
   // a prop and never runs the containment predicate locally, so the gantt bars
   // agree with the row chips and the divisor by construction. Spans come from the
   // shared `selectedSpanById` scan (Rule 2: computed once).
-  // CF-05 — api_key_id → friendly exchange/account label, built from the SAME
-  // `payload.apiKeys` + `dataSourceLabel` idiom the per-key constituent rows
-  // render (`${Exchange} — ${nickname|••••tail}`). A per-key (book-member)
-  // unit carries the PREFIXED `key <uuid>` as its `name` from
-  // buildPerKeyStrategyForBuilderSet (scenario-adapter.ts:146 — the unit's `id`
-  // is the bare api_key_id; its `name` is `key ${apiKeyId}`), so without this
-  // map the gantt would show that raw token. This is the ONE place the
-  // per-key row name is resolved before rows reach CoverageTimeline (which only
-  // renders `row.name` — it never derives labels). No second label formatter.
-  const apiKeyLabelById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const k of payload.apiKeys ?? []) {
-      const { exchange, nickname, maskedTail } = dataSourceLabel(k);
-      m.set(k.id, `${exchange} — ${nickname ?? maskedTail}`);
-    }
-    return m;
-  }, [payload.apiKeys]);
-
+  // CF-05 — the gantt rows resolve a per-key unit through `apiKeyLabelById`
+  // (declared above `perKeyAdapterOutput`). Since Phase 167.1.2 plan 07 the
+  // unit's own `name` already IS that label, so this lookup is redundant and
+  // harmless; it stays so a strategy row (no apiKeys entry) keeps `s.name`.
   const timelineRows = useMemo(
     () =>
       engineSet.strategies
@@ -3212,6 +3906,25 @@ export function ScenarioComposer({
     () => scenarioMetrics.portfolio_daily_returns ?? [],
     [scenarioMetrics.portfolio_daily_returns],
   );
+  // BENCH-01 — the chart overlay series. `EquityChart.benchmark` runs
+  // `anchorFromFirstPositive` (divide-by-first), so it expects a WEALTH-level
+  // curve (~1.0 base), NOT raw daily returns. Phase 169.4 D-66: it is the close
+  // LEVEL at each stored close (`btcLevelsFromCloses`), never compounded
+  // returns, which would lose the move across a dropped close for good. 169.4
+  // review WR-01: the base is the last close on or before the scenario's first
+  // date, so BTC starts at 1.0 with the portfolio rather than at the served
+  // series' first close (2023-04-26 once the fixture is prepended); the factsheet
+  // chart never re-bases a comparator. Declared here, after `portfolioDaily`,
+  // because it reads the scenario's first date. Suppressed (undefined) when the
+  // toggle is off or the benchmark is unavailable, which hides the overlay.
+  const scenarioFirstDate = portfolioDaily[0]?.date;
+  const btcWealth = useMemo(
+    () =>
+      showBenchmark && btc !== null
+        ? btcLevelsFromCloses(btc.prices, scenarioFirstDate)
+        : undefined,
+    [showBenchmark, btc, scenarioFirstDate],
+  );
   const blendPanels = useMemo(
     // BLEND-01 — the rolling-window blend panels ride the SAME derived blend
     // basis as the headline KPIs (√365 if any selected leg is crypto, else 252).
@@ -3240,27 +3953,31 @@ export function ScenarioComposer({
   // PEER-05 (Phase 42) — the blend-vs-live-book signed delta on the sample basis
   // at the blend's periodsPerYear (like-for-like legs; #597 BLEND-01). The
   // own-book leg recomputes the live book's Sharpe/Sortino/maxDD via
-  // `sampleBasisRatios` on the OWN-BOOK DAILY RETURNS — derived here from
-  // `baselineEquityDailyPoints` (absolute-USD equity LEVELS: value[i]/value[i-1]
-  // − 1), NOT `liveBaselineMetrics` (a different/population basis). BLEND-01: the
-  // book leg is annualized at the SAME `blendBasis` the engine used for the blend
+  // `sampleBasisRatios` on the OWN-BOOK DAILY RETURNS — the payload's persisted
+  // flow-neutral returns (`baselineEquityDailyReturns`, Phase 167.1.2 plan 11,
+  // D-06). They used to be level ratios of the $-curve (value[i]/value[i-1] − 1),
+  // which read a deposit or a withdrawal as a return. NOT `liveBaselineMetrics`
+  // (a different/population basis). BLEND-01: the book leg is annualized at the
+  // SAME `blendBasis` the engine used for the blend
   // leg (`scenarioMetrics`), so the delta stays like-for-like in BASIS at 365 as
   // well as 252 — a crypto book's blend and own-book legs both ride √365. Each
   // delta = blend − book; null when a leg is null. `null` (→ undefined) when
   // there is no live book series (blank mode or a no-book allocator) so the panel
   // is silently absent. Keyed on the engine output + the own-book series + basis.
   const scenarioOwnBookDelta = useMemo<OwnBookDeltaPayload | undefined>(() => {
-    const levels = baselineEquityDailyPoints;
-    // Need ≥ 2 dated levels to derive at least one daily return. No book → absent.
-    if (!levels || levels.length < 2) return undefined;
-    const bookReturns: number[] = [];
-    for (let i = 1; i < levels.length; i++) {
-      const prev = levels[i - 1].value;
-      const cur = levels[i].value;
-      if (prev > 0 && Number.isFinite(prev) && Number.isFinite(cur)) {
-        bookReturns.push(cur / prev - 1);
-      }
+    // The producer only emits finite returns (extractTrustworthyDerivedSeries).
+    // Review C2 SFH-11 (b): if that contract ever breaks, the book leg is
+    // absent and the break is logged. Filtering the bad value out silently
+    // would compute the Sharpe and Sortino on fewer observations with nothing
+    // said. No book → absent.
+    const bookReturns = baselineEquityDailyReturns.map((point) => point.value);
+    if (!bookReturns.every((r) => Number.isFinite(r))) {
+      console.error(
+        "[ScenarioComposer] non-finite own-book return in equityDailyReturns; the own-book comparison is omitted",
+      );
+      return undefined;
     }
+    // One observation is not a Sharpe or Sortino worth showing.
     if (bookReturns.length < 2) return undefined;
     const book = sampleBasisRatios(bookReturns, blendBasis);
     // Blend ratios are the engine's already-rounded sample-basis output at the
@@ -3287,7 +4004,7 @@ export function ScenarioComposer({
       book_n: bookReturns.length,
     };
   }, [
-    baselineEquityDailyPoints,
+    baselineEquityDailyReturns,
     scenarioMetrics.n,
     scenarioMetrics.sharpe,
     scenarioMetrics.sortino,
@@ -3460,16 +4177,346 @@ export function ScenarioComposer({
     }
     return byRef;
   }, [holdingsSummary]);
-  const scenarioAum = useMemo(() => {
-    let sum = 0;
-    for (const [scopeRef, on] of Object.entries(scenario.draft.toggleByScopeRef)) {
-      if (!on) continue;
-      if (!scopeRef.startsWith("holding:")) continue;
-      const h = holdingByRef.get(scopeRef);
-      if (h) sum += h.value_usd;
+  // Phase 151 AUM-01 — the DERIVED live-holdings total: what custody says the
+  // modelled book is worth. It is one INPUT to the scenario's AUM, not the AUM
+  // itself.
+  //
+  // Review round 2 F2 — NARROWED to the CONTRIBUTING key set, the same
+  // narrowing `dataSourceKeys` and `totalBookEquity` already carry.
+  //
+  // Un-narrowed, this summed every `holding:` toggle in the draft — and
+  // `defaultDraftFromHoldings` seeds ALL holdings true — so `scenarioAum` was
+  // the WHOLE 8-key book while `totalBookEquity` (Σ equity over
+  // `dataSourceKeys`) was the 2 contributing ones, and the weights renormalize
+  // across just those 2 rows. One row then showed TWO dollar figures on the
+  // same line: its USD cell `Math.round(weight × scenarioAum)` against the
+  // whole book, its NOTIONAL cell `share × totalBookEquity × L` against the
+  // modelled one, differing by the whole-book/contributing ratio.
+  //
+  // The basis chosen is the MODELLED book (founder's AUM model: portfolio AUM
+  // is the sum of what is actually being modelled, built bottom-up from the
+  // per-strategy dollars). A key with no return series contributes no row, no
+  // weight and no projection, so its custody value cannot be part of a number
+  // the rows are supposed to add up to.
+  //
+  // ⚠️ This supersedes the "Pitfall 5 (recorded asymmetry)" note at the
+  // `canEnterBook` gate above, which read "AUM is CUSTODY — the holdings of
+  // every active key, manager-side included". That asymmetry is exactly the
+  // defect: it put the manager-side and series-less keys' custody value into a
+  // denominator the composer's own rows renormalize without them. Because the
+  // headline PORTFOLIO AUM now means something narrower for a partial book, it
+  // is DISCLOSED next to the field (`scenario-aum-modelled-note`) rather than
+  // changed silently.
+  //
+  // Blank mode is unaffected: `holdingsSummary` is `[]` there, so this is 0 by
+  // construction either way.
+  //
+  // Review round 3 E1 — the VALUE basis is now `holdingEquityContributionLocal`,
+  // not `value_usd`. F2 closed the key-SET divergence; this closes the
+  // remaining VALUE-basis one. `totalBookEquity` — the base the NOTIONAL column
+  // divides against — is Σ `holdingEquityContributionLocal`, and the SSR
+  // `liveBaselineMetrics.aum` is Σ `holdingEquityContribution` (queries.ts
+  // NEW-C03-01). On a SPOT book the two definitions coincide exactly, so F2's
+  // fixtures and the founder's spot venues see no change at all. On a
+  // DERIVATIVES book they do not: `value_usd` there is the leveraged NOTIONAL
+  // contract size while the equity at stake is `unrealized_pnl_usd`, so a 10x
+  // perp put ~10x its own equity into the AUM. The founder's production book is
+  // Deribit, i.e. exactly that case — the headline PORTFOLIO AUM and the
+  // NOTIONAL cells were two different definitions of what a position is worth,
+  // and the per-row dollars could not reconcile against the notionals no matter
+  // how the key set was narrowed.
+  //
+  // ⚠️ BEHAVIOUR NOTE. `scenarioAum` falls back to this sum only when the
+  // allocator has typed no manual AUM, and two gates ride on it: the commit
+  // refusal (`scenarioAum <= 0` with voluntary adds) and the per-row size gate
+  // (`weight × scenarioAum <= 0`). A derivatives book whose Σ unrealized P&L is
+  // zero or negative therefore now REFUSES a commit that the notional-based sum
+  // would have allowed — deliberately: `totalBookEquity` already returns `null`
+  // on that same Σ ≤ 0 (every NOTIONAL cell an em-dash) and the SSR AUM already
+  // reads the same 0-or-negative number, so refusing is the honest answer and
+  // the remedy is one field away (type the size). The remedy is NAMED: the
+  // refusal copy and the `liveHoldingsSum <= 0` hint next to the field both
+  // point at the Portfolio AUM input.
+  //
+  // Phase 167.1 AUMTRUST — the loop that computed this sum MOVED, unchanged in
+  // walk order, filters and accumulation order, into `summarizeLiveHoldings`
+  // (`../lib/live-holdings-summary`), which returns the total AND the part of
+  // it sourced from keys needing attention from ONE pass, so the disclosure
+  // beside the field can never drift from the number it qualifies. The
+  // degrade-branch and E1 comments travelled with the loop. `liveHoldingsSum`
+  // keeps its name and its value, so every reader below is untouched.
+  //
+  // Two memos, not one (the `holdingByRef` precedent above): the key-status
+  // map changes only with the payload, the summary with every toggle.
+  const statusByKeyId = useMemo(
+    () =>
+      new Map<string, string | null>(
+        (payload.apiKeys ?? []).map((k) => [k.id, k.sync_status]),
+      ),
+    [payload.apiKeys],
+  );
+  // D-20: the keys the payload itself names as manager-side, derived by the
+  // one pinned helper (`managerSideKeyIds`), never re-derived here.
+  const managerSideApiKeyIds = useMemo(
+    () =>
+      // Raw fields, no `?? []`: the helper treats a missing one as "no
+      // manager-side key" (WR-06), which over-discloses rather than hides.
+      managerSideKeyIds(
+        payload.eligibleApiKeyIds,
+        payload.allocatorEligibleApiKeyIds,
+      ),
+    [payload.eligibleApiKeyIds, payload.allocatorEligibleApiKeyIds],
+  );
+  const liveHoldingsSummary = useMemo(
+    () =>
+      summarizeLiveHoldings({
+        toggleByScopeRef: scenario.draft.toggleByScopeRef,
+        holdingByRef,
+        contributingApiKeyIds: payload.contributingApiKeyIds ?? [],
+        managerSideApiKeyIds,
+        statusByKeyId,
+        // Review C2 WR-03: the server-built eligible set, read raw (no
+        // `?? []`): an absent one means "cannot tell", not "none eligible".
+        eligibleApiKeyIds: payload.eligibleApiKeyIds,
+      }),
+    [
+      scenario.draft.toggleByScopeRef,
+      holdingByRef,
+      payload.contributingApiKeyIds,
+      managerSideApiKeyIds,
+      statusByKeyId,
+      payload.eligibleApiKeyIds,
+    ],
+  );
+  const liveHoldingsSum = liveHoldingsSummary.total;
+  // Review WR-05 — a summed holding whose key the key list dropped is a payload
+  // the dashboard did not expect (only the degrade branch can sum one). The
+  // marker discloses it; the console line is for local dev.
+  //
+  // Review round 2 WR-04 — a browser `console.error` reaches no operator
+  // (Sentry runs without a console-capture integration), so the anomaly is
+  // also captured, following the `ScenarioCommitDrawer` pattern: a
+  // warning-level event with component and reason tags. ⛔ It carries the
+  // COUNT only. No key id, holding or venue goes into the message, the tags or
+  // `extra`, in either sink.
+  const unknownStatusCount = liveHoldingsSummary.unknownStatus.count;
+  useEffect(() => {
+    if (unknownStatusCount > 0) {
+      console.error(
+        `[ScenarioComposer] ${unknownStatusCount} summed holding(s) reference a key missing from the key list; disclosed as an unknown sync status`,
+      );
+      captureToSentry(
+        new Error(
+          "ScenarioComposer: summed holding(s) reference a key missing from the key list",
+        ),
+        {
+          tags: {
+            component: "ScenarioComposer",
+            reason: "holding_key_missing_from_key_list",
+          },
+          extra: { unknown_status_count: unknownStatusCount },
+          level: "warning",
+        },
+      );
     }
-    return sum;
-  }, [scenario.draft.toggleByScopeRef, holdingByRef]);
+  }, [unknownStatusCount]);
+
+  // Phase 151 AUM-01 — SANITIZE-ON-READ (the sanitizeLeverageMap precedent at
+  // the decode sites above). The persisted value is untrusted: the codec
+  // deliberately carries no range refine, because a refine failure there routes
+  // to the draft-DELETING reset. So the bound is applied HERE, at the point of
+  // use. `isValidDollar` covers [0, 1e12) and rejects null/NaN/non-numbers; the
+  // extra `> 0` treats a stored 0 as UNSET — a zero is a claim, not an absence
+  // (UI-SPEC), and a 0 AUM must keep tripping the honest commit refusal.
+  const sanitizedManualAum =
+    isValidDollar(scenario.draft.manualAumUsd) && scenario.draft.manualAumUsd > 0
+      ? scenario.draft.manualAumUsd
+      : undefined;
+
+  // Phase 151 AUM-01 — the scenario's portfolio AUM. MANUAL WINS IN BOTH MODES:
+  // in book mode the live sum is a seed the allocator may override (they may be
+  // modelling a different size than custody currently holds), and in blank mode
+  // there is no live sum by construction (holdingsSummary is [] at the entryMode
+  // switch), so the manual value is the ONLY possible source there — which is
+  // exactly why a blank-slate scenario could not size or commit before this.
+  //
+  // Every pre-existing consumer keeps reading `scenarioAum` unchanged: the
+  // drawdown USD scaling, the commit refusal gate, the per-row size gate, the
+  // illustrative-shape note, and the ScenarioCommitDrawer prop.
+  const scenarioAum = sanitizedManualAum ?? liveHoldingsSum;
+
+  // Seed the AUM input ONCE, then never again (windowTouchedRef idiom). Book
+  // mode seeds from the live-holdings total — it is the allocator's real size,
+  // and pre-filling it is what makes the field an OVERRIDE rather than a chore.
+  // Blank mode seeds "" and NEVER "0": a zero is a claim (UI-SPEC), and a
+  // pre-filled 0 would look like an answer to a question the user never
+  // answered. A reopened draft carrying a manual value seeds that instead.
+  useEffect(() => {
+    if (aumTouchedRef.current) return;
+    setAumInputText(committedAumText());
+    // committedAumText is a render-local closure over exactly these two values.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sanitizedManualAum, liveHoldingsSum]);
+
+  // 151 UAT (founder, 2026-08-07) — WHOLE DOLLARS. The live-holdings sum is a
+  // float sum of custody values, so the seeded field read `39963.1076231` on
+  // the founder's book: eleven digits of false precision on a money input, and
+  // a number nobody would type. Round for DISPLAY only; the precise value stays
+  // in state (`sanitizedManualAum ?? liveHoldingsSum` is what every consumer
+  // reads, unchanged) — the exact discipline the per-strategy USD input already
+  // uses (`Math.round(weight × scenarioAum)`, never written back).
+  const displayDollars = (n: number) => String(Math.round(n));
+
+  // The text the field SHOULD show for the currently-committed state — the one
+  // place the seed rule and the refusal snap-back both read, so the displayed
+  // value can never drift from the draft.
+  const committedAumText = () =>
+    sanitizedManualAum !== undefined
+      ? displayDollars(sanitizedManualAum)
+      : liveHoldingsSum > 0
+        ? displayDollars(liveHoldingsSum)
+        : "";
+
+  // Commit the typed AUM on blur / Enter (never per keystroke — the :5456
+  // blank-≠-zero recipe this mirrors). Three refusals, none of which write:
+  //   • blank   — "no value entered", never 0 (the `raw.trim() !== ""` guard);
+  //               a benign focus→blur of an empty field commits nothing.
+  //   • invalid — non-finite / negative / >= $1e12 (isValidDollar). Mirrors
+  //               handleWeightChange's fail-loud posture (console.warn + keep
+  //               the previous value) rather than clamping to a number the
+  //               allocator never typed.
+  //   • zero    — an explicit 0 is refused for the same reason it reads as
+  //               unset on the way in: a zero is a claim, not an absence.
+  // Every refusal snaps the text back to the committed value, so the field can
+  // never display a number the draft does not hold (the same displayed-vs-state
+  // divergence the commitError banner exists to prevent for weights).
+  function commitAumInput(raw: string) {
+    // 151 red-team G1 — A REFUSAL IS NOT AN EDIT IN PROGRESS. `aumTouchedRef` is
+    // armed by the input's onChange and answers "was there a keystroke behind
+    // this blur?"; every arm that REFUSES the keystroke must therefore disarm
+    // it, because the refusal snapped the text back to the committed value and
+    // there is no longer an uncommitted edit for a later blur to commit. Leaving
+    // it armed reopened WR-04 through a second door: type `0` → Enter (refused,
+    // text snaps back to the derived "39963") → refocus and blur with NO
+    // keystroke → the ref was still true, so the SNAPPED-BACK text committed as
+    // `setManualAum(39963)`. That is the full WR-04 harm — the derived size
+    // frozen (and QUANTIZED, 39963.1076231 → 39963), the "Overrides
+    // live-holdings total" note for an override nobody made, and `manual_aum_usd`
+    // newly on the commit body, moving the idempotency `request_hash` for a
+    // caller T-151-21 deliberately left unchanged.
+    if (raw.trim() === "") {
+      aumTouchedRef.current = false;
+      setAumInputText(committedAumText());
+      return;
+    }
+    const parsed = Number(raw);
+    if (!isValidDollar(parsed) || parsed <= 0) {
+      console.warn("[ScenarioComposer] refused an invalid portfolio AUM", {
+        raw,
+      });
+      // Review round 2 F4 — SAY SO, for the same reason `commitDollarInput`'s
+      // two refusal arms now route through `onRefuseEdit` → `setCommitError`: a
+      // console.warn is invisible, and all the allocator sees is the field
+      // snapping back to its previous figure with no explanation. This function
+      // runs in the OUTER component, so it calls `setCommitError` directly
+      // rather than through the `onRefuseEdit` prop the list rows use.
+      //
+      // Cause-accurate and range-naming, per the sibling arms: a zero is
+      // refused for a DIFFERENT reason than a malformed number (a zero AUM is a
+      // claim, not an absence — the same rule that makes a stored 0 read as
+      // unset), so the two do not share one vague sentence.
+      //
+      // 151 red-team K1 — THE MESSAGE MAY NOT INSTRUCT WHAT THE CODE CANNOT DO.
+      // The zero arm used to end "Clear the field instead to leave it unset.",
+      // and that sentence is FALSE in exactly the state an allocator would
+      // follow it from: book mode with a committed manual override they want to
+      // remove. There is no `setManualAum(undefined)` caller anywhere in `src/`
+      // — the blank arm above deliberately only snaps the text back, because it
+      // is what makes "a benign focus→blur of an empty field commits nothing"
+      // hold — so clearing a field showing `500000` and blurring re-displays
+      // `500000` and the draft still holds the override. The copy now states
+      // only what actually happened. (The missing capability itself — no UI
+      // path to revert an override to the derived live-holdings size — is a
+      // real gap, but closing it is a behaviour change on the AUM seam that has
+      // already produced three regressions this session, so it is logged as a
+      // follow-up rather than smuggled in behind a copy fix.)
+      setCommitError(
+        parsed === 0
+          ? "Portfolio AUM must be greater than $0 — a zero size cannot be allocated. The zero was not applied."
+          : "Invalid portfolio AUM — enter a positive amount under $1,000,000,000,000. The previous value was kept.",
+      );
+      // G1 — disarm (see the note at the top of this function): the snap-back
+      // below restores the committed text, so a subsequent bare blur must not
+      // write it.
+      aumTouchedRef.current = false;
+      setAumInputText(committedAumText());
+      return;
+    }
+    // 151 review WR-04 — A BLUR IS NOT AN EDIT. In book mode the field is
+    // SEEDED with the derived live-holdings sum, so tabbing through the form
+    // without touching it used to write `manualAumUsd = liveHoldingsSum` and
+    // silently convert a DERIVED size into a persisted manual OVERRIDE: the AUM
+    // then froze (a later holdings sync moved the live sum while the scenario
+    // stayed pinned), the "Overrides live-holdings total $X" note appeared for
+    // an override nobody made, and the drawer started sending `manual_aum_usd`
+    // — changing the commit body bytes, and therefore the idempotency
+    // `request_hash`, for a caller the design deliberately left unchanged
+    // (T-151-21).
+    //
+    // Review [9] — ask whether a KEYSTROKE happened, not whether the number
+    // came out the same. The previous guard compared `Math.round(parsed)`
+    // against the ROUNDED displayed text, which cannot tell a bare blur apart
+    // from a deliberate override that lands on the same integer: with
+    // `liveHoldingsSum = 39963.1076231` the field shows "39963", so an
+    // allocator who types 39963 precisely BECAUSE they want the scenario pinned
+    // to a round number — so it stops moving when custody syncs — had the write
+    // dropped. No `manualAumUsd`, no "Overrides live-holdings total" note, no
+    // `manual_aum_usd` in the commit body, and the field snapped back to the
+    // same text they typed, so it looked like it had worked.
+    //
+    // `aumTouchedRef` is set by the input's onChange, so it answers the actual
+    // WR-04 question ("is this a blur with no edit behind it?") exactly, with
+    // no value comparison to alias over — and it holds on the manual-AUM side
+    // too, where the old rounded comparison had the SAME hole in reverse: a
+    // bottom-up resize stores an exact float (Σ of the row dollars), the field
+    // shows `round()` of it, and a bare tab-through would have re-committed the
+    // rounded integer and QUANTIZED the stored value. Both programmatic writers
+    // (`setBottomUpAum`, the saved-scenario reopen) clear this ref precisely so
+    // a derived figure they seeded can never be written back by a blur.
+    if (!aumTouchedRef.current) {
+      setAumInputText(committedAumText());
+      return;
+    }
+    scenario.setManualAum(parsed);
+    // Review round 2 F4 — clear on success, the `handleWeightChange` arm's own
+    // discipline. The banner has no dismiss control, so a refusal message that
+    // outlived the value it described would sit under a now-valid AUM until an
+    // unrelated weight edit happened to clear it.
+    setCommitError(null);
+    // The typed value IS the committed value now, so let the mirror resume
+    // tracking (a later holdings refresh should re-seed the field again).
+    aumTouchedRef.current = false;
+  }
+
+  /**
+   * 151 UAT — the BOTTOM-UP AUM writer handed to the constituent list.
+   *
+   * A bottom-up dollar edit resizes the portfolio from a DIFFERENT control than
+   * the AUM field, so the field's seeded-once mirror must be released or it
+   * keeps displaying the last number typed INTO it while the draft holds the
+   * new one — the exact displayed-vs-draft divergence SP-C1 fixed on the reopen
+   * seam, arriving through another door (and with the same consequence: a bare
+   * blur would then write the stale figure back).
+   *
+   * Releasing the gate is right, not merely convenient: the gate exists to stop
+   * a HOLDINGS REFRESH from re-snapping text the allocator is still typing. An
+   * explicit resize by the allocator's own other gesture is not that — their
+   * uncommitted AUM keystrokes are superseded by it.
+   */
+  function setBottomUpAum(value: number) {
+    aumTouchedRef.current = false;
+    scenario.setManualAum(value);
+  }
 
 
   // -------------------------------------------------------------------------
@@ -3555,8 +4602,11 @@ export function ScenarioComposer({
     // guarantee a finite, non-negative product below.
     const hasVoluntaryAdds = scenario.draft.addedStrategies.length > 0;
     if (hasVoluntaryAdds && (!Number.isFinite(scenarioAum) || scenarioAum <= 0)) {
+      // Phase 151 AUM-03 — name only affordances that EXIST on this screen. The
+      // book clause is offered only when the segment genuinely renders, so the
+      // refusal can never point at a control the allocator cannot see.
       setCommitError(
-        "Can't record a scenario commit: portfolio AUM is zero. Connect an exchange API key or toggle on a live holding before submitting.",
+        canEnterBook ? AUM_REFUSAL_BOOK_REACHABLE : AUM_REFUSAL_NO_BOOK,
       );
       return;
     }
@@ -3609,7 +4659,20 @@ export function ScenarioComposer({
     // correspond to. Capturing it HERE (not at POST time) is load-bearing — a
     // holdings refresh during drawer-dwell must not retroactively make the
     // stale commit look current.
-    setCommitFingerprint(scenario.draft.init_holdings_fingerprint);
+    // 151 review CR-01 — an EMPTY fingerprint is "this draft was NOT authored
+    // against a holdings basis" (blank mode seeds `[]`, so
+    // computeHoldingsFingerprint([]) === ""), never "this allocator holds
+    // nothing". Sending "" made the RPC precondition compare the empty token
+    // set against the allocator's REAL holdings and 409 every blank-mode
+    // commit — the phase's headline flow (blank slate + a manual AUM + commit)
+    // was a dead end for anyone with a live book. `null` is the explicit "no
+    // basis to be stale against"; a book-authored draft still sends its real
+    // fingerprint, so the anti-stale guarantee is untouched where it applies.
+    setCommitFingerprint(
+      scenario.draft.init_holdings_fingerprint === ""
+        ? null
+        : scenario.draft.init_holdings_fingerprint,
+    );
     if (useInternalCommitDrawer) {
       setCommitDrawerOpen(true);
     } else {
@@ -3626,7 +4689,12 @@ export function ScenarioComposer({
     return (
       <div
         data-widget-id="scenario-composer"
-        className="mx-auto max-w-[1440px] py-12"
+        // 153.2 review WR-02 — NO px CAP. This body is the Scenario tab of
+        // `/allocations`, an `isWide` dense-table surface, and the shell went
+        // fluid on 2026-08-09. A 1440px cap here silently re-clamped it, so the
+        // founder's dead-margin report survived on the very surface they filed
+        // it against while DESIGN.md recorded `/allocations` as fixed.
+        className="mx-auto py-12"
       >
         <div className="rounded-lg border border-border bg-surface p-12 text-center">
           <h2
@@ -3670,6 +4738,13 @@ export function ScenarioComposer({
               name: s.name,
               markets: s.markets,
               strategy_types: s.strategy_types,
+              // Phase 152 SCEN-02 — TWIN SEAM A (empty-state mount). Its
+              // byte-identical twin is the main-body <StrategyBrowseDrawer>
+              // below; edit BOTH or an allocator who adds from the blank slate
+              // silently loses the ownership bit. Straight pass-through: the
+              // drawer forwards what GET /api/strategies/browse said, and
+              // absent stays absent (never coerced to false or true).
+              isOwn: s.isOwn,
             })
           }
           onAddOwn={() => {
@@ -3697,10 +4772,97 @@ export function ScenarioComposer({
     );
   }
 
+  // Phase 167.1 AUMTRUST — WHERE the live-holdings total is on screen, computed
+  // ONCE from the committed state (`sanitizedManualAum`, never the per-keystroke
+  // `aumInputText`) and read by the AUM row below, so the untrusted-key marker
+  // and the existing notes cannot disagree about it.
+  //   • fieldShowsLive        — the field's number IS the live total: no
+  //                             manual value (UI-SPEC state 3), or a manual
+  //                             value exactly equal to it (state 6).
+  //                             ⚠️ Review round 3 IN-03: "equal" is EXACT
+  //                             float equality, kept deliberately (review
+  //                             [9]). The live total is a float sum of
+  //                             custody values, a typed value is usually a
+  //                             whole number, so typing the rounded live
+  //                             figure lands in State B (a true override
+  //                             note), not here. State 6 is reached when the
+  //                             summed values are whole or a resize matches
+  //                             the sum exactly.
+  //   • overrideNoteShowsLive — a manual value differs from a positive live
+  //                             total, so only the override note quotes it.
+  //   • fieldBlankHintShows   — no manual value and a live total <= 0: the
+  //                             field is blank and the "Required to size and
+  //                             commit." hint shows (state 4). With a marker
+  //                             the hint names the live total itself, so the
+  //                             clause has a number to qualify. ⚠️ Review
+  //                             round 3 IN-02: this flag says the HINT
+  //                             renders, in any mode, and NOT that the live
+  //                             total is on screen. The hint names the live
+  //                             total only when `showUntrustedMarker` is also
+  //                             true (which requires book mode). It was named
+  //                             `hintShowsLive` until 2026-09-24.
+  // ⛔ D-18 REOPENED 2026-09-24 by the founder ("Reopen, show the marker"):
+  // whenever the figure on screen includes untrusted dollars, the marker
+  // shows. Until then state 6 (review IN-06) and state 4 (review WR-04) were
+  // absent by D-18's "live > 0" and "the two differ" conditions. State 7 (a
+  // manual value with a live total <= 0) stays absent: the field shows the
+  // allocator's own number and nothing on screen contains the live total.
+  // The marker renders iff one of those three holds AND at least one part has
+  // a count — gated on the COUNT, never on the amount, because a derivative's
+  // contribution can be <= 0 and still come from a key whose numbers are not
+  // current (D-07). D-06 (b), 2026-09-24: the excluded part (D-20's `$Y`)
+  // counts toward the gate too, so an exclusion is never silent. Review round
+  // 3 WR-01, 2026-09-24: so does the excluded unknown-status part. Phase
+  // 167.1.2 SC-4: so does the excluded trusted (no return history) part.
+  const fieldShowsLive =
+    liveHoldingsSum > 0 &&
+    (sanitizedManualAum === undefined || sanitizedManualAum === liveHoldingsSum);
+  const overrideNoteShowsLive =
+    sanitizedManualAum !== undefined &&
+    liveHoldingsSum > 0 &&
+    sanitizedManualAum !== liveHoldingsSum;
+  const fieldBlankHintShows =
+    sanitizedManualAum === undefined && liveHoldingsSum <= 0;
+  const showUntrustedMarker =
+    entryMode === "book" &&
+    (liveHoldingsSummary.untrusted.count > 0 ||
+      liveHoldingsSummary.unknownStatus.count > 0 ||
+      liveHoldingsSummary.excludedUntrusted.count > 0 ||
+      liveHoldingsSummary.excludedUnknownStatus.count > 0 ||
+      liveHoldingsSummary.excludedTrusted.count > 0 ||
+      liveHoldingsSummary.excludedNotConnected.count > 0) &&
+    (fieldShowsLive || overrideNoteShowsLive || fieldBlankHintShows);
+  // Review WR-02 — the note that qualifies the field's value is its accessible
+  // description, so a screen-reader user who tabs to PORTFOLIO AUM hears the
+  // qualification with the number and not only in linear reading order.
+  // Derived from the SAME flags that render the notes, so it can never point
+  // at an element that is not on screen. Review round 3 IN-01: that is three
+  // contributors since the D-18 reopen, not two: State A, the override note,
+  // and State C's hint. No role or live region is
+  // added (D-09); this supersedes UI-SPEC U-07's "no aria-describedby".
+  // D-18 REOPENED: in state 4 the blank field's description is the hint that
+  // now names the live total and its untrusted part (only when it does, so a
+  // plain hint stays undescribed, as before).
+  const aumInputDescribedBy =
+    [
+      showUntrustedMarker && fieldShowsLive
+        ? "scenario-aum-untrusted-note"
+        : null,
+      overrideNoteShowsLive ? "scenario-aum-override-note" : null,
+      showUntrustedMarker && fieldBlankHintShows
+        ? "scenario-aum-required-note"
+        : null,
+    ]
+      .filter((id): id is string => id !== null)
+      .join(" ") || undefined;
+
   return (
     <div
       data-widget-id="scenario-composer"
-      className="mx-auto flex max-w-[1440px] flex-col"
+      // 153.2 review WR-02 — NO px CAP; see the empty-state branch above. This
+      // is the shell that holds the constituent and coverage tables, i.e. the
+      // exact content the fluid decision exists for.
+      className="mx-auto flex flex-col"
     >
       {/* IMPACT-01 — persistent PROJECTED honesty pill. Always rendered (NOT a
           tooltip/hover), plain text, NO role="alert". Neutral-outline token per
@@ -3709,7 +4871,7 @@ export function ScenarioComposer({
           filled <Badge> primitive. A projection is a hypothetical, not your
           live book — the badge says so unconditionally. */}
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-2xl font-semibold text-text-primary">Portfolio</h2>
+        <h2 className="text-2xl font-semibold text-text-primary">Scenario portfolio</h2>
         <span
           data-testid="scenario-projected-badge"
           className="inline-flex items-center rounded-sm border border-text-muted px-2 py-0.5 text-fixed-10 uppercase tracking-wide font-semibold text-text-muted"
@@ -3889,6 +5051,146 @@ export function ScenarioComposer({
         Compose a draft portfolio and project KPI / equity / drawdown impact vs
         your live baseline.
       </p>
+
+      {/* Phase 151 AUM-01 — the ONE Portfolio AUM field, present in BOTH entry
+          modes (UI-SPEC §1). Blank mode starts empty; book mode pre-fills from
+          the live-holdings total and stays editable as an override. Weights
+          remain the single source of truth — editing this rescales the DOLLAR
+          figures and changes no return, so `scenarioMetrics` is untouched.
+          Reuses the composer's existing number-input recipe verbatim (no new
+          visual primitive) and the `text-fixed-10` mono eyebrow the PROJECTED
+          pill above already uses — deliberately the FIXED 10px token, not the
+          fluid `text-micro` clamp, so this stays a four-size surface. */}
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <label
+          htmlFor="scenario-aum"
+          className="font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted"
+        >
+          PORTFOLIO AUM (USD)
+        </label>
+        <input
+          id="scenario-aum"
+          aria-describedby={aumInputDescribedBy}
+          data-testid="scenario-aum-input"
+          type="number"
+          min="0"
+          step="1"
+          inputMode="numeric"
+          value={aumInputText}
+          onChange={(e) => {
+            // Mark touched on the FIRST keystroke, not at commit time: a
+            // holdings refresh mid-typing must not re-seed the field out from
+            // under the allocator.
+            aumTouchedRef.current = true;
+            setAumInputText(e.target.value);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              commitAumInput((e.target as HTMLInputElement).value);
+            }
+          }}
+          onBlur={(e) => {
+            commitAumInput(e.target.value);
+          }}
+          className="w-32 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs"
+        />
+        {/* Phase 167.1 AUMTRUST — State A: the field shows the live total, and
+            part of that total comes from keys needing attention (a `revoked` or
+            `sign_in_failed` sync, whose numbers are not current). A headline
+            money figure may not change meaning silently, so the sentence sits
+            right beside the number it qualifies. It DISCLOSES and never
+            subtracts: the founder's decision (2026-09-22) is to keep the total
+            and flag it, because excluding those holdings would make a password
+            rotation read as an AUM loss (D-02 / D-03).
+
+            Same muted steady-state voice as the sibling notes in this row: no
+            role, no aria-live, no glyph, no sign colour. The remedy lives on
+            the Holdings tab and the key card, not here (D-09). */}
+        {showUntrustedMarker && fieldShowsLive && (
+          <span
+            id="scenario-aum-untrusted-note"
+            data-testid="scenario-aum-untrusted-note"
+            className="text-xs text-text-muted"
+          >
+            {capitalizeFirst(buildUntrustedAumClause(liveHoldingsSummary))}.
+          </span>
+        )}
+        {/* Phase 167.1 AUMTRUST — State C (D-18 REOPENED 2026-09-24, review
+            WR-04): the field is blank because the live total is <= 0. Before
+            the reopen the marker vanished here, so a non-positive total driven
+            by keys needing attention read as an unexplained blank. With a
+            marker, the hint names the live total and carries the clause on it,
+            the State B construction; without one it is byte-identical to
+            before. The nested span has no class, as in State B (D-09). */}
+        {fieldBlankHintShows && (
+          <span
+            id="scenario-aum-required-note"
+            data-testid="scenario-aum-required-note"
+            className="text-xs text-text-muted"
+          >
+            Required to size and commit.
+            {showUntrustedMarker && (
+              <>
+                {" "}The live-holdings total is {formatUsd(liveHoldingsSum)},
+                which{" "}
+                <span data-testid="scenario-aum-untrusted-note">
+                  {buildUntrustedAumClause(liveHoldingsSummary)}
+                </span>
+                .
+              </>
+            )}
+          </span>
+        )}
+        {/* Phase 167.1 AUMTRUST — State B: a committed manual value differs from
+            the live total, so the field shows the allocator's own number and
+            only this note quotes the live total. A standalone "Includes …"
+            beside the field would then read as qualifying the MANUAL value,
+            which is false, so the disclosure follows the live total in here as
+            a relative clause on it (D-18). State A above renders only when the
+            field shows the live total, so one number never carries two markers
+            (D-08). The nested span has no class: it inherits this note's muted
+            voice (D-09). With no untrusted holding the text is byte-identical
+            to before: `Overrides live-holdings total $X.` */}
+        {overrideNoteShowsLive && (
+          <span
+            id="scenario-aum-override-note"
+            data-testid="scenario-aum-override-note"
+            className="text-xs text-text-muted"
+          >
+            Overrides live-holdings total {formatUsd(liveHoldingsSum)}
+            {showUntrustedMarker && (
+              <>
+                , which{" "}
+                <span data-testid="scenario-aum-untrusted-note">
+                  {buildUntrustedAumClause(liveHoldingsSummary)}
+                </span>
+              </>
+            )}
+            .
+          </span>
+        )}
+        {/* Review round 2 F2 — the DISCLOSURE that pays for the narrowing above.
+            The book-mode AUM now describes the MODELLED book (the keys carrying
+            a return series), not custody's whole-book total, and a headline
+            money figure may not change meaning silently. Rendered next to the
+            field it qualifies, because that is the number it is about.
+
+            NOT a second copy of `scenario-partial-book-note`: that one sits
+            above the constituent list and explains MISSING ROWS ("N of M keys
+            not yet contributing"); this one explains the MONEY BASIS ("models N
+            of M"). Same two integers, same muted voice, two different questions
+            — and neither is stated twice. Book mode only: in blank mode the AUM
+            is whatever the allocator typed and has no key basis to disclose. */}
+        {entryMode === "book" && notYetContributing > 0 && (
+          <span
+            data-testid="scenario-aum-modelled-note"
+            className="text-xs text-text-muted"
+          >
+            Models {allocatorEligibleCount - notYetContributing} of{" "}
+            {allocatorEligibleCount} keys — the ones with a return series.
+          </span>
+        )}
+      </div>
 
       {/* IMPACT-01 — coverage caveat. Names the live overlapping-day count
           (scenarioMetrics.n) AND the shortest-history strategy via the
@@ -4071,6 +5373,16 @@ export function ScenarioComposer({
         />
       )}
 
+      {/* Phase 170 / SC1-LAYERS (C1-A1 + C1-A2, 2026-09-28) — one square
+          Blend-window data panel. Row 1 header, row 2 window control, row 3
+          timeline, row 4 the scenario KPI strip. Rows 1–3 still mount only
+          when windowBounds is set; with no bounds the panel is row 4 alone
+          and that row has no leading hairline. The eyebrow is the same
+          non-comparative label in every state (frozen 170.1 COPY item (b)). */}
+      <div
+        className="mt-6 border border-border bg-surface"
+        data-testid="scenario-blend-window"
+      >
       {/* Phase 58 (COVERAGE-03) — the honest blend header is the PRIMARY visual
           anchor of this surface (58-UI-SPEC §Interaction): it states the engine's
           member_count · effective window ABOVE the coverage-window control, so
@@ -4080,7 +5392,7 @@ export function ScenarioComposer({
           cross-check reconciles the same axis). Mounts alongside the window
           control (a selected set to describe). */}
       {windowBounds && (
-        <div className="mt-6">
+        <div className="px-4 py-3">
           <BlendHeader metrics={scenarioMetrics} unionSpan={fullRangeWindow} />
         </div>
       )}
@@ -4091,13 +5403,14 @@ export function ScenarioComposer({
           control sits above its graph). Only mounts when the selected set has a
           span to window (windowBounds !== null). A distinct axis from the
           rolling-metrics window / factsheet brush-zoom / startDates (POLISH-01).
-          Presets + DESIGN.md styling land in the Task-2 pass. */}
+          Phase 170 C1-A1 — its own rounded box is gone; it is a hairline row
+          of the Blend-window panel. ref / tabIndex / testid stay (RT-5). */}
       {windowBounds && (
         <div
           // RT-5 — the Include-click focus target (see pendingWindowFocusRef).
           ref={coverageWindowControlRef}
           tabIndex={-1}
-          className="mt-6 flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface px-4 py-3"
+          className="flex flex-wrap items-center gap-3 border-t border-border px-4 py-3"
           data-testid="scenario-coverage-window"
         >
           <span className="text-fixed-11 font-medium uppercase tracking-wide text-text-muted">
@@ -4189,7 +5502,7 @@ export function ScenarioComposer({
           the row chips by construction. Only mounts when there is a windowed set
           to plot. */}
       {windowBounds && (
-        <div className="mt-6">
+        <div className="border-t border-border px-4 py-3">
           <CoverageTimeline
             rows={timelineRows}
             unionWindow={fullRangeWindow}
@@ -4198,9 +5511,14 @@ export function ScenarioComposer({
         </div>
       )}
 
-      <div className="mt-6">
+      {/* Row 4 — the hairline is absent when rows 1–3 did not render. */}
+      <div className={windowBounds ? "border-t border-border" : undefined}>
+        <p className="text-micro font-mono uppercase tracking-[0.18em] text-text-muted px-4 pt-3">
+          Scenario blend
+        </p>
         <KpiStrip
           mode="scenario"
+          variant="panel"
           scenarioMetrics={scenarioMetrics}
           liveMetrics={liveMetricsForKpi}
           metrics={liveMetricsForKpi}
@@ -4210,6 +5528,7 @@ export function ScenarioComposer({
           minHistoryDepthMonths={minHistoryDepthMonths}
           activeVenues={activeVenues}
         />
+      </div>
       </div>
 
       {/* CONSTIT-01 (Pitfall 5) — all-constituents-excluded honest empty,
@@ -4259,7 +5578,7 @@ export function ScenarioComposer({
           (byte-identity preserved). */}
       <div className="relative mt-0">
         {/* BENCH-01 — the BTC overlay rides the synth payload's `benchmark`
-            (cumulative-WEALTH form via `btcWealth`). `btcWealth` is undefined
+            (the close-level form via `btcWealth`, D-66). `btcWealth` is undefined
             when the toggle is off or the benchmark is unavailable, which hides
             the overlay. */}
         <ScenarioFactsheetChart
@@ -4280,6 +5599,31 @@ export function ScenarioComposer({
           // absent) when there is no live book series.
           scenarioOwnBookDelta={scenarioOwnBookDelta}
         />
+        {/* Phase 167.1.2 / D-02: the own-book comparison is withheld while the
+            equity history is rebuilt; say so rather than leave a silent gap.
+            Not in blank mode, where there is no own book to compare with.
+            Phase 167.1.2 / D-15 (supersedes IN-01): the Overview and the
+            Scenario gate on the same state. The earlier extra condition on the
+            history's size or source is removed, so in book mode a book with no
+            snapshot yet reads here as it does on the Overview's rebuilding
+            panel. Review C3 SFH-C3-04: that parity holds only in book mode. In
+            blank mode, chosen or forced (no live book, or no allocator key
+            with a per-key series yet, so `bookEntryGateSatisfied` is false),
+            no own-book line is drawn and there is no comparison to disclose.
+            That is D-15's blank-mode exception, and the Overview may still
+            show its rebuilding panel for the same book.
+            Review C3 SFH-C3-01: the sentence is picked by the class the
+            Overview gives the same reason (`equityHistoryRebuildClass`). */}
+        {isOwnBookRebuilding && !isBlankMode && (
+          <p
+            data-testid="scenario-ownbook-rebuilding"
+            className="mt-2 text-fixed-11 text-text-muted"
+          >
+            {OWN_BOOK_REBUILDING_LINE[
+              equityHistoryRebuildClass(equityHistoryRebuildReason)
+            ]}
+          </p>
+        )}
         {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted line
             swatch via the `--color-chart-benchmark` token (UI-SPEC §Copywriting
             / §Color). Disabled when the
@@ -4317,15 +5661,15 @@ export function ScenarioComposer({
 
       {/* BENCH-01 — "vs BTC" active-return section. Reads the active scenario's
           full daily portfolio returns (`scenarioMetrics.portfolio_daily_returns`
-          — OPTIONAL, so `?? []`) + the fetched BTC daily returns, inner-joins
-          by date, and renders TE/IR/alpha/beta over the intersection window OR
-          the honest "unavailable" empty state (below the 30-day floor, no
-          overlap, or a failed fetch via `btcAvailable=false`). */}
+          — OPTIONAL, so `?? []`) + the fetched BTC closes, pairs them through
+          the one pairing function (Phase 169.4 D-68), and renders
+          TE/IR/alpha/beta over the paired window OR the honest "unavailable"
+          empty state (below the 30-day floor, no overlap, or a failed fetch via
+          `btc` null). */}
       <Card className="mt-6">
         <ScenarioBenchmarkSection
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
-          btcDaily={btcDaily}
-          benchmarkAvailable={btcAvailable}
+          btc={btc}
           // BLEND-01 — TE/IR/alpha ride the same derived blend basis
           // (√periodsPerYear); the correlation/beta terms are basis-invariant.
           periodsPerYear={blendBasis}
@@ -4335,7 +5679,7 @@ export function ScenarioComposer({
       {/* STRESS-01 / STRESS-02 (Plan 26-02) — the "Stress & VaR" section on the
           own-book scenario surface. A sibling of the benchmark section above:
           props-only over the same already-leveraged portfolio_daily_returns + the
-          fetched BTC factor series, it lets the allocator pick a BTC shock preset
+          fetched BTC factor closes, it lets the allocator pick a BTC shock preset
           and read the β-propagated projected impact + historical VaR(95%)/CVaR with
           a mandatory inline disclosure, OR the honest empty state (degenerate
           scenario / BTC unavailable / below the Phase-22 sample floor). Own-book
@@ -4344,8 +5688,7 @@ export function ScenarioComposer({
       <Card className="mt-6">
         <StressVarSection
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
-          btcDaily={btcDaily}
-          btcAvailable={btcAvailable}
+          btc={btc}
           n={scenarioMetrics.n}
           strategyCount={engineSet.strategies.length}
         />
@@ -4609,11 +5952,21 @@ export function ScenarioComposer({
           column / allocator-portfolio payload builder / percentile-rank badge,
           no api-ingest literal (LOCKED honesty invariant — a what-if has no
           verified track record to peer-rank). */}
+      {/* Phase 170 / SC1-LAYERS (C1-A3, 2026-09-28) — the two repeat cards
+          are one closed section. Bodies, disclosures, the 10-point floor, the
+          3M/6M/12M control and both data-panel attributes are unchanged. The
+          card headings are h3 under the section title; size and weight stay. */}
+      <CollapsibleSection
+        id="composer-blend-detail"
+        title="Blend distribution and rolling windows"
+        defaultOpen={false}
+        storageKey="composer-collapse:blend-detail"
+      >
       <Card className="mt-6" data-panel="blend-returns-distribution" aria-label="Returns distribution">
         <div className="mb-3">
-          <h2 className="text-base font-semibold text-text-primary">
+          <h3 className="text-base font-semibold text-text-primary">
             Returns distribution
-          </h2>
+          </h3>
         </div>
         {blendPanels.histogramSeries.length === 0 ? (
           // WR-02 — gate on the ADAPTER's actual degenerate verdict, not a
@@ -4661,9 +6014,9 @@ export function ScenarioComposer({
           never role="alert". */}
       <Card className="mt-6" data-panel="blend-rolling" aria-label="Rolling metrics">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-base font-semibold text-text-primary">
+          <h3 className="text-base font-semibold text-text-primary">
             Rolling metrics
-          </h2>
+          </h3>
           <SegmentedControl
             ariaLabel="Rolling window"
             activeId={String(rollingWindow)}
@@ -4716,6 +6069,7 @@ export function ScenarioComposer({
           </div>
         )}
       </Card>
+      </CollapsibleSection>
 
       {flaggedHoldings.length > 0 && (
         <div className="mt-8 rounded-lg border border-border bg-surface p-4">
@@ -4786,6 +6140,26 @@ export function ScenarioComposer({
           scoped storageKey (independent of the factsheet `factsheet-collapse:`
           namespace) persists the choice across reloads. No onToggle — composer
           collapse analytics are out of scope this phase. */}
+      {/* Phase 151 AUM-04 — the partial-book note. Book mode renders toggle rows
+          for CONTRIBUTING keys only; this says so plainly rather than leaving the
+          allocator to wonder where their other keys went (never silent).
+          UI-SPEC color gate: MUTED, never amber, never red — a key with no
+          per-key history is an honest steady state, not a recoverable transient
+          and not a failure. Plain static text with no role="alert" and no
+          aria-live: steady-state disclosure, not an event.
+          Placed OUTSIDE the CollapsibleSection, immediately above the list it
+          describes: inside, a collapsed section would hide it and break the
+          never-silent invariant. */}
+      {entryMode === "book" && notYetContributing > 0 && (
+        <div
+          data-testid="scenario-partial-book-note"
+          className="mt-2 text-xs text-text-muted"
+        >
+          {notYetContributing} of {allocatorEligibleCount} keys not yet
+          contributing — no per-key history yet.
+        </div>
+      )}
+
       <CollapsibleSection
         id="composer-composition-controls"
         title="Strategies & weights"
@@ -4798,10 +6172,18 @@ export function ScenarioComposer({
           mixedPerKeyBook={isMixedPerKeyBook}
           onTogglePerKey={scenario.togglePerKeySource}
           addedProvenanceByRef={addedProvenanceByRef}
+          addedMetricsByRef={addedMetricsByRef}
           onToggle={scenario.toggleHolding}
           onSetWeight={handleWeightChange}
           blendShareByRef={blendShareByRef}
           totalBookEquity={totalBookEquity}
+          scenarioAum={scenarioAum}
+          // 151 UAT (founder, 2026-08-07) — BOTTOM-UP AUM, blank mode only.
+          // In book mode the AUM comes from live holdings (overridable) and a
+          // dollar edit back-computes a weight WITHIN it — unchanged this round.
+          bottomUpAum={isBlankMode}
+          onSetManualAum={setBottomUpAum}
+          onRefuseEdit={setCommitError}
           leverageByRef={leverageByRef}
           onSetLeverage={handleLeverageChange}
           targetModeByRef={targetModeByRef}
@@ -4811,6 +6193,7 @@ export function ScenarioComposer({
           portfolioMaxDrawdown={scenarioMetrics.max_drawdown}
           onRemoveAdded={handleRemoveAdded}
           coverageEligible={coverageEligible}
+          addedSeriesStateByRef={addedSeriesStateByRef}
         />
       </CollapsibleSection>
 
@@ -4934,6 +6317,13 @@ export function ScenarioComposer({
             name: s.name,
             markets: s.markets,
             strategy_types: s.strategy_types,
+            // Phase 152 SCEN-02 — TWIN SEAM B (main-body mount). Its
+            // byte-identical twin is the empty-state <StrategyBrowseDrawer>
+            // above; edit BOTH or an allocator with a live book silently loses
+            // the ownership bit. Straight pass-through: the drawer forwards
+            // what GET /api/strategies/browse said, and absent stays absent
+            // (never coerced to false or true).
+            isOwn: s.isOwn,
           })
         }
         onAddOwn={() => {
@@ -4969,6 +6359,12 @@ export function ScenarioComposer({
             name: candidate.name,
             markets: candidate.markets,
             strategy_types: candidate.strategy_types,
+            // Phase 152 SCEN-02 — deliberately NO isOwn: a Bridge candidate
+            // comes from the match engine and carries no ownership signal;
+            // absent = no chip (never fabricate ownership — CONTEXT lock).
+            // This is the THIRD add seam and the one that must NOT match the
+            // twins above; if a future edit "completes the set" here, it turns
+            // a match-engine suggestion into a claim the user authored it.
           });
           // UNIFY-04 — a Bridge candidate is also a catalog strategy not in the
           // book; lazy-fetch its series so the projection moves on add.
@@ -5004,6 +6400,12 @@ export function ScenarioComposer({
         onClose={() => setCommitDrawerOpen(false)}
         diffs={commitDiffs}
         scenarioAum={scenarioAum}
+        // Phase 151 AUM-01 — the MANUAL value only, never `scenarioAum`. A
+        // book-mode commit that never touched the AUM field passes undefined,
+        // so the drawer omits the key and the audit row stays on the
+        // server-recomputed path (NEW-C18-04) instead of being re-labelled a
+        // client assertion carrying the live-holdings sum.
+        manualAumUsd={sanitizedManualAum}
         // B11 / NEW-C18-10: the holdings fingerprint frozen with these diffs.
         initHoldingsFingerprint={commitFingerprint}
         onSubmitSuccess={() => {
@@ -5149,6 +6551,46 @@ type PerKeySource = MyAllocationDashboardPayload["apiKeys"][number];
  *  so CompositionList's props stay referentially stable across renders. */
 const EMPTY_PER_KEY_SOURCES: PerKeySource[] = [];
 
+/** WEIGHTS-00 — the sentence a DERIVED notional carries. Byte-verbatim from the
+ *  pre-152 tree: a cell that already shows a number explains what the number is,
+ *  never a remedy. */
+const NOTIONAL_DERIVED_NOTE =
+  "Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input";
+
+/**
+ * Phase 152 SCEN-04 (decision D-3, corrected by review CR-01) — the em-dash
+ * sentences, ONE PER CAUSE.
+ *
+ * SCEN-04 shipped a single string for all three causes, which made the note a
+ * DIAGNOSIS that was wrong in the most common em-dash state. The set below is
+ * cause-accurate by construction: `notionalCell` returns the cause from the same
+ * expression that returns the text, and the renderer indexes this map with it.
+ *
+ * None of these is the AUM sentence (`AUM_UNSET_REMEDY`), and re-unifying them
+ * with it is the named regression: this cell's em-dash is never caused by
+ * `scenarioAum`, so "set portfolio AUM" would name a remedy that cannot make the
+ * cell derivable. The AUM sentence stays on the USD cell, where it is true.
+ */
+const NOTIONAL_NOTE_BY_CAUSE = {
+  /** `totalBookEquity == null` — there is no live book equity to size against.
+   *  True for a book-less allocator and for a degenerate Σ ≤ 0 book. */
+  equity: "Notional needs live book equity — not derivable in this scenario",
+  /** The ref is absent from `blendShareByRef`: the row is toggled OFF, or the
+   *  selected weight mass is 0 so the map is empty for EVERY row, or the ref is
+   *  not in this render's engine set. In all three the row genuinely carries no
+   *  blend share, and re-including it (or giving the selected set a non-zero
+   *  weight) is a remedy that CAN make the cell derivable. */
+  "not-in-blend":
+    "Notional needs a blend share — this row is not in the blend",
+  /** Finite equity and share, non-finite product — reachable only through a
+   *  non-finite leverage, which the validated inputs do not produce. A bare
+   *  statement of fact rather than a guessed remedy: naming a blocker we cannot
+   *  prove is the very thing CR-01 is about. */
+  indeterminate: "Notional is not derivable for this row",
+} as const;
+
+type NotionalCause = keyof typeof NOTIONAL_NOTE_BY_CAUSE;
+
 interface CompositionListProps {
   draft: ReturnType<typeof useScenarioState>["draft"];
   /**
@@ -5179,6 +6621,18 @@ interface CompositionListProps {
    * this map.
    */
   addedProvenanceByRef: Record<string, ProvenanceTier | null>;
+  /**
+   * Phase 152 SCEN-03 — added-strategy id → the in-memory metrics the row's
+   * detail panel renders. A NARROW `{cagr, sharpe}` projection of the parent's
+   * metadata lookup: book strategies carry values, drawer-added legs carry
+   * `null` for both (the returns route does not serve them and CONTEXT locks NO
+   * new fetches this phase). Presentation-only — this map never reaches the
+   * frozen engine, and the panel renders honest absence rather than a 0.
+   */
+  addedMetricsByRef: Record<
+    string,
+    { cagr: number | null; sharpe: number | null; state: AddedMetricsState }
+  >;
   onToggle: (scopeRef: string) => void;
   onSetWeight: (scopeRef: string, weight: number) => void;
   /**
@@ -5195,6 +6649,44 @@ interface CompositionListProps {
    * em-dash `—` (Numbers Contract), never a fabricated $0.
    */
   totalBookEquity: number | null;
+  /**
+   * Phase 151 AUM-01 — the scenario's portfolio AUM (`sanitizedManualAum ??
+   * liveHoldingsSum`). The base for the per-strategy DOLLAR input: a row's
+   * allocation in dollars is `weight × scenarioAum`, and a typed amount
+   * back-computes `weight = amount / scenarioAum`. `<= 0` (nothing set, no
+   * live book) → the dollar cell renders the em-dash read-only state and NO
+   * division executes. Distinct from `totalBookEquity`, which bases the
+   * derived Notional column (a DIFFERENT number — equity × share × leverage).
+   */
+  scenarioAum: number;
+  /**
+   * 151 UAT (founder, 2026-08-07) — BOTTOM-UP AUM. True in BLANK mode, where
+   * the per-strategy USD input is THE entry point on which weight is built:
+   * there is no live book, so the portfolio's size is whatever the allocator
+   * allocates. Editing row i's dollar to `d_i'` holds every OTHER row's current
+   * derived dollar FIXED and grows/shrinks the portfolio instead —
+   * `manualAumUsd = Σ_{j≠i} d_j + d_i'` — then every weight is `d_j / AUM'`.
+   *
+   * False in BOOK mode, where the AUM is what custody says the book is worth
+   * (overridable) and a dollar edit back-computes a weight WITHIN that fixed
+   * size. Unchanged this round.
+   */
+  bottomUpAum: boolean;
+  /**
+   * 151 UAT — the manual-AUM writer, used ONLY on the bottom-up path, in the
+   * same event handler as the weight write (React batches both into one render,
+   * so the pair lands atomically). Never a second weight-write channel.
+   */
+  onSetManualAum: (value: number) => void;
+  /**
+   * Review [10] — the list's channel to the composer's ONE refusal banner
+   * (`setCommitError`). `onSetWeight`'s own refusals already surface, but a
+   * dollar edit can be refused BEFORE it reaches the weight path (an all-zero
+   * portfolio has no size to divide by, and an invalid amount never gets that
+   * far), and those two arms were console-only — the field silently snapped
+   * back. Same sink, so a refusal from either source reads identically.
+   */
+  onRefuseEdit: (message: string) => void;
   /** R4 — ref → leverage multiplier (default 1.0 when absent). */
   leverageByRef: Record<string, number>;
   onSetLeverage: (scopeRef: string, leverage: number) => void;
@@ -5222,6 +6714,15 @@ interface CompositionListProps {
    * + this map.
    */
   coverageEligible: Record<string, boolean>;
+  /**
+   * Phase 147 / SCEN-01 — the SERVER-derived per-row answer to "what does an
+   * empty series mean here?" ("available" | "computing" | "empty"), merged from
+   * the book payload and the lazy returns route by the composer's ONE narrowing
+   * helper. Threaded READ-ONLY: this list renders the chip + note from it and
+   * never re-derives it (least of all from `daily_returns.length`, which cannot
+   * tell a running job from terminal absence — UI-SPEC §3).
+   */
+  addedSeriesStateByRef: Record<string, SeriesState>;
 }
 
 // WEIGHTS-04 (Phase 113) — the honest failure copy for a `!ok` solve. Mirrors
@@ -5248,10 +6749,15 @@ function CompositionList({
   mixedPerKeyBook,
   onTogglePerKey,
   addedProvenanceByRef,
+  addedMetricsByRef,
   onToggle,
   onSetWeight,
   blendShareByRef,
   totalBookEquity,
+  scenarioAum,
+  bottomUpAum,
+  onSetManualAum,
+  onRefuseEdit,
   leverageByRef,
   onSetLeverage,
   targetModeByRef,
@@ -5261,24 +6767,415 @@ function CompositionList({
   portfolioMaxDrawdown,
   onRemoveAdded,
   coverageEligible,
+  addedSeriesStateByRef,
 }: CompositionListProps) {
-  // WEIGHTS-00 (A1 locked) — the DERIVED, read-only notional string for a row:
+  /**
+   * Phase 152 SCEN-03 — the id of the ONE added row whose detail panel is open,
+   * or null when every row is collapsed.
+   *
+   * A single `string | null`, deliberately NOT a `Set`: one-open-at-a-time is
+   * owned by the list parent (the HoldingsTable → HoldingDetail idiom this
+   * mirrors). A Set would let two panels stand open, which turns a list of rows
+   * into a stack of expanded cards and loses the comparison the composer exists
+   * for. The toggle is `prev === id ? null : id` — the same functional form the
+   * holdings host uses.
+   *
+   * Only the HOST idiom is reused, not HoldingsTable's a11y: that table toggles
+   * from a `<tr onClick>` carrying aria-expanded, which is pointer-only and
+   * invalid ARIA on a bare row. Here the keyboard-reachable affordance is a real
+   * `<button>` on the strategy name (Enter/Space work natively), and the row
+   * surface is pointer AMPLIFICATION only.
+   */
+  const [expandedAddedId, setExpandedAddedId] = useState<string | null>(null);
+  /** The functional toggle, shared byte-for-byte by the name button and the
+   *  row-surface amplification handler — two call sites, one behaviour. */
+  const toggleAddedDetail = (id: string) =>
+    setExpandedAddedId((prev) => (prev === id ? null : id));
+
+  /**
+   * Phase 152 review WR-03 — release the id when the row it names leaves the
+   * draft.
+   *
+   * The state is keyed by strategy id, not by position, so removing an EXPANDED
+   * row left the id held. Adding the same strategy back in the same session then
+   * mounted its row with the detail panel already open and
+   * `aria-expanded="true"` on first render — a state no user gesture asked for,
+   * that the one-open-at-a-time contract did not intend, and that a screen
+   * reader announces as expanded on first encounter.
+   *
+   * ⚠️ Deliberately React's "adjust state during render" idiom, NOT a
+   * `useEffect` that watches `draft.addedStrategies`. That effect is a
+   * `react-hooks/set-state-in-effect` lint ERROR in this repo — and it would be
+   * the worse mechanism anyway: it commits the stale-open render FIRST and
+   * corrects it on a second pass, so the pre-expanded panel really exists in the
+   * DOM (long enough for a screen reader to reach it) before collapsing.
+   * Adjusting here re-runs the component before anything commits, so the wrong
+   * state is never observable.
+   *
+   * Deliberately not a release on the remove handler either: that closes only
+   * the `×` seam. Any path that drops a row while this list stays mounted (a
+   * draft reset, a saved-scenario open) leaves the same stale id behind. ONE
+   * condition on the row's ABSENCE covers every such path — the project's
+   * "close the whole class, not the point case" rule.
+   *
+   * The `!= null` guard is the loop fence: after the write the condition is
+   * false, so this settles in one extra pass. An id still in the draft is
+   * untouched, so an unrelated re-render (weight edit, toggle, autosave) never
+   * collapses an open panel.
+   */
+  if (
+    expandedAddedId != null &&
+    !draft.addedStrategies.some((a) => a.id === expandedAddedId)
+  ) {
+    setExpandedAddedId(null);
+  }
+
+  /** Phase 152 SCEN-03 — the composer's mono-eyebrow recipe, byte-verbatim from
+   *  the PORTFOLIO AUM label (152-UI-SPEC reuse rule: no new visual primitives). */
+  const DETAIL_EYEBROW =
+    "font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted";
+
+  // WEIGHTS-00 (A1 locked) — the DERIVED, read-only notional for a row:
   // equity × blend-share × leverage. It is purely informative (a
   // clears-minimum-invest readout) and STRUCTURALLY never a weight input. Any
   // factor missing/non-finite (no book equity; an EXCLUDED row absent from
-  // blendShareByRef; a degenerate share) → `null` → em-dash `—` per the Numbers
-  // Contract — never 0, never a fabricated dollar figure an LP could act on.
-  const notionalText = (ref: string): string => {
+  // blendShareByRef; a degenerate share) → em-dash `—` per the Numbers Contract
+  // — never 0, never a fabricated dollar figure an LP could act on.
+  //
+  // Phase 152 review CR-01 — the returned `cause` is the HONESTY INVARIANT, not
+  // decoration. The em-dash has three independent causes and they demand three
+  // different sentences. Pinning one string (the shipped
+  // "Notional needs live book equity …") told an allocator who HAS a live book
+  // that the blocker was missing equity whenever they simply toggled the row
+  // off — a false blocker whose implied remedy (get a live book) CANNOT make the
+  // cell derivable. That is the exact defect class this phase exists to remove,
+  // committed against a different cause. The cause is therefore derived HERE, in
+  // the same expression that produces the text, so an edit to one can never
+  // leave the other behind.
+  const notionalCell = (
+    ref: string,
+  ): { text: string; cause: NotionalCause | null } => {
+    // Precedence mirrors the original guard's `||` order: no book equity is the
+    // structural blocker and outranks a per-row blend-share miss.
+    if (totalBookEquity == null) return { text: "—", cause: "equity" };
     const share = blendShareByRef[ref];
-    if (
-      totalBookEquity == null ||
-      typeof share !== "number" ||
-      !Number.isFinite(share)
-    ) {
-      return "—";
+    if (typeof share !== "number" || !Number.isFinite(share)) {
+      return { text: "—", cause: "not-in-blend" };
     }
     const notional = share * totalBookEquity * (leverageByRef[ref] ?? 1);
-    return Number.isFinite(notional) ? formatCurrency(notional) : "—";
+    return Number.isFinite(notional)
+      ? { text: formatCurrency(notional), cause: null }
+      : { text: "—", cause: "indeterminate" };
+  };
+
+  /**
+   * Phase 152 SCEN-04 (review CR-01 + WR-06) — the notional span, rendered by
+   * BOTH row kinds (per-key and added) from this ONE helper.
+   *
+   * WR-06: SCEN-04 originally explained the em-dash on added rows only, leaving
+   * the identical em-dash on the per-key half of the same list un-explained —
+   * the original "what does this mean?" complaint still standing immediately
+   * above the rows that now answered it. Both call sites now route through here,
+   * so the two halves cannot drift again.
+   *
+   * The sentence is duplicated into `sr-only` text because a `title` alone is
+   * unreachable by keyboard/touch and is not announced by every screen reader
+   * (151's renderDollarInput pattern). The DERIVED branch keeps its original
+   * sentence byte-verbatim and grows NO sr-only text — a remedy note on a cell
+   * that already shows a number would be noise.
+   */
+  const renderNotional = (ref: string, labelText: string) => {
+    const { text, cause } = notionalCell(ref);
+    const note = cause == null ? NOTIONAL_DERIVED_NOTE : NOTIONAL_NOTE_BY_CAUSE[cause];
+    return (
+      <span
+        data-testid="scenario-constituent-notional"
+        title={note}
+        className="w-20 text-right font-mono text-xs text-text-muted"
+      >
+        {/* Review round 2 F5 — the COLUMN NAME, on BOTH branches.
+            SCEN-04 attached sr-only text only to the em-dash branch, so the
+            DERIVED branch — a real currency figure — had no accessible name at
+            all, and BOTH column-label strips are `aria-hidden="true"`. A screen
+            reader announced a bare "$1,234" with no idea which column it came
+            from, in a row of five numeric columns. Every neighbouring control
+            already carries one (the weight input's sr-only label, the dollar
+            input's sr-only label, the leverage input's aria-label), so this was
+            the one unlabelled cell in the row — and an unlabelled NOTIONAL
+            column is the founder complaint that drove the phase. Fixing it for
+            sighted users only is half a fix.
+
+            Name first, then the note: the em-dash branch keeps its
+            cause-accurate sentence, the derived branch keeps having no remedy
+            text (a cell that already shows a number explains what the number
+            is via `title`, and the sr-only name supplies the column). */}
+        <span className="sr-only">{labelText} notional. </span>
+        {text}
+        {cause != null && <span className="sr-only">{note}</span>}
+      </span>
+    );
+  };
+
+  // -------------------------------------------------------------------------
+  // Phase 151 AUM-01 — the per-strategy DOLLAR input ("allocate $500k to this
+  // strategy"). It is a second VIEW of the weight, NEVER a second weight-WRITE
+  // path.
+  //
+  // ⚠️ v1.11 weight-basis landmines (binding): the commit below calls
+  // `onSetWeight` — the composer's ONE `handleWeightChange` — so the >1 clamp
+  // and its "Weight clamped to 1 …" banner, the mixed-book engine-unit basis
+  // choice, and the sole-unit refusal ("A single constituent is always 100%.")
+  // are all INHERITED. Forking a second weight-write path for dollars (a direct
+  // setWeightOverride / applyWeightOverrides call from here) is the named defect
+  // class — a typed fraction that renders as ~0% against raw per-key equity
+  // dollars, and a poisoned override that survives exclude/re-include.
+  //
+  // The adjacent Notional span is a DIFFERENT number (equity × share × leverage)
+  // and is untouched by any of this.
+  // -------------------------------------------------------------------------
+  const AUM_UNSET_REMEDY = "Set portfolio AUM to size in dollars";
+
+  /**
+   * A ref's weight, derived EXACTLY as the row that renders it does. ONE
+   * derivation shared by the row display and the bottom-up sum below, so the
+   * dollars the allocator is looking at and the dollars the AUM is built from
+   * can never drift (the RT-02 lesson: an edit basis and a display basis that
+   * are written twice WILL desync).
+   */
+  const weightForRef = (ref: string): number =>
+    mixedPerKeyBook
+      ? (blendShareByRef[ref] ?? draft.weightOverrides[ref] ?? 0)
+      : (draft.weightOverrides[ref] ?? 0);
+
+  /**
+   * 151 UAT — the bottom-up AUM for an edit of `ref` to `amount`.
+   *
+   * HOLD EVERY OTHER ROW'S DOLLAR FIXED and let the portfolio resize:
+   *   AUM' = Σ_{j≠i} d_j + d_i'   where d_j = w_j × AUM
+   *
+   * Summed over the OTHER rows explicitly rather than as `AUM − d_i`. Those two
+   * are equal only when the weights sum to 1, and they do not always: the
+   * added-only carve-out deliberately lets a LONE added unit keep its RAW typed
+   * weight rather than be renormalized to 1.0. With a sole row at w=0.5 and
+   * AUM 1,000,000, `AUM − d_i` would compute 500,000 of phantom "other" money
+   * and land the portfolio at 1,100,000 for a $600k edit instead of $600k.
+   *
+   * Returns null when the result is not a usable size (all-zero portfolio, or a
+   * non-finite from a degenerate draft) — the caller then refuses the edit
+   * rather than writing a zero/NaN AUM.
+   */
+  const bottomUpAumFor = (ref: string, amount: number): number | null => {
+    const otherRefs = [
+      ...perKeySources.map((k) => k.id),
+      ...draft.addedStrategies.map((a) => a.id),
+    ].filter(
+      // The BASIS is the enabled set — the same set `setWeightOverride`
+      // renormalizes over. An excluded row is not in the blend, so its dollars
+      // are not part of the portfolio's size.
+      (id) => id !== ref && draft.toggleByScopeRef[id] !== false,
+    );
+    const otherDollars = otherRefs.reduce(
+      (sum, id) => sum + weightForRef(id) * scenarioAum,
+      0,
+    );
+    const nextAum = Math.max(0, otherDollars) + amount;
+    // Review [7] — validate against the SAME shared bound `commitAumInput`
+    // enforces, not merely finite/positive. `isValidDollar` is [0, 1e12), and
+    // `sanitizedManualAum` re-reads the stored value through it on every render
+    // (:3837). A sum that clears `Number.isFinite` but not `isValidDollar` gets
+    // written into the draft and then discarded by the read side one render
+    // later: `scenarioAum` falls back to `liveHoldingsSum` (0 in blank mode),
+    // every dollar cell collapses to the em-dash and Commit refuses — while the
+    // autosave and the saved-scenario PUT still carry the out-of-range number.
+    // Refusing here keeps the write side and the read side agreeing.
+    if (!isValidDollar(nextAum) || nextAum <= 0) return null;
+    return nextAum;
+  };
+
+  const commitDollarInput = (
+    ref: string,
+    el: HTMLInputElement,
+    displayed: number,
+  ) => {
+    const raw = el.value;
+    // Blank ≠ zero (the composer's shared blank-guard, mirrored from the
+    // target-DD and AUM inputs): a benign focus→blur of an emptied field
+    // commits nothing rather than committing a Number("") === 0.
+    if (raw.trim() !== "") {
+      const amount = Number(raw);
+      if (isValidDollar(amount)) {
+        // 151 review WR-05 — A BLUR IS NOT AN EDIT. The field displays
+        // `Math.round(weight × AUM)`, so committing the DISPLAYED figure writes
+        // `round(w·A)/A` back: a lossy round-trip that moves the weight by up to
+        // `0.5 / AUM`. Immaterial at $460k, visible at a modelling AUM of a few
+        // thousand (the field accepts any positive value under $1e12) — and
+        // `handleWeightChange` rescales every OTHER constituent to match. Worse,
+        // in a MIXED book `weightValue` is the DERIVED blend share, so the write
+        // stamps `userWeightOverrides[ref]` and permanently pins a row that was
+        // riding the blend — by a keyboard tab. Compare against the rendered
+        // integer (what the user is looking at), not against the float.
+        if (Math.round(amount) === displayed) {
+          el.value = String(displayed);
+          return;
+        }
+        // 151 UAT — BOTTOM-UP (blank mode): the portfolio resizes around the
+        // typed amount instead of the amount competing for a fixed pie.
+        //
+        // ⚠️ STILL THE ONE WEIGHT-WRITE PATH. This does NOT fork a second
+        // writer: it changes only the DENOMINATOR handed to `onSetWeight`
+        // (= handleWeightChange), so the >1 clamp + banner, the mixed-book
+        // engine-unit basis and the sole-unit refusal are all still inherited.
+        //
+        // Why the proportional redistribution inside handleWeightChange /
+        // setWeightOverride already produces exactly the bottom-up weights, so
+        // no second pass is needed and no other row has to be written here:
+        //   the redistribution gives  w_j' = w_j · (1 − w_i')/(1 − w_i)
+        //   and                       1 − w_i' = (AUM' − d_i')/AUM'
+        //                                      = (AUM − d_i)/AUM'
+        //   so with Σw = 1:           w_j' = w_j · AUM/AUM' = d_j/AUM'
+        // — i.e. every OTHER row's DOLLAR figure is unchanged, which is the
+        // founder's "hold every other row fixed" rule stated in weight space.
+        if (bottomUpAum) {
+          const nextAum = bottomUpAumFor(ref, amount);
+          if (nextAum === null) {
+            // An all-zero portfolio has no size to divide by. Refuse rather
+            // than write a 0/NaN AUM — the same fail-loud posture as the
+            // invalid-amount arm above.
+            //
+            // Review [10] — SAY SO. A console.warn is invisible: the field just
+            // snapped back to its previous figure with no explanation, and the
+            // gesture that reaches here most often is the ordinary one of
+            // typing 0 to drop the last funded row. Every other refusal on this
+            // surface (the >1 weight clamp, the non-finite weight arm, the
+            // leverage clamp) surfaces a message; this one now does too.
+            console.warn(
+              "[ScenarioComposer] refused a dollar edit that yields no portfolio size",
+              { ref, amount },
+            );
+            onRefuseEdit(
+              "A portfolio needs a size — zeroing the last funded strategy would leave nothing to allocate. Set another strategy's dollars first, or exclude this row instead.",
+            );
+
+            el.value = String(displayed);
+            return;
+          }
+          // Both writes ride the SAME event handler, so React batches them into
+          // one render and the pair lands atomically: no frame exists in which
+          // the new weight is read against the old AUM.
+          onSetManualAum(nextAum);
+          // Review [8] follow-on — a SOLE constituent is already 100%, so the
+          // resize alone expresses the edit and `handleWeightChange` would
+          // refuse the (unchanged) 1.0 write with "A single constituent is
+          // always 100%." — a banner for a gesture that in fact succeeded.
+          // Skip the no-op write; a real weight move still goes through the one
+          // weight-write path and still inherits every refusal it carries.
+          const nextWeight = amount / nextAum;
+          if (Math.abs(nextWeight - weightForRef(ref)) > 1e-9) {
+            onSetWeight(ref, nextWeight);
+          }
+          el.value = String(displayed);
+          return;
+        }
+        // BOOK mode — unchanged. THE one weight-write path. `scenarioAum > 0`
+        // is still guaranteed here: the em-dash branch below relaxes only for
+        // `bottomUpAum`, and that path returned above — so on this line the
+        // guard is intact and no division by zero can reach handleWeightChange.
+        onSetWeight(ref, amount / scenarioAum);
+      } else {
+        // Fail-loud + keep the previous value, mirroring handleWeightChange's
+        // non-finite posture — never clamp to a number the allocator never
+        // typed.
+        console.warn(
+          "[ScenarioComposer] refused an invalid dollar allocation",
+          { ref, raw },
+        );
+        // Review [10] — and say so, for the same reason as the no-size arm.
+        onRefuseEdit(
+          "Invalid dollar allocation — enter a positive amount under $1,000,000,000,000. The previous value was kept.",
+        );
+
+      }
+    }
+    // Snap the text back to the DERIVED figure so the field can never display a
+    // number the draft does not hold. Correct in both branches: when the commit
+    // moves the derived dollar, the `key` remount replaces this with the fresh
+    // defaultValue; when it does not move, `displayed` IS the post-commit value.
+    el.value = String(displayed);
+  };
+
+  const renderDollarInput = (
+    ref: string,
+    labelText: string,
+    weightValue: number,
+    disabled: boolean,
+  ) => {
+    // AUM unset — an honest non-derivable state, the notionalText recipe: the
+    // em-dash, never a silently disabled input and never a fabricated $0. The
+    // title is duplicated into an sr-only span because a title alone is
+    // unreachable by keyboard/touch and is not announced by every screen reader
+    // (UI-SPEC §2). No division executes on this branch.
+    // Review [8] — the em-dash is the honest state ONLY when the dollar figure
+    // is genuinely non-derivable, i.e. in BOOK mode, where the portfolio's size
+    // is custody's answer and a row's dollars cannot exist before it.
+    //
+    // In BOTTOM-UP (blank) mode the causality is the other way round: the row's
+    // dollars are the INPUT and the portfolio's size is their sum, so a zero
+    // AUM is not "unset, come back later" — it is the empty portfolio the
+    // allocator is about to fill. Rendering the em-dash here made the bottom-up
+    // path unreachable from a fresh blank scenario (`liveHoldingsSum` is 0 by
+    // construction and nothing has been typed, so `scenarioAum` is 0 and EVERY
+    // row rendered the em-dash): the allocator had to seed a Portfolio AUM
+    // top-down first — exactly the flow UAT-1 replaced. `bottomUpAumFor` needs
+    // no non-zero AUM to work (the other rows contribute Σ w_j × 0 = 0, so the
+    // first amount typed simply becomes the portfolio), and every division
+    // below is by `nextAum`, never by this zero.
+    if (!Number.isFinite(scenarioAum) || (scenarioAum <= 0 && !bottomUpAum)) {
+      return (
+        <span
+          data-testid="scenario-constituent-usd-unset"
+          title={AUM_UNSET_REMEDY}
+          className="w-24 text-right font-mono text-xs text-text-muted"
+        >
+          —<span className="sr-only">{AUM_UNSET_REMEDY}</span>
+        </span>
+      );
+    }
+    // Display rounds to whole dollars (UI-SPEC); the rounded value is NEVER
+    // written back — the stored weight changes only on a user edit, so a
+    // re-render can never drift the draft.
+    const displayed = Math.round(weightValue * scenarioAum);
+    return (
+      <>
+        <label className="sr-only" htmlFor={`alloc-usd-${ref}`}>
+          {labelText} allocation (USD)
+        </label>
+        <input
+          // Re-key on the derived dollar: a weight or AUM change refreshes the
+          // field, while keystrokes between commits are left alone (the
+          // uncontrolled half of the composer's blur/Enter recipe — a controlled
+          // mirror would fight the user mid-type).
+          key={displayed}
+          id={`alloc-usd-${ref}`}
+          data-testid="scenario-constituent-dollar"
+          type="number"
+          min="0"
+          step="1"
+          inputMode="numeric"
+          defaultValue={String(displayed)}
+          disabled={disabled}
+          title="Allocation in dollars = weight × portfolio AUM. Commits on blur/Enter and back-computes the weight."
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              commitDollarInput(ref, e.target as HTMLInputElement, displayed);
+            }
+          }}
+          onBlur={(e) => {
+            commitDollarInput(ref, e.target, displayed);
+          }}
+          className="w-24 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
+        />
+      </>
+    );
   };
 
   // WEIGHTS-03/04 (Phase 113) — the shared Target-max-DD row surface. ONE
@@ -5415,7 +7312,8 @@ function CompositionList({
           here double-labels the same content. No top margin on the card either:
           the list is the sole child inside the collapsible's <details> body, so
           spacing comes from the summary's border + mb-4, not a sibling-era mt-8. */}
-      <ul className="grid gap-2" data-testid="scenario-constituent-list">
+      <ResponsiveTable label="Strategies and weights">
+      <ul className="grid gap-2 min-w-max" data-testid="scenario-constituent-list">
         {/* CONSTIT-01/02/03 — per-key exchange sources as uniform constituent
             rows, interleaved ABOVE the added strategies in the ONE list. Same row
             anatomy as an added row: an include/exclude toggle (the shared
@@ -5430,6 +7328,73 @@ function CompositionList({
             symbol/coin (Pitfall 3, CONSTIT-04 grep gate). A per-key source still
             has NO remove button (it is toggled, not removed). Per-coin holdings
             are NOT rendered — they live on the Holdings tab (CONSTIT-03). */}
+        {/* 151/152 UAT (founder, 2026-08-07) — the PER-KEY column-label strip.
+            This SUPERSEDES the 152 scope call that per-key rows "deliberately
+            get none": on the founder's deribit book the row read `0.000` and
+            `1` with nothing to say what either number was. Phase 152 declined a
+            SHARED header because the two row types have different column sets
+            (a per-key row has no dollar input and no remove button, so one strip
+            would drift ~104px); the answer is a SECOND variant sized to THIS
+            cluster — WEIGHT (w-20) · MODE (invisible-sizer) · LEV (w-16) ·
+            NOTIONAL (w-20), no USD column and no trailing × spacer.
+
+            Same recipe as `scenario-added-header` otherwise: the mono eyebrow,
+            the row's horizontal inset without a rule, and aria-hidden (every
+            control below already carries its own accessible name, so announcing
+            the strip would double-label the group).
+
+            Pitfall 3 carries over verbatim: the strip is sized for the DEFAULT
+            Leverage mode. A row switched to Target max-DD injects an extra w-16
+            drawdown sub-control and drifts the labels on THAT row only — do not
+            "fix" per-row; a conditional header would relabel columns as the user
+            toggles. */}
+        {perKeySources.length > 0 && (
+          <li
+            aria-hidden="true"
+            data-testid="scenario-perkey-header"
+            className="mb-1 border border-transparent px-3"
+          >
+            <div className="flex w-full items-center justify-between gap-3">
+              {/* Spacer over the name cluster — the labels describe the numeric
+                  columns only. */}
+              <span />
+              <div className="flex items-center gap-2 font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted">
+                <span
+                  data-testid="scenario-perkey-header-label"
+                  className="w-20 text-right"
+                >
+                  WEIGHT
+                </span>
+                {/* MODE has no fixed width — the toggle is content-sized. The
+                    invisible-sizer idiom reproduces the DEFAULT toggle's box
+                    byte-for-byte (renderModeToggle's border/padding/type classes
+                    around an invisible "Leverage") and overlays the label, so
+                    the column cannot drift from the live control. */}
+                <span className="relative shrink-0 rounded border border-transparent px-2 py-1 font-metric text-fixed-11 uppercase tracking-wider">
+                  <span className="invisible">Leverage</span>
+                  <span
+                    data-testid="scenario-perkey-header-label"
+                    className="absolute inset-0 flex items-center justify-center font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted"
+                  >
+                    MODE
+                  </span>
+                </span>
+                <span
+                  data-testid="scenario-perkey-header-label"
+                  className="w-16 text-right"
+                >
+                  LEV
+                </span>
+                <span
+                  data-testid="scenario-perkey-header-label"
+                  className="w-20 text-right"
+                >
+                  NOTIONAL
+                </span>
+              </div>
+            </div>
+          </li>
+        )}
         {perKeySources.map((k) => {
           const included = draft.toggleByScopeRef[k.id] !== false;
           const { exchange, nickname, maskedTail } = dataSourceLabel(k);
@@ -5536,14 +7501,14 @@ function CompositionList({
                   className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50 read-only:bg-surface-muted read-only:text-text-muted"
                 />
                 {/* WEIGHTS-00 notional — DERIVED read-only text (equity × L),
-                    never a weight input. Em-dash when non-derivable. */}
-                <span
-                  data-testid="scenario-constituent-notional"
-                  title="Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input"
-                  className="w-20 text-right font-mono text-xs text-text-muted"
-                >
-                  {notionalText(k.id)}
-                </span>
+                    never a weight input. Em-dash when non-derivable.
+                    Phase 152 review WR-06 — the per-key half of the list now
+                    explains its em-dash through the SAME renderer the added
+                    rows use, with ITS cause-accurate sentence (an excluded key
+                    reads "not in the blend", not "needs live book equity").
+                    Before this, SCEN-04's explanation stopped halfway down the
+                    list. */}
+                {renderNotional(k.id, labelText)}
               </div>
               </div>
               {renderSolveState(k.id)}
@@ -5551,9 +7516,88 @@ function CompositionList({
           );
         })}
         {draft.addedStrategies.length > 0 && (
-          <li className="mt-2 px-1 text-xs uppercase tracking-wider text-text-muted">
-            Strategies added · {draft.addedStrategies.length}
-          </li>
+          <>
+            <li className="mt-2 px-1 text-xs uppercase tracking-wider text-text-muted">
+              Strategies added · {draft.addedStrategies.length}
+            </li>
+            {/* Phase 152 SCEN-04 — the column-label strip. The founder's
+                verbatim complaint was "What do the numbers actually mean?": the
+                added row is five unlabelled numeric columns. ONE strip labels
+                the group it aligns with (152-UI-SPEC Contract 3) — per-key rows
+                deliberately get none, because post-151 they have neither a
+                dollar input nor a remove button and a shared header would drift
+                ~104px off their columns.
+
+                aria-hidden: presentational only. Every control below already
+                carries its own accessible name (sr-only <label> / aria-label),
+                so announcing the eyebrow strip would double-label the whole
+                group rather than add information.
+
+                Pitfall 3 (accepted limitation, UI-SPEC Contract 3): the strip is
+                sized for the DEFAULT Leverage mode. A row switched to Target
+                max-DD injects an extra w-16 drawdown sub-control and drifts the
+                labels on THAT row only — do not "fix" this per-row; a
+                conditional header would relabel columns as the user toggles. */}
+            <li
+              aria-hidden="true"
+              data-testid="scenario-added-header"
+              // Reproduces the row's horizontal inset (rows are `p-3 border`, so
+              // 12px padding + 1px border) without drawing a rule — vertical
+              // spacing comes from the ul's gap-2 plus mb-1.
+              className="mb-1 border border-transparent px-3"
+            >
+              <div className="flex w-full items-center justify-between gap-3">
+                {/* Spacer over the name cluster — the labels describe the
+                    numeric columns only. */}
+                <span />
+                <div className="flex items-center gap-2 font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted">
+                  <span
+                    data-testid="scenario-added-header-label"
+                    className="w-20 text-right"
+                  >
+                    WEIGHT
+                  </span>
+                  <span
+                    data-testid="scenario-added-header-label"
+                    className="w-24 text-right"
+                  >
+                    USD
+                  </span>
+                  {/* MODE has no fixed width — the toggle is content-sized. The
+                      invisible-sizer idiom reproduces the DEFAULT toggle's box
+                      byte-for-byte (renderModeToggle's border/padding/type
+                      classes around an invisible "Leverage") and overlays the
+                      label, so the column cannot drift from the live control. */}
+                  <span className="relative shrink-0 rounded border border-transparent px-2 py-1 font-metric text-fixed-11 uppercase tracking-wider">
+                    <span className="invisible">Leverage</span>
+                    <span
+                      data-testid="scenario-added-header-label"
+                      className="absolute inset-0 flex items-center justify-center font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted"
+                    >
+                      MODE
+                    </span>
+                  </span>
+                  <span
+                    data-testid="scenario-added-header-label"
+                    className="w-16 text-right"
+                  >
+                    LEV
+                  </span>
+                  <span
+                    data-testid="scenario-added-header-label"
+                    className="w-20 text-right"
+                  >
+                    NOTIONAL
+                  </span>
+                  {/* Trailing spacer sized like the remove (×) button so every
+                      label stays over its own column. */}
+                  <span className="invisible rounded-md border border-transparent px-2 py-1 text-xs">
+                    ×
+                  </span>
+                </div>
+              </div>
+            </li>
+          </>
         )}
         {draft.addedStrategies.map((a) => {
           const enabled = draft.toggleByScopeRef[a.id] !== false;
@@ -5571,24 +7615,76 @@ function CompositionList({
           const weight = mixedPerKeyBook
             ? (blendShareByRef[a.id] ?? draft.weightOverrides[a.id] ?? 0)
             : (draft.weightOverrides[a.id] ?? 0);
-          // Phase 58 COVERAGE-02 — three-state chip, derived (NOT re-computed)
-          // from the row's `enabled` (the `selected` axis) + the threaded
-          // `coverageEligible` map, exactly the two states the plan wires here:
-          //   enabled === false            → manually-excluded
-          //   enabled && coverageEligible  → in-blend
+          // Phase 58 COVERAGE-02 + Phase 147 SCEN-01 — the row's ONE chip,
+          // derived (NOT re-computed) from the row's `enabled` (the `selected`
+          // axis), the SERVER-derived `series_state`, and the threaded
+          // `coverageEligible` map. Precedence is locked by 147-UI-SPEC §2 and a
+          // row is never double-labelled:
+          //   enabled === false            → manually-excluded  (user intent is the
+          //                                  most recent + most explicit signal)
+          //   series_state "computing"     → syncing
+          //   series_state "empty"         → no-series
+          //   coverageEligible             → in-blend
+          // Series availability outranks coverage because a row with no series
+          // is not "outside the window" — it has nothing to place in a window.
           // The enabled-but-not-eligible (auto-excluded, amber) state is rendered
           // by its own group + Plan 02 — no chip here for it, so the main list
           // never mislabels an outside-window row as in-blend.
+          const seriesState = addedSeriesStateByRef[a.id] ?? "available";
           const chipState: CoverageState | null = !enabled
             ? "manually-excluded"
-            : coverageEligible[a.id]
-              ? "in-blend"
-              : null;
+            : seriesState === "computing"
+              ? "syncing"
+              : seriesState === "empty"
+                ? "no-series"
+                : coverageEligible[a.id]
+                  ? "in-blend"
+                  : null;
+          // Phase 152 SCEN-03 — the row's in-memory metrics + whether BOTH are
+          // missing (the only state that earns the absence NOTE; a single miss
+          // is an em-dash beside its live sibling).
+          const metrics = addedMetricsByRef[a.id] ?? {
+            cagr: null,
+            sharpe: null,
+            state: "pending" as AddedMetricsState,
+          };
+          const metricsAbsent = metrics.cagr == null && metrics.sharpe == null;
+          // Phase 162 HONEST-05 (UI-SPEC C-4) — the note is a CLAIM about this
+          // strategy ("it has no computed metrics"), so it may only render once
+          // the answer is in, and only when the answer came from a request that
+          // actually REACHED the strategy. All three states render the same two
+          // em-dashes — the honest render of "unknown" — and differ only in what
+          // they are entitled to say underneath:
+          //   pending      → nothing (the claim must not flash on every add)
+          //   settled      → the strategy has no computed metrics
+          //   unavailable  → we could not load them (says nothing about the
+          //                  strategy: the fetch never observed it)
+          const metricsAbsentSettled =
+            metricsAbsent && metrics.state === "settled";
+          // Gated on `metricsAbsent` too, so this note can never appear beside a
+          // live figure. It cannot today — an "unavailable" entry carries no
+          // pair — but the note's wording ("could not load metrics") would be
+          // false next to one, and a render guard is cheaper than the assumption.
+          const metricsUnavailable =
+            metricsAbsent && metrics.state === "unavailable";
+          const detailOpen = expandedAddedId === a.id;
           return (
             <li
               key={a.id}
               data-scope-ref={a.id}
               data-testid="scenario-constituent-added"
+              data-series-state={seriesState}
+              // Phase 152 SCEN-03 — POINTER AMPLIFICATION (152-UI-SPEC Contract
+              // 2). The keyboard-reachable affordance is the strategy-name
+              // BUTTON below; this handler only widens the pointer target to the
+              // whole row. Deliberately NO role="button"/tabIndex on the li —
+              // that would nest the toggle, five inputs and the remove button
+              // inside an interactive role (an a11y violation), which is exactly
+              // why HoldingsTable's `<tr onClick>` idiom is NOT mirrored here.
+              // Every interactive descendant stops propagation (three sites:
+              // the name button, the include/exclude switch, and the
+              // control-cluster wrapper) so a click on a control never toggles.
+              onClick={() => toggleAddedDetail(a.id)}
               className={`flex flex-col gap-2 rounded-md border border-border p-3 ${
                 enabled ? "" : "opacity-50 line-through"
               }`}
@@ -5600,7 +7696,14 @@ function CompositionList({
                   role="switch"
                   aria-checked={enabled}
                   aria-label={`Toggle ${a.name} on/off in scenario`}
-                  onClick={() => onToggle(a.id)}
+                  // Phase 152 SCEN-03 (checker B-2) — the include/exclude switch
+                  // is an EXCLUDED control, but it lives in this LEFT cluster,
+                  // outside the control-cluster stopPropagation wrapper below.
+                  // Without its own stop, excluding a row would also expand it.
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggle(a.id);
+                  }}
                   className={`flex h-5 w-9 items-center rounded-full transition-colors ${
                     enabled ? "bg-accent" : "bg-border"
                   }`}
@@ -5612,18 +7715,82 @@ function CompositionList({
                     }`}
                   />
                 </button>
-                <span className="text-sm text-text-primary">{a.name}</span>
+                {/* Phase 152 SCEN-03 — the name is the DETAIL AFFORDANCE. A real
+                    <button> (not a div with role/tabIndex) so Enter and Space
+                    activate it natively and the expanded/collapsed state is
+                    announced through aria-expanded + aria-controls. */}
+                <button
+                  type="button"
+                  aria-expanded={detailOpen}
+                  aria-controls={`scenario-detail-${a.id}`}
+                  onClick={(e) => {
+                    // stopPropagation FIRST (checker B-1). This button sits in
+                    // the row's LEFT cluster, OUTSIDE the control-cluster
+                    // wrapper, so its click bubbles to the li's pointer
+                    // amplification handler — which runs the SAME functional
+                    // toggle. Without this line one click toggles twice and nets
+                    // to a no-op: the panel would never open by pointer OR by
+                    // keyboard, since a native button dispatches click for
+                    // Enter/Space. Stopping here (rather than gating the li
+                    // handler on event.target) keeps the li handler a one-liner
+                    // with no DOM introspection to drift.
+                    e.stopPropagation();
+                    toggleAddedDetail(a.id);
+                  }}
+                  className="truncate text-left text-sm text-text-primary transition-colors hover:text-accent"
+                >
+                  {a.name}
+                </button>
                 {/* CONSTIT-02 — per-row provenance badge (api_verified / csv /
                     self_reported / composite). Null → no badge (honest absence). */}
                 <TrustTierLabel
                   trustTier={addedProvenanceByRef[a.id] ?? null}
                   className="shrink-0"
                 />
+                {/* Phase 152 SCEN-02 — ownership is a persistent FACT, so it
+                    wears the rounded-md badge family (the uppercase rounded-sm
+                    family next to it is DERIVED state that changes on its own;
+                    ownership never does). Placed after provenance and before
+                    coverage: identity facts first, derived state last.
+
+                    The gate is `=== true`, never `!== false` and never bare
+                    truthiness. `false`, `null` and an ABSENT key are three
+                    different wire shapes — a legacy persisted draft written
+                    before 152-02 declared the field carries no `isOwn` at all,
+                    and a `!== false` gate would decorate every one of those
+                    rows with a claim the wire never made. Absence is honest;
+                    such rows go un-marked until the strategy is added again
+                    from Browse, whose dedupe branch backfills the bit
+                    (scenario-state.ts `addStrategyBrowse`). Review WR-01: that
+                    branch used to return the draft untouched, so this sentence
+                    named a refresh path that did not exist and a pre-152 draft
+                    stayed chip-less permanently. An ABSENT bit on the incoming
+                    payload still backfills nothing (CONTEXT lock: never
+                    fabricate ownership).
+
+                    Same YoursChip component the browse drawer renders (152-04)
+                    — one recipe, so the two surfaces cannot drift. */}
+                {a.isOwn === true && (
+                  <YoursChip
+                    data-testid={`scenario-yours-${a.id}`}
+                    className="shrink-0"
+                  />
+                )}
                 {chipState && (
                   <CoverageStateChip state={chipState} className="shrink-0" />
                 )}
               </div>
-              <div className="flex items-center gap-2">
+              {/* Phase 152 SCEN-03 — the ONE stopPropagation wrapper over the
+                  control cluster (152-UI-SPEC Contract 2): weight input, dollar
+                  input, mode toggle, target input, leverage input and the remove
+                  button all sit inside it, so editing a number never expands the
+                  row. Deliberately one wrapper rather than six per-control
+                  handlers — a per-control list is a set someone forgets to
+                  extend when a seventh control lands. */}
+              <div
+                className="flex items-center gap-2"
+                onClick={(e) => e.stopPropagation()}
+              >
                 <label className="sr-only" htmlFor={`weight-${a.id}`}>
                   {a.name} weight
                 </label>
@@ -5638,6 +7805,10 @@ function CompositionList({
                   onChange={(e) => onSetWeight(a.id, Number(e.target.value))}
                   className="w-20 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
                 />
+                {/* AUM-01 — the same weight, expressed in dollars. Routes back
+                    through onSetWeight (handleWeightChange), so every guard is
+                    inherited; em-dash when AUM is unset. */}
+                {renderDollarInput(a.id, a.name, weight, !enabled)}
                 {/* WEIGHTS-03 — per-row mode toggle + (Target mode) drawdown
                     input; the leverage input below goes READ-ONLY in Target mode
                     (never disabled — the derived L stays visible). */}
@@ -5662,14 +7833,12 @@ function CompositionList({
                   className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50 read-only:bg-surface-muted read-only:text-text-muted"
                 />
                 {/* WEIGHTS-00 notional — DERIVED read-only text (equity × L),
-                    never a weight input. Em-dash when non-derivable. */}
-                <span
-                  data-testid="scenario-constituent-notional"
-                  title="Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input"
-                  className="w-20 text-right font-mono text-xs text-text-muted"
-                >
-                  {notionalText(a.id)}
-                </span>
+                    never a weight input. Em-dash when non-derivable.
+                    Phase 152 SCEN-04 — the em-dash branch explains itself: the
+                    title names the ACTUAL cause (review CR-01: one sentence per
+                    cause, not one sentence for all three) and is duplicated into
+                    an sr-only span. Same renderer as the per-key rows above. */}
+                {renderNotional(a.id, a.name)}
                 <button
                   type="button"
                   aria-label="Remove from scenario"
@@ -5680,11 +7849,236 @@ function CompositionList({
                 </button>
               </div>
               </div>
+              {/* Phase 152 SCEN-03 — the inline detail panel. Mounted INSIDE the
+                  row li, directly below the main row line, behind an interior
+                  hairline (152-UI-SPEC Contract 2's host anatomy: the li already
+                  supplies bg-surface + p-3, so the panel adds only the rule and
+                  its own top padding — a data panel, not a nested card).
+
+                  Everything it shows is ALREADY IN MEMORY. CONTEXT locks NO new
+                  fetches this phase, which is why there is no loading state and
+                  no error state here: by construction there is nothing to load
+                  and nothing that can fail. Absence is rendered honestly instead
+                  — an em-dash per field, or the metrics note when BOTH figures
+                  are missing.
+
+                  Its own stopPropagation is a deliberate addition beyond
+                  UI-SPEC's enumerated exclusions: the panel is new DOM inside a
+                  clickable li, and a panel that collapses when you click its own
+                  content (selecting a figure to copy, say) defeats its purpose.
+                  The factsheet link inside it stays clickable — stopping
+                  propagation does not prevent the default navigation. */}
+              {detailOpen && (
+                <div
+                  id={`scenario-detail-${a.id}`}
+                  data-testid={`scenario-detail-${a.id}`}
+                  className="mt-2 border-t border-border pt-3"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className={DETAIL_EYEBROW}>PROVENANCE</span>
+                      <span
+                        data-testid={`scenario-detail-provenance-${a.id}`}
+                        className="inline-flex items-center text-xs text-text-muted"
+                      >
+                        {/* TrustTierLabel renders NOTHING for a null tier, so a
+                            bare mount would leave a labelled empty space — which
+                            reads as a rendering bug, not as absence. The panel
+                            writes the em-dash itself. */}
+                        {addedProvenanceByRef[a.id] != null ? (
+                          <TrustTierLabel
+                            trustTier={addedProvenanceByRef[a.id]}
+                            className="shrink-0"
+                          />
+                        ) : (
+                          "—"
+                        )}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={DETAIL_EYEBROW}>MARKETS</span>
+                      <span
+                        data-testid={`scenario-detail-markets-${a.id}`}
+                        className="text-xs text-text-primary"
+                      >
+                        {a.markets.length > 0 ? a.markets.join(" · ") : "—"}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={DETAIL_EYEBROW}>TYPES</span>
+                      <span
+                        data-testid={`scenario-detail-types-${a.id}`}
+                        className="text-xs text-text-primary"
+                      >
+                        {a.strategy_types.length > 0
+                          ? a.strategy_types.join(" · ")
+                          : "—"}
+                      </span>
+                    </div>
+                    {/* Phase 162 / HONEST-05 (UI-SPEC C-4) — the metric pair
+                        renders ALWAYS, in every one of C-4's five states. Both
+                        formatters return "—" for null, so a half-known row shows
+                        its live figure beside a dash and a wholly-unknown row
+                        shows two dashes — never a fabricated 0.00, and never an
+                        inline toFixed.
+
+                        It used to be hidden entirely when both were null, which
+                        was defensible only while that state was permanent and
+                        the note was the whole answer. Now the pair fills in
+                        after a lazy fetch, so the eyebrows have to be there
+                        BEFORE it settles or the panel would visibly reflow the
+                        moment the answer arrived — and, worse, the pre-settle
+                        row would render no metric affordance at all while
+                        claiming nothing, leaving the user unable to tell "still
+                        loading" from "nothing to show". Two dashes say
+                        "unknown", which is the true statement in both. */}
+                    {(
+                      <>
+                        <div className="flex items-center gap-2">
+                          <span className={DETAIL_EYEBROW}>CAGR</span>
+                          <span
+                            data-testid={`scenario-detail-cagr-${a.id}`}
+                            // C-4 / Numbers Contract: a real magnitude reads in
+                            // primary ink (sign-only colour rule — never green
+                            // for positive); an em-dash is muted, because a
+                            // missing value must not compete with a present one.
+                            className={`font-mono text-xs tabular-nums ${
+                              metrics.cagr == null
+                                ? "text-text-muted"
+                                : "text-text-primary"
+                            }`}
+                          >
+                            {formatPercent(metrics.cagr, 1)}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className={DETAIL_EYEBROW}>SHARPE</span>
+                          <span
+                            data-testid={`scenario-detail-sharpe-${a.id}`}
+                            className={`font-mono text-xs tabular-nums ${
+                              metrics.sharpe == null
+                                ? "text-text-muted"
+                                : "text-text-primary"
+                            }`}
+                          >
+                            {formatNumber(metrics.sharpe, 2)}
+                          </span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  {/* BOTH missing AND settled → one sentence that names the
+                      remedy, instead of two dashes that name nothing.
+
+                      Phase 162 / HONEST-05 — the copy CHANGED, because the old
+                      copy stopped being true here. It read "Metrics not
+                      available in the composer" and its comment called this the
+                      panel's PERMANENT metrics statement: at the time, a
+                      drawer-added leg's pair really was structurally
+                      unreachable — `addedStrategyMetadataLookup` sourced
+                      cagr/sharpe from the BOOK payload alone and the lazy
+                      /api/strategies/[id]/returns route did not serve them.
+                      This phase widened that route to co-serve the pair from
+                      the same row, so a drawer-added leg with computed
+                      analytics now renders real figures. A note still claiming
+                      the composer cannot show metrics would be a lie sitting
+                      next to the fix.
+
+                      What remains true is narrower and belongs to the STRATEGY,
+                      not the surface: this row has no computed metrics (no
+                      analytics row, or a run that did not finish — the route
+                      withholds those under isRankableAnalyticsRow). The
+                      factsheet remedy is real and always resolves (OWN-02).
+
+                      Gated on `metricsAbsentSettled`, never bare
+                      `metricsAbsent`: an in-flight fetch has the same two nulls
+                      and must not be described, and NEITHER may a failed one —
+                      see the sibling note below (C-4). */}
+                  {metricsAbsentSettled && (
+                    <p className="mt-2 text-xs text-text-muted">
+                      No computed metrics for this strategy — open the factsheet
+                      for detail.
+                    </p>
+                  )}
+                  {/* The SEAM-fault note (Phase 162 silent-failure audit).
+
+                      Same slot, same muted treatment, same single-note
+                      discipline — and deliberately a DIFFERENT sentence,
+                      because the sentence above is a claim about the strategy
+                      and this row has no standing to make it. What reached here
+                      is a non-ok response (our own route returns 500 from its
+                      select-error arm), a network throw, or a malformed body:
+                      the app failed to ASK, and never observed the strategy at
+                      all.
+
+                      This is the fix for a measured falsehood, not a
+                      hypothetical: with PostgREST wedged — a recurring failure
+                      mode on this stack — an allocator dragging in three
+                      strategies was told all three have no computed metrics,
+                      then found full CAGR and Sharpe on each factsheet one
+                      click away. We told them something false about someone
+                      else's track record, on a money surface.
+
+                      So the copy attributes NOTHING: no cause, no claim about
+                      the strategy's analytics, and no invitation to conclude
+                      anything from the em-dashes. "Right now" is the only
+                      inference offered, and it is the one that is true — the
+                      remove + re-add retry (WR-01) really does re-fire the
+                      fetch. No red: a failure to load is still absence, and
+                      absence is not an error (DESIGN.md gates). */}
+                  {metricsUnavailable && (
+                    <p className="mt-2 text-xs text-text-muted">
+                      We could not load metrics for this strategy right now.
+                    </p>
+                  )}
+                  {/* The panel's single action and its only accent element
+                      (152-UI-SPEC Contract 2: the link is the focal point,
+                      everything above it is context leading to it). Access
+                      control lives server-side in the factsheet's own two-lane
+                      selection — this is an href for an id the viewer's draft
+                      already contains, never a disclosure. */}
+                  <Link
+                    href={`/factsheet/${a.id}`}
+                    className="mt-3 inline-block text-sm text-accent transition-colors hover:text-accent-hover"
+                  >
+                    View factsheet →
+                  </Link>
+                </div>
+              )}
+              {/* Phase 147 / SCEN-01 — the excluded-from-blend note, keyed off
+                  the SAME chipState as the chip so a row carries exactly one
+                  signal (a manually-excluded row says "Excluded" and stops —
+                  the note would be a second, competing explanation).
+                  Chip-then-note reads as a complete sentence: what the state is,
+                  then what it means for the blend. The syncing note carries a
+                  polite live region because it resolves on its own without any
+                  user action (DESIGN-05); the terminal note does NOT — an idle
+                  live region on every no-series row is announcement spam. */}
+              {chipState === "syncing" && (
+                <p
+                  role="status"
+                  aria-live="polite"
+                  data-testid="scenario-series-state-note"
+                  className="text-fixed-11 font-medium text-warning"
+                >
+                  First metrics arrive in ~10–15 min — not in the blend yet
+                </p>
+              )}
+              {chipState === "no-series" && (
+                <p
+                  data-testid="scenario-series-state-note"
+                  className="text-fixed-11 font-medium text-text-muted"
+                >
+                  No return series available — not in the blend
+                </p>
+              )}
               {renderSolveState(a.id)}
             </li>
           );
         })}
       </ul>
+      </ResponsiveTable>
       {/* WEIGHTS-00 honesty caveat (A1 locked) — leverage scales return, vol and
           max drawdown but the risk-adjusted ratios and correlation are
           leverage-INVARIANT (no borrow cost modeled). Mirrors the

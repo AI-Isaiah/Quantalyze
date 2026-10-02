@@ -44,7 +44,7 @@
  * contract is at least PINNED for next CI cycle).
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { createClient } from "@supabase/supabase-js";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 import { cleanupTestAllocator } from "./helpers/cleanup-test-project";

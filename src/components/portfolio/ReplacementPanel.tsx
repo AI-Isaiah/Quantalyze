@@ -3,6 +3,17 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import type { BridgeCandidate } from "@/lib/types";
 import { ReplacementCard } from "./ReplacementCard";
+import { RouteResponseError } from "@/lib/route-response-error";
+
+/**
+ * The one sentence shown when the failure did NOT come from a route response —
+ * a rejected fetch, or a 2xx whose `candidates` field is not an array.
+ * DESIGN.md §Voice: declarative, sentence-case, active voice. It names the
+ * actual affordance: this panel has no retry button, and its only refetch
+ * trigger is a fresh mount, so re-opening it IS the retry.
+ */
+const CANDIDATES_UNAVAILABLE_COPY =
+  "We could not load replacement candidates. Close this panel and open it again to retry.";
 
 interface ReplacementPanelProps {
   portfolioId: string;
@@ -49,12 +60,33 @@ export function ReplacementPanel({
 
         if (!res.ok) {
           const body = await res.json().catch(() => ({ error: "Bridge request failed" }));
-          throw new Error(body.error ?? `HTTP ${res.status}`);
+          // The route's `error` field is reviewed copy — on a breaker trip it
+          // IS the single-source sentence from src/lib/seam-copy.ts. Marking it
+          // route-authored is what lets the catch below refuse to render
+          // everything else without deleting the breaker surface.
+          throw new RouteResponseError(body.error ?? `HTTP ${res.status}`);
         }
 
         const data = await res.json();
+        // 140.3-07 / B-28 — `data.candidates ?? []` turned a MALFORMED body
+        // into an empty-but-successful panel: the user read "No replacement
+        // candidates found that would improve this portfolio" as a claim about
+        // their portfolio when it was really a claim about our parse. Same
+        // shape as the untrusted-network-read guard at
+        // `allocations/widgets/outcomes/OutcomesWidget.tsx` (`!Array.isArray(
+        // data?.original)`), copied rather than re-invented. Note `?? []` also
+        // admitted a non-array truthy value straight into `.map()`.
+        if (!Array.isArray(data?.candidates)) {
+          console.error("[bridge.fetch] malformed candidates payload", {
+            portfolioId,
+            strategyId,
+            received: typeof data?.candidates,
+          });
+          if (!controller.signal.aborted) setError(CANDIDATES_UNAVAILABLE_COPY);
+          return;
+        }
         if (!controller.signal.aborted) {
-          setCandidates(data.candidates ?? []);
+          setCandidates(data.candidates);
         }
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
@@ -68,7 +100,16 @@ export function ReplacementPanel({
             strategyId,
             err,
           });
-          setError(err instanceof Error ? err.message : "Failed to load candidates");
+          // 140.3-07 / B-27 member 3 — only a message built from the route
+          // RESPONSE is rendered. A rejected fetch arrives as a TypeError whose
+          // message can embed an internal host; res.json() on a proxy's HTML
+          // error page arrives as a SyntaxError. Neither is copy. The caught
+          // value still reaches the console breadcrumb logged just above.
+          setError(
+            err instanceof RouteResponseError
+              ? err.message
+              : CANDIDATES_UNAVAILABLE_COPY,
+          );
         }
       }
     }

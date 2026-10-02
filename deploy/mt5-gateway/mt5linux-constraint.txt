@@ -1,0 +1,27 @@
+# pip constraint file for the gmag11/metatrader5_vnc gateway image.
+#
+# Copy this to the gateway's persistent volume at /config/mt5linux-constraint.txt
+# and set the gateway env var PIP_CONSTRAINT=/config/mt5linux-constraint.txt so the
+# image's start.sh honours these pins on every boot (both the Wine and Linux pip
+# installs it runs). WITHOUT these three pins the RPyC bridge accepts a TCP connection
+# and logs "server started on :8001" but is functionally DEAD — see the three failure
+# modes below. (Discovered 2026-07-25; a bare TCP-connect / LISTEN check is false-green.)
+#
+# 1. mt5linux: 0.1.10+ regressed to Popen(..., shell=True) for the mkdir + wine launch,
+#    which on POSIX runs bare `mkdir`/`wine` with the real args in $0/$1 → server.py is
+#    never created. 0.1.9 is the clean pre-regression version the image README documents.
+#    Also: 1.x dropped the `-w` interface start.sh depends on.
+mt5linux==0.1.9
+# 2. rpyc: mt5linux 0.1.9 requires exactly this, and the client (worker + gateway-Linux)
+#    MUST speak the same 5.x protocol as the Wine server. rpyc 6.x is NOT wire-compatible
+#    with 5.x → `ValueError: invalid message type: 18` on the handshake. Pin <6, always.
+#    NOTE: an already-provisioned gateway may still be running rpyc 5.2.3 on the Wine
+#    side (start.sh skips the MetaTrader5/mt5linux reinstall when present, so this pin
+#    only governs a FRESH install). 5.0.1 and 5.2.3 are verified cross-compatible on the
+#    wire — any 5.x on both ends is fine; the worker (requirements.in) pins 5.2.3.
+rpyc==5.0.1
+# 3. numpy: MetaTrader5==5.0.36's compiled `_core` is built against the numpy 1.x C-ABI,
+#    but MetaTrader5 declares only `numpy>=1.7` (unbounded) so pip pulls 2.x →
+#    `ImportError: numpy.core.multiarray failed to import` the moment the client calls
+#    initialize(). Must stay <2 (1.26.4 has a cp39 win32 wheel for the Wine python).
+numpy<2

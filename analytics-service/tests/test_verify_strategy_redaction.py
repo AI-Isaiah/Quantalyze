@@ -55,7 +55,23 @@ def _real_portfolio_module():
     # itself be a CI signal, not a silent skip).
     importlib.import_module("fastapi")
     importlib.import_module("slowapi")
-    return importlib.import_module("routers.portfolio")
+    mod = importlib.import_module("routers.portfolio")
+
+    # PYAPI-03: routers.portfolio now shares ONE Limiter — and therefore ONE
+    # `memory://` store — with the rest of the process, instead of minting a
+    # fresh private Limiter (and a fresh, empty store) on every reload. This
+    # file drives `verify_strategy` with a REAL Starlette Request, so the real
+    # 5/hour limit now applies and its counter SURVIVES across test modules:
+    # unreset, the 6th `/api/verify-strategy` request in a pytest session raises
+    # `RateLimitExceeded: 429: 5 per 1 hour` before reaching the handler under
+    # test. Reset per call, exactly as `test_simulator_router.py`'s `client`
+    # fixture already does for the same singleton. Guarded getattr because a
+    # sibling module may have swapped in a no-op shim, which enforces nothing
+    # and has nothing to reset.
+    _reset = getattr(mod.limiter, "reset", None)
+    if callable(_reset):
+        _reset()
+    return mod
 
 
 class TestVerifyStrategyOuterHandlerRedaction:

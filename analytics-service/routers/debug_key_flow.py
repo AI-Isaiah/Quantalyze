@@ -58,7 +58,13 @@ def _verify_internal_token(token: str | None) -> None:
         raise HTTPException(status_code=401, detail="Invalid internal token")
 
 
-Broker = Literal["okx", "binance", "bybit", "deribit", "sfox"]
+# Phase 135 (MT5SRC-01): 'mt5' widened for key-save boundary type-consistency,
+# mirroring how 'sfox' was admitted here. This is a pure Literal-membership edit;
+# like sfox, mt5 is non-ccxt and has no create_exchange path — this debug harness
+# is testnet-only and its endpoints route brokers through create_exchange, so a
+# real mt5 exercise here would 503 on absent DEBUG_KEY_FLOW_MT5_* creds. No
+# downstream ccxt guard exists for sfox, so none is added for mt5.
+Broker = Literal["okx", "binance", "bybit", "deribit", "sfox", "mt5"]
 
 
 def _maybe_enable_sandbox(exchange: ccxt.Exchange) -> None:
@@ -128,11 +134,15 @@ async def validate_key(
         )
         _maybe_enable_sandbox(exchange)
         result = await validate_key_permissions(exchange)
+        # Phase 167.1.2 IN-01: the venue account id is an account identifier
+        # and leaves the service only as the real validate response's
+        # `venue_account_id` (services/account_identity.py). Never here.
+        public_result = {k: v for k, v in result.items() if k != "account_id"}
         return StepResponse(
             step="validate_key",
             status="ok" if result.get("valid") else "error",
             duration_ms=int((time.monotonic() - t0) * 1000),
-            detail={"broker": body.broker, **result},
+            detail={"broker": body.broker, **public_result},
             error=None if result.get("valid") else {
                 "code": result.get("error_code") or "VALIDATION_FAILED",
                 "human_message": result.get("error") or "validate_key_permissions returned valid=False",

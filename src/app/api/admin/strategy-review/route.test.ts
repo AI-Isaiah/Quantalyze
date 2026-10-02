@@ -63,16 +63,63 @@ vi.mock("@/lib/email", () => ({
   notifyManagerApproved: async () => undefined,
 }));
 
-vi.mock("@/lib/strategyGate", () => ({
-  checkStrategyGate: () => ({ passed: true }),
-  // Real impl (exchange === "deribit") — the venue-aware re-check predicate
-  // depends on it, and the mockAdminClient `api_keys` route supplies the
-  // exchange, so mocking it faithfully keeps the ledger-vs-perp branch honest.
-  isLedgerBackedExchange: (exchange: string | null | undefined) =>
-    exchange === "deribit",
-  STRATEGY_GATE_MIN_TRADES: 5,
-  STRATEGY_GATE_MIN_CSV_ROWS: 7,
-}));
+/**
+ * The suite's standard gate stub: passes every input, so the tests below
+ * isolate the ROUTE's own reads and re-check logic. Factored out because two
+ * C-3 cases install a THROWING doMock and `vi.doMock` persists for the rest of
+ * the file — the TOCTOU beforeEach re-asserts this one before every test so no
+ * case can inherit a previous case's gate.
+ */
+/**
+ * C-3 gate behaviour switch — the ONE knob the two gate-refusal cases turn.
+ *
+ * Why this exists instead of a second `vi.doMock("@/lib/strategyGate", ...)`:
+ * a second `doMock` for a path that `beforeEach` has ALREADY doMocked does not
+ * reliably override at import time (this file's own §G9 docblock says so). When
+ * it silently lost, the throwing factory never took, the standard pass:true stub
+ * ran, and the route legitimately answered 200 — reddening
+ * "StrategyGateUnevaluableError -> 503" with `expected 200 to be 503` on
+ * whichever CI shard happened to lose the race, while passing in isolation and
+ * on the other shard. The assertion was sound; the harness under it was not.
+ *
+ * `gateThrow` is read INSIDE the stub at call time, so there is exactly one
+ * registered factory for the path and nothing to race. `beforeEach` clears it,
+ * so no case can inherit the previous case's throw.
+ *
+ * Declared `var` deliberately: `vi.mock` is hoisted, and `var` hoists to
+ * `undefined` (falsy) rather than a TDZ ReferenceError if the factory is ever
+ * evaluated earlier than expected.
+ */
+// eslint-disable-next-line no-var
+var gateThrow: (() => never) | null = null;
+
+async function stubbedGateModule() {
+  const actual =
+    await vi.importActual<typeof import("@/lib/strategyGate")>(
+      "@/lib/strategyGate",
+    );
+  return {
+    checkStrategyGate: () => {
+      if (gateThrow) gateThrow();
+      return { passed: true };
+    },
+    // THE REAL IMPLEMENTATION, deliberately (SC-4). The TOCTOU re-check is the
+    // subject of this suite's daily-returns cases, and it now CALLS this export
+    // rather than restating it inline. Stubbing it would make every re-check
+    // branch assertion below a test of the stub. `checkStrategyGate` above is
+    // still stubbed — the first-pass gate is covered elsewhere and is isolated
+    // here on purpose — but the shared predicate must be genuine.
+    isDailyReturnsSourced: actual.isDailyReturnsSourced,
+    STRATEGY_GATE_MIN_TRADES: 5,
+    STRATEGY_GATE_MIN_CSV_ROWS: 7,
+    // C-3: the route narrows its gate-refusal catch with `instanceof`, so this
+    // must be the REAL class — a stub would make the narrowing vacuously false
+    // and the arm untestable.
+    StrategyGateUnevaluableError: actual.StrategyGateUnevaluableError,
+  };
+}
+
+vi.mock("@/lib/strategyGate", () => stubbedGateModule());
 
 import { runAdminPostCsrfRateLimitSuite } from "@/__tests__/helpers/adminPostCsrfRateLimit";
 
@@ -109,6 +156,17 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     // explicit doUnmock, every test below would 429 before reaching the
     // gate logic we want to exercise.
     vi.doUnmock("@/lib/ratelimit");
+    // Re-assert the standard gate stub: the two C-3 gate-refusal cases used to
+    // install a THROWING doMock, and vi.doMock persists for the remainder of the
+    // file. Without this, the next test in declaration order inherited the throw
+    // — observed, not hypothetical (it reddened SC-4 on the first run).
+    //
+    // Those two cases now flip `gateThrow` instead (see its docblock), so the
+    // reset below is what actually clears them; the doMock re-assert stays
+    // because the CSRF/rate-limit suite above registers its own factories and
+    // this keeps ONE known-good factory on the path.
+    gateThrow = null;
+    vi.doMock("@/lib/strategyGate", () => stubbedGateModule());
     vi.resetModules();
   });
 
@@ -130,13 +188,17 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     recheckApiKeyId?: string | null;
     /** count returned by the re-check csv_daily_returns query (CSV path). */
     recheckCsvCount?: number;
-    /** exchange returned by the first-pass api_keys lookup (P72 venue gate).
-     *  Default "okx" (fill-based). Set "deribit" to exercise the keyed
-     *  ledger-backed daily-returns branch. Inert when recheckApiKeyId is null. */
-    mockKeyExchange?: string | null;
-    /** when true, the first-pass api_keys exchange lookup returns an error, so
-     *  the route must fail loud (503) rather than coercing isLedgerBacked=false. */
-    mockKeyExchangeError?: boolean;
+    /**
+     * `strategy_analytics.series_completeness` returned by BOTH the first-pass
+     * and the re-check analytics reads (MT5-11/12). This is what decides the
+     * daily-returns branch now — the api_keys venue lookup it replaced is gone
+     * from the route entirely.
+     *
+     * Default `null` — a row no producer has stamped, which is the honest
+     * default and the fail-CLOSED one. A test that wants the daily-returns
+     * branch must say which verdict earns it.
+     */
+    mockSeriesCompleteness?: string | null;
     /**
      * PUB-01 (Phase 87) — number of strategy_keys members. Default 0 (single-key
      * / CSV: SC-4 byte-unchanged path). When >= 1 the route's defense-in-depth
@@ -160,10 +222,43 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     strategyKeysCountError?: boolean;
     /** when true, the compute_jobs stitch-job lookup errors → fail-loud 503. */
     stitchJobLookupError?: boolean;
+    // --- C-3 (140.4-01): read-failure toggles for the SEVEN first-pass /
+    //     re-check reads that participate in the approve decision and had no
+    //     `error` binding. Each must answer 503 about US with NO publish write. ---
+    /** first-pass `strategies` lookup returns a read error. */
+    strategyReadError?: boolean;
+    /** first-pass `trades` head count returns a read error. */
+    tradeCountError?: boolean;
+    /** first-pass `trades` head count returns count:null with NO error. */
+    tradeCountNull?: boolean;
+    /** earliest-trade probe (order ascending) returns a read error. */
+    earliestTradeError?: boolean;
+    /** latest-trade probe (order descending) returns a read error. */
+    latestTradeError?: boolean;
+    /** first-pass `strategy_analytics` read returns a read error. */
+    analyticsReadError?: boolean;
+    /** TOCTOU re-check `trades` head count returns a read error. */
+    recheckTradeCountError?: boolean;
+    /** TOCTOU re-check `trades` head count returns count:null with NO error. */
+    recheckTradeCountNull?: boolean;
+    /** TOCTOU re-check `strategy_analytics` read returns a read error. */
+    recheckAnalyticsError?: boolean;
   };
 
-  /** Tracks whether the route issued the compute_jobs read (SC-4 assertion). */
-  type RecheckTracker = { computeJobsQueried: boolean };
+  /**
+   * Tracks whether the route issued the compute_jobs read (SC-4 assertion) and
+   * whether it issued the `strategies` UPDATE at all. The UPDATE tracker is the
+   * load-bearing half of every 503 case below: a status-only assertion cannot
+   * distinguish "refused before writing" from "wrote, then answered 503".
+   * `tradesHeadCalls` / `analyticsReads` order-discriminate the first-pass read
+   * from its TOCTOU re-check twin (the route issues them in that order).
+   */
+  type RecheckTracker = {
+    computeJobsQueried: boolean;
+    publishUpdateIssued: boolean;
+    tradesHeadCalls: number;
+    analyticsReads: number;
+  };
 
   /**
    * Install an admin-client mock that routes from('trades') and
@@ -172,7 +267,13 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
    * returns `updateAffected` to simulate row-match / no-match.
    */
   function mockAdminClient(opts: RecheckMock): RecheckTracker {
-    const tracker: RecheckTracker = { computeJobsQueried: false };
+    const tracker: RecheckTracker = {
+      computeJobsQueried: false,
+      publishUpdateIssued: false,
+      tradesHeadCalls: 0,
+      analyticsReads: 0,
+    };
+    const READ_ERROR = { message: "boom" };
     vi.doMock("@/lib/supabase/admin", () => ({
       createAdminClient: () => ({
         from: (table: string) => {
@@ -230,7 +331,26 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
               ) => ({
                 eq: () => {
                   if (meta?.head) {
-                    // count probe (used by both first-pass and re-check)
+                    // count probe. The route issues the first-pass count
+                    // before the TOCTOU re-check count, so call order
+                    // discriminates the two.
+                    tracker.tradesHeadCalls += 1;
+                    const firstPass = tracker.tradesHeadCalls === 1;
+                    if (firstPass ? opts.tradeCountError : opts.recheckTradeCountError) {
+                      return Promise.resolve({
+                        count: null,
+                        data: null,
+                        error: READ_ERROR,
+                      });
+                    }
+                    if (firstPass ? opts.tradeCountNull : opts.recheckTradeCountNull) {
+                      // count:null with NO error — equally unrepresentable.
+                      return Promise.resolve({
+                        count: null,
+                        data: null,
+                        error: null,
+                      });
+                    }
                     return Promise.resolve({
                       count: opts.recheckTradeCount,
                       data: null,
@@ -241,13 +361,28 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
                   // the wizard-shape `[0]?.timestamp` access without
                   // tripping the < 7 days branch (matched timestamps =>
                   // span 0; checkStrategyGate is mocked passed:true).
+                  // Sort direction distinguishes earliest (ascending) from
+                  // latest (descending) so each can fail independently.
                   return {
-                    order: () => ({
+                    order: (
+                      _col: string,
+                      orderOpts: { ascending: boolean },
+                    ) => ({
                       limit: () =>
-                        Promise.resolve({
-                          data: [{ timestamp: new Date().toISOString() }],
-                          error: null,
-                        }),
+                        Promise.resolve(
+                          (
+                            orderOpts.ascending
+                              ? opts.earliestTradeError
+                              : opts.latestTradeError
+                          )
+                            ? { data: null, error: READ_ERROR }
+                            : {
+                                data: [
+                                  { timestamp: new Date().toISOString() },
+                                ],
+                                error: null,
+                              },
+                        ),
                     }),
                   };
                 },
@@ -258,16 +393,33 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
             return {
               select: () => ({
                 eq: () => ({
-                  single: async () => ({
-                    data:
-                      opts.recheckStatus === null
-                        ? null
-                        : {
-                            computation_status: opts.recheckStatus,
-                            computation_error: null,
-                          },
-                    error: null,
-                  }),
+                  single: async () => {
+                    // First-pass gate read precedes the TOCTOU re-check read.
+                    tracker.analyticsReads += 1;
+                    const firstPass = tracker.analyticsReads === 1;
+                    if (
+                      firstPass
+                        ? opts.analyticsReadError
+                        : opts.recheckAnalyticsError
+                    ) {
+                      return { data: null, error: READ_ERROR };
+                    }
+                    return {
+                      data:
+                        opts.recheckStatus === null
+                          ? null
+                          : {
+                              computation_status: opts.recheckStatus,
+                              computation_error: null,
+                              // MT5-11/12 — the completeness verdict rides this
+                              // same read at both passes (the route widened the
+                              // column list rather than adding a query).
+                              series_completeness:
+                                opts.mockSeriesCompleteness ?? null,
+                            },
+                      error: null,
+                    };
+                  },
                 }),
               }),
             };
@@ -285,61 +437,59 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
               }),
             };
           }
-          if (table === "api_keys") {
-            // P72 venue gate: first-pass exchange lookup
-            // (.select("exchange").eq("id").maybeSingle()).
-            return {
-              select: () => ({
-                eq: () => ({
-                  maybeSingle: async () =>
-                    opts.mockKeyExchangeError
-                      ? { data: null, error: { message: "boom" } }
-                      : {
-                          data: { exchange: opts.mockKeyExchange ?? "okx" },
-                          error: null,
-                        },
-                }),
-              }),
-            };
-          }
+          // MT5-11/12 — the `api_keys` arm that used to live here is GONE with
+          // the route's venue lookup. The gate no longer asks which exchange a
+          // key points at; it reads the verdict the series' producer stamped.
           // strategies — supports both the first-pass single() lookup
           // and the .update().eq().eq().select() write path.
           return {
             select: () => ({
               eq: () => ({
-                single: async () => ({
-                  data: {
-                    api_key_id:
-                      opts.recheckApiKeyId !== undefined
-                        ? opts.recheckApiKeyId
-                        : "key-1",
-                    name: "Strat 1",
-                    user_id: "user-1",
-                    // M-1152: the post-approve manager-notify reads
-                    // profiles.email (admin.from("profiles").select("email")
-                    // routes through this fallthrough). Present so the notify
-                    // branch is reachable; inert for every other test because
-                    // notifyManagerApproved is a no-op mock by default.
-                    email: "manager-e2e@test.local",
-                  },
-                  error: null,
-                }),
+                single: async () =>
+                  // The strategies read error is scoped to `strategies`; the
+                  // `profiles` notify read routes through this same
+                  // fallthrough and must stay healthy.
+                  opts.strategyReadError && table === "strategies"
+                    ? { data: null, error: READ_ERROR }
+                    : {
+                        data: {
+                          api_key_id:
+                            opts.recheckApiKeyId !== undefined
+                              ? opts.recheckApiKeyId
+                              : "key-1",
+                          name: "Strat 1",
+                          user_id: "user-1",
+                          // M-1152: the post-approve manager-notify reads
+                          // profiles.email (admin.from("profiles").select("email")
+                          // routes through this fallthrough). Present so the notify
+                          // branch is reachable; inert for every other test because
+                          // notifyManagerApproved is a no-op mock by default.
+                          email: "manager-e2e@test.local",
+                        },
+                        error: null,
+                      },
               }),
             }),
-            update: () => ({
-              eq: () => ({
-                // reject path: single .eq('id')
-                then: (resolve: (v: { error: null }) => unknown) =>
-                  resolve({ error: null }),
-                // approve path: .eq('id').eq('status').select('id')
+            update: () => {
+              // C-3: the route issues exactly one `strategies` UPDATE, and it
+              // is the publish write. Recording it here is what lets a 503 case
+              // assert "refused BEFORE writing" rather than merely "answered 503".
+              if (table === "strategies") tracker.publishUpdateIssued = true;
+              return {
                 eq: () => ({
-                  select: async () => ({
-                    data: opts.updateAffected,
-                    error: null,
+                  // reject path: single .eq('id')
+                  then: (resolve: (v: { error: null }) => unknown) =>
+                    resolve({ error: null }),
+                  // approve path: .eq('id').eq('status').select('id')
+                  eq: () => ({
+                    select: async () => ({
+                      data: opts.updateAffected,
+                      error: null,
+                    }),
                   }),
                 }),
-              }),
-            }),
+              };
+            },
           };
         },
       }),
@@ -370,6 +520,8 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error).toMatch(/analytics no longer complete/i);
+    // 140.3-G9 / SEAMUX-03 — one token for the whole 409 re-check fact class.
+    expect(body.code).toBe("REVIEW_RECHECK_FAILED");
   });
 
   it("returns 409 when re-check finds trade count fell below 5", async () => {
@@ -385,6 +537,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error).toMatch(/trade count fell below threshold/i);
+    expect(body.code).toBe("REVIEW_RECHECK_FAILED");
   });
 
   it("returns 200 when re-check sees complete analytics + >=5 trades", async () => {
@@ -467,6 +620,9 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error).toMatch(/no longer awaiting review/i);
+    // 140.3-G9 — this 409 was BEYOND the plan's four-arm floor; it is the same
+    // re-check fact class (state changed during review), so the same token.
+    expect(body.code).toBe("REVIEW_RECHECK_FAILED");
   });
 
   // --- CSV-sourced re-check branch (no key, 0 trades, history in
@@ -482,6 +638,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckApiKeyId: null,
       recheckTradeCount: 0,
       recheckCsvCount: 1112,
+      mockSeriesCompleteness: "user_supplied",
       recheckStatus: "complete",
       updateAffected: [{ id: "strat-1" }],
     });
@@ -495,6 +652,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckApiKeyId: null,
       recheckTradeCount: 0,
       recheckCsvCount: 3,
+      mockSeriesCompleteness: "user_supplied",
       recheckStatus: "complete",
       updateAffected: [{ id: "strat-1" }],
     });
@@ -508,6 +666,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckApiKeyId: null,
       recheckTradeCount: 0,
       recheckCsvCount: 7,
+      mockSeriesCompleteness: "user_supplied",
       recheckStatus: "complete",
       updateAffected: [{ id: "strat-1" }],
     });
@@ -515,20 +674,25 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(res.status).toBe(200);
   });
 
-  // --- P72: keyed ledger-backed (Deribit) strategies. A CONNECTED api key on a
-  //     ledger-backed venue with 0 trades and a csv_daily_returns series must
-  //     take the re-check's daily-returns branch (not the trade-count branch).
-  //     The mirror predicate uses `!api_key_id || isLedgerBacked` (venue-aware),
-  //     matching the shared gate — a keyed FILL-based venue must NOT be diverted. ---
+  // --- MT5-11/12: the re-check's daily-returns branch is decided by the
+  //     PERSISTED completeness verdict. A CONNECTED api key with 0 trades and a
+  //     csv_daily_returns series takes that branch iff its series is certified;
+  //     the venue is never consulted. Verdict literals below are HAND-TYPED —
+  //     nothing is imported from strategyGate.ts (Oracle Independence).
+  //
+  //     SC-4: these cases run against the REAL exported predicate (see
+  //     stubbedGateModule). What used to sit in the route here was a
+  //     hand-written copy of the first-pass predicate, kept in step by a comment
+  //     saying the two "must never diverge". They diverged. ---
 
-  it("keyed Deribit PASSES the re-check: ledger-backed key + 0 trades + >=7 csv rows + complete -> 200", async () => {
-    // Pre-P72 the mirror predicate required !api_key_id, so a keyed Deribit
-    // strategy (0 trades by construction) fell to the trade branch and 409'd.
-    // The venue-aware term routes a LEDGER-BACKED key to the csv-row check
-    // (30 >= 7) and lets it publish.
+  it("keyed ledger_complete PASSES the re-check: certified series + 0 trades + >=7 csv rows -> 200", async () => {
+    // The MT5-11 unblock, through the path that actually publishes. A deal
+    // ledger has no fills to fetch, so `trades` is empty by construction; the
+    // combiner certifies the series and the re-check routes to the csv-row
+    // check (30 >= 7) instead of 409ing on a trade count that is 0 by design.
     mockAdminClient({
-      recheckApiKeyId: "key-deribit",
-      mockKeyExchange: "deribit",
+      recheckApiKeyId: "key-1",
+      mockSeriesCompleteness: "ledger_complete",
       recheckTradeCount: 0,
       recheckCsvCount: 30,
       recheckStatus: "complete",
@@ -539,10 +703,10 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect((await res.json()).success).toBe(true);
   });
 
-  it("keyed Deribit below the CSV floor in the re-check -> 409 (CSV threshold, not trade count)", async () => {
+  it("keyed ledger_complete below the CSV floor in the re-check -> 409 (CSV threshold, not trade count)", async () => {
     mockAdminClient({
-      recheckApiKeyId: "key-deribit",
-      mockKeyExchange: "deribit",
+      recheckApiKeyId: "key-1",
+      mockSeriesCompleteness: "ledger_complete",
       recheckTradeCount: 0,
       recheckCsvCount: 3,
       recheckStatus: "complete",
@@ -553,14 +717,15 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect((await res.json()).error).toMatch(/CSV history fell below threshold/i);
   });
 
-  it("keyed FILL-based (perp) with 0 trades + csv series -> 409 trade count (Finding 1 regression guard)", async () => {
-    // A keyed perp (non-ledger-backed) with 0 fills in-window but a funding
-    // csv_daily_returns series must NOT be diverted to the csv branch and
-    // published — its series has no completeness gate. isLedgerBacked=false
-    // (exchange "okx") keeps it on the trade branch → 409 trade count.
+  it("⭐ D-15 through the PUBLISHING path: keyed perp with fill_derived_unproven + 30 csv rows -> 409 trade count", async () => {
+    // The phase's safety property, asserted on the admin approve route rather
+    // than only on the pure gate. A keyed perp with 0 fills in-window still has
+    // a funding-only csv_daily_returns series; its producer stamped
+    // `fill_derived_unproven` because the realized-PnL fetch had a gap.
+    // Admitting it here would publish a materially understated track record.
     mockAdminClient({
       recheckApiKeyId: "key-perp",
-      mockKeyExchange: "okx",
+      mockSeriesCompleteness: "fill_derived_unproven",
       recheckTradeCount: 0,
       recheckCsvCount: 30,
       recheckStatus: "complete",
@@ -571,12 +736,57 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect((await res.json()).error).toMatch(/trade count fell below threshold/i);
   });
 
-  it("fails LOUD (503) when the api_keys exchange lookup errors (WR-01) — never coerces isLedgerBacked=false", async () => {
-    // A transient api_keys read error must not silently set isLedgerBacked=false
-    // and reject a legit Deribit onboarding with a misleading trade-count 400.
+  // --- SC-4 ORACLE PAIR. These two cases exist to red-pin the shared-predicate
+  //     call. A hand-copy that kept the deleted `!approveApiKeyId` term passes
+  //     the first and WRONGLY passes the second, because keylessness alone used
+  //     to admit. Only the second can distinguish the two implementations. ---
+
+  it("SC-4(a) COMPOSITE (api_key_id NULL) with composite_stitched is approvable end-to-end -> 200", async () => {
+    // Composites passed historically via `!api_key_id`, the term this phase
+    // deleted. They now depend on the stitch job stamping a verdict. If this
+    // reds, no composite can ever be approved again.
     mockAdminClient({
-      recheckApiKeyId: "key-deribit",
-      mockKeyExchangeError: true,
+      recheckApiKeyId: null,
+      mockSeriesCompleteness: "composite_stitched",
+      recheckTradeCount: 0,
+      recheckCsvCount: 30,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+  });
+
+  it("SC-4(b) COMPOSITE with a NULL verdict is REFUSED -> 409 (the hand-copy would wrongly publish it)", async () => {
+    mockAdminClient({
+      recheckApiKeyId: null,
+      mockSeriesCompleteness: null,
+      recheckTradeCount: 0,
+      recheckCsvCount: 30,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/trade count fell below threshold/i);
+  });
+
+  it("WR-01: a failing first-pass verdict read fails LOUD (503) — never a coerced-null verdict rendered as a gate refusal", async () => {
+    // REPURPOSED from "fails LOUD when the api_keys exchange lookup errors":
+    // that lookup no longer exists, but the property it pinned is unchanged and
+    // now attaches to the read that replaced it. The verdict is the value that
+    // selects the gate's branch, and `null` is a MEANINGFUL verdict here (fail
+    // closed) — which is exactly why an UNREAD one must never be coerced into
+    // it. A silent `series_completeness = null` would reject a legitimate
+    // ledger-backed onboarding with a misleading "0 trades" message about the
+    // manager's strategy, when the failure was ours.
+    //
+    // Distinct from the generic first-pass read-error case below: this one
+    // pins the negative — the response must NOT be the gate-refusal 400.
+    const tracker = mockAdminClient({
+      analyticsReadError: true,
+      recheckApiKeyId: "key-1",
       recheckTradeCount: 0,
       recheckCsvCount: 30,
       recheckStatus: "complete",
@@ -584,7 +794,13 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     });
     const res = await postApprove();
     expect(res.status).toBe(503);
-    expect((await res.json()).error).toMatch(/verify strategy data source/i);
+    const body = await res.json();
+    expect(body.error).toMatch(/verify strategy data source/i);
+    // 140.3-G9 / SEAMUX-03 — one token for the whole source-read 503 fact class.
+    expect(body.code).toBe("REVIEW_SOURCE_READ_FAILED");
+    // The negative half: not a verdict ABOUT THE STRATEGY, and nothing written.
+    expect(body.code).not.toBe("GUARD_BLOCKED");
+    expect(tracker.publishUpdateIssued).toBe(false);
   });
 
   // --- PUB-01 (Phase 87) composite gate: OQ-1 defense-in-depth pure READ. A
@@ -602,6 +818,11 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckApiKeyId: null,
       recheckTradeCount: 0,
       recheckCsvCount: 30,
+      // MT5-11/12 — a composite reaches the daily-returns branch on the stitch
+      // job's verdict now, not on `!api_key_id`. Without it every PUB-01 case
+      // below would 409 on a trade count that is 0 by construction, and the
+      // composite gate under test would never be reached.
+      mockSeriesCompleteness: "composite_stitched",
       recheckStatus: "complete_with_warnings",
       strategyKeysCount: 2,
       latestStitchJobStatus: "done",
@@ -620,6 +841,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckApiKeyId: null,
       recheckTradeCount: 0,
       recheckCsvCount: 30,
+      mockSeriesCompleteness: "composite_stitched",
       recheckStatus: "complete",
       strategyKeysCount: 2,
       latestStitchJobStatus: "running",
@@ -637,6 +859,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckApiKeyId: null,
       recheckTradeCount: 0,
       recheckCsvCount: 30,
+      mockSeriesCompleteness: "composite_stitched",
       recheckStatus: "complete",
       strategyKeysCount: 2,
       latestStitchJobStatus: undefined,
@@ -655,6 +878,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckApiKeyId: null,
       recheckTradeCount: 0,
       recheckCsvCount: 30,
+      mockSeriesCompleteness: "composite_stitched",
       recheckStatus: "complete",
       strategyKeysCountError: true,
       updateAffected: [{ id: "strat-1" }],
@@ -662,6 +886,188 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     const res = await postApprove();
     expect(res.status).toBe(503);
     expect((await res.json()).error).toMatch(/verify strategy data source/i);
+  });
+
+  // --- C-3 (140.4-01): every read that participates in the approve decision
+  //     must bind `error` and answer 503 ABOUT US, with NO publish write.
+  //
+  //     On the untouched tree the route destructured six members from the
+  //     first-pass Promise.all and read `.error` on exactly one (csvCountError),
+  //     so a failed read arrived as a VALUE indistinguishable from real data:
+  //     supabase-js 2.110.1 resolves rather than throws. The sharpest instance
+  //     is the earliest/latest pair — a failed timestamp read made the gate's
+  //     span null, `spanDays !== null &&` skipped the entire 7-day check, and
+  //     the route PUBLISHED an under-history track record as verified.
+  //
+  //     Every case asserts BOTH halves: the 503 status AND publishUpdateIssued
+  //     === false. Status alone cannot see a route that writes and then 503s. ---
+
+  const READ_FAILURE_503 = /verify strategy data source/i;
+
+  it("first-pass strategies read error -> 503, no publish UPDATE", async () => {
+    const tracker = mockAdminClient({
+      strategyReadError: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toMatch(READ_FAILURE_503);
+    // 140.3-G9 / SEAMUX-03 — the source-read 503 token, on a first-pass read.
+    expect(body.code).toBe("REVIEW_SOURCE_READ_FAILED");
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("first-pass trades COUNT read error -> 503, no publish UPDATE", async () => {
+    const tracker = mockAdminClient({
+      tradeCountError: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("first-pass trades count of NULL with no error -> 503, no publish UPDATE (`?? 0` is the fabrication)", async () => {
+    // A null count coerced to 0 is a MEASUREMENT the route did not make. It
+    // reaches the gate as "this strategy has zero trades", which is a claim
+    // about the user's account, not about our read.
+    const tracker = mockAdminClient({
+      tradeCountNull: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("EARLIEST-trade read error -> 503, no publish UPDATE (the C-3 publish-side fail-open)", async () => {
+    // Untouched tree: 200 + status published. The failed read made spanDays
+    // null and the 7-day gate was skipped entirely.
+    const tracker = mockAdminClient({
+      earliestTradeError: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("LATEST-trade read error -> 503, no publish UPDATE (second member of the class)", async () => {
+    const tracker = mockAdminClient({
+      latestTradeError: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("first-pass strategy_analytics read error -> 503, no publish UPDATE", async () => {
+    const tracker = mockAdminClient({
+      analyticsReadError: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("TOCTOU re-check trades count read error -> 503 (not a 409 about the strategy), no publish UPDATE", async () => {
+    // Untouched tree answered 409 "trade count fell below threshold during
+    // review" — a claim about the STRATEGY derived from a read that failed.
+    const tracker = mockAdminClient({
+      recheckTradeCountError: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("TOCTOU re-check trades count of NULL with no error -> 503, no publish UPDATE", async () => {
+    const tracker = mockAdminClient({
+      recheckTradeCountNull: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("TOCTOU re-check strategy_analytics read error -> 503 (not a 409), no publish UPDATE", async () => {
+    const tracker = mockAdminClient({
+      recheckAnalyticsError: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("checkStrategyGate throwing StrategyGateUnevaluableError -> 503, no publish UPDATE", async () => {
+    // Defence in depth: the guards above should make this unreachable from the
+    // route's own reads. The arm exists so a future caller-side hole, or a
+    // third consumer, cannot turn the gate's refusal into an unhandled 500 —
+    // and so the refusal can never be swallowed into a pass.
+    const tracker = mockAdminClient({
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    // Flip the ONE registered stub's behaviour rather than racing a second
+    // doMock onto the same path (see `gateThrow`). The REAL error class, so the
+    // route's `instanceof` narrowing is exercised rather than a look-alike.
+    const actualGate =
+      await vi.importActual<typeof import("@/lib/strategyGate")>(
+        "@/lib/strategyGate",
+      );
+    gateThrow = () => {
+      throw new actualGate.StrategyGateUnevaluableError(12);
+    };
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("a non-gate throw from checkStrategyGate is NOT swallowed into a 503", async () => {
+    // Narrowed catch: rethrow anything that is not the gate's refusal.
+    // Swallowing an unknown throw here is how a fail-open comes back.
+    mockAdminClient({
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    // Same switch as the case above — one registered factory, nothing to race.
+    gateThrow = () => {
+      throw new TypeError("something else entirely");
+    };
+    await expect(postApprove()).rejects.toThrow(/something else entirely/);
   });
 
   it("SC-4: single-key approve (0 members) never issues the compute_jobs read", async () => {
@@ -729,7 +1135,25 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
     /** csv_daily_returns row count. Composites (apiKeyId null) source history
      *  here — supply >=7 so the gate reaches the analytics-status arm. */
     csvRowCount?: number;
+    /**
+     * `strategy_analytics.series_completeness` (MT5-11/12). Default null —
+     * fail closed. A fixture that wants the daily-returns branch must name the
+     * verdict that earns it; keylessness alone no longer admits anything.
+     */
+    seriesCompleteness?: string | null;
+    /**
+     * C-3 (140.4-01) anti-over-refusal control. When true the
+     * strategy_analytics `.single()` returns PostgREST's PGRST116 — "the result
+     * contains 0 rows" — which is an ABSENCE, not a read failure: `data` is
+     * null either way and the gate already has a verdict for it
+     * (ANALYTICS_MISSING, 400, fail-CLOSED). A blanket 503 on any bound error
+     * would turn a legitimate "sync your trades first" into an outage message.
+     */
+    analyticsNoRows?: boolean;
   };
+
+  /** Records whether the route reached the `strategies` publish UPDATE. */
+  type GateTracker = { publishUpdateIssued: boolean };
 
   /**
    * Admin client that feeds the route's FIVE first-pass gate queries
@@ -737,7 +1161,8 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
    * strategy_analytics.single). The gate fails before the TOCTOU re-check
    * / UPDATE, so those paths are never reached.
    */
-  function mockGateAdminClient(fx: GateFixture): void {
+  function mockGateAdminClient(fx: GateFixture): GateTracker {
+    const tracker: GateTracker = { publishUpdateIssued: false };
     vi.doMock("@/lib/supabase/admin", () => ({
       createAdminClient: () => ({
         from: (table: string) => {
@@ -783,16 +1208,29 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
             return {
               select: () => ({
                 eq: () => ({
-                  single: async () => ({
-                    data:
-                      fx.computationStatus === null
-                        ? null
-                        : {
-                            computation_status: fx.computationStatus,
-                            computation_error: fx.computationError,
+                  single: async () =>
+                    fx.analyticsNoRows
+                      ? {
+                          data: null,
+                          // PostgREST's own no-rows code from `.single()`.
+                          error: {
+                            code: "PGRST116",
+                            message:
+                              "JSON object requested, multiple (or no) rows returned",
                           },
-                    error: null,
-                  }),
+                        }
+                      : {
+                          data:
+                            fx.computationStatus === null
+                              ? null
+                              : {
+                                  computation_status: fx.computationStatus,
+                                  computation_error: fx.computationError,
+                                  series_completeness:
+                                    fx.seriesCompleteness ?? null,
+                                },
+                          error: null,
+                        },
                 }),
               }),
             };
@@ -810,21 +1248,11 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
               }),
             };
           }
-          if (table === "api_keys") {
-            // P72 venue gate: first-pass exchange lookup. Non-ledger ("okx")
-            // keeps a keyed strategy on the trade branch, matching these gate
-            // fixtures' trade/analytics reason-string expectations.
-            return {
-              select: () => ({
-                eq: () => ({
-                  maybeSingle: async () => ({
-                    data: { exchange: "okx" },
-                    error: null,
-                  }),
-                }),
-              }),
-            };
-          }
+          // MT5-11/12 — the `api_keys` venue lookup this arm served is gone from
+          // the route. What kept these fixtures on the trade branch was the
+          // non-ledger exchange "okx"; what keeps them there now is the absent
+          // verdict (seriesCompleteness defaults to null → fail closed), which
+          // is the same outcome reached for a better reason.
           // strategies — first-pass single() lookup.
           return {
             select: () => ({
@@ -839,10 +1267,29 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
                 }),
               }),
             }),
+            // Present so "did the route reach the publish write?" is observable
+            // rather than a TypeError. Every fixture in this suite must fail the
+            // gate BEFORE it.
+            update: () => {
+              if (table === "strategies") tracker.publishUpdateIssued = true;
+              return {
+                eq: () => ({
+                  eq: () => ({
+                    select: async () => ({
+                      data: [{ id: "strat-1" }],
+                      error: null,
+                    }),
+                  }),
+                  then: (resolve: (v: { error: null }) => unknown) =>
+                    resolve({ error: null }),
+                }),
+              };
+            },
           };
         },
       }),
     }));
+    return tracker;
   }
 
   async function postApprove(): Promise<Response> {
@@ -872,6 +1319,12 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
     expect(body.error).toMatch(/only 3 trade/i);
     // Regression guard: the stable CODE must NOT leak in place of the reason.
     expect(body.error).not.toContain("INSUFFICIENT_TRADES");
+    // 140.3-G9 / SEAMUX-03 — the gate refusal carries GUARD_BLOCKED (the union
+    // member finalize-wizard stamps a publish-gate refusal with). The
+    // machine `code` lives ALONGSIDE the human reason, never in place of it —
+    // the reason stays the founder-facing prose (M-0285), the code is the
+    // client discriminator.
+    expect(body.code).toBe("GUARD_BLOCKED");
   });
 
   it("returns 400 with the ANALYTICS_FAILED reason string when computation_status='failed'", async () => {
@@ -891,16 +1344,68 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
     expect(body.error).not.toContain("ANALYTICS_FAILED");
   });
 
+  it("C-3 anti-regression: a genuine short span still 400s with the gate's own INSUFFICIENT_DAYS sentence", async () => {
+    // The twin of the fail-open. When the earliest/latest reads SUCCEED and the
+    // span is genuinely 2 days, the answer is a verdict about the STRATEGY
+    // (400), not a 503 about us — and no publish write is issued. If this ever
+    // became a 503, the read-failure guards would have over-refused.
+    const tracker = mockGateAdminClient({
+      apiKeyId: "key-1",
+      tradeCount: 50,
+      earliest: "2026-04-01T00:00:00Z",
+      latest: "2026-04-03T00:00:00Z", // 2.0 days
+      computationStatus: "complete",
+      computationError: null,
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/^Cannot approve: /);
+    expect(body.error).toMatch(/span only 2\.0 day/i);
+    expect(body.error).not.toContain("INSUFFICIENT_DAYS");
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("C-3 anti-over-refusal: PGRST116 (no analytics row) is an ABSENCE -> 400 ANALYTICS_MISSING, never 503", async () => {
+    // `.single()` reports "0 rows" as an error object. Treating that as a read
+    // FAILURE would answer 503 to every manager who has not synced yet, and
+    // would replace a useful instruction with an outage message. In both
+    // PGRST116 shapes `data` is null, so the gate fails CLOSED (400) — the
+    // carve-out can never produce a publish.
+    const tracker = mockGateAdminClient({
+      apiKeyId: "key-1",
+      tradeCount: 50,
+      earliest: "2026-01-01T00:00:00Z",
+      latest: "2026-03-01T00:00:00Z",
+      computationStatus: "complete",
+      computationError: null,
+      analyticsNoRows: true,
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/^Cannot approve: /);
+    expect(body.error).toMatch(/have not been computed/i);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
   it("PUB-01: a COMPOSITE (api_key_id NULL, csv series) with computation_status='failed' -> 400 blocked at the first-pass gate", async () => {
-    // A composite routes down isDailyReturnsSourced (api_key_id NULL + 0 trades
-    // + csv rows >= 7); a failed member fan-out surfaces as
-    // computation_status='failed', which the first-pass gate blocks with
-    // ANALYTICS_FAILED (400) BEFORE any UPDATE. Pins PUB-01's route direction
-    // for composites at the first pass (previously implicit / untested).
+    // A composite routes down isDailyReturnsSourced (0 trades + csv rows >= 7 +
+    // the stitch job's `composite_stitched` verdict); a failed member fan-out
+    // surfaces as computation_status='failed', which the first-pass gate blocks
+    // with ANALYTICS_FAILED (400) BEFORE any UPDATE. Pins PUB-01's route
+    // direction for composites at the first pass.
+    //
+    // MT5-11/12 — the verdict is now what puts it on that branch (api_key_id
+    // NULL alone no longer does). Without it the composite falls to the trade
+    // branch and reports INSUFFICIENT_TRADES, so this case ALSO covers the
+    // first pass of the SC-4 composite-approvability property, through the real
+    // gate rather than the stub.
     mockGateAdminClient({
       apiKeyId: null,
       tradeCount: 0,
       csvRowCount: 30,
+      seriesCompleteness: "composite_stitched",
       earliest: "2026-01-01T00:00:00Z",
       latest: "2026-03-01T00:00:00Z",
       computationStatus: "failed",
@@ -912,6 +1417,115 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
     expect(body.error).toMatch(/^Cannot approve: /);
     expect(body.error).toContain("Analytics computation failed");
     expect(body.error).not.toContain("ANALYTICS_FAILED");
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // [161-07 / WIZERR-10 + -09] THE PUBLISH-TIME TOCTOU RE-CHECK RENDERS THE
+  // NEW REASONS — BY MEASUREMENT, NOT BY INHERITANCE.
+  //
+  // The requirement's second half ("the publish-time TOCTOU re-check wording
+  // follows") is true only because BOTH surfaces call the ONE shared
+  // `checkStrategyGate` — the arrangement `strategyGate.ts` adopted after a
+  // hand-copied re-check "diverged anyway" under a comment saying it must not.
+  // That reachability was an ASSUMPTION (A5) at plan time. These cases make it
+  // enforced: they run the REAL gate (the describe `vi.doUnmock`s it) and
+  // assert the FULL rendered string including the route's own prefix, so a
+  // reason that reads wrong after "Cannot approve: " — a fragment, a lowercase
+  // start — fails here rather than on a founder's screen.
+  //
+  // ⚠️ The admin surface's own `code` stays GUARD_BLOCKED. The gate code is
+  // carried in the SENTENCE, never swapped into the code channel: AdminTabs
+  // discriminates on `code`, and a fourth value appearing there would be a wire
+  // change nobody asked for.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  it("[161-07] an examined-but-refused series renders its own sentence, not 'only 0 trade(s)'", async () => {
+    // The D-15 economic case at the PUBLISH gate: a keyed perp on a
+    // fill-derived venue, 135 daily rows, zero fills by construction, every job
+    // green. Before 161-07 the founder read "Cannot approve: Strategy has only
+    // 0 trade(s). A minimum of 5 trades is required." about a strategy with 135
+    // days of returns.
+    const tracker = mockGateAdminClient({
+      apiKeyId: "key-1",
+      tradeCount: 0,
+      csvRowCount: 135,
+      seriesCompleteness: "fill_derived_unproven",
+      earliest: "2026-01-01T00:00:00Z",
+      latest: "2026-03-01T00:00:00Z",
+      computationStatus: "complete",
+      computationError: null,
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+
+    // THE FULL RENDERED STRING, hand-typed — prefix included. This is the
+    // assertion that makes the reason's sentence-shape a contract rather than
+    // an intention.
+    expect(body.error).toBe(
+      "Cannot approve: The return series is derived from individual fills, " +
+        "which cannot establish that the record is complete.",
+    );
+
+    // The false sentence is named as the thing that must be absent.
+    expect(body.error).not.toMatch(/only 0 trade/i);
+    expect(body.error).not.toMatch(/minimum of 5 trades/i);
+    // The machine code lives alongside the prose, never in place of it.
+    expect(body.error).not.toContain("SERIES_EXAMINED_REFUSED");
+    expect(body.code).toBe("GUARD_BLOCKED");
+    // A refusal, still: no publish write was issued.
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("[161-07] a gapped sampled series renders ITS sentence — the two verdicts do not share one", async () => {
+    // The anti-collapse half at this surface. A single generic string would
+    // satisfy the case above while telling an sFOX manager about fills.
+    mockGateAdminClient({
+      apiKeyId: "key-1",
+      tradeCount: 0,
+      csvRowCount: 135,
+      seriesCompleteness: "sampled_gapped",
+      earliest: "2026-01-01T00:00:00Z",
+      latest: "2026-03-01T00:00:00Z",
+      computationStatus: "complete",
+      computationError: null,
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe(
+      "Cannot approve: The return series is built from sampled balance " +
+        "snapshots with interior gaps, so it is not a complete record.",
+    );
+    expect(body.code).toBe("GUARD_BLOCKED");
+  });
+
+  it("[161-07] the 7-day floor still fires here, with its threshold-attached sentence", async () => {
+    // UNCHANGED BEHAVIOUR ON THIS PATH, pinned deliberately. The admin route
+    // has always applied the floor; what 161-07 changed is that the WIZARD's
+    // composite arm applies it too. This case is what proves that work did not
+    // disturb the surface it was copying — and it is also the boundary the
+    // wizard arm is now expected to agree with.
+    const tracker = mockGateAdminClient({
+      apiKeyId: null,
+      tradeCount: 0,
+      csvRowCount: 3,
+      seriesCompleteness: "composite_stitched",
+      earliest: "2026-01-01T00:00:00Z",
+      latest: "2026-03-01T00:00:00Z",
+      computationStatus: "complete",
+      computationError: null,
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe(
+      "Cannot approve: The return series covers only 3 day(s). " +
+        "A minimum of 7 days is required.",
+    );
+    expect(body.error).not.toContain("INSUFFICIENT_CSV_HISTORY");
+    expect(body.code).toBe("GUARD_BLOCKED");
+    expect(tracker.publishUpdateIssued).toBe(false);
   });
 });
 
@@ -954,5 +1568,253 @@ describe("POST /api/admin/strategy-review — B9 M-1143 review_note length cap",
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toMatch(/invalid request/i);
+    // 140.3-G9 / SEAMUX-03 — a boundary-shape rejection carries VALIDATION_FAILED.
+    expect(body.code).toBe("VALIDATION_FAILED");
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// 140.4-16 / WR-04 — the scrub predicate, applied to a file the CLASS guard is
+// structurally blind to.
+// ══════════════════════════════════════════════════════════════════════════
+
+describe("[140.4-16 / WR-04] no console site passes a caught value unscrubbed", () => {
+  /**
+   * ⚠️ WHY THIS GUARD IS COLOCATED AND NOT A ROSTER ENTRY.
+   *
+   * `seam-log-coverage.test.ts` derives its route roster from the SEAM IMPORT
+   * EDGE — a file joins when it imports `analytics-client`, `resilient-fetch`
+   * or `process-key-client`. This route imports none of them, so
+   * `deriveSeamRouteFiles` cannot reach it and `it.each(SEAM_FILES)` never
+   * inspects it. That derivation is correct and is this phase's flagship; the
+   * honest response is not to smuggle a route into the file's HAND-TYPED **lib
+   * module** half (a category error that would also make the derived-vs-typed
+   * set equality assert something it does not mean), but to run the same
+   * predicate here, where the file lives.
+   *
+   * The exposure is real, not theoretical. Plan 140.4-01 converted six
+   * `Promise.all` members to checked reads — the C-3 fix — and every one of the
+   * seven new `console.error` sites it added passes the raw PostgREST error
+   * object straight into the log. Those objects carry `message` / `details` /
+   * `hint`; a constraint-violation `details` string can contain row values,
+   * which is precisely why `describeThrown`'s plain-object branch exists in
+   * `seam-redaction.ts`. Five credential leaks have already been found in this
+   * milestone.
+   */
+  const ROUTE = "src/app/api/admin/strategy-review/route.ts";
+
+  /** Strip comments so a docblock quoting `console.error(err)` is not counted. */
+  function stripComments(src: string): string {
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  }
+
+  it("every console.* argument that is an error binding goes through scrubSeamError", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const src = stripComments(
+      readFileSync(join(process.cwd(), ROUTE), "utf8"),
+    );
+
+    // Every `console.<level>( ... )` call, arguments captured to the closing
+    // paren of the call. Route sites are short and never nest a paren-heavy
+    // expression, so a non-greedy scan to `);` is sufficient here — and the
+    // vacuity fence below proves the scan found them.
+    const calls = [...src.matchAll(/console\.\w+\(([\s\S]*?)\);/g)].map(
+      (m) => m[1],
+    );
+
+    // VACUITY FENCE. A scan that matches nothing reports compliance forever.
+    expect(
+      calls.length,
+      "the console scan found nothing — every assertion below is vacuous",
+    ).toBeGreaterThanOrEqual(13);
+
+    // An "error binding" is any identifier this route binds off a Supabase read
+    // or a catch. Naming the SHAPE rather than the identifiers keeps the guard
+    // from going stale the moment a new read is added.
+    const ERRORISH = /\b([A-Za-z_$][\w$]*(?:[eE]rr|[eE]rror)\w*)\b/;
+    const offenders: string[] = [];
+    for (const args of calls) {
+      const m = ERRORISH.exec(args);
+      if (!m) continue;
+      // `?? "..."` fallbacks and `.code` reads are allowlisted for the same
+      // reason the class guard allowlists them: a five-character SQLSTATE and a
+      // hand-typed string carry nothing.
+      if (!/scrubSeamError\s*\(/.test(args)) {
+        offenders.push(args.trim().replace(/\s+/g, " ").slice(0, 90));
+      }
+    }
+
+    expect(
+      offenders,
+      "a caught value or PostgREST error object reaches console.* unscrubbed. " +
+        "undici embeds OUTGOING HEADERS in err.message, and a PostgREST error " +
+        "carries `details`/`hint` which can contain row values. Wrap it: " +
+        "scrubSeamError(x) from @/lib/seam-redaction. Do NOT answer this by " +
+        "dropping the value — that is the A-10 defect.",
+    ).toEqual([]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// 140.3-G9 / SEAMUX-03 — the machine `code` on every arm this route emits.
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * WHY (Rule 9). This route is the TENTH seam-importing production route — the
+ * one the 140.3-VERIFICATION nine-route list MISSED (instance-not-class hazard).
+ * A dropped `code` is a client-discrimination regression on the admin review
+ * surface: 140.3-12 reserves the right to reword the human prose, so a consumer
+ * that branches on the sentence breaks the day it does. These assertions run
+ * against the PARSED RESPONSE BODY of the invoked handler — the wiring, not a
+ * helper — so a code removed from an arm reddens here.
+ *
+ * The auth/throttle arms (401/403/429) are code-asserted ONLY here: the shared
+ * `runAdminPostCsrfRateLimitSuite` above drives them but predates SEAMUX-03 and
+ * asserts status only. The 503 / 409 / GUARD_BLOCKED / VALIDATION_FAILED classes
+ * gain their `body.code` expectations in the suites where their fixtures already
+ * live (C-0060, M-0285, B9). The arm-agnostic fence at the bottom is the
+ * every-arm guarantee: it reads the route source and fails if ANY non-2xx arm
+ * ships without a `code` — the check that survives a new arm being added.
+ */
+/**
+ * Auth/throttle baseline driven by ONE hoisted state object per module, not by
+ * competing per-test doMocks. vitest keeps doMock registrations across
+ * resetModules and a second doMock for the same path does not reliably override
+ * the first within a generation, so the null-user / non-admin / deny-limiter
+ * cases are expressed as MUTATIONS of `g9` that a single stable factory reads at
+ * import time. beforeEach resets `g9`, so no case leaks into the next.
+ */
+const g9 = vi.hoisted(() => ({
+  user: null as unknown,
+  isAdmin: true,
+  denyLimiter: false,
+}));
+
+describe("POST /api/admin/strategy-review — 140.3-G9 SEAMUX-03 machine codes", () => {
+  const url = "http://localhost:3000/api/admin/strategy-review";
+
+  beforeEach(() => {
+    vi.resetModules();
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    // Authed-admin, healthy-limiter baseline. Tests mutate g9 before post().
+    g9.user = TEST_USER;
+    g9.isAdmin = true;
+    g9.denyLimiter = false;
+    // One factory per module, reading the live g9 fields. A doMock overrides the
+    // top-of-file vi.mock; reverting via doUnmock would hit the real
+    // supabase/server and read the request-scoped cookie store outside a request.
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: {
+          getUser: async () => ({ data: { user: g9.user }, error: null }),
+        },
+      }),
+    }));
+    vi.doMock("@/lib/admin", () => ({ isAdminUser: async () => g9.isAdmin }));
+    vi.doMock("@/lib/ratelimit", () => ({
+      adminActionLimiter: {},
+      checkLimit: async () =>
+        g9.denyLimiter
+          ? { success: false, retryAfter: 7 }
+          : { success: true, retryAfter: 0 },
+    }));
+    vi.doMock("@/lib/strategyGate", () => stubbedGateModule());
+  });
+
+  async function post(body: unknown): Promise<Response> {
+    const mod = await import("./route");
+    const req = new NextRequest(url, {
+      method: "POST",
+      headers: { origin: "http://localhost:3000" },
+      body: JSON.stringify(body),
+    });
+    return (mod.POST as (req: NextRequest) => Promise<Response>)(req);
+  }
+
+  it("401 unauthenticated → code UNAUTHENTICATED (auth verdict only, no seam state)", async () => {
+    g9.user = null;
+    const res = await post({ id: "abc", action: "approve" });
+    expect(res.status).toBe(401);
+    const b = await res.json();
+    expect(b.error).toBe("Unauthorized");
+    expect(b.code).toBe("UNAUTHENTICATED");
+  });
+
+  it("403 forbidden → code FORBIDDEN (a non-admin learns nothing beyond the status)", async () => {
+    g9.isAdmin = false;
+    const res = await post({ id: "abc", action: "approve" });
+    expect(res.status).toBe(403);
+    const b = await res.json();
+    expect(b.error).toBe("Forbidden");
+    expect(b.code).toBe("FORBIDDEN");
+  });
+
+  it("429 our-limiter refusal → code RATE_LIMITED", async () => {
+    g9.denyLimiter = true;
+    const res = await post({ id: "abc", action: "approve" });
+    expect(res.status).toBe(429);
+    const b = await res.json();
+    expect(b.error).toBe("Too many requests");
+    expect(b.code).toBe("RATE_LIMITED");
+    // Additive-only: the Retry-After header the arm already carried survives.
+    expect(res.headers.get("Retry-After")).toBe("7");
+  });
+
+  it("400 malformed action → code VALIDATION_FAILED (zod boundary, before the limiter)", async () => {
+    const res = await post({ id: "abc", action: "bogus" });
+    expect(res.status).toBe(400);
+    const b = await res.json();
+    expect(b.error).toMatch(/invalid request/i);
+    expect(b.code).toBe("VALIDATION_FAILED");
+  });
+
+  it("400 non-object body → code VALIDATION_FAILED", async () => {
+    const res = await post([1, 2, 3]);
+    expect(res.status).toBe(400);
+    const b = await res.json();
+    expect(b.code).toBe("VALIDATION_FAILED");
+  });
+
+  it("ARM-AGNOSTIC FENCE: every non-2xx NextResponse.json arm carries a string `code`", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const src = readFileSync(
+      join(process.cwd(), "src/app/api/admin/strategy-review/route.ts"),
+      "utf8",
+    );
+    // Capture each NextResponse.json(body, { status: NNN ... }): the body object
+    // (non-greedy to the `}, { status:` boundary — which correctly steps past the
+    // `${gate.reason}` brace in the interpolated 400 arm) and its 3-digit status.
+    // The lone 200 arm `NextResponse.json({ success: true })` has no status arg
+    // and is excluded by construction.
+    const arms = [
+      ...src.matchAll(
+        /NextResponse\.json\(\s*(\{[\s\S]*?\}),\s*\{\s*status:\s*(\d{3})/g,
+      ),
+    ];
+    // VACUITY FENCE — a scan that matches nothing reports compliance forever.
+    expect(
+      arms.length,
+      "the arm scan found nothing — the fence is vacuous",
+    ).toBeGreaterThanOrEqual(25);
+
+    const offenders: string[] = [];
+    for (const [, bodyLiteral, status] of arms) {
+      if (Number(status) < 300) continue; // 2xx arms need no code
+      if (!/\bcode:\s*"/.test(bodyLiteral)) {
+        offenders.push(
+          `status ${status}: ${bodyLiteral.replace(/\s+/g, " ").slice(0, 80)}`,
+        );
+      }
+    }
+    expect(
+      offenders,
+      "a non-2xx arm reaches the client with no machine `code` — the SEAMUX-03 " +
+        "client-discrimination regression this route was the 10th to close.",
+    ).toEqual([]);
   });
 });

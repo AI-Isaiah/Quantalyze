@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
-import { userActionLimiter, keysSyncUserLimiter, checkLimit } from "@/lib/ratelimit";
+import {
+  userActionLimiter,
+  keysSyncUserLimiter,
+  checkLimit,
+  rateLimitDenyJson,
+} from "@/lib/ratelimit";
 import { logAuditEventAsUser } from "@/lib/audit";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { postProcessKey } from "@/lib/process-key-client";
@@ -10,7 +15,24 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { isUuid } from "@/lib/utils";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { scrubSeamError } from "@/lib/seam-redaction";
+import {
+  retractInheritedRefreshMarker,
+  retractionFailureCode,
+} from "@/lib/ledger-refresh-marker";
 import type { User } from "@supabase/supabase-js";
+
+/**
+ * Phase 164.6 review fix (IN-04): the longest the composite kickoff waits for
+ * the inherited-marker retraction before answering its 202. The retraction is
+ * best-effort and never changes the response, but it is a read plus, when a
+ * marker is present, an UPDATE that can queue behind a claiming worker's row
+ * lock, all on the user's synchronous request. Same bounded-race shape as
+ * `SNAPSHOT_BUDGET_MS` in src/app/api/intro/route.ts. Deliberately NOT moved
+ * into `after()`: a retraction that lands after the response widens the
+ * post-claim window [164.6-COMPOSITE-CLAIMTIME-SNAPSHOT] already records.
+ */
+const MARKER_RETRACTION_BUDGET_MS = 5_000;
 
 /**
  * POST /api/keys/sync — kicks off trade sync + analytics computation.
@@ -33,22 +55,56 @@ import type { User } from "@supabase/supabase-js";
  * on an unknowable membership count.
  *
  * ─── Direct-writes audit (D.10) ───────────────────────────────────────
- * Post-2.9 R2 writers of strategy_analytics.computation_status:
+ * Post-2.9 R2 writers of strategy_analytics.computation_status.
+ *
+ * JOB-01 stamp obligation (migration 20260802120000): the TWO writers that set
+ * 'computing' — (a) and (c) — must set computing_started_at in the SAME
+ * statement, and EVERY writer that leaves 'computing' must clear it to NULL in
+ * the same payload, or the pg_cron reaper either skips the row forever
+ * (NULL-stamp skip rule) or re-fires on a stale stamp. Enforced statically at
+ * build time by analytics-service/tests/test_computing_started_at_stamp.py
+ * (Python + this TS route surface) and supabase/tests/
+ * test_strategy_analytics_stuck_computing_reaper.sql (the deployed SQL bodies).
+ *
  *   (a) Worker: sync_strategy_analytics_status RPC (migration 038) — the
  *       compute_jobs worker is the sole writer on the unified/queue path.
+ *       Branch (a) is a 'computing' WRITER and stamps computing_started_at
+ *       CONDITIONALLY, on the transition INTO computing only: it is PERFORMed on
+ *       every job hop, so an unconditional stamp would reset the clock each hop
+ *       and the row would never age past the threshold. Branches (b)/(c) are the
+ *       SQL exit transitions and clear the stamp to NULL.
  *   (c) analytics_runner.py (Python /api/compute-analytics) — upserts
  *       'computing'/'complete'/'failed' during compute, invoked by the
- *       worker internally.
+ *       worker internally. `_mark_computing` is the ONLY Python 'computing'
+ *       writer and stamps computing_started_at client-side (UTC ISO — a
+ *       PostgREST payload cannot express SQL now()). Its terminal writers, and
+ *       the job_worker.py terminal/composite-success writers, all clear the
+ *       stamp to NULL.
  *   (d) portfolio.py (Python /api/portfolio-analytics) — writes
  *       computation_status for portfolio_analytics rows only, not strategy.
+ *       Out of scope for the stamp: different table.
  *   (e) Initial strategy creation: migration 001 DEFAULT 'pending' on INSERT.
+ *       Never 'computing', so no stamp.
  *   (f) set_wizard_composite_members RPC (migration 20260712120000, RT-1) —
  *       when the composite draft's member set CHANGES, resets a COMPLETED row
  *       ('complete'/'complete_with_warnings' → 'pending') to invalidate the
  *       stale stitch so the wizard re-stitches. Scoped to completed/IDLE rows
  *       ONLY (never a 'computing' row the worker owns), so it does not race the
  *       worker's compute-time writes; an identical re-Continue leaves it
- *       untouched (WIZ-05 no-op invariant).
+ *       untouched (WIZ-05 no-op invariant). No stamp: it never touches a
+ *       'computing' row.
+ *   (g) pg_cron reaper reap_strategy_analytics_stuck_computing (migration
+ *       20260802120000) — terminalizes a stranded 'computing' row (past the
+ *       threshold, no active compute_jobs row) to 'failed' with
+ *       computation_warned=FALSE and computing_started_at=NULL. Terminalizes
+ *       only; it never re-enqueues.
+ *   (h) THIS ROUTE and its two Next.js siblings — strategies/finalize-wizard
+ *       (×2) and strategies/csv-finalize — write terminal 'failed' PLACEHOLDER
+ *       rows on their own error paths (never 'computing'), so they are
+ *       stamp-CLEARING exit sites and set computing_started_at to NULL. This
+ *       supersedes the older claim above that "this route never upserts
+ *       computation_status directly": it does, via
+ *       stampCompositeFailedUnlessComplete, on the unknowable-membership arm.
  * No other paths write strategy_analytics.computation_status for strategies.
  * ──────────────────────────────────────────────────────────────────────
  */
@@ -58,8 +114,20 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const body = await req.json();
   const { strategy_id } = body;
 
+  // ── Phase 140.3-10 / SEAMUX-03 — a machine code on EVERY arm ──────────
+  // Every non-2xx this route emits now carries a `code`, so a consumer
+  // discriminates on a stable token instead of sniffing the prose. Prose is
+  // 140.3-12's to reword; a client branching on it breaks the day it does.
+  // The codes are chosen so each names the fact that is actually true of its
+  // own arm — a missing id, a malformed id, our own throttle, an unknowable
+  // composite membership, a failed enqueue, a Supabase transport fault and an
+  // absent draft are seven different facts, and collapsing them onto one token
+  // would leave the consumer exactly where it started.
   if (!strategy_id || typeof strategy_id !== "string") {
-    return NextResponse.json({ error: "Missing strategy_id" }, { status: 400, headers: NO_STORE_HEADERS });
+    return NextResponse.json(
+      { error: "Missing strategy_id", code: "MISSING_STRATEGY_ID" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   // F6 (code-review): reject a malformed strategy_id BEFORE it becomes the
@@ -68,7 +136,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // fresh allowance + an ownership SELECT) from arbitrary strings. A
   // valid-but-unowned id still gets the uniform 404 below (P458, no existence leak).
   if (!isUuid(strategy_id)) {
-    return NextResponse.json({ error: "Invalid strategy_id" }, { status: 400, headers: NO_STORE_HEADERS });
+    return NextResponse.json(
+      { error: "Invalid strategy_id", code: "INVALID_STRATEGY_ID" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   // F6 (M-0327/H-0279): two-tier rate limit.
@@ -83,28 +154,77 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // A per-user-ONLY bucket (the pre-F6 `keys-sync:${user.id}`) had the
   // starvation + cross-strategy-burn problem; a per-strategy-ONLY bucket
   // removed the per-user ceiling. Both together close both holes.
+  //
+  // ⚠️ 140.3-10 — THE TWO THROTTLE ARMS BELOW ARE TWO DISTINCT SITES emitting
+  // the same sentence. A grep of the string finds them both, but a "fix the
+  // arm" reading treats them as one and leaves the second codeless. They carry
+  // the SAME code deliberately: to the caller both are the one fact "our own
+  // limiter refused this request, here is how long to wait", and which BUCKET
+  // ran out is our internal accounting, not something the caller can act on
+  // differently. `RATE_LIMITED` is the app-global vocabulary's own name for
+  // exactly that fact (see WizardErrorCode's note: OUR limiter, as opposed to
+  // KEY_RATE_LIMIT which is an EXCHANGE throttle) — reusing it here keeps one
+  // token for one fact across the seam instead of minting a route-local
+  // synonym. Each site is pinned by its own case, driven through its own
+  // bucket key with its own wait, so a code dropped from one does not hide
+  // behind the other's assertion.
+  //
+  // ⚠️ 140.4-13 / SEAMRIM-05 — AND THE SAME "TWO DISTINCT SITES" WARNING NOW
+  // APPLIES TO THE 503 SPLIT. Both arms deny through `rateLimitDenyJson`, and
+  // both are pinned by their own case driven through their own bucket. A guard
+  // that only asked "does this FILE mention the builder" would stay green with
+  // the second arm reverted to an inlined 429 — which is exactly the mutation
+  // this plan's ledger row M105 runs.
+  //
+  // The 429 body and headers below are UNCHANGED: `{error, code:"RATE_LIMITED"}`
+  // in that key order, with NO_STORE_HEADERS + Retry-After. The `code` is a live
+  // contract — `SyncPreviewStep`'s KNOWN_KICKOFF_CODES maps `RATE_LIMITED` — so
+  // flattening it onto the builder's default body would have been a regression,
+  // not a simplification.
   const userRl = await checkLimit(keysSyncUserLimiter, `keys-sync-user:${user.id}`);
   if (!userRl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(userRl.retryAfter) } },
-    );
+    return rateLimitDenyJson(userRl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { error: "Too many requests", code: "RATE_LIMITED" },
+      misconfiguredBody: {
+        error: "Rate limiter unavailable",
+        code: "SEAM_MISCONFIGURED",
+      },
+    });
   }
   const rl = await checkLimit(
     userActionLimiter,
     `keys-sync:${user.id}:${strategy_id}`,
   );
   if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
-    );
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { error: "Too many requests", code: "RATE_LIMITED" },
+      misconfiguredBody: {
+        error: "Rate limiter unavailable",
+        code: "SEAM_MISCONFIGURED",
+      },
+    });
   }
 
   // Verify ownership via the user-scoped client so we get a clean
   // 403 before ever reaching the Railway pipeline.
   const supabase = await createClient();
-  const { data: strategy } = await supabase
+  // ⚠️ 140.3-10 / TRAP-3 (LIVE, not hypothetical) — this read used to be
+  // `.single()` destructured as `const { data: strategy } =`, DISCARDING
+  // `error`. `.single()` answers `data: null` for three different facts: no
+  // such row, a row this user does not own, AND a transport/query failure. The
+  // old code folded all three into "Strategy not found" — so a Supabase blip
+  // DURING OUR OWN OUTAGE told the user their draft was gone, and the state
+  // that names is the one whose way forward is to throw the draft away. Naming
+  // a vague error arm is what turns it into a specific lie.
+  //
+  // The split copies the in-tree template at
+  // the `wizard_session_id` draft-read split in `strategies/finalize-wizard/route.ts` verbatim in shape:
+  // `.maybeSingle()`, then the transport error first (a 500 ABOUT US, with the
+  // caught value scrubbed through the shipped `scrubSeamError` — never a
+  // hand-rolled scrub), then the genuinely-absent row.
+  const { data: strategy, error: strategyErr } = await supabase
     .from("strategies")
     // 89-02: api_key_id joins the ownership select so the composite-first
     // branch below can gate on api_key_id === null with ZERO extra queries for
@@ -112,7 +232,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     .select("id, user_id, api_key_id")
     .eq("id", strategy_id)
     .eq("user_id", user.id)
-    .single();
+    .maybeSingle();
+
+  if (strategyErr) {
+    console.error(
+      `[keys/sync] strategy lookup failed for ${strategy_id}:`,
+      scrubSeamError(strategyErr),
+    );
+    return NextResponse.json(
+      { error: "Could not load draft", code: "DRAFT_LOOKUP_FAILED" },
+      { status: 500, headers: NO_STORE_HEADERS },
+    );
+  }
 
   if (!strategy) {
     // P458 (audit-2026-05-07): uniform 404 for both "no such strategy" AND
@@ -121,8 +252,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // 403-unowned from 404-not-found. Now there is no asymmetry: an
     // attacker probing a foreign strategy_id and an attacker probing a
     // random uuid both see the same response shape.
+    //
+    // ⚠️ 140.3-10 — THE SPLIT ABOVE MUST NOT WEAKEN THIS. Both facts still
+    // reach THIS line and produce a byte-identical body, status and header
+    // set; the only thing pulled out is the transport failure, which is a
+    // statement about US and was never a statement about the strategy. Adding
+    // any response difference between not-found and not-owned here re-opens
+    // the enumeration hole. Pinned by a dedicated byte-identity case.
+    //
+    // The code is `GATE_DRAFT_GONE`, the same token `finalize-wizard` already
+    // emits for the same fact — one fact, one token across both routes.
     return NextResponse.json(
-      { error: "Strategy not found" },
+      { error: "Strategy not found", code: "GATE_DRAFT_GONE" },
       { status: 404, headers: NO_STORE_HEADERS },
     );
   }
@@ -136,7 +277,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // because the backbone is permanent-on (Phase 106) and the unified arm
   // cannot honestly derive a NULL-api_key composite (it would mis-route to a
   // single-key path). This MIRRORS the Phase-88 finalize-wizard hoist
-  // (finalize-wizard/route.ts:517-621).
+  // (the Phase-88 hoist in finalize-wizard/route.ts).
   //
   // Scoped to api_key_id === null: a composite has strategies.api_key_id NULL
   // (members live in strategy_keys); api_key_id SET is definitively single-key
@@ -154,10 +295,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     } catch (err) {
       console.error(
         `[keys/sync] composite membership probe failed for ${strategy_id}:`,
-        err,
+        scrubSeamError(err),
       );
+      // 140.3-10 — `COMPOSITE_MEMBERSHIP_UNKNOWN` is the EXISTING wizard code
+      // for precisely this fail-closed: finalize-wizard already emits it from
+      // its mirror of this probe. This route was the straggler emitting the
+      // same 503 codeless, so the identical fact carried a token on one route
+      // and nothing on the other.
       return NextResponse.json(
-        { error: "Could not start sync. Try again in a moment." },
+        {
+          error: "Could not start sync. Try again in a moment.",
+          code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+        },
         { status: 503, headers: NO_STORE_HEADERS },
       );
     }
@@ -191,7 +340,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       if (assetClassErr) {
         console.warn(
           `[keys/sync] composite asset_class derive failed (non-blocking) for ${strategy_id}:`,
-          assetClassErr,
+          scrubSeamError(assetClassErr),
         );
         // Parity with finalize (:504-507): a persistent write failure would
         // otherwise be invisible in Sentry and surface only as recurring
@@ -216,16 +365,103 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       if (rpcError) {
         console.error(
           `[keys/sync] enqueue_compute_job (stitch_composite) RPC failed for ${strategy_id}:`,
-          rpcError,
+          scrubSeamError(rpcError),
         );
+        // 140.3-10 — a DISTINCT fact from the membership fail-closed above:
+        // membership was known, the enqueue itself failed. Same sentence, same
+        // status, different cause, so a different token.
         return NextResponse.json(
-          { error: "Could not start sync. Try again in a moment." },
+          {
+            error: "Could not start sync. Try again in a moment.",
+            code: "SYNC_KICKOFF_FAILED",
+          },
           { status: 503, headers: NO_STORE_HEADERS },
         );
       }
       console.log(
         `[keys/sync] enqueued stitch_composite job=${rpcData} for strategy=${strategy_id}`,
       );
+
+      // Phase 164.6 / 161.1-D13 — the enqueue may have DEDUPED onto an in-flight
+      // ledger-refresh job, whose marker would keep a stale factsheet published
+      // over a failure of a request the user is watching. Retract it, exactly as
+      // Python's `_retract_refresh_marker_on_reuse` does. Best-effort: the enqueue
+      // already succeeded, so a failed retraction never changes the 202, but it
+      // is LOUD under its own tag. The read-modify-write residual (161.1-D12) is
+      // inherited; see `retractInheritedRefreshMarker`'s JSDoc.
+      //
+      // BOUNDED (164.6 review fix, IN-04) by `MARKER_RETRACTION_BUDGET_MS`. Past
+      // the budget the 202 goes out and the overrun is LOUD under its OWN tag,
+      // because a retraction that did not finish may have left the marker in
+      // place. The retraction itself is not cancelled.
+      //
+      // L2 (164.6 round 2): a rejection that lands AFTER the budget used to be
+      // absorbed by the settled race without a word, so the reason the marker
+      // stayed in place was lost. The `.catch` on the retraction promise itself
+      // reports it under its OWN `_late` tag, with its SQLSTATE. An in-time
+      // rejection is reported once, by the catch below, never also as late.
+      let retractionTimer: ReturnType<typeof setTimeout> | undefined;
+      let retractionTimedOut = false;
+      // @audit-skip: job-row provenance metadata; user intent is audited by the sync.start event below.
+      const retraction = retractInheritedRefreshMarker(admin, rpcData, correlation_id);
+      retraction.catch((err: unknown) => {
+        if (!retractionTimedOut) return;
+        const code = retractionFailureCode(err);
+        console.error(
+          `[keys/sync] composite refresh-marker retraction failed late, after the ${MARKER_RETRACTION_BUDGET_MS} ms budget, for ${strategy_id} (code=${code}):`,
+          scrubSeamError(err),
+        );
+        captureToSentry(err, {
+          tags: { op: "keys-sync.composite_refresh_marker_retract_late" },
+          extra: { strategy_id, job_id: rpcData, correlation_id },
+        });
+      });
+      try {
+        const outcome = await Promise.race([
+          retraction.then((result) => ({
+            kind: "done" as const,
+            retraction: result,
+          })),
+          new Promise<{ kind: "timeout" }>((resolve) => {
+            retractionTimer = setTimeout(() => {
+              retractionTimedOut = true;
+              resolve({ kind: "timeout" });
+            }, MARKER_RETRACTION_BUDGET_MS);
+          }),
+        ]);
+        if (outcome.kind === "timeout") {
+          console.error(
+            `[keys/sync] composite refresh-marker retraction exceeded ${MARKER_RETRACTION_BUDGET_MS} ms for ${strategy_id}; answering 202 without it, and the marker may still be in place`,
+          );
+          captureToSentry(
+            new Error(
+              `keys/sync composite refresh-marker retraction exceeded ${MARKER_RETRACTION_BUDGET_MS} ms`,
+            ),
+            {
+              tags: { op: "keys-sync.composite_refresh_marker_retract_timeout" },
+              extra: { strategy_id, job_id: rpcData, correlation_id },
+            },
+          );
+        } else if (outcome.retraction.retracted) {
+          console.warn(
+            `[keys/sync] retracted inherited ${outcome.retraction.marker} marker on job=${rpcData} for strategy=${strategy_id}`,
+          );
+        }
+      } catch (err) {
+        // LOW-2 (164.6 review fix): the thrown message is generic by design; the
+        // PostgREST SQLSTATE rides in `cause`, so it is named here.
+        const code = retractionFailureCode(err);
+        console.error(
+          `[keys/sync] composite refresh-marker retraction failed for ${strategy_id} (code=${code}):`,
+          scrubSeamError(err),
+        );
+        captureToSentry(err, {
+          tags: { op: "keys-sync.composite_refresh_marker_retract" },
+          extra: { strategy_id, job_id: rpcData, correlation_id },
+        });
+      } finally {
+        clearTimeout(retractionTimer);
+      }
 
       // Idempotent double-submit is handled by the compute_jobs partial unique
       // index (finalize comment :860-864); repeated preview mounts re-POST safely.
@@ -274,6 +510,28 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       resolvedSource = keyRow.exchange;
     }
   }
+  // Phase 146.1 / B2 (2026-08-18) — THE FORWARD WAS REMOVED HERE. This block
+  // used to read the session and hand `postProcessKey` a LIVE end-user Supabase
+  // JWT for the `X-User-Access-Token` header. The v1.19 xhigh review measured
+  // the far side: the only Python reader, `services/db.py
+  // get_user_scoped_supabase`, has ZERO production callers, and
+  // the `not hasattr(..., "get_user_scoped_supabase")` gate in
+  // `analytics-service/tests/test_process_key.py` actively PINS that
+  // non-use. Nothing in `analytics-service` reads the header. A live credential
+  // that crosses a service boundary and is never read is pure exposure surface,
+  // so it is no longer sent.
+  //
+  // The 140.2 obligation that justified the forward is DISCHARGED BY
+  // SUBSTITUTION, not abandoned: the ownership pre-check it was meant to enable
+  // is already shipped as the explicit Python `strategies` id+user_id filter
+  // (`_caller_owns_strategy` in `analytics-service/routers/process_key.py`). See
+  // `.planning/phases/140.1-.../140.1-TS-OBLIGATIONS.md` TS-15 for the dated
+  // superseding note and the NOT-TAKEN option (b).
+  //
+  // ⛔ The header name STAYS on `resilient-fetch.ts`'s CREDENTIAL_HEADER_NAMES
+  // scrub enumeration on purpose — pruning it would be an instance fix that
+  // re-opens the class for whatever this seam carries next.
+
   return await unifiedKeysSyncHandler({
     strategy_id,
     userId: user.id,
@@ -327,7 +585,7 @@ async function stampCompositeFailedUnlessComplete(
     console.error(
       `[keys/sync] could not read existing analytics before stamping 'failed' ` +
         `(${logLabel}) for ${strategyId}:`,
-      readErr,
+      scrubSeamError(readErr),
     );
     return;
   }
@@ -341,7 +599,7 @@ async function stampCompositeFailedUnlessComplete(
     // pattern in the POST handler above).
     console.error(
       `[keys/sync] failed to stamp terminal 'failed' (${logLabel}) for ${strategyId}:`,
-      stampErr,
+      scrubSeamError(stampErr),
     );
   }
 }
@@ -386,6 +644,8 @@ async function compositeMemberCount(
       {
         computation_status: "failed",
         computation_warned: false,
+        // JOB-01: clear on exit from computing (reaper key — migration 20260802120000)
+        computing_started_at: null,
         computation_error:
           "Could not determine composite membership " +
           "(strategy_keys count unavailable). Please retry.",
@@ -427,15 +687,33 @@ async function unifiedKeysSyncHandler(args: {
   // `body.strategy_id` keep working. Preserve verification_id + queued as
   // additive fields.
   //
-  // CT-5 (army2) — branch on queued: a real enqueue (`queued===true`)
-  // returns 202 syncing; an idempotent WIZARD_DUPLICATE
-  // (`queued===false && code==='WIZARD_DUPLICATE'`) returns 200 with the
-  // upstream's preserved status (e.g. 'validated' or whatever the
-  // pre-existing row holds), the idempotent flag, and the WIZARD_DUPLICATE
-  // code so the wizardErrors copy can render even on a 200.
+  // CT-5 (army2) — a real enqueue returns 202 syncing; a duplicate returns 200
+  // with the upstream's preserved status (e.g. 'validated' or whatever the
+  // pre-existing row holds), the idempotent flag, and the WIZARD_DUPLICATE code
+  // so the wizardErrors copy can render even on a 200.
+  //
+  // ⚠️ Phase 140.3-02 / TS-02 — THE DUPLICATE BRANCH KEYS ON THE CODE ALONE.
+  // It used to read `queued === false && code === "WIZARD_DUPLICATE"`, and that
+  // conjunct was provably wrong in BOTH directions. `queued` and `code` are
+  // ORTHOGONAL facts on this reply:
+  //   · `queued` / `job_state` is a JOB fact — a compute job is now enqueued or
+  //     running for this verification.
+  //   · `code: "WIZARD_DUPLICATE"` + `idempotent: true` is a SUBMISSION fact —
+  //     this submission was a duplicate; no new verification was created.
+  // Neither implies the other, and `process_key.py:_resume_duplicate_job` exists
+  // precisely to produce the state where BOTH are true: the RESUMED WEDGE — a
+  // duplicate submission whose wedged job we re-enqueued. Both duplicate
+  // emitters share ONE builder (`_wizard_duplicate_reply`) which takes `queued`
+  // as a PARAMETER, so `queued: true` beside the code is the normal reply.
+  // The old conjunct therefore SKIPPED the duplicate branch on exactly the case
+  // that most needs it, and reported a recognised duplicate as a fresh sync.
+  // `SubmitStep.tsx` already branches on `data.code === "WIZARD_DUPLICATE"`
+  // alone on the finalize side; this route was the straggler. (The same false
+  // mutual exclusion was deleted from the onboard predicate by TS-01/TS-03 —
+  // see `src/lib/process-key-onboard-contract.ts`. Do not re-introduce it here.)
   const upstream = (result.body ?? {}) as Record<string, unknown>;
   if (upstream && typeof upstream === "object" && "queued" in upstream) {
-    if (upstream.queued === false && upstream.code === "WIZARD_DUPLICATE") {
+    if (upstream.code === "WIZARD_DUPLICATE") {
       return NextResponse.json(
         {
           // H-0309: uniform `ok: true` success discriminator (alongside the
@@ -445,7 +723,20 @@ async function unifiedKeysSyncHandler(args: {
           strategy_id: args.strategy_id,
           status: typeof upstream.status === "string" ? upstream.status : "syncing",
           verification_id: upstream.verification_id ?? null,
-          queued: false,
+          // TS-02 — FORWARD the job fact rather than asserting it. This was
+          // hardcoded `false`, which on a resumed wedge states the opposite of
+          // what the backbone just did: a job IS enqueued. Re-pointing the
+          // branch without this would have moved the lie instead of removing it.
+          queued: upstream.queued === true,
+          // Round-2 review (SFH LOW-8) — the JOB's state, forwarded verbatim
+          // from `process_key.py`: "enqueued" when the duplicate path
+          // (`_resume_duplicate_job`, the resumed wedge) queued or found a
+          // PENDING job, "running" when the job is already in flight (that
+          // path, or the chain-in-flight guard). The wizard needs it to tell a
+          // Retry that queued work from one the server refused.
+          ...(typeof upstream.job_state === "string"
+            ? { job_state: upstream.job_state }
+            : {}),
           code: "WIZARD_DUPLICATE",
           idempotent: true,
           // Unified is a single-key resync path — never a composite.

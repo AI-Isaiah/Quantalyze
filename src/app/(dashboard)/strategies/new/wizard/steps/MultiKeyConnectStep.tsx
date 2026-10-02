@@ -13,14 +13,35 @@ import {
   ConnectKeyStep,
   type ConnectKeySuccess,
   type ConnectKeyDraft,
+  type PreselectedKey,
 } from "./ConnectKeyStep";
-import { type WizardErrorCode } from "@/lib/wizardErrors";
+import {
+  recogniseSeamErrorCode,
+  type WizardErrorCode,
+} from "@/lib/wizardErrors";
+import { ValidateWaitCard } from "../ValidateWaitCard";
+import {
+  WAIT_CARD_MOUNT_DELAY_MS,
+  connectAbortDeadlineMsFor,
+  validateBudgetSecondsFor,
+} from "@/lib/wizard/validate-budget";
+import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SupportedExchange } from "@/lib/utils";
-import { SFOX_UI_ENABLED } from "@/lib/utils";
+import { SFOX_UI_ENABLED, MT5_UI_ENABLED } from "@/lib/utils";
 import {
   getWizardCorrelationId,
   wizardFetch,
 } from "@/lib/wizard/wizard-correlation";
+import { seamErrorCode } from "@/lib/seam-discriminator";
+// 140.5-03 / SEAMPROSE-02 — the ONE `Retry-After` parser (HTTP-date safe, never
+// NaN/0/negative). A raw `Number(res.headers.get(...))` is a repo-wide ESLint
+// error by design.
+import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
+import {
+  readCredentialInput,
+  CREDENTIAL_KEY_INPUT_PROPS,
+  CREDENTIAL_SECRET_INPUT_PROPS,
+} from "@/lib/credential-input";
 
 /**
  * Phase 88 / ONB-01 — the multi-key ConnectKeyStep.
@@ -38,13 +59,27 @@ import {
  *
  * ── DELIBERATE DUPLICATION (flagged for Phase-91 QA) ──────────────────────────
  * The exchange-card grid + credential markup + credential posture below are
- * replicated VERBATIM from ConnectKeyStep (autoComplete="off", secret as
- * type="password" with show/hide, POST-body-only, no browser storage). This is
+ * replicated VERBATIM from ConnectKeyStep (secret as type="password" with
+ * show/hide, POST-body-only, no browser storage). The credential input
+ * attributes and the paste rule are NOT duplicated: both steps import them
+ * from `src/lib/credential-input.ts` (169.3 D-76). This is
  * neutrality-over-DRY: State A must stay byte-identical to ConnectKeyStep, which
  * means ConnectKeyStep exports nothing new (footerSlot is its ONLY diff), so the
  * multi-key panels cannot share ConnectKeyStep's private EXCHANGES/markup. The
  * duplication is intentional — Phase-91 QA should verify the two credential
  * surfaces stay in lockstep (labels, placeholders, secret handling).
+ *
+ * ⚠️ THE LOCKSTEP IS NOW ASSERTED, BECAUSE IT BROKE (153.4 review CR-03). "QA
+ * should verify" is not a mechanism: this roster fell an entire VENUE behind —
+ * `MT5_UI_ENABLED` was not so much as imported here — and the resulting panel
+ * posted `passphrase: null`, silently dropping the broker server, while rendering
+ * no field to put it back. `MultiKeyConnectStep.test.tsx`'s "[CR-03] … THE CLASS
+ * GUARD" case now compares the two surfaces' rendered exchange cards with both
+ * flags ON, so the NEXT venue added to one roster and not the other reds. ⛔ If
+ * that case goes red, add the venue here — never delete the case. The real class
+ * fix (one shared option table both steps import, which the State-A neutrality
+ * argument above does NOT forbid — it forbids ConnectKeyStep growing an export)
+ * is logged in TODOS.md.
  */
 
 function genId(): string {
@@ -70,6 +105,17 @@ interface ExchangeOption {
   requiresSecret?: boolean;
   credentialLabels?: { key: string; secret: string };
   credentialPlaceholders?: { key: string; secret: string };
+  // 153.4 review CR-03 — the four third-field overrides ConnectKeyStep's option
+  // shape already carried and this one did not. Absent → today's OKX strings and
+  // today's masked render, so every existing venue's panel is byte-identical.
+  // MT5 reuses the SAME passphrase slot for the broker SERVER NAME, which is not
+  // a credential, so it relabels the field and unmasks it.
+  passphraseLabel?: string;
+  passphrasePlaceholder?: string;
+  passphraseHelper?: string;
+  passphraseSecret?: boolean;
+  // Optional muted helper under the secret input. Absent → nothing renders.
+  secretHelper?: string;
 }
 
 // Replicated verbatim from ConnectKeyStep (see DELIBERATE DUPLICATION above).
@@ -121,6 +167,42 @@ const EXCHANGES: ExchangeOption[] = [
         },
       ]
     : []),
+  // 153.4 review CR-03 — THE MT5 CARD THIS ROSTER WAS MISSING, gated on the same
+  // flag as its single-key twin.
+  //
+  // ⚠️ ITS ABSENCE WAS NOT COSMETIC. An MT5 key reaches a member panel by exactly
+  // one route — the UAT/F-4 draft carry-over in `enterMulti`, which is the path
+  // plan 153.4-05's own tests drive. With no card, `EXCHANGES.find(e => e.id ===
+  // "mt5")` was `undefined` for that panel, so `requiresPassphrase` defaulted
+  // FALSE and `validatePanel` posted `passphrase: null` — silently dropping the
+  // broker server the user typed in State A — while `KeyPanel` rendered no field
+  // to put it back and `canValidate` did not gate on it. The submit control was
+  // enabled for a request that could not succeed. The same lookup miss also cost
+  // the panel its credential labels ("MT5 login" / "Investor password"), its
+  // investor-vs-master steer, its `aria-pressed` card and its validated summary
+  // name.
+  ...(MT5_UI_ENABLED
+    ? [
+        {
+          id: "mt5" as const,
+          name: "MT5",
+          caption: "Live investor (read-only) login. Forex & CFD.",
+          requiresPassphrase: true,
+          credentialLabels: { key: "MT5 login", secret: "Investor password" },
+          credentialPlaceholders: {
+            key: "Your MT5 account number",
+            secret: "Your read-only investor password",
+          },
+          passphraseLabel: "Broker server",
+          passphraseSecret: false,
+          passphrasePlaceholder: "Exactly as shown in your MT5 terminal",
+          passphraseHelper:
+            "Open your MT5 terminal's login window and copy the server name exactly as it appears there — it is broker-specific and often carries a region or Demo/Live suffix.",
+          secretHelper:
+            "Use your investor (read-only) password — not your master password. A master password can place trades, so we refuse it and store nothing.",
+        },
+      ]
+    : []),
 ];
 
 // F3 (Phase 122): honest structural note appended to the step-level "What we
@@ -150,6 +232,232 @@ const TRUST_ATOMS: { title: string; body: string }[] = [
   },
 ];
 
+/**
+ * 140.3-13a / SEAMUX-08 — the composite variant's funnel step name.
+ *
+ * DELIBERATELY NOT `"connect_key"`. State A of this component delegates to
+ * `ConnectKeyStep`, which emits `step: "connect_key"` from its own error paths,
+ * so reusing that value here would merge the single-key and multi-key funnels
+ * into one indistinguishable bucket — and the whole reason this component needed
+ * emissions is that the COMPOSITE path was invisible. Before this plan
+ * `grep -c 'trackForQuantsEventClient'` on this file was **0**: every multi-key
+ * failure — an add-key rejection, a set-members rejection, a failed rehydrate —
+ * produced no funnel event at all, so a seam outage during a multi-key connect
+ * was indistinguishable from nobody attempting one.
+ */
+const MULTI_KEY_FUNNEL_STEP = "connect_key_multi";
+
+/**
+ * Every `WizardErrorCode` that `POST /api/strategies/composite/add-key` can put
+ * on the wire.
+ *
+ * Same reasoning as `ConnectKeyStep`'s `KNOWN_CREATE_WITH_KEY_CODES`, which is
+ * the sibling route: this replaces a bare `as WizardErrorCode` cast of
+ * `data.code` — widened with an optional and then defaulted to `"UNKNOWN"` — of
+ * NETWORK DATA into a closed union, copying `SubmitStep.tsx`'s
+ * `KNOWN_FINALIZE_CODES` membership shape. The two routes' `classifyKeyValidationError` halves are
+ * identical by construction — both call the one shared classifier — but the
+ * sets are still written out per route rather than shared, because the direct
+ * emissions differ and a shared set would silently admit one route's codes at
+ * the other.
+ *
+ * ⚠️ 140.4-15 / SEAMRIM-08 — THIS SET IS NO LONGER THE ONLY HOP AT THE ADD-KEY
+ * ARM, AND IT DELIBERATELY DID NOT GAIN A MEMBER. `140.4-13` made
+ * `composite/add-key/route.ts`'s 503 arm answer a limiter MISCONFIGURATION with
+ * the WIRE code `SEAM_MISCONFIGURED` (`rateLimitDenyJson`'s
+ * `misconfiguredBody`), replacing the 429 `KEY_RATE_LIMIT` whose copy calls the
+ * throttle "exchange-side" — our own outage, blamed on the user's venue. With
+ * only the set below, that code missed every member and rendered `UNKNOWN`:
+ * *"Try the last action again."*, **with a Retry control**, for a fault whose
+ * own copy says *"Retrying will not clear it: the setting stays wrong until we
+ * fix it and redeploy."* The remedy is the ONE shared table
+ * (`SEAM_CODE_TO_WIZARD_CODE`, read through `recogniseSeamErrorCode`) consulted
+ * FIRST — coverage-law row 1 — not a member here, which would be a hand-typed
+ * allow-list edit owed again at every surface the next wire code reaches.
+ *
+ * ⚠️ 164.2-05 CORRECTION (2026-09-06). This paragraph used to continue: *"The
+ * table's key set and this set intersect in NOTHING, so the ordering cannot
+ * change what any member below renders."* THAT IS NO LONGER TRUE — admitting
+ * `RATE_LIMITED` below (see its row) gives this set exactly one member the wire
+ * table also carries. The CONCLUSION still holds, and it always rested on the
+ * other reason: 140.4-16 / WR-11 turned the measurement into an assertion in
+ * `seam-ratelimit-posture.invariant.test.ts`, which derives both vocabularies
+ * from disk and asserts the NECESSARY condition — a shared code must get the
+ * SAME answer — rather than disjointness. The wire table maps `RATE_LIMITED`
+ * to ITSELF, so the two sides AGREE and the ordering still cannot change what
+ * renders. ⛔ Disjointness was only ever a SUFFICIENT condition that happened
+ * to hold here; it did not hold at `KNOWN_KICKOFF_CODES`, which has shared
+ * `RATE_LIMITED` all along, and it does not hold here any more either. See `ConnectKeyStep`'s
+ * `KNOWN_CREATE_WITH_KEY_CODES` docblock for the full reasoning; both key-entry
+ * steps take the change together because both routes emit the code.
+ */
+const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
+  new Set<WizardErrorCode>([
+    // Emitted directly by `composite/add-key/route.ts`'s own guards.
+    "KEY_INVALID_FORMAT",
+    // 142.2 / MT5-04 (D-05) — the four codes `KEY_INVALID_FORMAT` was split
+    // into. `composite/add-key/route.ts` mirrors `create-with-key` guard for
+    // guard, so it emits the same four and this roster gains the same four.
+    // The two rosters stay SEPARATE (see the docblock above): they agree here
+    // because the two routes genuinely emit the same set, not because one was
+    // copied from the other.
+    "KEY_MISSING_REQUIRED_FIELD",
+    "KEY_UNSUPPORTED_VENUE",
+    "KEY_VENUE_NOT_ENABLED",
+    "KEY_INPUT_TOO_LONG",
+    "KEY_NOT_READ_ONLY",
+    "KEY_HAS_TRADING_PERMS",
+    "KEY_HAS_WITHDRAW_PERMS",
+    "DRAFT_ALREADY_EXISTS",
+    "KEY_RATE_LIMIT",
+    // 164.2-05 / criterion 4 (2026-09-06) — BESIDE `KEY_RATE_LIMIT`, NOT
+    // INSTEAD OF IT. The two stand for DIFFERENT facts and both are reachable
+    // on this route.
+    //
+    // `composite/add-key`'s `userActionLimiter` deny arm used to answer
+    // `KEY_RATE_LIMIT`, whose copy calls the throttle *"a transient,
+    // exchange-side throttle"* and whose `fix[1]` offers *"try a different
+    // exchange account"*. That bucket is keyed
+    // `strategies-composite-add-key:<uid>` — OURS, per USER — so no exchange is
+    // consulted and no other exchange account can clear it. The arm now answers
+    // `RATE_LIMITED`, which already carried the true sentence (*"the cap is
+    // ours, not your exchange's"*). The route's own comment had recorded that
+    // debt since 140.4-13 and named 140.4-12 as its owner; 140.4-12 never made
+    // the change, and this plan pays it as a CLASS across all four
+    // `userActionLimiter` routes.
+    //
+    // ⛔ `KEY_RATE_LIMIT` STAYS ABOVE because `classifyKeyValidationError` still
+    // returns it at 503 for a GENUINE venue throttle, where its exchange
+    // sentence is TRUE. Removing it would swap a false sentence for an UNKNOWN
+    // card on the one arm that earned it.
+    //
+    // ⚠️ WHAT THIS ROW ACTUALLY BUYS — MEASURED, because 164.2-04 shipped a
+    // first draft of the twin comment in `ConnectKeyStep.tsx` that claimed the
+    // wrong thing. It is a COUPLING guard, not a copy guard: the add-key arm
+    // below TRANSLATES FIRST through `SEAM_CODE_TO_WIZARD_CODE`, which maps
+    // `RATE_LIMITED` to ITSELF, so deleting this line does NOT make the step
+    // render UNKNOWN. What it buys is that this route's own minted vocabulary
+    // is written down here rather than borrowed from the shared wire table —
+    // which is what makes a future edit to that table a caught change instead
+    // of a rendered one. ⛔ `KNOWN_SET_MEMBERS_CODES` below is the OPPOSITE
+    // case; do not copy this paragraph onto it.
+    "RATE_LIMITED",
+    "UNKNOWN",
+    // Returned by the shared `classifyKeyValidationError` at its catch arm.
+    "SERVICE_UNAVAILABLE_RETRY",
+    "KEY_INVALID_SIGNATURE",
+    "KEY_AUTH_FAILED",
+    "KEY_MT5_MASTER_PASSWORD",
+    "KEY_MT5_WRONG_SERVER",
+    // 164.6.5 / criterion 5 — same addition as `KNOWN_CREATE_WITH_KEY_CODES`
+    // (full reasoning there), taken together because both routes share the
+    // classifier that emits it. Admitted HERE IN THE SAME COMMIT the shared
+    // classifier starts returning it.
+    "KEY_MT5_TERMINAL_UNRESPONSIVE",
+    "KEY_IP_ALLOWLIST",
+    "KEY_NETWORK_TIMEOUT",
+    "KEY_PROBE_FAILED",
+    "KEY_EXCHANGE_UNAVAILABLE",
+    "KEY_VENUE_TRANSIENT",
+    // ⚠️ STOPGAP (hotfix 2026-08-06, incident 2026-08-05): same three-code
+    // addition as `KNOWN_CREATE_WITH_KEY_CODES` (see the full incident note
+    // there) — the server put `SERVICE_UNREACHABLE` on the wire, the roster
+    // rejected it, and the step rendered UNKNOWN with a Retry control for a
+    // no-answer fault. The two rosters stay SEPARATE (docblock above) and
+    // take the change together because both routes share the classifier that
+    // emits these codes. Copy for all three verified in `WIZARD_ERROR_COPY`.
+    //
+    // ⭐ CLASS fix (derive the roster from the route contract) = `ROSTER-DERIVE-01`
+    // in `TODOS.md` — 153.7 verification W-153.7-2. This line used to point at
+    // "Phase 153 / WIZFORM-02", which is now ticked COMPLETE, leaving the fix
+    // ownerless; and its "do not grow this list further" cannot be obeyed, since
+    // every new classifier verdict must be admitted here in the same commit or
+    // the step renders UNKNOWN with a Retry control. Growing it is no longer
+    // silent: `[153.7 review W-153.7-1]` in `wizardErrors.invariant.test.ts`
+    // reds by name when this roster does not admit a classifier-reachable code.
+    // The full reasoning is at the twin line in `ConnectKeyStep.tsx`.
+    "SERVICE_UNREACHABLE",
+    "KEY_MISSING_READ_SCOPE",
+    "KEY_PERMISSION_DENIED",
+    // 153.7-02 / WIZFORM-02-CLASS — the same addition as
+    // `KNOWN_CREATE_WITH_KEY_CODES` (full reasoning there), taken together
+    // because both routes share the classifier that emits it. The two rosters
+    // stay SEPARATE per the docblock above; they agree here because the shared
+    // `classifyKeyValidationError` genuinely returns this code at both catch
+    // arms, not because one was copied from the other. Copy verified present in
+    // `WIZARD_ERROR_COPY`, and it is deliberately NOT recoverable — the three
+    // wire codes behind it are `retryable=False` at their emitters.
+    "SEAM_INTERNAL_FAULT",
+    // 164.5.4-02 / D-03 — the same addition as `KNOWN_CREATE_WITH_KEY_CODES`
+    // (full reasoning there), taken together because both rosters are checked
+    // against the SAME `classifyKeyValidationError` population and
+    // `[153.7 review W-153.7-1]` reds on both by name. The two rosters stay
+    // SEPARATE per the docblock above; they agree here because the shared
+    // classifier genuinely returns this code at both catch arms. Copy verified
+    // present in `WIZARD_ERROR_COPY`, and it is deliberately NOT recoverable —
+    // the wire code behind it is `retryable=False` at its emitter and a Retry
+    // would re-read the identical stored bytes.
+    "KEY_MUST_BE_RECONNECTED",
+    // 167-CREDTRUST / D-05, D-07 — the same addition as
+    // `KNOWN_CREATE_WITH_KEY_CODES` (full reasoning there), taken together
+    // because both rosters are checked against the SAME
+    // `classifyKeyValidationError` population and
+    // `[153.7 review W-153.7-1]` reds on both by name. Copy verified present
+    // in `WIZARD_ERROR_COPY`, and it is deliberately NOT recoverable — the
+    // wire code behind it is `recoverable=False` at its emitter and a Retry
+    // would re-run the identical validate against a terminal a wrong
+    // password may have wedged.
+    "KEY_SIGN_IN_FAILED",
+  ]);
+
+/**
+ * Every `WizardErrorCode` that `POST /api/strategies/composite/set-members` can
+ * put on the wire — a SEPARATE, much smaller route contract.
+ *
+ * ⚠️ This is why one shared set per STEP would be wrong. `set-members` performs
+ * no key validation at all: it never calls `classifyKeyValidationError` and
+ * emits exactly four codes. Admitting `KEY_AUTH_FAILED` here would let a drifted
+ * or spoofed body render "the exchange rejected your credentials" on a call that
+ * only ever persisted date windows.
+ */
+const KNOWN_SET_MEMBERS_CODES: ReadonlySet<WizardErrorCode> =
+  new Set<WizardErrorCode>([
+    "MULTI_KEY_WINDOWS_INVALID",
+    "GUARD_BLOCKED",
+    // ⚠️ 164.2-05 (2026-09-06) — UNREACHABLE-BY-DESIGN, AND KEPT DELIBERATELY.
+    //
+    // Read this before treating the row as live. `set-members` answered its own
+    // 429 with `KEY_RATE_LIMIT` and that arm was its ONLY producer: this route
+    // performs no key validation, so — as the docblock above says — it never
+    // calls `classifyKeyValidationError` and no classifier verdict can arrive
+    // here. As of 164.2-05 the arm answers `RATE_LIMITED`, so NOTHING emits
+    // this code on this route any more.
+    //
+    // It stays because removing it is a RENDERING change this plan did not
+    // measure: a response from an older instance mid-deploy would go from a
+    // stale sentence to the UNKNOWN card, and picking between those two is a
+    // separate decision from "stop emitting the false one". ⛔ Do not read this
+    // row as evidence that a venue throttle can reach this step — that is
+    // exactly the false attribution the line below was added to remove.
+    "KEY_RATE_LIMIT",
+    // ⭐ 164.2-05 / criterion 4 — AND ON THIS ROSTER THE ROW IS A COPY GUARD,
+    // unlike its twin in `KNOWN_ADD_KEY_CODES` above.
+    //
+    // `handleContinue` does NOT translate: it reads
+    // `data.code && KNOWN_SET_MEMBERS_CODES.has(data.code)` and falls straight
+    // to `"UNKNOWN"`. There is no `recogniseSeamErrorCode` hop on this arm, so
+    // omit this line and a real throttle renders the generic UNKNOWN card
+    // instead of the honest cap sentence. MEASURED, not inferred: with the row
+    // absent the step-level envelope reads `data-error-code="UNKNOWN"`.
+    //
+    // The fact it now names is our own per-user cap
+    // (`strategies-composite-set-members:<uid>`), which is the only kind of
+    // throttle this endpoint can produce — it persists date windows and reaches
+    // no venue on any path.
+    "RATE_LIMITED",
+    "UNKNOWN",
+  ]);
+
 interface PanelState {
   id: string;
   exchange: ExchangeId;
@@ -164,8 +472,112 @@ interface PanelState {
   status: "editing" | "validating" | "validated";
   apiKeyId: string | null;
   errorCode: WizardErrorCode | null;
+  /**
+   * 140.5-03 / SEAMPROSE-02 — the wait THIS PANEL's failing add-key response
+   * advertised, in seconds, or `null` when it advertised none.
+   *
+   * PER-PANEL and not per-step: each panel validates independently against
+   * `composite/add-key`, and that route is rate-limited per identity, so panel
+   * 3 hitting the limiter says nothing about panel 1. A single step-level wait
+   * would render panel 3's duration under panel 1's error.
+   *
+   * Cleared on every fresh validate attempt beside `errorCode` (TRAP-3).
+   */
+  retryAfterSeconds: number | null;
+  /**
+   * 164.6.5-07 / D-14 — the id of THIS panel's most recent add-key attempt,
+   * captured off the wizardFetch call itself (task 1's `onCorrelationId`).
+   *
+   * PER-PANEL for the same reason `retryAfterSeconds` above is: each panel
+   * validates independently against `composite/add-key`, so panel 3's id
+   * says nothing about panel 1's. A step-level id would recreate the D-14
+   * defect one level down — one value covering several distinct failures.
+   *
+   * Cleared on every fresh validate attempt beside `errorCode` (TRAP-3).
+   */
+  requestCorrelationId: string | null;
+  /**
+   * 153.4-05 / D-05 / WIZFORM-05 — when THIS panel's in-flight validate left the
+   * browser, or `null` when none is.
+   *
+   * PER-PANEL for exactly the reason `retryAfterSeconds` above is: panels
+   * validate independently against `composite/add-key`, so panel 3 can be twelve
+   * seconds into a wait while panel 1 has not started one. A single step-level
+   * clock would render panel 3's elapsed figure — and panel 3's escalation —
+   * underneath panel 1.
+   */
+  waitStartedAt: number | null;
+  /**
+   * Milliseconds since `waitStartedAt`, ticked once per second by the ONE
+   * step-level interval (never faster — the card renders whole seconds).
+   *
+   * PER-PANEL, and STORED rather than derived in the JSX: a `Date.now()`
+   * comparison at render time re-times every panel's card whenever anything else
+   * re-renders the step, and the 300 ms render gate below depends on this value
+   * moving on a TICK and not on a render.
+   */
+  waitElapsedMs: number;
+  /**
+   * THIS panel's user pressed `Stop waiting`. ⛔ NOT an error — it renders as a
+   * neutral line, never a `WizardErrorEnvelope`. Cleared on this panel's next
+   * validate and the moment any of its credential fields change.
+   *
+   * PER-PANEL: "we stopped waiting" is true of one member's check and false of
+   * every other one still running. A step-level flag would tell a user who
+   * abandoned panel 3 that nothing is happening on panel 1 either.
+   */
+  waitCancelled: boolean;
+  /**
+   * The venue of THIS panel's CURRENT (or most recent) attempt, frozen when the
+   * validate left the browser.
+   *
+   * PER-PANEL, and FROZEN. The exchange cards stay clickable while a panel's
+   * validate is in flight, and every duration this panel states — the card's
+   * promise, the ladder's rungs, the client deadline and the `budgetSeconds` its
+   * deadline envelope names — must describe the request that is actually on the
+   * wire. Reading live `exchange` would let a mid-flight card click re-time the
+   * deadline and advertise a budget nobody granted (T-153.4-12). A composite may
+   * mix a serialized venue with ccxt ones, and those two arms are 90 seconds
+   * apart, so this is not a theoretical delta.
+   *
+   * ⚠️ Deliberately NOT cleared when the wait ends: the failure envelope is
+   * rendered AFTER the attempt, and it must name the budget that attempt was
+   * granted rather than whatever card is selected by the time it is read.
+   */
+  waitExchange: ExchangeId | null;
   confirmingRemove: boolean;
 }
+
+/**
+ * 153.4-05 — the patch EVERY outcome arm of a panel's validate applies beside
+ * its own fields. A wait that has finished must leave nothing a later render can
+ * read as a wait still running: a card outliving the request it describes is the
+ * indefinite spinner in a new costume, which is what this plan exists to end.
+ *
+ * ⚠️ `waitExchange` is absent on purpose — see its docblock above.
+ */
+const WAIT_CLEARED: Partial<PanelState> = {
+  waitStartedAt: null,
+  waitElapsedMs: 0,
+  waitCancelled: false,
+};
+
+/**
+ * 153.4-05 — the panel fields whose edit invalidates a `Stop waiting` line.
+ *
+ * The sentence says "your key details are still on this page", and once the user
+ * starts changing those details it describes an attempt that no longer matches
+ * what they are looking at. Held in ONE place, read by `updatePanel`, rather
+ * than in six `onChange` handlers — so a seventh field cannot be added without
+ * it (the same discipline `ConnectKeyStep` applies with a single effect).
+ */
+const CREDENTIAL_FIELDS: ReadonlyArray<keyof PanelState> = [
+  "exchange",
+  "nickname",
+  "apiKey",
+  "apiSecret",
+  "passphrase",
+];
 
 function newPanel(): PanelState {
   return {
@@ -182,6 +594,12 @@ function newPanel(): PanelState {
     status: "editing",
     apiKeyId: null,
     errorCode: null,
+    retryAfterSeconds: null,
+    requestCorrelationId: null,
+    waitStartedAt: null,
+    waitElapsedMs: 0,
+    waitCancelled: false,
+    waitExchange: null,
     confirmingRemove: false,
   };
 }
@@ -320,6 +738,22 @@ export interface MultiKeyConnectStepProps {
    * dropped). Optional — the standalone/legacy single-key wizard omits it.
    */
   onDirtyChange?: (dirty: boolean) => void;
+  /**
+   * 162-06 / HONEST-06 — PASS-THROUGH to State A's `ConnectKeyStep`, which owns
+   * the saved-key summary. This component adds nothing to it and reads nothing
+   * from it.
+   *
+   * ⚠️ STATE B IGNORES IT, and that is correct rather than an oversight: a
+   * preselect is one stored key, while State B is the composite panel list. The
+   * two cannot co-occur on the /my-strategies path that mints a preselect — a
+   * key that is a composite member is LINKED, so it is not a bare key and never
+   * renders the "Finish setup →" row that starts this. If one ever did arrive
+   * together with a rehydrated membership, the panels win and the preselect
+   * simply does not render; nothing false is shown either way.
+   */
+  preselectKey?: PreselectedKey | null;
+  /** 162-06 — the summary's "Use a different key"; owned by the overlay. */
+  onUseDifferentKey?: () => void;
 }
 
 /**
@@ -349,6 +783,17 @@ function toRehydratedPanel(member: {
     status: "validated",
     apiKeyId: member.api_key_id,
     errorCode: null,
+    retryAfterSeconds: null,
+    // 164.6.5-07 / D-14 — same reasoning as the wait fields below: rehydrated
+    // means no request from this browser, so there is no id to capture.
+    requestCorrelationId: null,
+    // 153.4-05 — a rehydrated panel arrives ALREADY `validated`: it made no
+    // request from this browser, so it has no wait, and the card's gate (which
+    // requires `status === "validating"`) can never fire for it.
+    waitStartedAt: null,
+    waitElapsedMs: 0,
+    waitCancelled: false,
+    waitExchange: null,
     confirmingRemove: false,
   };
 }
@@ -358,6 +803,8 @@ export function MultiKeyConnectStep({
   onSuccess,
   draftStrategyId,
   onDirtyChange,
+  preselectKey = null,
+  onUseDifferentKey,
 }: MultiKeyConnectStepProps) {
   const [mode, setMode] = useState<"single" | "multi">("single");
   const [panels, setPanels] = useState<PanelState[]>([]);
@@ -367,7 +814,36 @@ export function MultiKeyConnectStep({
   const [continueError, setContinueError] = useState<WizardErrorCode | null>(
     null,
   );
+  /**
+   * 140.5-03 / SEAMPROSE-02 — the wait the failing `set-members` response
+   * advertised, in seconds, or `null` when it advertised none.
+   *
+   * STEP-LEVEL, unlike the per-panel field on `PanelState`: Continue is one
+   * request for the whole set, so there is exactly one failure to describe.
+   *
+   * Cleared on every fresh Continue attempt beside `continueError` (TRAP-3).
+   */
+  const [continueRetryAfterSeconds, setContinueRetryAfterSeconds] = useState<
+    number | null
+  >(null);
+  /**
+   * 164.6.5-07 / D-14 — the id of THIS Continue attempt, captured off the
+   * `composite/set-members` wizardFetch call (task 1's `onCorrelationId`).
+   * STEP-LEVEL for the same reason `continueRetryAfterSeconds` above is: one
+   * request for the whole set. Cleared beside `continueError` (TRAP-3).
+   */
+  const [continueRequestCorrelationId, setContinueRequestCorrelationId] =
+    useState<string | null>(null);
   const [correlationId] = useState<string>(() => getWizardCorrelationId());
+  /**
+   * 164.6.5-07 / D-14 — the id of the mount-time rehydration GET
+   * (`composite/members`), captured the same way. A THIRD distinct request
+   * this step can render an envelope off, so it gets its OWN captured id
+   * rather than sharing either of the two above (see the per-panel and
+   * step-level docblocks for why a single shared id recreates the defect).
+   */
+  const [rehydrateRequestCorrelationId, setRehydrateRequestCorrelationId] =
+    useState<string | null>(null);
   // Phase 94.1 / F3 — rehydration lifecycle. "loading" while the WIZ-01
   // members GET is in flight, "error" when it fails (non-ok / throw /
   // unparseable body). Gates a loading placeholder + an actionable retry
@@ -432,8 +908,16 @@ export function MultiKeyConnectStep({
         // flight. Set inside the async IIFE (not synchronously in the effect
         // body) per react-hooks/set-state-in-effect.
         setRehydrateStatus("loading");
+        // 164.6.5-07 / D-14 — cleared with the status it belongs to, for the
+        // same TRAP-3 reason every other capture in this step is.
+        setRehydrateRequestCorrelationId(null);
         const res = await wizardFetch(
           `/api/strategies/composite/members?strategy_id=${draftStrategyId}`,
+          undefined,
+          {
+            // 164.6.5-07 / D-14 — capture the id THIS GET put on the wire.
+            onCorrelationId: setRehydrateRequestCorrelationId,
+          },
         );
         if (cancelled) return;
         if (!res.ok) {
@@ -444,6 +928,18 @@ export function MultiKeyConnectStep({
           // F3 — surface a distinguishable, retryable error rather than
           // degrading silently to the blank State-A form.
           setRehydrateStatus("error");
+          // 140.3-13a / SEAMUX-08 — the THIRD error surface of this step, and
+          // the one no document listed. It renders a real
+          // WIZARD_KEYS_LOAD_FAILED envelope to the user, so leaving it
+          // unreported would have shipped a step that emits on two of three
+          // paths while the count read >= 1 and looked closed. The code is the
+          // one the banner below actually builds — the funnel and the screen
+          // must not be able to disagree.
+          trackForQuantsEventClient("wizard_error", {
+            wizard_session_id: wizardSessionId,
+            step: MULTI_KEY_FUNNEL_STEP,
+            code: "WIZARD_KEYS_LOAD_FAILED",
+          });
           return;
         }
         const data = (await res.json().catch(() => ({}))) as {
@@ -488,15 +984,100 @@ export function MultiKeyConnectStep({
         // Logs only `err`, never member/panel fields (T-94-07).
         console.error("[wizard:MultiKeyConnectStep] members GET threw:", err);
         setRehydrateStatus("error");
+        trackForQuantsEventClient("wizard_error", {
+          wizard_session_id: wizardSessionId,
+          step: MULTI_KEY_FUNNEL_STEP,
+          code: "WIZARD_KEYS_LOAD_FAILED",
+        });
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [draftStrategyId, retryTick]);
+  }, [draftStrategyId, retryTick, wizardSessionId]);
 
   const focusRef = useRef<string | null>(null);
   const cardRefs = useRef<Map<string, HTMLButtonElement | null>>(new Map());
+
+  /**
+   * 153.4-05 — the in-flight validate controllers, KEYED BY `panel.id`.
+   *
+   * ⛔ NEVER BY INDEX. `onMove` reorders panels, so an index captured when a
+   * validate started can point at a DIFFERENT panel by the time that panel's
+   * `Stop waiting` is pressed — the abort would then either miss entirely or
+   * cancel a sibling's credential-carrying POST (T-153.4-18). Entries are
+   * deleted in the validate's `finally`, so the maps cannot grow across attempts.
+   */
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  /**
+   * WHO aborted, per panel. An `AbortError` is ONE rejection with two opposite
+   * meanings — a user's choice, which must never be recorded as a seam failure,
+   * and a spent budget, which must be — and the catch cannot tell them apart
+   * without this. Same key, same lifetime as the controller map.
+   */
+  const abortReasonsRef = useRef<Map<string, "user" | "deadline">>(new Map());
+  /**
+   * The panel whose validate control should receive focus once its cancelled
+   * wait has settled (UI-SPEC Surface 1 §Cancel affordance).
+   */
+  const pendingWaitFocusRef = useRef<string | null>(null);
+  /**
+   * Per-panel validate ROW elements — THE ROW, NOT THE BUTTON. The shared
+   * `ui/Button.tsx` is a plain function component whose props are
+   * `ButtonHTMLAttributes`, which carries no `ref` (TS2322, measured at
+   * 153.4-04), and this phase's UI-SPEC ⛔ forbids editing it because
+   * `AllocateDialog.test.tsx` carves it out BY IDENTITY. The row holds the ref
+   * and the focus effect queries the one button inside it; the `Button` ref gap
+   * is logged in TODOS.md.
+   */
+  const validateRowRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
+
+  /**
+   * 153.4 review CR-04 — UNMOUNTING IS NOT A VERDICT, AND NOTHING MAY STAY ON THE
+   * WIRE FOR A SURFACE THE USER HAS LEFT.
+   *
+   * The interval effect's cleanup clears the tick — which is also the ONLY thing
+   * enforcing a client deadline on every panel's request — but it never walked
+   * this map. So a step unmounted mid-validate (Continue advancing, a back-nav, a
+   * route change) left N credential-carrying POSTs running with no controller
+   * holding them and no bound at all, which is the exact property the interval's
+   * own docblock USED TO claim was closed ("it does give up, so no request can
+   * hold this tab open forever"). ⚠️ That sentence is gone from there now: the
+   * unmount hole this effect closes was not its only counter-example — removing a
+   * validating panel broke it too.
+   *
+   * ⚠️ AND THAT SECOND HOLE IS NOW CLOSED (Phase 163 / SEC-06). This paragraph
+   * used to end "and that one is left open deliberately (153.4 review WR-03,
+   * logged in TODOS.md)". SUPERSEDED: `doRemove` aborts the removed panel's
+   * request by identity, so this effect and that one are now the same discipline
+   * applied at two exits, not a closed hole beside an open one.
+   *
+   * ⚠️ The reason is `"user"` per panel because leaving IS a user action:
+   * recording it as a deadline would put N seam failures in the funnel for N
+   * healthy requests.
+   *
+   * ⚠️ Both maps are captured in the effect BODY rather than read off the refs
+   * inside the cleanup: the ref OBJECTS are stable for the component's life and
+   * the maps are mutated in place, so the capture sees every controller
+   * `validatePanel` has registered by unmount time. Same shape the react-hooks
+   * exhaustive-deps rule wants for a cleanup that touches a ref.
+   */
+  useEffect(() => {
+    const controllers = abortControllersRef.current;
+    const reasons = abortReasonsRef.current;
+    return () => {
+      for (const [id, controller] of controllers) {
+        reasons.set(id, "user");
+        controller.abort();
+      }
+    };
+  }, []);
+  const registerValidateRowRef = useCallback(
+    (id: string, el: HTMLDivElement | null) => {
+      validateRowRefs.current.set(id, el);
+    },
+    [],
+  );
   // UAT/F-4: the latest unvalidated draft the user typed into the single-key
   // (State A) ConnectKeyStep form. enterMulti seeds the first panel from this so
   // switching to multi-key mode carries the in-progress key over.
@@ -558,9 +1139,35 @@ export function MultiKeyConnectStep({
 
   const updatePanel = useCallback(
     (idx: number, patch: Partial<PanelState>) => {
+      // 153.4-05 — a stale cancelled line must never sit under edited details.
+      // Centralised here rather than repeated in each field's `onChange`; an
+      // explicit `waitCancelled` in the patch always wins (the validate path
+      // sets it deliberately).
+      const next =
+        CREDENTIAL_FIELDS.some((f) => f in patch) && !("waitCancelled" in patch)
+          ? { ...patch, waitCancelled: false }
+          : patch;
       setPanels((prev) =>
-        prev.map((p, i) => (i === idx ? { ...p, ...patch } : p)),
+        prev.map((p, i) => (i === idx ? { ...p, ...next } : p)),
       );
+    },
+    [],
+  );
+
+  /**
+   * 153.4-05 — patch a panel by IDENTITY rather than by position.
+   *
+   * ⛔ The validate path may NOT use the index it was called with. `onMove`
+   * reorders panels while a request is in flight, so an outcome written back to
+   * the captured index lands on whichever panel now sits there — writing one
+   * member's failure, cancelled line or verified id onto another's. Every
+   * outcome arm of `validatePanel` goes through here; `updatePanel(idx, patch)`
+   * stays for the synchronous UI edits, where the index is current by
+   * construction because the user just clicked that panel's control.
+   */
+  const updatePanelById = useCallback(
+    (id: string, patch: Partial<PanelState>) => {
+      setPanels((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
     },
     [],
   );
@@ -577,9 +1184,111 @@ export function MultiKeyConnectStep({
     });
   }, []);
 
+  /**
+   * Phase 163 / SEC-06 — REMOVING A PANEL RELEASES ITS REQUEST.
+   *
+   * This used to be three lines that dropped the panel and walked away, and it
+   * was the LAST reachable path leaving a credential-carrying POST on the wire
+   * with no client bound of ours: removing a validating panel also recomputes
+   * `anyValidating` to false, which tears down the single interval that was
+   * enforcing that request's deadline. `handleStopWaiting` below is the analog
+   * this copies, down to the `panelsRef` lookup and the reason-before-abort
+   * order.
+   *
+   * ⛔ THE ABORT IS KEYED BY `p.id`, NEVER BY `idx`. The index the user just
+   * clicked is current by construction — that is why reading `panelsRef.current`
+   * at THIS instant is sound — but everything after it is identity-keyed, because
+   * `onMove` reorders panels and the index a validate STARTED from is not the
+   * index its removal is clicked from (the invariant stated above
+   * `abortControllersRef`).
+   *
+   * ⚠️ THE REASON IS SET BEFORE THE ABORT, AND THE ORDER IS LOAD-BEARING. `abort()`
+   * settles the validate's catch, which reads `abortReasonsRef` to tell a user's
+   * choice from a spent budget. Set it after — or not at all — and one healthy
+   * removal lands in the funnel as a `SERVICE_UNREACHABLE`, which is precisely
+   * the misreporting the reason map exists to prevent.
+   *
+   * ⚠️ THE MAPS ARE NOT CLEANED HERE, AND THAT IS DELIBERATE (163-08 deviation,
+   * measured). Cleaning them looks right and is wrong: the catch reads the reason
+   * a microtask LATER, so a synchronous `delete` is indistinguishable from never
+   * having written it and produces exactly the funnel pollution above — MEASURED,
+   * not reasoned: the eager-delete shape reds the SEC-06 cases with a
+   * `SERVICE_UNREACHABLE` in the funnel, identically to omitting the reason.
+   *
+   * Nothing leaks either way. `validatePanel`'s `finally` deletes BOTH entries on
+   * every outcome including this abort, and it runs whether or not the panel is
+   * still mounted because it belongs to the async call, not to the component
+   * (read from that block, which states the same property; a stale map entry has
+   * no observable behaviour to assert on, since panel ids are never reused and
+   * every attempt clears its own reason at :1212). To keep that true the reason
+   * is written ONLY when a controller exists to consume it — writing one with no
+   * in-flight request would leave an entry no `finally` will ever collect.
+   *
+   * ⚠️ AND `pendingWaitFocusRef` IS NOT SET, unlike `handleStopWaiting`. There is
+   * no control left to focus; the focus effect matches on a panel id that no
+   * longer exists, so setting it would park a stale id that steals focus from
+   * whatever the user does next.
+   *
+   * ⛔ NO NEW COPY MAY CLAIM NOTHING WAS SAVED. Aborting stops this browser
+   * listening; it does not stop the server working. `composite/add-key` runs
+   * `validateKey` → `encryptKey` → the add RPC and reads no `request.signal`
+   * (re-verified at this edit), so the credential may still be encrypted and
+   * stored for a panel the user has just deleted. Server-side cancellation is a
+   * recorded non-goal owned by another phase — see the CR-02 paragraph above
+   * `handleStopWaiting`, which states the same bound for the same route.
+   */
+  /**
+   * ⛔ THE REMOVAL IS KEYED ON IDENTITY, NOT ON THE INDEX (163-REVIEW / WR-09).
+   *
+   * This used to resolve `p` from `panelsRef.current[idx]`, use it only for the
+   * abort, and then remove by POSITION — `prev.filter((_, i) => i !== idx)`.
+   * The two halves read DIFFERENT SNAPSHOTS. `panelsRef` is synced in a
+   * post-commit effect, so within one batched tick it still holds the state the
+   * user's DOM was rendered from, while the updater's `prev` already carries an
+   * earlier update from that same tick. An index that was correct against the
+   * list the user was looking at then got applied to a SHIFTED list.
+   *
+   * MEASURED, not reasoned (the spec is `[163-REVIEW / WR-09]` in this step's
+   * test file). Three panels, the user clicks Remove on key 1 and key 2 in one
+   * tick: the wizard deleted keys 1 and 3 and left key 2 standing. It destroyed
+   * the credentials of the key the user never touched, and said nothing.
+   *
+   * `panelsRef.current[idx]` is the RIGHT place to resolve identity precisely
+   * BECAUSE it lags: the row the user clicked was rendered from that committed
+   * state, so the id it yields is the row they meant. Filtering by that id then
+   * makes the two halves agree by construction. This is the same argument the
+   * `abortControllersRef` docblock above already makes for the abort — WR-09's
+   * point was that it applies just as much to the `filter`.
+   *
+   * ⛔ AND AN UNRESOLVABLE INDEX THROWS RATHER THAN RETURNING. The old
+   * `if (!p) return` turned a mis-index into a SILENT no-op: no announcement,
+   * no removal, no error, and a confirm dialog that stayed open so the user
+   * clicked again to the same nothing — undiagnosable from a bug report. Note
+   * that merely dropping the guard and keeping the positional filter would have
+   * been WORSE, announcing "Key N removed" while removing nothing. `idx` is
+   * always sourced from the current render's `panels.map`, so this branch is
+   * unreachable in normal operation; if it is ever reached the component's
+   * invariants are already broken and a stack trace is the honest outcome.
+   * `requestRemove` below already fails loud on this exact condition (it
+   * dereferences `p.apiKey` unguarded) — this makes the sibling consistent and
+   * names the invariant instead of raising a bare TypeError.
+   */
   const doRemove = useCallback((idx: number) => {
+    const p = panelsRef.current[idx];
+    if (!p) {
+      throw new Error(
+        `MultiKeyConnectStep.doRemove: no panel at index ${idx} (have ` +
+          `${panelsRef.current.length}). Removal is keyed on panel identity; ` +
+          `an index that cannot be resolved to one must not be guessed at.`,
+      );
+    }
+    const controller = abortControllersRef.current.get(p.id);
+    if (controller) {
+      abortReasonsRef.current.set(p.id, "user");
+      controller.abort();
+    }
     setAnnouncement(`Key ${idx + 1} removed`);
-    setPanels((prev) => prev.filter((_, i) => i !== idx));
+    setPanels((prev) => prev.filter((panel) => panel.id !== p.id));
   }, []);
 
   const requestRemove = useCallback(
@@ -604,29 +1313,216 @@ export function MultiKeyConnectStep({
     [updatePanel],
   );
 
+  /**
+   * 153.4-05 / D-05 — ONE interval drives EVERY validating panel's wait.
+   *
+   * ⛔ NOT one interval per panel. A once-a-second render does not need N timers
+   * disagreeing about "now" (T-153.4-22), and the card is pure precisely so this
+   * step can own a single clock for all of them. The interval is armed while ANY
+   * panel is validating and cleared the moment none is (and on unmount).
+   *
+   * It does two things per tick, both read through `panelsRef` — this file's
+   * "synced in an effect, never written during render" rule — so the callback
+   * never closes over a stale panel list:
+   *
+   *   1. THE CLIENT DEADLINE, evaluated against EACH PANEL'S OWN venue budget. A
+   *      composite can mix a serialized venue (120 000 ms) with ccxt ones
+   *      (30 000 ms); a shared deadline would abort a two-minute grant after
+   *      forty-five seconds.
+   *
+   *      ⚠️ THE DEADLINE COVERS THE ROUTE, NOT THE VALIDATE LEG (153.4 review
+   *      CR-01). `composite/add-key` spends `validateKey` THEN `encryptKey` THEN
+   *      the add RPC, and it does not read `request.signal` — this abort has no
+   *      server-side effect at all. Sized on the validate budget alone, the
+   *      deadline fired almost exclusively in the window where validate had
+   *      already SUCCEEDED and the route was minting and storing the key.
+   *      `connectAbortDeadlineMsFor` covers validate + encrypt + the
+   *      FAILING-state store worst case + the grace — the failing column
+   *      rather than the closed one (153.6 / PARITY-03), because a seam that
+   *      is stalling long enough to reach this deadline is by construction the
+   *      seam whose breaker is failing, and the failing state charges three
+   *      store commands per seam call where the closed state charges one. The
+   *      grace is still there for the reason it always was: the seam deadlines
+   *      fire inside our own route and the reply still has to travel back, so
+   *      giving up at exactly the route's budget could cut off a verdict already
+   *      on the wire and re-create the silent UNKNOWN this phase exists to end.
+   *      The browser gives up LAST — for every panel this interval is still
+   *      watching.
+   *
+   *      ⚠️ THE CLAIM HOLDS AGAIN, AND THIS PARAGRAPH RECORDS WHY IT ONCE DID
+   *      NOT (Phase 163 / SEC-06). It used to close "so no request can hold this
+   *      tab open forever" and then refute itself: the `Remove` control is
+   *      deliberately not disabled while a panel is validating, and removing
+   *      such a panel recomputes `anyValidating` to false, clears this one
+   *      interval, and leaves that request with no client bound of OURS — only
+   *      the platform's invocation limit (153.4 review WR-03).
+   *
+   *      ⛔ IT THEN SAID: *"Left as-is on purpose rather than unfixed by
+   *      oversight: the abort buys nothing there, because neither connect route
+   *      reads `request.signal` (so it would not stop the key being stored) and
+   *      `updatePanelById` no-ops for an id that is gone (so the settled request
+   *      cannot touch the UI). Logged in TODOS.md."* SUPERSEDED — and note that
+   *      both of its premises are still TRUE. What was wrong was the conclusion
+   *      drawn from them. "The server keeps working" and "the UI cannot be
+   *      touched" do not add up to "the abort buys nothing": what it buys is
+   *      releasing an in-flight request that CARRIES THE USER'S CREDENTIALS from
+   *      a UI context the user has just deleted, and returning the browser's
+   *      connection and its unbounded wait with it. A credential-carrying POST
+   *      must not outlive the panel that owns it, whatever the server does with
+   *      it afterwards. `doRemove` now aborts by identity with reason `"user"`.
+   *
+   *      ⛔ THE HONEST BOUND IS UNCHANGED, so no new copy may over-claim: this
+   *      stops US listening, not the server working. See the CR-02 paragraph
+   *      above `handleStopWaiting` — the route runs on into `encryptKey` and the
+   *      add RPC, and server-side cancellation remains a non-goal owned
+   *      elsewhere.
+   *   2. THE ELAPSED FIGURE each panel's card renders.
+   */
+  const anyValidating = panels.some((p) => p.status === "validating");
+  useEffect(() => {
+    if (!anyValidating) return;
+    const tick = setInterval(() => {
+      const now = Date.now();
+      for (const p of panelsRef.current) {
+        if (p.status !== "validating" || p.waitStartedAt === null) continue;
+        if (now - p.waitStartedAt >= connectAbortDeadlineMsFor(p.waitExchange)) {
+          abortReasonsRef.current.set(p.id, "deadline");
+          abortControllersRef.current.get(p.id)?.abort();
+        }
+      }
+      setPanels((prev) =>
+        prev.map((p) =>
+          p.status === "validating" && p.waitStartedAt !== null
+            ? { ...p, waitElapsedMs: now - p.waitStartedAt }
+            : p,
+        ),
+      );
+    }, 1_000);
+    return () => clearInterval(tick);
+  }, [anyValidating]);
+
+  /**
+   * 153.4-05 — abandon ONE panel's wait, and nothing else.
+   *
+   * ⛔ NO CONFIRMATION DIALOG. Pressing this costs the user nothing they can act
+   * on: the request is going to finish or fail on its own either way, and a
+   * confirmation step on the one control whose purpose is escaping a stall is the
+   * opposite of the affordance.
+   *
+   * The panel is looked up by index through `panelsRef` (the index the user just
+   * clicked is current) and everything after that is keyed by its ID, so a
+   * reorder between the validate and the cancel cannot redirect the abort.
+   *
+   * ⚠️ ABORTING STOPS THE BROWSER LISTENING; IT DOES NOT STOP THE SERVER WORKING,
+   * AND THE SERVER'S WORK IS NOT ONLY A PROBE. This comment used to close with
+   * "nothing is written on this path … which is what lets the cancelled copy
+   * truthfully say nothing was saved". THAT WAS A FACT ABOUT `validate-key`
+   * ASSERTED ABOUT THE ROUTE (153.4 review CR-02). What the user aborts is
+   * `POST /api/strategies/composite/add-key`, which runs `validateKey` →
+   * `encryptKey` → the add RPC and reads no `request.signal`, so on any run where
+   * validate subsequently succeeds the credential IS encrypted and an `api_keys`
+   * row IS written — while this panel sits at `status: "editing"` with
+   * `apiKeyId: null`. ⚠️ And unlike `create-with-key`, this route has NO
+   * existing-draft short-circuit by construction (see DIVERGENCE (1) in
+   * `add-key/route.ts`), so an immediate re-validate mints a SECOND stored
+   * credential for the same key rather than reconciling to the first.
+   *
+   * ⛔ The cancelled line below therefore states only what THIS BROWSER knows.
+   */
+  const handleStopWaiting = useCallback((idx: number) => {
+    const p = panelsRef.current[idx];
+    if (!p) return;
+    abortReasonsRef.current.set(p.id, "user");
+    pendingWaitFocusRef.current = p.id;
+    abortControllersRef.current.get(p.id)?.abort();
+  }, []);
+
+  /**
+   * 153.4-05 — restore focus to the cancelled panel's validate control.
+   *
+   * ⚠️ IN AN EFFECT, NOT IN THE CLICK HANDLER. `Stop waiting` lives inside a card
+   * that unmounts on the same interaction, and at the instant of the click the
+   * validate button is still `disabled` (`canValidate` is false while the panel
+   * is validating). `focus()` on a disabled control is a no-op, so focus would
+   * fall to `<body>` and a keyboard user would lose their place entirely. The
+   * abort settles a tick later; by then the panel is back to `editing` and its
+   * button is focusable again.
+   */
+  useEffect(() => {
+    const id = pendingWaitFocusRef.current;
+    if (!id) return;
+    const target = panels.find((p) => p.id === id);
+    if (!target || target.status === "validating") return;
+    pendingWaitFocusRef.current = null;
+    validateRowRefs.current
+      .get(id)
+      ?.querySelector<HTMLButtonElement>("button")
+      ?.focus();
+  }, [panels]);
+
   const validatePanel = useCallback(
     async (idx: number) => {
       const p = panelsRef.current[idx];
       if (p.status === "validating") return;
+      // 153.4-05 — everything after this line is keyed by IDENTITY. A reorder
+      // while the request is in flight makes `idx` point at a different panel.
+      const panelId = p.id;
       const activeOption = EXCHANGES.find((e) => e.id === p.exchange);
       const requiresPassphrase = activeOption?.requiresPassphrase ?? false;
       const requiresSecret = activeOption?.requiresSecret ?? true;
-      updatePanel(idx, { status: "validating", errorCode: null });
+      // 153.4-05 — the controller is in place BEFORE the request leaves, and any
+      // reason recorded for a previous attempt is dropped with it.
+      const controller = new AbortController();
+      abortControllersRef.current.set(panelId, controller);
+      abortReasonsRef.current.delete(panelId);
+      // 140.5-03 — the wait is cleared WITH the code it belongs to, on every
+      // fresh attempt. This is the half a copy-paste of the working thread
+      // drops: a wait left from attempt 1 rendered under attempt 2's failure
+      // names a duration nobody advertised (TRAP-3).
+      updatePanelById(panelId, {
+        status: "validating",
+        errorCode: null,
+        retryAfterSeconds: null,
+        // 164.6.5-07 / D-14 — cleared with the code it belongs to, for the
+        // same TRAP-3 reason as `retryAfterSeconds` above.
+        requestCorrelationId: null,
+        // 153.4-05 — the wait starts: ONE `Date.now()` the step's interval then
+        // measures against, the previous attempt's cancelled line retired, and
+        // the venue FROZEN so every duration this panel goes on to state
+        // describes the request actually on the wire.
+        waitStartedAt: Date.now(),
+        waitElapsedMs: 0,
+        waitCancelled: false,
+        waitExchange: p.exchange,
+      });
       try {
-        const res = await wizardFetch("/api/strategies/composite/add-key", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            exchange: p.exchange,
-            api_key: p.apiKey,
-            // sFOX is token-only: send api_secret "" (Phase-119 add-key carve-out
-            // normalizes empty→"" and accepts it for sfox).
-            api_secret: requiresSecret ? p.apiSecret : "",
-            passphrase: requiresPassphrase ? p.passphrase : null,
-            label: p.nickname.trim() || `${p.exchange} key`,
-            wizard_session_id: wizardSessionId,
-          }),
-        });
+        const res = await wizardFetch(
+          "/api/strategies/composite/add-key",
+          {
+            method: "POST",
+            // `wizardFetch` spreads `init` and overrides only `headers`, so the
+            // signal reaches `fetch` unchanged — no change to that module needed.
+            signal: controller.signal,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              exchange: p.exchange,
+              api_key: p.apiKey,
+              // sFOX is token-only: send api_secret "" (Phase-119 add-key carve-out
+              // normalizes empty→"" and accepts it for sfox).
+              api_secret: requiresSecret ? p.apiSecret : "",
+              passphrase: requiresPassphrase ? p.passphrase : null,
+              label: p.nickname.trim() || `${p.exchange} key`,
+              wizard_session_id: wizardSessionId,
+            }),
+          },
+          {
+            // 164.6.5-07 / D-14 — capture the id THIS panel's request put on
+            // the wire, keyed by `panelId` (identity, not `idx` — see the
+            // comment at the top of this function).
+            onCorrelationId: (id) =>
+              updatePanelById(panelId, { requestCorrelationId: id }),
+          },
+        );
         const data = (await res.json().catch(() => ({}))) as {
           ok?: boolean;
           strategy_id?: string;
@@ -634,12 +1530,80 @@ export function MultiKeyConnectStep({
           code?: string;
         };
         if (!res.ok || !data.ok || !data.strategy_id || !data.api_key_id) {
-          const code = (data.code as WizardErrorCode | undefined) ?? "UNKNOWN";
-          updatePanel(idx, { status: "editing", errorCode: code });
+          // 140.3-13a / SEAMUX-08 — membership-checked, never cast.
+          //
+          // 140.4-15 / SEAMRIM-08 — TRANSLATE FIRST, THEN MEMBERSHIP-CHECK, the
+          // same order `SyncPreviewStep`'s kickoff arm adopted in 140.4-12 and
+          // `ConnectKeyStep`'s sibling arm adopts alongside this one.
+          //
+          // ⚠️ 140.5-03 / SEAMPROSE-03 — CORRECTION. This paragraph used to end
+          // "the two vocabularies are disjoint, so neither hop shadows the
+          // other". THE WRONG REASON FOR A TRUE CONCLUSION, and one this file's
+          // own `KNOWN_ADD_KEY_CODES` header does not claim.
+          //
+          // THE NECESSARY PROPERTY IS AGREEMENT; DISJOINTNESS IS ONLY
+          // SUFFICIENT. Where the vocabularies overlap the table wins by the
+          // order above, and that is harmless because both sides answer the
+          // SAME code — not because they never meet.
+          //
+          // Measured at 140.5-03, predicate stated because a line-based grep
+          // gets it wrong: intersect KEY SETS against
+          // `SEAM_CODE_TO_WIZARD_CODE`'s keys, never values. Under that
+          // predicate `KNOWN_KICKOFF_CODES` ∩ = {RATE_LIMITED} and
+          // `KNOWN_FINALIZE_CODES` ∩ = {SEAM_MISCONFIGURED}; this file's two
+          // sets and `ConnectKeyStep`'s intersect in NOTHING.
+          //
+          // ⚠️ 164.2-05 CORRECTION (2026-09-06) — THAT LAST CLAUSE IS NOW
+          // FALSE, twice over. 164.2-04 admitted `RATE_LIMITED` to
+          // `ConnectKeyStep`'s `KNOWN_CREATE_WITH_KEY_CODES` and this plan
+          // admitted it to BOTH sets in this file, so all three now intersect
+          // the wire table in {RATE_LIMITED}. The measurement is left standing
+          // rather than deleted because the REASONING it records is what this
+          // correction turns on and is still correct: agreement is the
+          // necessary condition, disjointness only a sufficient one. Every
+          // overlap on record is a SELF-MAP, so all of them AGREE at HEAD, and
+          // `seam-ratelimit-posture.invariant.test.ts` reddens if a shared code
+          // ever gets different answers. Do not restore the disjointness
+          // sentence as the REASON — an empty intersection here was a fact
+          // about the rosters of the day, and the safety never rested on it.
+          // 140.4-16 / WR-09 — READ THROUGH THE LEAF, not off the top level.
+          // The commit that added this hop claimed it "mirrors
+          // `SyncPreviewStep`'s kickoff arm exactly". It did not: that arm and
+          // `SubmitStep` both read `seamErrorCode(body)`, which handles the
+          // nested `service_error` shape (`body.detail.code`), while this one
+          // read `data.code` and saw only the flat shape. Harmless today —
+          // this route funnels every caught value through
+          // `classifyKeyValidationError` and never forwards a nested
+          // envelope — but an undisclosed divergence under a comment
+          // asserting equivalence is how the next reader inherits a wrong
+          // premise. The leaf exists precisely so a nested envelope is never
+          // read as "a body carrying no code".
+          const translated = recogniseSeamErrorCode(seamErrorCode(data));
+          const code: WizardErrorCode =
+            translated !== "UNKNOWN"
+              ? translated
+              : data.code && KNOWN_ADD_KEY_CODES.has(data.code as WizardErrorCode)
+                ? (data.code as WizardErrorCode)
+                : "UNKNOWN";
+          // 140.5-03 / SEAMPROSE-02 — the wait rides the HEADER, read through
+          // the ONE parser, from the SAME response as the code. Absent header
+          // ⇒ `null` ⇒ no wait rendered rather than a zero nobody advertised.
+          updatePanelById(panelId, {
+            ...WAIT_CLEARED,
+            status: "editing",
+            errorCode: code,
+            retryAfterSeconds: parseRetryAfterSeconds(res.headers),
+          });
+          trackForQuantsEventClient("wizard_error", {
+            wizard_session_id: wizardSessionId,
+            step: MULTI_KEY_FUNNEL_STEP,
+            code,
+          });
           return;
         }
         setStrategyId(data.strategy_id);
-        updatePanel(idx, {
+        updatePanelById(panelId, {
+          ...WAIT_CLEARED,
           status: "validated",
           apiKeyId: data.api_key_id,
           errorCode: null,
@@ -657,15 +1621,94 @@ export function MultiKeyConnectStep({
           passphrase: "",
         });
       } catch (err) {
-        updatePanel(idx, {
+        /**
+         * 153.4-05 — AN ABORT IS NOT A TRANSPORT FAILURE, AND THE TWO ABORTS ARE
+         * NOT THE SAME OUTCOME. Branch FIRST, before anything below can classify
+         * a user's own choice as an outage.
+         *
+         * ⚠️ TRAP-1, re-checked at this edit now that an `AbortSignal` rides the
+         * request: an `AbortError` is a `DOMException` with a fixed name and
+         * message and carries no request, no headers and no body, so it embeds
+         * no credential either — the measurement in the `SERVICE_UNREACHABLE`
+         * arm below still holds unchanged.
+         */
+        if (controller.signal.aborted) {
+          const reason = abortReasonsRef.current.get(panelId);
+          if (reason === "user") {
+            // The user chose this. ⛔ No `errorCode`, ⛔ no `console.error` and
+            // ⛔ no `wizard_error`: recording a deliberate cancel as an error
+            // tells an operator the seam is failing when it is not, and that
+            // funnel is what they would read to decide MT5 is broken
+            // (T-153.4-21).
+            updatePanelById(panelId, {
+              ...WAIT_CLEARED,
+              status: "editing",
+              waitCancelled: true,
+              errorCode: null,
+              retryAfterSeconds: null,
+            });
+            return;
+          }
+          if (reason === "deadline") {
+            // A real failure, and the funnel must agree with the screen (the
+            // 140.5-03 rule this file states twice). The envelope names the
+            // budget we granted — see `budgetSeconds` in `KeyPanel`.
+            updatePanelById(panelId, {
+              ...WAIT_CLEARED,
+              status: "editing",
+              errorCode: "SEAM_DEADLINE_EXCEEDED",
+              retryAfterSeconds: null,
+            });
+            trackForQuantsEventClient("wizard_error", {
+              wizard_session_id: wizardSessionId,
+              step: MULTI_KEY_FUNNEL_STEP,
+              code: "SEAM_DEADLINE_EXCEEDED",
+            });
+            return;
+          }
+        }
+        // 140.5-03 / SEAMPROSE-03 — OUR HOP, NOT THE EXCHANGE'S. ⚠️ THIS CATCH
+        // AND ITS SIBLING IN `handleContinue` WERE MISSED BY EVERY PRIOR
+        // CENSUS: the synthesis named three transport catches and this file
+        // holds two of the five. The request to
+        // `/api/strategies/composite/add-key` never completed, so the exchange
+        // may never have been contacted; `KEY_NETWORK_TIMEOUT`'s copy ("We
+        // could not reach the exchange") asserted a venue fault for a fault on
+        // our own hop, the rule `wizardErrors.ts` states by name beside it.
+        //
+        // ⚠️ BOTH OCCURRENCES. The telemetry payload below carried the same
+        // wrong code, which is the identical false attribution in
+        // machine-readable form — an operator reading that funnel would
+        // conclude the VENUES are flaky when the fault is ours.
+        updatePanelById(panelId, {
+          ...WAIT_CLEARED,
           status: "editing",
-          errorCode: "KEY_NETWORK_TIMEOUT",
+          errorCode: "SERVICE_UNREACHABLE",
+          // No response exists on this path, so no wait was advertised.
+          // Explicit rather than inherited: a wait surviving from a previous
+          // attempt would render under this failure (TRAP-3).
+          retryAfterSeconds: null,
         });
-        // Logs only `err`, never credential fields (T-88-18).
+        trackForQuantsEventClient("wizard_error", {
+          wizard_session_id: wizardSessionId,
+          step: MULTI_KEY_FUNNEL_STEP,
+          code: "SERVICE_UNREACHABLE",
+        });
+        // Logs only `err`, never credential fields (T-88-18). TRAP-1 re-checked
+        // at this edit as a PROPERTY: `wizardFetch` sets exactly one header
+        // (`X-Correlation-Id`) and this route authenticates by COOKIE, so no
+        // credential value is on the request for a rejection to embed. The
+        // typed key material lives in React state, never in `err`.
         console.error("[wizard:MultiKeyConnectStep] add-key threw:", err);
+      } finally {
+        // 153.4-05 — this attempt's controller and its reason die with it, on
+        // EVERY outcome (the `return`s above run this too). Without it the maps
+        // would grow one entry per attempt for the life of the step.
+        abortControllersRef.current.delete(panelId);
+        abortReasonsRef.current.delete(panelId);
       }
     },
-    [updatePanel, wizardSessionId],
+    [updatePanelById, wizardSessionId],
   );
 
   const { fieldErrors, summaryLines } = useMemo(
@@ -705,6 +1748,11 @@ export function MultiKeyConnectStep({
     };
   }, [onDirtyChange]);
 
+  // 164.6.5-07 / D-14 — DELIBERATELY STILL `correlationId`, not a captured
+  // request id. `summaryLines` comes from `computeValidation(panels)`, pure
+  // CLIENT-SIDE validation — there is no request behind this envelope at all,
+  // so there is no per-request id to prefer. Recorded per task 3's
+  // enumeration requirement: this site was examined and correctly left alone.
   const summaryEnvelope =
     summaryLines.length > 0
       ? {
@@ -718,6 +1766,11 @@ export function MultiKeyConnectStep({
         }
       : null;
 
+  // 164.6.5-07 / D-14 — `continueRequestCorrelationId` (captured off the
+  // set-members request) wins whenever Continue actually ran; the page-load
+  // id remains the fallback only for the brief window before it has. BOTH
+  // arms below share the one step-level id, same as they already share one
+  // handler/state — see that state's docblock.
   const continueErrorEnvelope = continueError
     ? continueError === "MULTI_KEY_WINDOWS_INVALID"
       ? {
@@ -734,12 +1787,29 @@ export function MultiKeyConnectStep({
           // recoverable so ErrorEnvelope renders Retry (showRetry = recoverable
           // && Boolean(onRetry)). Keep the table entry summary-only — do NOT
           // pollute wizardErrors.ts.
-          ...buildEnvelope(continueError, correlationId),
+          ...buildEnvelope(
+            continueError,
+            continueRequestCorrelationId ?? correlationId,
+            {
+              retryAfterSeconds: continueRetryAfterSeconds ?? undefined,
+            },
+          ),
           cause:
             "We couldn't save these key windows — the server rejected them, most likely a clock or timing mismatch between your browser and our servers. Review the dates and try again.",
           recoverable: true,
         }
-      : buildEnvelope(continueError, correlationId)
+      : // 140.5-03 / SEAMPROSE-02 — ONE handler, one state, BOTH arms. The two
+        // `buildEnvelope` calls here are the same failure rendered two ways
+        // (the windows-invalid arm spreads and overrides), so threading only
+        // the arm an author happens to read first would leave the other silent.
+        // `?? undefined` because ABSENCE IS NOT ZERO (140.3-10's rule).
+        buildEnvelope(
+          continueError,
+          continueRequestCorrelationId ?? correlationId,
+          {
+            retryAfterSeconds: continueRetryAfterSeconds ?? undefined,
+          },
+        )
     : null;
 
   const handleContinue = useCallback(async () => {
@@ -747,19 +1817,45 @@ export function MultiKeyConnectStep({
     if (continuing || !strategyId) return;
     setContinuing(true);
     setContinueError(null);
+    // 140.5-03 — the wait dies with the code it belongs to, on every fresh
+    // attempt (TRAP-3).
+    setContinueRetryAfterSeconds(null);
+    // 164.6.5-07 / D-14 — same reset rule, same reason.
+    setContinueRequestCorrelationId(null);
     try {
       const keys = buildSetMembersKeys(current);
-      const res = await wizardFetch("/api/strategies/composite/set-members", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ strategy_id: strategyId, keys }),
-      });
+      const res = await wizardFetch(
+        "/api/strategies/composite/set-members",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ strategy_id: strategyId, keys }),
+        },
+        {
+          // 164.6.5-07 / D-14 — capture the id THIS request put on the wire.
+          onCorrelationId: setContinueRequestCorrelationId,
+        },
+      );
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
         code?: string;
       };
       if (!res.ok || !data.ok) {
-        setContinueError((data.code as WizardErrorCode | undefined) ?? "UNKNOWN");
+        // 140.3-13a / SEAMUX-08 — membership-checked against set-members' OWN
+        // four-code contract, never cast and never against add-key's set.
+        const code: WizardErrorCode =
+          data.code && KNOWN_SET_MEMBERS_CODES.has(data.code as WizardErrorCode)
+            ? (data.code as WizardErrorCode)
+            : "UNKNOWN";
+        setContinueError(code);
+        // 140.5-03 / SEAMPROSE-02 — the wait rides the HEADER, read through the
+        // ONE parser, from the SAME response as the code above.
+        setContinueRetryAfterSeconds(parseRetryAfterSeconds(res.headers));
+        trackForQuantsEventClient("wizard_error", {
+          wizard_session_id: wizardSessionId,
+          step: MULTI_KEY_FUNNEL_STEP,
+          code,
+        });
         setContinuing(false);
         return;
       }
@@ -773,11 +1869,34 @@ export function MultiKeyConnectStep({
         exchange: first.exchange,
       });
     } catch (err) {
-      setContinueError("KEY_NETWORK_TIMEOUT");
+      // 140.5-03 / SEAMPROSE-03 — OUR HOP, NOT THE EXCHANGE'S, and here the
+      // old code was doubly wrong: `set-members` performs NO key validation at
+      // all (it never calls `classifyKeyValidationError` — see
+      // `KNOWN_SET_MEMBERS_CODES` above), so it never touches an exchange on
+      // any path. "We could not reach the exchange" named a venue that was
+      // provably not involved, for a request that only persists date windows.
+      //
+      // ⚠️ BOTH OCCURRENCES, telemetry included — same false attribution,
+      // machine-readable.
+      setContinueError("SERVICE_UNREACHABLE");
+      // No response exists on this path, so no wait was advertised. Explicit,
+      // because a value surviving from a previous attempt would render under
+      // this failure (TRAP-3).
+      setContinueRetryAfterSeconds(null);
+      trackForQuantsEventClient("wizard_error", {
+        wizard_session_id: wizardSessionId,
+        step: MULTI_KEY_FUNNEL_STEP,
+        code: "SERVICE_UNREACHABLE",
+      });
       setContinuing(false);
+      // TRAP-1 re-checked at this edit as a PROPERTY: `wizardFetch` sets
+      // exactly one header (`X-Correlation-Id`) and this route authenticates by
+      // COOKIE, so no credential value is on the request for a rejection to
+      // embed. The Continue payload carries `{api_key_id, window_start,
+      // window_end}` only — no plaintext key material exists on this path.
       console.error("[wizard:MultiKeyConnectStep] set-members threw:", err);
     }
-  }, [continuing, strategyId, onSuccess]);
+  }, [continuing, strategyId, onSuccess, wizardSessionId]);
 
   // ── State A: byte-identical ConnectKeyStep + the ONE ghost affordance ───────
   // The rehydration loading/error affordances (F3) render as NON-form-replacing
@@ -814,7 +1933,12 @@ export function MultiKeyConnectStep({
         {rehydrateStatus === "error" && (
           <div className="mb-4" data-testid="rehydrate-error">
             <WizardErrorEnvelope
-              envelope={buildEnvelope("WIZARD_KEYS_LOAD_FAILED", correlationId)}
+              // 164.6.5-07 / D-14 — the id of THIS rehydration GET, falling
+              // back to the page-load id only if it somehow captured none.
+              envelope={buildEnvelope(
+                "WIZARD_KEYS_LOAD_FAILED",
+                rehydrateRequestCorrelationId ?? correlationId,
+              )}
               onRetry={() => {
                 setRehydrateStatus("loading");
                 setRetryTick((t) => t + 1);
@@ -826,6 +1950,8 @@ export function MultiKeyConnectStep({
           wizardSessionId={wizardSessionId}
           onSuccess={onSuccess}
           onDraftChange={onSingleDraftChange}
+          preselectKey={preselectKey}
+          onUseDifferentKey={onUseDifferentKey}
           footerSlot={
             <Button
               type="button"
@@ -894,8 +2020,10 @@ export function MultiKeyConnectStep({
             fieldError={fieldErrors[i]}
             correlationId={correlationId}
             registerCardRef={registerCardRef}
+            registerValidateRowRef={registerValidateRowRef}
             onUpdate={updatePanel}
             onValidate={validatePanel}
+            onStopWaiting={handleStopWaiting}
             onMove={move}
             onRequestRemove={requestRemove}
             onConfirmRemove={doRemove}
@@ -971,8 +2099,12 @@ interface KeyPanelProps {
   fieldError?: FieldError;
   correlationId: string;
   registerCardRef: (id: string, el: HTMLButtonElement | null) => void;
+  /** 153.4-05 — the validate ROW, so a cancelled wait can restore focus to it. */
+  registerValidateRowRef: (id: string, el: HTMLDivElement | null) => void;
   onUpdate: (idx: number, patch: Partial<PanelState>) => void;
   onValidate: (idx: number) => void;
+  /** 153.4-05 — abandon THIS panel's wait. Aborts nothing else. */
+  onStopWaiting: (idx: number) => void;
   onMove: (idx: number, dir: -1 | 1) => void;
   onRequestRemove: (idx: number) => void;
   onConfirmRemove: (idx: number) => void;
@@ -989,8 +2121,10 @@ function KeyPanel({
   fieldError,
   correlationId,
   registerCardRef,
+  registerValidateRowRef,
   onUpdate,
   onValidate,
+  onStopWaiting,
   onMove,
   onRequestRemove,
   onConfirmRemove,
@@ -1006,12 +2140,80 @@ function KeyPanel({
     active?.credentialPlaceholders?.key ?? "Paste the read-only key";
   const secretPlaceholder =
     active?.credentialPlaceholders?.secret ?? "Paste the secret";
+  // 153.4 review CR-03 — the third field's per-venue strings. Every default is
+  // today's hardcoded OKX value, so a panel on any existing venue renders
+  // byte-identically; MT5 relabels the slot to the broker server and unmasks it
+  // (a server NAME is not a credential, and the user must be able to read it
+  // back against the helper that says to copy it exactly).
+  const passphraseLabel = active?.passphraseLabel ?? "OKX Passphrase";
+  const passphrasePlaceholder =
+    active?.passphrasePlaceholder ?? "Paste the OKX passphrase";
+  const passphraseHelper =
+    active?.passphraseHelper ??
+    "OKX requires a passphrase in addition to key and secret. You set this when you created the API key on OKX.";
+  const passphraseSecret = active?.passphraseSecret ?? true;
+  const secretHelper = active?.secretHelper;
   const secretInputId = `key-${index}-api-secret-input`;
   const windowEndId = `key-${index}-window-end`;
 
+  // 153.4-05 — the venue THIS panel's most recent attempt actually ran against,
+  // falling back to the selected card only when no attempt has been made.
+  const attemptVenue = p.waitExchange ?? p.exchange;
+
+  // 164.6.5-07 / D-14 — THIS panel's own captured id wins, falling back to
+  // the page-load `correlationId` only for the brief window before this
+  // panel has made a request. Per-panel, not step-level — see
+  // `PanelState.requestCorrelationId`'s docblock.
   const errorEnvelope = p.errorCode
-    ? buildEnvelope(p.errorCode, correlationId)
+    ? buildEnvelope(p.errorCode, p.requestCorrelationId ?? correlationId, {
+        // 140.5-03 / SEAMPROSE-02 — THIS panel's advertised wait, not the
+        // step's. `?? undefined` because ABSENCE IS NOT ZERO (140.3-10's rule):
+        // `null` in the envelope slot renders as a `0`-second wait we were
+        // never told about.
+        retryAfterSeconds: p.retryAfterSeconds ?? undefined,
+        // 153.4-05 / UI-SPEC Gate A — the budget WE granted THIS panel, in
+        // seconds, and ONLY for the code that names one. The same rule one line
+        // up: the expression yields `undefined`, never `null` and never `0` — a
+        // `0` here is a budget we never granted, which turns a vague failure
+        // into a specific lie (TRAP-3). Read from the FROZEN attempt venue, so
+        // the figure describes the request that actually ran out of time.
+        budgetSeconds:
+          p.errorCode === "SEAM_DEADLINE_EXCEEDED"
+            ? validateBudgetSecondsFor(attemptVenue)
+            : undefined,
+        // 153.4-05 / UI-SPEC Gate B — WITHOUT THIS, `SEAM_DEADLINE_EXCEEDED`'s
+        // "Your key details are still on this page." is silently withheld: that
+        // bullet declares `REQUIRES_CONNECT_SURFACE` and absence SUPPRESSES. A
+        // user who waited two minutes and is then told nothing about the
+        // credentials they typed is the worst outcome this phase can produce,
+        // which is why 153.1-04 bound the obligation to the commit that starts
+        // EMITTING the code — this one, for the composite surface.
+        surface: "connect",
+        // 153.1-03 / D-17 — the venue, as a lookup key into the closed
+        // capability record (never interpolated into copy). Absence renders the
+        // substitutable remedy unconditionally, so a serialized-venue user reads
+        // "switch to a different exchange" for a venue that IS their account.
+        // PER PANEL, because each member carries its own venue — a step-level
+        // value would answer panel 1's question with panel 3's venue.
+        venue: attemptVenue,
+      })
     : null;
+
+  /**
+   * 153.4-05 / UI-SPEC Surface 1 §Render gate — the card's gate is DERIVED, not
+   * stored.
+   *
+   * ⚠️ `waitElapsedMs` moves on the step's 1 s tick, so it is 0 for the whole
+   * first second: a validate that answers in under 300 ms finishes before the
+   * value can ever reach 300 and no card flashes. That is the render gate,
+   * satisfied WITHOUT a second per-panel timer — please do not "fix" it by
+   * adding one. (`ConnectKeyStep` needs an explicit 300 ms timeout because it
+   * gates on a boolean rather than on a ticked figure.)
+   */
+  const showWaitCard =
+    p.status === "validating" &&
+    p.waitStartedAt !== null &&
+    p.waitElapsedMs >= WAIT_CARD_MOUNT_DELAY_MS;
 
   const canValidate =
     !!p.apiKey &&
@@ -1025,6 +2227,11 @@ function KeyPanel({
       <fieldset
         data-testid={`key-panel-${index}`}
         data-panel={index + 1}
+        // 153.4-05 / UI-SPEC Surface 1 — busy while THIS panel's validate is in
+        // flight, absent otherwise (never `"false"`: the attribute's absence and
+        // its false value are the same state to AT, and one of the two is
+        // noise). Per panel, because the other panels are not busy.
+        aria-busy={p.status === "validating" ? "true" : undefined}
         className="rounded-md border border-border bg-white px-4 py-3"
       >
         <legend className="font-metric text-micro uppercase tracking-wider tabular-nums text-text-secondary">
@@ -1154,9 +2361,11 @@ function KeyPanel({
               <Input
                 label={keyLabel}
                 value={p.apiKey}
-                onChange={(e) => onUpdate(index, { apiKey: e.target.value })}
+                onChange={(e) =>
+                  onUpdate(index, { apiKey: readCredentialInput(e) })
+                }
                 placeholder={keyPlaceholder}
-                autoComplete="off"
+                {...CREDENTIAL_KEY_INPUT_PROPS}
                 data-testid={`key-${index}-api-key`}
               />
 
@@ -1186,32 +2395,42 @@ function KeyPanel({
                     type={p.showSecret ? "text" : "password"}
                     value={p.apiSecret}
                     onChange={(e) =>
-                      onUpdate(index, { apiSecret: e.target.value })
+                      onUpdate(index, { apiSecret: readCredentialInput(e) })
                     }
                     placeholder={secretPlaceholder}
-                    autoComplete="off"
+                    {...CREDENTIAL_SECRET_INPUT_PROPS}
                     data-testid={`key-${index}-api-secret`}
                     className="mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-body text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
                   />
+                  {/* Muted (never amber/red) steer under the secret input —
+                      DESIGN.md semantic-color gate: tone is earned by an actual
+                      rejection, not a preemptive warning. MT5 uses it for the
+                      investor-vs-master steer; absent elsewhere. */}
+                  {secretHelper && (
+                    <p className="mt-1 text-micro text-text-muted">
+                      {secretHelper}
+                    </p>
+                  )}
                 </div>
               )}
 
               {requiresPassphrase && (
                 <div>
                   <Input
-                    label="OKX Passphrase"
-                    type={p.showSecret ? "text" : "password"}
+                    label={passphraseLabel}
+                    type={passphraseSecret && !p.showSecret ? "password" : "text"}
                     value={p.passphrase}
                     onChange={(e) =>
                       onUpdate(index, { passphrase: e.target.value })
                     }
-                    placeholder="Paste the OKX passphrase"
-                    autoComplete="off"
+                    placeholder={passphrasePlaceholder}
+                    {...(passphraseSecret
+                      ? CREDENTIAL_SECRET_INPUT_PROPS
+                      : CREDENTIAL_KEY_INPUT_PROPS)}
                     data-testid={`key-${index}-passphrase`}
                   />
                   <p className="mt-1 text-micro text-text-muted">
-                    OKX requires a passphrase in addition to key and secret. You
-                    set this when you created the API key on OKX.
+                    {passphraseHelper}
                   </p>
                 </div>
               )}
@@ -1302,13 +2521,61 @@ function KeyPanel({
           <div className="mt-3">
             <WizardErrorEnvelope
               envelope={errorEnvelope}
-              onRetry={() => onUpdate(index, { errorCode: null })}
+              onRetry={() =>
+                // 140.5-03 — the wait is cleared WITH the code, mirroring
+                // `SyncPreviewStep`'s `handleKickoffRetry`. Belt and braces
+                // with the clear in `validatePanel`: whichever path dismisses
+                // the error, no wait survives it.
+                onUpdate(index, { errorCode: null, retryAfterSeconds: null })
+              }
             />
           </div>
         )}
 
+        {/* 153.4-05 / D-05 — THIS panel's long wait, made legible. One card per
+            validating panel, mounted inside the panel it describes so panel 3's
+            wait can never render under panel 1, and torn down on every outcome.
+            The card is PURE — this step owns the clock, the controller and the
+            budget; it renders ABOVE the validate row so the escalation and the
+            `Stop waiting` control sit next to the button they describe. */}
+        {showWaitCard && (
+          <ValidateWaitCard
+            exchange={attemptVenue}
+            elapsedMs={p.waitElapsedMs}
+            onStopWaiting={() => onStopWaiting(index)}
+          />
+        )}
+
+        {/* The cancelled state. ⛔ NOT a `WizardErrorEnvelope` and ⛔ never
+            `text-negative`: the user chose this and nothing failed. DESIGN.md
+            §Semantic-color gates — red asserts a permanent failure, and there is
+            no failure here to assert. Scoped to this panel, because the other
+            panels' checks are still running.
+
+            ⛔ NO "NOTHING WAS SAVED" CLAIM (153.4 review CR-02). Aborting stops
+            this browser listening; the route runs on past validate into
+            `encryptKey` and the add RPC, so this key may well be stored. ⚠️ The
+            tail differs from the single-key surface's ON PURPOSE and is not
+            copy-drift: `create-with-key` reconciles a re-submit through its
+            `wizard_session_id` idempotency fence, and `composite/add-key` has no
+            such fence by construction — so here the honest steer is to wait
+            rather than to re-fire, which would mint a second credential. */}
+        {p.waitCancelled && p.status !== "validating" && (
+          <p
+            className="mt-3 text-caption text-text-secondary"
+            data-testid={`key-${index}-wait-cancelled`}
+          >
+            We stopped waiting for your broker. Your key details are still on
+            this page — the check may still be finishing on our side, so give it
+            a moment before validating this key again.
+          </p>
+        )}
+
         {p.status !== "validated" && (
-          <div className="mt-5">
+          <div
+            className="mt-5"
+            ref={(el) => registerValidateRowRef(p.id, el)}
+          >
             <Button
               type="button"
               data-testid={`key-${index}-validate`}

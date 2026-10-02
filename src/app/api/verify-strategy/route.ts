@@ -4,8 +4,48 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { UI_EXCHANGE_CODES } from "@/lib/utils";
 import { isSfoxEnabledServer, type SupportedExchange } from "@/lib/closed-sets";
-import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
+import {
+  publicIpLimiter,
+  checkLimit,
+  getClientIp,
+  rateLimitDenyJson,
+} from "@/lib/ratelimit";
 import { postProcessKey } from "@/lib/process-key-client";
+// 140.3-13a / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
+// capture policy written out in full in `src/app/api/admin/match/eval/route.ts`.
+//
+// ⚠️ THIS ROUTE IS STILL THE SECRET-BEARING ONE OF THIS PLAN'S FOUR. WHAT THE
+// BOUNDARY CARRIES TODAY (Phase 146.1 / B2, 2026-08-18): the caller's RAW
+// exchange `api_key` / `api_secret`, which this handler puts in the OUTGOING
+// REQUEST BODY. It no longer carries a live end-user Supabase JWT — the
+// `X-User-Access-Token` forward that TS-15 added was removed here because the
+// only reader on the far side has zero callers (see the B2 block below the
+// teaser context). No module-level env list can know a value that arrived in
+// THIS request, so every capture below still names them in `secrets: [...]` —
+// that argument is the ONLY thing standing between undici's header-inlining
+// (TRAP-1) and a credential leaving our infrastructure for a third party.
+// `140.3-02` closed a live end-user JWT log leak; adding an observability
+// channel must not re-open it through Sentry instead.
+import { captureToSentry } from "@/lib/sentry-capture";
+// 140.4-07 / SEAMRIM-06 — the same per-request credentials the block above
+// names for Sentry apply verbatim to the CONSOLE. Until this import, they were
+// applied to Sentry ONLY, and the three console sites below logged the caught
+// value raw — on the PUBLIC, anonymous route that declares them.
+import { scrubSeamError } from "@/lib/seam-redaction";
+
+/**
+ * Phase 140 / SEAM-02 — pinned for clarity; asserted against
+ * SEAM_ROUTE_BUDGETS by seam-budgets.invariant.test.
+ *
+ * 300 is the project's VERIFIED effective Vercel default
+ * (`defaultResourceConfig.functionDefaultTimeout: 300`, read from the live
+ * project settings on 2026-07-25), so declaring it here cannot raise this
+ * route's worst-case lambda hold. It exists so the SC-4b headroom invariant
+ * has an in-repo source of truth instead of a dashboard-changeable
+ * assumption: this route spends one `process-key-sync` budget (60s — the
+ * teaser runs the full pipeline INLINE), 5× headroom.
+ */
+export const maxDuration = 300;
 
 function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -21,17 +61,72 @@ export async function POST(req: NextRequest) {
   const ip = getClientIp(req.headers);
   const rl = await checkLimit(publicIpLimiter, `verify-strategy:${ip}`);
   if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
+    // 140.4-13 / SEAMRIM-05 — the 503-vs-429 decision is the CHOKEPOINT'S, not
+    // this route's. Before this, every deny here was a 429, so an Upstash
+    // outage told an anonymous visitor evaluating us for the first time that
+    // THEY were being throttled. `rateLimitDenyJson` answers 503 on
+    // `ratelimit_misconfigured` so the outage reaches the canary instead.
+    //
+    // No options: this route's genuine 429 body and headers ALREADY are the
+    // builder's defaults — `{error: "Too many requests"}` with `Retry-After`
+    // and nothing else (it is the one seam route with no NO_STORE_HEADERS).
+    // Byte-identical by construction rather than by transcription.
+    return rateLimitDenyJson(rl);
   }
 
+  // ── Phase 140.3-G4 / SEAMUX-03 — a machine code on EVERY arm this PUBLIC
+  // teaser route emits, so a client discriminates the fault on a stable token
+  // instead of sniffing prose. This is an UNAUTHENTICATED route: every token
+  // below is a closed-set clean token — it never names an env var, hostname, or
+  // internal service.
+  //
+  // ── 161-09 / WIZERR-08 — THE FIVE REQUEST-SHAPE ARMS STOP SHARING ONE CODE.
+  // They all answered `KEY_INVALID_FORMAT`, mirroring create-with-key before
+  // 142.2 split that code into four. Only ONE of the five is a format failure.
+  //
+  //   · unreadable body      → KEY_MISSING_REQUIRED_FIELD. The union comment
+  //     defines that code as covering exactly "a field the form requires
+  //     arrived empty, OR the body was not a readable object".
+  //   · missing fields       → KEY_MISSING_REQUIRED_FIELD.
+  //   · malformed email      → KEY_INVALID_FORMAT, RETAINED. A present value
+  //     whose SHAPE is wrong is a format failure, and none of the four split
+  //     codes is true of it: it is not missing, not a venue property, not a
+  //     length cap. ⚠️ `KEY_INVALID_FORMAT`'s union comment reserves "exactly
+  //     ONE emitter per route" for the two WIZARD connect routes and their
+  //     `api_secret.length < 8` ccxt check. That rule is about those routes;
+  //     this is a different route with different facts, and forcing a FALSE
+  //     code here to satisfy a rule written about other routes would be the
+  //     defect this phase exists to remove, wearing a compliance badge.
+  //   · unsupported exchange → KEY_UNSUPPORTED_VENUE.
+  //   · sfox server gate     → KEY_VENUE_NOT_ENABLED (see the F3 note at the arm).
+  //
+  // ⛔ CODES ONLY ON THIS ROUTE (threat T-161-27). Every SENTENCE below is
+  // byte-identical, and that is not caution — it is the disclosure boundary
+  // itself. MEASURED at HEAD, 2026-08-24: the only consumer,
+  // `src/components/landing/VerificationForm.tsx`, renders
+  // `human_message ?? error ?? "Verification failed"` and NEVER READS `code`.
+  // The two occurrences of the word "code" in that file are both in comments.
+  // So on this route the code channel is machine-only and the sentence is the
+  // sole public disclosure surface: re-coding an arm cannot widen what an
+  // anonymous caller learns, and moving a sentence would.
+  //
+  // ⚠️ KEY ORDER IS DELIBERATELY LEFT AS `{ error, code }` HERE, unlike the
+  // sibling `keys/validate-and-encrypt`, which 161-09 reordered to `code:`-first.
+  // Every coverage law in this repo derives its population with a `code:`-first
+  // predicate, so these nine arms are invisible to all of them — MEASURED at
+  // HEAD: the derivation over this file returns ZERO. That is recorded rather
+  // than fixed because no law watches this route and no consumer reads its
+  // codes, so a reorder here would be churn on a PUBLIC route whose diff the
+  // threat register (T-161-27) requires to stay minimal and auditable. The day
+  // a law or a consumer arrives, the reorder comes with it.
   let body: Record<string, unknown>;
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Invalid JSON body", code: "KEY_MISSING_REQUIRED_FIELD" },
+      { status: 400 },
+    );
   }
 
   const { email, exchange, api_key, api_secret } = body as {
@@ -43,13 +138,24 @@ export async function POST(req: NextRequest) {
 
   if (!email || !exchange || !api_key || !api_secret) {
     return NextResponse.json(
-      { error: "Missing required fields: email, exchange, api_key, api_secret" },
+      {
+        error: "Missing required fields: email, exchange, api_key, api_secret",
+        code: "KEY_MISSING_REQUIRED_FIELD",
+      },
       { status: 400 },
     );
   }
 
   if (!isValidEmail(email)) {
-    return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
+    // 161-09 / WIZERR-08 — `KEY_INVALID_FORMAT` is KEPT here, deliberately, and
+    // this is the split landing CORRECTLY rather than the split failing. A
+    // present value whose shape is wrong is the one fact on this route that IS
+    // a format failure. See the fact→code mapping in the block above for why
+    // the "one emitter per route" rule does not reach this route.
+    return NextResponse.json(
+      { error: "Invalid email address", code: "KEY_INVALID_FORMAT" },
+      { status: 400 },
+    );
   }
 
   // F3 (Phase 122): gate this PUBLIC/unauthenticated teaser verify on the
@@ -63,7 +169,10 @@ export async function POST(req: NextRequest) {
   // until SFOX_ENABLED flips the offer on. The disclosed enum tracks the offer.
   if (!UI_EXCHANGE_CODES.includes(exchange as SupportedExchange)) {
     return NextResponse.json(
-      { error: `Unsupported exchange. Supported: ${UI_EXCHANGE_CODES.join(", ")}` },
+      {
+        error: `Unsupported exchange. Supported: ${UI_EXCHANGE_CODES.join(", ")}`,
+        code: "KEY_UNSUPPORTED_VENUE",
+      },
       { status: 400 },
     );
   }
@@ -74,8 +183,44 @@ export async function POST(req: NextRequest) {
   // half-state), UI_EXCHANGE_CODES above would admit sfox; this ensures the
   // public teaser cannot forward a live sfox key-process before go-live either.
   if (exchange.toLowerCase() === "sfox" && !isSfoxEnabledServer()) {
+    // 161-09 / WIZERR-08 + F3 — `KEY_VENUE_NOT_ENABLED`, because it is TRUE of
+    // this fact: we SUPPORT sfox, it is not open here yet. The alternative,
+    // `KEY_UNSUPPORTED_VENUE`, carries the copy "We do not support that
+    // exchange" — false of a venue we do support, and chosen only to guard
+    // against a hypothetical future leak. Trading a present falsehood for a
+    // future one is the wrong trade in a phase about false sentences.
+    //
+    // THE DISCLOSURE IS BOUNDED BY ORDERING, not by the code. The
+    // UI_EXCHANGE_CODES gate above runs FIRST, so this arm is reachable ONLY
+    // when sfox IS in the offered set — the documented NEXT_PUBLIC_SFOX_ENABLED
+    // on / SFOX_ENABLED off half-state. It cannot name a venue the landing form
+    // was not already offering. That ordering is pinned by a test, not
+    // inherited: reversing the two gates reddens it.
+    //
+    // ⚠️⚠️ LATENT HAZARD, RECORDED SO A FUTURE CONSUMER MUST RE-DECIDE RATHER
+    // THAN INHERIT — and, since 161-REVIEW / WR-04, PINNED rather than merely
+    // recorded. `KEY_VENUE_NOT_ENABLED`'s copy entry reads "This exchange is not
+    // open on Quantalyze yet."
+    //
+    // ⛔ STATE THE HAZARD AT ITS REAL SIZE. An earlier version of this note said
+    // that sentence "WOULD leak a coming-soon signal about an unlaunched venue",
+    // which contradicts the ordering argument two paragraphs above and overstates
+    // what can happen. The UI_EXCHANGE_CODES gate runs FIRST, so this arm cannot
+    // fire for a venue the landing form was not already offering. The residual
+    // hazard is narrower and still real: the coming-soon WORDING would be
+    // rendered for a venue we are presenting as available, which is the copy
+    // WIZERR-08/F3 bans on this surface — not a disclosure of something hidden.
+    //
+    // THE PREMISE THIS DEFERRAL RESTS ON IS NOW ASSERTED, NOT ASSUMED. Measured:
+    // `VerificationForm` reads `data.human_message` then `data.error` and never
+    // `data.code`, and no file under `src/components/landing/` translates a code
+    // through `WIZARD_ERROR_COPY` / `recogniseSeamErrorCode` / `formatKeyError`.
+    // `route.test.ts`'s "[161-REVIEW / WR-04] premise pin" derives that
+    // population from disk and reddens the day it stops holding, so F3 gets
+    // re-decided AT THAT MOMENT rather than assumed settled because this line
+    // already existed.
     return NextResponse.json(
-      { error: "sFOX integration is not yet available." },
+      { error: "sFOX integration is not yet available.", code: "KEY_VENUE_NOT_ENABLED" },
       { status: 400 },
     );
   }
@@ -132,7 +277,7 @@ function sanitizeMetricsSnapshot(value: unknown): unknown {
  * CT-3 (army2) — the upstream `/process-key` teaser flow returns
  * `{verification_id, status, trust_tier, metrics_snapshot, fingerprint, ...}`
  * but does NOT mint a public_token. The landing-page <VerificationForm/>
- * (src/components/landing/VerificationForm.tsx:56) requires `data.public_token`
+ * (the `<VerificationForm/>` in src/components/landing/VerificationForm.tsx) requires `data.public_token`
  * and throws "invalid response" otherwise. Without minting+returning here,
  * flipping the unified-backbone flag ON breaks the landing-page teaser flow
  * end-to-end. Mint a 32-byte base64url token, persist to strategy_verifications
@@ -143,6 +288,35 @@ async function unifiedVerifyStrategyHandler(
   body: Record<string, unknown>,
 ): Promise<NextResponse> {
   const exchange = (body.exchange as string) ?? "okx";
+
+  /**
+   * 146.2 / R2 (2026-08-19) — THE request-body credentials, enumerated ONCE.
+   *
+   * ⛔ A NEW BODY CREDENTIAL IS ADDED HERE AND NOWHERE ELSE. Both consumers
+   * below derive from this object: the outgoing `teaserContext` (what LEAVES)
+   * and `perRequestSecrets` (what gets SCRUBBED before crossing to Sentry).
+   * Typing a credential directly into either one is the defect this shape
+   * exists to prevent.
+   *
+   * ⚠️ WHY THE STRUCTURE, not just a third literal. 146.1 left
+   * `perRequestSecrets` naming `api_key`/`api_secret` while `teaserContext`
+   * forwarded a `passphrase` as well. On OKX / KuCoin / Coinbase that
+   * passphrase is a first-class exchange credential — key + secret + passphrase
+   * IS the account — and undici inlines the outgoing body into `err.message`
+   * (TRAP-1), so it crossed to a third party in the clear from all four capture
+   * sites below. Two hand-maintained lists over one set drift; one declaration
+   * with two derived readers cannot.
+   *
+   * ⚠️ THIS IS STILL AN ALLOWLIST, so PR-X5 below holds. The keys are literals
+   * written here, never keys taken from the caller's body — the spread cannot
+   * introduce a field an attacker named.
+   */
+  const bodyCredentials = {
+    api_key: body.api_key,
+    api_secret: body.api_secret,
+    passphrase: body.passphrase,
+  };
+
   // PR-X5 (2026-05-15) security fix — DO NOT spread the raw body into
   // context. This endpoint is unauthenticated public input. Spreading
   // would let an attacker pre-supply `strategy_id`, `wizard_session_id`,
@@ -156,12 +330,82 @@ async function unifiedVerifyStrategyHandler(
   const teaserContext: Record<string, unknown> = {
     email: body.email,
     exchange: body.exchange,
-    api_key: body.api_key,
-    api_secret: body.api_secret,
+    // The wire shape is UNCHANGED: a credential the caller omitted is dropped
+    // rather than sent as `undefined` (which `JSON.stringify` in
+    // `process-key-client` would drop anyway). The filter generalises the
+    // old `if (body.passphrase !== undefined)` conditional to every member,
+    // so the omission rule does not have to be re-typed per credential.
+    ...Object.fromEntries(
+      Object.entries(bodyCredentials).filter(([, v]) => v !== undefined),
+    ),
   };
-  if (body.passphrase !== undefined) {
-    teaserContext.passphrase = body.passphrase;
-  }
+
+  /**
+   * Phase 146.1 / B2 (2026-08-18) — THE FORWARD WAS REMOVED HERE, at BOTH sites.
+   *
+   * This block used to read the request's Supabase session and hand the
+   * resulting LIVE end-user JWT to `postProcessKey` (which set it as
+   * `X-User-Access-Token`) and to `perRequestSecrets` below. The v1.19 xhigh
+   * review measured the far side: the only Python reader,
+   * `services/db.py get_user_scoped_supabase`, has ZERO production callers, and
+   * the `not hasattr(..., "get_user_scoped_supabase")` gate in
+  // `analytics-service/tests/test_process_key.py` actively PINS that
+   * non-use. Nothing in `analytics-service` reads the header at all.
+   *
+   * ⚠️ THIS ROUTE IS PUBLIC, so the removal is strictly a reduction. The old
+   * shape was session-conditional precisely because a FABRICATED value on an
+   * unauthenticated route would be elevation of privilege; forwarding NOTHING
+   * on every path is the same guarantee with no live credential in flight. The
+   * `verify-strategy` "no session forwards nothing" seam case is retained and
+   * unchanged — it is the proof the inversion did not simply delete assertions.
+   *
+   * The 140.2 obligation that justified the forward is DISCHARGED BY
+   * SUBSTITUTION, not abandoned: the ownership pre-check is already shipped as
+   * the explicit Python `strategies` id+user_id filter
+   * (`_caller_owns_strategy` in `analytics-service/routers/process_key.py`). See
+   * `.planning/phases/140.1-.../140.1-TS-OBLIGATIONS.md` TS-15 for the dated
+   * superseding note and the NOT-TAKEN option (b).
+   *
+   * ⛔ The header name STAYS on `resilient-fetch.ts`'s CREDENTIAL_HEADER_NAMES
+   * scrub enumeration on purpose — that scrub DERIVES its per-request secrets
+   * from the outgoing headers, so it covers whatever this seam carries next.
+   */
+
+  /**
+   * 140.3-13a / SEAMUX-08 — the per-request credentials every `captureToSentry`
+   * in this handler must name.
+   *
+   * Declared ONCE, here, rather than re-typed at each of the four call sites:
+   * four sites each remembering the same values is the instance-not-class shape
+   * this programme has already paid for, and the failure mode is silent — a
+   * capture that forgets one still succeeds, still looks correct in review, and
+   * ships the credential to a third party.
+   *
+   * ⛔ THIS ARRAY MUST NOT SHRINK AND MUST NOT BE DELETED, AND IT IS NO LONGER
+   * WRITTEN OUT BY HAND. Phase 146.1 / B2 removed ONE member
+   * (`userAccessToken`) because the route stopped forwarding it, NOT because
+   * per-request scrubbing stopped mattering — and in doing so it left behind an
+   * enumeration that READ complete ("both remaining members") while naming two
+   * of the three credentials actually in flight. 146.2 / R2 replaced the
+   * hand-written array with `Object.values(bodyCredentials)`, the SAME
+   * declaration the outgoing body is built from, so the two can no longer
+   * disagree about what the caller sent.
+   *
+   * All THREE members are unknowable to any module-level env list:
+   *   · `api_key` / `api_secret` / `passphrase` — the caller's RAW exchange
+   *     credentials, which this handler puts in the outgoing request BODY.
+   *     undici inlines that body into `err.message` (TRAP-1) and nothing in
+   *     `SEAM_SECRET_ENV_NAMES` can reach a value that arrived in the request.
+   *     On OKX / KuCoin / Coinbase the `passphrase` is not an extra: it is the
+   *     third of three credentials that together ARE the account.
+   *
+   * ⚠️ `undefined` members are harmless — `scrubSeamString` skips non-strings —
+   * so a body field the caller omitted needs no separate array. That is why the
+   * scrub array takes every member UNCONDITIONALLY while the outgoing body
+   * still omits the absent ones.
+   */
+  const perRequestSecrets: readonly unknown[] = Object.values(bodyCredentials);
+
   const result = await postProcessKey({
     flow_type: "teaser",
     source: exchange,
@@ -180,11 +424,84 @@ async function unifiedVerifyStrategyHandler(
   if (!result.ok) return result.response;
 
   const upstream = (result.body ?? {}) as Record<string, unknown>;
+
+  /**
+   * Phase 140.3-02 / TS-12 + TS-14 — SUCCESS IS DECIDED BY THE ENVELOPE'S OWN
+   * `ok`, NEVER BY SNIFFING A FIELD AND NEVER BY THE STATUS.
+   *
+   * ⚠️ WHY NOT THE STATUS (fold-in M-6 from the 140.1 code review). `validate-only`
+   * answers **200 with `ok:false`** where `_scope_rejected` answers **403**, on the
+   * IDENTICAL `not val.valid` predicate. It was judged a deliberate carve-out, but
+   * it contradicts the contract and `STATUS_CONTRACT.md` records the exception
+   * nowhere. A consumer branching on STATUS is therefore wrong on one of the two
+   * paths no matter which status it picks. Branching on `ok` is correct on both.
+   * Do NOT "simplify" this back to a status check.
+   *
+   * ⚠️ WHY NOT `verification_id`. This used to read
+   * `typeof upstream.verification_id === "string"` and call that success. The
+   * Python terminal-success builder's own docstring names THIS site as the shape
+   * consumers used to SNIFF, and adds `ok: true` + an explicit `code: null` so
+   * they stop. A sniff cannot tell a success carrying an id from a FAILURE
+   * carrying one — and treating the latter as success mints a queryable
+   * public_token and publishes a teaser factsheet for a key the exchange rejected.
+   *
+   * ⚠️ THE SHAPE GUARD BELOW IS NOT DEAD — a FINDING against TS-12's premise,
+   * recorded here rather than silently satisfied. TS-12 called the 502 fallback's
+   * rejection case dead and said to delete the guard. Its REJECTION trigger IS
+   * dead: a rejection now returns at `!result.ok` above and never reaches here.
+   * Its DRIFT trigger is not. A 2xx whose body lost `verification_id` still
+   * arrives, and without the guard this route answers 200 with a public_token
+   * persisted against `.eq("id", null)` — a token queryable against no row. That
+   * is the "silent success on failure" defect this phase exists to close, and the
+   * exact twin of the `isUuid` guard TS-13 explicitly says to KEEP one route over.
+   * So the guard stays; only its RATIONALE narrows, and both halves are named in
+   * the log line so an operator can tell which one fired.
+   */
   const verificationId =
     typeof upstream.verification_id === "string" ? upstream.verification_id : null;
-  if (!verificationId) {
+  if (upstream.ok !== true || !verificationId) {
+    // 140.3-13a / SEAMUX-08 — the CONTRACT-VIOLATION half of the capture policy
+    // (`admin/match/eval/route.ts`). A 2xx we cannot use is not a caller fault
+    // and not an expected infrastructure condition: either the upstream said
+    // `ok:false` on a 2xx, or its terminal-success builder dropped
+    // `verification_id`. Both are drift in a contract only we can fix, and
+    // neither produces any other alert — the caller just sees a 502.
+    //
+    // A SYNTHETIC Error, deliberately: the raw upstream body carries
+    // `encrypted_credentials` and is never handed to Sentry, exactly as the
+    // console line below already refuses to log it.
+    captureToSentry(
+      new Error("verify-strategy: upstream 2xx is not a usable verification"),
+      {
+        tags: { surface: "verify-strategy", step: "upstream-contract" },
+        extra: {
+          ok: String(upstream.ok),
+          upstream_code:
+            typeof upstream.code === "string" ? upstream.code : null,
+          has_verification_id: verificationId !== null,
+        },
+        secrets: perRequestSecrets,
+      },
+    );
+    console.error(
+      "[verify-strategy] upstream 2xx is not a usable verification:",
+      {
+        // Diagnostics only — never the body, which carries encrypted_credentials.
+        ok: upstream.ok,
+        upstream_code: typeof upstream.code === "string" ? upstream.code : null,
+        has_verification_id: verificationId !== null,
+        correlation_id:
+          typeof upstream.correlation_id === "string"
+            ? upstream.correlation_id
+            : null,
+      },
+    );
+    // SEAMUX-03: an answer ARRIVED (a 2xx) that we could not recognise —
+    // UNKNOWN, the repo's terminal/unclassified fallback. NOT SERVICE_UNREACHABLE
+    // ("we sent it and never got an answer" — false here) nor
+    // UPSTREAM_NETWORK_ERROR (no transport fault occurred).
     return NextResponse.json(
-      { error: "Verification service returned an invalid response" },
+      { error: "Verification service returned an invalid response", code: "UNKNOWN" },
       { status: 502 },
     );
   }
@@ -205,9 +522,30 @@ async function unifiedVerifyStrategyHandler(
   try {
     admin = createAdminClient();
   } catch (configErr) {
-    console.error("[verify-strategy] createAdminClient config error:", configErr);
+    // 140.3-13a / SEAMUX-08 — TERMINAL, UNCLASSIFIED. 🔴 The comment above
+    // ALREADY promised this fault would be "loud in logs/Sentry", and until
+    // this line the Sentry half of that sentence was false: `grep -c
+    // captureToSentry` on this file read 0. The claim is now true rather than
+    // removed, because a service-role client that will not construct is a
+    // permanent config fault that takes the whole anonymous teaser down and
+    // nothing else reports it.
+    //
+    // `secrets` names all three per-request credentials: a Supabase client
+    // constructor error can inline the key it was handed, and this handler is
+    // holding the caller's raw exchange material at the same time.
+    captureToSentry(configErr, {
+      tags: { surface: "verify-strategy", step: "admin-client-config" },
+      level: "fatal",
+      secrets: perRequestSecrets,
+    });
+    console.error(
+      "[verify-strategy] createAdminClient config error:",
+      scrubSeamError(configErr, perRequestSecrets),
+    );
+    // SEAMUX-03: OUR configuration fault (a service-role client that will not
+    // construct), nothing the caller did — SEAM_MISCONFIGURED (union member).
     return NextResponse.json(
-      { error: "Verification service misconfigured" },
+      { error: "Verification service misconfigured", code: "SEAM_MISCONFIGURED" },
       { status: 500 },
     );
   }
@@ -236,19 +574,43 @@ async function unifiedVerifyStrategyHandler(
       })
       .eq("id", verificationId);
     if (persistError) {
+      // 140.3-13a / SEAMUX-08 — TERMINAL, UNCLASSIFIED. The verification ran and
+      // succeeded upstream; only OUR write of the public_token failed, so the
+      // user is told "Failed to finalize" for work that already happened. There
+      // is no typed branch above this and no other alert on the path.
+      captureToSentry(persistError, {
+        tags: { surface: "verify-strategy", step: "public-token-persist" },
+        secrets: perRequestSecrets,
+      });
       console.error(
         "[verify-strategy] CT-3 public_token persist failed:",
-        persistError,
+        scrubSeamError(persistError, perRequestSecrets),
       );
+      // SEAMUX-03: a Supabase write about US failed (the verification succeeded
+      // upstream; only our public_token write did not) — VERIFY_PERSIST_FAILED,
+      // a new route token on the keys/sync DRAFT_LOOKUP_FAILED precedent. The
+      // thrown twin below carries the SAME token (same fact ⇒ same token).
       return NextResponse.json(
-        { error: "Failed to finalize verification" },
+        { error: "Failed to finalize verification", code: "VERIFY_PERSIST_FAILED" },
         { status: 500 },
       );
     }
   } catch (err) {
-    console.error("[verify-strategy] CT-3 public_token persist threw:", err);
+    // The THROWN twin of the arm above — a transport failure reaching Supabase
+    // rather than a returned PostgrestError. Same policy arm, same secrets, and
+    // separately captured because the two are separately reachable.
+    captureToSentry(err, {
+      tags: { surface: "verify-strategy", step: "public-token-persist-threw" },
+      secrets: perRequestSecrets,
+    });
+    console.error(
+      "[verify-strategy] CT-3 public_token persist threw:",
+      scrubSeamError(err, perRequestSecrets),
+    );
+    // SEAMUX-03: the THROWN twin of the returned-error arm above — same fact
+    // (our persist write failed), same token.
     return NextResponse.json(
-      { error: "Failed to finalize verification" },
+      { error: "Failed to finalize verification", code: "VERIFY_PERSIST_FAILED" },
       { status: 500 },
     );
   }

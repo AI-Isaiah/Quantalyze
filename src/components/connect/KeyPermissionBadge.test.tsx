@@ -1,6 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { KeyPermissionBadge } from "./KeyPermissionBadge";
+import { addSentryBreadcrumb } from "@/lib/sentry-capture";
+
+// 164.2-01 / 161-ERRPREFIX — the component now routes the machine code to a
+// Sentry breadcrumb, so the module is mocked here to observe that call. The
+// factory names BOTH exports deliberately: `vi.mock` replaces the whole module,
+// so omitting `captureToSentry` would make any future import of it `undefined`
+// in this suite and fail at the call, not at the assertion. Idiom copied from
+// `src/app/factsheet/[id]/v2/page.stale-analytics.test.tsx:38` and siblings.
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: vi.fn(),
+  addSentryBreadcrumb: vi.fn(),
+}));
 
 // Helper to mount fetch responses.
 function mockFetchOnce(response: object, ok = true, status = 200) {
@@ -14,11 +26,18 @@ function mockFetchOnce(response: object, ok = true, status = 200) {
 describe("KeyPermissionBadge", () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
+    // `restoreAllMocks` below restores SPIES; a `vi.fn()` from a module factory
+    // keeps its call history across tests, so clear it explicitly or the
+    // breadcrumb assertions would pass on a neighbouring test's call.
+    vi.mocked(addSentryBreadcrumb).mockClear();
   });
 
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    // This repo has no global fetch-stub safety net and a leaked stub is its
+    // known CI-only failure cause (CI runs Node 22, local runs Node 25).
+    vi.unstubAllGlobals();
   });
 
   it("shows loading skeleton on mount", () => {
@@ -112,28 +131,372 @@ describe("KeyPermissionBadge", () => {
     );
   });
 
-  // When the route returns a structured { error, code } payload (the new
-  // PROBE_BACKEND_UNAVAILABLE shape), prepend the code so support can
-  // grep for it in tickets without asking the user to copy the status.
-  it("prepends the structured `code` field to the error message", async () => {
+  /**
+   * [164.2-01 / 161-ERRPREFIX] — THE SPLIT: prose to the user, code to the log
+   * AND to a Sentry breadcrumb.
+   *
+   * ⚠️ THE TEST THAT USED TO SIT HERE PINNED THE DEFECT. It was titled
+   * "prepends the structured `code` field to the error message" and asserted
+   * `getByText(/PROBE_BACKEND_UNAVAILABLE: Could not reach the permissions
+   * service/)` — it made the raw machine code, inside the user's sentence, a
+   * CONTRACT. Removing the prefix would therefore have read as a regression,
+   * which is why the defect survived four phases. The founder ruling of
+   * 2026-08-26 (161-ERRPREFIX) is a SPLIT, not a deletion: the user reads the
+   * curated prose only, and the code goes to `console.error` and to a Sentry
+   * breadcrumb, preserving the support-ticket greppability the prefix existed
+   * for (the justification that sat at `KeyPermissionBadge.tsx:137-138` until
+   * 164.2-01 removed it — the split comment now standing there records the
+   * reversal, so do not expect to find the old sentence at that anchor).
+   *
+   * These assertions are INVERTED rather than deleted — the fixture is kept and
+   * the expectation is the old one negated — so a reader can see the reversal
+   * was deliberate. Same idiom as `api/portfolio-optimizer/route.test.ts:440-462`.
+   *
+   * ⭐ AND IT IS PARAMETRISED, because the defect was a CLASS and not one
+   * string: the prefix was applied to EVERY coded refusal the route can answer.
+   * The population is not guessed here — `src/lib/probe-vocabulary.invariant.test.ts`
+   * derives it from the route source and pins it against a hand-typed ROSTER at
+   * `EXPECTED_TOTAL_CODES = 6`, so a NEW arm fails THERE by name. This table
+   * transcribes that roster plus the status each arm actually answers, read off
+   * `src/app/api/keys/[id]/permissions/route.ts` (503/429/500/502/502/502).
+   */
+  const ROUTE_REFUSALS: ReadonlyArray<{
+    code: string;
+    status: number;
+    prose: string;
+    /**
+     * 164.5.4-D3 / A-02 — does this refusal leave the "Re-check" control
+     * PRESSABLE? It is the same question the probe-vocabulary roster answers as
+     * `retryClearsIt`, asked of the AFFORDANCE rather than of the sentence: a
+     * usable control is itself a claim that pressing it can help, so a fault a
+     * retry cannot clear must not offer one.
+     *
+     * ⚠️ The `true` rows carry the real weight here. A gate that disabled the
+     * control for EVERY refusal would satisfy a single-code test and would be a
+     * REGRESSION on the outage and throttle paths, where re-checking is exactly
+     * the right thing to do.
+     */
+    recheckStaysUsable: boolean;
+  }> = [
+    {
+      code: "CIRCUIT_OPEN",
+      status: 503,
+      prose:
+        "The analytics service is temporarily unavailable. Please try again in a moment.",
+      recheckStaysUsable: true,
+    },
+    {
+      code: "PROBE_RATE_LIMITED",
+      status: 429,
+      prose: "Too many requests",
+      recheckStaysUsable: true,
+    },
+    {
+      code: "KEY_UNDECRYPTABLE",
+      status: 500,
+      prose:
+        "This stored key can no longer be decrypted. Reconnect the key — retrying will not help.",
+      // The ONE irrecoverable member of this route's vocabulary. The stored
+      // ciphertext stays unreadable until the key is reconnected, so no number
+      // of re-checks can change the answer.
+      recheckStaysUsable: false,
+    },
+    {
+      code: "PROBE_BACKEND_UNAVAILABLE",
+      status: 502,
+      prose: "Could not reach the permissions service. Try again shortly.",
+      recheckStaysUsable: true,
+    },
+    {
+      code: "PROBE_TIMEOUT",
+      status: 502,
+      prose: "Permissions probe timed out. Try again.",
+      recheckStaysUsable: true,
+    },
+    {
+      code: "PROBE_FAILED",
+      status: 502,
+      prose: "Could not check key scopes. Try again.",
+      recheckStaysUsable: true,
+    },
+  ];
+
+  function mockRefusal(code: string, status: number, prose: string) {
     global.fetch = vi.fn().mockResolvedValueOnce({
       ok: false,
-      status: 502,
-      statusText: "Bad Gateway",
-      json: async () => ({
-        error: "Could not reach the permissions service. Try again shortly.",
-        code: "PROBE_BACKEND_UNAVAILABLE",
-      }),
+      status,
+      statusText: "Refused",
+      json: async () => ({ error: prose, code }),
     } as Response) as unknown as typeof fetch;
+  }
 
-    render(<KeyPermissionBadge apiKeyId="key-1" />);
-    await waitFor(() =>
-      expect(
-        screen.getByText(
-          /PROBE_BACKEND_UNAVAILABLE: Could not reach the permissions service/,
-        ),
-      ).toBeInTheDocument(),
+  describe("[164.2-01 / 161-ERRPREFIX] the code is split out of the rendered sentence", () => {
+    // ── THE RENDER HALF ─────────────────────────────────────────────────────
+    it.each(ROUTE_REFUSALS)(
+      "$code: the user reads the curated prose and NEVER the raw code",
+      async ({ code, status, prose }) => {
+        mockRefusal(code, status, prose);
+        render(<KeyPermissionBadge apiKeyId="key-1" />);
+
+        await waitFor(() =>
+          expect(screen.getByText(prose)).toBeInTheDocument(),
+        );
+        // THE inversion: the old pin required this substring to be present.
+        expect(
+          document.body.textContent,
+          `The rendered sentence still carries the machine code ${code}. A user ` +
+            "with a broken key is not the reader of a code — the 2026-08-26 " +
+            "ruling routes it to the log and the breadcrumb instead.",
+        ).not.toContain(code);
+      },
     );
+
+    // ── THE LOG HALF ────────────────────────────────────────────────────────
+    // Identity, not substring (`arg === code`), copied from the B-27 test
+    // below at "does NOT render a raw caught message". This is what forces the
+    // code to be its OWN console.error argument: an interpolated
+    // `${err.code}: ${message}` string is not `=== code` and fails here.
+    it.each(ROUTE_REFUSALS)(
+      "$code: the code reaches console.error as an argument of its own",
+      async ({ code, status, prose }) => {
+        const consoleSpy = vi
+          .spyOn(console, "error")
+          .mockImplementation(() => {});
+        mockRefusal(code, status, prose);
+        render(<KeyPermissionBadge apiKeyId="key-1" />);
+
+        // ⚠️ THE WAIT IS ON THIS HALF'S OWN SUBJECT, NOT ON THE RENDER.
+        // Waiting on the prose instead was measured (164.2-01, neuter 1) to
+        // make all six of these rows go RED for a RENDER reason — a timeout,
+        // not a log finding — which would have made the log half unable to
+        // distinguish "the code stopped reaching the console" from "the prose
+        // changed". Each half must fail for its own cause.
+        await waitFor(() =>
+          expect(
+            consoleSpy.mock.calls.find((call) =>
+              call.some((arg) => arg === code),
+            ),
+            `${code} never reached console.error as a standalone argument, ` +
+              "so the greppability the prefix existed for was traded away " +
+              "rather than relocated. That fails the ruling as surely as " +
+              "leaving the prefix in the render.",
+          ).toBeDefined(),
+        );
+      },
+    );
+
+    // ── THE BREADCRUMB HALF ─────────────────────────────────────────────────
+    it.each(ROUTE_REFUSALS)(
+      "$code: the code is the MESSAGE of a Sentry breadcrumb",
+      async ({ code, status, prose }) => {
+        mockRefusal(code, status, prose);
+        render(<KeyPermissionBadge apiKeyId="key-1" />);
+
+        // Waits on the BREADCRUMB, for the same reason the log half above
+        // waits on the console: a half that waits on the render cannot fail
+        // for its own cause.
+        await waitFor(() =>
+          expect(
+            vi.mocked(addSentryBreadcrumb),
+            `No breadcrumb carried ${code}. The breadcrumb is the half of ` +
+              "the split that survives a user who never opens the console.",
+          ).toHaveBeenCalledWith(expect.objectContaining({ message: code })),
+        );
+      },
+    );
+
+    // The breadcrumb message must be the CODE, never the prose — the whole
+    // point of the split is that the two audiences get different strings.
+    it("the breadcrumb message is the machine code, not the user's sentence", async () => {
+      const { code, status, prose } = ROUTE_REFUSALS[0];
+      mockRefusal(code, status, prose);
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+
+      await waitFor(() =>
+        expect(vi.mocked(addSentryBreadcrumb)).toHaveBeenCalled(),
+      );
+      const call = vi.mocked(addSentryBreadcrumb).mock.calls[0]?.[0];
+      expect(call?.message).toBe(code);
+      expect(call?.message).not.toBe(prose);
+    });
+
+    // NEGATIVE CONTROL — a refusal with NO code must not invent one, and must
+    // not fire a breadcrumb whose message would then be prose or `undefined`.
+    it("a bodied refusal with no `code` renders its prose and fires no breadcrumb", async () => {
+      global.fetch = vi.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: "Bad Gateway",
+        json: async () => ({ error: "Exchange permission probe failed" }),
+      } as Response) as unknown as typeof fetch;
+
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      await waitFor(() =>
+        expect(
+          screen.getByText("Exchange permission probe failed"),
+        ).toBeInTheDocument(),
+      );
+      expect(vi.mocked(addSentryBreadcrumb)).not.toHaveBeenCalled();
+    });
+
+    // ── THE AFFORDANCE HALF ─────────────────────────────────────────────────
+    //
+    // 164.5.4-D3 / A-02 — THE THIRD AUDIENCE OF THE SAME CODE.
+    //
+    // The two halves above settle WHERE the code's text goes: the curated
+    // prose to the user, the machine code to the console and the breadcrumb.
+    // Neither asks what the code should do to the CONTROL rendered beside that
+    // prose, and the answer was "nothing" — `disabled` was gated on `loading`
+    // alone, so a key whose stored ciphertext can no longer be decrypted still
+    // offered a "Re-check" that could never succeed. The route's own sentence
+    // said "retrying will not help" directly above a button inviting exactly
+    // that. The sentence and the affordance contradicted each other on one
+    // screen, which is the 162-09 / HONEST-02 class this component has already
+    // been through once.
+    //
+    // ⚠️ The assertion is on the `disabled` ATTRIBUTE, not on the control's
+    // ABSENCE, and that is deliberate. A removed control with no explanation is
+    // worse for the user than a dead one sitting beside a sentence that says
+    // why it is dead — and an absence assertion also passes when the whole
+    // component fails to render, which is not the property we mean.
+    it.each(ROUTE_REFUSALS)(
+      "$code: the re-check control's usability matches the fault (usable=$recheckStaysUsable)",
+      async ({ code, status, prose, recheckStaysUsable }) => {
+        mockRefusal(code, status, prose);
+        render(<KeyPermissionBadge apiKeyId="key-1" />);
+
+        await waitFor(() =>
+          expect(screen.getByText(prose)).toBeInTheDocument(),
+        );
+
+        const recheck = screen.getByTestId("key-permission-recheck");
+        if (recheckStaysUsable) {
+          expect(
+            recheck,
+            `${code} is a fault a re-check CAN clear, but the control is ` +
+              "disabled. The gate has stopped being narrow: it is now " +
+              "refusing a retry during an outage or a throttle, where " +
+              "retrying is the correct and only remedy.",
+          ).not.toBeDisabled();
+        } else {
+          expect(
+            recheck,
+            `${code} is a fault a re-check can NEVER clear, but the control ` +
+              "is still pressable. The route's own sentence tells the user " +
+              "retrying will not help while the button beside it invites " +
+              "exactly that — the contradiction 164.5.4-D3 exists to close.",
+          ).toBeDisabled();
+        }
+      },
+    );
+
+    // The happy path — the parametrised table above is refusals only, so
+    // nothing in it would notice a gate that disabled the control on success.
+    it("a SUCCESSFUL probe leaves the re-check control usable", async () => {
+      mockFetchOnce({
+        read: true,
+        trade: false,
+        withdraw: false,
+        detected_at: new Date().toISOString(),
+        probe_error: false,
+      });
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+
+      await waitFor(() =>
+        expect(screen.getByTestId("key-perm-pill-read")).toBeInTheDocument(),
+      );
+      expect(
+        screen.getByTestId("key-permission-recheck"),
+        "The gate disabled the control on a successful probe. It must key on " +
+          "the route's refusal code, not on the mere completion of a load.",
+      ).not.toBeDisabled();
+    });
+
+    // THE GATE IS NOT STICKY. The retained code must be cleared by the next
+    // attempt's invalidation, exactly as `error` and `perms` already are — a
+    // gate that outlives the fact it was decided on is a second defect wearing
+    // the first one's clothes.
+    it("a successful load AFTER an undecryptable one re-enables the control", async () => {
+      const undecryptable = ROUTE_REFUSALS.find(
+        (r) => r.code === "KEY_UNDECRYPTABLE",
+      )!;
+      global.fetch = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status: undecryptable.status,
+          statusText: "Refused",
+          json: async () => ({
+            error: undecryptable.prose,
+            code: undecryptable.code,
+          }),
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            read: true,
+            trade: false,
+            withdraw: false,
+            detected_at: new Date().toISOString(),
+            probe_error: false,
+          }),
+        } as Response) as unknown as typeof fetch;
+
+      const { rerender } = render(<KeyPermissionBadge apiKeyId="key-1" />);
+      // ⚠️ WAIT ON THE SETTLED STATE, NOT ON `toBeDisabled` DIRECTLY. The
+      // control is ALSO disabled while `loading` is true, so a
+      // `waitFor(…toBeDisabled())` here is satisfied by the in-flight render
+      // and passes with NO gate implemented at all — measured, 164.5.4-03
+      // RED run 1. The refusal prose renders only once `!loading && error`,
+      // so waiting on it pins the assertion to the state we actually mean.
+      await waitFor(() =>
+        expect(screen.getByText(undecryptable.prose)).toBeInTheDocument(),
+      );
+      expect(
+        screen.getByTestId("key-permission-recheck"),
+        "The control is pressable on the undecryptable answer, so the " +
+          "re-enable half below would be measuring nothing.",
+      ).toBeDisabled();
+
+      // The control is dead, so the re-load cannot come from a click. Changing
+      // `apiKeyId` re-runs `load` through the effect — the real path by which a
+      // card is pointed at a freshly reconnected key.
+      rerender(<KeyPermissionBadge apiKeyId="key-2" />);
+
+      await waitFor(() =>
+        expect(screen.getByTestId("key-perm-pill-read")).toBeInTheDocument(),
+      );
+      expect(
+        screen.getByTestId("key-permission-recheck"),
+        "The re-check control stayed disabled after a SUCCESSFUL load. The " +
+          "retained code is not being cleared by the next attempt's " +
+          "invalidation, so one undecryptable answer permanently kills the " +
+          "control on a card that is now working.",
+      ).not.toBeDisabled();
+    });
+
+    // A response with NO parseable JSON body carries no code at all, so there
+    // is nothing to gate on and the control must behave exactly as it did
+    // before this phase.
+    it("an unparseable error body leaves the re-check control usable", async () => {
+      global.fetch = vi.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: "Bad Gateway",
+        json: async () => {
+          throw new SyntaxError("Unexpected token < in JSON at position 0");
+        },
+      } as unknown as Response) as unknown as typeof fetch;
+
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      await waitFor(() =>
+        expect(screen.getByText(/HTTP 502/)).toBeInTheDocument(),
+      );
+      expect(
+        screen.getByTestId("key-permission-recheck"),
+      ).not.toBeDisabled();
+    });
   });
 
   it("re-fetches on Re-check click", async () => {
@@ -262,6 +625,344 @@ describe("KeyPermissionBadge", () => {
       expect(summary).toHaveAttribute("data-state", "probe-error");
       expect(summary.textContent).toContain("Could not contact the exchange");
       expect(summary).toHaveAttribute("role", "alert");
+    });
+  });
+
+  /**
+   * [140.3-07 / SEAMUX-09 / B-26 live member 2] — correction C-5.
+   *
+   * The findings doc concluded "a class of ONE" by a syntax-shaped candidate
+   * scan. Enumerated by BEHAVIOUR — "can this component render a fetched result
+   * while an error is set?" — this component is a second live member: `load`
+   * calls `setError(null)` and `setPerms(data)` but never `setPerms(null)`, and
+   * `{loading && !perms && …}` / `{!loading && error && …}` / `{perms && …}` are
+   * INDEPENDENT SIBLINGS with no guard-order exclusivity.
+   *
+   * So "Re-check" during an outage rendered the PREVIOUS Read/Trade/Withdraw
+   * verdict beside the error. That is a stale SECURITY claim about a
+   * money-bearing key, and it is worse than the stale allocation because the
+   * user reads it as a current fact about their key's scope.
+   *
+   * The assertions query for the CHIPS, not for the error text: the hazard is
+   * the stale verdict, and an error message says nothing about its absence.
+   */
+  describe("[140.3-07 / SEAMUX-09] a failed re-check discards the stale scope verdict", () => {
+    function scopeChips() {
+      return [
+        screen.queryByTestId("key-perm-pill-read"),
+        screen.queryByTestId("key-perm-pill-trade"),
+        screen.queryByTestId("key-perm-pill-withdraw"),
+      ].filter(Boolean);
+    }
+
+    async function renderWithVerdict() {
+      const fetchMock = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          read: true,
+          trade: false,
+          withdraw: false,
+          detected_at: new Date().toISOString(),
+        }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      await waitFor(() => expect(scopeChips()).toHaveLength(3));
+      return fetchMock;
+    }
+
+    it("removes every Read/Trade/Withdraw chip when the re-check hits a breaker 503", async () => {
+      const fetchMock = await renderWithVerdict();
+      // The verdict is on screen and reads as a current fact before the failure.
+      expect(screen.getByTestId("key-perm-pill-read")).toHaveAttribute(
+        "data-granted",
+        "true",
+      );
+
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: "Service Unavailable",
+        json: async () => ({
+          error: "Could not check key scopes. Try again.",
+          code: "PROBE_FAILED",
+        }),
+      });
+
+      fireEvent.click(screen.getByTestId("key-permission-recheck"));
+
+      // [164.2-01 / 161-ERRPREFIX] INVERTED, not deleted. This `waitFor` used
+      // to read `getByText(/PROBE_FAILED/)` — it was only the WAIT CONDITION
+      // for this test's two real assertions below, but it waited on the raw
+      // code appearing in the DOM, which the 2026-08-26 ruling removes. It now
+      // waits on the route's curated prose instead; the fixture, and both
+      // assertions this test exists for, are untouched.
+      await waitFor(() =>
+        expect(
+          screen.getByText("Could not check key scopes. Try again."),
+        ).toBeInTheDocument(),
+      );
+
+      // THE assertion: no stale security claim survives the failure.
+      expect(scopeChips()).toHaveLength(0);
+      expect(screen.queryByTestId("key-permission-summary")).toBeNull();
+    });
+
+    it("renders no scope verdict for the fail-closed 2xx `{}` the 140.3-03 route now answers", async () => {
+      // 140.3-03 made `keys/[id]/permissions` fail CLOSED: an unreadable 2xx
+      // upstream body is answered as 502 { error, code: "PROBE_FAILED" } and is
+      // never cached. This component is that route's only consumer, so the two
+      // fixes must agree — a fail-closed route in front of a component that
+      // keeps showing the old verdict closes nothing.
+      const fetchMock = await renderWithVerdict();
+
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: "Bad Gateway",
+        json: async () => ({
+          error: "Could not check key scopes. Try again.",
+          code: "PROBE_FAILED",
+        }),
+      });
+
+      fireEvent.click(screen.getByTestId("key-permission-recheck"));
+
+      // [164.2-01 / 161-ERRPREFIX] INVERTED, not deleted. This assertion used
+      // to be byte-exact on `"PROBE_FAILED: Could not check key scopes. Try
+      // again."` — i.e. it pinned the CODE PREFIX as the contract between the
+      // fail-closed route and this component. The 2026-08-26 ruling splits
+      // them: the sentence is what the user reads, and the code is what the
+      // log and the breadcrumb carry. The fixture and the scope-chip assertion
+      // are unchanged; only the expected string moved, plus an explicit
+      // absence check so the prefix cannot creep back through this path.
+      await waitFor(() =>
+        expect(
+          screen.getByText("Could not check key scopes. Try again."),
+        ).toBeInTheDocument(),
+      );
+      expect(document.body.textContent).not.toContain("PROBE_FAILED");
+      expect(scopeChips()).toHaveLength(0);
+    });
+
+    it("does NOT render a raw caught message when the fetch itself rejects (B-27)", async () => {
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const fetchMock = await renderWithVerdict();
+
+      const raw = new TypeError(
+        "NetworkError: connect ECONNREFUSED http://analytics.internal:8002/keys",
+      );
+      fetchMock.mockRejectedValueOnce(raw);
+
+      fireEvent.click(screen.getByTestId("key-permission-recheck"));
+
+      await waitFor(() =>
+        expect(
+          screen.getByText("We could not check this key's scopes. Use Re-check to try again."),
+        ).toBeInTheDocument(),
+      );
+
+      // The raw value never reaches the DOM …
+      expect(document.body.textContent).not.toContain("ECONNREFUSED");
+      expect(document.body.textContent).not.toContain("analytics.internal");
+      // … but it DOES reach the console, so debuggability was not traded away.
+      expect(
+        consoleSpy.mock.calls.find((call) => call.some((arg) => arg === raw)),
+      ).toBeDefined();
+      // And the stale verdict is discarded on this path too.
+      expect(scopeChips()).toHaveLength(0);
+    });
+
+    it("ANTI-REGRESSION: a successful re-check renders the NEW verdict", async () => {
+      const fetchMock = await renderWithVerdict();
+
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          read: true,
+          trade: true,
+          withdraw: false,
+          detected_at: new Date().toISOString(),
+        }),
+      });
+
+      fireEvent.click(screen.getByTestId("key-permission-recheck"));
+
+      await waitFor(() =>
+        expect(screen.getByTestId("key-perm-pill-trade")).toHaveAttribute(
+          "data-granted",
+          "true",
+        ),
+      );
+      expect(scopeChips()).toHaveLength(3);
+    });
+
+    it("ANTI-REGRESSION: invalidating does not introduce a set-after-unmount", async () => {
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(() => new Promise(() => {})),
+      );
+      const { unmount } = render(<KeyPermissionBadge apiKeyId="key-1" />);
+      unmount();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // The existing `mountedRef` guard must survive the invalidation edit.
+      const warned = consoleSpy.mock.calls.some((call) =>
+        call.some(
+          (arg) =>
+            typeof arg === "string" &&
+            /unmounted|not wrapped in act|state update/i.test(arg),
+        ),
+      );
+      expect(warned).toBe(false);
+    });
+  });
+
+  /**
+   * [162-09 / HONEST-02] — a failed probe may not present any scope as detected.
+   *
+   * Live PROD QA 2026-08-25 observed, on ONE screen simultaneously:
+   *   "Could not contact the exchange to verify scopes."
+   *   "Read ✓  Trade ✓  Withdraw ✓ — Detected 1m ago from the exchange."
+   * The plain-English summary branched on `probe_error`; the three scope chips
+   * and the "Detected … from the exchange" caption rendered unconditionally.
+   *
+   * The severity is the DIRECTION of the falsehood: Trade ✓ / Withdraw ✓ renders
+   * directly beneath the connect form's own copy "Only read-only keys are
+   * accepted. Keys with trading or withdrawal permissions will be rejected."
+   * A user who believes the chips concludes their read-only key can withdraw
+   * funds; a user who believes the copy concludes the app is broken. No reading
+   * leaves them correctly informed.
+   *
+   * These assertions therefore query the CHIPS and the CAPTION. The pre-existing
+   * probe-error assertion on `key-permission-summary` above passes against the
+   * BROKEN behaviour and cannot stand in for them.
+   *
+   * CONSUMER SWEEP (162-09 Task 2) — the class is closed, and it is a class of
+   * ONE. `grep -rna probe_error src analytics-service` returns exactly one
+   * component hit (this one); every other TS hit is a route, a schema, or a
+   * spec. `grep -rna detected_at src --include="*.tsx"` likewise returns only
+   * this component and its spec — no other surface renders a "detected at"
+   * claim about a key probe. `KeyPermissionBadge` itself has two render sites,
+   * `strategies/[id]/edit/page.tsx:84` and `wizard/steps/SyncPreviewStep.tsx:2546`
+   * (the composite branch deliberately omits it), and both inherit the gate
+   * from the component — there is no second, independently-gated copy.
+   * `WithdrawalWarningStrip.tsx` names Trade/Withdraw but states the POLICY
+   * ("keys with Trade or Withdraw permissions are refused"), never a detected
+   * fact — it is the copy these chips were contradicting, not a second
+   * offender. `finalize-wizard/route.ts:946` reads `probe_error` server-side
+   * and already branches on it (→ KEY_NETWORK_TIMEOUT), so the wizard's error
+   * surface asserts no scope either. Scope ENFORCEMENT is untouched throughout.
+   */
+  describe("[162-09] a failed probe presents no scope as detected", () => {
+    // Non-null scope values, deliberately in the dangerous direction: an
+    // unusable upstream body claiming the key can trade AND withdraw. Under
+    // `probe_error` none of it is knowable, so none of it may be shown.
+    const PROBE_ERROR_WITH_SCOPES = {
+      read: true,
+      trade: true,
+      withdraw: true,
+      probe_error: true,
+      detected_at: new Date().toISOString(),
+    };
+
+    function chips() {
+      return ["read", "trade", "withdraw"].map((scope) =>
+        screen.getByTestId(`key-perm-pill-${scope}`),
+      );
+    }
+
+    it("K-1a: renders no chip as granted or denied — every chip is unknown", async () => {
+      mockFetchOnce(PROBE_ERROR_WITH_SCOPES);
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      await screen.findByTestId("key-permission-summary");
+
+      for (const chip of chips()) {
+        expect(chip).toHaveAttribute("data-granted", "unknown");
+        // Neither verdict glyph: ✓ is the false claim and ✗ is the opposite
+        // false claim. A probe that did not answer supports neither.
+        expect(chip.textContent).not.toContain("✓");
+        expect(chip.textContent).not.toContain("✗");
+        // A screen reader must hear the unknown too — status is never carried
+        // by color, and "granted"/"not granted" is the same lie in text.
+        expect(chip.getAttribute("aria-label")).toMatch(/unknown/);
+        expect(chip.getAttribute("aria-label")).not.toMatch(/granted/);
+        // UI-SPEC C-3/C-4: colorless absence. Absence is not an error, so no
+        // red — and no accent either, which would read as "this is fine".
+        expect(chip.className).not.toMatch(/text-negative/);
+        expect(chip.className).not.toMatch(/text-accent/);
+      }
+    });
+
+    it("K-1b: renders no 'Detected … from the exchange' freshness caption", async () => {
+      mockFetchOnce(PROBE_ERROR_WITH_SCOPES);
+      const { container } = render(<KeyPermissionBadge apiKeyId="key-1" />);
+      await screen.findByTestId("key-permission-summary");
+
+      // The freshness claim is the caption's <time> plus its trailing clause.
+      // ("Detected" alone would also match the panel heading "Detected key
+      // scopes", which is a label, not a claim about this probe.)
+      expect(container.querySelector("time")).toBeNull();
+      expect(document.body.textContent).not.toContain("from the exchange");
+    });
+
+    it("K-1c: the contradiction observed in PROD has no render path", async () => {
+      mockFetchOnce(PROBE_ERROR_WITH_SCOPES);
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      const summary = await screen.findByTestId("key-permission-summary");
+
+      // The screen says it could not read the scopes …
+      expect(summary.textContent).toContain("Could not contact the exchange");
+      // … so nothing else on that same screen may assert one.
+      const body = document.body.textContent ?? "";
+      expect(body).not.toContain("Read ✓");
+      expect(body).not.toContain("Trade ✓");
+      expect(body).not.toContain("Withdraw ✓");
+    });
+
+    it("K-2: a successful probe still renders the chips AND the caption", async () => {
+      mockFetchOnce({
+        read: true,
+        trade: false,
+        withdraw: false,
+        detected_at: new Date().toISOString(),
+      });
+      const { container } = render(<KeyPermissionBadge apiKeyId="key-1" />);
+      await waitFor(() =>
+        expect(screen.getByTestId("key-perm-pill-read")).toHaveAttribute(
+          "data-granted",
+          "true",
+        ),
+      );
+      expect(screen.getByTestId("key-perm-pill-trade")).toHaveAttribute(
+        "data-granted",
+        "false",
+      );
+      expect(screen.getByTestId("key-perm-pill-read").textContent).toContain(
+        "✓",
+      );
+      // The gate is error-scoped, not a chip deletion: on the path where the
+      // freshness claim is true, it survives untouched.
+      expect(container.querySelector("time")).not.toBeNull();
+      expect(document.body.textContent).toContain("from the exchange");
+    });
+
+    it("K-3: the probe-error summary sentence is unchanged beside the unknown chips", async () => {
+      mockFetchOnce(PROBE_ERROR_WITH_SCOPES);
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      const summary = await screen.findByTestId("key-permission-summary");
+      expect(summary).toHaveAttribute("data-state", "probe-error");
+      // Byte-exact: this sentence was already honest and must not drift.
+      expect(summary.textContent).toBe(
+        "Could not contact the exchange to verify scopes. Try the Re-check button in a moment.",
+      );
+      expect(summary).toHaveAttribute("role", "alert");
+      // One honest message, and no second claim standing beside it.
+      expect(chips()).toHaveLength(3);
     });
   });
 });

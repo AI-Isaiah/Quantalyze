@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AlertSeverity, DocType, SupportedExchange } from "./utils";
+import type { CapitalOwnership } from "./capital-ownership";
 import {
   SIGNUP_ROLES,
   exchangeEnum,
@@ -207,6 +208,19 @@ export interface Strategy {
    * Phase 17 / DESIGN-01 polishes the visual; the data wiring is final here.
    */
   trust_tier?: "api_verified" | "csv_uploaded" | "self_reported" | null;
+  /**
+   * Phase 150 / OWN-03 — whose capital is in this key. THREE display states:
+   * `"own_capital"` (accent tag, the only allocatable mark), `"team_review"`
+   * (muted tag, the wizard default), and absent/`null` (legacy rows never
+   * asked — NO tag, and non-allocatable). Deliberately nullable with no DB
+   * default and no backfill; see `@/lib/capital-ownership` and
+   * 150-RESEARCH.md § Schema Findings 1. Never test this field inline —
+   * `isAllocatable()` is the single-source predicate.
+   *
+   * `RankedStrategyRow` (queries.ts) is `Strategy & …`, so the owner-surface
+   * rows inherit this field from here.
+   */
+  capital_ownership?: CapitalOwnership | null;
 }
 
 /**
@@ -289,6 +303,11 @@ export interface StrategyAnalytics {
   id: string;
   strategy_id: string;
   computed_at: string;
+  // JOB-01: NULL = "not currently computing". Writer-stamped in the SAME statement that
+  // sets computation_status='computing'; cleared on every exit. The pg_cron reaper
+  // reap_strategy_analytics_stuck_computing (migration 20260802120000) keys on this,
+  // never computed_at.
+  computing_started_at: string | null;
   // B9: single source of truth is STRATEGY_ANALYTICS_COMPUTATION_STATUSES in
   // closed-sets.ts, pinned against the DB CHECK by check-zod-db-check-parity.test.ts.
   computation_status: StrategyAnalyticsComputationStatus;
@@ -317,6 +336,28 @@ export interface StrategyAnalytics {
    */
   metrics_json: MetricsJson | null;
   returns_series: { date: string; value: number }[] | null;
+  /**
+   * Phase 163 / HONEST-08 — NOT a `strategy_analytics` column. It is the DATE
+   * OF THE LAST POINT of `returns_series`, projected as a JSONB alias
+   * (`series_end:returns_series->-1->>date`) by the ranked-list embed, and
+   * derived in `shapeRowAnalytics` on the owner path where the wildcard embed
+   * carries the array itself. MEASURED against the TEST project 2026-08-26:
+   * the alias returns HTTP 200 with a bare ISO date string, in both the
+   * top-level and the embedded form (`->0` returns the FIRST point, which is
+   * what proves `-1` really is the last).
+   *
+   * WHY A SCALAR AND NOT THE ARRAY: `/browse/[slug]` is anonymous, and the
+   * ranked projection exists precisely to keep bulk analytics payloads away
+   * from unauthenticated readers (see CATEGORY_RANKING_ANALYTICS_COLUMNS'
+   * docblock). One date answers "where does the track record end"; the series
+   * would answer it by shipping every point.
+   *
+   * OPTIONAL, following the `three_month` alias precedent: reads that do not
+   * project it (and every fixture predating it) stay valid, and an ABSENT
+   * value means "unknown", which the freshness resolver treats as
+   * "cannot support a freshness claim" — never as "fine".
+   */
+  series_end?: string | null;
   drawdown_series: { date: string; value: number }[] | null;
   monthly_returns: Record<string, Record<string, number>> | null;
   daily_returns: Record<string, Record<string, number>> | null;
@@ -543,7 +584,8 @@ export type StrategyAnalyticsSeriesKind =
   | "rolling_volatility_3m" | "rolling_volatility_6m" | "rolling_volatility_12m"
   | "rolling_alpha" | "rolling_beta"
   | "exposure_series" | "turnover_series" | "log_returns_series"
-  | "mtm_daily_returns";
+  | "mtm_daily_returns"
+  | "smoothed_mtm_daily_returns";
 
 /**
  * The `strategy_analytics_series.kind` string for the persisted MTM daily-return
@@ -568,6 +610,35 @@ export type MtmDailyReturnsSeriesPayload = {
   rows: Array<{ date: string; return: number }>;
   gap_spans: Array<{ start: string; end: string }>;
   conventions: { periods_per_year: number; cumulative_method: string; day_basis: string };
+};
+
+/**
+ * The `strategy_analytics_series.kind` string for the persisted SMOOTHED-MTM
+ * daily-return series (Phase 132/133). SINGLE TS SOURCE of the literal — the
+ * reader (`composite-read-path.ts readSmoothedSeries`) references THIS constant,
+ * never a bare string (Python owner: `analytics-service/services/basis_series.py:118`
+ * `KIND_SMOOTHED_MTM`).
+ */
+export const SMOOTHED_MTM_DAILY_RETURNS_SERIES_KIND = "smoothed_mtm_daily_returns" as const;
+
+/**
+ * Persisted JSONB payload of a `smoothed_mtm_daily_returns` row (Phase 132). The
+ * smoothed sibling of {@link MtmDailyReturnsSeriesPayload}: SAME
+ * schema/rows/gap_spans/conventions shape, `basis: "smoothed_mtm"` literal (written
+ * by `basis_series.py persist_basis_series` with `basis="smoothed_mtm"`), plus the
+ * OPTIONAL Phase-105 `nan_dates` key (emitted only when the derive surfaced
+ * guard-NaN dates under zero_fill — `basis_series.py:360-361`). Untrusted-shape on
+ * read (DB JSONB → RSC boundary): `parseSmoothedSeriesPayload` coerces defensively
+ * (and rejects a wrong-`basis` payload) before it reaches the payload.
+ */
+export type SmoothedMtmDailyReturnsSeriesPayload = {
+  schema: number;
+  basis: "smoothed_mtm";
+  rows: Array<{ date: string; return: number }>;
+  gap_spans: Array<{ start: string; end: string }>;
+  conventions: { periods_per_year: number; cumulative_method: string; day_basis: string };
+  /** Phase 105 additive composite-only key — present only when guard-NaN dates were surfaced. */
+  nan_dates?: string[];
 };
 
 /**
@@ -616,6 +687,12 @@ export type StrategyAnalyticsSeriesRow =
       strategy_id: string;
       kind: "mtm_daily_returns";
       payload: MtmDailyReturnsSeriesPayload;
+      computed_at: string;
+    }
+  | {
+      strategy_id: string;
+      kind: "smoothed_mtm_daily_returns";
+      payload: SmoothedMtmDailyReturnsSeriesPayload;
       computed_at: string;
     };
 
@@ -1143,7 +1220,27 @@ export interface ApiKey {
   // AllocatorExchangeManager — schema must include it to avoid silent
   // row-drops.
   disconnected_at: string | null;
+  // Migration 20260920120000 (Phase 164.5.3 / MT5CREDS), exposing the
+  // column added by migration 20260812083206 (Phase 154/WIZCONT-02). The
+  // non-secret account identity the credential in this row was connected
+  // with — MT5-only today (NULL for every ccxt venue). "What the server
+  // passed", never "what the venue confirmed" — see the column's own
+  // COMMENT. Rendered on both key cards for exchange === "mt5" only.
+  venue_account_id: string | null;
+  // Migration 20260925120000 (Phase 167.1.2 D-11). The live key of the same
+  // owner that already holds the exchange account this key reads, and why.
+  // Both-or-neither in the database. Written only by the service-role
+  // identity stamper. Read through accountShareNote, which applies the column
+  // COMMENT's reader rule (the holder must still be working).
+  account_shared_with_api_key_id: string | null;
+  account_share_kind: ApiKeyAccountShareKind | null;
+  // Same migration (D-05 / D-09). The owner's include/exclude choice for a
+  // departed key's history; NULL = the default rule.
+  history_inclusion: "include" | "exclude" | null;
 }
+
+/** Phase 167.1.2 D-11 / D-04 — the closed set of `api_keys.account_share_kind`. */
+export type ApiKeyAccountShareKind = "duplicate" | "composite_member";
 
 /**
  * audit-2026-05-07 M-0583: trust-boundary parser for `api_keys` rows.
@@ -1177,6 +1274,10 @@ export const ApiKeyRowSchema = z
     sync_error: z.string().nullable(),
     last_429_at: _isoTimestampNullable,
     disconnected_at: _isoTimestampNullable,
+    venue_account_id: z.string().nullable(),
+    account_shared_with_api_key_id: z.string().nullable(),
+    account_share_kind: z.enum(["duplicate", "composite_member"]).nullable(),
+    history_inclusion: z.enum(["include", "exclude"]).nullable(),
   })
   .strict() satisfies z.ZodType<ApiKey>;
 
@@ -1370,10 +1471,33 @@ export interface AttributionRow {
 export interface RiskDecompositionRow {
   strategy_id: string;
   strategy_name: string;
-  marginal_risk_pct: number;
+  /**
+   * null = the portfolio carries no risk, so no share of it exists to
+   * apportion (166.1 D7, founder 2026-09-26; round-1 SFH MEDIUM-2). Never 0.
+   *
+   * Unit: percent (a 28% share is 28, not 0.28), as the producer
+   * `compute_risk_decomposition` / `routers/portfolio.py` sends it; the adapter
+   * passes it through unchanged (2026-09-27, 169 D-49). `formatPercent` takes a
+   * fraction, so a display converts once (`RiskAttribution`).
+   *
+   * Signed (169 review round 1 IN-05, 2026-09-29): the shares sum to 100, but
+   * one is negative for a strategy that offsets the book's risk, and the
+   * others then exceed 100. It is not bounded to 0 to 100.
+   */
+  marginal_risk_pct: number | null;
   standalone_vol: number;
-  component_var: number;
-  weight_pct: number;
+  /** null for the same reason as `marginal_risk_pct`. */
+  component_var: number | null;
+  /**
+   * Unit: percent, 0 to 100 (a 40% weight is 40), from `routers/portfolio.py`,
+   * same as `marginal_risk_pct` (2026-09-27, 169 D-49).
+   *
+   * null = the producer sent no weight (`_safe_float` persists None for a
+   * non-finite one). Never 0: a 0 read as "no capital" and marked every row
+   * with a risk share "Overweight risk" (2026-09-29, 169 review round 1 SFH
+   * M-5; the same rule 166.1 D7 applies to `marginal_risk_pct`).
+   */
+  weight_pct: number | null;
 }
 
 export interface BenchmarkComparison {
@@ -1387,8 +1511,13 @@ export interface BenchmarkComparison {
 export interface OptimizerSuggestionRow {
   strategy_id: string;
   strategy_name: string;
-  corr_with_portfolio: number;
-  sharpe_lift: number;
+  /**
+   * null = the correlation does not exist (the portfolio or the candidate
+   * does not disperse). Never read as 0 (166.1 D7, founder 2026-09-26).
+   */
+  corr_with_portfolio: number | null;
+  /** null = the portfolio has no Sharpe, so a lift over it does not exist (166.1 D7). */
+  sharpe_lift: number | null;
   dd_improvement: number;
   score: number;
 }
@@ -1441,10 +1570,14 @@ export interface BridgeCandidate {
    * corr_delta (correlation reduced), and dd_delta (shallower drawdown) are
    * each >= 0 when the candidate improves that axis. Use
    * `asImprovement(raw, "higher-better")` before rendering.
+   *
+   * null = the delta does not exist: one side's metric is undefined because a
+   * leg's returns do not vary. Rendered as "—", never as 0 (166.1 D7, founder
+   * 2026-09-26).
    */
-  sharpe_delta: number;
-  dd_delta: number;
-  corr_delta: number;
+  sharpe_delta: number | null;
+  dd_delta: number | null;
+  corr_delta: number | null;
   composite_score: number;
   fit_label: BridgeFitLabel;
 }
@@ -1608,10 +1741,18 @@ export type ComputeJobStatus =
 
 /**
  * Error classification used by `mark_compute_job_failed` to decide
- * retry vs final. Set by the Python runner's `classify_exception`
- * helper.
+ * retry vs final. The first three are set by the Python runner's
+ * `classify_exception` helper.
+ *
+ * `orphaned` is different in kind and is NOT writable through that RPC —
+ * `mark_compute_job_failed` still rejects it (deliberately, so a handler can
+ * never claim its own worker died). It is written only by the
+ * `retention_compute_jobs_orphaned_running` reaper's direct UPDATE, for jobs
+ * whose worker went away holding the claim. Those are retryable by definition;
+ * before mig 20260826140000 they were classified `permanent` and the user was
+ * told retrying would not help (Phase 162 F-3).
  */
-export type ErrorKind = "transient" | "permanent" | "unknown";
+export type ErrorKind = "transient" | "permanent" | "unknown" | "orphaned";
 
 /**
  * `ComputeJob` mirrors the `compute_jobs` Postgres row (migration 032).

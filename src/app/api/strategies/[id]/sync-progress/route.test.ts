@@ -25,12 +25,17 @@ import { STALL_THRESHOLD_MS } from "@/lib/sync-progress";
  */
 
 vi.mock("server-only", () => ({}));
+// 167.2-REVIEW-SFH M-4: the three could-not-tell answers are captured.
+const captureToSentryMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
 
 const {
   authState,
   ownershipResult,
   ownershipQuery,
   rpcResult,
+  rpcQueue,
+  memberCount,
   fromCalls,
   rpcCalls,
   checkLimitMock,
@@ -51,6 +56,14 @@ const {
     data: null as unknown,
     error: null as { message: string } | null,
   },
+  // 167.2-REVIEW IN-03: the strategy_keys head count the route reads to decide
+  // stitch preference. Default 1 (a member exists), so every case that
+  // predates it keeps the stitch-preferring selection; null means the count
+  // read failed.
+  memberCount: { value: 1 as number | null },
+  // 167.2-REVIEW-SFH M-4 / M-5: answers for successive RPC calls, in order.
+  // Empty answers every call with `rpcResult`, as before.
+  rpcQueue: [] as Array<{ data: unknown; error: { message: string } | null }>,
   // Every table the user-scoped client touches, in order. The RT-1 structural
   // pin asserts "strategy_analytics" is NEVER among them.
   fromCalls: [] as string[],
@@ -77,6 +90,21 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     from: (table: string) => {
       fromCalls.push(table);
+      if (table === "strategy_keys") {
+        // IN-03: a head count, awaited on the builder; kept apart from the
+        // ownership recorder so the ownership pins still read one query.
+        const countChain = {
+          select: () => countChain,
+          eq: () => countChain,
+          then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
+            Promise.resolve(
+              memberCount.value === null
+                ? { count: null, error: { message: "synthetic count failure" } }
+                : { count: memberCount.value, error: null },
+            ).then(resolve, reject),
+        };
+        return countChain;
+      }
       ownershipQuery.table = table;
       const builder = {
         select: (cols: string) => {
@@ -93,7 +121,7 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     rpc: (name: string, args: Record<string, unknown>) => {
       rpcCalls.push([name, args]);
-      return Promise.resolve(rpcResult);
+      return Promise.resolve(rpcQueue.shift() ?? rpcResult);
     },
   }),
 }));
@@ -146,6 +174,33 @@ function stitchRow(
   };
 }
 
+/**
+ * A NON-stitch job row (`process_key_long`, `sync_trades`, …) as
+ * `get_user_compute_jobs` returns it. The single-key wizard's jobs are all of
+ * these kinds — which is exactly why the route, filtering to `stitch_composite`,
+ * answered IDLE for every single-key strategy that ever had a job in flight.
+ */
+function otherKindRow(
+  kind: string,
+  over: Partial<{
+    status: string;
+    claimed_at: string | null;
+    created_at: string;
+    metadata: Record<string, unknown> | null;
+  }> = {},
+) {
+  return {
+    id: "33333333-3333-3333-3333-333333333333",
+    strategy_id: TEST_STRATEGY_ID,
+    kind,
+    status: over.status ?? "running",
+    claimed_at: over.claimed_at ?? ago(30_000),
+    created_at: over.created_at ?? "2026-07-12T11:50:00.000Z",
+    updated_at: NOW_ISO,
+    metadata: over.metadata === undefined ? {} : over.metadata,
+  };
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 describe("GET /api/strategies/[id]/sync-progress", () => {
@@ -161,6 +216,8 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     rpcResult.error = null;
     fromCalls.length = 0;
     rpcCalls.length = 0;
+    rpcQueue.length = 0;
+    memberCount.value = 1;
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
   });
@@ -455,20 +512,14 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     expect(body.stalled).toBe(false);
   });
 
-  it("returns {jobStatus:null, stalled:false, memberProgress:[]} 200 when no stitch_composite job exists", async () => {
-    // Only a non-composite kind is visible for this strategy.
-    rpcResult.data = [
-      {
-        id: "99999999-9999-9999-9999-999999999999",
-        strategy_id: TEST_STRATEGY_ID,
-        kind: "sync_trades",
-        status: "running",
-        claimed_at: ago(30_000),
-        created_at: NOW_ISO,
-        updated_at: NOW_ISO,
-        metadata: {},
-      },
-    ];
+  it("returns {jobStatus:null, stalled:false, memberProgress:[]} 200 when NO job of any kind exists", async () => {
+    // ⚠️ 154-04 CHANGED THIS CASE'S PREMISE, not its expectation. It used to
+    // drive a RUNNING `sync_trades` row and assert IDLE — pinning the very
+    // hiding STALE-01a turned on: a job was in flight and the route said
+    // nothing was. IDLE now means what it says, so the premise is the empty
+    // job list. The old premise's new answer is asserted by
+    // WIDEN-SINGLE-KEY-RUNNING below.
+    rpcResult.data = [];
     const res = await call(TEST_STRATEGY_ID);
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -559,6 +610,329 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     errSpy.mockRestore();
   });
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // 154-04 — BYTE-IDENTITY PINS, WRITTEN AND OBSERVED GREEN *BEFORE* THE
+  // KIND-FILTER WIDENING.
+  //
+  // Plan 154-04 widens this route so a SINGLE-KEY strategy can finally see that
+  // it has a job in flight (today every single-key caller gets IDLE, which is
+  // why the wizard had no way to tell "still working" from "nothing running").
+  // The widening is only safe if composite behaviour does not move, and the way
+  // to know that is to measure composite behaviour first, on the UNMODIFIED
+  // route, and to spell the answer out as bytes rather than as a shape.
+  //
+  // These two cases were added in their own commit and observed green against
+  // the route as it stood. If the widening moves a composite response by so much
+  // as a key order, they redden.
+  // ═══════════════════════════════════════════════════════════════════════
+  it("PIN-COMPOSITE-BYTES: the composite response is byte-identical (pinned pre-widening)", async () => {
+    rpcResult.data = [
+      stitchRow({
+        status: "running",
+        metadata: {
+          member_progress_at: ago(30_000),
+          member_progress: [
+            { seq: 1, exchange: "deribit", label: "D", status: "in_process" },
+          ],
+        },
+      }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    const body = await res.json();
+    // Hand-typed serialization: pins the VALUES *and* the key order, which a
+    // `toEqual` would not. `{jobStatus, stalled, memberProgress}` is the
+    // construction order at route.ts:233 and `{seq, exchange, label, status}` the
+    // projection order at :206-217.
+    expect(JSON.stringify(body)).toBe(
+      '{"jobStatus":"running","stalled":false,"memberProgress":' +
+        '[{"seq":1,"exchange":"deribit","label":"D","status":"in_process"}]}',
+    );
+  });
+
+  it("PIN-COMPOSITE-WINS: a NEWER non-stitch job does not displace the stitch projection (pinned pre-widening)", async () => {
+    // ⭐ The case the widening could plausibly break: a composite strategy whose
+    // most recent job of ANY kind is not the stitch. The stitch is what carries
+    // member progress and the only heartbeat anyone writes, so it must stay the
+    // source of this response no matter what else ran afterwards.
+    rpcResult.data = [
+      otherKindRow("sync_trades", {
+        status: "done",
+        created_at: "2026-07-12T11:59:00.000Z", // newest overall
+      }),
+      stitchRow({
+        status: "running",
+        created_at: "2026-07-12T11:55:00.000Z",
+        metadata: {
+          member_progress_at: ago(30_000),
+          member_progress: [
+            { seq: 1, exchange: "deribit", label: "D", status: "in_process" },
+          ],
+        },
+      }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(JSON.stringify(await res.json())).toBe(
+      '{"jobStatus":"running","stalled":false,"memberProgress":' +
+        '[{"seq":1,"exchange":"deribit","label":"D","status":"in_process"}]}',
+    );
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 154-04 — THE WIDENED ARM. These replace PIN-SINGLE-KEY-BEFORE, which
+  // measured the same input answering IDLE against the pre-widening route
+  // (commit "test(154-04): pin sync-progress composite bytes …").
+  // ═══════════════════════════════════════════════════════════════════════
+  it("WIDEN-SINGLE-KEY-RUNNING: a single-key RUNNING job is now visible as jobStatus", async () => {
+    // The exact input PIN-SINGLE-KEY-BEFORE drove to `jobStatus: null`.
+    rpcResult.data = [otherKindRow("process_key_long", { status: "running" })];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      jobStatus: "running",
+      stalled: false, // never stalled for a non-stitch kind — see below
+      memberProgress: [], // no worker writes member_progress for this kind
+    });
+  });
+
+  it("WIDEN-SINGLE-KEY-DONE: a finished single-key job reports 'done'", async () => {
+    rpcResult.data = [
+      otherKindRow("compute_analytics_from_csv", { status: "done" }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body.jobStatus).toBe("done");
+    expect(body.stalled).toBe(false);
+  });
+
+  it("WIDEN-SINGLE-KEY-LATEST: the newest single-key job wins, whatever its kind", async () => {
+    // A real single-key chain: process_key_long → derive_broker_dailies →
+    // compute_analytics_from_csv. The caller wants where the chain IS, so the
+    // newest row answers even though the earlier ones are terminal.
+    rpcResult.data = [
+      otherKindRow("process_key_long", {
+        status: "done",
+        created_at: "2026-07-12T11:37:43.000Z",
+      }),
+      otherKindRow("derive_broker_dailies", {
+        status: "done",
+        created_at: "2026-07-12T11:38:05.000Z",
+      }),
+      otherKindRow("compute_analytics_from_csv", {
+        status: "running",
+        created_at: "2026-07-12T11:39:02.000Z",
+      }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body.jobStatus).toBe("running");
+  });
+
+  it("WIDEN-NO-FALSE-STALL: an ANCIENT claimed_at on a single-key job is NOT stalled", async () => {
+    // ⭐ THE HAZARD THE WIDENING MUST NOT INTRODUCE. `claimed_at` is stamped
+    // once at claim time and never refreshed; only the stitch worker writes a
+    // real heartbeat. A naive widening would read this 13-minute-old claim as
+    // evidence of a stall and invite the user to abort a healthy long crawl —
+    // manufacturing exactly the kind of false claim about the world that this
+    // phase exists to delete. `stalled` is stitch-derived, so: false.
+    rpcResult.data = [
+      otherKindRow("process_key_long", {
+        status: "running",
+        claimed_at: ago(13 * 60_000), // past STALL_THRESHOLD_MS
+      }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body.jobStatus).toBe("running");
+    expect(body.stalled).toBe(false);
+  });
+
+  it("WIDEN-REDACTION: the widened arm leaks no metadata, ciphertext or last_error", async () => {
+    // T-95-07 extends to the new arm: it is a projection, not a passthrough.
+    // Even a rogue writer's blob on a NON-stitch row must not cross the wire.
+    rpcResult.data = [
+      {
+        ...otherKindRow("process_key_long", {
+          status: "running",
+          metadata: {
+            source: "keys/sync",
+            correlation_id: "cid-abcdef",
+            api_key_encrypted: "SECRETVALUE",
+            api_secret_encrypted: "SECRETVALUE",
+            passphrase_encrypted: "SECRETVALUE",
+            dek_encrypted: "SECRETVALUE",
+            nonce: "SECRETVALUE",
+            // A rogue member_progress on a kind that has no members must NOT
+            // be projected either — the entries are stitch-gated.
+            member_progress: [
+              { seq: 1, exchange: "mt5", label: "L", status: "in_process" },
+            ],
+            member_progress_at: ago(30_000),
+          },
+        }),
+        last_error: "SECRETVALUE: raw worker traceback",
+      },
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    const body = await res.json();
+    expect(Object.keys(body).sort()).toEqual([
+      "jobStatus",
+      "memberProgress",
+      "stalled",
+    ]);
+    expect(body.memberProgress).toEqual([]);
+    const serialized = JSON.stringify(body);
+    for (const forbidden of [
+      "metadata",
+      "correlation_id",
+      "source",
+      "member_progress_at",
+      "claimed_at",
+      "last_error",
+      "SECRETVALUE",
+      "api_key_encrypted",
+      "api_secret_encrypted",
+      "passphrase_encrypted",
+      "dek_encrypted",
+      "nonce",
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
+  it("WIDEN-RT-1: the widened arm still never queries strategy_analytics", async () => {
+    // The RT-1 invariant is what makes the amber state trustworthy; a new arm
+    // is a new chance to break it. Structural, like the original pin.
+    rpcResult.data = [otherKindRow("process_key_long", { status: "running" })];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(res.status).toBe(200);
+    expect(fromCalls).not.toContain("strategy_analytics");
+    expect(fromCalls).toContain("strategies");
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 167.2 KCS-20 — THE NON-STITCH FALLBACK IS FACTSHEET-CHAIN ONLY.
+  //
+  // "Latest job of ANY kind" let a recurring cron row (`reconcile_strategy`,
+  // `sync_funding`) that has nothing to do with the factsheet become the answer,
+  // so a strategy whose chain job had FAILED read `done` the moment the daily
+  // reconcile finished. The fallback now considers only the chain kinds
+  // (process_key_long, sync_trades, derive_broker_dailies,
+  // compute_analytics_from_csv, compute_analytics); `jobStatus: null` means no
+  // factsheet-chain job is visible. The stitch arm and PIN-COMPOSITE-* are
+  // untouched.
+  // ═══════════════════════════════════════════════════════════════════════
+  it("CHAIN-FILTER-FAILED-WINS: a NEWER done reconcile_strategy does not hide a failed_final process_key_long", async () => {
+    rpcResult.data = [
+      otherKindRow("reconcile_strategy", {
+        status: "done",
+        created_at: "2026-07-12T11:59:00.000Z", // newest overall
+      }),
+      otherKindRow("process_key_long", {
+        status: "failed_final",
+        created_at: "2026-07-12T11:30:00.000Z",
+      }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body).toEqual({
+      jobStatus: "failed_final",
+      stalled: false,
+      memberProgress: [],
+    });
+  });
+
+  it("CHAIN-FILTER-FUNDING-IGNORED: a NEWER running sync_funding does not displace a done compute_analytics_from_csv", async () => {
+    rpcResult.data = [
+      otherKindRow("sync_funding", {
+        status: "running",
+        created_at: "2026-07-12T11:59:00.000Z", // newest overall
+      }),
+      otherKindRow("compute_analytics_from_csv", {
+        status: "done",
+        created_at: "2026-07-12T11:40:00.000Z",
+      }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body.jobStatus).toBe("done");
+    expect(body.stalled).toBe(false);
+  });
+
+  // LOW-8 — the SQL status bridge (`sync_strategy_analytics_status`) holds
+  // `computing` while ANY job of the strategy is non-terminal. When the chain
+  // is finished but a recurring job is still in flight, the body says so, so
+  // the wizard does not read "chain done, status computing" as stuck.
+  it("LOW-8-OTHER-IN-FLIGHT: a done chain beside a pending reconcile_strategy reports otherJobInFlight", async () => {
+    rpcResult.data = [
+      otherKindRow("reconcile_strategy", {
+        status: "pending",
+        created_at: "2026-07-12T11:59:00.000Z",
+      }),
+      otherKindRow("compute_analytics_from_csv", {
+        status: "done",
+        created_at: "2026-07-12T11:40:00.000Z",
+      }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body.jobStatus).toBe("done");
+    expect(body.otherJobInFlight).toBe(true);
+  });
+
+  it("R2-MED-4: a DEAD recurring job (crash-looping, or 8 h old) does not set otherJobInFlight", async () => {
+    const done = otherKindRow("compute_analytics_from_csv", {
+      status: "done",
+      created_at: "2026-07-12T11:40:00.000Z",
+    });
+    // Pending with its attempt budget spent: a crash loop, not work in flight.
+    rpcResult.data = [
+      { ...otherKindRow("reconcile_strategy", { status: "pending", created_at: "2026-07-12T11:59:00.000Z" }), attempts: 3, max_attempts: 3 },
+      done,
+    ];
+    expect((await (await call(TEST_STRATEGY_ID)).json()).otherJobInFlight).toBeUndefined();
+    // Created 8 h or more before the pinned now.
+    rpcResult.data = [
+      otherKindRow("poll_positions", { status: "pending", created_at: "2026-07-12T03:59:59.000Z" }),
+      done,
+    ];
+    expect((await (await call(TEST_STRATEGY_ID)).json()).otherJobInFlight).toBeUndefined();
+    // Control: the same job inside the window still counts.
+    rpcResult.data = [
+      otherKindRow("poll_positions", { status: "pending", created_at: "2026-07-12T04:00:01.000Z" }),
+      done,
+    ];
+    expect((await (await call(TEST_STRATEGY_ID)).json()).otherJobInFlight).toBe(true);
+  });
+
+  it("LOW-8-CONTROL: a done chain beside only FINISHED recurring jobs omits otherJobInFlight", async () => {
+    rpcResult.data = [
+      otherKindRow("reconcile_strategy", { status: "done", created_at: "2026-07-12T11:59:00.000Z" }),
+      otherKindRow("poll_positions", { status: "failed_final", created_at: "2026-07-12T11:58:00.000Z" }),
+      otherKindRow("compute_analytics_from_csv", { status: "done", created_at: "2026-07-12T11:40:00.000Z" }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body).toEqual({ jobStatus: "done", stalled: false, memberProgress: [] });
+  });
+
+  it("CHAIN-FILTER-ONLY-NON-CHAIN: rows of only non-chain kinds answer the IDLE body", async () => {
+    rpcResult.data = [
+      otherKindRow("reconcile_strategy", { status: "done" }),
+      otherKindRow("sync_funding", { status: "running" }),
+      otherKindRow("compute_intro_snapshot", { status: "failed_final" }),
+      otherKindRow("poll_positions", { status: "pending" }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(await res.json())).toBe(
+      '{"jobStatus":null,"stalled":false,"memberProgress":[]}',
+    );
+  });
+
+  it("CHAIN-FILTER-READ-WINDOW: the RPC is asked for COMPUTE_STATE_READ_LIMIT (100) rows, not 20", async () => {
+    // A chain-filtered fallback over a 20-row window can be hidden behind a
+    // run of daily cron rows (RESEARCH P11). Typed as a literal here, never
+    // imported from the module under test.
+    rpcResult.data = [];
+    await call(TEST_STRATEGY_ID);
+    expect(rpcCalls).toEqual([
+      ["get_user_compute_jobs", { p_strategy_id: TEST_STRATEGY_ID, p_limit: 100 }],
+    ]);
+  });
+
   // ── SF-3: a REAL read is NOT degraded (distinct from the couldn't-read blip) ──
   it("a real read (running job) is degraded:false/absent, unlike the RPC-degrade branch", async () => {
     rpcResult.data = [
@@ -577,5 +951,114 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     // The `degraded` key is ABSENT on a real read (the client treats
     // absent === not degraded); it is present ONLY on the rpcError branch.
     expect("degraded" in body).toBe(false);
+  });
+
+  // ── 167.2-REVIEW-SFH M-4 / M-5: "could not tell" is DEGRADED, never IDLE ──
+  // The key card's KCS-18 success gate and its pre-attempt gate read IDLE's
+  // `jobStatus: null` as "no chain job in flight". Each case below is an
+  // answer the route could not read, and each one used to be IDLE.
+  const DEGRADED_BODY = '{"jobStatus":null,"stalled":false,"memberProgress":[],"degraded":true}';
+  // 167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1: the two DETERMINISTIC degrade
+  // stages name themselves (a closed, non-sensitive string), so the key card
+  // does not promise that "a moment" will help. A transient failure does not.
+  const DEGRADED_WINDOW_FULL_BODY =
+    '{"jobStatus":null,"stalled":false,"memberProgress":[],"degraded":true,"degradedReason":"window_full"}';
+  const DEGRADED_BAD_STATUS_BODY =
+    '{"jobStatus":null,"stalled":false,"memberProgress":[],"degraded":true,"degradedReason":"bad_status"}';
+
+  it("M4-NOT-AN-ARRAY: an RPC answer with neither rows nor an error is DEGRADED, and captured", async () => {
+    rpcResult.data = null;
+    const res = await call(TEST_STRATEGY_ID);
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(await res.json())).toBe(DEGRADED_BODY);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("M4-WINDOW-FULL: a full window with no chain row, still full at the RPC cap, is DEGRADED, and captured", async () => {
+    const cron = (n: number) =>
+      Array.from({ length: n }, () => otherKindRow("reconcile_strategy", { status: "done" }));
+    rpcQueue.push({ data: cron(100), error: null }, { data: cron(1000), error: null });
+    const res = await call(TEST_STRATEGY_ID);
+    expect(JSON.stringify(await res.json())).toBe(DEGRADED_WINDOW_FULL_BODY);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("M5-REASK: a full 100-row window with no chain row re-asks once at the RPC cap (1000) and answers from that read", async () => {
+    const cron = Array.from({ length: 100 }, () =>
+      otherKindRow("reconcile_strategy", { status: "done" }),
+    );
+    rpcQueue.push(
+      { data: cron, error: null },
+      {
+        data: [...cron, otherKindRow("process_key_long", { status: "running" })],
+        error: null,
+      },
+    );
+    const res = await call(TEST_STRATEGY_ID);
+    expect((await res.json()).jobStatus).toBe("running");
+    expect(rpcCalls).toEqual([
+      ["get_user_compute_jobs", { p_strategy_id: TEST_STRATEGY_ID, p_limit: 100 }],
+      ["get_user_compute_jobs", { p_strategy_id: TEST_STRATEGY_ID, p_limit: 1000 }],
+    ]);
+    expect(captureToSentryMock).not.toHaveBeenCalled();
+  });
+
+  it("M4-BAD-STATUS: a selected job whose status is outside the six-value domain is DEGRADED, and captured", async () => {
+    rpcResult.data = [otherKindRow("process_key_long", { status: "exploded" })];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(JSON.stringify(await res.json())).toBe(DEGRADED_BAD_STATUS_BODY);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("M4-CONTROL: a short window with no chain row is still the real IDLE (not degraded, nothing captured)", async () => {
+    rpcResult.data = [otherKindRow("reconcile_strategy", { status: "done" })];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(JSON.stringify(await res.json())).toBe(
+      '{"jobStatus":null,"stalled":false,"memberProgress":[]}',
+    );
+    expect(captureToSentryMock).not.toHaveBeenCalled();
+  });
+
+  // ── 167.2-REVIEW IN-03: an old stitch does not answer for a strategy with no members ──
+  it("IN03-CONVERTED: zero members, an old done stitch and a NEWER running chain job answer the chain job", async () => {
+    memberCount.value = 0;
+    // 167.2-REVIEW-R2 IN-05: the IN-03 scenario is a strategy CONVERTED to a
+    // single key, so a key is linked; that is what proves it single.
+    ownershipResult.data = {
+      id: TEST_STRATEGY_ID,
+      user_id: TEST_USER_ID,
+      api_key_id: "22222222-2222-4222-8222-222222222222",
+    };
+    rpcResult.data = [
+      stitchRow({ status: "done", created_at: "2026-07-12T10:00:00.000Z" }),
+      otherKindRow("process_key_long", { status: "running", created_at: "2026-07-12T11:58:00.000Z" }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(JSON.stringify(await res.json())).toBe(
+      '{"jobStatus":"running","stalled":false,"memberProgress":[]}',
+    );
+  });
+
+  // ── 167.2-REVIEW-R2 IN-05: a zero count is a claim RLS can fabricate ──
+  it("IN05-ZERO-UNLINKED-STITCH: zero members, NO linked key and a stitch on record keep the stitch-preferring rule (a regressed policy cannot drop a composite's member progress)", async () => {
+    memberCount.value = 0;
+    ownershipResult.data = { id: TEST_STRATEGY_ID, user_id: TEST_USER_ID, api_key_id: null };
+    rpcResult.data = [
+      stitchRow({ status: "running", created_at: "2026-07-12T11:50:00.000Z", claimed_at: ago(60_000), metadata: { member_progress: [] } }),
+      otherKindRow("process_key_long", { status: "done", created_at: "2026-07-12T11:58:00.000Z" }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    expect((await res.json()).jobStatus).toBe("running");
+    expect(ownershipQuery.selectCols).toBe("id, user_id, api_key_id");
+  });
+
+  it("IN03-COUNT-UNREADABLE: a member count that cannot be read keeps the stitch-preferring rule", async () => {
+    memberCount.value = null;
+    rpcResult.data = [
+      stitchRow({ status: "done", created_at: "2026-07-12T10:00:00.000Z", metadata: { member_progress: [] } }),
+      otherKindRow("process_key_long", { status: "running", created_at: "2026-07-12T11:58:00.000Z" }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    expect((await res.json()).jobStatus).toBe("done");
   });
 });

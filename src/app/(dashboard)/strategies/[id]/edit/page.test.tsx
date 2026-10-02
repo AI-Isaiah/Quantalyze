@@ -21,24 +21,86 @@ import { render, screen } from "@testing-library/react";
 import React from "react";
 
 vi.mock("server-only", () => ({}));
+// 167.2-REVIEW-SFH H-2: an unreadable shape is captured, not only logged.
+const captureToSentryMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
 
-const { getUserMock, strategyDataMock } = vi.hoisted(() => ({
-  getUserMock: vi.fn<() => Promise<{ data: { user: unknown } }>>(),
-  strategyDataMock: vi.fn<() => Promise<{ data: unknown }>>(),
-}));
+const { getUserMock, strategyDataMock, memberCountMock, memberCountReadMock, apiKeyManagerPropsMock } =
+  vi.hoisted(() => ({
+    getUserMock: vi.fn<() => Promise<{ data: { user: unknown } }>>(),
+    strategyDataMock: vi.fn<() => Promise<{ data: unknown }>>(),
+    // Phase 167.2 / KCS-23: the `strategy_keys` head-count answer the page's
+    // `countCompositeMembers` read receives. Default (set in beforeEach) is
+    // zero members, a single-key strategy.
+    memberCountMock: vi.fn<() => { count: number | null; error: { message: string } | null }>(),
+    // Records every `strategy_keys` read with the strategy id it was scoped to.
+    memberCountReadMock: vi.fn<(strategyId: unknown) => void>(),
+    // The props the page handed to <ApiKeyManager>, one call per render.
+    apiKeyManagerPropsMock: vi.fn<(props: Record<string, unknown>) => void>(),
+  }));
+// 167.2-REVIEW-SFH M-7: the owner-scoped job RPC the page asks, only for a
+// zero-member strategy with no linked key, whether a stitch is on record.
+const rpcMock = vi.hoisted(() =>
+  vi.fn<(name: string, args: Record<string, unknown>) => { data: unknown; error: unknown }>(
+    () => ({ data: [], error: null }),
+  ),
+);
 
+// Extended DELIBERATELY for KCS-23 (dispatch on the table name): `strategies`
+// keeps its original chain, `strategy_keys` answers the queued head count, and
+// any other table throws so a read the page was never meant to make fails loud.
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({
     auth: { getUser: getUserMock },
-    from: () => ({
-      select: () => ({
-        eq: () => ({
-          eq: () => ({
-            single: () => strategyDataMock(),
+    rpc: (name: string, args: Record<string, unknown>) => Promise.resolve(rpcMock(name, args)),
+    from: (table: string) => {
+      if (table === "strategies") {
+        return {
+          select: () => ({
+            eq: () => ({
+              eq: () => ({
+                single: () => strategyDataMock(),
+              }),
+            }),
           }),
-        }),
-      }),
-    }),
+        };
+      }
+      if (table === "strategy_keys") {
+        // 167.2-REVIEW CR-02 (lineage): this double used to REFUSE anything but
+        // a head count ("must be head-counted, never read"). The composite
+        // card now lists only its members, so the page reads the member KEY
+        // IDS (one column, RLS `strategy_keys_owner`) and derives the count
+        // from them. `memberCountMock` still names the count; the double turns
+        // it into that many synthetic member ids. Any other projection throws.
+        return {
+          select: (cols: string) => {
+            if (cols !== "api_key_id") {
+              throw new Error(`strategy_keys must be read as api_key_id only, got: ${cols}`);
+            }
+            return {
+              eq: (_col: string, strategyId: unknown) => {
+                memberCountReadMock(strategyId);
+                const { count, error } = memberCountMock();
+                return Promise.resolve(
+                  error
+                    ? { data: null, error }
+                    : {
+                        data:
+                          count === null
+                            ? null
+                            : Array.from({ length: count }, (_, i) => ({
+                                api_key_id: `key-member-${i + 1}`,
+                              })),
+                        error: null,
+                      },
+                );
+              },
+            };
+          },
+        };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    },
   })),
 }));
 
@@ -62,8 +124,10 @@ vi.mock("@/components/strategy/StrategyForm", () => ({
     React.createElement("form", { "data-testid": "strategy-form" }),
 }));
 vi.mock("@/components/strategy/ApiKeyManager", () => ({
-  ApiKeyManager: () =>
-    React.createElement("div", { "data-testid": "api-key-manager" }),
+  ApiKeyManager: (props: Record<string, unknown>) => {
+    apiKeyManagerPropsMock(props);
+    return React.createElement("div", { "data-testid": "api-key-manager" });
+  },
 }));
 // Issue #12 (v0.24.5.22): the legacy `CsvUpload` component was deleted —
 // it mislabeled `daily_return` as "PnL" and wrote synthetic trade rows
@@ -91,6 +155,8 @@ beforeEach(() => {
   getUserMock.mockResolvedValue({
     data: { user: { id: "u-owner-1" } },
   });
+  memberCountMock.mockReturnValue({ count: 0, error: null });
+  rpcMock.mockImplementation(() => ({ data: [], error: null }));
 });
 
 async function renderEditPage() {
@@ -185,5 +251,239 @@ describe("EditStrategyPage source-conditional panels (UAT 2026-05-17)", () => {
     expect(
       screen.queryByTestId("key-permission-badge"),
     ).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Phase 167.2 / KCS-23: the page tells the key card whether the strategy is a
+ * composite. On a composite the card offers no control that rewrites
+ * `strategies.api_key_id` (that write would silently make it a single-key
+ * strategy); when the member count cannot be read the card gets "unknown" and
+ * fails closed on those controls, while the PAGE still renders, because the
+ * card's `Update password` and `Delete` are the remedy the /strategies
+ * "Sign-in failed" pill sends the owner here for.
+ */
+describe("EditStrategyPage composite shape (KCS-23)", () => {
+  const apiStrategy = {
+    id: STRATEGY_ID,
+    name: "Synthetic Composite",
+    source: "wizard",
+    api_key_id: null,
+    supported_exchanges: ["OKX"],
+  };
+
+  function lastKeyShape() {
+    const calls = apiKeyManagerPropsMock.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls[calls.length - 1][0].keyShape;
+  }
+
+  it("COMPOSITE-PROP: two strategy_keys members pass keyShape \"composite\" to the key card", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({ count: 2, error: null });
+    await renderEditPage();
+
+    expect(memberCountReadMock).toHaveBeenCalledWith(STRATEGY_ID);
+    expect(screen.getByTestId("api-key-manager")).toBeInTheDocument();
+    expect(lastKeyShape()).toBe("composite");
+    // 167.2-REVIEW CR-02: the card is told WHICH keys are members, so it can
+    // list only those beneath KCS23-COMPOSITE.
+    expect(apiKeyManagerPropsMock.mock.calls.at(-1)![0].compositeMemberKeyIds).toEqual([
+      "key-member-1",
+      "key-member-2",
+    ]);
+  });
+
+  it("SINGLE-PROP: zero strategy_keys members pass keyShape \"single\"", async () => {
+    strategyDataMock.mockResolvedValue({
+      data: { ...apiStrategy, api_key_id: "key-synthetic-1" },
+    });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    await renderEditPage();
+
+    expect(memberCountReadMock).toHaveBeenCalledWith(STRATEGY_ID);
+    expect(lastKeyShape()).toBe("single");
+  });
+
+  it("COUNT-FAILS: an unreadable member count renders the page with keyShape \"unknown\" and logs the strategy id server-side", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({
+      count: null,
+      error: { message: "synthetic permission denied" },
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await renderEditPage();
+
+      expect(screen.getByTestId("api-key-manager")).toBeInTheDocument();
+      expect(lastKeyShape()).toBe("unknown");
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining("composite member count failed"),
+        expect.objectContaining({
+          id: STRATEGY_ID,
+          message: expect.stringContaining("synthetic permission denied"),
+        }),
+      );
+      // 167.2-REVIEW-SFH H-2: captured like the owner factsheet's identical
+      // read (`stage: "strategy-shape"`), not only logged.
+      expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+        tags: { route: "strategies/edit/page", stage: "strategy-shape" },
+      });
+      // The error text reaches the server log only, never the card's props.
+      const props = apiKeyManagerPropsMock.mock.calls.at(-1)![0];
+      expect(JSON.stringify(props)).not.toContain("synthetic permission denied");
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  // 167.2-REVIEW-SFH M-7: a zero member count is a claim RLS can fabricate
+  // (a denied SELECT filters rows; it does not error). With no linked key the
+  // page asks the SECURITY DEFINER job RPC whether a composite ran here.
+  it("M7-STITCH-HISTORY: zero members, no linked key, a stitch on record -> \"unknown\", never \"single\"", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    rpcMock.mockImplementation(() => ({
+      data: [{ kind: "stitch_composite", status: "done", created_at: "2026-09-01T00:00:00.000Z" }],
+      error: null,
+    }));
+    await renderEditPage();
+
+    expect(rpcMock).toHaveBeenCalledWith("get_user_compute_jobs", {
+      p_strategy_id: STRATEGY_ID,
+      p_limit: 100,
+    });
+    expect(lastKeyShape()).toBe("unknown");
+  });
+
+  it("M7-HISTORY-UNREADABLE: zero members, no linked key, the job read fails -> \"unknown\" (fail closed)", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    rpcMock.mockImplementation(() => ({ data: null, error: { message: "synthetic rpc failure" } }));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await renderEditPage();
+      expect(lastKeyShape()).toBe("unknown");
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("M7-NO-HISTORY: zero members, no linked key, no stitch on record -> \"single\" (a genuinely unlinked strategy keeps Add Key)", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    rpcMock.mockImplementation(() => ({
+      data: [{ kind: "process_key_long", status: "failed_final", created_at: "2026-09-01T00:00:00.000Z" }],
+      error: null,
+    }));
+    await renderEditPage();
+    expect(lastKeyShape()).toBe("single");
+  });
+
+  // 167.2-REVIEW-R2 CR-01 / SFH-R2 R2-H1 (round 2): a mature single-key
+  // strategy whose key was deleted (api_key_id -> null by the FK) has 100+ job
+  // rows, a chain row among the newest 100 and no stitch anywhere. The history
+  // read must re-ask at the RPC cap and answer "single" (Add Key stays), not
+  // read the non-exhaustive first window as "unreadable" -> "unknown".
+  function jobRows(n: number, kind: string) {
+    return Array.from({ length: n }, (_, i) => ({
+      kind,
+      status: "done",
+      created_at: `2026-09-01T00:00:${String(i % 60).padStart(2, "0")}.000Z`,
+    }));
+  }
+
+  it("R2-CR01-100-ROW-HISTORY: zero members, no linked key, a 100-row window with a chain row and no stitch -> re-asks at the cap and stays \"single\"", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    rpcMock.mockImplementation((_name, args) =>
+      args.p_limit === 1000
+        ? { data: [...jobRows(1, "sync_trades"), ...jobRows(149, "reconcile_strategy")], error: null }
+        : { data: [...jobRows(1, "sync_trades"), ...jobRows(99, "reconcile_strategy")], error: null },
+    );
+    await renderEditPage();
+
+    expect(rpcMock).toHaveBeenCalledWith("get_user_compute_jobs", {
+      p_strategy_id: STRATEGY_ID,
+      p_limit: 1000,
+    });
+    expect(lastKeyShape()).toBe("single");
+    expect(captureToSentryMock).not.toHaveBeenCalled();
+  });
+
+  it("R2-CR01-CAP-FULL: the history is still full at the RPC cap with no stitch -> \"unknown\", logged and captured (stage composite-history)", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    rpcMock.mockImplementation((_name, args) => ({
+      data: [...jobRows(1, "sync_trades"), ...jobRows(Number(args.p_limit) - 1, "reconcile_strategy")],
+      error: null,
+    }));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await renderEditPage();
+      expect(lastKeyShape()).toBe("unknown");
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining("composite history"),
+        expect.objectContaining({ id: STRATEGY_ID, history: "unreadable" }),
+      );
+      expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+        tags: { route: "strategies/edit/page", stage: "composite-history" },
+      });
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("R2-M2-CAPTURE: every path that resolves the shape to \"unknown\" from the history is captured (seen, read failed, read threw)", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const answers: Array<() => { data: unknown; error: unknown }> = [
+      () => ({ data: [{ kind: "stitch_composite", status: "done" }], error: null }),
+      () => ({ data: null, error: { message: "synthetic rpc failure" } }),
+      () => {
+        throw new Error("synthetic rpc throw");
+      },
+    ];
+    try {
+      for (const answer of answers) {
+        captureToSentryMock.mockClear();
+        rpcMock.mockImplementation(answer);
+        await renderEditPage();
+        expect(lastKeyShape()).toBe("unknown");
+        expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+          tags: { route: "strategies/edit/page", stage: "composite-history" },
+        });
+        // Tags only: the strategy id stays in the server log.
+        expect(JSON.stringify(captureToSentryMock.mock.calls)).not.toContain(STRATEGY_ID);
+      }
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("M7-LINKED-NO-READ: a linked key with zero members is single and asks the job RPC nothing", async () => {
+    strategyDataMock.mockResolvedValue({ data: { ...apiStrategy, api_key_id: "key-synthetic-1" } });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    await renderEditPage();
+    expect(lastKeyShape()).toBe("single");
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("CSV-NO-COUNT: a CSV strategy performs no strategy_keys read", async () => {
+    strategyDataMock.mockResolvedValue({
+      data: {
+        id: STRATEGY_ID,
+        name: "Synthetic CSV",
+        source: "csv",
+        api_key_id: null,
+        supported_exchanges: [],
+      },
+    });
+    await renderEditPage();
+
+    expect(screen.getByTestId("csv-edit-note")).toBeInTheDocument();
+    expect(memberCountReadMock).not.toHaveBeenCalled();
+    expect(apiKeyManagerPropsMock).not.toHaveBeenCalled();
   });
 });

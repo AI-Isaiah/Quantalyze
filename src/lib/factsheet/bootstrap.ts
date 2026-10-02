@@ -1,4 +1,5 @@
-import { cumEq, drawdowns } from "./compute";
+import { arithmeticUnderwater, cumEq, drawdowns } from "./compute";
+import { sharpe as sharpeRatio } from "@/lib/return-stats";
 
 /** Pre-aggregated histogram of the resample distribution — small payload
  *  (40 numbers per metric) instead of shipping 2000 raw resamples.
@@ -12,8 +13,13 @@ export type BootstrapHistogram = {
 };
 
 export type BootstrapCISummary = {
-  sharpe: { point: number; lo: number; hi: number; hist: BootstrapHistogram };
-  sortino: { point: number; lo: number; hi: number; hist: BootstrapHistogram };
+  /** `n_valid`: how many of the `n_resamples` resamples HAVE the ratio. A
+   *  resample with no dispersion has no Sharpe, one with no losing day no
+   *  Sortino; both are dropped (D7), so the CI and histogram rest on
+   *  `n_valid` draws. Optional: a payload cached before it existed lacks it,
+   *  and a reader then treats it as `n_resamples`. */
+  sharpe: { point: number; lo: number; hi: number; hist: BootstrapHistogram; n_valid?: number };
+  sortino: { point: number; lo: number; hi: number; hist: BootstrapHistogram; n_valid?: number };
   max_dd: { point: number; lo: number; hi: number; hist: BootstrapHistogram };
   n_resamples: number;
   block_len: number;
@@ -34,10 +40,32 @@ export type BootstrapCISummary = {
  * Deterministic Mulberry32 PRNG with a fixed seed so the same series
  * produces the same CI on every render.
  */
-export function bootstrapCI(rets: number[], n_resamples = 2000, block_len = 5, seed = 42, periodsPerYear = 252): BootstrapCISummary {
+/**
+ * The fewest resamples with a Sharpe (or, for the Sortino CI, with a Sortino)
+ * that still make a 95% interval. At 40,
+ * `ci95`'s 2.5% and 97.5% order statistics (indices 1 and 39) each leave at
+ * least one resample outside the interval, so the bounds are not simply the
+ * smallest and largest draw. Below it the CI renders "—".
+ */
+export const MIN_SHARPE_RESAMPLES = 40;
+
+export function bootstrapCI(
+  rets: number[],
+  n_resamples = 2000,
+  block_len = 5,
+  seed = 42,
+  periodsPerYear = 252,
+  /** Phase 169.1 (D-34): the headline's cumulative method; it moves only the Max DD. Default geometric. */
+  cumulativeMethod: "geometric" | "arithmetic" = "geometric",
+): BootstrapCISummary {
   const n = rets.length;
-  const sharpes: number[] = new Array(n_resamples);
-  const sortinos: number[] = new Array(n_resamples);
+  // Only resamples that HAVE a Sharpe (founder decision D7, 2026-09-26). A
+  // resample with no dispersion (a sparse-trading series can draw all zeros)
+  // has no Sharpe; counting it as 0 put a fabricated spike at 0 in the
+  // histogram and pulled the interval toward it. The same holds for a
+  // resample with no losing day, which has no Sortino (review round 2 HI-02).
+  const sharpes: number[] = [];
+  const sortinos: number[] = [];
   const maxDds: number[] = new Array(n_resamples);
   const rand = mulberry32(seed);
 
@@ -52,16 +80,26 @@ export function bootstrapCI(rets: number[], n_resamples = 2000, block_len = 5, s
       }
       filled += take;
     }
-    const stats = headlineStats(resampled, periodsPerYear);
-    sharpes[k] = stats.sharpe;
-    sortinos[k] = stats.sortino;
+    const stats = headlineStats(resampled, periodsPerYear, cumulativeMethod);
+    if (Number.isFinite(stats.sharpe)) sharpes.push(stats.sharpe);
+    if (Number.isFinite(stats.sortino)) sortinos.push(stats.sortino);
     maxDds[k] = stats.max_dd;
   }
 
-  const point = headlineStats(rets, periodsPerYear);
+  const point = headlineStats(rets, periodsPerYear, cumulativeMethod);
   return {
-    sharpe: { point: point.sharpe, ...ci95(sharpes), hist: histogram(sharpes, 40) },
-    sortino: { point: point.sortino, ...ci95(sortinos), hist: histogram(sortinos, 40) },
+    sharpe: {
+      point: point.sharpe,
+      ...(sharpes.length >= MIN_SHARPE_RESAMPLES ? ci95(sharpes) : { lo: NaN, hi: NaN }),
+      hist: histogram(sharpes, 40),
+      n_valid: sharpes.length,
+    },
+    sortino: {
+      point: point.sortino,
+      ...(sortinos.length >= MIN_SHARPE_RESAMPLES ? ci95(sortinos) : { lo: NaN, hi: NaN }),
+      hist: histogram(sortinos, 40),
+      n_valid: sortinos.length,
+    },
     max_dd: { point: point.max_dd, ...ci95(maxDds), hist: histogram(maxDds, 40) },
     n_resamples,
     block_len,
@@ -99,29 +137,37 @@ function histogram(xs: number[], bins: number): BootstrapHistogram {
   return { lo, hi, bins: counts };
 }
 
-function headlineStats(rets: number[], periodsPerYear = 252): { sharpe: number; sortino: number; max_dd: number } {
+function headlineStats(
+  rets: number[],
+  periodsPerYear = 252,
+  cumulativeMethod: "geometric" | "arithmetic" = "geometric",
+): { sharpe: number; sortino: number; max_dd: number } {
   const n = rets.length;
-  if (n === 0) return { sharpe: 0, sortino: 0, max_dd: 0 };
+  if (n === 0) return { sharpe: NaN, sortino: NaN, max_dd: 0 };
   let sum = 0;
   for (const r of rets) sum += r;
   const m = sum / n;
-  let varSum = 0;
   let downSqSum = 0;
   let hasNeg = false;
   for (const r of rets) {
-    const dr = r - m;
-    varSum += dr * dr;
     if (r < 0) {
       downSqSum += r * r;
       hasNeg = true;
     }
   }
-  const s = Math.sqrt(varSum / n);
-  const sharpe = s > 0 ? (m * periodsPerYear) / (s * Math.sqrt(periodsPerYear)) : 0;
+  // Population sd (divide by n), as the resamples always used. A residue sd
+  // (a compounding constant yield) is no dispersion, exactly as for an all-zero
+  // series (D-07), and the missing Sharpe stays NaN, an absence (D7).
+  const sharpe = sharpeRatio(rets, { periodsPerYear, ddof: 0 }) ?? NaN;
   const downDev = hasNeg ? Math.sqrt(downSqSum / n) * Math.sqrt(periodsPerYear) : 0;
-  const sortino = downDev > 0 ? (m * periodsPerYear) / downDev : 0;
-  const eq = cumEq(rets);
-  const dd = drawdowns(eq);
+  // No losing day means no Sortino: NaN, an absence, as `compute` gives (D7,
+  // review round 2 HI-02), never a fabricated 0.
+  const sortino = downDev > 0 ? (m * periodsPerYear) / downDev : NaN;
+  // Phase 169.1 (D-34): the drawdown mirrors the headline's method, so an
+  // arithmetic composite's point Max DD is the running-sum trough its headline
+  // and equity chart show (compute()'s own `arithmeticUnderwater`), not the
+  // geometric one. Sharpe and Sortino above do not depend on the method.
+  const dd = cumulativeMethod === "arithmetic" ? arithmeticUnderwater(rets) : drawdowns(cumEq(rets));
   let maxDd = 0;
   for (let i = 0; i < dd.length; i++) if (dd[i] < maxDd) maxDd = dd[i];
   return { sharpe, sortino, max_dd: maxDd };

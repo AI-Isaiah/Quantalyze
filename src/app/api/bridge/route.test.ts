@@ -1,5 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest, NextResponse } from "next/server";
+// Phase 140 / SEAM-04: the REAL breaker error, taken from the dependency-free
+// leaf. It must NEVER be picked up through `@/lib/analytics-client` — this file
+// mocks that module wholesale (a full factory, no importActual), so the class
+// read through it would be `undefined` and `err instanceof undefined` throws a
+// TypeError from inside the route's own catch block (threat T-140-30). Nothing
+// mocks the leaf, and this file never calls vi.resetModules(), so a static
+// import here is the same class object the route narrows against.
+import { CircuitOpenError } from "@/lib/seam-errors";
 
 /**
  * Tests for POST /api/bridge (G13-004).
@@ -47,6 +55,21 @@ const STATE = vi.hoisted(() => ({
     underperformerId: string,
     userId: string,
   ) => Promise<unknown>,
+  // Phase 163 SEC-04 — every limiter instance handed to `checkLimit`, in call
+  // order, so a test can assert WHICH bucket this route spends BY IDENTITY.
+  limitersSeen: [] as unknown[],
+}));
+
+/**
+ * Phase 163 SEC-04 — the limiter instance this route must consume.
+ *
+ * A distinguishable object, not `{}`: the identity assertion compares against
+ * this exact reference, so "the route called checkLimit" and "the route called
+ * checkLimit WITH THE COMPUTE BUCKET" stay different claims.
+ */
+const BRIDGE_COMPUTE_LIMITER_SENTINEL = vi.hoisted(() => ({
+  __id: "bridgeComputeLimiter",
+  __limit: "10/3600s",
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -103,9 +126,17 @@ vi.mock("@/lib/csrf", () => ({
       : null,
 }));
 
+// Phase 163 SEC-04 — this route consumes `bridgeComputeLimiter` (10/3600s),
+// NOT the shared `userActionLimiter` (5/60s). The mock exposes ONLY the
+// limiter the route is supposed to use, so reverting the route to the shared
+// bucket fails here with "No `userActionLimiter` export is defined on the
+// mock" rather than silently passing.
 vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: {},
-  checkLimit: async () => STATE.checkLimitResult,
+  bridgeComputeLimiter: BRIDGE_COMPUTE_LIMITER_SENTINEL,
+  checkLimit: async (limiter: unknown) => {
+    STATE.limitersSeen.push(limiter);
+    return STATE.checkLimitResult;
+  },
   isRateLimitMisconfigured: (
     rl: { success: boolean; reason?: string },
   ): boolean =>
@@ -115,10 +146,36 @@ vi.mock("@/lib/ratelimit", () => ({
 vi.mock("@/lib/analytics-client", async () => {
   class AnalyticsUpstreamError extends Error {
     readonly status: number;
-    constructor(message: string, status: number) {
+    // 140.3-G6 / SEAMUX-03 — the stable MACHINE code the real class carries
+    // (analytics-client.ts:119). Additive + optional: every pre-existing
+    // construction here passes two args and keeps `null`, so the route's
+    // `code: err.seamCode ?? "UNKNOWN"` forward can be driven both ways.
+    readonly seamCode: string | null;
+    // 161-06 / WIZERR-05 — the 4th and 5th, mirroring the real class
+    // (`analytics-client.ts`) parameter-for-parameter. `dependency` was added
+    // there by 140.3-11 and this double never picked it up; `retryAfterSeconds`
+    // is 161-06's. Both are additive and optional, so every pre-existing
+    // construction in this file keeps passing fewer args and keeps defaulting.
+    // ⚠️ ORDER IS THE POINT, not just presence: with `dependency` missing, a
+    // 4th positional argument would be the WAIT here and the DEPENDENCY NAME in
+    // production. `analytics-upstream-error.parity.invariant.test.ts` is what
+    // makes that a failure instead of a convention — it is why this block can
+    // no longer drift in silence.
+    readonly dependency: string | null;
+    readonly retryAfterSeconds: number | null;
+    constructor(
+      message: string,
+      status: number,
+      seamCode: string | null = null,
+      dependency: string | null = null,
+      retryAfterSeconds: number | null = null,
+    ) {
       super(message);
       this.name = "AnalyticsUpstreamError";
       this.status = status;
+      this.seamCode = seamCode;
+      this.dependency = dependency;
+      this.retryAfterSeconds = retryAfterSeconds;
     }
   }
   class AnalyticsTimeoutError extends Error {
@@ -175,6 +232,7 @@ beforeEach(() => {
   STATE.portfolioOwnedBySession = true;
   STATE.eqCalls = [];
   STATE.findReplacementImpl = async () => ({ candidates: [] });
+  STATE.limitersSeen = [];
   captureSpy.mockClear();
 });
 
@@ -323,6 +381,90 @@ describe("POST /api/bridge", () => {
       }),
     );
     expect(res.status).toBe(503);
+  });
+
+  /**
+   * Phase 163 SEC-04 — the deny arms above, bound to the limiter IDENTITY.
+   *
+   * ⚠️ WHY THESE EXIST WHEN TC3/TC3c ALREADY COVER THE SHAPES. TC3 and TC3c
+   * drive `STATE.checkLimitResult` directly, so they assert what the route
+   * does GIVEN a denial — and they pass identically whichever bucket produced
+   * it. Reverting this route to the shared `userActionLimiter` leaves both
+   * green. The 429/503 contracts are therefore not evidence about WHICH budget
+   * the caller is spending, and SEC-04 is entirely a claim about which budget.
+   *
+   * What makes the swap falsifiable at the route level is asserting the
+   * instance handed to `checkLimit`. `STATE.limitersSeen` records it per call.
+   *
+   * ── RED DEMO: neuter -> RED -> restore (performed, not imagined) ───────────
+   * Reverting `route.ts:94` to `checkLimit(userActionLimiter, ...)` fails on
+   * BOTH tiers, which is the point of having both:
+   *   · STRUCTURAL — `seam-ratelimit-posture.invariant.test.ts` fails BY NAME
+   *     via EXPECTED_ROUTE_LIMITERS:
+   *       src/app/api/bridge/route.ts: derived=[userActionLimiter]
+   *                                    pinned=[bridgeComputeLimiter]
+   *   · BEHAVIOURAL — these two cases fail, because the mock deliberately
+   *     exports ONLY `bridgeComputeLimiter`: the revert cannot even resolve its
+   *     import ("No `userActionLimiter` export is defined on the mock"), so it
+   *     fails loudly at the module boundary rather than silently spending the
+   *     wrong bucket.
+   * Both observed, then restored from a byte backup (NOT `git checkout --`,
+   * which would have destroyed the uncommitted work in the tree) and verified
+   * by shasum.
+   */
+  it("[163 SEC-04] the 429 is spent from bridgeComputeLimiter, BY IDENTITY", async () => {
+    STATE.checkLimitResult = { success: false, retryAfter: 30 };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+
+    // The established contract, unchanged by the swap.
+    expect(res.status).toBe(429);
+    const body = await res.json();
+    expect(body.code).toBe("RATE_LIMITED");
+    expect(body.retryAfter).toBe(30);
+    expect(res.headers.get("Retry-After")).toBe("30");
+
+    // The claim the contract above cannot make.
+    expect(
+      STATE.limitersSeen,
+      "This route must spend the COMPUTE bucket (10/3600s), not the shared " +
+        "userActionLimiter (5/60s = 300/hour). The Python endpoint behind it " +
+        "serves 10/hour per tenant, so a 5/60s bucket can only ever emit " +
+        "Retry-After <= 60 for a wait the backend may set at up to 3600s — " +
+        "the caller is told to retry in a minute and burns the difference " +
+        "into a backend 429 this layer never saw.",
+    ).toEqual([BRIDGE_COMPUTE_LIMITER_SENTINEL]);
+  });
+
+  it("[163 SEC-04] the misconfigured 503 arm is unchanged by the swap", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+
+    expect(
+      res.status,
+      "Our Upstash store being unreachable is OUR outage, and swapping which " +
+        "bucket we consult does not change that. A 429 here would render the " +
+        "outage as the allocator over-using bridge scoring and hide it from " +
+        "the canary that watches 5xx.",
+    ).toBe(503);
+    expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(STATE.limitersSeen).toEqual([BRIDGE_COMPUTE_LIMITER_SENTINEL]);
   });
 
   it("TC4 — 400 bad JSON", async () => {
@@ -511,6 +653,42 @@ describe("POST /api/bridge", () => {
     expect(body.error).toMatch(/timed out/i);
   });
 
+  // Phase 140 / SEAM-04 (SC-5c): a tripped Railway breaker is a distinct
+  // condition from "scoring blew up" — it means no request was even issued and
+  // the caller should come back after a known cooldown. Before this arm existed
+  // it fell through to the generic 500, telling the client to retry immediately
+  // against a service we already know is down.
+  it("TC11 — CircuitOpenError → 503 + Retry-After carrying the breaker's own TTL (SC-5c)", async () => {
+    // 7, deliberately NOT the 30s breaker default: 30 is simultaneously
+    // BREAKER_COOLDOWN_S and DEFAULT_RETRY_AFTER_S, so a route that hardcoded
+    // "30" would pass a 30-second fixture. This one only passes if the route
+    // forwards err.retryAfterS.
+    STATE.findReplacementImpl = async () => {
+      throw new CircuitOpenError(7);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("7");
+    // M-0889: the breaker arm is a response like any other — no-store holds.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    const body = await res.json();
+    expect(body.error).toBe(
+      "The analytics service is temporarily unavailable. Please try again in a moment.",
+    );
+    // T-140-17: the client-facing copy names no infrastructure.
+    expect(body.error).not.toMatch(/circuit|breaker|upstash|railway|http/i);
+    // A breaker trip is an infrastructure state shared by every caller, not a
+    // per-request defect: capturing it would emit one Sentry event per request
+    // for the whole cooldown window. The console.error line is the signal.
+    expect(captureSpy).not.toHaveBeenCalled();
+  });
+
   it("TC5c — 400 when ids are non-UUID strings (M-0884)", async () => {
     const { POST } = await import("./route");
     const res = await POST(
@@ -523,5 +701,222 @@ describe("POST /api/bridge", () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toMatch(/required/i);
+  });
+
+  // ── 140.3-G6 / SEAMUX-03 — every ROUTE-EMITTED arm carries a machine `code` ──
+  // A client discriminates the fault on a stable token instead of sniffing the
+  // prose (which 140.3-12 owns and may reword). The `withAuth` 401 is
+  // helper-owned and excluded — the verifier accepted keys/sync the same way.
+  // Each arm is driven independently so a code dropped from ONE reddens here and
+  // does not hide behind another arm's assertion.
+  const okBody = () => ({
+    portfolio_id: PORTFOLIO_ID,
+    underperformer_strategy_id: UNDERPERFORMER_ID,
+  });
+
+  it("G6 — 400 invalid JSON carries code VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(null, { rawBody: "{not json" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("G6 — 400 invalid body shape carries code VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ portfolio_id: PORTFOLIO_ID }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("G6 — 503 limiter-misconfigured carries code SEAM_MISCONFIGURED", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
+  });
+
+  it("G6 — 429 real throttle carries code RATE_LIMITED (retryAfter body field kept)", async () => {
+    STATE.checkLimitResult = { success: false, retryAfter: 30 };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(429);
+    const body = await res.json();
+    expect(body.code).toBe("RATE_LIMITED");
+    // Additive: the pre-existing retryAfter body field must survive alongside.
+    expect(body.retryAfter).toBe(30);
+  });
+
+  it("G6 — 404 carries code PORTFOLIO_NOT_FOUND", async () => {
+    STATE.portfolioFound = false;
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(404);
+    expect((await res.json()).code).toBe("PORTFOLIO_NOT_FOUND");
+  });
+
+  it("G6 — breaker 503 carries code CIRCUIT_OPEN", async () => {
+    STATE.findReplacementImpl = async () => {
+      throw new CircuitOpenError(7);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("CIRCUIT_OPEN");
+  });
+
+  it("G6 — forwarded upstream 4xx PRESERVES err.seamCode", async () => {
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("no returns data", 400, "NO_RETURNS_DATA");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("NO_RETURNS_DATA");
+  });
+
+  it("G6 — forwarded upstream 4xx with NO seamCode falls back to UNKNOWN", async () => {
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("unprocessable", 422);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(422);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  it("G6 — 504 timeout carries code UPSTREAM_TIMEOUT", async () => {
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      throw new AnalyticsTimeoutError("/api/portfolio-bridge", 15000);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(504);
+    expect((await res.json()).code).toBe("UPSTREAM_TIMEOUT");
+  });
+
+  it("G6 — terminal 500 carries code UNKNOWN", async () => {
+    STATE.findReplacementImpl = async () => {
+      throw new Error("Zod contract drift at scoring.py:188");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 161-08 / WIZERR-06 — the terminal arm forwards the CODE and still refuses
+  // the MESSAGE.
+  //
+  // Before this plan the four cases below could not be told apart: every 5xx —
+  // classified or not — answered `UNKNOWN`, so the MORE severe half of the seam
+  // vocabulary was the half the client could not discriminate.
+  //
+  // ⚠️ ORACLE INDEPENDENCE. The static sentence is HAND-TRANSCRIBED here, never
+  // imported from the route. A test that imports the constant it asserts about
+  // re-states the implementation's own formula and cannot fail when the copy
+  // changes.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** Transcribed by hand from the route's terminal arm. Do NOT import it. */
+  const BRIDGE_TERMINAL_SENTENCE = "Bridge scoring failed. Please try again.";
+
+  /**
+   * A message shaped like the things H-1062 exists to keep off the wire: a
+   * traceback marker, a `parseResponse()` contract-drift string with a Python
+   * source location, and a service base URL. Deliberately NOT reused from the
+   * route — the point is that none of it crosses.
+   */
+  const LEAKY_5XX_MESSAGE =
+    "Traceback: parseResponse contract drift at simulator_scoring.py:188 — base http://analytics.invalid:8000";
+
+  it("WIZERR-06 (a) — a 5xx seam error carrying a code forwards THAT code, sentence unchanged", async () => {
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      // A real 500 from the service's own service-key middleware, which refuses
+      // before `call_next` on every route including /api/portfolio-bridge.
+      throw new AnalyticsUpstreamError(
+        "Service key is not configured",
+        500,
+        "SERVICE_KEY_UNCONFIGURED",
+      );
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("SERVICE_KEY_UNCONFIGURED");
+    expect(body.error).toBe(BRIDGE_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (b) — a 5xx seam error with a NULL code still answers UNKNOWN, sentence unchanged", async () => {
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("upstream traceback line 42", 502);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    // The fallback stays legitimate: the seam classified nothing, so neither
+    // do we. This is a RENDERING terminal, not a classification failure.
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(BRIDGE_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (c) — a NON-SEAM throwable answers UNKNOWN, sentence unchanged", async () => {
+    STATE.findReplacementImpl = async () => {
+      // No `seamCode` own property at all — the duck-typed read must answer
+      // `undefined` rather than throw, and the arm must fall back.
+      throw new Error("ECONNREFUSED 127.0.0.1:8000");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(BRIDGE_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (d) — NEGATIVE CONTROL: no substring of the thrown message reaches the body (H-1062)", async () => {
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError(
+        LEAKY_5XX_MESSAGE,
+        500,
+        "SERVICE_KEY_UNCONFIGURED",
+      );
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    const serialized = JSON.stringify(await res.json());
+
+    // ⚠️ VACUITY GUARD, FIRST. `"anything".includes("")` is `true`, so a blank
+    // or near-blank corpus would make every assertion below pass without
+    // testing anything. Pin the corpus before using it as one.
+    expect(LEAKY_5XX_MESSAGE.trim().length).toBeGreaterThan(40);
+    const tokens = LEAKY_5XX_MESSAGE.split(/\s+/).filter((t) => t.length >= 4);
+    expect(
+      tokens.length,
+      "the leak corpus produced too few usable tokens to be a real control",
+    ).toBeGreaterThan(5);
+
+    for (const token of tokens) {
+      expect(
+        serialized,
+        `the 5xx body leaked "${token}" out of err.message — H-1062 is re-opened`,
+      ).not.toContain(token);
+    }
+    expect(serialized).not.toContain(LEAKY_5XX_MESSAGE);
+    // ...and the arm still did its job while refusing the message.
+    expect(serialized).toContain("SERVICE_KEY_UNCONFIGURED");
   });
 });

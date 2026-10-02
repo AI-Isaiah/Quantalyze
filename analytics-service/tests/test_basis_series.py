@@ -25,6 +25,7 @@ import pytest
 from services.basis_series import (
     KIND_CASH_SETTLEMENT,
     KIND_MTM_DAILY_RETURNS,
+    KIND_SMOOTHED_MTM,
     BasisSeriesResult,
     _KIND_BY_BASIS,
     derive_basis_series,
@@ -763,3 +764,88 @@ def test_cash_persist_none_heals_via_delete() -> None:
         ("strategy_analytics_series",
          [("strategy_id", "strat-cash"), ("kind", KIND_CASH_SETTLEMENT)]),
     ]
+
+
+# ── Phase 132 (SMTM-01): smoothed_mtm joins _KIND_BY_BASIS (the third basis) ─────
+
+
+def test_smoothed_mtm_kind_mapping() -> None:
+    """Phase 132: the smoothed_mtm third basis joins the basis→kind map.
+    `strategy_analytics_series.kind` is unconstrained TEXT (no DDL), so adding a kind
+    is a map entry + a module constant. Neuter (drop the map entry / rename the
+    constant) → RED."""
+    assert KIND_SMOOTHED_MTM == "smoothed_mtm_daily_returns"
+    assert _KIND_BY_BASIS["smoothed_mtm"] == "smoothed_mtm_daily_returns"
+    assert _KIND_BY_BASIS["smoothed_mtm"] == KIND_SMOOTHED_MTM
+
+
+def _smoothed_result() -> BasisSeriesResult:
+    """A smoothed-convention (√365, crypto) derived result — the smoothed basis
+    carries the same crypto conventions as mtm/cash on a Deribit book."""
+    return derive_basis_series(
+        _fixture_mtm(), None,
+        periods_per_year=365, cumulative_method="geometric", day_basis="calendar",
+    )
+
+
+def test_smoothed_persist_roundtrips_via_batch_rpc() -> None:
+    """A smoothed persist routes the payload through the SAME service-role-only batch
+    RPC keyed on the `smoothed_mtm` kind; rebuilding a Series from the persisted rows
+    reproduces the sparse input EXACTLY. `derive_basis_series` / `persist_basis_series`
+    are basis-agnostic — no signature change. Neuter the kind / drop a payload field /
+    round the floats → RED."""
+    fake = _StubSupabase()
+    r = _smoothed_result()
+    persist_basis_series(fake, "strat-smoothed", basis="smoothed_mtm", result=r)
+
+    assert len(fake.rpc_calls) == 1
+    name, args = fake.rpc_calls[0]
+    assert name == "upsert_strategy_analytics_series_batch"
+    assert args["p_strategy_id"] == "strat-smoothed"
+    assert set(args["p_kinds"]) == {KIND_SMOOTHED_MTM}
+    payload = args["p_kinds"][KIND_SMOOTHED_MTM]
+    assert payload == {
+        "schema": 2,
+        "basis": "smoothed_mtm",
+        "rows": r.series_rows,
+        "gap_spans": r.gap_spans,
+        "conventions": r.conventions,
+    }
+    assert fake.deletes == []  # upsert path never deletes
+
+    rebuilt = pd.Series(
+        [row["return"] for row in payload["rows"]],
+        index=pd.DatetimeIndex([row["date"] for row in payload["rows"]]).as_unit("us"),
+        dtype="float64",
+    )
+    expected = _drop_nonfinite(_fixture_mtm()).sort_index()
+    pd.testing.assert_series_equal(rebuilt, expected, check_exact=True, check_freq=False)
+
+
+def test_smoothed_persist_none_heals_via_delete() -> None:
+    """result=None DELETES the (strategy_id, smoothed_mtm) row — the same Pitfall-5
+    heal path as the other two bases. Neuter (drop the kind filter / skip the delete)
+    → RED."""
+    fake = _StubSupabase()
+    persist_basis_series(fake, "strat-smoothed", basis="smoothed_mtm", result=None)
+
+    assert fake.rpc_calls == []  # heal never upserts
+    assert fake.deletes == [
+        ("strategy_analytics_series",
+         [("strategy_id", "strat-smoothed"), ("kind", KIND_SMOOTHED_MTM)]),
+    ]
+
+
+def test_every_pnl_basis_has_a_kind_map_entry() -> None:
+    """Enum↔kind sync pin: EVERY member of `deribit_txn._PNL_BASES` (the compute-layer
+    basis enum) must have a `_KIND_BY_BASIS` entry, else the worker would build a
+    series it cannot persist. Written generically over `_PNL_BASES` so a FUTURE fourth
+    basis fails loud HERE too (rather than silently at a worker persist). Neuter (add a
+    basis to the enum without a map entry) → RED."""
+    from services.deribit_txn import _PNL_BASES
+
+    missing = sorted(b for b in _PNL_BASES if b not in _KIND_BY_BASIS)
+    assert missing == [], (
+        f"basis enum members with no _KIND_BY_BASIS entry: {missing} — add a "
+        f"KIND_* constant + map entry in basis_series.py"
+    )

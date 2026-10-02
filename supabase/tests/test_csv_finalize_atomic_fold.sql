@@ -1,0 +1,1353 @@
+-- Test: finalize_csv_strategy_with_returns — the folded three-write SECURITY
+-- DEFINER transaction (migration 20260819120000_csv_finalize_atomic_fold.sql).
+-- Phase 145 / JOB-06 / SC#2 (D-07) + SC#3's SQL half (D-08).
+--
+-- WHAT THIS FILE IS FOR
+-- ---------------------
+-- SC#2's guarantee is "a partial failure leaves no orphan strategy row", and
+-- its only honest proof is EXECUTION AT THE DEPLOYED BODY: this file calls the
+-- real fold against a real Postgres with a payload engineered to fail AFTER
+-- the strategies INSERT has run, and asserts ZERO rows remain in ALL THREE
+-- tables. A grep for "no handler clause" proves a state; only this execution
+-- proves the state HOLDS behaviorally (the 143/D-19 oracle-discipline lesson:
+-- never re-type the predicate — execute the deployed object).
+--
+-- WHY THE OTHER GATES CANNOT CATCH WHAT THIS ONE PINS
+-- ---------------------------------------------------
+-- test_csv_finalize_double_submit.sql exercises the 23505 fence and its
+-- rollback; it never drives a MID-BODY data fault, never calls with
+-- p_terminal_status='private', never submits an empty trades payload, and
+-- never exceeds the cap. test_csv_finalize_auth_guard.sql only exercises the
+-- two 42501 guards. Each of Parts 2-5 below reddens under an edit every other
+-- gate stays green on.
+--
+-- WHAT IS ASSERTED
+--   Part 1 — STRUCTURAL (deliberately UNGATED — no presence green-skip; on
+--            the shared TEST project this part is designed-RED until Plan 06
+--            applies 20260819120000 there, which is this file's free-standing
+--            RED proof): the fold exists as EXACTLY ONE 6-arg overload,
+--            SECURITY DEFINER, authenticated holds EXECUTE, anon does not,
+--            service_role does not (1c), and the comment-stripped body carries
+--            NO handler clause (1d — v1.19 review-of-146.1 finding W3). 1c and
+--            1d are STANDING versions of assertions that previously existed
+--            only inside migration self-verify blocks, i.e. only at the one
+--            apply that never runs again.
+--   Part 2 — THE ATOMICITY ORACLE (SC#2): a 10-element payload whose 6th
+--            element carries a malformed date (bypassing the route validator
+--            by calling the RPC directly) raises during the dailies INSERT —
+--            i.e. AFTER the strategies and verification INSERTs ran — and
+--            leaves ZERO strategies rows, ZERO verification rows, ZERO
+--            dailies for that session.
+--   Part 3 — TERMINAL STATUS (SC#3 / D-08): a 'private' call writes
+--            strategies.status='private' (losing this silently promotes
+--            CONTRIB-02 private contributions into the admin publish queue);
+--            a default call writes 'pending_review'. Economic oracle on the
+--            dailies: persisted count and a spot-checked (date, value) pair
+--            equal WHAT WAS SUBMITTED — never the fold's own formula.
+--   Part 3d — TERMINAL STATUS, THE REFUSAL SIDE (v1.19 review C4): a
+--            p_terminal_status='published' call raises 22023 and commits
+--            nothing. Part 3 only ever proved the two ACCEPTED values; the
+--            whitelist's refusal arm shipped ungated, so nothing would have
+--            noticed a direct-RPC caller finalizing straight onto the public
+--            surface without entering the admin review queue.
+--   Part 3e — TERMINAL STATUS, THE NULL ARM (v1.19 review-of-146.1 finding
+--            R5): a p_terminal_status=NULL call raises 22023 naming
+--            p_terminal_status, and commits nothing. 3d cannot cover this —
+--            `NOT IN (...)` is NULL for a NULL argument and plpgsql takes the
+--            ELSE branch, which is the shape GUARD 1 shipped in until
+--            migration 20260819151000. Pre-fix, this call answers 23502 from
+--            strategies.status.
+--   Part 4 — TRADES-EMPTY (RESEARCH Pitfall 2): an EMPTY p_rows array with
+--            fmt='trades' SUCCEEDS with zero dailies — the parents'
+--            empty-array 22023 must NOT have been copied verbatim, or every
+--            trades finalize breaks.
+--   Part 5 — THE CAP: 5001 rows raises 22023 (the 20260522111839:160-162 cap
+--            survived the fold verbatim) and commits nothing.
+--   Part 6 — THE INPUT GUARDS (v1.19 review A1, migration 20260819130000).
+--            Twelve negative sub-Parts (6a-6h, 6j-6m), each asserting the call
+--            RAISED, that RETURNED_SQLSTATE is EXACTLY '22023', and that
+--            strategies / strategy_verifications / csv_daily_returns each hold
+--            ZERO rows for the probe — proving the guard ran BEFORE any write
+--            rather than being undone by a rollback afterwards. Plus 6i, the
+--            UNWRAPPED conforming-payload counterpart, without which a body
+--            that refuses EVERYTHING would pass Part 6 perfectly.
+--            ⚠️ Reachability, stated so nobody re-files this as a live break:
+--            the route already 400s the empty-series shapes at
+--            route.ts:1337-1352. These guards are BOUNDARY HARDENING against
+--            an AUTHENTICATED DIRECT-RPC caller, confined by the fold's own
+--            auth.uid() guard to poisoning that caller's OWN tenant.
+--   Part 7 — THE RE-HOMED fmt / NAME GUARDS (v1.19 review B5): invalid fmt,
+--            empty name, name > 80 chars each raise 22023 and commit nothing.
+--
+-- WHY PARTS 6 AND 7 LIVE HERE AND NOT IN VITEST (v1.19 review B5)
+-- ----------------------------------------------------------------
+-- The invalid-fmt / empty-name / oversize-name guard behaviours used to be
+-- asserted in src/__tests__/csv-finalize-rpc.test.ts. Those cases were
+-- `it.skipIf(!HAS_LIVE_DB)` and HAS_LIVE_DB is false in EVERY CI vitest shard
+-- by explicit instruction (.github/workflows/ci.yml:286), so they had never
+-- executed in CI even once — and since Phase 145 they also called
+-- finalize_csv_strategy, a function 20260819120000 DROPped, so they could
+-- never pass again. They were re-homed here because THIS file is
+-- auto-discovered by the sql-tests glob (supabase/tests/test_*.sql) and runs
+-- under `psql -v ON_ERROR_STOP=1` against the TEST project. Coverage that
+-- cannot execute is not coverage.
+--
+-- Register: test_reconcile_dropped_enqueue_sweep.sql — ungated structural
+-- Part 1; every writing part opens its OWN `BEGIN;`, sets
+-- `SET LOCAL lock_timeout = '5s'`, and closes with `ROLLBACK;` (NO outer
+-- whole-file transaction — psql's nested BEGIN emits a warning, creates no
+-- savepoint, and the first inner rollback would end the outer transaction and
+-- autocommit later seeds onto the SHARED test project). Seeds go through the
+-- real FK chain with gen_random_uuid() ids so concurrent CI runs cannot
+-- collide; claims are driven via set_config on request.jwt.claims (the repo's
+-- standing idiom). NO psql backslash meta-commands.
+--
+-- Usage:
+--   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
+--     supabase/tests/test_csv_finalize_atomic_fold.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, REDUNDER-BACKFILL). Each prose
+-- RED-UNDER below an arm carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line
+-- below declares what the lane applies before this gate.
+-- ⚠️ THE OBJECT UNDER TEST IS THE REAL FOLD. All three migrations that define
+-- it are in the list — 20260819120000 creates it, 20260819130000 adds the input
+-- guards, and 20260819151000 is the LAST definition, so every twin that mutates
+-- the body targets THAT file. 20260728120000 is there because 20260819120000's
+-- STEP 0 refuses to apply unless the 5-arg parent it folds is present to DROP.
+-- 13-fixture-csv-finalize-fold.sql supplies only scaffold the gate's seeds and
+-- those pre-flights name — including a stand-in for production's
+-- `on_auth_user_created` signup trigger, without which every part would die
+-- 23503 on the strategies FK and Part 6's guards would "pass" on a foreign-key
+-- failure instead of on the guard.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","supabase/migrations/20260522111839_csv_daily_returns.sql","supabase/migrations/20260624120000_csv_daily_returns_per_key_axis.sql","supabase/migrations/20260728120000_csv_finalize_double_submit_idempotency.sql","supabase/migrations/20260819120000_csv_finalize_atomic_fold.sql","supabase/migrations/20260819130000_csv_finalize_fold_input_guards.sql","supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql"]}
+
+-- ==========================================================================
+-- Part 1 — STRUCTURAL: the fold exists, SECDEF, one 6-arg overload, grants
+-- ==========================================================================
+DO $$
+DECLARE
+  v_cnt       INT;
+  v_secdef    BOOLEAN;
+  v_nargs     INT;
+  v_fn_src    TEXT;
+  v_code      TEXT;
+  v_proconfig TEXT[];
+BEGIN
+  SELECT count(*), bool_and(p.prosecdef), min(p.pronargs), min(p.proconfig)
+    INTO v_cnt, v_secdef, v_nargs, v_proconfig
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'finalize_csv_strategy_with_returns';
+
+  IF v_cnt = 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1): finalize_csv_strategy_with_returns does not exist - migration 20260819120000 is not applied to this database. On the shared TEST project this is the DESIGNED RED until Plan 06 applies it; anywhere else it means the csv-finalize path has NO writer at all';
+  END IF;
+  IF v_cnt > 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1): % overloads of finalize_csv_strategy_with_returns exist - PostgREST answers PGRST203 to every csv-finalize call while two overloads are visible', v_cnt;
+  END IF;
+  IF v_secdef IS NOT TRUE THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1): finalize_csv_strategy_with_returns is not SECURITY DEFINER - every INSERT runs as the caller and fails RLS, breaking every finalize';
+  END IF;
+  IF v_nargs <> 6 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1): finalize_csv_strategy_with_returns has % args, expected 6 - the route caller passes 6 named arguments and would 42883', v_nargs;
+  END IF;
+
+  -- ---- 1b — THE STANDING search_path PIN (146.2 review-of-05 finding 2) ---
+  -- ⭐ WHY THIS LINE EXISTS. This gate already pinned prosecdef, the arity,
+  -- all three ACLs and the no-handler prosrc property — but never proconfig.
+  -- So the search_path pin was asserted ONLY at apply time, by
+  -- 20260819151000's STEP 4(b2), in a file that will never run again. It is
+  -- the MORE dangerous of the two properties the pair guards: prosecdef going
+  -- FALSE breaks every finalize loudly and instantly (the writes start failing
+  -- RLS), whereas the search_path going missing breaks NOTHING visibly — the
+  -- function keeps working for every honest caller while an RLS-exempt
+  -- definer-rights body silently resolves strategies, strategy_verifications
+  -- and csv_daily_returns through the CALLER's search_path. Any authenticated
+  -- caller able to create a schema could then point the finalize writes at
+  -- attacker-owned shadow tables, outside the tenant-scoped originals
+  -- entirely. A CREATE OR REPLACE that drops the SET clause applies green and,
+  -- before this line, no recurring gate would have reddened.
+  --
+  -- ⛔ REGEX, NOT EQUALITY — A DELIBERATE DEPARTURE FROM THE NEAREST IN-REPO
+  -- PRECEDENT, and the reason is MEASURED, not reasoned. The precedent,
+  -- test_cutover_strategy_metrics_keys_atomic.sql Test 1, asserts
+  -- `'search_path=public, pg_temp' = ANY(proconfig)` — an exact string
+  -- compare. Measured on a throwaway PG16 (16.14), an equality test is SAFE
+  -- against re-rendering: `= public,pg_catalog` and `= "public", pg_catalog`
+  -- both normalise to the identical stored entry `search_path=public,
+  -- pg_catalog`, so spacing and quoting do NOT break it (the broader
+  -- "pg_get_functiondef re-renders it" worry does not apply — proconfig is
+  -- not read through pg_get_functiondef at all). What DOES break it is the
+  -- VALUE's content, and both breaking cases are healthy databases:
+  --     SET search_path = pg_catalog, public          -> equality f, regex t
+  --     SET search_path = public, pg_catalog, pg_temp -> equality f, regex t
+  -- A reorder and a hardening addition each leave the property this line
+  -- exists to protect fully intact — the body still resolves through a FIXED
+  -- list rather than the caller's — while an equality test reds. A gate that
+  -- fails on a healthy database is worse than none, because it teaches the
+  -- next author to delete it. This check therefore reuses the regex form the
+  -- migration's own STEP 4(b2) settled on: the entry must BE a search_path
+  -- assignment (anchored ^) and must name both schemas WORD-BOUNDED, which is
+  -- what keeps it from going soft — measured RED on `search_path=public`
+  -- (pg_catalog dropped), on `search_path=public_evil, pg_catalog` (a
+  -- look-alike schema: `\M` refuses to end a word inside `public_evil`), and
+  -- on proconfig NULL entirely.
+  IF NOT EXISTS (
+    SELECT 1 FROM unnest(coalesce(v_proconfig, ARRAY[]::text[])) cfg
+     WHERE cfg ~ '^search_path='
+       AND cfg ~ '\mpublic\M'
+       AND cfg ~ '\mpg_catalog\M'
+  ) THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1b): finalize_csv_strategy_with_returns has lost its "SET search_path = public, pg_catalog" pin (proconfig=%) - a SECURITY DEFINER body without one resolves strategies/strategy_verifications/csv_daily_returns through the CALLER''s search_path, so any authenticated caller who can create a schema redirects every finalize write to attacker-owned shadow tables while the function still looks healthy. Re-issue the SET clause on the function; never relax this assertion', v_proconfig;
+  END IF;
+
+  -- RED-UNDER: REVOKE EXECUTE on finalize_csv_strategy_with_returns from
+  --            `authenticated` on the live database after the migrations have
+  --            applied. The ACL is re-issued by 20260819151000 STEP 2 and
+  --            re-asserted by its own STEP 4(b), so an EDIT to that file aborts
+  --            the apply before this gate ever runs — the drift this arm exists
+  --            to catch is a LATER one (a DROP+CREATE, a role reshuffle, a
+  --            manual REVOKE), which is exactly what a post-apply `sql` step is.
+  -- RED-UNDER-M: {"arm":"Part 1","apply":[{"kind":"sql","stmt":"REVOKE EXECUTE ON FUNCTION public.finalize_csv_strategy_with_returns(UUID, UUID, TEXT, TEXT, JSONB, TEXT) FROM authenticated"}]}
+  IF NOT has_function_privilege('authenticated',
+        'public.finalize_csv_strategy_with_returns(uuid,uuid,text,text,jsonb,text)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1): authenticated holds no EXECUTE on finalize_csv_strategy_with_returns - every legitimate csv-finalize answers 42501 (the 20260522111839:200-208 outage class); re-GRANT to authenticated, never to service_role';
+  END IF;
+  IF has_function_privilege('anon',
+        'public.finalize_csv_strategy_with_returns(uuid,uuid,text,text,jsonb,text)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1): anon holds EXECUTE on finalize_csv_strategy_with_returns - an unauthenticated browser can POST /rest/v1/rpc/finalize_csv_strategy_with_returns directly; a DROP+CREATE re-granted it via pg_default_acl - re-issue the REVOKE';
+  END IF;
+
+  -- ---- 1c — the service_role EXECUTE pin (v1.19 review, carried 146.1
+  --      finding "the REVOKE is asserted only at apply time") --------------
+  -- 20260819130000 REVOKEs service_role and asserts the revocation in its own
+  -- STEP 4 (:531-534), and its COMMENT claims "Grants: authenticated ONLY".
+  -- But a migration's self-verify runs ONCE, at the apply that nobody re-runs.
+  -- Everything that could re-grant service_role afterwards — a later
+  -- DROP+CREATE picking up a pg_default_acl, a hand-run GRANT during an
+  -- incident, a restored dump — lands on a database where NOTHING checks
+  -- again. The anon half of that pair has always been pinned here; the
+  -- service_role half was not. This line is that half.
+  --
+  -- ⚠️ Honest severity, so nobody re-files this as a live hole: a service-role
+  -- call NULLs auth.uid() and is already refused with 42501 by the fold's own
+  -- identity guard before it can write anything. What is at stake is the
+  -- documented grant shape staying TRUE — a COMMENT that claims
+  -- authenticated-only while service_role holds EXECUTE is how the next reader
+  -- reasons from a wrong premise about who can reach this body.
+  IF has_function_privilege('service_role',
+        'public.finalize_csv_strategy_with_returns(uuid,uuid,text,text,jsonb,text)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1c): service_role holds EXECUTE on finalize_csv_strategy_with_returns - the function COMMENT claims "Grants: authenticated ONLY" and 20260819130000 REVOKEd it; something re-granted it (a DROP+CREATE picking up pg_default_acl, a hand-run GRANT, a restored dump) and the documented grant shape is now false - re-issue the REVOKE rather than softening the COMMENT';
+  END IF;
+
+  -- ---- 1d — THE STANDING NO-HANDLER PIN (v1.19 review-of-146.1 finding W3)
+  -- ⭐ WHY THIS LINE EXISTS. "The body carries NO handler clause" is called
+  -- THE MECHANISM of the fold (20260819120000:80-96): an unhandled raise
+  -- aborts the function and rolls all three writes back, which is the whole of
+  -- SC#2. Until now that invariant was asserted ONLY inside the migrations'
+  -- self-verify blocks — i.e. only at apply time, in files that will never run
+  -- again. A future CREATE OR REPLACE that "hardens" this body with
+  -- `EXCEPTION WHEN OTHERS THEN ... RAISE;` would apply completely green and
+  -- no standing gate would notice. This assertion is what makes such an edit
+  -- redden CI on every run.
+  --
+  -- ⚠️ IT ALSO CATCHES WHAT COUNTS CANNOT. A handler that catches, writes, and
+  -- RE-RAISES is invisible to every row-count oracle in this suite and in
+  -- test_csv_finalize_double_submit.sql: a plpgsql EXCEPTION block is an
+  -- implicit subtransaction, so a re-raise rolls the handler's own writes back
+  -- and the counts read clean either way. Structure is the only observable
+  -- that discriminates that variant. test_csv_finalize_double_submit.sql
+  -- Part 3 points here for exactly that reason.
+  --
+  -- ⛔ THE COMMENT-STRIP IS LOAD-BEARING — DO NOT "SIMPLIFY" IT AWAY.
+  -- pg_get_functiondef reconstructs the body from prosrc, which stores the
+  -- source VERBATIM INCLUDING COMMENTS. This body's comments discuss handler
+  -- clauses at length (they explain why there is none), and every future
+  -- author warned off adding one will write the words down again. A raw match
+  -- would therefore red on precisely the healthy body it exists to protect —
+  -- and a self-verify that fails on a healthy database is worse than none,
+  -- because it teaches the next author to delete the check. The mirror-image
+  -- failure is just as real: strip nothing and a DELETED guard whose
+  -- explanatory comment survives still passes. ⚠️ This trap has been hit THREE
+  -- times independently in this repo (migration 20260814120000's post-verify,
+  -- plan 156-08's assertion 5h, and test_wizard_session_idempotency.sql:164-178
+  -- which documents all three). MEASURED for this file on a throwaway PG16:
+  -- with the strip, a body carrying a comment that mentions the handler form
+  -- stays green; without it, the same body reds.
+  --
+  -- Word-bounded and case-insensitive: `\mEXCEPTION\M[[:space:]]+\mWHEN\M`
+  -- matches the handler clause in any casing but is not satisfied by the many
+  -- `RAISE EXCEPTION '...'` statements in the body (the next token there is a
+  -- quote, never WHEN).
+  SELECT pg_get_functiondef(
+           'public.finalize_csv_strategy_with_returns(uuid,uuid,text,text,jsonb,text)'::regprocedure)
+    INTO v_fn_src;
+  IF v_fn_src IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1d): pg_get_functiondef returned NULL for finalize_csv_strategy_with_returns(uuid,uuid,text,text,jsonb,text) - the no-handler pin has nothing to read, so it would pass while asserting nothing';
+  END IF;
+  v_code := regexp_replace(v_fn_src, '--[^\n]*', '', 'g');
+  IF v_code ~* '\mEXCEPTION\M[[:space:]]+\mWHEN\M' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1d): finalize_csv_strategy_with_returns contains a handler clause - a swallowed error commits a strategies row without its dailies, which is EXACTLY the orphan class SC#2 dissolves, and a catch-write-and-re-raise handler is invisible to every row-count oracle in this suite because the subtransaction rolls its writes back too. Remove the handler; never "harden" this body with one (the function COMMENT says so, and 20260819120000:80-96 explains why)';
+  END IF;
+
+  RAISE NOTICE 'Part 1 OK: finalize_csv_strategy_with_returns is live (one 6-arg SECDEF overload; search_path pinned to public + pg_catalog; authenticated EXECUTE; anon and service_role both shut out; no handler clause in the comment-stripped body).';
+END $$;
+
+-- ==========================================================================
+-- Part 2 — THE ATOMICITY ORACLE (SC#2): mid-body fault leaves ZERO rows in
+--          ALL THREE tables
+-- ==========================================================================
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+DO $$
+DECLARE
+  probe_user    UUID := gen_random_uuid();
+  probe_session UUID := gen_random_uuid();
+  v_rows        JSONB;
+  v_result      UUID;
+  raised        BOOLEAN := FALSE;
+  err_state     TEXT;
+  err_msg       TEXT;
+  n_strat       INT;
+  n_sv          INT;
+  n_dl          INT;
+BEGIN
+  -- Seed through the real FK chain.
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (probe_user, '00000000-0000-0000-0000-000000000000',
+          'test-fold-atom-' || probe_user || '@quantalyze.test', now(), now());
+
+  -- 10 elements; the 6th carries a date the ::DATE cast must refuse. The
+  -- route validator would 400 this payload — calling the RPC directly is the
+  -- point: the DB-side guarantee must hold for callers the route never sees.
+  SELECT jsonb_agg(jsonb_build_object(
+           'date', CASE WHEN i = 5 THEN 'not-a-date' ELSE (DATE '2026-02-01' + i)::text END,
+           'daily_return', 0.002))
+    INTO v_rows
+    FROM generate_series(0, 9) i;
+
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', probe_user::text, 'role', 'authenticated')::text, true);
+
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'atomicity oracle probe', v_rows);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS
+      err_state = RETURNED_SQLSTATE,
+      err_msg   = MESSAGE_TEXT;
+  END;
+
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 2a): a payload with a malformed date at element 6 SUCCEEDED and returned % - the dailies cast is not running (the dailies INSERT was removed, or the payload is being silently coerced); the atomicity oracle has nothing to observe and SC#2 is unproven', v_result;
+  END IF;
+
+  -- The exact SQLSTATE is the date-cast's (22007 invalid_datetime_format on
+  -- PG16); pin the CLASS, not the code — a future PG major bumping the code
+  -- within class 22 is not a regression of the guarantee under test.
+  -- RED-UNDER: invert GUARD 2's caller-identity comparison in migration
+  --            20260819151000 to `IS NOT DISTINCT FROM`, so a MATCHING
+  --            identity raises 42501 and the malformed-date payload never
+  --            reaches the ::DATE cast at all. The failure the oracle was
+  --            designed around (a class-22 datetime error) is replaced by one
+  --            that is not, which is exactly what this arm refuses. STEP 4's
+  --            own check (h3) pins the IS DISTINCT FROM spelling and would
+  --            abort the apply, so the layered second step relaxes that term
+  --            (GRAMMAR Shape 3).
+  -- RED-UNDER-M: {"arm":"Part 2b","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"IF v_auth_uid IS DISTINCT FROM p_user_id THEN","replace":"IF v_auth_uid IS NOT DISTINCT FROM p_user_id THEN","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"v_auth_uid[[:space:]]+IS[[:space:]]+DISTINCT[[:space:]]+FROM","replace":"v_auth_uid[[:space:]]+IS","occurrences":1}]}
+  IF err_state NOT LIKE '22%' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 2b): the malformed-date call failed with SQLSTATE % (%) - expected a class-22 data exception from the ::DATE cast; a different failure means the fault injected is not the fault this oracle was designed around', err_state, err_msg;
+  END IF;
+
+  -- THE ORACLE: zero rows in all three tables for this (user, session). The
+  -- strategies INSERT ran before the cast raised; if ANY row survives, the
+  -- fold has a handler clause (or split transactions) and the orphan-strategy
+  -- class SC#2 dissolves is back.
+  --
+  -- ⚠️ HONESTY NOTE (Phase 146.1-07, cosmetic batch): Part 2c is BELT to Part
+  -- 2a's BRACES, not an independent measurement. The `BEGIN ... EXCEPTION WHEN
+  -- OTHERS` block above is an implicit PL/pgSQL SUBTRANSACTION (a savepoint),
+  -- so when the fold raises, that subtransaction rolls back and every write
+  -- the fold made is undone by PL/pgSQL semantics — regardless of anything the
+  -- fold itself does. Once Part 2a has established that the call RAISED, these
+  -- three counts are 0/0/0 by construction.
+  --
+  -- It is kept because it is nearly free and it still discriminates the one
+  -- case the savepoint cannot undo: a write that ESCAPES the subtransaction
+  -- (dblink, an autonomous-transaction extension, or any out-of-transaction
+  -- side channel added to the fold later). Do not read a green Part 2c as
+  -- independent evidence of the fold's atomicity — Part 2a is what carries
+  -- that, and the route-level suites carry the rest.
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 2c): after the mid-body fault, counts are strategies=%, verifications=%, dailies=% - expected 0/0/0. A committed remainder here IS the orphan strategy row JOB-06 exists to make impossible: some write survived a failure that aborted the rest', n_strat, n_sv, n_dl;
+  END IF;
+
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  RAISE NOTICE 'Part 2 OK: mid-body fault (SQLSTATE %, element 6 of 10) left ZERO rows in strategies, strategy_verifications and csv_daily_returns.', err_state;
+END $$;
+
+ROLLBACK;
+
+-- ==========================================================================
+-- Part 3 — TERMINAL STATUS (SC#3 / D-08) + the economic oracle on dailies
+-- ==========================================================================
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+DO $$
+DECLARE
+  probe_user  UUID := gen_random_uuid();
+  session_pv  UUID := gen_random_uuid();
+  session_df  UUID := gen_random_uuid();
+  payload     JSONB := '[{"date":"2026-05-01","daily_return":0.0111},
+                         {"date":"2026-05-02","daily_return":-0.0032}]'::jsonb;
+  v_private   UUID;
+  v_default   UUID;
+  v_status    TEXT;
+  n_dl        INT;
+  v_spot      DOUBLE PRECISION;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (probe_user, '00000000-0000-0000-0000-000000000000',
+          'test-fold-priv-' || probe_user || '@quantalyze.test', now(), now());
+
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', probe_user::text, 'role', 'authenticated')::text, true);
+
+  -- (a) explicit 'private' — the CONTRIB-02 wire (route.ts contribution arm
+  -- passes it explicitly). Losing the argument silently promotes private
+  -- contributions into the admin publish queue (keyed on
+  -- status='pending_review').
+  v_private := public.finalize_csv_strategy_with_returns(
+    probe_user, session_pv, 'daily_returns', 'fold private probe', payload, 'private');
+  SELECT status INTO v_status FROM public.strategies WHERE id = v_private;
+  -- RED-UNDER: replace `p_terminal_status` with the literal 'pending_review'
+  --            in the fold's strategies INSERT VALUES list (migration
+  --            20260819151000). The whitelist above still accepts 'private',
+  --            so the call succeeds and silently promotes a CONTRIB-02
+  --            private contribution into the admin publish queue — the exact
+  --            regression this arm names. STEP 4 pins the INSERT's
+  --            wizard_session_id columns, not the status VALUE, so one edit
+  --            applies clean.
+  -- RED-UNDER-M: {"arm":"Part 3a","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"    p_user_id, p_strategy_name, p_terminal_status, 'csv',","replace":"    p_user_id, p_strategy_name, 'pending_review', 'csv',","occurrences":1}]}
+  IF v_status IS DISTINCT FROM 'private' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3a): a p_terminal_status=''private'' call wrote strategies.status=% - expected ''private''. The argument is being ignored or forced, and every CONTRIB-02 private contribution now lands in the admin publish queue (D-08)', v_status;
+  END IF;
+
+  -- (b) default — the manager flow omits the argument and must get
+  -- 'pending_review'.
+  v_default := public.finalize_csv_strategy_with_returns(
+    probe_user, session_df, 'daily_returns', 'fold default probe', payload);
+  SELECT status INTO v_status FROM public.strategies WHERE id = v_default;
+  IF v_status IS DISTINCT FROM 'pending_review' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3b): a default-status call wrote strategies.status=% - expected ''pending_review''. The DEFAULT was changed and every manager finalize now lands in the wrong state', v_status;
+  END IF;
+
+  -- (c) economic oracle: persisted equals submitted — count and one
+  -- spot-checked (date, value) pair, read back from the table, never
+  -- re-derived through the fold's own expressions.
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns WHERE strategy_id = v_private;
+  IF n_dl <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3c): % dailies persisted for a 2-row submission - persisted must equal submitted', n_dl;
+  END IF;
+  SELECT daily_return INTO v_spot FROM public.csv_daily_returns
+   WHERE strategy_id = v_private AND date = DATE '2026-05-02';
+  IF v_spot IS DISTINCT FROM -0.0032 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3c): daily_return for 2026-05-02 is % - expected -0.0032 exactly as submitted; a transformed value here means the fold is EDITING the user''s track record, which is money-data fabrication', v_spot;
+  END IF;
+
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  RAISE NOTICE 'Part 3 OK: ''private'' writes private, default writes pending_review, and the persisted series equals the submitted file (2 rows; spot 2026-05-02 = -0.0032).';
+END $$;
+
+ROLLBACK;
+
+-- ==========================================================================
+-- Part 3d — TERMINAL STATUS, THE REFUSAL SIDE (v1.19 review C4):
+--           p_terminal_status='published' raises 22023 and commits nothing
+-- ==========================================================================
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+DO $$
+DECLARE
+  probe_user    UUID := gen_random_uuid();
+  probe_session UUID := gen_random_uuid();
+  payload       JSONB := '[{"date":"2026-05-01","daily_return":0.0111}]'::jsonb;
+  v_result      UUID;
+  raised        BOOLEAN := FALSE;
+  err_state     TEXT;
+  err_msg       TEXT;
+  n_strat       INT;
+  n_sv          INT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (probe_user, '00000000-0000-0000-0000-000000000000',
+          'test-fold-pub-' || probe_user || '@quantalyze.test', now(), now());
+
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', probe_user::text, 'role', 'authenticated')::text, true);
+
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold published probe', payload, 'published');
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS
+      err_state = RETURNED_SQLSTATE,
+      err_msg   = MESSAGE_TEXT;
+  END;
+
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3d): a p_terminal_status=''published'' call SUCCEEDED and returned % - the CONTRIB-02 whitelist (D-08) is gone, so a direct-RPC caller can finalize an unreviewed CSV strategy straight onto the public surface without ever entering the admin review queue', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3d): the ''published'' call failed with SQLSTATE % (%) - expected 22023 from the terminal-status whitelist, BEFORE any write. A different code means the refusal came from somewhere else (a CHECK constraint, an enum cast) and the whitelist itself may already be gone', err_state, err_msg;
+  END IF;
+
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  IF n_strat <> 0 OR n_sv <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3d): after the refused ''published'' call, counts are strategies=%, verifications=% - expected 0/0. The whitelist ran AFTER a write instead of as the FIRST statement, which is the placement D-08 requires', n_strat, n_sv;
+  END IF;
+
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  RAISE NOTICE 'Part 3d OK: p_terminal_status=''published'' raised 22023 (%) and committed nothing.', err_msg;
+END $$;
+
+ROLLBACK;
+
+-- ==========================================================================
+-- Part 3e — TERMINAL STATUS, THE NULL ARM (v1.19 review-of-146.1 finding R5;
+--           migration 20260819151000): p_terminal_status := NULL raises 22023
+--           from GUARD 1 and commits nothing
+-- ==========================================================================
+-- ⭐ WHY 3d IS NOT ENOUGH. Part 3d proves the whitelist refuses a WRONG value.
+-- It cannot prove the whitelist is reachable at all for a NULL one, because
+-- `p_terminal_status NOT IN ('pending_review','private')` evaluates to NULL
+-- for a NULL argument and plpgsql takes the ELSE branch on a NULL IF
+-- condition. That is not hypothetical: it is the shape the guard SHIPPED in,
+-- inside 20260819130000 — the very migration whose job was making the other
+-- guards NULL-explicit. Nothing below GUARD 1 refused the value either, so it
+-- reached the strategies INSERT and failed as a 23502 NOT NULL violation from
+-- strategies.status: an error naming a COLUMN instead of the offending input,
+-- with no arm in the route's classifier, while this function's own COMMENT
+-- ERRCODE map promised 22023 for an invalid terminal status. 20260819151000
+-- gives GUARD 1 the `IS NULL OR` arm that GUARD 4 (fmt) and GUARD 5 (name)
+-- already carried, and this Part is what keeps the promise checkable.
+--
+-- ⚠️ EXACT SQLSTATE, never LIKE '22%' and never "any error" — for the same
+-- reason Part 6 spells its assertions that way. The PRE-fix body DOES fail
+-- this call; it fails it with a table-constraint code. A class-pinned or
+-- any-error assertion would pass on precisely the defect being fenced. The
+-- distinguishing substring is checked alongside the code so a future 22023
+-- raised by some OTHER guard cannot stand in for this one.
+--
+-- ⚠️ REACHABILITY, stated so nobody re-files this as a live user-facing break:
+-- the route CANNOT send NULL here. src/app/api/strategies/csv-finalize/route.ts
+-- validates entry_context and passes string literals for the terminal status.
+-- This is the AUTHENTICATED DIRECT-RPC boundary class — the same class A1
+-- closes — and the fold's own auth.uid() guard confines it to the caller's own
+-- strategy. What R5 repairs is a documented interface (the ERRCODE map) that
+-- the deployed body did not honour.
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+DO $$
+DECLARE
+  probe_user    UUID := gen_random_uuid();
+  probe_session UUID := gen_random_uuid();
+  payload       JSONB := '[{"date":"2026-05-01","daily_return":0.0111}]'::jsonb;
+  v_result      UUID;
+  raised        BOOLEAN := FALSE;
+  err_state     TEXT;
+  err_msg       TEXT;
+  n_strat       INT;
+  n_sv          INT;
+  n_dl          INT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (probe_user, '00000000-0000-0000-0000-000000000000',
+          'test-fold-nullstatus-' || probe_user || '@quantalyze.test', now(), now());
+
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', probe_user::text, 'role', 'authenticated')::text, true);
+
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold null-status probe', payload, NULL::text);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS
+      err_state = RETURNED_SQLSTATE,
+      err_msg   = MESSAGE_TEXT;
+  END;
+
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3e): a p_terminal_status=NULL call SUCCEEDED and returned % - GUARD 1 passed a NULL straight through and so did every guard below it, so a direct-RPC caller just wrote a strategies row with a NULL status (or whatever a later default supplied) without the CONTRIB-02 whitelist ever having an opinion', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3e): the NULL-terminal-status call failed with SQLSTATE % (%) - expected 22023 from GUARD 1, BEFORE any write. A 23502 here is the PRE-146.2 shape: the whitelist is no longer NULL-explicit (`p_terminal_status NOT IN (...)` is NULL for a NULL argument and plpgsql takes the ELSE branch), so the refusal is coming from the strategies.status NOT NULL constraint instead - an error that names a column rather than the input, and one this function''s COMMENT ERRCODE map says should be a 22023', err_state, err_msg;
+  END IF;
+  IF position('p_terminal_status' in err_msg) = 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3e): the NULL-terminal-status call raised 22023 but its message (%) does not name p_terminal_status - some OTHER guard is answering for this input, so this Part would go on passing after GUARD 1''s NULL arm was deleted', err_msg;
+  END IF;
+
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3e): after the refused NULL-terminal-status call, counts are strategies=%, verifications=%, dailies=% - expected 0/0/0. GUARD 1 ran AFTER a write instead of as the FIRST statement, which is the placement D-08 requires', n_strat, n_sv, n_dl;
+  END IF;
+
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  RAISE NOTICE 'Part 3e OK: p_terminal_status=NULL raised 22023 (%) and committed nothing.', err_msg;
+END $$;
+
+ROLLBACK;
+
+-- ==========================================================================
+-- Part 4 — TRADES-EMPTY: '[]' with fmt='trades' succeeds with zero dailies
+-- ==========================================================================
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+DO $$
+DECLARE
+  probe_user    UUID := gen_random_uuid();
+  probe_session UUID := gen_random_uuid();
+  v_result      UUID;
+  n_dl          INT;
+  n_sv          INT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (probe_user, '00000000-0000-0000-0000-000000000000',
+          'test-fold-trades-' || probe_user || '@quantalyze.test', now(), now());
+
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', probe_user::text, 'role', 'authenticated')::text, true);
+
+  -- Deliberately NOT wrapped in a handler: if the parents' empty-array 22023
+  -- was copied verbatim into the fold (RESEARCH Pitfall 2), this call raises,
+  -- ON_ERROR_STOP aborts the file, and the failure message is the raw 22023 —
+  -- which is exactly the regression: every fmt='trades' finalize (a
+  -- legitimately empty series) would 500 in production.
+  v_result := public.finalize_csv_strategy_with_returns(
+    probe_user, probe_session, 'trades', 'fold trades-empty probe', '[]'::jsonb);
+
+  IF v_result IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 4): the trades-empty finalize returned NULL';
+  END IF;
+
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns WHERE strategy_id = v_result;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications WHERE strategy_id = v_result;
+  IF n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 4): % dailies persisted for an EMPTY payload - the fold fabricated rows the user never submitted', n_dl;
+  END IF;
+  -- RED-UNDER: delete the fold's strategy_verifications INSERT in migration
+  --            20260819151000 (replace the whole statement with a plpgsql
+  --            no-op). Every earlier part counts verifications only after a
+  --            REFUSED call and expects 0, so this is the FIRST arm that can
+  --            observe the missing write. ⚠️ The other two Part 4 arms cannot
+  --            take a mutation: this call is deliberately UNWRAPPED, so any
+  --            drift that makes the fold RAISE aborts the file outside any
+  --            arm and would score NO-IDENTITY (the wave-6 lesson).
+  -- RED-UNDER-M: {"arm":"Part 4","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"  INSERT INTO strategy_verifications (\n    strategy_id, wizard_session_id, status, trust_tier, flow_type, source,\n    errors, correlation_id\n  ) VALUES (\n    v_strategy_id, p_wizard_session_id, 'validated', 'csv_uploaded', 'csv', 'csv',\n    NULL, NULL\n  );","replace":"  NULL;","occurrences":1}]}
+  IF n_sv <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 4): % verification rows for the trades-empty finalize, expected exactly 1', n_sv;
+  END IF;
+
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  RAISE NOTICE 'Part 4 OK: an empty trades payload finalized successfully (strategy %, zero dailies, one verification row).', v_result;
+END $$;
+
+ROLLBACK;
+
+-- ==========================================================================
+-- Part 5 — THE CAP: 5001 rows raises 22023 and commits nothing
+-- ==========================================================================
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+DO $$
+DECLARE
+  probe_user    UUID := gen_random_uuid();
+  probe_session UUID := gen_random_uuid();
+  v_rows        JSONB;
+  v_result      UUID;
+  raised        BOOLEAN := FALSE;
+  err_state     TEXT;
+  err_msg       TEXT;
+  n_strat       INT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (probe_user, '00000000-0000-0000-0000-000000000000',
+          'test-fold-cap-' || probe_user || '@quantalyze.test', now(), now());
+
+  SELECT jsonb_agg(jsonb_build_object('date', (DATE '2000-01-01' + i)::text, 'daily_return', 0.0001))
+    INTO v_rows
+    FROM generate_series(0, 5000) i;   -- 5001 elements
+
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', probe_user::text, 'role', 'authenticated')::text, true);
+
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold cap probe', v_rows);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS
+      err_state = RETURNED_SQLSTATE,
+      err_msg   = MESSAGE_TEXT;
+  END;
+
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 5a): a 5001-row payload SUCCEEDED and returned % - the 5000-row cap (20260522111839:160-162) did not survive the fold; a direct RPC caller can insert an unbounded series (the route validator is bypassable by construction)', v_result;
+  END IF;
+  -- RED-UNDER: change the cap guard's ERRCODE from 22023 to 22004 in migration
+  --            20260819151000. The cap still fires, so Part 5a stays green and
+  --            this arm is the first failure — which is the point: the route's
+  --            classifier keys on the CODE, and a cap that refuses with the
+  --            wrong one is a 500 where a legible 400 was promised. STEP 4(d)
+  --            pins the `> 5000` literal, not the ERRCODE, so one edit applies
+  --            clean.
+  -- RED-UNDER-M: {"arm":"Part 5b","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"'finalize_csv_strategy_with_returns: p_rows exceeds 5000 rows (got %)', jsonb_array_length(p_rows)\n      USING ERRCODE = '22023';","replace":"'finalize_csv_strategy_with_returns: p_rows exceeds 5000 rows (got %)', jsonb_array_length(p_rows)\n      USING ERRCODE = '22004';","occurrences":1}]}
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 5b): the 5001-row call failed with SQLSTATE % (%) - expected 22023 from the cap guard, BEFORE any write', err_state, err_msg;
+  END IF;
+
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  IF n_strat <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 5c): % strategies rows exist after the capped call - the cap guard ran AFTER a write instead of before every write', n_strat;
+  END IF;
+
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  RAISE NOTICE 'Part 5 OK: 5001 rows raised 22023 (%) and committed nothing.', err_msg;
+END $$;
+
+ROLLBACK;
+
+-- ==========================================================================
+-- Part 6 — THE INPUT GUARDS (v1.19 review A1; migration 20260819130000).
+--          Twelve NEGATIVE sub-Parts. Each asserts three things IN ORDER:
+--          (i) the call RAISED, (ii) RETURNED_SQLSTATE is EXACTLY '22023',
+--          (iii) strategies / strategy_verifications / csv_daily_returns each
+--          hold ZERO rows for the probe. (iii) is what separates "the guard
+--          ran before any write" from "a rollback cleaned up afterwards" —
+--          without it, moving a guard below the strategies INSERT would go
+--          unnoticed.
+--
+--          ⚠️ EXACT SQLSTATE, never LIKE '22%' and never "any error". Sub-Parts
+--          6f/6m (missing daily_return / missing date) exist precisely to prove
+--          the guard fires AHEAD of csv_daily_returns' NOT NULL constraints,
+--          which would give 23502; sub-Part 6h proves it fires ahead of
+--          csv_daily_returns_strategy_date_key, which would give 23505. A
+--          class-pinned assertion would PASS on the very failure mode being
+--          fenced.
+--
+--          ⚠️ Each sub-Part is written out in full rather than driven from a
+--          loop, deliberately: a loop would collapse to a single
+--          GET STACKED DIAGNOSTICS site and to one generic consequence
+--          message, and a loop that iterates zero times passes while asserting
+--          nothing.
+-- ==========================================================================
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+DO $$
+DECLARE
+  probe_user    UUID := gen_random_uuid();
+  probe_session UUID;
+  v_result      UUID;
+  raised        BOOLEAN;
+  err_state     TEXT;
+  err_msg       TEXT;
+  n_strat       INT;
+  n_sv          INT;
+  n_dl          INT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (probe_user, '00000000-0000-0000-0000-000000000000',
+          'test-fold-guards-' || probe_user || '@quantalyze.test', now(), now());
+
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', probe_user::text, 'role', 'authenticated')::text, true);
+
+  -- ---- Part 6a — p_rows := NULL, fmt='daily_returns' ----------------------
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold guard probe 6a', NULL::jsonb);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  -- RED-UNDER: replace the body of GUARD 3 (the NULL p_rows refusal) in
+  --            migration 20260819151000 with a plpgsql no-op. Every rows guard
+  --            below it is three-valued logic a NULL argument PASSES, so the
+  --            call runs to completion and returns a strategy with zero
+  --            dailies — the state 146.1-RESEARCH measured before the guard
+  --            existed. STEP 4(i) pins the `IF p_rows IS NULL THEN` head,
+  --            which this edit leaves in place, so one edit applies clean.
+  -- RED-UNDER-M: {"arm":"Part 6a","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"    RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_rows is required (got NULL)'\n      USING ERRCODE = '22023';","replace":"    NULL;","occurrences":1}]}
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6a): a NULL p_rows call SUCCEEDED and returned % - the NULL guard is gone. jsonb_typeof(NULL) is NULL, NULL <> ''array'' is NULL and plpgsql takes the ELSE branch, so a NULL argument walks past EVERY rows guard and commits a strategy with zero dailies that the Phase 143 sweep structurally cannot heal', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6a): the NULL p_rows call failed with SQLSTATE % (%) - expected 22023 from the p_rows NULL guard, BEFORE any write', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6a): counts are strategies=%, verifications=%, dailies=% after the refused call - expected 0/0/0; the guard ran AFTER a write instead of before every write', n_strat, n_sv, n_dl;
+  END IF;
+  RAISE NOTICE 'Part 6a OK: NULL p_rows raised 22023 (%) and committed nothing.', err_msg;
+
+  -- ---- Part 6b — p_rows := '[]', fmt='daily_returns' ----------------------
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold guard probe 6b', '[]'::jsonb);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6b): an EMPTY daily_returns payload SUCCEEDED and returned % - the empty-array guard is gone or is still scoped to every fmt, and a strategy now exists whose entire track record is nothing', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6b): the empty daily_returns call failed with SQLSTATE % (%) - expected 22023 from the empty-rows guard, BEFORE any write', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6b): counts are strategies=%, verifications=%, dailies=% after the refused call - expected 0/0/0; the guard ran AFTER a write instead of before every write', n_strat, n_sv, n_dl;
+  END IF;
+  RAISE NOTICE 'Part 6b OK: empty daily_returns raised 22023 (%) and committed nothing.', err_msg;
+
+  -- ---- Part 6c — p_rows := '[]', fmt := NULL ------------------------------
+  -- The NULL-fmt reachability probe. Without `p_fmt IS NULL OR` on the fmt
+  -- whitelist, `p_fmt NOT IN (...)` is NULL for a NULL fmt and plpgsql takes
+  -- the ELSE branch, so an unformatted call walks past the whitelist AND past
+  -- a `<>`-scoped empty-array guard, and finalizes with zero dailies.
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, NULL::text, 'fold guard probe 6c', '[]'::jsonb);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6c): an empty payload with a NULL fmt SUCCEEDED and returned % - both the fmt whitelist and the empty-rows guard are NULL-blind, which is the exact three-valued-logic hole finding A1 measured', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6c): the NULL-fmt call failed with SQLSTATE % (%) - expected 22023 from a NULL-explicit guard, BEFORE any write', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6c): counts are strategies=%, verifications=%, dailies=% after the refused call - expected 0/0/0; the guard ran AFTER a write instead of before every write', n_strat, n_sv, n_dl;
+  END IF;
+  RAISE NOTICE 'Part 6c OK: NULL fmt raised 22023 (%) and committed nothing.', err_msg;
+
+  -- ---- Part 6d — daily_return "NaN" ---------------------------------------
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold guard probe 6d',
+      '[{"date":"2026-02-01","daily_return":"NaN"}]'::jsonb);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6d): a NaN daily_return SUCCEEDED and returned % - the value scan is gone. A NaN in the series makes Sharpe, Sortino and every drawdown undefined for every downstream consumer, and no recompute can ever turn it back into a number', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6d): the NaN call failed with SQLSTATE % (%) - expected 22023 from the value scan, BEFORE any write', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6d): counts are strategies=%, verifications=%, dailies=% after the refused call - expected 0/0/0; the guard ran AFTER a write instead of before every write', n_strat, n_sv, n_dl;
+  END IF;
+  RAISE NOTICE 'Part 6d OK: NaN daily_return raised 22023 (%) and committed nothing.', err_msg;
+
+  -- ---- Part 6e — daily_return 1e300 ---------------------------------------
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold guard probe 6e',
+      '[{"date":"2026-02-01","daily_return":1e300}]'::jsonb);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6e): a 1e300 daily_return SUCCEEDED and returned % - the magnitude bound is gone, and a single such row overflows every compounded equity curve derived from this series to Infinity', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6e): the 1e300 call failed with SQLSTATE % (%) - expected 22023 from the value scan, BEFORE any write', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6e): counts are strategies=%, verifications=%, dailies=% after the refused call - expected 0/0/0; the guard ran AFTER a write instead of before every write', n_strat, n_sv, n_dl;
+  END IF;
+  RAISE NOTICE 'Part 6e OK: 1e300 daily_return raised 22023 (%) and committed nothing.', err_msg;
+
+  -- ---- Part 6f — daily_return ABSENT (must be 22023, NOT 23502) -----------
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold guard probe 6f',
+      '[{"date":"2026-02-01"}]'::jsonb);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6f): an element with no daily_return SUCCEEDED and returned % - the NULL-value arm of the value scan is gone', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6f): the missing-daily_return call failed with SQLSTATE % (%) - expected 22023 EXACTLY. 23502 here means the payload was stopped by csv_daily_returns'' NOT NULL constraint AFTER the guards let it through: the caller gets an error naming a column instead of the offending input, and the route has no arm that maps it', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6f): counts are strategies=%, verifications=%, dailies=% after the refused call - expected 0/0/0; the guard ran AFTER a write instead of before every write', n_strat, n_sv, n_dl;
+  END IF;
+  RAISE NOTICE 'Part 6f OK: missing daily_return raised 22023 (%) and committed nothing.', err_msg;
+
+  -- ---- Part 6g — date '9999-12-31' ----------------------------------------
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold guard probe 6g',
+      '[{"date":"9999-12-31","daily_return":0.01}]'::jsonb);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6g): a 9999-12-31 dated return SUCCEEDED and returned % - the future-date fence is gone, and a track record that extends past today is a claim about performance that has not happened yet', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6g): the future-dated call failed with SQLSTATE % (%) - expected 22023 from the value scan, BEFORE any write', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6g): counts are strategies=%, verifications=%, dailies=% after the refused call - expected 0/0/0; the guard ran AFTER a write instead of before every write', n_strat, n_sv, n_dl;
+  END IF;
+  RAISE NOTICE 'Part 6g OK: 9999-12-31 raised 22023 (%) and committed nothing.', err_msg;
+
+  -- ---- Part 6h — two elements sharing one date (22023, NOT 23505) ---------
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold guard probe 6h',
+      '[{"date":"2026-02-01","daily_return":0.01},
+        {"date":"2026-02-01","daily_return":0.02}]'::jsonb);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6h): a payload with two returns for one day SUCCEEDED and returned % - the duplicate-date scan is gone', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6h): the duplicate-date call failed with SQLSTATE % (%) - expected 22023 EXACTLY. 23505 here means the payload reached the dailies INSERT and tripped csv_daily_returns_strategy_date_key: the route''s resolve arm reads ANY 23505 as the double-submit fence, so a permanent input defect comes back to the user as a 503 invitation to retry forever', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6h): counts are strategies=%, verifications=%, dailies=% after the refused call - expected 0/0/0; the guard ran AFTER a write instead of before every write', n_strat, n_sv, n_dl;
+  END IF;
+  RAISE NOTICE 'Part 6h OK: duplicate dates raised 22023 (%) and committed nothing.', err_msg;
+
+  -- ---- Part 6j — daily_return 10.5, THE NEAR-BOUNDARY PROBE ---------------
+  -- ⭐ Do not drop this sub-Part. Without it the magnitude guard can be widened
+  -- from BETWEEN -10 AND 10 to BETWEEN -10 AND 100 with EVERY other detector
+  -- staying green: 6d's NaN fails any BETWEEN whatever the bound (Postgres
+  -- sorts NaN above all numbers), 6e's 1e300 still exceeds 100, and a bare
+  -- substring gate is satisfied by '-10 AND 100' as a prefix. 6j is the only
+  -- probe that sits between 10 and 100; with 6i (9.9 accepted) it is the
+  -- discriminating pair that pins the bound at exactly +/-10.
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold guard probe 6j',
+      '[{"date":"2026-02-01","daily_return":10.5}]'::jsonb);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6j): a daily_return of 10.5 (a +1050%% day) SUCCEEDED and returned % - the magnitude bound has been WIDENED past +/-10 and no longer mirrors MAX_DAILY_RETURN at route.ts:198-200, so the DB accepts series the route refuses and the two fences disagree silently', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6j): the 10.5 call failed with SQLSTATE % (%) - expected 22023 from the value scan, BEFORE any write', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6j): counts are strategies=%, verifications=%, dailies=% after the refused call - expected 0/0/0; the guard ran AFTER a write instead of before every write', n_strat, n_sv, n_dl;
+  END IF;
+  RAISE NOTICE 'Part 6j OK: 10.5 raised 22023 (%) and committed nothing.', err_msg;
+
+  -- ---- Part 6k — date '0001-01-01', the LOWER date fence ------------------
+  -- The only probe of the `< 1900-01-01` arm. Without it that arm can be
+  -- deleted with 6g (a FUTURE date) still green.
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold guard probe 6k',
+      '[{"date":"0001-01-01","daily_return":0.01}]'::jsonb);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6k): a 0001-01-01 dated return SUCCEEDED and returned % - the lower date fence is gone, and every window, drawdown and annualization downstream now reads a two-millennium span as the strategy''s real history', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6k): the 0001-01-01 call failed with SQLSTATE % (%) - expected 22023 from the value scan, BEFORE any write', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6k): counts are strategies=%, verifications=%, dailies=% after the refused call - expected 0/0/0; the guard ran AFTER a write instead of before every write', n_strat, n_sv, n_dl;
+  END IF;
+  RAISE NOTICE 'Part 6k OK: 0001-01-01 raised 22023 (%) and committed nothing.', err_msg;
+
+  -- ---- Part 6l — daily_return "-Infinity", the LOWER magnitude fence ------
+  -- The only probe that pins the LOWER bound. A guard mis-written as
+  -- `daily_return > 10` still catches NaN (which sorts above every number),
+  -- 1e300 and 10.5 — 6d, 6e and 6j would all stay green while every negative
+  -- outlier walked straight through.
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold guard probe 6l',
+      '[{"date":"2026-02-01","daily_return":"-Infinity"}]'::jsonb);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6l): a -Infinity daily_return SUCCEEDED and returned % - the LOWER half of the magnitude bound is gone (a guard written as "> 10" passes 6d, 6e and 6j and catches nothing on this side), and one such row drives every compounded curve derived from the series to -Infinity', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6l): the -Infinity call failed with SQLSTATE % (%) - expected 22023 from the value scan, BEFORE any write', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6l): counts are strategies=%, verifications=%, dailies=% after the refused call - expected 0/0/0; the guard ran AFTER a write instead of before every write', n_strat, n_sv, n_dl;
+  END IF;
+  RAISE NOTICE 'Part 6l OK: -Infinity raised 22023 (%) and committed nothing.', err_msg;
+
+  -- ---- Part 6m — date ABSENT (must be 22023, NOT 23502) -------------------
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold guard probe 6m',
+      '[{"daily_return":0.01}]'::jsonb);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6m): an element with no date SUCCEEDED and returned % - the missing-date arm of the value scan is gone', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6m): the missing-date call failed with SQLSTATE % (%) - expected 22023 EXACTLY. 23502 here means csv_daily_returns'' NOT NULL constraint stopped it AFTER the guards let it through, which is the same illegible-error class 6f fences for the sibling column', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6m): counts are strategies=%, verifications=%, dailies=% after the refused call - expected 0/0/0; the guard ran AFTER a write instead of before every write', n_strat, n_sv, n_dl;
+  END IF;
+  RAISE NOTICE 'Part 6m OK: missing date raised 22023 (%) and committed nothing.', err_msg;
+
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  RAISE NOTICE 'Part 6 (negatives) OK: 6a-6h and 6j-6m each raised 22023 before any write (0/0/0 across all three tables).';
+END $$;
+
+ROLLBACK;
+
+-- ==========================================================================
+-- Part 6i — THE ANTI-VACUITY COUNTERPART: a CONFORMING 2-row daily_returns
+--           payload SUCCEEDS and persists exactly what was submitted.
+--
+--           Deliberately NOT wrapped in a handler (Part 4's rule): a
+--           regression must surface as the raw SQLSTATE under ON_ERROR_STOP=1.
+--           Without this sub-Part a body whose guards refuse EVERYTHING would
+--           pass all of Part 6 perfectly — twelve negatives are twelve pieces
+--           of evidence for a deny-all function.
+--
+--           The two values are 9.9 and -9.9: just INSIDE both ends of the
+--           +/-10 bound. Paired with 6j (10.5 refused) and 6l (-Infinity
+--           refused) they pin the bound at exactly +/-10 from both sides.
+-- ==========================================================================
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+DO $$
+DECLARE
+  probe_user    UUID := gen_random_uuid();
+  probe_session UUID := gen_random_uuid();
+  payload       JSONB := '[{"date":"2026-02-01","daily_return":9.9},
+                           {"date":"2026-02-02","daily_return":-9.9}]'::jsonb;
+  v_result      UUID;
+  n_dl          INT;
+  v_spot_hi     DOUBLE PRECISION;
+  v_spot_lo     DOUBLE PRECISION;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (probe_user, '00000000-0000-0000-0000-000000000000',
+          'test-fold-conform-' || probe_user || '@quantalyze.test', now(), now());
+
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', probe_user::text, 'role', 'authenticated')::text, true);
+
+  v_result := public.finalize_csv_strategy_with_returns(
+    probe_user, probe_session, 'daily_returns', 'fold conforming probe 6i', payload);
+
+  IF v_result IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6i): a conforming 2-row daily_returns finalize returned NULL';
+  END IF;
+
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns WHERE strategy_id = v_result;
+  IF n_dl <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6i): % dailies persisted for a conforming 2-row submission - expected 2. A guard is refusing or dropping legitimate rows, which means Part 6''s twelve negatives are evidence for a function that refuses everything rather than for guards that discriminate', n_dl;
+  END IF;
+
+  -- Economic oracle: read the values back from the table, never re-derived
+  -- through the fold's own expressions.
+  SELECT daily_return INTO v_spot_hi FROM public.csv_daily_returns
+   WHERE strategy_id = v_result AND date = DATE '2026-02-01';
+  SELECT daily_return INTO v_spot_lo FROM public.csv_daily_returns
+   WHERE strategy_id = v_result AND date = DATE '2026-02-02';
+  IF v_spot_hi IS DISTINCT FROM 9.9 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6i): daily_return for 2026-02-01 is % - expected 9.9 exactly as submitted; a transformed value here means the fold is EDITING the user''s track record, which is money-data fabrication', v_spot_hi;
+  END IF;
+  IF v_spot_lo IS DISTINCT FROM -9.9 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6i): daily_return for 2026-02-02 is % - expected -9.9 exactly as submitted; the NEGATIVE in-bound value is what proves the magnitude guard admits the whole legitimate range and not just its upper half', v_spot_lo;
+  END IF;
+
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  RAISE NOTICE 'Part 6i OK: a conforming payload with 9.9 / -9.9 finalized (strategy %) and persisted both values verbatim.', v_result;
+END $$;
+
+ROLLBACK;
+
+-- ==========================================================================
+-- Part 7 — THE RE-HOMED fmt / NAME GUARDS (v1.19 review B5). These three
+--          behaviours were asserted in src/__tests__/csv-finalize-rpc.test.ts
+--          against a function that no longer exists, in cases that CI never
+--          ran. See "WHY PARTS 6 AND 7 LIVE HERE" in the header.
+-- ==========================================================================
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+DO $$
+DECLARE
+  probe_user    UUID := gen_random_uuid();
+  probe_session UUID;
+  payload       JSONB := '[{"date":"2026-02-01","daily_return":0.01}]'::jsonb;
+  v_result      UUID;
+  raised        BOOLEAN;
+  err_state     TEXT;
+  err_msg       TEXT;
+  n_strat       INT;
+  n_sv          INT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (probe_user, '00000000-0000-0000-0000-000000000000',
+          'test-fold-namefmt-' || probe_user || '@quantalyze.test', now(), now());
+
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', probe_user::text, 'role', 'authenticated')::text, true);
+
+  -- ---- Part 7a — p_fmt := 'nonsense' --------------------------------------
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'nonsense', 'fold guard probe 7a', payload);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  -- RED-UNDER: widen GUARD 4's fmt whitelist in migration 20260819151000 to
+  --            admit 'nonsense'. The call then succeeds and a caller-supplied
+  --            format the fold cannot interpret reaches the writes. STEP 4(j)
+  --            pins the NULL-explicit SHAPE of the whitelist, not its member
+  --            list, so the widened list applies clean — which is precisely
+  --            why this behavioural arm has to exist.
+  -- RED-UNDER-M: {"arm":"Part 7a","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"p_fmt NOT IN ('daily_returns','daily_nav','trades')","replace":"p_fmt NOT IN ('daily_returns','daily_nav','trades','nonsense')","occurrences":1}]}
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 7a): fmt=''nonsense'' SUCCEEDED and returned % - the fmt whitelist is gone, and the series would be interpreted downstream by whichever reader guesses first (returns vs NAV vs trades are three different economic meanings for the same numbers)', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 7a): the bogus-fmt call failed with SQLSTATE % (%) - expected 22023 from the fmt whitelist, BEFORE any write', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  IF n_strat <> 0 OR n_sv <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 7a): counts are strategies=%, verifications=% after the refused call - expected 0/0; the guard ran AFTER a write', n_strat, n_sv;
+  END IF;
+  RAISE NOTICE 'Part 7a OK: invalid fmt raised 22023 (%) and committed nothing.', err_msg;
+
+  -- ---- Part 7b — p_strategy_name := '' ------------------------------------
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', '', payload);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 7b): an EMPTY strategy name SUCCEEDED and returned % - the name guard is gone, and an unnamed strategy renders as a blank row the owner cannot identify in any list, picker or factsheet', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 7b): the empty-name call failed with SQLSTATE % (%) - expected 22023 from the name guard, BEFORE any write', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  IF n_strat <> 0 OR n_sv <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 7b): counts are strategies=%, verifications=% after the refused call - expected 0/0; the guard ran AFTER a write', n_strat, n_sv;
+  END IF;
+  RAISE NOTICE 'Part 7b OK: empty name raised 22023 (%) and committed nothing.', err_msg;
+
+  -- ---- Part 7c — p_strategy_name of 81 characters -------------------------
+  probe_session := gen_random_uuid();
+  raised := FALSE; err_state := NULL; err_msg := NULL; v_result := NULL;
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', repeat('x', 81), payload);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 7c): an 81-character strategy name SUCCEEDED and returned % - the 80-character cap is gone (or is off by one), so the DB accepts names the wizard refuses and the two limits disagree silently', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 7c): the oversize-name call failed with SQLSTATE % (%) - expected 22023 from the name-length guard, BEFORE any write', err_state, err_msg;
+  END IF;
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  IF n_strat <> 0 OR n_sv <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 7c): counts are strategies=%, verifications=% after the refused call - expected 0/0; the guard ran AFTER a write', n_strat, n_sv;
+  END IF;
+  RAISE NOTICE 'Part 7c OK: 81-character name raised 22023 (%) and committed nothing.', err_msg;
+
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  RAISE NOTICE 'Part 7 OK: the fmt / name guards re-homed from csv-finalize-rpc.test.ts now execute in CI.';
+  RAISE NOTICE 'test_csv_finalize_atomic_fold: ALL PASS (structural; atomicity oracle zero/zero/zero; private + default status; published refused; trades-empty; 5000 cap; input guards 6a-6h + 6j-6m refused before any write with the conforming 6i counterpart accepted; re-homed fmt/name guards 7a-7c).';
+END $$;
+
+ROLLBACK;

@@ -1,0 +1,2 @@
+# fixture allowlist — count-mismatch-low.green
+20260101000000_fx_a.sql	public.fx_ref	2	# consumer: the extractor self-test

@@ -12,8 +12,10 @@ For deploy semantics and the CI/prod invariants, see the repo
 |---------|------|
 | [deploy-rollback.md](./deploy-rollback.md) | A deploy regressed prod — roll back Vercel / Railway / schema |
 | [railway-worker.md](./railway-worker.md) | Analytics worker is stale, wedged, or stuck on old code (skipped-deploy gotcha) |
+| [shared-test-db-mutex.md](./shared-test-db-mutex.md) | A `main-ci-cancelled` issue was filed, main CI concluded cancelled, or the TEST-DB CI lock is stuck (manual unlock) |
 | [migration-failure.md](./migration-failure.md) | A migration broke prod, the apply workflow failed, or `schema_migrations` drifted |
 | [sentry-triage.md](./sentry-triage.md) | Investigating a Sentry alert/error (EU region, deploy-lag, read-only MCP) |
+| [seam-breaker.md](./seam-breaker.md) | Vercel→Railway seam circuit breaker is open, or seam calls are failing (NOT the compute-queue 429 cooldown) |
 
 ## Subsystems
 
@@ -25,6 +27,8 @@ For deploy semantics and the CI/prod invariants, see the repo
 | [metrics-nan-policy.md](./metrics-nan-policy.md) | Metrics NaN handling policy |
 | [posthog-wizard-funnel.md](./posthog-wizard-funnel.md) | PostHog wizard funnel dashboard |
 | [vercel-cron-upgrade.md](./vercel-cron-upgrade.md) | Vercel cron scheduler |
+| [mt5-go-live.md](./mt5-go-live.md) | MT5 prod gateway stand-up + real-broker soak + flag flip (private-net-only RPyC, GATE-CHECK, rollback) |
+| [prod-prober-cadence-go-live.md](./prod-prober-cadence-go-live.md) | Registering the PROD-side prod-prober cadence observer (`pg_cron`, Phase 164.1.1 PROBERCADENCE) |
 
 ## Security & compliance
 

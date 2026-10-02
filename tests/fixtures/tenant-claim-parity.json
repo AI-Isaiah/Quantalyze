@@ -1,0 +1,64 @@
+{
+  "_comment": [
+    "Phase 140.2-09 / TS-04 — the committed case table for the X-Tenant-Claim wire format.",
+    "",
+    "WHY A FILE AND NOT A LITERAL IN EACH SUITE. The TypeScript mint",
+    "(src/lib/tenant-claim.ts) and the Python verifier",
+    "(analytics-service/services/rate_limit.py:verify_tenant_claim) cannot import each",
+    "other. A copy-pasted literal in each suite proves only that someone once copied",
+    "correctly; a committed fixture binds both readers to the SAME BYTES, so a drift on",
+    "either side reddens the other's suite. This is the same shape as",
+    "analytics-service/tests/fixtures/process_key_onboard_contract.json, which",
+    "tests/lib/process-key-onboard-contract-parity.test.ts and",
+    "analytics-service/tests/test_process_key_onboard_contract.py already share.",
+    "",
+    "PROVENANCE OF THE `claim` VALUES. Each was computed ONCE by a standalone",
+    "`node -e` process calling node:crypto directly — never by importing the module",
+    "under test. An oracle that asks the code under test what it expects cannot fail.",
+    "",
+    "WIRE FORMAT: `<payload>.<exp>.<hex-hmac-sha256>`, MAC over `\"<payload>.<exp>\"`,",
+    "key = INTERNAL_API_TOKEN. `exp` = floor(now/1000) + ttl_seconds. The Python parse",
+    "is `raw.rsplit(\".\", 2)`, so the payload must contain no dot (the TS mint refuses",
+    "one) and the claim must be <= 512 characters.",
+    "",
+    "⚠️ OWED: a pytest reader bound to THIS file. Phase 146 owns the limiter surface;",
+    "see 140.1-TS-OBLIGATIONS.md TS-36. Until that lands the cross-language gate rests",
+    "on the single hand-copied literal 140.1 pinned in",
+    "analytics-service/tests/test_process_key.py, not on this table."
+  ],
+  "ttl_seconds": 300,
+  "cases": [
+    {
+      "name": "tenant-a",
+      "why": "the A half of the cross-tenant isolation pair — same clock, same secret, different payload",
+      "payload": "tenant-a",
+      "secret": "internal-test-token",
+      "exp": 2524608300,
+      "claim": "tenant-a.2524608300.ec1e8a76925d327d6904d55c880a38640d100c71b924ce49777b5d44c9ebad23"
+    },
+    {
+      "name": "tenant-b",
+      "why": "the B half — its MAC must differ from tenant-a's, which is what makes the buckets separate",
+      "payload": "tenant-b",
+      "secret": "internal-test-token",
+      "exp": 2524608300,
+      "claim": "tenant-b.2524608300.2b3ec38c63c8a0542ef8ee3743486530cb224aaafdd5d7a6182d070e669ba4f4"
+    },
+    {
+      "name": "uuid-payload",
+      "why": "the production shape: a Supabase user.id is a dot-free UUID",
+      "payload": "11111111-2222-3333-4444-555555555555",
+      "secret": "internal-test-token",
+      "exp": 1900000000,
+      "claim": "11111111-2222-3333-4444-555555555555.1900000000.b6c8871017dcf8dd2410083e6f00536bb251f1fd7fe7880072c875c4ddd323b5"
+    },
+    {
+      "name": "public-anonymous-different-secret",
+      "why": "the teaser bucket payload, and a DIFFERENT secret — pins that the key is an input, not a constant",
+      "payload": "public",
+      "secret": "another-secret",
+      "exp": 1800000000,
+      "claim": "public.1800000000.449444a51bf7c226e9792f63366f944aab1b56ca34f94f36756d16021b12fb8c"
+    }
+  ]
+}

@@ -39,6 +39,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from tests.limiter_stub import evict_module, patch_shared_limiter
 
 # The EXACT string the TS classifyKeyValidationError matches on
 # (lower.includes("authentication failed")) — byte-identical to
@@ -71,17 +72,24 @@ def exchange_router(monkeypatch):
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
 
+    # PYAPI-03: the routers no longer CONSTRUCT a Limiter, they import the
+    # singleton from services.rate_limit — so rebinding `slowapi.Limiter` above
+    # no longer reaches them and the REAL slowapi wrapper would reject the
+    # MagicMock request this suite passes. Stub the INSTANCE too; must run
+    # before the router is re-imported below. See tests/limiter_stub.py.
+    patch_shared_limiter(monkeypatch)
+
     # F2 (Phase 122): these tests exercise the ENABLED sfox validation path, so
     # pin the server go-live flag ON. The disabled default is covered by the
     # dedicated fail-closed test below (which delenv's it after this setup).
     monkeypatch.setenv("SFOX_ENABLED", "true")
 
-    sys.modules.pop("routers.exchange", None)
+    evict_module("routers.exchange")
     from routers import exchange as exchange_router
 
     yield exchange_router
 
-    sys.modules.pop("routers.exchange", None)
+    evict_module("routers.exchange")
 
 
 def _make_client(get_balances_side_effect=None):
@@ -256,7 +264,12 @@ async def test_sfox_rate_limit_maps_to_rate_limited_detail_not_credentials(excha
     with pytest.raises(HTTPException) as ei:
         await _call(router, _make_req(router))
 
-    assert ei.value.status_code == 400
+    # 424 = CALLER'S EXCHANGE (STATUS_CONTRACT.md §5), remapped from 400 by
+    # 140.3-06 at all seven VenueTransientHTTPException sites (C1 here). The old
+    # 400 said the CALLER'S REQUEST was malformed, which is the same lie in the
+    # status line that this test's `detail` assertions exist to kill in the body:
+    # a venue throttle is not a bad key and not a bad request.
+    assert ei.value.status_code == 424
     assert ei.value.detail == RATE_LIMITED_DETAIL
     # honesty anti-assertions: never a 500, never "check your credentials".
     assert ei.value.status_code != 500
@@ -285,7 +298,8 @@ async def test_sfox_transient_upstream_maps_to_network_detail_not_credentials(
     with pytest.raises(HTTPException) as ei:
         await _call(router, _make_req(router))
 
-    assert ei.value.status_code == 400
+    # 424 = CALLER'S EXCHANGE (C2; see the 429 case above for the full rationale).
+    assert ei.value.status_code == 424
     assert ei.value.detail == NETWORK_ERROR_DETAIL
     # honesty anti-assertions: never a 500, never blame the credentials.
     assert ei.value.status_code != 500
@@ -418,7 +432,9 @@ async def test_ccxt_exchange_still_uses_create_exchange_path(exchange_router):
         router, _make_req(router, exchange="binance", api_key="k", api_secret="s")
     )
 
-    assert result == {"valid": True, "read_only": True}
+    # Phase 167.1.2 (D-01): the ccxt success path also carries the venue
+    # account id; None here because the stubbed verdict carries none.
+    assert result == {"valid": True, "read_only": True, "venue_account_id": None}
     create_exchange_spy.assert_called_once()
     assert create_exchange_spy.call_args.args[0] == "binance"
     sfox_factory.assert_not_called()

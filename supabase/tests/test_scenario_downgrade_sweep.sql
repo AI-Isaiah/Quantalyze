@@ -47,6 +47,26 @@
 -- Usage:
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_scenario_downgrade_sweep.sql
+--
+-- ⭐ RED-UNDER ANNOTATIONS (Phase 164.4). Each assertion below carries a prose
+-- `RED-UNDER:` naming the smallest change that makes it fail, and a
+-- machine-readable `RED-UNDER-M:` twin the mutation runner applies on a
+-- throwaway pg-lane cluster to PROVE it reds on its own arm, then restores
+-- GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line below declares
+-- what the lane applies before this gate.
+-- ⚠️ WHY EVERY TWIN HERE TARGETS THIS FILE AND NOT A MIGRATION — read this
+-- before "fixing" it. The artifact under test is a SWEEP SCRIPT,
+-- scripts/sweeps/f4-memberkeyids-restamp.sql, and this file does not execute
+-- it: it carries the discriminator and the jsonb_set transform COPIED VERBATIM
+-- (header, :5-10). So the statements a mutation must reach are the copies
+-- BELOW, and every twin edits one of them. None edits an assertion, a failure
+-- branch or an identity — GRAMMAR rules 3a/3b still bind, and the gate file is
+-- an explicitly legal mutation target (run.mjs:1806).
+-- ⚠️ FINDING, booked not fixed here: nothing MECHANICALLY enforces that those
+-- copies still equal the sweep script's bytes; the header asserts it in prose.
+-- That is a two-registries drift class of the kind this repo deletes elsewhere.
+-- Booked to TODOS as [REDUNDER-SWEEPCOPY].
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","supabase/migrations/20260522111839_csv_daily_returns.sql","supabase/migrations/20260621120000_scenarios_table_and_rls.sql","supabase/migrations/20260624120000_csv_daily_returns_per_key_axis.sql"]}
 
 -- --------------------------------------------------------------------------
 -- Defensive pre-clean. ON DELETE CASCADE chains auth.users -> profiles ->
@@ -233,6 +253,13 @@ BEGIN
   RAISE NOTICE 'Seed OK: GT alloc=% (downgraded=%), GF alloc=% (downgraded=%)',
     uid_gt, scen_gt_id, uid_gf, scen_gf_id;
 
+  -- RED-UNDER: raise the discriminator's schema_version floor — `>= 4` becomes
+  --            `>= 5` in THIS assertion's copy of the sweep DETECT clause. The
+  --            sweep would then see none of the downgraded rows it exists to
+  --            find, and the whole file would be about an empty set.
+  --            (Scoped to this copy: the post-condition's identical clause is a
+  --            separate arm and is left alone.)
+  -- RED-UNDER-M: {"arm":"Assertion 1","apply":[{"kind":"edit","file":"supabase/tests/test_scenario_downgrade_sweep.sql","find":"  -- ----- ASSERTION 1: discriminator flags EXACTLY the two downgraded rows ----\n  -- (copied verbatim from the sweep DETECT section, scoped to the seeded set)\n  SELECT count(*) INTO detect_cnt\n  FROM scenarios\n  WHERE schema_version >= 4\n","replace":"  -- ----- ASSERTION 1: discriminator flags EXACTLY the two downgraded rows ----\n  -- (copied verbatim from the sweep DETECT section, scoped to the seeded set)\n  SELECT count(*) INTO detect_cnt\n  FROM scenarios\n  WHERE schema_version >= 5\n","occurrences":1}]}
   -- ----- ASSERTION 1: discriminator flags EXACTLY the two downgraded rows ----
   -- (copied verbatim from the sweep DETECT section, scoped to the seeded set)
   SELECT count(*) INTO detect_cnt
@@ -325,6 +352,14 @@ BEGIN
   WHERE s.schema_version >= 4
     AND NOT (s.draft ? 'memberKeyIds');
 
+  -- RED-UNDER: drop the revoked/disconnected exclusion from the RESTAMP's
+  --            eligible-key predicate — delete `AND k.sync_status IS DISTINCT
+  --            FROM 'revoked'` and `AND k.disconnected_at IS NULL` from the
+  --            transform above. GT's revoked and disconnected keys BOTH carry a
+  --            series, so the sweep would stamp four ids where the runtime's own
+  --            eligible predicate yields two. This arm re-derives the expected
+  --            set from the FULL predicate, which is what catches it.
+  -- RED-UNDER-M: {"arm":"Assertion 2","apply":[{"kind":"edit","file":"supabase/tests/test_scenario_downgrade_sweep.sql","find":"        FROM api_keys k\n        WHERE k.user_id = s.allocator_id\n          AND k.is_active\n          AND k.sync_status IS DISTINCT FROM 'revoked'\n          AND k.disconnected_at IS NULL\n","replace":"        FROM api_keys k\n        WHERE k.user_id = s.allocator_id\n          AND k.is_active\n","occurrences":1}]}
   -- ----- ASSERTION 2: gate-true downgraded row stamped with eligible ids -----
   -- Expected = the sorted JSONB array of GT's eligible key ids (revoked +
   -- disconnected EXCLUDED). Recompute independently via the eligible predicate.
@@ -392,6 +427,14 @@ BEGIN
   END IF;
   RAISE NOTICE 'Assertion 2d OK: stale-series-only key (>730d) treated as no-series (stamped []).';
 
+  -- RED-UNDER: delete `AND NOT (s.draft ? 'memberKeyIds')` from the RESTAMP
+  --            UPDATE's WHERE (the 2-space copy above, not assertion 4's). The
+  --            sweep then re-derives memberKeyIds for EVERY v4 row, including
+  --            the two genuine ones a user saved deliberately — the blank-save
+  --            row's `[]` is overwritten with GT's two eligible ids. Assertions 2
+  --            and 2b-2d still pass: the downgraded rows get the same values as
+  --            before, which is exactly why byte-identity is a separate arm.
+  -- RED-UNDER-M: {"arm":"Assertion 3","apply":[{"kind":"edit","file":"supabase/tests/test_scenario_downgrade_sweep.sql","find":"  WHERE s.schema_version >= 4\n    AND NOT (s.draft ? 'memberKeyIds');","replace":"  WHERE s.schema_version >= 4;","occurrences":1}]}
   -- ----- ASSERTION 3: genuine + pre-v4 rows are byte-identical ---------------
   IF (SELECT draft FROM scenarios WHERE id = scen_blank_id) IS DISTINCT FROM blank_before THEN
     RAISE EXCEPTION 'TEST FAILED (Assertion 3): blank-save genuine row (memberKeyIds:[]) was mutated by the sweep';
@@ -404,6 +447,16 @@ BEGIN
   END IF;
   RAISE NOTICE 'Assertion 3 OK: genuine-v4 (incl. blank-save) and pre-v4 rows untouched.';
 
+  -- RED-UNDER: make the SECOND pass both unguarded and differently-derived —
+  --            delete `AND NOT (s.draft ? 'memberKeyIds')` from its WHERE AND
+  --            the revoked/disconnected exclusion from its eligible predicate.
+  --            ⚠️ TWO steps because this arm is BLIND to either alone: without
+  --            the guard the re-run recomputes the SAME value (a no-op it cannot
+  --            see), and with the guard a drifted predicate matches no row at
+  --            all. Non-idempotence needs a second pass that both runs and
+  --            disagrees — that pair is the drift, not two separate ones.
+  --            The FIRST pass is untouched, so assertions 1-3 stay green.
+  -- RED-UNDER-M: {"arm":"Assertion 4","apply":[{"kind":"edit","file":"supabase/tests/test_scenario_downgrade_sweep.sql","find":"    WHERE s.schema_version >= 4\n      AND NOT (s.draft ? 'memberKeyIds');","replace":"    WHERE s.schema_version >= 4;","occurrences":1},{"kind":"edit","file":"supabase/tests/test_scenario_downgrade_sweep.sql","find":"          FROM api_keys k\n          WHERE k.user_id = s.allocator_id\n            AND k.is_active\n            AND k.sync_status IS DISTINCT FROM 'revoked'\n            AND k.disconnected_at IS NULL\n","replace":"          FROM api_keys k\n          WHERE k.user_id = s.allocator_id\n            AND k.is_active\n","occurrences":1}]}
   -- ----- ASSERTION 4: idempotency — a second run is a no-op -----------------
   -- After the first sweep both downgraded rows carry the key, so the
   -- discriminator matches nothing; capture the post-run drafts, re-run, compare.
@@ -460,6 +513,17 @@ BEGIN
   END;
   RAISE NOTICE 'Assertion 4 OK: re-running the sweep is a no-op (idempotent).';
 
+  -- RED-UNDER: lower the post-condition's own schema_version floor — `>= 4`
+  --            becomes `>= 3` in THIS copy of the discriminator. The pre-v4 row
+  --            (schema_version 3, no memberKeyIds) is then counted as unswept
+  --            residue and the sweep looks incomplete when it is not.
+  --            ⚠️ This is the ONLY mutation that reaches this arm FIRST, and the
+  --            reason is worth stating: every route to a genuinely non-zero
+  --            residue count — a downgraded row left unstamped, a genuine row
+  --            losing its key — is caught by assertion 2/2b-2d or 3 several
+  --            statements earlier. The post-condition is defence in depth over
+  --            those arms, so what it uniquely owns is its own floor.
+  -- RED-UNDER-M: {"arm":"post-condition","apply":[{"kind":"edit","file":"supabase/tests/test_scenario_downgrade_sweep.sql","find":"  -- ----- POST-CONDITION: zero downgraded rows remain in the seeded set -------\n  SELECT count(*) INTO detect_cnt\n  FROM scenarios\n  WHERE schema_version >= 4\n","replace":"  -- ----- POST-CONDITION: zero downgraded rows remain in the seeded set -------\n  SELECT count(*) INTO detect_cnt\n  FROM scenarios\n  WHERE schema_version >= 3\n","occurrences":1}]}
   -- ----- POST-CONDITION: zero downgraded rows remain in the seeded set -------
   SELECT count(*) INTO detect_cnt
   FROM scenarios

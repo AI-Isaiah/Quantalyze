@@ -76,6 +76,17 @@ export interface ScenarioComparePanelProps {
     perKeyReturnsByApiKeyId?: Record<string, DailyPoint[]>;
     eligibleApiKeyIds?: string[];
     perKeyDailiesGateSatisfied?: boolean;
+    /**
+     * Phase 151 AUM-04 / review WR-07 — the SPLIT book gate and the ids the
+     * composer's engine actually blends. The two membership seams below derive
+     * from these, so compare and the composer name the same constituent set: on
+     * the role-BLIND `eligibleApiKeyIds` the live-book leg would blend the
+     * owner's MANAGER-side keys the composer excludes, and under a partial book
+     * the all-or-nothing flag would derive `[]` (an added-only column) for a
+     * book the composer projects per-key.
+     */
+    bookEntryGateSatisfied?: boolean;
+    contributingApiKeyIds?: string[];
   };
 }
 
@@ -218,6 +229,11 @@ function deriveCompareInputs(
     addedStrategyMetadataLookup,
     perKeyReturnsByApiKeyId: payload.perKeyReturnsByApiKeyId,
     eligibleApiKeyIds: payload.eligibleApiKeyIds,
+    // SP-W2 — the ROLE-AWARE basis the compute-time membership intersection
+    // uses, so a saved draft's persisted members are narrowed to what the
+    // composer's engine actually blends. Without it a pre-151 book draft made
+    // this panel blend the owner's manager-side keys the composer excludes.
+    contributingApiKeyIds: payload.contributingApiKeyIds,
     equityByApiKeyId,
     perKeyDailiesGateSatisfied: payload.perKeyDailiesGateSatisfied,
   };
@@ -289,9 +305,13 @@ export function ScenarioComparePanel({
           draft.memberKeyIds === undefined
             ? setMemberKeyIds(
                 draft,
+                // 151 review WR-07 — the SAME two signals the composer derives
+                // from (`ScenarioComposer.openSavedScenario`), so an underived
+                // column here and the same draft reopened in the composer can
+                // never resolve to different memberships.
                 deriveMembershipFromGate(
-                  payload.perKeyDailiesGateSatisfied ?? false,
-                  payload.eligibleApiKeyIds ?? [],
+                  payload.bookEntryGateSatisfied ?? false,
+                  payload.contributingApiKeyIds ?? [],
                 ),
               )
             : draft;
@@ -321,9 +341,13 @@ export function ScenarioComparePanel({
     if (!includeLiveBook) return null;
     try {
       const metrics = computeMetricsForDraft(
+        // 151 review WR-07 — the live-book leg is the composer's book-mode
+        // projection, so it is stamped with what that engine blends: the
+        // CONTRIBUTING keys under the SPLIT gate, never the role-blind eligible
+        // set (which re-admits manager-side keys the composer excludes).
         buildLiveBookDraft(
-          payload.perKeyDailiesGateSatisfied ?? false,
-          payload.eligibleApiKeyIds ?? [],
+          payload.bookEntryGateSatisfied ?? false,
+          payload.contributingApiKeyIds ?? [],
         ),
         liveInputs,
         { liveBook: true },

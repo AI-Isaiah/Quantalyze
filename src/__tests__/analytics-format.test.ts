@@ -12,6 +12,7 @@ const SAMPLE_ANALYTICS: StrategyAnalytics = {
   id: "a-1",
   strategy_id: "s-1",
   computed_at: "2026-04-01T00:00:00Z",
+  computing_started_at: null,
   computation_status: "complete",
   computation_error: null,
   benchmark: "BTC",

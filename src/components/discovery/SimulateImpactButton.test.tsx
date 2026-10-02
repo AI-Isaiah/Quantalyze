@@ -37,9 +37,14 @@ describe("<SimulateImpactButton>", () => {
   it("opens the impact panel when clicked", async () => {
     // Prevent the panel's fetch from actually firing — we just need to see
     // the dialog mount.
-    globalThis.fetch = vi.fn(
-      () => new Promise(() => {}),
-    ) as unknown as typeof fetch;
+    // Via stubGlobal, not `globalThis.fetch = …`: a direct assignment is
+    // invisible to `unstubGlobals: true` (vitest.config.ts), so this
+    // never-resolving mock would outlive the file and hang the next file in
+    // the worker that fetches.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})) as unknown as typeof fetch,
+    );
 
     render(
       <SimulateImpactButton
@@ -67,9 +72,14 @@ describe("<SimulateImpactButton>", () => {
   });
 
   it("does not open the panel when disabled", () => {
-    globalThis.fetch = vi.fn(
-      () => new Promise(() => {}),
-    ) as unknown as typeof fetch;
+    // Via stubGlobal, not `globalThis.fetch = …`: a direct assignment is
+    // invisible to `unstubGlobals: true` (vitest.config.ts), so this
+    // never-resolving mock would outlive the file and hang the next file in
+    // the worker that fetches.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})) as unknown as typeof fetch,
+    );
 
     render(
       <SimulateImpactButton

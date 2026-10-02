@@ -876,3 +876,51 @@ class TestPi07CronLosingRacerInFlightBucket:
         assert pr["failed"] == 0
         assert pr["skipped"] == 0
         assert pr["failures"] == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 166.1 round-1 WR-03 / SFH MEDIUM-1 — the book-level average
+# correlation states how many pairs it covers
+# ---------------------------------------------------------------------------
+
+class TestAvgPairwiseCorrelationPairCount:
+    """C1 masks a leg that does not disperse, and the average skips its pairs,
+    so the KPI labelled as the whole book is computed over a subset. The
+    router must record pairs used and pairs total in data_quality beside it."""
+
+    @staticmethod
+    async def _compute(returns: list[list[dict]]) -> dict:
+        ids = [f"s{i + 1}" for i in range(len(returns))]
+        ps = [
+            {"strategy_id": sid, "current_weight": 1.0 / len(ids),
+             "strategies": {"id": sid, "name": sid.upper()}}
+            for sid in ids
+        ]
+        sa_rows = [
+            {"strategy_id": sid, "returns_series": r, "equity_curve": _equity_records(r),
+             "total_aum": 100.0}
+            for sid, r in zip(ids, returns)
+        ]
+        sb, _ = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa_rows)
+
+        async def _fake_benchmark(symbol):
+            return None, True
+        with patch("routers.portfolio.get_supabase", return_value=sb), \
+             patch("routers.portfolio.get_benchmark_returns", side_effect=_fake_benchmark):
+            return await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+
+    @pytest.mark.asyncio
+    async def test_a_flat_leg_is_counted_out_of_the_average(self):
+        flat = _returns_records(base=0.0, vol=0.0, seed=3)
+        result = await self._compute([_returns_records(seed=1), _returns_records(seed=2), flat])
+        dq = result["data_quality"]
+        assert dq["avg_pairwise_correlation_pairs_used"] == 1
+        assert dq["avg_pairwise_correlation_pairs_total"] == 3
+        assert result["avg_pairwise_correlation"] is not None
+
+    @pytest.mark.asyncio
+    async def test_a_dispersing_book_uses_every_pair(self):
+        result = await self._compute([_returns_records(seed=1), _returns_records(seed=2)])
+        dq = result["data_quality"]
+        assert dq["avg_pairwise_correlation_pairs_used"] == 1
+        assert dq["avg_pairwise_correlation_pairs_total"] == 1

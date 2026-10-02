@@ -31,6 +31,7 @@ hits the exchange.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -38,15 +39,79 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import sentry_sdk
+from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from services.db import get_supabase, one
-from services.encryption import decrypt_credentials, get_kek
+from services.encryption import decrypt_credentials, encrypt_credentials, get_kek
+# PYAPI-05 — the status-attributability contract. Every deliberate 5xx/424 in
+# this file goes through service_error. Contract: docs/STATUS_CONTRACT.md.
+from services.error_contract import service_error
 from services.exchange import aclose_exchange, create_exchange
 from services.key_permissions import detect_permissions
+# D-04 (164.5.3 / MT5CREDS) — the SAME live-broker probe /validate-key's MT5
+# branch uses, reused verbatim rather than re-implemented. exchange.py imports
+# nothing from routers.*, so this is not a cycle.
+from routers.exchange import _validate_mt5_key
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 logger = logging.getLogger("quantalyze.analytics")
+
+
+# ---------------------------------------------------------------------------
+# KEK-misconfiguration operator signal (PYAPI-06 site 4)
+# ---------------------------------------------------------------------------
+
+# A missing/rotated KEK leaves NO operator signal today: internal.py's arm logged
+# nothing at all, and the response was a 4xx-shaped "encryption not configured"
+# that nobody pages on. It gains one — but BOUNDED. A stale KEK fires on EVERY
+# permission probe, and the dashboard renders five badges per page, so an
+# unbounded capture turns the signal into a flood that gets muted, which is
+# indistinguishable from having no signal.
+_KEK_ALERT_WINDOW_S = 300.0
+_last_kek_alert_at: float | None = None
+
+
+def _reset_kek_alert() -> None:
+    """Test-only helper to clear the capture window between cases."""
+    global _last_kek_alert_at
+    _last_kek_alert_at = None
+
+
+def _alert_kek_unavailable() -> None:
+    """Emit at most one Sentry capture per ``_KEK_ALERT_WINDOW_S`` for a KEK
+    misconfiguration, plus a structured log on EVERY occurrence.
+
+    Shape cloned from ``services/audit.py:428-467``: ``set_tag`` before the
+    capture so events are greppable per-cause, and the whole capture wrapped in
+    ``try/except: pass`` because a Sentry transport failure (DSN misconfigured,
+    network down before the SDK connected) must never mask or crash the path it
+    is reporting on.
+
+    Neither the tag nor the message may carry any substring of any secret — an
+    alert that leaks the credential it is complaining about is worse than the
+    outage it reports. Nothing here reads the KEK value or the caller's token.
+    """
+    global _last_kek_alert_at
+    # Logged every time: the RATE of rejection is itself the operator's evidence.
+    logger.error(
+        "KEK unavailable — /internal permission probe rejected; "
+        "operator action required (no retry can clear this)"
+    )
+    now = time.monotonic()
+    if _last_kek_alert_at is not None and (now - _last_kek_alert_at) < _KEK_ALERT_WINDOW_S:
+        return
+    _last_kek_alert_at = now
+    try:
+        sentry_sdk.set_tag("kek_unavailable", "true")
+        sentry_sdk.capture_message(
+            "KEK unavailable: /internal permission probe cannot decrypt credentials",
+            level="error",
+        )
+    except Exception:
+        pass  # never mask the original failure via a Sentry failure
 
 
 # ---------------------------------------------------------------------------
@@ -146,22 +211,56 @@ async def get_key_permissions(
          Best-effort — a write failure here logs and continues; we'd rather
          answer the call than fail closed on an audit hiccup.
       4. Load + decrypt the api_keys row.
-      5. Open a CCXT exchange + call ``detect_permissions`` (TTL-cached).
+      5. Branch on the venue. ``sfox`` and ``mt5`` are NOT ccxt exchanges —
+         ``create_exchange`` raises ValueError for both — so each has its own arm
+         ABOVE the ccxt path, returning the honest STRUCTURAL read-only triple
+         (neither adapter exposes a trade surface, so there is no scope to
+         probe). Everything else opens a CCXT exchange and calls
+         ``detect_permissions`` (TTL-cached).
       6. Return the triple plus a ``detected_at`` ISO timestamp.
 
-    Errors:
+    Errors (PYAPI-05 — see ``docs/STATUS_CONTRACT.md``; the status line alone is
+    decidable, and only a genuine service fault counts against our health):
       403 — bad/missing X-Internal-Token, or INTERNAL_API_TOKEN unconfigured.
       404 — key_id not found.
+      422 — the caller's own api_keys row has no exchange set (S-10).
       429 — per-key rate limit hit.
-      502 — exchange returned an error during the live probe.
+      424 — the caller's EXCHANGE did not answer the permission probe (S-12).
+            Breaker-inert; `dependency` names the venue.
+      500 — KEK unavailable (S-08), the stored key is undecryptable (S-09), or
+            OUR adapter construction failed (S-11 — `create_exchange` does no
+            network I/O, so its non-ValueError escapes are ours, not the
+            venue's; PYAPIFIX-03). All are `retryable:false`: permanent until
+            an operator or a deploy acts, and none names a venue.
     """
     _verify_internal_token(request)
 
     if not _consume_rate_limit(key_id):
-        raise HTTPException(
-            status_code=429,
+        # PYAPIFIX2-03. This throttle answers the service's OWN envelope: the
+        # 429 arm of `error_contract._validate` existed but had zero call sites
+        # — unadopted, not unreachable — so a throttle carried no machine
+        # `code` and read, to a discriminator keying on `body.detail.code`, like
+        # any other 4xx. It is the one CALLER fault an identical retry clears.
+        #
+        # `code` is REUSED from the app-global RateLimitExceeded handler's
+        # vocabulary (`main.py`'s 429 JSONResponse), never re-minted — two
+        # synonyms for one condition is the defect this contract exists to stop.
+        # The explicit `headers={"Retry-After": ...}` kwarg is REPLACED, not
+        # dropped: `service_error` sets the header itself from `retry_after` via
+        # `_retry_after_headers`. `dependency` is omitted (a 429 is ours to
+        # impose, so naming one would mint a breaker key for our own throttle).
+        #
+        # ⚠️ This makes a THIRD 429 body shape coexist in the service: the flat
+        # `main.py` handler body, this nested envelope, and the bare scalar
+        # `{"detail": "<string>"}` still raised at match.py / simulator.py /
+        # portfolio.py. Deliberate. Picking the winner belongs to TS-23's owner
+        # (140.2 / 146) when it migrates those two — not here.
+        raise service_error(
+            429,
+            "RATE_LIMITED",
+            retryable=True,
+            retry_after=int(_RATE_LIMIT_WINDOW_S),
             detail="Too many permission probes for this key. Try again in a moment.",
-            headers={"Retry-After": str(int(_RATE_LIMIT_WINDOW_S))},
         )
 
     supabase = get_supabase()
@@ -205,17 +304,47 @@ async def get_key_permissions(
     try:
         kek = get_kek()
     except RuntimeError:
-        raise HTTPException(status_code=503, detail="Encryption not configured")
+        # S-08 / PYAPI-05 + PYAPI-06 — the same missing/rotated KEK as S-07 on
+        # /api/encrypt-key, on the endpoint the findings doc never listed. It is
+        # permanent until an operator acts, so R-1 makes it 500 retryable:false
+        # and it can never feed the breaker.
+        _alert_kek_unavailable()
+        raise service_error(
+            500,
+            "KEK_UNAVAILABLE",
+            dependency="kek",
+            retryable=False,
+            detail="Credential encryption is not configured. This needs an operator, not a retry.",
+        )
 
     try:
         api_key, api_secret, passphrase = decrypt_credentials(key_data, kek)
     except Exception:
+        # S-09 / PYAPI-05 — A-02. The status was already right; what was missing
+        # is the machine code and the explicit retryable:false. A key that cannot
+        # be decrypted will never decrypt on an identical retry, so counting it
+        # guarantees a self-sustaining outage.
         logger.error("Failed to decrypt API key %s for permission probe", key_id)
-        raise HTTPException(status_code=500, detail="Failed to decrypt credentials")
+        raise service_error(
+            500,
+            "KEY_UNDECRYPTABLE",
+            dependency="kek",
+            retryable=False,
+            detail="This stored key could not be decrypted. It must be reconnected.",
+        )
 
     exchange_name = key_data.get("exchange")
     if not exchange_name:
-        raise HTTPException(status_code=502, detail="API key has no exchange set")
+        # S-10 / PYAPI-05 — the clearest mis-attribution in the file. A NULL
+        # column on the CALLER'S OWN row answered 502, i.e. "our upstream is
+        # broken", which is false under any reading and counted against our
+        # health. It is caller data: CALLER class, 422.
+        raise service_error(
+            422,
+            "KEY_MISSING_EXCHANGE",
+            retryable=False,
+            detail="This API key has no exchange set and cannot be probed.",
+        )
 
     # SFOX-05 (F2): sfox is NOT a ccxt exchange — create_exchange RAISES ValueError
     # for it, which the ccxt path below maps to a misleading 400/502 at the
@@ -318,12 +447,86 @@ async def get_key_permissions(
             if sfox_client is not None:
                 await sfox_client.aclose()
 
+    # MT5-13 — mt5 is NOT a ccxt exchange either, and it had no branch here. It
+    # fell through to `create_exchange`, which raises ValueError("Unsupported
+    # exchange: mt5") -> the 400 below -> finalize-wizard renders EVERY probe
+    # failure as KEY_NETWORK_TIMEOUT ("we could not reach the exchange, try
+    # again"). So a PERMANENT unsupported-venue condition was sold to the user as
+    # a transient one, on a route that fires on EVERY submit: MT5 strategies
+    # could not be finalized at all, and the retry the copy invited could never
+    # work (measured 2026-08-04 — the founder clicked Submit five times before
+    # this was traced). Branch BEFORE create_exchange, exactly as sfox does above.
+    #
+    # Read-only is STRUCTURAL here, so there is no scope to probe:
+    #   * `Mt5Client` composes read methods + the `order_check` probe ONLY — no
+    #     trade surface, no `__getattr__` passthrough. Our code cannot trade with
+    #     this credential whatever it is. That is the same argument the sfox arm
+    #     above makes for its GET-only adapter, and it is why neither venue emits
+    #     a probed scope triple.
+    #   * On TOP of that, the stored credential was proven investor-only
+    #     BEHAVIOURALLY at connect: `routers/exchange._validate_mt5_key` runs
+    #     `order_check` and REJECTS a trade-capable (master) login, persisting
+    #     nothing. An MT5 investor password cannot be promoted to a master one —
+    #     broadening means supplying a DIFFERENT credential, which re-runs connect
+    #     and that validator.
+    # The scope-broadening threat this `force_refresh` probe exists to catch
+    # therefore has no MT5 instance, and the structural triple is the honest
+    # answer rather than a convenient one.
+    #
+    # Deliberately NO live gateway round-trip, which is where this diverges from
+    # the sfox arm's `get_balances()`: an RPyC `login` switches the ONE shared
+    # terminal onto this account (the MT5CONC-02 hazard the worker serialises
+    # behind a single gateway lock), and it would buy zero scope information
+    # because the answer is fixed by construction. Liveness is the sync path's
+    # job and fails loudly there; this endpoint answers scopes.
+    if exchange_name == "mt5":
+        return {
+            "read": True,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+            "detected_at": datetime.now(timezone.utc).isoformat(),
+        }
+
     try:
         exchange = create_exchange(exchange_name, api_key, api_secret, passphrase)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception:
-        raise HTTPException(status_code=502, detail="Failed to initialise exchange connection")
+        # S-11 / PYAPIFIX-03 (H-2) — the 424 this arm used to raise was wrong,
+        # and deliberately reversed here. `services/exchange.py` create_exchange
+        # is EXCHANGE_CLASSES.get(), a dict build, cls(config) and two attribute
+        # sets: ZERO network I/O. Nothing has been sent to the venue when this
+        # fires, so a non-ValueError escape is a TypeError / AttributeError /
+        # ImportError / OOM in OUR adapter construction — ours, always.
+        #
+        # As a 424 it was breaker-inert AND a 4xx, so an outright bug in our own
+        # code counted nowhere and paged nobody, while the body told the user
+        # their venue was down. R-1 classes it SERVICE-PERMANENT: 500,
+        # retryable:false, no Retry-After (only a deploy can clear it).
+        #
+        # No `dependency`: 140.2 keys its breaker on that field (SEAMCORE-01), so
+        # a venue name on a 500 mints a per-dependency breaker key for something
+        # that is not ours. Plan 140.1.1-01's C3 membership guard now REFUSES it
+        # at construction — this is enforced, not merely intended.
+        #
+        # Code is ADAPTER_INIT_FAILED, not EXCHANGE_INIT_FAILED: the code names
+        # OUR adapter construction. A code that names the exchange contradicts a
+        # SERVICE-PERMANENT attribution in the one field 140.2 discriminates on.
+        #
+        # logger.error, not warning: a 500 is page-worthy, and the sibling arm
+        # 18 lines below (permission detection) already uses error. The raw
+        # exception stays in the log, never in the body.
+        logger.error(
+            "Adapter init failed for key=%s exchange=%s (our fault — create_exchange does no network I/O)",
+            key_id, exchange_name,
+        )
+        raise service_error(
+            500,
+            "ADAPTER_INIT_FAILED",
+            retryable=False,
+            detail="Something went wrong on our side while opening this connection. Nothing is wrong with your key.",
+        )
 
     try:
         perms = await detect_permissions(
@@ -336,7 +539,19 @@ async def get_key_permissions(
             "Permission detection failed for key=%s exchange=%s: %s",
             key_id, exchange_name, exc,
         )
-        raise HTTPException(status_code=502, detail="Exchange permission probe failed")
+        # S-12 / PYAPI-05 — C-12's headline. Binance maintenance, a key revoked
+        # at the venue and an IP-allowlist change ALL land here, uncached, five
+        # badges per dashboard render. As a 502 that was five recorded failures
+        # and a platform-wide trip that then denied Deribit users, the optimizer,
+        # admin match and CSV finalize. As a 424 it is zero recorded failures,
+        # and the user is told which venue is not answering.
+        raise service_error(
+            424,
+            "EXCHANGE_PROBE_FAILED",
+            dependency=str(exchange_name),
+            retryable=True,
+            detail="Your exchange did not answer the permission check. This is a problem at the venue — try again shortly.",
+        )
     finally:
         try:
             await aclose_exchange(exchange)
@@ -354,3 +569,206 @@ async def get_key_permissions(
         "probe_error": bool(perms.get("probe_error", False)),
         "detected_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /internal/keys/{key_id}/rotate-secret
+# ---------------------------------------------------------------------------
+
+
+class RotateSecretRequest(BaseModel):
+    new_secret: str
+    # 164.5.3 fix-python (review finding 1, 2026-09-20) — OPTIONAL,
+    # BACKWARD-COMPATIBLE owner-scoping field. Defense-in-depth: without it, a
+    # holder of INTERNAL_API_TOKEN can use this endpoint as a rate-limited
+    # password oracle against an arbitrary key_id (an attacker-supplied
+    # candidate password, with a live broker login disclosed on success) — a
+    # materially worse primitive than the read-only sibling `get_key_permissions`.
+    # The primary control stays the session-scoped ownership check at the
+    # Next.js caller (`src/app/api/keys/[id]/rotate-secret/route.ts`); this is
+    # depth, not the control. Optional so either half can land first without a
+    # broken window: when absent, behavior is UNCHANGED (no owner filter).
+    # ⛔ CALLER CONTRACT — not wired here (a sibling owns that file): the
+    # Next.js route must be updated to pass the session `user_id` in this
+    # field for the depth to take effect.
+    user_id: str | None = None
+
+
+@router.post("/keys/{key_id}/rotate-secret")
+async def rotate_key_secret(
+    key_id: str, request: Request, req: RotateSecretRequest
+) -> dict[str, Any]:
+    """Re-validate a corrected MT5 investor password against the live broker
+    and, only on success, re-encrypt and return fresh ciphertext.
+
+    164.5.3 / MT5CREDS, D-04 (founder decision, 2026-09-20). This is the ONLY
+    place in the phase that touches a live credential in plaintext — mirrors
+    ``get_key_permissions``'s posture exactly: plaintext never leaves this
+    service. The caller (a new Next.js route, plan 04 of this phase) supplies
+    only the new password; the login and broker server the credential is
+    checked against come from THIS SERVICE's own decrypt of the stored row,
+    never from the browser or from Next.js (D-03: login/server cannot change
+    via this path — that is what Delete + Add Key means).
+
+    Flow, mirroring ``get_key_permissions``'s own ordering:
+      1. Auth via ``X-Internal-Token`` (constant-time compare, reused verbatim).
+      2. Per-key rate limit (the SAME ``_consume_rate_limit`` bucket
+         ``get_key_permissions`` already uses, keyed on ``key_id`` — this is
+         defense-in-depth mirroring the sibling endpoint's posture, not a new
+         mechanism).
+      3. Load the row; 404 if absent — BEFORE any decrypt. Optionally scoped
+         to ``req.user_id`` when the caller supplies it (defense-in-depth
+         owner check, review finding 1, 164.5.3 fix-python) — a mismatched
+         owner also reads 404, never disclosing that the key_id exists under
+         a different account.
+      4. Venue-scope gate: 422 if the row's ``exchange`` is not ``mt5`` —
+         BEFORE any decrypt. Defense-in-depth; the Next.js side (plan 04)
+         enforces the same gate as the primary control.
+      5. Load the KEK; 500 ``KEK_UNAVAILABLE`` if unconfigured.
+      6. ``decrypt_credentials`` the row to recover ``(login, OLD password
+         [discarded], broker_server)``; 500 ``KEY_UNDECRYPTABLE`` on a genuine
+         decrypt failure (``InvalidToken`` / ``JSONDecodeError`` / ``KeyError``
+         only — narrowed per review finding 3; an unrelated bug propagates as
+         an unhandled 500 instead of being mislabeled as a broken key).
+      7. Call ``_validate_mt5_key(login, req.new_secret, broker_server)`` —
+         the SAME gateway probe MT5 create already uses, with the SAME
+         three-argument credential-slot order (login -> api_key position, new
+         password -> api_secret position, broker_server -> passphrase
+         position). Its exceptions (``AUTH_FAILED_DETAIL`` /
+         ``MT5_MASTER_PASSWORD_DETAIL`` / ``MT5_WRONG_SERVER_DETAIL``, a
+         ``VenueTransientHTTPException``, or a gateway-unconfigured
+         ``service_error``) PROPAGATE UNCAUGHT — this lets the Next.js
+         caller's existing ``classifyKeyValidationError`` cascade recognise
+         them byte-identically, with zero new TS vocabulary. Nothing is
+         re-encrypted or returned on any of these paths (D-04). The returned
+         result is captured and asserted to be the success shape ``{"valid":
+         True, "read_only": True}`` (review finding 2) — its only non-raising
+         exit — before proceeding, rather than trusting that invariant blindly
+         across the module boundary.
+      8. On success, ``encrypt_credentials`` the UNCHANGED login/server with
+         the NEW password and return its six ciphertext fields plus
+         ``venue_account_id``. ``login`` is the ONLY plaintext value in the
+         response — never the password, never the broker server
+         (T-164.5.3-06).
+
+    ⛔ No line in this function logs, echoes, or otherwise surfaces
+    ``req.new_secret``, the decrypted old password, or the broker server.
+
+    Errors:
+      403 — bad/missing X-Internal-Token, or INTERNAL_API_TOKEN unconfigured.
+      404 — key_id not found.
+      422 — the row's exchange is not ``mt5``.
+      429 — per-key rate limit hit.
+      400 — the broker rejected the new credential (three distinguishable
+            detail strings, propagated from ``_validate_mt5_key`` uncaught).
+      500 — KEK unavailable, the stored key is undecryptable, or
+            ``_validate_mt5_key`` returned a non-success shape without
+            raising (``MT5_VALIDATE_INVARIANT_VIOLATION`` — should be
+            unreachable; see review finding 2).
+    """
+    _verify_internal_token(request)
+
+    if not _consume_rate_limit(key_id):
+        raise service_error(
+            429,
+            "RATE_LIMITED",
+            retryable=True,
+            retry_after=int(_RATE_LIMIT_WINDOW_S),
+            detail="Too many secret-rotation attempts for this key. Try again in a moment.",
+        )
+
+    supabase = get_supabase()
+
+    # Finding 1 (defense-in-depth): scope the row load to the caller's own
+    # key when `req.user_id` is supplied. A mismatched owner reads as
+    # "not found" (404), not 403 — this must not disclose that a key_id
+    # exists under a different account. Absent `req.user_id` (old/existing
+    # callers), the query is byte-identical to before this fix.
+    query = supabase.table("api_keys").select("*").eq("id", key_id)
+    if req.user_id:
+        query = query.eq("user_id", req.user_id)
+    key_data = one(query.maybe_single().execute())
+    if not key_data:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    if key_data.get("exchange") != "mt5":
+        raise HTTPException(
+            status_code=422,
+            detail="This endpoint only rotates MT5 credentials.",
+        )
+
+    try:
+        kek = get_kek()
+    except RuntimeError:
+        raise service_error(
+            500,
+            "KEK_UNAVAILABLE",
+            dependency="kek",
+            retryable=False,
+            detail="Credential encryption is not configured. This needs an operator, not a retry.",
+        )
+
+    try:
+        login, _old_password, broker_server = decrypt_credentials(key_data, kek)
+    except (InvalidToken, json.JSONDecodeError, KeyError):
+        # Finding 3: narrowed from a bare `except Exception:` to the exception
+        # types `decrypt_credentials` actually raises for a genuine decrypt
+        # failure — InvalidToken (bad KEK/DEK, malformed/missing ciphertext
+        # columns), JSONDecodeError (corrupted decrypted payload), KeyError
+        # (payload missing an expected credential slot). A bug elsewhere (e.g.
+        # a TypeError from a future signature change) now propagates as an
+        # unhandled 500 instead of being mislabeled "reconnected" advice that
+        # would instruct the founder to delete a perfectly good key.
+        # `exc_info=True` records the type + traceback on the operator side —
+        # the prior bare `logger.error` recorded neither. Never the credential
+        # itself: decrypt_credentials raises before any plaintext is bound to
+        # a local the log statement could reach.
+        logger.error(
+            "Failed to decrypt API key %s for secret rotation", key_id, exc_info=True
+        )
+        raise service_error(
+            500,
+            "KEY_UNDECRYPTABLE",
+            dependency="kek",
+            retryable=False,
+            detail="This stored key could not be decrypted. It must be reconnected.",
+        )
+
+    # D-04: validate BEFORE persisting. A failed validation's exceptions
+    # propagate uncaught — nothing below this line runs on that path.
+    validate_result = await _validate_mt5_key(login, req.new_secret, broker_server)
+    # Finding 2: capture and assert the probe's result rather than discarding
+    # it. `_validate_mt5_key`'s only non-raising exit is the success shape
+    # `{"valid": True, "read_only": True}` — an invariant that lives in
+    # routers/exchange.py, not here. Make the guarantee local so a future
+    # change to that invariant fails loudly at the one call site in this
+    # phase that persists a credential, rather than silently re-encrypting
+    # and returning ciphertext for a probe that did not actually succeed.
+    if not (
+        validate_result.get("valid") is True
+        and validate_result.get("read_only") is True
+    ):
+        logger.error(
+            "rotate_key_secret: _validate_mt5_key returned a non-success shape "
+            "without raising for key=%s (invariant violation)", key_id,
+        )
+        raise service_error(
+            500,
+            "MT5_VALIDATE_INVARIANT_VIOLATION",
+            retryable=False,
+            detail="Credential validation returned an unexpected result. Nothing was changed.",
+        )
+
+    encrypted = encrypt_credentials(login, req.new_secret, broker_server, kek)
+    # WR-04 (164.5.3 review) — normalise the identifier the caller may
+    # BACKFILL from this response, matching every other writer of this
+    # column: create-with-key and validate-and-encrypt both `.trim()`, and
+    # create_wizard_strategy stamps `NULLIF(btrim(...), '')`. An untrimmed
+    # value renders with a stray space on the key card AND does not collide
+    # with its own trimmed twin in the partial UNIQUE index
+    # `api_keys_user_exchange_venue_account_uniq`, which is the index that
+    # exists to stop one broker account being connected twice.
+    # ⛔ The ciphertext is built from the UNTRIMMED `login` on purpose: it
+    # must stay byte-identical to what the broker authenticated. Only the
+    # returned display/identity value is normalised.
+    return {**encrypted, "venue_account_id": (login or "").strip() or None}

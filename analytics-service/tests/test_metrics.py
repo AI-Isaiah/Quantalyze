@@ -1,6 +1,7 @@
 import logging
 import math
 import warnings
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
@@ -8,6 +9,11 @@ import pytest
 import quantstats as qs
 
 from services.metrics import compute_all_metrics, _safe_float, sanitize_metrics
+from tests.dispersion_fixtures import (
+    CONSTANT_YIELDS as _Q166R2_CONSTANT_YIELDS,
+    apy as _q166r2_apy,
+    nav_constant_yield as _q166r2_nav_constant_yield,
+)
 
 
 class TestSafeFloat:
@@ -512,6 +518,15 @@ class TestComputeAllMetrics:
         the post-fix contract: every benchmark-relative metric is over the
         intersection, and (anti-vacuity) the produced alpha/beta differ from what
         the OLD full-range path would have produced.
+
+        166.4 D-04 (2026-09-27, ratified by the founder 2026-09-27): the one
+        shared sample is now the 166.4 D-A interval pair, not the daily inner
+        join. The both-endpoints rule applies whichever leg is sparser, so on
+        this fixture (a DAILY strategy against a BUSINESS-DAY benchmark) every
+        Monday after index 0 has no benchmark close dated Sunday and leaves the
+        pair: the 85 inner-join rows become 69. The intent assertions are
+        unchanged (one sample for every metric; different from the full-range
+        back-fill); only the oracle pair is rebuilt, from the definition.
         """
         rng = np.random.default_rng(7)
         # Strategy trades 24/7 (every calendar day).
@@ -521,15 +536,43 @@ class TestComputeAllMetrics:
         b_dates = pd.bdate_range("2024-01-01", periods=85)
         bench = pd.Series(rng.normal(0.0005, 0.025, 85), index=b_dates, name="BTC")
 
-        # Sanity: the calendars genuinely differ (intersection < strategy length).
-        aligned = strat.align(bench, join="inner")
-        ar, ab = aligned[0], aligned[1]
+        # 166.4 D-04 oracle pair, built from the definition: a benchmark date
+        # with a finite return is a close, and so is the day before its first
+        # return (166.4 D-07); interval k >= 1 is paired iff the strategy dates
+        # k-1 and k are both closes, and its value is the price ratio
+        # price[t_k] / price[t_{k-1}] - 1; index 0 pairs with the benchmark
+        # return dated t_0 (166.4 D-05).
+        base_close = bench.index[0] - pd.Timedelta(days=1)
+        closes = set(bench.index[bench.notna()]) | {base_close}
+        price = (1.0 + bench).cumprod()
+
+        def _price_at(d):
+            return 1.0 if d == base_close else float(price[d])
+
+        s = strat.index
+        dates, values = [], []
+        if s[0] in bench.index:
+            dates.append(s[0])
+            values.append(float(bench[s[0]]))
+        for k in range(1, len(s)):
+            if s[k] in closes and s[k - 1] in closes and s[k] != base_close:
+                dates.append(s[k])
+                values.append(_price_at(s[k]) / _price_at(s[k - 1]) - 1.0)
+        ar = strat.loc[dates]
+        ab = pd.Series(values, index=pd.DatetimeIndex(dates), name="BTC")
+        # Sanity: the calendars genuinely differ (the pair < strategy length),
+        # and the rows the old inner join had but the pair lacks are exactly
+        # the Mondays after index 0.
         assert 1 < len(ar) < len(strat), "fixture must have a real calendar gap"
+        inner = s[s.isin(bench.index)]
+        dropped = inner[~inner.isin(ar.index)]
+        assert (len(inner), len(ar)) == (85, 69)
+        assert (dropped.dayofweek == 0).all() and s[0] not in dropped
 
         result = compute_all_metrics(strat, bench)
         mj = result["metrics_json"]
 
-        # Oracle: every benchmark-relative metric over the SAME inner-join sample.
+        # Oracle: every benchmark-relative metric over the SAME D-A sample.
         exp = qs.stats.greeks(ar, ab)
         exp_alpha = _safe_float(exp.get("alpha", 0))
         exp_beta = _safe_float(exp.get("beta", 0))
@@ -632,6 +675,7 @@ from services.metrics import (
     _rolling_volatility,
     _rolling_alpha,
     _rolling_alpha_beta,
+    _rolling_greeks,
     _rolling_beta,
     _log_returns_series,
 )
@@ -713,28 +757,35 @@ def test_compute_all_metrics_no_benchmark_rolling_alpha_beta_are_empty_lists(
     assert result.sibling_kinds["rolling_beta"] == []
 
 
-def test_scalar_sortino_passes_mar_as_rf(golden_returns, monkeypatch):
-    """Audit 2026-05-07 H-0725: compute_all_metrics must pass `rf=MAR` to
-    `qs.stats.sortino` explicitly. If the call relies on qs's default `rf=0`,
-    any future tune of MAR away from 0 silently diverges the scalar sortino
-    from `_rolling_sortino` (which IS MAR-floored).
+def test_scalar_sortino_threads_mar_as_the_downside_floor(golden_returns, monkeypatch):
+    """Audit 2026-05-07 H-0725 — MECHANISM UPDATED by Phase 159 / RANK-05.
+
+    The contract is unchanged: the scalar Sortino must be floored at the SAME
+    minimum acceptable return as `_rolling_sortino`, so a future tune of MAR away
+    from 0 cannot silently diverge them.
+
+    What changed is how it is observable. Pre-159 this was pinned by spying on
+    the `rf` kwarg of `qs.stats.sortino`. RANK-05 removed that call entirely —
+    `sortino` carries no `prepare_returns=` kwarg in the pinned quantstats
+    0.0.81, so inline pandas was the only way to disable its price-detection
+    heuristic — and a call-spy on a call that no longer happens is a test that
+    cannot fail. Pin the ECONOMICS instead: raising the minimum acceptable return
+    must LOWER Sortino, because every return is measured against a higher floor
+    (the excess mean falls and more days count as downside). If MAR is ever
+    dropped from the inline math, the two runs coincide and this goes RED.
     """
     import services.metrics as metrics_module
 
-    captured: dict[str, object] = {}
-    real_sortino = metrics_module.qs.stats.sortino
+    baseline = compute_all_metrics(golden_returns)["sortino"]
+    assert baseline is not None, "fixture must produce a defined Sortino"
 
-    def spy_sortino(series, rf=None, **kwargs):
-        captured["rf"] = rf
-        return real_sortino(series, rf=rf, **kwargs) if rf is not None else real_sortino(series, **kwargs)
-
-    monkeypatch.setattr(metrics_module.qs.stats, "sortino", spy_sortino)
-    compute_all_metrics(golden_returns)
-    assert "rf" in captured, "compute_all_metrics did not call qs.stats.sortino"
-    # MAR is currently 0.0 — the contract is that the rf kwarg is forwarded explicitly
-    # (not omitted), so future MAR tunes flow through automatically.
-    assert captured["rf"] == MAR, (
-        f"qs.stats.sortino must be called with rf=MAR ({MAR}); got rf={captured['rf']}"
+    monkeypatch.setattr(metrics_module, "MAR", 0.5)
+    floored = compute_all_metrics(golden_returns)["sortino"]
+    assert floored is not None
+    assert floored < baseline, (
+        f"raising MAR from {MAR} to 0.5 must lower Sortino "
+        f"(got {floored} vs baseline {baseline}) — MAR is not threaded into the "
+        "scalar Sortino"
     )
 
 
@@ -922,29 +973,31 @@ def test_rolling_beta_returns_finalized_list(golden_returns, benchmark_returns):
 def test_rolling_alpha_beta_single_rolling_greeks_call(
     golden_returns, benchmark_returns, monkeypatch
 ):
-    """Audit 2026-05-07 H-0711: rolling alpha + beta must share ONE
-    qs.stats.rolling_greeks pass. Previously _rolling_alpha and _rolling_beta
-    each called rolling_greeks independently, doubling the rolling-OLS work.
+    """Audit 2026-05-07 H-0711: rolling alpha + beta must share ONE rolling
+    greeks pass. Previously _rolling_alpha and _rolling_beta each ran it
+    independently, doubling the rolling-OLS work.
+
+    Phase 166 (D-06): the pass is the inline `_rolling_greeks` now, so the spy
+    counts that helper. Counting `qs.stats.rolling_greeks` would see 0 calls
+    and could no longer fail on a double pass.
     """
     import services.metrics as metrics_module
 
     call_count = {"n": 0}
-    real_rg = metrics_module.qs.stats.rolling_greeks
+    real_rg = metrics_module._rolling_greeks
 
     def counting_rolling_greeks(*args, **kwargs):
         call_count["n"] += 1
         return real_rg(*args, **kwargs)
 
-    monkeypatch.setattr(
-        metrics_module.qs.stats, "rolling_greeks", counting_rolling_greeks
-    )
+    monkeypatch.setattr(metrics_module, "_rolling_greeks", counting_rolling_greeks)
     result = compute_all_metrics(golden_returns, benchmark_returns)
     # The siblings should still be populated...
     assert len(result.sibling_kinds["rolling_alpha"]) > 0
     assert len(result.sibling_kinds["rolling_beta"]) > 0
-    # ...from EXACTLY ONE rolling_greeks pass.
+    # ...from EXACTLY ONE rolling greeks pass.
     assert call_count["n"] == 1, (
-        f"rolling_greeks should be called once per analytics run; got {call_count['n']}"
+        f"_rolling_greeks should be called once per analytics run; got {call_count['n']}"
     )
 
 
@@ -995,18 +1048,21 @@ def test_rolling_alpha_beta_short_benchmark_returns_empty():
 def test_rolling_alpha_beta_logs_warning_on_qs_failure(
     golden_returns, benchmark_returns, monkeypatch, caplog
 ):
-    """Audit 2026-05-07 H-0726.3: when qs.stats.rolling_greeks raises (e.g.
-    qs version drift, missing columns), the helper must emit a WARNING and
-    return ([], []) — NOT swallow it silently as before.
+    """Audit 2026-05-07 H-0726.3: when the rolling greeks pass raises, the
+    helper must emit a WARNING and return ([], []) — NOT swallow it silently
+    and NOT propagate it.
+
+    Phase 166 (D-06): the fault is injected into the inline `_rolling_greeks`,
+    the code production now runs. The M-0682 missing-columns test was deleted
+    with its branch: the frame is built in this module, so a quantstats column
+    rename can no longer reach `_rolling_alpha_beta`.
     """
     import services.metrics as metrics_module
 
     def boom_rolling_greeks(_returns, _benchmark, _window):
-        raise RuntimeError("simulated qs.stats.rolling_greeks failure")
+        raise RuntimeError("simulated _rolling_greeks failure")
 
-    monkeypatch.setattr(
-        metrics_module.qs.stats, "rolling_greeks", boom_rolling_greeks
-    )
+    monkeypatch.setattr(metrics_module, "_rolling_greeks", boom_rolling_greeks)
 
     with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
         alpha, beta = _rolling_alpha_beta(golden_returns, benchmark_returns, 90)
@@ -1014,40 +1070,6 @@ def test_rolling_alpha_beta_logs_warning_on_qs_failure(
     assert beta == []
     matching = [r for r in caplog.records if "rolling_greeks" in r.getMessage()]
     assert matching, "rolling_greeks failure must emit WARNING with helper name"
-
-
-def test_rolling_alpha_beta_missing_columns_returns_empty_and_logs(
-    golden_returns, benchmark_returns, monkeypatch, caplog
-):
-    """M-0682: when qs.stats.rolling_greeks SUCCEEDS but the returned
-    DataFrame is missing the expected 'alpha'/'beta' columns (a qs version
-    that renames them), the helper must return ([], []) AND emit a WARNING.
-    This is a DISTINCT branch from the qs-raises path — the call returns
-    cleanly, but the columns aren't there. Previously the silent
-    empty-return masked qs column drift.
-    """
-    import services.metrics as metrics_module
-
-    def greeks_without_alpha_beta(returns, _benchmark, _window):
-        # A DataFrame with the right index but the wrong column name.
-        return pd.DataFrame({"gamma": [1.0] * len(returns)}, index=returns.index)
-
-    monkeypatch.setattr(
-        metrics_module.qs.stats, "rolling_greeks", greeks_without_alpha_beta
-    )
-
-    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
-        alpha, beta = _rolling_alpha_beta(golden_returns, benchmark_returns, 90)
-    assert alpha == []
-    assert beta == []
-    matching = [
-        r for r in caplog.records
-        if "missing expected alpha/beta columns" in r.getMessage()
-    ]
-    assert matching, (
-        "missing alpha/beta columns must emit a WARNING so a qs column "
-        "rename is operator-visible, not silently swallowed."
-    )
 
 
 def test_rolling_alpha_beta_none_benchmark_returns_empty():
@@ -1325,25 +1347,37 @@ def test_qstats_scalars_handle_missing_benchmark(golden_returns):
 
 
 def test_qstats_scalars_logs_warning_on_qs_failure(golden_returns, caplog, monkeypatch):
-    """Audit 2026-05-07 H-0710 / H-0713 / H-0723: a qs.stats.* failure must emit
-    `logger.warning` with the scalar name + returns length so operators can detect
-    silent regressions. Failure-soft contract (other 9 scalars unaffected) is
-    preserved.
+    """Audit 2026-05-07 H-0710 / H-0713 / H-0723: a failure inside a scalar must
+    emit `logger.warning` with the scalar name + returns length so operators can
+    detect silent regressions. Failure-soft contract (other scalars unaffected)
+    is preserved.
+
+    Phase 166 re-target (the 159 Deviation-2 rule: replace the contract, never
+    delete it): `recovery_factor` is an inline mirror now, so patching
+    `qs.stats.recovery_factor` would no longer reach it. The fault is injected
+    into `_max_drawdown_from_wealth`, a real step INSIDE the mirror's math.
     """
     import services.metrics as metrics_module
 
-    def boom_recovery_factor(_returns):
-        raise RuntimeError("simulated qs.stats.recovery_factor failure")
+    def boom_max_drawdown(_wealth):
+        raise RuntimeError("simulated _max_drawdown_from_wealth failure")
 
     monkeypatch.setattr(
-        metrics_module.qs.stats, "recovery_factor", boom_recovery_factor
+        metrics_module, "_max_drawdown_from_wealth", boom_max_drawdown
     )
 
     with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
         result = compute_qstats_scalars(golden_returns, None)
 
-    # The failing scalar is None as before, the other 9 are still computed.
+    # The failing scalar is None as before, the others are still computed.
     assert result["recovery_factor"] is None
+    others = [
+        k for k, _ in _QSTATS_SINGLE_ARG_SCALARS if k != "recovery_factor"
+    ]
+    assert all(result[k] is not None for k in others), (
+        "one failing scalar must not take the others down: "
+        f"{ {k: result[k] for k in others} }"
+    )
     # And the failure produced a WARNING log naming the scalar.
     failing_records = [
         r for r in caplog.records
@@ -1357,17 +1391,22 @@ def test_qstats_scalars_logs_warning_on_qs_failure(golden_returns, caplog, monke
 def test_qstats_scalars_r_squared_status_error_on_qs_failure(
     golden_returns, benchmark_returns, monkeypatch
 ):
-    """Audit 2026-05-07 H-0718: when a benchmark IS present but qs.stats.r_squared
-    raises, the companion `r_squared_status` field must be 'error' (not 'no_benchmark'
-    and not 'ok'). This is the disambiguation that lets operators see the failure
-    state without trawling logs.
+    """Audit 2026-05-07 H-0718: when a benchmark IS present but the r_squared
+    computation raises, the companion `r_squared_status` field must be 'error'
+    (not 'no_benchmark' and not 'ok'). This is the disambiguation that lets
+    operators see the failure state without trawling logs.
+
+    Phase 166 plan 05: r_squared is the inline mirror `_r_squared`, so the fault
+    is injected into the regression it calls, `linregress` (imported at module
+    scope in services/metrics.py), rather than into `qs.stats.r_squared`, which
+    production no longer calls.
     """
     import services.metrics as metrics_module
 
-    def boom_r_squared(_returns, _benchmark):
-        raise RuntimeError("simulated qs.stats.r_squared failure")
+    def boom_linregress(_x, _y):
+        raise RuntimeError("simulated linregress failure")
 
-    monkeypatch.setattr(metrics_module.qs.stats, "r_squared", boom_r_squared)
+    monkeypatch.setattr(metrics_module, "linregress", boom_linregress)
 
     result = compute_qstats_scalars(golden_returns, benchmark_returns)
     assert result["r_squared"] is None
@@ -1377,17 +1416,21 @@ def test_qstats_scalars_r_squared_status_error_on_qs_failure(
 def test_qstats_scalars_r_squared_status_error_when_qs_returns_nan(
     golden_returns, benchmark_returns, monkeypatch
 ):
-    """Red-team F7: qs.stats.r_squared may RETURN NaN/Inf (not raise) — e.g.
+    """Red-team F7: the regression may RETURN a NaN r-value (not raise) — e.g.
     zero-variance benchmark, degenerate covariance. `_safe_float` collapses
     that to None, but the previous code unconditionally set status='ok'.
     Status must be 'error' whenever the final r_squared value is None.
+
+    Phase 166 plan 05: re-targeted from `qs.stats.r_squared` to the
+    `linregress` call inside the `_r_squared` mirror. The fake returns the same
+    5-tuple shape, with a NaN r-value in position 2.
     """
     import services.metrics as metrics_module
 
-    def nan_r_squared(_returns, _benchmark):
-        return float("nan")
+    def nan_linregress(_x, _y):
+        return (float("nan"), float("nan"), float("nan"), float("nan"), float("nan"))
 
-    monkeypatch.setattr(metrics_module.qs.stats, "r_squared", nan_r_squared)
+    monkeypatch.setattr(metrics_module, "linregress", nan_linregress)
 
     result = compute_qstats_scalars(golden_returns, benchmark_returns)
     assert result["r_squared"] is None
@@ -1460,27 +1503,40 @@ def test_rolling_alpha_beta_zero_overlap_returns_empty():
     assert beta == []
 
 
-@pytest.mark.parametrize("result_key,qs_attr", _QSTATS_SINGLE_ARG_SCALARS)
+@pytest.mark.parametrize(
+    "result_key", [k for k, _ in _QSTATS_SINGLE_ARG_SCALARS]
+)
 def test_qstats_scalars_dispatch_table_per_entry(
-    golden_returns, caplog, monkeypatch, result_key, qs_attr
+    golden_returns, caplog, monkeypatch, result_key
 ):
     """Specialist test-gap: the dispatch table (`_QSTATS_SINGLE_ARG_SCALARS`)
-    is the single source of truth for 8 (key, qs.stats attr) pairs after the
-    simplify refactor. A typo would silently produce None in production for
-    one scalar. Parametrize the failure path across every entry so a regression
-    fails the matching attribute's row, not a generic "scalar None" assertion.
+    is the single source of truth for 8 (key, callable) pairs. A wiring slip
+    would silently produce None in production for one scalar. Parametrize the
+    failure path across every entry so a regression fails the matching key's
+    row, not a generic "scalar None" assertion.
+
+    Phase 166 re-target: the table holds module callables now (every entry an
+    inline mirror since plan 166-04), so the fault is injected by
+    swapping THIS entry's callable for a raiser in a patched copy of the table.
     """
     import services.metrics as metrics_module
 
     def boom(_returns):
-        raise RuntimeError(f"simulated qs.stats.{qs_attr} failure")
+        raise RuntimeError(f"simulated {result_key} failure")
 
-    monkeypatch.setattr(metrics_module.qs.stats, qs_attr, boom)
+    patched = tuple(
+        (key, boom if key == result_key else fn)
+        for key, fn in metrics_module._QSTATS_SINGLE_ARG_SCALARS
+    )
+    monkeypatch.setattr(metrics_module, "_QSTATS_SINGLE_ARG_SCALARS", patched)
     with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
         result = compute_qstats_scalars(golden_returns, None)
     assert result[result_key] is None
-    matching = [r for r in caplog.records if result_key in r.getMessage()]
-    assert matching, f"failure for qs.stats.{qs_attr} must log WARNING naming {result_key!r}"
+    matching = [
+        r for r in caplog.records
+        if result_key in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert matching, f"failure for {result_key} must log WARNING naming {result_key!r}"
 
 
 # audit-2026-05-07 silent-failure sweep: regression tests for the
@@ -1493,12 +1549,12 @@ def test_qstats_scalars_dispatch_table_per_entry(
     "scalar_key,qs_attr",
     [
         ("var_1d_95", "value_at_risk"),
-        ("cvar", "cvar"),
-        ("omega", "omega"),
-        ("gain_pain", "gain_to_pain_ratio"),
+        # Phase 159 / RANK-05: `cvar` is now an inline wrapper (0.0.81's
+        # `conditional_value_at_risk` drops `prepare_returns` before computing its
+        # VaR threshold), but the wrapper still calls the `value_at_risk`
+        # primitive — so that is where the fault is injected for this row.
+        ("cvar", "value_at_risk"),
         ("tail_ratio", "tail_ratio"),
-        ("smart_sharpe", "smart_sharpe"),
-        ("smart_sortino", "smart_sortino"),
         ("profit_factor", "profit_factor"),
     ],
 )
@@ -1511,6 +1567,14 @@ def test_compute_all_metrics_inline_qstats_scalar_failures_log_warning(
     is still failure-soft (other scalars unaffected) but the failure emits a
     WARNING naming the scalar + returns_len, mirroring the H-0710 /
     H-0713 / H-0723 pattern already used by `_safe_qstats_scalar`.
+
+    Phase 159 / RANK-05 narrowed this table from 8 rows to 4. `omega`,
+    `gain_pain`, `smart_sharpe` and `smart_sortino` no longer route through
+    quantstats at all (their 0.0.81 implementations carry no `prepare_returns=`
+    kwarg and had to be mirrored inline to kill the price heuristic), so
+    detonating `qs.stats.<attr>` for those keys injects a fault that can no
+    longer occur — a row that cannot fail. Their surviving contract is pinned by
+    `test_rank05_inlined_scalars_are_failure_soft_without_quantstats` below.
     """
     import services.metrics as metrics_module
 
@@ -2558,3 +2622,1842 @@ class TestInsufficientWindowFlag:
         res_long = compute_all_metrics(r_long)
         assert res_long.insufficient_window is False
         assert "insufficient_window" not in res_long.metrics_json
+
+
+# ---------------------------------------------------------------------------
+# Phase 159 / Plan 05 — RANK-05: quantstats price-detection heuristic closure
+# ---------------------------------------------------------------------------
+# quantstats 0.0.81's `_utils._prepare_returns` carries a PRICE-detection
+# heuristic:
+#
+#     elif data.min() >= 0 and data.max() > 1:
+#         data = data.pct_change(fill_method=None)
+#
+# An all-non-negative daily-RETURNS series with one >100% day is therefore
+# silently re-read as a PRICE path and differenced. `max_drawdown` and
+# `to_drawdown_series` hit the mirror-image guess in `_prepare_prices`
+# (a series that is NOT `min < 0 or max < 1` is passed through AS prices).
+#
+# These tests pin ECONOMICS, never the implementation's own formula:
+#   * an all-winning series cannot have a negative Sharpe/Sortino, a
+#     non-positive gain/loss ratio, or a 99% drawdown;
+#   * order-independent statistics must be invariant under a shuffle of the
+#     daily returns (the bogus `pct_change` re-read is order-DEPENDENT);
+#   * on a series that does NOT trip the heuristic, every closed site must
+#     still equal LIVE quantstats 0.0.81 output (the non-self-referential
+#     correctness anchor).
+
+
+def _rank05_trigger_series() -> pd.Series:
+    """The P114 scenario verbatim: a YOUNG ALL-WINNING account.
+
+    Day 1 is +150%; every later day is a smaller-but-still-positive gain. The
+    series is all-non-negative with max > 1, so it trips BOTH quantstats guesses
+    (`_prepare_returns`' price detection and `_prepare_prices`' pass-through).
+    The decaying tail makes the bogus "price" path a DOWNTREND, which is what
+    flips the sign of the two headline ranked KPIs.
+    """
+    n = 60
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    vals = np.linspace(0.012, 0.004, n)
+    vals[0] = 1.5
+    return pd.Series(vals, index=dates, name="returns").astype("float64")
+
+
+def _rank05_benign_all_positive() -> pd.Series:
+    """Same shape, WITHOUT the >100% day — all-non-negative but max < 1, so the
+    heuristic provably cannot fire. Pre/post-fix values must be identical."""
+    n = 60
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    vals = np.linspace(0.012, 0.004, n)
+    return pd.Series(vals, index=dates, name="returns").astype("float64")
+
+
+def _rank05_benign_mixed() -> pd.Series:
+    """Mixed-sign series — `min() >= 0` is False, so NEITHER guess can ever
+    fire. The parity control: every closed site must match live quantstats."""
+    rng = np.random.default_rng(15905)
+    dates = pd.bdate_range("2024-01-01", periods=250)
+    vals = rng.normal(0.0006, 0.013, 250)
+    vals[40] = -0.09
+    vals[41] = 0.07
+    return pd.Series(vals, index=dates, name="returns").astype("float64")
+
+
+def test_rank05_quantstats_pin_is_still_0_0_81():
+    """D-04 prohibition: the fix must not move the quantstats pin. Every math
+    mirror below cites 0.0.81 source; a version bump silently invalidates them."""
+    assert qs.__version__ == "0.0.81", (
+        f"quantstats pin moved to {qs.__version__}; the RANK-05 inline mirrors "
+        "cite 0.0.81 source and must be re-derived against the new version."
+    )
+
+
+def test_rank05_trigger_fixture_actually_trips_the_heuristic():
+    """Anti-vacuity guard for every trigger-series test below. If a future edit
+    makes the fixture benign, the sign-invariant tests would pass VACUOUSLY."""
+    s = _rank05_trigger_series()
+    assert bool(s.min() >= 0), "fixture must be all-non-negative"
+    assert bool(s.max() > 1), "fixture must contain a >100% day"
+    assert bool((s > 0).all()), "fixture must be ALL-WINNING (no losing day)"
+    # And the benign controls must NOT trip it.
+    assert bool(_rank05_benign_all_positive().max() <= 1)
+    assert bool(_rank05_benign_mixed().min() < 0)
+
+
+def test_rank05_all_winning_series_has_non_negative_sharpe_and_sortino():
+    """ECONOMIC INVARIANT (RANK-05): a series that never lost a day cannot have
+    a negative risk-adjusted return.
+
+    Pre-fix measurement (quantstats 0.0.81, 2026-08-21): sharpe = -4.3469,
+    sortino = -4.2254 on this all-winning fixture — the sign flip that reaches
+    the public ranks.
+
+    Sortino is *undefined* (None) for a series with zero downside, which is the
+    honest reading; what it can never be is NEGATIVE.
+    """
+    result = compute_all_metrics(_rank05_trigger_series())
+    sharpe = result["sharpe"]
+    sortino = result["sortino"]
+    assert sharpe is not None and sharpe > 0, (
+        f"all-winning series reported sharpe={sharpe} — the quantstats price "
+        "heuristic re-read the returns as a price path"
+    )
+    assert sortino is None or sortino > 0, (
+        f"all-winning series reported sortino={sortino}; with zero losing days "
+        "the downside deviation is 0, so Sortino is undefined — never negative"
+    )
+
+
+def test_rank05_headline_sharpe_sortino_do_not_call_quantstats(monkeypatch):
+    """MECHANISM PIN (anti-vacuity). `sharpe`/`sortino` carry NO
+    `prepare_returns=` kwarg in 0.0.81, so the ONLY closure is inline pandas.
+    Detonate the quantstats entry points: if either headline KPI is ever routed
+    back through `qs.stats`, the price heuristic returns with it and this test
+    goes RED at the reintroducing commit.
+    """
+    import services.metrics as metrics_module
+
+    def _detonate(*_args, **_kwargs):
+        raise AssertionError(
+            "compute_all_metrics routed a headline KPI back through quantstats "
+            "— the _prepare_returns price heuristic is live again (RANK-05)"
+        )
+
+    monkeypatch.setattr(metrics_module.qs.stats, "sharpe", _detonate)
+    monkeypatch.setattr(metrics_module.qs.stats, "sortino", _detonate)
+    result = compute_all_metrics(_rank05_benign_mixed())
+    assert result["sharpe"] is not None
+    assert result["sortino"] is not None
+
+
+def test_rank05_benign_all_positive_series_matches_live_quantstats():
+    """BENIGN PARITY (untriggered): a series the heuristic cannot fire on must
+    produce byte-comparable sharpe/sortino against LIVE quantstats 0.0.81.
+    The oracle is quantstats itself — not a restatement of the inline formula.
+    """
+    s = _rank05_benign_all_positive()
+    result = compute_all_metrics(s)
+    assert result["sharpe"] == pytest.approx(
+        float(qs.stats.sharpe(s, periods=252)), rel=1e-9
+    )
+    # Zero losing days -> quantstats' downside deviation is 0 -> NaN -> None.
+    assert _safe_float(qs.stats.sortino(s, rf=MAR, periods=252)) is None
+    assert result["sortino"] is None
+
+
+def test_rank05_benign_mixed_sign_series_matches_live_quantstats():
+    """BENIGN PARITY control: on a mixed-sign series NEITHER quantstats guess
+    can fire, so the inline mirror must reproduce quantstats exactly."""
+    s = _rank05_benign_mixed()
+    result = compute_all_metrics(s)
+    assert result["sharpe"] == pytest.approx(
+        float(qs.stats.sharpe(s, periods=252)), rel=1e-9
+    )
+    assert result["sortino"] == pytest.approx(
+        float(qs.stats.sortino(s, rf=MAR, periods=252)), rel=1e-9
+    )
+
+
+def test_rank05_benign_parity_holds_on_a_non_default_annualization_clock():
+    """The clock threads: crypto's 365 basis must also match live quantstats."""
+    s = _rank05_benign_mixed()
+    result = compute_all_metrics(s, periods_per_year=365)
+    assert result["sharpe"] == pytest.approx(
+        float(qs.stats.sharpe(s, periods=365)), rel=1e-9
+    )
+    assert result["sortino"] == pytest.approx(
+        float(qs.stats.sortino(s, rf=MAR, periods=365)), rel=1e-9
+    )
+
+
+# --- Task 2: the rest of the compute_all_metrics quantstats surface -----------
+
+# Per-site benign-series parity oracles. Each entry is
+# (output key, where the key lives, a callable computing the LIVE quantstats
+# 0.0.81 value for the same input). These are the non-self-referential anchors:
+# the oracle is quantstats itself, invoked at test time, never a restatement of
+# the inline formula. `smart_*` deliberately use quantstats' DEFAULT periods=252
+# because the production call sites do (pre-existing, preserved by RANK-05).
+_RANK05_PARITY_SITES = (
+    ("volatility", "top", lambda s: qs.stats.volatility(s, periods=252)),
+    ("max_drawdown", "top", lambda s: qs.stats.max_drawdown(s)),
+    ("omega", "mj", lambda s: qs.stats.omega(s)),
+    ("gain_pain", "mj", lambda s: qs.stats.gain_to_pain_ratio(s)),
+    ("tail_ratio", "mj", lambda s: qs.stats.tail_ratio(s)),
+    ("profit_factor", "mj", lambda s: qs.stats.profit_factor(s)),
+    ("smart_sharpe", "mj", lambda s: qs.stats.smart_sharpe(s)),
+    ("smart_sortino", "mj", lambda s: qs.stats.smart_sortino(s)),
+    ("var_1d_95", "mj", lambda s: qs.stats.value_at_risk(s, confidence=0.95)),
+    ("cvar", "mj", lambda s: qs.stats.cvar(s)),
+)
+
+
+@pytest.mark.parametrize(
+    "key,where,oracle", _RANK05_PARITY_SITES, ids=[e[0] for e in _RANK05_PARITY_SITES]
+)
+def test_rank05_every_closed_site_matches_live_quantstats_on_a_benign_series(
+    key, where, oracle
+):
+    """BENIGN PARITY, per closed site. On a mixed-sign series NEITHER quantstats
+    guess can fire, so replacing a call with inline math (or disabling
+    `_prepare_returns` via the kwarg) must not move the value by so much as a
+    float ulp beyond the stated tolerance. A drift here means the RANK-05
+    replacement got the math wrong — it is a defect in the fix, never a fixture
+    to regenerate.
+    """
+    s = _rank05_benign_mixed()
+    result = compute_all_metrics(s)
+    actual = result[key] if where == "top" else result["metrics_json"][key]
+    expected = _safe_float(oracle(s))
+    assert expected is not None, f"oracle produced no value for {key} — fixture is unfit"
+    assert actual == pytest.approx(expected, rel=1e-9), (
+        f"{key} drifted from live quantstats 0.0.81 on a benign series"
+    )
+
+
+def test_rank05_drawdown_series_matches_live_quantstats_on_a_benign_series():
+    """The underwater curve feeds dd_duration, drawdown_episodes and the chart.
+    Pin the whole series (not just its minimum) against live quantstats."""
+    s = _rank05_benign_mixed()
+    result = compute_all_metrics(s)
+    emitted = result["drawdown_series"]
+    # `returns_for_chart` == s here: the fixture is NaN-free with every value
+    # above the -100% floor, so fillna(0)/clip are both no-ops.
+    expected = qs.stats.to_drawdown_series(s)
+    assert len(emitted) == len(expected) > 0, "fixture must not be down-sampled away"
+    for point, (date, exp_val) in zip(emitted, expected.items()):
+        assert point["date"] == date.strftime("%Y-%m-%d")
+        assert point["value"] == pytest.approx(exp_val, abs=1e-12)
+
+
+def test_rank05_all_winning_series_has_zero_drawdown():
+    """ECONOMIC INVARIANT: a series with no losing day never goes underwater.
+
+    Pre-fix measurement: max_drawdown = -0.9973 on this fixture, because
+    `_prepare_prices` passed the RETURNS through as a price path and read the
+    decay from the +150% day as a 99.7% crash. max_drawdown is a ranked column.
+    """
+    result = compute_all_metrics(_rank05_trigger_series())
+    assert result["max_drawdown"] == pytest.approx(0.0, abs=1e-12), (
+        f"all-winning series reported max_drawdown={result['max_drawdown']}"
+    )
+
+
+def test_rank05_all_winning_series_has_no_pain():
+    """ECONOMIC INVARIANT: gain/loss ratios for a series with zero losing days
+    are either undefined (no denominator) or positive — never zero or negative.
+
+    Pre-fix measurement: omega = 0.0, gain_pain = -1.0, profit_factor = 0.0,
+    smart_sharpe = -4.1735, smart_sortino = -4.0569.
+    """
+    mj = compute_all_metrics(_rank05_trigger_series())["metrics_json"]
+    for key in ("omega", "gain_pain", "profit_factor", "smart_sharpe", "smart_sortino"):
+        value = mj.get(key)
+        assert value is None or value > 0, (
+            f"all-winning series reported {key}={value}; with zero losing days "
+            "this ratio is undefined, never non-positive"
+        )
+
+
+# Statistics that do NOT depend on the ORDER of the daily returns. quantstats'
+# bogus `pct_change` re-read IS order-dependent, so a shuffle is a sharp,
+# formula-free detector of the heuristic. `max_drawdown` and the `smart_*` pair
+# are excluded on purpose: path depth and autocorrelation are legitimately
+# order-dependent.
+_RANK05_ORDER_INVARIANT = ("sharpe", "volatility")
+_RANK05_ORDER_INVARIANT_MJ = ("tail_ratio", "var_1d_95", "cvar")
+
+
+def test_rank05_order_independent_statistics_survive_a_shuffle():
+    """ECONOMIC INVARIANT: Sharpe, volatility, tail ratio, VaR and CVaR are
+    functions of the DISTRIBUTION of daily returns, not of their sequence.
+    Reordering the same returns must leave them bit-comparable. quantstats'
+    price re-read differences consecutive values, so pre-fix every one of them
+    moved — this test is RED against the unfixed pipeline.
+    """
+    original = _rank05_trigger_series()
+    rng = np.random.default_rng(4242)
+    permuted_values = rng.permutation(original.to_numpy())
+    shuffled = pd.Series(permuted_values, index=original.index, name="returns")
+    # Anti-vacuity: the permutation must actually reorder the series.
+    assert not np.allclose(original.to_numpy(), shuffled.to_numpy())
+    # ...and it must still trip the heuristic (same values, same min/max).
+    assert bool(shuffled.min() >= 0) and bool(shuffled.max() > 1)
+
+    base = compute_all_metrics(original)
+    perm = compute_all_metrics(shuffled)
+    for key in _RANK05_ORDER_INVARIANT:
+        assert base[key] is not None, f"{key} must be defined for this fixture"
+        assert perm[key] == pytest.approx(base[key], rel=1e-12), (
+            f"{key} changed under a pure reordering of the same daily returns"
+        )
+    for key in _RANK05_ORDER_INVARIANT_MJ:
+        expected = base["metrics_json"].get(key)
+        assert expected is not None, f"{key} must be defined for this fixture"
+        assert perm["metrics_json"].get(key) == pytest.approx(expected, rel=1e-12), (
+            f"{key} changed under a pure reordering of the same daily returns"
+        )
+
+
+def test_rank05_inlined_scalars_are_failure_soft_without_quantstats(
+    golden_returns, caplog, monkeypatch
+):
+    """The inlined metrics_json scalars must (a) not reach quantstats at all, and
+    (b) keep the failure-soft + named-WARNING contract for faults that CAN still
+    occur inside the inline math.
+
+    This replaces the four rows removed from
+    `test_compute_all_metrics_inline_qstats_scalar_failures_log_warning`, whose
+    injected fault (a raising `qs.stats.<attr>`) became unreachable once the
+    sites stopped calling quantstats.
+    """
+    import services.metrics as metrics_module
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("quantstats must not be reached by an inlined scalar")
+
+    for attr in ("omega", "gain_to_pain_ratio", "smart_sharpe", "smart_sortino"):
+        monkeypatch.setattr(metrics_module.qs.stats, attr, boom)
+    mj = compute_all_metrics(golden_returns)["metrics_json"]
+    for key in ("omega", "gain_pain", "smart_sharpe", "smart_sortino"):
+        assert mj.get(key) is not None, (
+            f"{key} degraded with quantstats detonated — the site still calls it"
+        )
+
+    # A real fault inside the inline smart_* math: the autocorrelation penalty is
+    # the one external primitive those two scalars call.
+    monkeypatch.setattr(metrics_module.np, "corrcoef", boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        degraded = compute_all_metrics(golden_returns)["metrics_json"]
+    assert degraded.get("smart_sharpe") is None
+    assert degraded.get("smart_sortino") is None
+    assert [
+        r for r in caplog.records
+        if "smart_sharpe" in r.getMessage() and r.levelno == logging.WARNING
+    ], "a fault inside the inline smart_sharpe math must log a WARNING naming it"
+    # Failure-soft: the sibling inline scalars are untouched.
+    assert degraded.get("omega") is not None
+    assert degraded.get("gain_pain") is not None
+
+
+def test_rank05_drawdown_details_is_heuristic_free():
+    """`qs.stats.drawdown_details` is the ONE quantstats call left in
+    compute_all_metrics without `prepare_returns=False`, and the Phase 166 AST
+    gate (`tests/qstats_gate.py`, `EXEMPT`) excludes it BY NAME. That exclusion
+    is only legitimate while the
+    function (and the helper it calls) provably never routes its input through
+    either preparer — it consumes an already-computed underwater curve, not a
+    return or price series. Scan the INSTALLED source so a future quantstats
+    that changes this goes RED here instead of silently reopening the defect.
+    """
+    import inspect
+
+    for fn in (qs.stats.drawdown_details, qs.stats.remove_outliers):
+        src = inspect.getsource(fn)
+        assert "_prepare_returns" not in src, f"{fn.__name__} now prepares returns"
+        assert "_prepare_prices" not in src, f"{fn.__name__} now prepares prices"
+    # And it still takes the drawdown curve, not returns.
+    assert "drawdown" in inspect.signature(qs.stats.drawdown_details).parameters
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 / QSTATS-TRUTH: every quantstats-derived number reflects the returns
+# ---------------------------------------------------------------------------
+# Phase 159 closed the quantstats price guess at the headline sites of
+# `compute_all_metrics`. The eight scalars dispatched by `compute_qstats_scalars`
+# (WINDOWS.md entry 9) were left open, and they persist to
+# `strategy_analytics.metrics_json`. Plan 166-03 closes the four DRAWDOWN-family
+# scalars (recovery_factor, ulcer_index, upi, serenity_index) with inline
+# mirrors of quantstats 0.0.81 minus the guess; plan 166-04 closes the
+# loss/Sharpe family on the same dispatch table.
+#
+# As in the RANK-05 section above, these tests pin ECONOMICS derived from the
+# definitions, never the implementation's own output, and every invariant was
+# observed RED against the pre-mirror code first (Phase 166 D-09).
+
+_Q166_DRAWDOWN_RATIO_KEYS = ("recovery_factor", "upi", "serenity_index")
+
+
+def _q166_trigger_nonmonotone() -> pd.Series:
+    """An all-winning trigger whose daily gains are NOT monotone in value.
+
+    Row 0 is +150%; after it, gains alternate 0.4% (even rows) and 2% (odd
+    rows). All-non-negative with max > 1, so it trips quantstats' price guess
+    exactly as `_rank05_trigger_series` does, but the zig-zag makes the bogus
+    "price" path go up and down. That matters: on the canonical trigger the
+    guessed path is a pure downtrend, so live `kelly_criterion` and `cpc_index`
+    are already None there (for the wrong reason) and their invariants could
+    never be observed RED. This fixture gives every drawdown-family AND
+    loss-family scalar a wrong, finite pre-fix value (166-RESEARCH §Q4).
+    """
+    n = 60
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    vals = np.where(np.arange(n) % 2 == 0, 0.004, 0.02)
+    vals[0] = 1.5
+    return pd.Series(vals, index=dates, name="returns").astype("float64")
+
+
+def test_q166_nonmonotone_trigger_actually_trips_the_heuristic():
+    """Anti-vacuity guard for the non-monotone invariant tests. If a future edit
+    made this fixture benign or monotone, the tests below would pass for the
+    wrong reason (or duplicate the canonical trigger's coverage)."""
+    s = _q166_trigger_nonmonotone()
+    assert bool(s.min() >= 0), "fixture must be all-non-negative"
+    assert bool(s.max() > 1), "fixture must contain a >100% day"
+    assert bool((s > 0).all()), "fixture must be ALL-WINNING (no losing day)"
+    tail = s.iloc[1:]
+    assert not (tail.is_monotonic_increasing or tail.is_monotonic_decreasing), (
+        "fixture must zig-zag after the +150% day, or it duplicates the canonical trigger"
+    )
+
+
+def test_q166_all_winning_series_has_no_drawdown_derived_ratios():
+    """ECONOMIC INVARIANT (D-09) on the canonical all-winning trigger.
+
+    A series with no losing day has a wealth curve that only rises, so it is
+    never underwater: every drawdown is 0 and the Ulcer Index (the RMS of the
+    drawdowns) is exactly 0. Recovery factor, UPI and Serenity divide by the max
+    drawdown, by the Ulcer Index, and by Ulcer x pitfall. Those denominators
+    measure a drawdown that does not exist, so each ratio is UNDEFINED (None),
+    never a number.
+
+    Pre-fix measurement (live quantstats through the dispatch table):
+    ulcer_index = 0.9947130555497081, recovery_factor = 2.0737188382869305,
+    upi = 2.9998728744771372, serenity_index = 0.3204442673452879. quantstats
+    read the returns as a price path and saw a 99% crash.
+    """
+    s = compute_qstats_scalars(_rank05_trigger_series(), None)
+    assert s["ulcer_index"] == 0.0, f"no losing day, but ulcer_index={s['ulcer_index']}"
+    for key in _Q166_DRAWDOWN_RATIO_KEYS:
+        assert s[key] is None, (
+            f"{key}={s[key]}: its denominator is a drawdown that does not exist"
+        )
+
+
+def test_q166_all_winning_drawdown_values_reach_metrics_json():
+    """The same invariant on the end-to-end path that persists to
+    `strategy_analytics.metrics_json`: `compute_all_metrics` merges the qstats
+    scalars into its `metrics_json` sub-dict. A fix that corrected
+    `compute_qstats_scalars` but not the persisted payload would be no fix.
+
+    Pre-fix measurement: the same four wrong values as
+    test_q166_all_winning_series_has_no_drawdown_derived_ratios.
+    """
+    mj = compute_all_metrics(_rank05_trigger_series())["metrics_json"]
+    assert mj["ulcer_index"] == 0.0, f"persisted ulcer_index={mj['ulcer_index']}"
+    for key in _Q166_DRAWDOWN_RATIO_KEYS:
+        assert mj[key] is None, (
+            f"persisted {key}={mj[key]}: its denominator is a drawdown that does not exist"
+        )
+
+
+def test_q166_nonmonotone_series_has_no_drawdown_derived_ratios():
+    """ECONOMIC INVARIANT (D-09) on the non-monotone all-winning trigger. Same
+    economics as the canonical trigger: no losing day, so no drawdown, so a zero
+    Ulcer Index and undefined drawdown-denominated ratios.
+
+    Pre-fix measurement: ulcer_index = 0.9919239385213344, recovery_factor =
+    92.05882352941175, upi = 4.117455241335786, serenity_index =
+    0.36207650738764285.
+    """
+    s = compute_qstats_scalars(_q166_trigger_nonmonotone(), None)
+    assert s["ulcer_index"] == 0.0, f"no losing day, but ulcer_index={s['ulcer_index']}"
+    for key in _Q166_DRAWDOWN_RATIO_KEYS:
+        assert s[key] is None, (
+            f"{key}={s[key]}: its denominator is a drawdown that does not exist"
+        )
+
+
+def _q166_golden_with_nan_days(s: pd.Series) -> pd.Series:
+    """A copy of ``s`` with rows 10, 50 and 100 set to NaN (upstream CSV gaps).
+
+    Proves the mirrors reproduce quantstats' NaN handling (fillna(0) in the
+    prepared terms, raw row count and skipna in the raw terms), not only its
+    arithmetic on dense input."""
+    out = s.copy()
+    out.iloc[[10, 50, 100]] = np.nan
+    return out
+
+
+# (metrics_json key, LIVE quantstats 0.0.81 oracle on the raw series). On the
+# benign fixtures below the price guess cannot fire, so live quantstats is the
+# non-self-referential correctness anchor (D-08). The first four rows are the
+# drawdown family (plan 166-03), the last three the loss family (plan 166-04).
+# probabilistic_sharpe_ratio has NO row: D-16 corrects 0.0.81's kurtosis term,
+# so live quantstats is no longer its anchor. Its anchor is the published
+# formula, in test_q166_psr_matches_the_published_formula.
+_Q166_PARITY_SITES = (
+    ("recovery_factor", lambda s: qs.stats.recovery_factor(s)),
+    ("ulcer_index", lambda s: qs.stats.ulcer_index(s)),
+    ("upi", lambda s: qs.stats.ulcer_performance_index(s)),
+    ("serenity_index", lambda s: qs.stats.serenity_index(s)),
+    ("kelly_criterion", lambda s: qs.stats.kelly_criterion(s)),
+    ("common_sense_ratio", lambda s: qs.stats.common_sense_ratio(s)),
+    ("cpc_index", lambda s: qs.stats.cpc_index(s)),
+)
+
+_Q166_BENIGN_FIXTURES = (
+    "benign_mixed",
+    "benign_all_positive",
+    "golden_returns",
+    "golden_returns_with_nan_days",
+)
+
+
+def _q166_benign_fixture(name: str, request: pytest.FixtureRequest) -> pd.Series:
+    if name == "benign_mixed":
+        return _rank05_benign_mixed()
+    if name == "benign_all_positive":
+        return _rank05_benign_all_positive()
+    golden = request.getfixturevalue("golden_returns")
+    if name == "golden_returns":
+        return golden
+    if name == "golden_returns_with_nan_days":
+        return _q166_golden_with_nan_days(golden)
+    raise AssertionError(f"unknown fixture {name!r}")
+
+
+@pytest.mark.parametrize("fixture_name", _Q166_BENIGN_FIXTURES)
+@pytest.mark.parametrize(
+    "key,oracle", _Q166_PARITY_SITES, ids=[e[0] for e in _Q166_PARITY_SITES]
+)
+def test_q166_parity_every_mirror_matches_live_quantstats(
+    key, oracle, fixture_name, request
+):
+    """BENIGN PARITY (D-08), one collected case per (site, fixture). On these
+    series quantstats' price guess cannot fire (mixed sign, max < 1, or both),
+    so a mirror that is "0.0.81 minus the guess" must equal live 0.0.81 to rel
+    1e-12. The value is read through `compute_qstats_scalars`, so the dispatch
+    table wiring is part of what is proven. A miss is a defect in the mirror,
+    never a tolerance to loosen.
+    """
+    s = _q166_benign_fixture(fixture_name, request)
+    assert not bool(s.min() >= 0 and s.max() > 1), "fixture would trip the guess"
+    actual = compute_qstats_scalars(s, None)[key]
+    expected = _safe_float(oracle(s))
+    if expected is None:
+        assert actual is None, f"{key}: live quantstats is undefined, mirror gave {actual}"
+    else:
+        assert actual is not None, f"{key}: mirror undefined, live quantstats gave {expected}"
+        assert actual == pytest.approx(expected, rel=1e-12, abs=0.0), (
+            f"{key} on {fixture_name} drifted from live quantstats 0.0.81"
+        )
+
+
+@pytest.mark.parametrize(
+    "key,anchor",
+    [
+        ("recovery_factor", 0.9517263110721105),
+        ("ulcer_index", 0.09511182002853455),
+        ("upi", 1.583422458226051),
+        ("serenity_index", 0.143686058754821),
+    ],
+)
+def test_q166_parity_benign_mixed_reproduces_the_research_anchor(key, anchor):
+    """The benign-mixed values live quantstats returned when the phase was
+    researched (166-RESEARCH §Q4). Pinned as numbers so a future quantstats
+    change that moved BOTH the oracle and the mirror would still be caught."""
+    actual = compute_qstats_scalars(_rank05_benign_mixed(), None)[key]
+    assert actual == pytest.approx(anchor, rel=1e-12, abs=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 plan 04: the LOSS/SHARPE family (kelly_criterion, PSR,
+# common_sense_ratio, cpc_index). Research Q2 measured that `prepare_returns=`
+# closes none of them: each reaches a preparer transitively (payoff_ratio,
+# win_rate, profit_factor, tail_ratio, sharpe). Every invariant below was
+# observed RED against the pre-mirror dispatch table first (D-09).
+# ---------------------------------------------------------------------------
+
+_Q166_LOSS_RATIO_KEYS = ("kelly_criterion", "common_sense_ratio", "cpc_index")
+
+
+def test_q166_all_winning_series_has_no_loss_derived_ratios():
+    """ECONOMIC INVARIANT (D-09) on the canonical all-winning trigger.
+
+    Profit factor is gross wins over gross losses. With no losing day the
+    denominator is a loss that does not exist, so profit factor, and the Common
+    Sense Ratio built on it (profit factor x tail ratio), are UNDEFINED (None),
+    never 0.0.
+
+    The Probabilistic Sharpe Ratio is Phi(SR / sigma_SR), the probability that
+    the true Sharpe exceeds 0. Every day of this series is a gain, so the sample
+    mean and SR are positive, and Phi of a positive number is above 0.5.
+
+    Pre-fix measurement (live quantstats through the dispatch table):
+    common_sense_ratio = 0.0, probabilistic_sharpe_ratio = 0.1531252134903383.
+    quantstats read the returns as a price path that falls after day 1, so it
+    saw a losing strategy.
+    """
+    s = compute_qstats_scalars(_rank05_trigger_series(), None)
+    assert s["common_sense_ratio"] is None, (
+        f"common_sense_ratio={s['common_sense_ratio']}: profit factor has no losses to divide by"
+    )
+    psr = s["probabilistic_sharpe_ratio"]
+    assert psr is not None and psr > 0.5, (
+        f"probabilistic_sharpe_ratio={psr}: an all-winning series has a positive Sharpe"
+    )
+
+
+def test_q166_all_winning_loss_values_reach_metrics_json():
+    """The same invariant on the persisted payload: `compute_all_metrics` merges
+    the qstats scalars into `metrics_json`, which lands in
+    `strategy_analytics.metrics_json`.
+
+    Pre-fix measurement: common_sense_ratio = 0.0,
+    probabilistic_sharpe_ratio = 0.1531252134903383, as in
+    test_q166_all_winning_series_has_no_loss_derived_ratios.
+    """
+    mj = compute_all_metrics(_rank05_trigger_series())["metrics_json"]
+    assert mj["common_sense_ratio"] is None, (
+        f"persisted common_sense_ratio={mj['common_sense_ratio']}: no losses to divide by"
+    )
+    psr = mj["probabilistic_sharpe_ratio"]
+    assert psr is not None and psr > 0.5, (
+        f"persisted probabilistic_sharpe_ratio={psr}: an all-winning series has a positive Sharpe"
+    )
+
+
+def test_q166_nonmonotone_series_has_no_loss_derived_ratios():
+    """ECONOMIC INVARIANT (D-09) on the non-monotone all-winning trigger.
+
+    No losing day, so the average loss is the mean of an empty set: the payoff
+    ratio (average win / |average loss|) and profit factor are undefined. Kelly
+    (built on payoff), CPC (profit factor x win rate x payoff) and the Common
+    Sense Ratio (profit factor x tail ratio) are therefore all None.
+
+    The canonical trigger cannot show this for kelly and cpc: there live
+    quantstats already returns None, for the wrong reason (research Q4). This
+    fixture gives them a wrong finite value. Pre-fix measurement:
+    kelly_criterion = 0.3890395480225989, cpc_index = 11.695887516415286,
+    common_sense_ratio = 23.98015435501653.
+    """
+    s = compute_qstats_scalars(_q166_trigger_nonmonotone(), None)
+    for key in _Q166_LOSS_RATIO_KEYS:
+        assert s[key] is None, (
+            f"{key}={s[key]}: its denominator is a loss that does not exist"
+        )
+
+
+def test_q166_shuffle_order_independent_scalars():
+    """ECONOMIC INVARIANT, formula-free: PSR, Kelly, the Common Sense Ratio and
+    the CPC index are functions of the DISTRIBUTION of daily returns (mean, std,
+    skew, kurtosis, win rate, average win and loss, gross sums, quantiles), not
+    of their order. Reordering the same days must leave them unchanged.
+    quantstats' price guess differences consecutive values, so it is
+    order-DEPENDENT, which makes a shuffle a sharp detector for it.
+
+    Deliberately EXCLUDED: ulcer_index, upi, serenity_index and recovery_factor.
+    They are built on the drawdown path, which legitimately depends on order.
+
+    Pre-fix, live values moved under this permutation (research Q4, re-measured
+    in the plan 166-04 SUMMARY), e.g. kelly 0.389 -> 0.485.
+    """
+    original = _q166_trigger_nonmonotone()
+    rng = np.random.default_rng(4242)
+    shuffled = pd.Series(
+        rng.permutation(original.to_numpy()), index=original.index, name="returns"
+    )
+    assert not np.array_equal(original.to_numpy(), shuffled.to_numpy())
+    # Anti-vacuity: the fixture must exercise the guess, i.e. live quantstats
+    # must give an order-dependent kelly on it. Otherwise equality proves nothing.
+    live_a = _safe_float(qs.stats.kelly_criterion(original))
+    live_b = _safe_float(qs.stats.kelly_criterion(shuffled))
+    assert live_a != live_b, "live kelly did not move under the shuffle: fixture is vacuous"
+
+    base = compute_qstats_scalars(original, None)
+    perm = compute_qstats_scalars(shuffled, None)
+    assert base["probabilistic_sharpe_ratio"] is not None
+    assert perm["probabilistic_sharpe_ratio"] == pytest.approx(
+        base["probabilistic_sharpe_ratio"], rel=1e-9, abs=0.0
+    ), "probabilistic_sharpe_ratio changed under a pure reordering"
+    for key in _Q166_LOSS_RATIO_KEYS:
+        if base[key] is None:
+            assert perm[key] is None, f"{key}: None on the original, {perm[key]} shuffled"
+        else:
+            assert perm[key] == pytest.approx(base[key], rel=1e-9, abs=0.0), (
+                f"{key} changed under a pure reordering: {base[key]} -> {perm[key]}"
+            )
+
+
+def test_q166_composed_leaf_fault_is_failure_soft(golden_returns, caplog, monkeypatch):
+    """A fault inside a quantstats LEAF that a mirror composes must stay
+    failure-soft and named (H-0710 contract), exactly as a fault in a whole
+    quantstats scalar was before the mirrors.
+
+    `win_rate` is a real leaf of exactly two mirrors: `_kelly_criterion` and
+    `_cpc_index`. Detonating it must make those two None, each with a WARNING
+    naming its key, and must leave the other six scalars computed. A mirror that
+    silently stopped calling `win_rate` (or a wrapper that swallowed the fault
+    without logging) fails here.
+    """
+    import services.metrics as metrics_module
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("simulated win_rate failure")
+
+    monkeypatch.setattr(metrics_module.qs.stats, "win_rate", boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_qstats_scalars(golden_returns, None)
+
+    affected = ("kelly_criterion", "cpc_index")
+    for key in affected:
+        assert result[key] is None, f"{key}={result[key]} with its win_rate leaf detonated"
+        assert [
+            r for r in caplog.records
+            if key in r.getMessage() and r.levelno == logging.WARNING
+        ], f"a fault inside {key}'s win_rate leaf must log a WARNING naming {key!r}"
+    others = [k for k, _ in _QSTATS_SINGLE_ARG_SCALARS if k not in affected]
+    assert len(others) == 6
+    assert all(result[k] is not None for k in others), (
+        "a win_rate fault must not take down scalars that do not use it: "
+        f"{ {k: result[k] for k in others} }"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 D-16: the Probabilistic Sharpe Ratio uses the NON-excess fourth
+# moment, as published. quantstats 0.0.81 feeds pandas' EXCESS kurtosis into a
+# term that expects the raw fourth moment, subtracting 3 twice (research §Q5
+# F-2). Its correctness anchor is therefore the published formula computed here
+# from sample moments, never live quantstats (which carries the defect) and
+# never pandas' own skew/kurtosis (which the mirror uses).
+# ---------------------------------------------------------------------------
+
+
+def _q166_psr_published(raw: pd.Series) -> float:
+    """Bailey & Lopez de Prado PSR(0), from sample moments, independently of the mirror.
+
+    PSR = Phi( SR / sqrt( (1 - g3*SR + ((g4 - 1)/4) * SR**2) / (n - 1) ) ),
+    SR the per-period (non-annualized) Sharpe, g3 the skewness, g4 the
+    NON-excess kurtosis (3 for a normal distribution), n the observation count.
+    """
+    from scipy import stats as scipy_stats
+
+    filled = raw.fillna(0).to_numpy(dtype="float64")
+    values = raw.to_numpy(dtype="float64")
+    sr = float(np.mean(filled) / np.std(filled, ddof=1))
+    g3 = float(scipy_stats.skew(values, bias=False, nan_policy="omit"))
+    g4 = float(scipy_stats.kurtosis(values, fisher=False, bias=False, nan_policy="omit"))
+    n = len(values)
+    return float(
+        scipy_stats.norm.cdf(sr / math.sqrt((1 - g3 * sr + ((g4 - 1) / 4) * sr**2) / (n - 1)))
+    )
+
+
+@pytest.mark.parametrize(
+    "fixture_name", ("benign_mixed", "golden_returns", "benign_all_positive")
+)
+def test_q166_psr_matches_the_published_formula(fixture_name, request):
+    """D-16: the persisted probabilistic_sharpe_ratio equals the published PSR.
+
+    The anchor recomputes SR, skewness and the NON-excess kurtosis from the
+    sample with numpy and scipy, and applies Bailey & Lopez de Prado's variance
+    term. It is algebraically identical to the mirror's quantstats-shaped
+    expression once the mirror feeds the non-excess moment, but the operation
+    order differs, so the tolerance is rel 1e-10, not bit equality.
+
+    Pre-fix (0.0.81 form, excess kurtosis): benign_mixed 0.7693296699257343,
+    golden_returns 0.37176286348610654, benign_all_positive None (the 0.0.81
+    variance term went negative).
+    """
+    s = _q166_benign_fixture(fixture_name, request)
+    expected = _q166_psr_published(s)
+    actual = compute_qstats_scalars(s, None)["probabilistic_sharpe_ratio"]
+    assert actual is not None, f"PSR undefined on {fixture_name}; published value {expected}"
+    assert actual == pytest.approx(expected, rel=1e-10, abs=0.0), (
+        f"PSR on {fixture_name} is not the published formula: {actual} vs {expected}"
+    )
+
+
+def test_q166_psr_is_defined_for_a_steadily_winning_series():
+    """ECONOMIC INVARIANT: a series that gains every day has a positive Sharpe,
+    so the probability that its true Sharpe exceeds 0 is a real number above
+    0.5. It cannot be undefined.
+
+    Pre-fix: None. quantstats 0.0.81 subtracts 3 from an already-excess
+    kurtosis, which drove its variance term negative on this fixture, and the
+    square root of a negative number is NaN (research §Q5 F-2).
+    """
+    psr = compute_qstats_scalars(_rank05_benign_all_positive(), None)[
+        "probabilistic_sharpe_ratio"
+    ]
+    assert psr is not None and psr > 0.5, (
+        f"probabilistic_sharpe_ratio={psr} for a series that never lost a day"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 plan 05: the SCALAR benchmark leg (r_squared, greeks alpha/beta).
+#
+# quantstats 0.0.81 runs every benchmark through `_prepare_benchmark` ->
+# `_prepare_returns` unconditionally, so no `prepare_returns=` keyword closes
+# the price guess on that leg (research Q2). The benchmark trigger below is an
+# all-non-negative benchmark with a +150% day, which live quantstats re-reads
+# as a price series and `pct_change`s.
+# ---------------------------------------------------------------------------
+
+
+def _q166_benchmark_trigger() -> tuple[pd.Series, pd.Series]:
+    """(strategy, benchmark) on the same 250 business days from 2024-01-01.
+
+    The strategy is benign (mixed sign). The benchmark is `[1.5]` followed by a
+    decaying positive tail: never negative and with max > 1, which is exactly
+    quantstats' price-detection condition. Research Q4 measured live 0.0.81 on
+    this pair: r_squared 0.006670639650444322, beta -0.015400848308443902,
+    alpha 0.12212418616146373 (periods 252).
+    """
+    idx = pd.bdate_range("2024-01-01", periods=250)
+    strategy = pd.Series(
+        np.random.default_rng(15905).normal(0.0006, 0.013, 250), index=idx
+    )
+    benchmark = pd.Series(np.r_[1.5, np.linspace(0.02, 0.001, 249)], index=idx)
+    return strategy, benchmark
+
+
+def _q166_calendar_mismatch() -> tuple[pd.Series, pd.Series]:
+    """(weekday strategy, 7-day benchmark) over DIFFERENT calendars.
+
+    The strategy trades business days only (160 rows, from a Thursday). The
+    benchmark trades every calendar day and starts earlier and ends later. It
+    is the SC3 weekday-vs-7-day pair of 166.4 D-A: each Monday return is paired
+    with the benchmark's compounded Friday-to-Monday move, not its
+    Sunday-to-Monday daily move. Both legs are benign.
+    """
+    s_idx = pd.bdate_range("2024-02-01", periods=160)
+    strategy = pd.Series(
+        np.random.default_rng(16605).normal(0.0005, 0.012, len(s_idx)), index=s_idx
+    )
+    b_idx = pd.date_range("2024-01-01", "2024-12-31", freq="D")
+    benchmark = pd.Series(
+        np.random.default_rng(16606).normal(0.0004, 0.03, len(b_idx)), index=b_idx
+    )
+    return strategy, benchmark
+
+
+def test_q166_benchmark_trigger_actually_trips_the_heuristic():
+    """ANTI-VACUITY: the benchmark leg meets quantstats' price condition
+    (min >= 0 and max > 1) and the strategy leg does not, so any value the
+    tests below see move is the benchmark guess and nothing else."""
+    strategy, benchmark = _q166_benchmark_trigger()
+    assert benchmark.min() >= 0 and benchmark.max() > 1
+    assert strategy.min() < 0
+
+
+def test_q166_benchmark_r_squared_is_the_squared_correlation():
+    """ECONOMIC ANCHOR: the R-squared of a one-regressor OLS is the squared
+    Pearson correlation of the pair. On the trigger the two legs share one
+    index, so the pair is the raw series as given.
+
+    Pre-mirror: live quantstats returned 0.006670639650444322, because it
+    `pct_change`d the benchmark first (research Q4).
+    """
+    strategy, benchmark = _q166_benchmark_trigger()
+    expected = float(strategy.corr(benchmark)) ** 2
+    actual = compute_qstats_scalars(strategy, benchmark)["r_squared"]
+    assert actual is not None
+    assert actual == pytest.approx(expected, rel=1e-12, abs=0.0), (
+        f"r_squared={actual}; squared correlation of the raw pair is {expected}"
+    )
+
+
+def test_q166_benchmark_r_squared_reaches_metrics_json():
+    """The persisted value, not only the helper's, is the squared correlation."""
+    strategy, benchmark = _q166_benchmark_trigger()
+    expected = float(strategy.corr(benchmark)) ** 2
+    mj = compute_all_metrics(strategy, benchmark)["metrics_json"]
+    assert mj["r_squared"] == pytest.approx(expected, rel=1e-12, abs=0.0), (
+        f"persisted r_squared={mj['r_squared']}; squared correlation is {expected}"
+    )
+
+
+def test_q166_benchmark_r_squared_is_pair_permutation_invariant():
+    """FORMULA-FREE DETECTOR: R-squared depends on the set of (r, b) PAIRS, not
+    their order. The price guess is a `pct_change` of the benchmark, which does
+    depend on order, so a guessing implementation moves under a joint
+    permutation."""
+    strategy, benchmark = _q166_benchmark_trigger()
+    perm = np.random.default_rng(4242).permutation(len(strategy))
+    s2 = pd.Series(strategy.to_numpy()[perm], index=strategy.index)
+    b2 = pd.Series(benchmark.to_numpy()[perm], index=strategy.index)
+    original = compute_qstats_scalars(strategy, benchmark)["r_squared"]
+    shuffled = compute_qstats_scalars(s2, b2)["r_squared"]
+    assert original is not None and shuffled is not None
+    assert shuffled == pytest.approx(original, rel=1e-9, abs=0.0), (
+        f"r_squared changed under a joint pair permutation: {original} -> {shuffled}"
+    )
+
+
+# 166.4 D-06: live quantstats parity is kept only where both legs share one
+# calendar and carry no NaN; the other two cases are re-anchored below on the
+# squared correlation of the shared pair.
+_Q166_R_SQUARED_PARITY_PAIRS = ("golden_with_benchmark",)
+
+
+def _q166_benchmark_pair(
+    name: str, request: pytest.FixtureRequest
+) -> tuple[pd.Series, pd.Series]:
+    if name == "calendar_mismatch":
+        return _q166_calendar_mismatch()
+    golden = request.getfixturevalue("golden_returns")
+    bench = request.getfixturevalue("benchmark_returns")
+    if name == "golden_with_benchmark":
+        return golden, bench
+    if name == "golden_with_nan_days_and_benchmark":
+        return _q166_golden_with_nan_days(golden), bench
+    raise AssertionError(f"unknown pair {name!r}")
+
+
+@pytest.mark.parametrize("pair_name", _Q166_R_SQUARED_PARITY_PAIRS)
+def test_q166_parity_r_squared_matches_live_quantstats(pair_name, request):
+    """BENIGN PARITY (D-08), one collected case per pair. Neither leg can trip
+    the guess, so the mirror must equal live 0.0.81 `r_squared` to rel 1e-12."""
+    strategy, benchmark = _q166_benchmark_pair(pair_name, request)
+    for leg in (strategy, benchmark):
+        assert not bool(leg.min() >= 0 and leg.max() > 1), "fixture would trip the guess"
+    expected = _safe_float(qs.stats.r_squared(strategy, benchmark))
+    actual = compute_qstats_scalars(strategy, benchmark)["r_squared"]
+    assert expected is not None
+    assert actual == pytest.approx(expected, rel=1e-12, abs=0.0), (
+        f"r_squared on {pair_name} drifted from live quantstats 0.0.81: {actual} vs {expected}"
+    )
+
+
+@pytest.mark.parametrize(
+    "pair_name", ("calendar_mismatch", "golden_with_nan_days_and_benchmark")
+)
+def test_q166_r_squared_equals_shared_pair_correlation_squared(pair_name, request):
+    """166.4 D-06 (2026-09-27, ratified by the founder 2026-09-27): r_squared is the squared correlation of the shared pair.
+
+    These two cases pinned live quantstats 0.0.81 `r_squared` until 166.4. On
+    unequal calendars quantstats back-fills the benchmark onto the strategy's
+    dates and zero-fills the first return, and on NaN strategy days it
+    zero-fills them for r_squared only, so its value is not the squared
+    correlation of any pair a benchmark metric reads. Under 166.4 D-A r_squared
+    reads the ONE interval pair, pairwise-complete, so it moves by
+    construction. Measured moves: calendar_mismatch 0.0005305518445182663 ->
+    0.0004969133053590204; golden_with_nan_days_and_benchmark
+    0.0011742485146902892 -> 0.0011740012121330516.
+    """
+    strategy, benchmark = _q166_benchmark_pair(pair_name, request)
+    mj = compute_all_metrics(strategy, benchmark)["metrics_json"]
+    assert mj["r_squared_status"] == "ok", mj["r_squared_status"]
+    assert mj["correlation"] is not None
+    assert mj["r_squared"] == pytest.approx(mj["correlation"] ** 2, rel=1e-12, abs=0.0), (
+        f"r_squared on {pair_name}={mj['r_squared']}; squared correlation is {mj['correlation'] ** 2}"
+    )
+
+
+def _q166_raw_pair_regression(
+    r: pd.Series, b: pd.Series, periods: int
+) -> tuple[float, float]:
+    """(alpha, beta) of the one-regressor OLS of r on b, over the rows where
+    BOTH are present. Written from the definition: beta = cov(r, b) / var(b),
+    alpha = (mean(r) - beta * mean(b)) * periods. No quantstats."""
+    pair = pd.concat([r, b], axis=1, join="inner").dropna()
+    rc, bc = pair.iloc[:, 0], pair.iloc[:, 1]
+    m = np.cov(rc, bc)
+    beta = float(m[0, 1] / m[1, 1])
+    alpha = float((rc.mean() - beta * bc.mean()) * periods)
+    return alpha, beta
+
+
+def test_q166_benchmark_greeks_are_the_raw_pair_regression():
+    """ECONOMIC ANCHOR: beta is the OLS slope of the strategy on the benchmark,
+    and alpha is the annualized intercept, both on the raw aligned pair.
+
+    Pre-mirror: live quantstats `greeks(..., prepare_returns=False)` returned
+    beta -0.015400848308443902 and alpha 0.12212418616146373, because it
+    `pct_change`d the benchmark first (research Q4).
+    """
+    strategy, benchmark = _q166_benchmark_trigger()
+    exp_alpha, exp_beta = _q166_raw_pair_regression(strategy, benchmark, 252)
+    mj = compute_all_metrics(strategy, benchmark)["metrics_json"]
+    assert mj["beta"] == pytest.approx(exp_beta, rel=1e-12, abs=0.0), (
+        f"beta={mj['beta']}; OLS slope of the raw pair is {exp_beta}"
+    )
+    assert mj["alpha"] == pytest.approx(exp_alpha, rel=1e-12, abs=0.0), (
+        f"alpha={mj['alpha']}; annualized OLS intercept of the raw pair is {exp_alpha}"
+    )
+
+
+def test_q166_greeks_nan_days_are_not_fabricated_zeros(
+    golden_returns, benchmark_returns
+):
+    """D-15 (F-3): a strategy with NaN days has a perfectly defined regression
+    over the days it does have. alpha and beta must be that regression, over
+    pairwise-complete observations, and treynor (cagr / beta) must be present.
+
+    Pre-fix: 0.0.81 `greeks` ends in `.fillna(0)`. Since Phase 159 passes the
+    strategy leg raw, one NaN day makes `np.cov` NaN, and the fillna turned
+    that into a confident alpha 0.0 / beta 0.0, rendered as 0.000 in the
+    Benchmark greeks table, with treynor silently dropped.
+    """
+    r = _q166_golden_with_nan_days(golden_returns)
+    exp_alpha, exp_beta = _q166_raw_pair_regression(r, benchmark_returns, 252)
+    out = compute_all_metrics(r, benchmark_returns)
+    mj = out["metrics_json"]
+    assert mj["alpha"] != 0.0 and mj["beta"] != 0.0, (
+        f"fabricated zeros: alpha={mj['alpha']}, beta={mj['beta']}"
+    )
+    assert mj["beta"] == pytest.approx(exp_beta, rel=1e-12, abs=0.0)
+    assert mj["alpha"] == pytest.approx(exp_alpha, rel=1e-12, abs=0.0)
+    assert mj.get("treynor") is not None, "treynor dropped though beta is defined"
+    assert mj["treynor"] == pytest.approx(out["cagr"] / exp_beta, rel=1e-12, abs=0.0)
+
+
+def test_q166_greeks_undefined_beta_is_none_not_zero(caplog):
+    """D-15 / D-09: when beta is undefined it is None, never 0.0. A beta of
+    0.0 claims the strategy is measured to be uncorrelated with the benchmark;
+    an undefined beta claims nothing.
+
+    Two ways beta is undefined: the benchmark never moves (zero variance, the
+    slope's denominator), or fewer than two days have both legs present.
+    Pre-fix, 0.0.81's `.fillna(0)` persisted 0.0 for both keys in both cases.
+
+    Round-1 review (SFH MEDIUM-1): `mj.get(key) is None` is ALSO true when the
+    key is ABSENT, which is what the benchmark fan-out's `except` leaves behind
+    when anything in it raises: alpha, beta, correlation, info_ratio and treynor
+    vanish together behind one WARNING. Drills N11/N12 (greeks RAISING on each
+    undefined path) survived. So each key must be PRESENT and None, the
+    siblings the fan-out writes must be present, and no fan-out WARNING may be
+    logged.
+    """
+    idx = pd.bdate_range("2024-01-01", periods=60)
+    strategy = pd.Series(
+        np.random.default_rng(7).normal(0.001, 0.01, len(idx)), index=idx
+    )
+    flat = pd.Series(0.001, index=idx)
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    mj = compute_all_metrics(strategy, flat)["metrics_json"]
+    assert "alpha" in mj and mj["alpha"] is None, (
+        f"alpha over a zero-variance benchmark: {mj.get('alpha', '<absent>')}"
+    )
+    assert "beta" in mj and mj["beta"] is None, (
+        f"beta over a zero-variance benchmark: {mj.get('beta', '<absent>')}"
+    )
+    assert "treynor" not in mj or mj["treynor"] is None
+    # The strategy moves, so tracking error is positive and info_ratio must
+    # survive: its absence would mean the fan-out aborted.
+    assert "info_ratio" in mj and mj["info_ratio"] is not None, mj.get("info_ratio", "<absent>")
+    assert "correlation" in mj
+
+    sparse = strategy.copy()
+    sparse.iloc[1:] = np.nan
+    moving = pd.Series(
+        np.random.default_rng(8).normal(0.0, 0.02, len(idx)), index=idx
+    )
+    mj = compute_all_metrics(sparse, moving)["metrics_json"]
+    assert "alpha" in mj and mj["alpha"] is None, (
+        f"alpha from one complete pair: {mj.get('alpha', '<absent>')}"
+    )
+    assert "beta" in mj and mj["beta"] is None, (
+        f"beta from one complete pair: {mj.get('beta', '<absent>')}"
+    )
+    assert "correlation" in mj
+
+    fanout = [r for r in caplog.records if "benchmark_metrics fan-out failed" in r.getMessage()]
+    assert fanout == [], [r.getMessage() for r in fanout]
+
+
+# 166.4 D-A: "calendar_mismatch" left this list. Its oracle (live quantstats on
+# the daily inner join) IS the defect; the fixture is now owned by
+# test_benchalign_weekday_beta_is_the_friday_to_monday_regression.
+_Q166_GREEKS_PARITY_PAIRS = ("golden_with_benchmark",)
+
+
+@pytest.mark.parametrize("pair_name", _Q166_GREEKS_PARITY_PAIRS)
+def test_q166_parity_greeks_match_live_quantstats_on_nan_free_series(
+    pair_name, request
+):
+    """BENIGN PARITY (D-08): on NaN-free input the D-15 pairwise restriction
+    removes nothing, so alpha and beta must equal live 0.0.81 `greeks` on the
+    SAME pair `compute_all_metrics` builds, to rel 1e-12. Both legs share one
+    calendar here, so the 166.4 D-A interval pair equals the inner join."""
+    strategy, benchmark = _q166_benchmark_pair(pair_name, request)
+    assert not strategy.isna().any() and not benchmark.isna().any()
+    aligned_r, aligned_b = strategy.align(benchmark, join="inner")
+    live = qs.stats.greeks(aligned_r, aligned_b, periods=252, prepare_returns=False)
+    mj = compute_all_metrics(strategy, benchmark)["metrics_json"]
+    assert mj["beta"] == pytest.approx(float(live["beta"]), rel=1e-12, abs=0.0)
+    assert mj["alpha"] == pytest.approx(float(live["alpha"]), rel=1e-12, abs=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 plan 06: the ROLLING benchmark leg (rolling alpha/beta).
+#
+# quantstats 0.0.81 `rolling_greeks` runs the benchmark through
+# `_prepare_benchmark` -> `_prepare_returns` unconditionally (research Q2), so
+# the benchmark trigger's +150% day is re-read as a price series there too.
+# These tests go through `_rolling_alpha_beta`, the production entry that
+# feeds the rendered `rolling_alpha` / `rolling_beta` sibling kinds.
+# ---------------------------------------------------------------------------
+
+_Q166_ROLLING_WINDOW = 90
+# `_finalize_rolling` writes values with `round(float(v), 4)`, so a written
+# point is within half a unit of the 4th decimal of the unrounded value. The
+# 1e-12 slack absorbs only the binary representation of that bound.
+_Q166_WRITTEN_TOLERANCE = 0.5e-4 + 1e-12
+
+
+def _q166_windowed_regression(
+    r: pd.Series, b: pd.Series, window: int
+) -> pd.DataFrame:
+    """In-test anchor, written from the definition with no pandas rolling and
+    no quantstats: for each `window`-row window ending at t,
+    beta_t = cov_w(r, b) / var_w(b) and alpha_t = mean_w(r) - beta_t * mean_w(b).
+    The inputs must already be one aligned frame."""
+    assert r.index.equals(b.index)
+    rv, bv = r.to_numpy(dtype=float), b.to_numpy(dtype=float)
+    dates, alphas, betas = [], [], []
+    for end in range(window, len(rv) + 1):
+        rw, bw = rv[end - window : end], bv[end - window : end]
+        m = np.cov(rw, bw)
+        beta = m[0, 1] / m[1, 1]
+        dates.append(r.index[end - 1])
+        betas.append(beta)
+        alphas.append(rw.mean() - beta * bw.mean())
+    return pd.DataFrame(
+        {"alpha": alphas, "beta": betas}, index=pd.DatetimeIndex(dates)
+    )
+
+
+def test_q166_rolling_beta_is_the_rolling_regression_slope():
+    """ECONOMIC ANCHOR (SC-4): the rendered rolling beta at t is the OLS slope
+    of the strategy on the benchmark over the 90 rows ending at t. On the
+    trigger both legs share one index and carry no NaN, so the window is the
+    raw pair as given.
+
+    Pre-mirror: live quantstats `rolling_greeks` `pct_change`d the benchmark
+    first, and the last beta point was -0.08887237598396791 against a raw-pair
+    slope of -0.7554623350323423 (research Q4).
+    """
+    strategy, benchmark = _q166_benchmark_trigger()
+    tail_r = strategy.iloc[-_Q166_ROLLING_WINDOW:].to_numpy()
+    tail_b = benchmark.iloc[-_Q166_ROLLING_WINDOW:].to_numpy()
+    m = np.cov(tail_r, tail_b)
+    expected = float(m[0, 1] / m[1, 1])
+
+    _, beta = _rolling_alpha_beta(strategy, benchmark, _Q166_ROLLING_WINDOW)
+    assert beta, "rolling beta is empty on a 250-row pair"
+    last = beta[-1]
+    assert last["date"] == strategy.index[-1].strftime("%Y-%m-%d")
+    assert abs(last["value"] - expected) <= _Q166_WRITTEN_TOLERANCE, (
+        f"rolling beta last point={last['value']}; rolling cov/var of the raw "
+        f"pair over the last {_Q166_ROLLING_WINDOW} rows is {expected}"
+    )
+
+
+def test_q166_rolling_alpha_is_the_windowed_intercept():
+    """ECONOMIC ANCHOR (D-17): every rendered rolling alpha point is the
+    intercept of the regression over ITS OWN 90-row window,
+    mean_w(r) - beta_t * mean_w(b). It is still UNANNUALIZED (Phase 34): a
+    per-period intercept, not a periods-scaled return.
+
+    Pre-fix, quantstats 0.0.81 computed `mean(r_all) - beta_t * mean(b_all)`
+    with FULL-SAMPLE means (research F-4), so the chart showed a linear
+    transform of rolling beta, not a rolling alpha. On the trigger the frame
+    quantstats builds (`fillna(0)` of the aligned pair) is the raw pair, since
+    neither leg has a NaN.
+    """
+    strategy, benchmark = _q166_benchmark_trigger()
+    assert not strategy.isna().any() and not benchmark.isna().any()
+    anchor = _q166_windowed_regression(strategy, benchmark, _Q166_ROLLING_WINDOW)
+
+    alpha, _ = _rolling_alpha_beta(strategy, benchmark, _Q166_ROLLING_WINDOW)
+    assert [p["date"] for p in alpha] == anchor.index.strftime("%Y-%m-%d").tolist()
+    misses = [
+        (p["date"], p["value"], float(e))
+        for p, e in zip(alpha, anchor["alpha"], strict=True)
+        if abs(p["value"] - e) > _Q166_WRITTEN_TOLERANCE
+    ]
+    assert not misses, (
+        f"{len(misses)}/{len(alpha)} rolling alpha points are not the windowed "
+        f"intercept; last (date, written, windowed intercept): {misses[-1]}"
+    )
+
+
+_Q166_ROLLING_PARITY_PAIRS = ("golden_with_benchmark", "calendar_mismatch")
+
+
+def _q166_rolling_pair(
+    name: str, request: pytest.FixtureRequest
+) -> tuple[pd.Series, pd.Series]:
+    """The pair inner-joined on the date intersection, both legs on one index.
+
+    It is a direct math pin of `_rolling_greeks` against live 0.0.81
+    `rolling_greeks` on equal-index input. It is not the pair production
+    passes: since 166.4 D-A `_rolling_alpha_beta` hands `_rolling_greeks` the
+    interval pair from `_benchmark_pair`."""
+    strategy, benchmark = (
+        _q166_benchmark_trigger()
+        if name == "benchmark_trigger"
+        else _q166_benchmark_pair(name, request)
+    )
+    return strategy.align(benchmark, join="inner")
+
+
+@pytest.mark.parametrize("pair_name", _Q166_ROLLING_PARITY_PAIRS)
+def test_q166_parity_rolling_beta_matches_live_quantstats(pair_name, request):
+    """BENIGN PARITY (D-06, D-08): neither leg can trip the guess, so every
+    rolling beta point must equal live 0.0.81 `rolling_greeks` at rel 1e-12,
+    before any rounding, and the undefined (warm-up) points must sit on the
+    same dates. `calendar_mismatch` is a weekday strategy against a 7-day
+    benchmark; after the inner join the two calendars agree, so this is a
+    direct math pin of `_rolling_greeks` on equal-index input, not the pair
+    production passes (that is `_benchmark_pair`'s interval pair, 166.4 D-A)."""
+    r, b = _q166_rolling_pair(pair_name, request)
+    for leg in (r, b):
+        assert not bool(leg.min() >= 0 and leg.max() > 1), "fixture would trip the guess"
+    live = qs.stats.rolling_greeks(r, b, _Q166_ROLLING_WINDOW)["beta"]
+    mine = _rolling_greeks(r, b, _Q166_ROLLING_WINDOW)["beta"]
+    assert mine.index.equals(live.index)
+    assert (mine.isna() == live.isna()).all(), "undefined beta points moved"
+    defined = live.notna()
+    assert int(defined.sum()) > 0
+    assert mine[defined].to_numpy() == pytest.approx(
+        live[defined].to_numpy(), rel=1e-12, abs=0.0
+    ), f"rolling beta on {pair_name} drifted from live quantstats 0.0.81"
+
+
+@pytest.mark.parametrize("pair_name", ("benchmark_trigger", "golden_with_benchmark"))
+def test_q166_rolling_greeks_alpha_is_the_windowed_intercept_full_precision(
+    pair_name, request
+):
+    """D-17 at full precision: every defined alpha point t equals
+    mean_w(r) - beta_t * mean_w(b) over the same 90-row window of the prepared
+    frame (the aligned pair with `fillna(0)`, as 0.0.81 builds it), with
+    beta_t from the in-test cov/var. Task 1's tests check the written,
+    rounded values; this one pins the unrounded math."""
+    r, b = _q166_rolling_pair(pair_name, request)
+    frame = pd.concat({"r": r, "b": b}, axis=1).fillna(0)
+    anchor = _q166_windowed_regression(frame["r"], frame["b"], _Q166_ROLLING_WINDOW)
+    alpha = _rolling_greeks(r, b, _Q166_ROLLING_WINDOW)["alpha"].dropna()
+    assert alpha.index.equals(anchor.index), "defined alpha points are not one per full window"
+    assert alpha.to_numpy() == pytest.approx(
+        anchor["alpha"].to_numpy(), rel=1e-9
+    ), f"rolling alpha on {pair_name} is not the windowed intercept"
+
+
+def test_q166_rolling_greeks_alpha_differs_from_the_full_sample_form(
+    golden_returns, benchmark_returns
+):
+    """ANTI-VACUITY for D-17: on the benign golden pair (where beta is
+    bit-identical to live quantstats) at least one alpha point differs from
+    0.0.81's full-sample form `mean(r_all) - beta_t * mean(b_all)`. If this
+    passed vacuously, the D-17 change would be a no-op and the golden
+    `sibling.rolling_alpha` move would be unexplained."""
+    r, b = golden_returns.align(benchmark_returns, join="inner")
+    live = qs.stats.rolling_greeks(r, b, _Q166_ROLLING_WINDOW)["alpha"]
+    mine = _rolling_greeks(r, b, _Q166_ROLLING_WINDOW)["alpha"]
+    both = live.notna() & mine.notna()
+    assert int(both.sum()) > 0
+    gap = (mine[both] - live[both]).abs()
+    assert float(gap.max()) > 1e-12, (
+        f"windowed alpha equals the full-sample form on every point (max gap {gap.max()})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 code review, round 1 (166-REVIEW.md, 166-REVIEW-SFH.md).
+#
+# Each test below pins one finding and was observed RED against the unfixed
+# code (neuter the guard -> RED -> restore -> cmp), per the project's
+# anti-vacuity rule.
+# ---------------------------------------------------------------------------
+
+
+def _q166r_constant_series(value: float = 0.001, n: int = 120) -> pd.Series:
+    """A constant daily return (a stablecoin-lending shape). For n=120 and 0.001,
+    pandas ``std()`` is ~4.35e-19, NOT 0.0 (measured), which is the float-residue
+    trap SFH HIGH-1 describes."""
+    idx = pd.bdate_range("2024-01-01", periods=n)
+    return pd.Series(value, index=idx, name="returns").astype("float64")
+
+
+def test_q166r_constant_series_sharpe_is_undefined_not_a_residue_quotient():
+    """SFH HIGH-1: a constant series has no dispersion, so its Sharpe is
+    UNDEFINED and must persist as None. Pre-fix, the float residue of ``std()``
+    (not an exact 0.0) slipped past the exact-zero guard and the headline Sharpe
+    persisted as 3.645e+16, while the backbone reported that number with status
+    ``ok``. A None here is the "no invented data" rule: an absent panel, never a
+    synthesized number, and never a synthesized 0.0 either."""
+    from services.metrics import _annualized_vol_sharpe, sharpe_vol_status_from_backbone
+
+    s = _q166r_constant_series()
+    assert float(s.std()) != 0.0, "fixture no longer carries the float residue it pins"
+
+    vol, sharpe = _annualized_vol_sharpe(s, 252)
+    assert vol == 0.0 and math.isnan(sharpe), (vol, sharpe)
+
+    mj = compute_all_metrics(s)
+    assert mj["sharpe"] is None, f"constant series persisted sharpe={mj['sharpe']}"
+
+    assert sharpe_vol_status_from_backbone(s, 252) == (0.0, None, "zero_volatility")
+
+    # Every sign and length measured to carry the residue behaves the same.
+    for value, n in ((0.0005, 250), (-0.002, 1000), (0.01, 60)):
+        c = _q166r_constant_series(value, n)
+        assert compute_all_metrics(c)["sharpe"] is None, (value, n)
+        assert sharpe_vol_status_from_backbone(c, 365)[2] == "zero_volatility", (value, n)
+
+
+def test_q166r_residue_guard_leaves_real_dispersion_bit_identical():
+    """The guard must reclassify ONLY float residue. On a series with real
+    dispersion the primitive is the exact pre-fix arithmetic."""
+    from services.metrics import _annualized_vol_sharpe
+
+    s = _rank05_benign_mixed()
+    expected_vol = float(s.std() * math.sqrt(252))
+    expected_sharpe = float((s.mean() * 252) / expected_vol)
+    assert _annualized_vol_sharpe(s, 252) == (expected_vol, expected_sharpe)
+
+
+def test_q166r_constant_benchmark_beta_is_undefined_not_a_residue_slope():
+    """SFH HIGH-1, same class on the benchmark leg: 0.0.81 `greeks` tests the
+    benchmark variance with `== 0`. A constant benchmark's `np.cov` variance is
+    float residue for most lengths (measured 1.9e-37 at 120 days), so the slope
+    over it was a fabricated beta: -1.92 and alpha 0.339 on a 250-day pair,
+    measured pre-fix. A benchmark that never moves defines no beta (D-09)."""
+    from services.metrics import _greeks_no_guess
+
+    for n in (120, 250, 1000):
+        flat = _q166r_constant_series(0.001, n)
+        assert float(np.cov(flat, flat)[1, 1]) != 0.0, "fixture lost its residue"
+        strategy = pd.Series(
+            np.random.default_rng(7).normal(0.001, 0.01, n), index=flat.index
+        )
+        assert _greeks_no_guess(strategy, flat, 252) == (None, None), n
+
+
+def test_q166r_serenity_undefined_arms_are_none_not_zero(monkeypatch):
+    """SFH MEDIUM-2: `_serenity_index` has two undefined arms, and a fabricated
+    0.0 from either one ("measured, terrible") shipped green before this test:
+    drills N8 and N10 both survived the suite.
+
+    * ``std_returns == 0``: an all-zero series (exact 0) and a constant losing
+      series (float residue, the SFH HIGH-1 class; pre-fix it persisted
+      -2.2e-18) both reach it.
+    * ``denominator == 0``: no natural input reaches it (see the mirror's
+      docstring for why), so the test forces ulcer to 0 on a series that has
+      losses, which makes the pitfall finite and the denominator exactly 0. The
+      arm must answer NaN, not 0.0, and not the inf the bare division would give.
+    """
+    import services.metrics as metrics_module
+
+    zeros = _q166r_constant_series(0.0, 120)
+    assert float(zeros.std()) == 0.0
+    losing = _q166r_constant_series(-0.002, 250)
+    assert float(losing.std()) != 0.0, "fixture lost its residue"
+    for s in (zeros, losing):
+        assert math.isnan(metrics_module._serenity_index(s)), s.iloc[0]
+        assert compute_qstats_scalars(s, None)["serenity_index"] is None, s.iloc[0]
+
+    mixed = _rank05_benign_mixed()
+    assert math.isfinite(metrics_module._serenity_index(mixed)), "control must be defined"
+    monkeypatch.setattr(metrics_module, "_ulcer_index", lambda r: 0.0)
+    assert math.isnan(metrics_module._serenity_index(mixed))
+
+
+def test_q166r_benchmark_mirrors_accept_a_tz_aware_pair():
+    """SFH LOW-1 / review IN-02: each benchmark mirror tz-normalised the strategy
+    leg but compared it against a still-tz-aware benchmark index, so a UTC pair
+    raised `TypeError: Cannot compare dtypes` in `_align_benchmark_like_qs`
+    (measured in `_greeks_no_guess`, `_r_squared` and `_rolling_greeks`), where
+    live 0.0.81 `greeks` returned values. In production that TypeError would be
+    swallowed by the fan-out `except` and alpha, beta, correlation, info_ratio
+    and treynor would vanish together. A tz-aware pair must give exactly the
+    values of the same pair made naive."""
+    from services.metrics import _greeks_no_guess, _r_squared, _rolling_greeks
+
+    idx = pd.bdate_range("2024-01-01", periods=200)
+    rng = np.random.default_rng(166)
+    r = pd.Series(rng.normal(0.001, 0.01, len(idx)), index=idx)
+    b = pd.Series(rng.normal(0.0005, 0.02, len(idx)), index=idx)
+    r_utc, b_utc = r.tz_localize("UTC"), b.tz_localize("UTC")
+
+    assert _greeks_no_guess(r_utc, b_utc, 252) == _greeks_no_guess(r, b, 252)
+    assert _r_squared(r_utc, b_utc) == _r_squared(r, b)
+    pd.testing.assert_frame_equal(
+        _rolling_greeks(r_utc, b_utc, 90), _rolling_greeks(r, b, 90), check_freq=False
+    )
+
+
+def test_q166r_psr_one_observation_is_undefined_without_a_failure_warning(caplog):
+    """Review IN-01: on a one-row series the PSR mirror divided a Python float by
+    `n - 1 == 0`, raised ZeroDivisionError, and `_safe_qstats_scalar` logged
+    `qstats scalar probabilistic_sharpe_ratio failed ... float division by zero`
+    with a traceback. The persisted value was None either way, so the defect
+    was the false "scalar failed" signal an operator would chase. One
+    observation defines no Sharpe: None, silently, like 0.0.81's NaN."""
+    one = pd.Series([0.01], index=pd.bdate_range("2024-01-01", periods=1))
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    out = compute_qstats_scalars(one, None)
+    assert out["probabilistic_sharpe_ratio"] is None
+    failed = [r.getMessage() for r in caplog.records if "failed" in r.getMessage()]
+    assert failed == [], failed
+
+
+def _q166r_suspect_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "the mirror is suspect" in r.getMessage()]
+
+
+def test_q166r_broken_mirror_logs_a_named_warning_an_undefined_ratio_does_not(
+    caplog, monkeypatch
+):
+    """SFH LOW-4: D-09 maps a legitimately undefined ratio to None, silently.
+    Before this, a mirror that went NaN because of a BUG was indistinguishable
+    from that: same None, no log line, no status companion.
+
+    A mirror returning NaN on a series that defines it (since round 2, each
+    mirror by its own precondition: ``_mirror_keys_defined_by``) must log a
+    WARNING that names it. The same NaN on the all-winning trigger, where D-09 makes kelly
+    undefined, must not."""
+    import services.metrics as metrics_module
+
+    mixed = _rank05_benign_mixed()
+    trigger = _rank05_trigger_series()
+    every_key = {k for k, _fn in metrics_module._QSTATS_SINGLE_ARG_SCALARS}
+    assert metrics_module._mirror_keys_defined_by(mixed) == every_key
+    assert "kelly_criterion" not in metrics_module._mirror_keys_defined_by(trigger)
+
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    clean = compute_qstats_scalars(mixed, None)
+    assert _q166r_suspect_lines(caplog) == []
+    assert all(clean[k] is not None for k, _fn in metrics_module._QSTATS_SINGLE_ARG_SCALARS)
+
+    broken = tuple(
+        (k, (lambda r: float("nan")) if k == "kelly_criterion" else fn)
+        for k, fn in metrics_module._QSTATS_SINGLE_ARG_SCALARS
+    )
+    monkeypatch.setattr(metrics_module, "_QSTATS_SINGLE_ARG_SCALARS", broken)
+    out = compute_qstats_scalars(mixed, None)
+    assert out["kelly_criterion"] is None
+    lines = _q166r_suspect_lines(caplog)
+    assert len(lines) == 1 and "kelly_criterion" in lines[0], lines
+
+    caplog.clear()
+    out = compute_qstats_scalars(trigger, None)
+    assert out["kelly_criterion"] is None
+    assert _q166r_suspect_lines(caplog) == [], "a D-09 undefined ratio was reported as a broken mirror"
+
+
+def test_q166r_r_squared_error_is_logged_only_when_both_legs_vary(caplog, monkeypatch):
+    """SFH INFO-2: `r_squared_status = "error"` was set on a non-finite R^2 with
+    no log line. A benchmark that never moves defines no R^2 (legitimately
+    undefined: status error, no log). Both legs moving and still no R^2 is a
+    broken mirror and must log a WARNING naming r_squared."""
+    import services.metrics as metrics_module
+
+    idx = pd.bdate_range("2024-01-01", periods=120)
+    rng = np.random.default_rng(1661)
+    strategy = pd.Series(rng.normal(0.001, 0.01, len(idx)), index=idx)
+    moving = pd.Series(rng.normal(0.0005, 0.02, len(idx)), index=idx)
+    flat = pd.Series(0.0, index=idx)
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+
+    out = compute_qstats_scalars(strategy, flat)
+    assert out["r_squared"] is None and out["r_squared_status"] == "error"
+    assert _q166r_suspect_lines(caplog) == []
+
+    assert compute_qstats_scalars(strategy, moving)["r_squared_status"] == "ok"
+    assert _q166r_suspect_lines(caplog) == []
+
+    monkeypatch.setattr(metrics_module, "_r_squared", lambda r, b: float("nan"))
+    out = compute_qstats_scalars(strategy, moving)
+    assert out["r_squared"] is None and out["r_squared_status"] == "error"
+    lines = _q166r_suspect_lines(caplog)
+    assert len(lines) == 1 and "r_squared" in lines[0], lines
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 code review, round 2 (166-REVIEW-R2.md, 166-REVIEW-SFH-R2.md).
+#
+# Same discipline as round 1: each guard was neutered, observed RED, restored
+# from a byte copy and checked with cmp.
+# ---------------------------------------------------------------------------
+
+
+# The compounding-NAV constant-yield generator, the APY helper and the yields
+# dict live in tests/dispersion_fixtures.py (Phase 166.1 D-03), imported at the
+# top of this file under their old names.
+
+
+def _q166r2_random_benchmark(index: pd.Index) -> pd.Series:
+    rng = np.random.default_rng(16602)
+    return pd.Series(rng.normal(0.001, 0.03, len(index)), index=index, name="benchmark")
+
+
+@pytest.mark.parametrize(
+    "daily_yield", list(_Q166R2_CONSTANT_YIELDS.values()), ids=list(_Q166R2_CONSTANT_YIELDS)
+)
+def test_q166r2_compounding_constant_yield_defines_no_dispersion_ratio(daily_yield):
+    """CR-01 / SFH R2-HIGH-1: a constant yield has no dispersion, so every ratio
+    over its std is UNDEFINED, at every site that divides by it.
+
+    Round 1's floor was ``1e-12 * |mean|``. A NAV-derived constant yield leaves
+    an ABSOLUTE ~1e-16 residue, so below about 5% APY the floor sank under it:
+    a 1e-4 daily yield persisted a headline Sharpe of 1.49e13 with status
+    ``ok`` and a PSR of 1.0, and every sibling site (smart_sharpe, rolling
+    Sharpe, correlation, rolling correlation, treynor over a residue beta,
+    R^2, outlier ratios) persisted a residue quotient. Each assertion below
+    names one of those sites; each was measured wrong before the fix.
+
+    Measured with the round-1 floor restored: 7 of the 11 cases go RED (daily
+    1e-5 and 1e-4, and APY 0.01% through 5%), because their residue exceeds
+    ``1e-12 * |mean|``. Daily 1e-3 and APY 10%, 50% and 100% were already caught
+    by the round-1 floor, since a larger mean lifts it above the residue; no
+    fixture of this shape can make them fail it. They stay as the pin that the
+    round-2 floor keeps covering that end of the scale.
+    """
+    import services.metrics as metrics_module
+
+    r = _q166r2_nav_constant_yield(daily_yield)
+    sd = float(r.std())
+    assert sd != 0.0, "fixture no longer carries the float residue it pins"
+    assert metrics_module._dispersion_is_residue(sd, float(r.mean()))
+
+    vol, sharpe = metrics_module._annualized_vol_sharpe(r, 365)
+    assert vol == 0.0 and math.isnan(sharpe), (vol, sharpe)
+    assert metrics_module.sharpe_vol_status_from_backbone(r, 365) == (
+        0.0, None, "zero_volatility",
+    )
+
+    res = compute_all_metrics(
+        r, benchmark_returns=_q166r2_random_benchmark(r.index), periods_per_year=365
+    )
+    mj = res.metrics_json
+    inner = mj["metrics_json"]
+    assert mj["sharpe"] is None, mj["sharpe"]
+    assert mj["volatility"] == 0.0, mj["volatility"]
+    assert inner["smart_sharpe"] is None, inner["smart_sharpe"]
+    assert inner["probabilistic_sharpe_ratio"] is None
+    assert inner["serenity_index"] is None
+    for window_key, points in mj["rolling_metrics"].items():
+        if window_key.startswith("sharpe"):
+            assert points == [], (window_key, points[:3])
+    assert "outlier_win_ratio" not in inner and "outlier_loss_ratio" not in inner
+    # Benchmark-relative sites over a strategy leg that never moves.
+    assert inner["correlation"] is None, inner["correlation"]
+    assert inner["btc_rolling_correlation_90d"] == []
+    assert inner["beta"] == 0.0, inner["beta"]
+    assert "treynor" not in inner, inner.get("treynor")
+    assert inner["r_squared"] is None and inner["r_squared_status"] == "error"
+
+
+def test_q166r2_compounding_constant_benchmark_defines_no_beta():
+    """CR-01 on the BENCHMARK leg: a benchmark whose returns are a compounding
+    constant yield has no variance, so beta, alpha, R^2, the rolling greeks and
+    the rolling correlation over it are undefined. Pre-fix the scalar beta was
+    9.6e11 and alpha -3.5e10 (reviewer), and the rendered rolling beta reached
+    4.3e13 (measured on this fixture)."""
+    import services.metrics as metrics_module
+
+    bench = _q166r2_nav_constant_yield(1e-4, start=100.0)
+    rng = np.random.default_rng(7)
+    strategy = pd.Series(rng.normal(0.001, 0.02, len(bench)), index=bench.index)
+
+    assert metrics_module._greeks_no_guess(strategy, bench, 365) == (None, None)
+    rolling = metrics_module._rolling_greeks(strategy, bench, 90)
+    assert rolling["beta"].notna().sum() == 0, rolling["beta"].dropna().head()
+    assert metrics_module._rolling_correlation(strategy, bench, 90) == []
+    assert not metrics_module._r_squared_pair_varies(strategy, bench)
+    out = compute_qstats_scalars(strategy, bench)
+    assert out["r_squared"] is None and out["r_squared_status"] == "error"
+
+
+def test_q166r2_residue_floor_keeps_real_quantisation_dispersion():
+    """SFH R2-MED-2, the OTHER side of the floor: widening it must go RED.
+
+    A NAV rounded to cents carries real quantisation noise. At 1% APY its sd is
+    about 4.1e-9 on a 1e6 NAV and 4.0e-11 on a 1e8 NAV (measured), the second 40x
+    above the 1e-12 floor. Those are measurements, so their Sharpe is the exact
+    unguarded arithmetic, not None. Round 1's drill M16a (floor widened to 1e-3)
+    survived the whole suite; with this test it cannot. The largest residue the
+    floor must still catch is about 1.3e-16 (test above), so the floor sits
+    between the two with orders of magnitude on each side.
+    """
+    import services.metrics as metrics_module
+
+    for start in (1e6, 1e8):
+        r = _q166r2_nav_constant_yield(_q166r2_apy(0.01), start=start, cents=True)
+        sd, mean = float(r.std()), float(r.mean())
+        assert sd > 1e-11, (start, sd)
+        assert not metrics_module._dispersion_is_residue(sd, mean), (start, sd)
+        expected_vol = float(r.std() * math.sqrt(365))
+        expected_sharpe = float((r.mean() * 365) / expected_vol)
+        assert metrics_module._annualized_vol_sharpe(r, 365) == (expected_vol, expected_sharpe)
+        mj = compute_all_metrics(r, periods_per_year=365)
+        assert mj["sharpe"] is not None and math.isfinite(mj["sharpe"]), (start, mj["sharpe"])
+        assert mj["metrics_json"]["smart_sharpe"] is not None, start
+
+
+def test_q166r2_constant_series_smart_sharpe_and_vol_are_not_residue():
+    """WR-01 and IN-02 on the round-1 fixture itself. With the headline Sharpe
+    already None, ``smart_sharpe`` still persisted 4.6e15 on 250 days of a
+    constant 0.001 (-4.6e15 on -0.002), and the headline ``volatility`` persisted
+    the residue 4.2e-18 while the backbone and the primitive said 0.0."""
+    for value in (0.001, -0.002):
+        c = _q166r_constant_series(value, 250)
+        mj = compute_all_metrics(c)
+        assert mj["metrics_json"]["smart_sharpe"] is None, (value, mj["metrics_json"]["smart_sharpe"])
+        assert mj["volatility"] == 0.0, (value, mj["volatility"])
+
+
+def test_q166r2_r_squared_over_a_pair_that_defines_none_is_none_not_residue(caplog):
+    """WR-02 and SFH R2-LOW-2.
+
+    * A constant NON-ZERO benchmark: scipy's ``linregress`` tests only an exact
+      zero variance, so R^2 persisted about 1e-34 with status ``ok`` (measured
+      3.2e-34 at 0.001, 0.0005 and -0.002). The pair is asked first now.
+    * Two rows: the line passes through both points, so R^2 is 1.0 whatever the
+      data; the ``len(p) >= 3`` conjunct makes it undefined. Remove it and this
+      goes RED with 0.9999999999999996.
+    * One row: its std is NaN, and ``_dispersion_is_real`` reads NaN as "does
+      not vary", so no false "mirror is suspect" line can come from it.
+    None of the three may log a suspect line: each is a legitimately undefined
+    R^2, not a broken mirror.
+    """
+    import services.metrics as metrics_module
+
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    for n in (120, 250, 1000):
+        idx = pd.bdate_range("2024-01-01", periods=n)
+        strategy = pd.Series(np.random.default_rng(n).normal(0.001, 0.01, n), index=idx)
+        for level in (0.001, 0.0005, -0.002):
+            out = compute_qstats_scalars(strategy, pd.Series(level, index=idx))
+            assert out["r_squared"] is None and out["r_squared_status"] == "error", (n, level, out)
+
+    two = pd.Series([0.01, -0.02], index=pd.bdate_range("2024-01-01", periods=2))
+    out = compute_qstats_scalars(two, pd.Series([0.03, 0.01], index=two.index))
+    assert out["r_squared"] is None and out["r_squared_status"] == "error", out
+
+    one = pd.Series([0.01], index=pd.bdate_range("2024-01-01", periods=1))
+    assert not metrics_module._r_squared_pair_varies(one, pd.Series([0.02], index=one.index))
+    assert metrics_module._dispersion_is_real(float("nan"), 0.0) is False
+    assert metrics_module._dispersion_is_residue(float("nan"), 0.0) is False
+    compute_qstats_scalars(one, pd.Series([0.02], index=one.index))
+    assert _q166r_suspect_lines(caplog) == []
+
+
+def _q166r2_s(values: list[float]) -> pd.Series:
+    return pd.Series(values, index=pd.bdate_range("2024-01-01", periods=len(values)), dtype="float64")
+
+
+def _q166r2_q05_zero_with_a_loss() -> pd.Series:
+    # Two losses in 100 days and 50 flat days: the 5% quantile is exactly 0.
+    return _q166r2_s([-0.01] * 2 + [0.0] * 50 + [0.01] * 48)
+
+
+def _q166r2_high_win_rate() -> pd.Series:
+    """365 days, 8 of them losing (2.2%): a carry or option-selling shape. Its 5%
+    quantile is POSITIVE, and all eight mirrors are finite on it."""
+    rng = np.random.default_rng(16603)
+    v = np.abs(rng.normal(0.002, 0.004, 365))
+    v[rng.choice(365, 8, replace=False)] = -np.abs(rng.normal(0.01, 0.005, 8))
+    return _q166r2_s(list(v))
+
+
+#: id -> (series builder, the mirror key the input does NOT define). Each case
+#: removes exactly ONE ingredient of that mirror's precondition, so each
+#: conjunct of ``_mirror_keys_defined_by`` has an input that fails only it.
+_Q166R2_UNDEFINED_CASES: dict[str, tuple[Callable[[], pd.Series], str]] = {
+    "recovery_no_loss": (_rank05_trigger_series, "recovery_factor"),
+    "ulcer_one_row": (lambda: _q166r2_s([0.01]), "ulcer_index"),
+    "upi_no_loss": (_rank05_trigger_series, "upi"),
+    "upi_inf_day": (lambda: _q166r2_s([0.01, -0.02, float("inf"), 0.01, -0.01]), "upi"),
+    "kelly_no_win": (lambda: _q166r2_s([-0.01, -0.02, -0.005, -0.01, -0.03]), "kelly_criterion"),
+    "kelly_no_loss": (_rank05_trigger_series, "kelly_criterion"),
+    "cpc_no_win": (lambda: _q166r2_s([-0.01, -0.02, -0.005, -0.01, -0.03]), "cpc_index"),
+    "common_sense_no_loss": (_rank05_trigger_series, "common_sense_ratio"),
+    "common_sense_q05_zero": (_q166r2_q05_zero_with_a_loss, "common_sense_ratio"),
+    "psr_constant": (lambda: _q166r_constant_series(0.001, 120), "probabilistic_sharpe_ratio"),
+    "psr_nav_constant_yield": (
+        lambda: _q166r2_nav_constant_yield(1e-4),
+        "probabilistic_sharpe_ratio",
+    ),
+    "psr_three_rows": (lambda: _q166r2_s([0.01, -0.02, 0.03]), "probabilistic_sharpe_ratio"),
+    "psr_negative_variance_term": (
+        lambda: _q166r2_s([0.01, 0.01, 0.02, 0.02]),
+        "probabilistic_sharpe_ratio",
+    ),
+    "serenity_no_loss": (_rank05_trigger_series, "serenity_index"),
+    "serenity_constant_losing": (lambda: _q166r_constant_series(-0.002, 250), "serenity_index"),
+    "serenity_flat_drawdown": (lambda: _q166r2_s([-0.1, 0.0, 0.0, 0.0, 0.0]), "serenity_index"),
+}
+
+
+@pytest.mark.parametrize(
+    ("build", "key"), list(_Q166R2_UNDEFINED_CASES.values()), ids=list(_Q166R2_UNDEFINED_CASES)
+)
+def test_q166r2_each_mirror_precondition_is_necessary(build, key, caplog):
+    """SFH R2-MED-1: each conjunct of each mirror's precondition is NECESSARY.
+
+    On an input missing one ingredient the mirror really is non-finite (a D-09
+    undefined ratio), the predicate leaves its key out, and no "mirror is
+    suspect" line is logged. Widening any conjunct puts the key back in on an
+    input where the mirror is NaN, which logs a false broken-mirror line and
+    turns this RED. Round 1's drills M7 (the quantile conjunct), M8 (the
+    observation count, carried now by the PSR variance term) and M9 (the win
+    conjunct) all survived the suite; here they are ``common_sense_q05_zero``,
+    ``psr_three_rows`` and ``kelly_no_win`` / ``cpc_no_win``.
+    """
+    import services.metrics as metrics_module
+
+    s = build()
+    fn = dict(metrics_module._QSTATS_SINGLE_ARG_SCALARS)[key]
+    assert _safe_float(fn(s)) is None, f"{key} is finite here, so the case proves nothing"
+    assert key not in metrics_module._mirror_keys_defined_by(s)
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    compute_qstats_scalars(s, None)
+    assert [line for line in _q166r_suspect_lines(caplog) if key in line] == []
+
+
+def test_q166r2_high_win_rate_strategy_keeps_the_broken_mirror_signal(caplog, monkeypatch):
+    """SFH R2-MED-1: round 1's single predicate required a NEGATIVE 5% quantile,
+    so a strategy losing on fewer than 5% of days got no broken-mirror signal
+    for ANY mirror, although all eight are finite on it. Per-mirror
+    preconditions keep the signal: a kelly mirror broken to NaN is named."""
+    import services.metrics as metrics_module
+
+    s = _q166r2_high_win_rate()
+    p = metrics_module._prepared_returns_no_guess(s)
+    assert float(p.quantile(0.05)) > 0.0, "fixture must have a positive 5% quantile"
+    every_key = {k for k, _fn in metrics_module._QSTATS_SINGLE_ARG_SCALARS}
+    assert metrics_module._mirror_keys_defined_by(s) == every_key
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    clean = compute_qstats_scalars(s, None)
+    assert all(clean[k] is not None for k in every_key), clean
+    assert _q166r_suspect_lines(caplog) == []
+
+    broken = tuple(
+        (k, (lambda r: float("nan")) if k == "kelly_criterion" else fn)
+        for k, fn in metrics_module._QSTATS_SINGLE_ARG_SCALARS
+    )
+    monkeypatch.setattr(metrics_module, "_QSTATS_SINGLE_ARG_SCALARS", broken)
+    compute_qstats_scalars(s, None)
+    lines = _q166r_suspect_lines(caplog)
+    assert len(lines) == 1 and "kelly_criterion" in lines[0], lines
+
+
+def test_q166r2_every_mirror_is_finite_wherever_its_precondition_holds():
+    """The SUFFICIENCY direction: on any input whose precondition holds, the
+    mirror is finite, so the "mirror is suspect" line cannot fire on a healthy
+    mirror. A deterministic sample of the 164,357-check fuzz recorded in
+    ``_mirror_keys_defined_by``: every series of length 2 to 4 over a 6-value
+    grid (a +150% day included), and 150 seeded random series in five shapes."""
+    import itertools
+
+    import services.metrics as metrics_module
+
+    mirrors = dict(metrics_module._QSTATS_SINGLE_ARG_SCALARS)
+    grid = [-0.5, -0.01, 0.0, 0.01, 0.02, 1.5]
+    series = [
+        _q166r2_s(list(combo)) for n in (2, 3, 4) for combo in itertools.product(grid, repeat=n)
+    ]
+    rng = np.random.default_rng(16604)
+    for i in range(150):
+        n = int(rng.integers(4, 300))
+        kind = i % 5
+        if kind == 0:
+            v = rng.normal(0.001, 0.02, n)
+        elif kind == 1:
+            v = np.abs(rng.normal(0.002, 0.01, n))
+            v[rng.random(n) < 0.02] *= -1
+        elif kind == 2:
+            v = rng.normal(0.001, 0.02, n)
+            v[rng.random(n) < 0.3] = np.nan
+        elif kind == 3:
+            v = np.where(rng.random(n) < 0.5, 0.0, rng.normal(0, 0.01, n))
+        else:
+            v = rng.normal(0.01, 0.05, n)
+            v[0] = 1.5
+        series.append(_q166r2_s(list(v)))
+    failures = []
+    checked = 0
+    for s in series:
+        for key in metrics_module._mirror_keys_defined_by(s):
+            checked += 1
+            if _safe_float(mirrors[key](s)) is None:
+                failures.append((key, s.tolist()))
+    assert checked > 1000, checked
+    assert failures == [], failures[:5]
+
+
+def test_q166r2_a_failing_mirror_predicate_is_logged(caplog, monkeypatch):
+    """SFH R2-LOW-1: the predicate's ``except`` switched the broken-mirror
+    signal off for the whole series with no log line (drill M10 survived). It
+    must name itself; the mirrors still run and still persist."""
+    import services.metrics as metrics_module
+
+    def _boom(_r):
+        raise RuntimeError("predicate exploded")
+
+    monkeypatch.setattr(metrics_module, "_mirror_keys_defined_by", _boom)
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    out = compute_qstats_scalars(_rank05_benign_mixed(), None)
+    lines = [r.getMessage() for r in caplog.records if "mirror predicate failed" in r.getMessage()]
+    assert len(lines) == 1 and "predicate exploded" in lines[0], lines
+    assert out["recovery_factor"] is not None
+
+
+def test_q166r2_a_pair_labelled_in_different_zones_is_refused_not_shifted(caplog):
+    """IN-03: a naive strategy paired with an Asia/Tokyo benchmark. Normalising
+    the benchmark to UTC turned each Tokyo midnight into 15:00 of the previous
+    UTC day, and the reindex back-fill then paired every strategy day with the
+    NEXT benchmark day: r_squared 0.009 with status ``ok``, measured, on a
+    shifted pairing. The pair is refused by name instead. A pair that agrees on
+    its day labels (both naive, a naive leg with a UTC leg, both in one zone)
+    gives exactly the values of the naive pair."""
+    import services.metrics as metrics_module
+
+    idx = pd.date_range("2024-01-01", periods=200, freq="D")
+    r = pd.Series(np.random.default_rng(3).normal(0.001, 0.01, 200), index=idx)
+    b = pd.Series(np.random.default_rng(4).normal(0.001, 0.02, 200), index=idx)
+    b_tokyo = b.tz_localize("Asia/Tokyo")
+
+    for fn in (
+        lambda: metrics_module._greeks_no_guess(r, b_tokyo, 365),
+        lambda: metrics_module._r_squared(r, b_tokyo),
+        lambda: metrics_module._rolling_greeks(r, b_tokyo, 90),
+    ):
+        with pytest.raises(ValueError, match="different time zones"):
+            fn()
+
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    out = compute_qstats_scalars(r, b_tokyo)
+    assert out["r_squared"] is None and out["r_squared_status"] == "error", out
+    assert any(
+        "r_squared failed" in rec.getMessage() and "different time zones" in rec.getMessage()
+        for rec in caplog.records
+    ), [rec.getMessage() for rec in caplog.records]
+
+    naive = (metrics_module._greeks_no_guess(r, b, 365), metrics_module._r_squared(r, b))
+    b_utc = b.tz_localize("UTC")
+    r_tokyo = r.tz_localize("Asia/Tokyo")
+    assert (metrics_module._greeks_no_guess(r, b_utc, 365), metrics_module._r_squared(r, b_utc)) == naive
+    assert (
+        metrics_module._greeks_no_guess(r_tokyo, b_tokyo, 365),
+        metrics_module._r_squared(r_tokyo, b_tokyo),
+    ) == naive

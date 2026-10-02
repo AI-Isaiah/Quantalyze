@@ -62,9 +62,10 @@ class IngestionAdapter(Protocol):
     calls to these methods in sequence.
 
     NOTE: `@runtime_checkable` only verifies method *presence*, not
-    signature shape. CI runs `mypy --strict services/ingestion/` (see
-    Makefile `lint` target — MC-3 fix from 19-REVIEWS.md) to catch
-    signature drift at type-check time before tests would notice.
+    signature shape. The ci.yml `python` job step "Type gate - mypy strict
+    over the running-service surface" covers this package as part of
+    `services/` (MC-3 fix from 19-REVIEWS.md) to catch signature drift at
+    type-check time before tests would notice.
     """
 
     async def validate(self, req: KeySubmissionRequest) -> ValidationResult: ...
@@ -104,7 +105,17 @@ class IngestionAdapter(Protocol):
 # returns flow through the broker-dailies ONE-path via the balance-history
 # usd_value series, never process_key fill metrics (SfoxAdapter.compute_metrics
 # is intentionally fail-loud).
-SUPPORTED_SOURCES: tuple[str, ...] = ("okx", "binance", "bybit", "csv", "deribit", "sfox")
+# Phase 135 (MT5SRC-01, 135-01) widens it with "mt5" — landed in lockstep with
+# the ``Source`` Literal (adapter.py) + ``_FACTORIES`` below so
+# test_source_literal_and_registry_agree stays green (the factory lands in the
+# SAME change — no Literal-ahead-of-registry split, the SFOX-01 pin precedent).
+# get_adapter("mt5") resolving is the ingestion CAPABILITY; the read-only
+# validate/encrypt branch is Phase 135 (MT5SRC-02), the onboarding UI is Phase
+# 138, go-live is Phase 139. MT5 returns flow through the broker-dailies ONE
+# backbone via the deal-ledger daily-NAV reconstruction (Phase 136), never
+# process_key fill metrics (Mt5Adapter.compute_metrics is intentionally
+# fail-loud).
+SUPPORTED_SOURCES: tuple[str, ...] = ("okx", "binance", "bybit", "csv", "deribit", "sfox", "mt5")
 ADAPTERS: dict[str, IngestionAdapter] = {}
 
 
@@ -161,6 +172,12 @@ def _make_sfox_adapter() -> IngestionAdapter:
     return SfoxAdapter()
 
 
+def _make_mt5_adapter() -> IngestionAdapter:
+    from .mt5 import Mt5Adapter
+
+    return Mt5Adapter()
+
+
 # M-11 — adapter factory registry. New adapters slot in here without
 # touching the dispatch chain.
 _FACTORIES: dict[str, "Callable[[], IngestionAdapter]"] = {
@@ -170,6 +187,7 @@ _FACTORIES: dict[str, "Callable[[], IngestionAdapter]"] = {
     "csv": _make_csv_adapter,
     "deribit": _make_deribit_adapter,
     "sfox": _make_sfox_adapter,
+    "mt5": _make_mt5_adapter,
 }
 
 
@@ -178,11 +196,13 @@ def get_adapter(source: str) -> IngestionAdapter:
 
     Raises ValueError on unknown source BEFORE attempting any import,
     so the unhappy path never triggers concrete-adapter module loads.
-    UC-B drops MT5/IBKR for v1.0.0; the supported allowlist is
-    `okx, binance, bybit, csv, deribit, sfox` (Phase 70 / DRB-08 added deribit
-    as the ingestion capability — onboarding orchestration is Phase 72; Phase
-    120 / SFOX-05 added sfox — onboarding UI is Phase 122, live-parity egress
-    is Phase 121).
+    The supported allowlist is
+    `okx, binance, bybit, csv, deribit, sfox, mt5` (Phase 70 / DRB-08 added
+    deribit as the ingestion capability — onboarding orchestration is Phase 72;
+    Phase 120 / SFOX-05 added sfox — onboarding UI is Phase 122, live-parity
+    egress is Phase 121; Phase 135 / MT5SRC-01 added mt5 — read-only
+    validate/encrypt is Phase 135 MT5SRC-02, onboarding UI is Phase 138, go-live
+    is Phase 139).
     """
     if source not in SUPPORTED_SOURCES:
         raise ValueError(

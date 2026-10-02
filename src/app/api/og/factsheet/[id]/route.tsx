@@ -1,7 +1,15 @@
 import { ImageResponse } from "next/og";
+import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { captureToSentry, shouldCaptureNow } from "@/lib/sentry-capture";
 import { withPublishedOnly } from "@/lib/visibility";
 import { computeOgHeadline } from "@/lib/factsheet/og-metrics";
+import { isComputedAnalytics } from "@/lib/closed-sets";
+// Phase 147 / SCEN-01 — the LEAF import. `resolveDailyReturnSeries` lives in
+// its own module precisely so this route (and the public share page) can share
+// the ONE series-resolution mechanism without dragging in the factsheet
+// build-payload graph on every unfurl hit.
+import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 
 /**
  * Dynamic OG card for the v2 factsheet. Renders strategy name + headline
@@ -12,6 +20,47 @@ import { computeOgHeadline } from "@/lib/factsheet/og-metrics";
  */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/** A healthy card, or a genuine not-found: amortised across many unfurl hits. */
+const LONG_CACHE_CONTROL = "public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800";
+/** Review round 1 SFH-02: a card rendered from a FAILURE is never cached, so
+ *  the next unfurl retries instead of freezing the failure for a day at the
+ *  CDN (the precedent is the BTC benchmark route's `ERROR_CACHE_CONTROL`). */
+const FAILURE_CACHE_CONTROL = "no-store";
+
+/** Log a failure, then report it to Sentry after the response (throttled per
+ *  stage, so an incident does not burn the quota). Never throws: a broken OG
+ *  image must not 500 the route. */
+function reportOgFailure(stage: "read" | "compute", id: string, err: unknown): void {
+  console.error(`[og:factsheet] ${stage} failed`, id, err);
+  try {
+    if (shouldCaptureNow(`og-factsheet:${stage}`)) {
+      after(() =>
+        captureToSentry(err, {
+          tags: { route: "api/og/factsheet", stage },
+          extra: { strategy_id: id },
+        }),
+      );
+    }
+  } catch {
+    // Scheduling the capture failed; the console.error above still stands.
+  }
+}
+
+/** The `strategy_analytics` embed shape this card reads (PostgREST returns an
+ *  object for a to-one embed and an array for a to-many one — both handled).
+ *  STALE-01 widened it by `computation_status` — see the gate at the compute.
+ *  169.4.1 OGSHARPE widened it by the stored `cagr` / `sharpe` / `max_drawdown`,
+ *  and review round 1 (CR-01) by `data_quality_flags`. */
+type AnalyticsEmbed = {
+  daily_returns?: unknown;
+  returns_series?: unknown;
+  computation_status?: unknown;
+  cagr?: unknown;
+  sharpe?: unknown;
+  max_drawdown?: unknown;
+  data_quality_flags?: unknown;
+};
 
 export async function GET(
   _req: Request,
@@ -24,24 +73,58 @@ export async function GET(
     codename?: string | null;
     description?: string | null;
     asset_class?: string | null;
-    strategy_analytics?: { daily_returns?: unknown } | { daily_returns?: unknown }[] | null;
+    strategy_analytics?: AnalyticsEmbed | AnalyticsEmbed[] | null;
   } | null = null;
+  // SFH-02: set on any failure path, so the card is sent no-store (see below).
+  let failed = false;
   try {
     const supabase = await createClient();
     const res = await withPublishedOnly(
       supabase
         .from("strategies")
         .select(
-          "id, name, codename, description, asset_class, strategy_analytics ( daily_returns )",
+          // Phase 147 / SCEN-01: `returns_series` joins the embed. The
+          // analytics-service writes the cumprod equity curve there and leaves
+          // `daily_returns` NULL (CSV ingest only), so reading `daily_returns`
+          // alone rendered the BLANK card — name, then three em-dashes — for
+          // every service-computed strategy on every social unfurl. Disclosure
+          // is unchanged: withPublishedOnly below still gates the read, so the
+          // column is only ever read for a published row, and the raw series
+          // never leaves the server (the response is an image).
+          // STALE-01: `computation_status` joins the embed. It is the ONLY
+          // column that distinguishes a series belonging to a run that
+          // FINISHED from one left behind by a run that failed — every
+          // `IS NOT NULL` test passes on both. Read-only widening of a
+          // published row's projection; nothing new leaves the server (this
+          // response is a PNG).
+          // Phase 169.4.1 OGSHARPE (SC4, D-10): the stored `cagr`, `sharpe` and
+          // `max_drawdown` join the embed, so the card shows the values the
+          // factsheet headline and every list show instead of a recomputation.
+          // They are already public on the discovery projection; nothing new
+          // leaves the server.
+          // Review round 1 (CR-01): `data_quality_flags` joins the embed. On a
+          // chain-broken row the stored `cagr` covers only the suffix after the
+          // break, so computeOgHeadline hides it (see its docblock). Read-only;
+          // the flags never leave the server (this response is a PNG).
+          "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status, cagr, sharpe, max_drawdown, data_quality_flags )",
         )
         .eq("id", id),
     )
       .maybeSingle();
+    // SFH-02: supabase-js does not throw on a query error, it returns
+    // `{ data: null, error }`. Without this check a statement timeout or a
+    // column error rendered the generic card as if the row were not found.
+    // A genuine not-found (`data === null`, `error === null`) is not a failure.
+    if (res.error) {
+      failed = true;
+      reportOgFailure("read", id, res.error);
+    }
     data = res.data ?? null;
   } catch (err) {
-    // Log for production debugging; OG image still renders with the fallback.
+    // OG image still renders with the fallback.
     // (deliberately doesn't throw — broken OG image must not 500 the deploy)
-    console.error("[og:factsheet] failed to load strategy", id, err);
+    failed = true;
+    reportOgFailure("read", id, err);
   }
 
   const name = data?.name ?? data?.codename ?? "Strategy";
@@ -57,19 +140,65 @@ export async function GET(
   let cagr = NaN;
   let maxDd = NaN;
   try {
+    // The embed unwrap stays — this route reads strategy_analytics as an EMBED
+    // (unlike the lazy-returns route, which queries the table directly).
     const analytics = Array.isArray(data?.strategy_analytics)
       ? data.strategy_analytics[0]
-      : (data?.strategy_analytics as { daily_returns?: unknown } | null | undefined);
-    const dailyRaw = analytics?.daily_returns;
-    if (Array.isArray(dailyRaw)) {
-      const rows = dailyRaw.map(d => {
-        const row = d as { date?: unknown; value?: unknown } | null;
-        return { date: row?.date, value: Number(row?.value) };
-      });
-      ({ sharpe, cagr, maxDd } = computeOgHeadline(rows, data?.asset_class));
+      : (data?.strategy_analytics as AnalyticsEmbed | null | undefined);
+    // Phase 147 / SCEN-01 — resolve through the ONE shared mechanism instead of
+    // the old array-shape gate plus hand-rolled row coercion. It strictly
+    // subsumes both: it normalizes all three stored `daily_returns` shapes
+    // (array / flat dict / nested year-keyed record), validates every point,
+    // AND falls back to differencing the `returns_series` wealth curve when the
+    // daily column is null. That fallback is the fix — the old gate tested the
+    // daily column for array-ness, a null column failed it, and the metrics
+    // were never computed at all, so the card rendered blank.
+    const rows = resolveDailyReturnSeries(
+      analytics?.daily_returns,
+      analytics?.returns_series,
+    );
+    // STALE-01 — the SERIES is a job output too, so a run that did not finish
+    // leaves the previous run's track sitting in these columns and nothing
+    // about the array says which run wrote it. This card recomputes Sharpe /
+    // CAGR / Max DD from that array IN-ROUTE, so the ranked-list shaper never
+    // sees it; the gate has to live here.
+    //
+    // ⚠️ It matters more here than anywhere else in this fix, for two reasons.
+    // The response carries `s-maxage=86400, stale-while-revalidate=604800`, so
+    // one render of a dead figure is served from CDN for a day and revalidated
+    // against for a week — long after the row is fixed. And its readers are
+    // Slack / LinkedIn / Twitter unfurl caches, which keep their own copy and
+    // show it to people who never open the page and never see a correction.
+    //
+    // Not computing is ALREADY this card's designed answer to "analytics
+    // aren't ready" — the docblock says so and `fmtNum`/`fmtPct` render the
+    // NaN sentinel as "—". A non-terminal row is the same answer to the same
+    // question, so it reuses the same path: name + description + three
+    // em-dashes. No new layout, no error card, and the route still cannot 500.
+    const computationStatus =
+      typeof analytics?.computation_status === "string"
+        ? analytics.computation_status
+        : null;
+    const analyticsComputed = isComputedAnalytics(computationStatus);
+    // Two points is the floor for any of the three metrics to mean anything
+    // (computeOgHeadline enforces its own stricter gates above that and returns
+    // NaN — the "—" sentinel — when they are not met).
+    // Phase 169.4.1 OGSHARPE (SC4, D-10, D-25): the stored scalars travel with
+    // the status, so a rankable row shows its PERSISTED figures under the card's
+    // own display gates (computeOgHeadline's docblock); only a key the embed did
+    // not carry falls back to the computation, and a stored null hides.
+    if (analyticsComputed && rows.length >= 2) {
+      ({ sharpe, cagr, maxDd } = computeOgHeadline(rows, data?.asset_class, {
+        cagr: analytics?.cagr,
+        sharpe: analytics?.sharpe,
+        max_drawdown: analytics?.max_drawdown,
+        computation_status: computationStatus,
+        data_quality_flags: analytics?.data_quality_flags,
+      }));
     }
   } catch (err) {
-    console.error("[og:factsheet] headline metric compute failed", id, err);
+    failed = true;
+    reportOgFailure("compute", id, err);
   }
 
   const fmtPct = (x: number) => (Number.isFinite(x) ? `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%` : "—");
@@ -120,10 +249,9 @@ export async function GET(
   // each fetch on share). 1h browser TTL + 24h CDN TTL with stale-while-
   // revalidate so a refresh after computed_at change picks up the new card
   // within the SWR window without stampeding the underlying compute.
-  response.headers.set(
-    "Cache-Control",
-    "public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800",
-  );
+  // SFH-02: a card rendered from a failed read or a failed compute is sent
+  // no-store instead, so one bad request is not served for a day.
+  response.headers.set("Cache-Control", failed ? FAILURE_CACHE_CONTROL : LONG_CACHE_CONTROL);
   return response;
 }
 

@@ -51,6 +51,19 @@
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_scenario_shares_rls.sql
 --
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, VAC-01). Each prose RED-UNDER below
+-- carries an adjacent `RED-UNDER-M` object that scripts/mutation-runner executes
+-- on every push: it mutates COPIES, requires the FIRST `TEST FAILED (…)` to name
+-- that arm, and restores GREEN. The schema is scripts/mutation-runner/GRAMMAR.md.
+-- The line below declares what the lane applies before this gate. It was
+-- DISCOVERED, not guessed — plan 164.4-05 iterated it over 3 lane runs to
+-- `All … assertions passed`, mean 0.98 s/lane over 3 timed GREEN runs.
+-- ⚠️ 07-fixture-supabase-default-privileges.sql carries Supabase's bootstrap
+-- default grants, WITHOUT which this migration's `REVOKE ALL ON scenario_shares
+-- FROM anon` revokes a grant anon never held — and Assertion 6 would pass for a
+-- reason unrelated to the migration.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/08-fixture-scenario-shares.sql","supabase/migrations/20260621120000_scenarios_table_and_rls.sql","supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql"]}
+--
 -- The test seeds two synthetic tenants (A and B) end-to-end:
 --   auth.users -> profiles -> strategies(published) -> strategy_analytics
 --                          -> scenarios -> scenario_shares
@@ -228,6 +241,13 @@ BEGIN
   -- ----- ASSERTION 1: CONTENT — A's token returns A's own content ONLY ---
   -- Resolve A's share via the RPC (the page calls it via service_role; the test
   -- runs in the un-forged seeding context, which is the service-role analog).
+  -- RED-UNDER: drop the addedStrategies scoping from get_shared_scenario's series
+  --            subquery in migration 20260622120000 (`WHERE sa.strategy_id =
+  --            ANY(…)` → `WHERE TRUE`), so every PUBLISHED strategy's series is
+  --            returned to every share — the CROSS-TENANT SERIES LEAK this arm
+  --            names. The `AND st.status = 'published'` term is left intact so the
+  --            migration's own body-shape self-verify (ii) still passes.
+  -- RED-UNDER-M: {"arm":"Assertion 1","apply":[{"kind":"edit","file":"supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql","find":"WHERE sa.strategy_id = ANY(COALESCE(v_added_ids, '{}'::uuid[]))","replace":"WHERE TRUE","occurrences":1}]}
   SELECT * INTO r FROM public.get_shared_scenario(hash_a);
   IF r.name IS NULL THEN
     RAISE EXCEPTION
@@ -286,6 +306,12 @@ BEGIN
   RAISE NOTICE 'Assertion 1 OK: A''s token returns A''s scenario + only A''s published series; no forbidden live-book field; draft.window + draft.memberKeyIds round-trip.';
 
   -- ----- ASSERTION 2: EMPTY addedStrategies → series = [] (no holdings) ---
+  -- RED-UNDER: change the COALESCE fallback of get_shared_scenario's series column
+  --            in migration 20260622120000 from `'[]'::jsonb` to a non-empty
+  --            default. The fallback is reached ONLY when jsonb_agg returns NULL,
+  --            i.e. only for a draft with no addedStrategies — which is exactly
+  --            this arm's case and no other.
+  -- RED-UNDER-M: {"arm":"Assertion 2","apply":[{"kind":"edit","file":"supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql","find":"           '[]'::jsonb);","replace":"           '[{\"strategy_id\": null}]'::jsonb);","occurrences":1}]}
   SELECT * INTO r FROM public.get_shared_scenario(hash_a_empty);
   IF r.name IS NULL THEN
     RAISE EXCEPTION
@@ -298,6 +324,12 @@ BEGIN
   RAISE NOTICE 'Assertion 2 OK: empty-addedStrategies scenario resolves to series = [] (no holdings leak).';
 
   -- ----- ASSERTION 3: UNKNOWN token → 0 rows (→ 404) --------------------
+  -- RED-UNDER: short-circuit get_shared_scenario's not-found exit in migration
+  --            20260622120000 to `IF FALSE THEN`, so a token that matched no share
+  --            falls through and returns one all-NULL row instead of zero rows.
+  -- ⚠️ Assertions 1, 2 and 4 all FIND their share, so the mutation is invisible to
+  --    them — an unresolved token is the only path through that branch.
+  -- RED-UNDER-M: {"arm":"Assertion 3","apply":[{"kind":"edit","file":"supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql","find":"  IF NOT FOUND THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   SELECT count(*) INTO row_cnt
     FROM public.get_shared_scenario(encode(sha256('does-not-exist'::bytea), 'hex'));
   IF row_cnt <> 0 THEN
@@ -307,6 +339,17 @@ BEGIN
   RAISE NOTICE 'Assertion 3 OK: unknown token returns 0 rows.';
 
   -- ----- ASSERTION 4: CROSS-TENANT READ — B''s token returns ONLY B ------
+  -- RED-UNDER: the SAME series-scoping removal as Assertion 1, with Assertion 1's
+  --            and Assertion 2's raises neutered so the leak is first observed on
+  --            tenant B's token.
+  -- ⚠️ SHADOWED BY DESIGN, AND THE NEUTER LIST IS LONG ON PURPOSE. The RPC has no
+  --    per-tenant branch, so ANY leak in the series subquery is visible on A's
+  --    token four assertions earlier. `neuter` suppresses ONE raise per entry (it
+  --    rewrites the FIRST surviving carrier), so reaching Assertion 1's fourth
+  --    raise — the cross-tenant one — costs four entries, and Assertion 2's
+  --    now-non-empty series costs two more. Assertion 1's remaining raises
+  --    (over-return, window and memberKeyIds round-trip) stay LIVE and still pass.
+  -- RED-UNDER-M: {"arm":"Assertion 4","apply":[{"kind":"edit","file":"supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql","find":"WHERE sa.strategy_id = ANY(COALESCE(v_added_ids, '{}'::uuid[]))","replace":"WHERE TRUE","occurrences":1}],"neuter":[{"arm":"Assertion 1"},{"arm":"Assertion 1"},{"arm":"Assertion 1"},{"arm":"Assertion 1"},{"arm":"Assertion 2"},{"arm":"Assertion 2"}]}
   SELECT * INTO r FROM public.get_shared_scenario(hash_b);
   IF r.name IS NULL THEN
     RAISE EXCEPTION
@@ -325,6 +368,12 @@ BEGIN
   -- ----- ASSERTION 5: REVOKE IMMEDIACY (SHARE-03) -----------------------
   -- Set revoked_at = now() on A''s share, then the SAME token must return 0 rows
   -- immediately (the RPC predicate is revoked_at IS NULL — data-layer immediacy).
+  -- RED-UNDER: widen get_shared_scenario's revoke gate in migration 20260622120000
+  --            to `AND (sh.revoked_at IS NULL OR TRUE)`, so a revoked share keeps
+  --            resolving.
+  -- ⚠️ `OR TRUE` rather than deleting the predicate: the migration's own body-shape
+  --    self-verify (i) greps for `revoked_at\s+IS\s+NULL` and would abort the apply.
+  -- RED-UNDER-M: {"arm":"Assertion 5","apply":[{"kind":"edit","file":"supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql","find":"     AND sh.revoked_at IS NULL;","replace":"     AND (sh.revoked_at IS NULL OR TRUE);","occurrences":1}]}
   UPDATE scenario_shares SET revoked_at = now() WHERE id = share_a_id;
   SELECT count(*) INTO row_cnt FROM public.get_shared_scenario(hash_a);
   IF row_cnt <> 0 THEN
@@ -339,6 +388,13 @@ BEGIN
   -- row-filtering even applies. Pin the exception so a future re-GRANT to anon
   -- fails this test loudly. (B''s share row still exists — A only revoked its
   -- own — so a missing REVOKE would expose a real row to anon.)
+  -- RED-UNDER: hand `anon` back the table grant the migration REVOKEs, on the live
+  --            lane database.
+  -- ⚠️ A `sql` step, not a migration edit — the REVOKE is what is under test, and
+  --    the grant it removes is Supabase's bootstrap default (07-fixture-…), not
+  --    anything this migration issues. With the grant back, anon's SELECT no longer
+  --    raises 42501 and the arm's first raise fires.
+  -- RED-UNDER-M: {"arm":"Assertion 6","apply":[{"kind":"sql","stmt":"GRANT SELECT ON public.scenario_shares TO anon"}]}
   PERFORM set_config('request.jwt.claims', NULL, true);
   SET LOCAL ROLE anon;
   raised := FALSE;
@@ -364,6 +420,17 @@ BEGIN
   -- silently scoped out by the scenario_shares_owner USING predicate
   -- (created_by = auth.uid()) → 0 rows affected (no error — RLS scopes, not
   -- 42501). Mirrors test_scenarios_rls Assertion 3.
+  -- RED-UNDER: open the scenario_shares_owner policy completely in migration
+  --            20260622120000 — `USING (true)` AND `WITH CHECK (true)` — so
+  --            tenant A's UPDATE reaches and rewrites tenant B's share row.
+  -- ⚠️ BOTH halves are required, and that is a MEASUREMENT, not caution. With
+  --    only USING widened the UPDATE is admitted for reading but its new row
+  --    (created_by = B) fails WITH CHECK, so the lane dies on an unhandled
+  --    42501 OUTSIDE any arm — scored NO-IDENTITY, not this arm biting.
+  -- ⚠️ Assertions 1-5 run in the un-forged seeding (superuser) context and
+  --    Assertion 6 is blocked at the grant layer, so this is the first arm a
+  --    policy widening can reach.
+  -- RED-UNDER-M: {"arm":"Assertion 7","apply":[{"kind":"edit","file":"supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql","find":"  USING (created_by = auth.uid())\n  WITH CHECK (\n    created_by = auth.uid()\n    AND EXISTS (\n      SELECT 1 FROM public.scenarios s\n      WHERE s.id = scenario_shares.scenario_id\n        AND s.allocator_id = auth.uid()\n    )\n  );","replace":"  USING (true)\n  WITH CHECK (true);","occurrences":1}]}
   PERFORM set_config(
     'request.jwt.claims',
     json_build_object('sub', uid_a::text, 'role', 'authenticated')::text,
@@ -396,6 +463,17 @@ BEGIN
   -- (RLS WITH CHECK violation, "new row violates row-level security policy").
   -- This is the layer-2 (table RLS) half of the CR-01 fix. If the owner-coherence
   -- EXISTS clause were removed, this INSERT would SUCCEED — the test fails loudly.
+  -- RED-UNDER: drop the CR-01 owner-coherence EXISTS clause from the
+  --            scenario_shares_owner WITH CHECK in migration 20260622120000,
+  --            leaving `created_by = auth.uid()` alone — the exact pre-CR-01
+  --            policy this arm was added to refuse.
+  -- ⚠️ Narrowing `AND s.allocator_id = auth.uid()` to `AND TRUE` does NOT redden
+  --    it (MEASURED: `no-red`): the EXISTS subquery is evaluated as the CALLER,
+  --    so scenarios' own RLS already hides B's row from A and the clause stays
+  --    false. The whole clause has to go, which is what the prose says anyway.
+  -- ⚠️ USING is left intact, so Assertion 7's cross-tenant UPDATE arm still
+  --    passes and the two layers stay distinguishable.
+  -- RED-UNDER-M: {"arm":"Assertion 8","apply":[{"kind":"edit","file":"supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql","find":"    created_by = auth.uid()\n    AND EXISTS (\n      SELECT 1 FROM public.scenarios s\n      WHERE s.id = scenario_shares.scenario_id\n        AND s.allocator_id = auth.uid()\n    )","replace":"    created_by = auth.uid()","occurrences":1}]}
   PERFORM set_config(
     'request.jwt.claims',
     json_build_object('sub', uid_a::text, 'role', 'authenticated')::text,
@@ -440,6 +518,14 @@ BEGIN
   -- probed on. (In production create_scenario_share revoke-then-inserts in one
   -- transaction, so the invariant is never violated; only this superuser
   -- force-insert must mirror that ordering.)
+  -- RED-UNDER: neutralise the read-time owner-coherence predicate of
+  --            get_shared_scenario in migration 20260622120000
+  --            (`AND s.allocator_id = sh.created_by` → `AND TRUE`), so a
+  --            force-inserted mis-owned share resolves another tenant's content.
+  -- ⚠️ This is layer 3, and it is reachable ONLY through the superuser force-insert
+  --    this arm performs — layer 2 (Assertion 8's WITH CHECK) is untouched, so no
+  --    earlier arm sees the mutation.
+  -- RED-UNDER-M: {"arm":"Assertion 9","apply":[{"kind":"edit","file":"supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql","find":"     AND s.allocator_id = sh.created_by","replace":"     AND TRUE","occurrences":1}]}
   UPDATE scenario_shares SET revoked_at = now() WHERE id = share_b_id;
   INSERT INTO scenario_shares (scenario_id, created_by, token_hash)
   VALUES (scen_b_id, uid_a, encode(sha256('mis-owned-share-row'::bytea), 'hex'));

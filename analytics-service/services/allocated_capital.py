@@ -42,6 +42,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from services.dispersion import dispersion_is_residue
 from services.external_flows import USD_FAMILY
 
 # Trading days per year — the √365 annualiser (crypto trades every calendar day;
@@ -53,7 +54,9 @@ _VALID_DENOMINATORS: frozenset[str] = frozenset({DENOMINATOR_ALLOCATED_CAPITAL})
 # The accrual bases a config may name (mirrors deribit_txn._PNL_BASES; imported
 # lazily-by-value here to keep this module ccxt/supabase-free — the string set is
 # the contract, validated identically).
-_VALID_PNL_BASES: frozenset[str] = frozenset({"cash_settlement", "mark_to_market"})
+_VALID_PNL_BASES: frozenset[str] = frozenset(
+    {"cash_settlement", "mark_to_market", "smoothed_mtm"}
+)
 METRICS_BASIS_ACTIVE_DAY: str = "active_day"
 METRICS_BASIS_CALENDAR_DAY: str = "calendar_day"
 _VALID_METRICS_BASES: frozenset[str] = frozenset(
@@ -467,11 +470,16 @@ def daily_pnl_usd_series(
 
 
 def _annualised_sharpe(returns: pd.Series) -> float:
-    """Mean / std × √365. ``nan`` when fewer than 2 points or zero variance."""
+    """Mean / std × √365. ``nan`` when fewer than 2 points or no dispersion.
+
+    Phase 166.1 (S4): "no dispersion" is Phase 166's residue floor, not
+    ``== 0.0``; a constant yield taken from a compounding NAV has a ~1e-16 std
+    and gave a ~1.5e13 Sharpe.
+    """
     if len(returns) < 2:
         return float("nan")
     sd = float(returns.std(ddof=1))
-    if sd == 0.0 or not np.isfinite(sd):
+    if not np.isfinite(sd) or dispersion_is_residue(sd, float(returns.mean())):
         return float("nan")
     return float(returns.mean()) / sd * float(np.sqrt(_ANNUALISATION_DAYS))
 

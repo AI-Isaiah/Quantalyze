@@ -46,12 +46,21 @@ vi.mock("@/lib/ratelimit", () => ({
   getClientIp: () => "203.0.113.7",
 }));
 
-// Admin client — the RPC is the primary read. Phase 84 (BLEND-01) adds ONE
-// narrow non-RPC read: the published-only `strategies` (id, asset_class)
-// enrichment for the blend basis. `rpcMock` drives the RPC result; the
-// `strategies` builder's terminal `.eq()` resolves `strategiesReadMock`
-// (default: no rows → empty lookup → √252). Any OTHER table still THROWS — the
-// leak guard proving the page reads nothing arbitrary.
+// Admin client — the RPC is the primary read. Exactly TWO narrow non-RPC reads
+// are sanctioned, both bounded to the RPC's own series ids:
+//   - Phase 84 (BLEND-01): published-only `strategies` (id, asset_class) for the
+//     blend basis. Terminal `.eq()` resolves `strategiesReadMock` (default: no
+//     rows → empty lookup → every leg projects `asset_class: null`
+//     (share-resolve.ts :237, `?? null`) → an ALL-UNKNOWN blend, which RANK-06
+//     (159-04) resolves to √365 — the conservative RISK clock — NOT √252. Only
+//     a STATED-'traditional' row yields √252.
+//   - Phase 147 (SCEN-01): `strategy_analytics` (strategy_id, returns_series) so
+//     analytics-service-only legs (daily_returns null) still project their real
+//     series. Terminal `.in()` resolves `analyticsReadMock` (default: no rows →
+//     empty lookup → the pre-147 daily_returns-only projection).
+// Any OTHER table still THROWS — the leak guard proving the page reads nothing
+// arbitrary. Both builders capture their select string + id bound so the double
+// is pinned against the real contract it stands in for.
 const rpcMock = vi.hoisted(() => vi.fn());
 const adminFromMock = vi.hoisted(() => vi.fn());
 const strategiesReadMock = vi.hoisted(() =>
@@ -68,13 +77,19 @@ const strategiesReadMock = vi.hoisted(() =>
     }),
   ),
 );
+const analyticsReadMock = vi.hoisted(() =>
+  vi.fn(async (_cols?: string, _inCol?: string, _ids?: unknown) => ({
+    data: [] as Array<{ strategy_id: string; returns_series: unknown }>,
+    error: null,
+  })),
+);
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     rpc: (fn: string, args: unknown) => rpcMock(fn, args),
     from: (table: string) => {
       adminFromMock(table);
-      // The ONLY non-RPC read this page is allowed (BLEND-01): the narrow
-      // published-only strategies (id, asset_class) blend-basis enrichment.
+      // Sanctioned read #1 (BLEND-01): the narrow published-only strategies
+      // (id, asset_class) blend-basis enrichment.
       if (table === "strategies") {
         return {
           select: (cols: string) => ({
@@ -82,6 +97,19 @@ vi.mock("@/lib/supabase/admin", () => ({
               eq: (statusCol: string, statusVal: unknown) =>
                 strategiesReadMock(cols, ids, statusCol, statusVal, inCol),
             }),
+          }),
+        };
+      }
+      // Sanctioned read #2 (SCEN-01): strategy_analytics (strategy_id,
+      // returns_series), bounded to the RPC series ids. Terminal is `.in()` —
+      // there is deliberately NO `.eq("status", …)` here: `status` is a
+      // `strategies`-table column, and these ids are already published-gated
+      // inside the SECURITY DEFINER RPC that produced them.
+      if (table === "strategy_analytics") {
+        return {
+          select: (cols: string) => ({
+            in: (inCol: string, ids: unknown) =>
+              analyticsReadMock(cols, inCol, ids),
           }),
         };
       }
@@ -103,7 +131,20 @@ vi.mock("@/lib/queries", () => ({
 // without their client-only deps. Each emits a sentinel + echoes leak-relevant
 // props so we can assert what data flowed in.
 vi.mock("@/app/(dashboard)/allocations/widgets/performance/EquityChart", () => ({
-  EquityChart: () => <div data-testid="equity-chart">equity-chart</div>,
+  // Phase 169.4 plan 169.4-04: echo the BTC overlay the page passes, so the
+  // close-level overlay (D-66) is asserted on what reaches the chart.
+  EquityChart: ({
+    benchmark,
+  }: {
+    benchmark?: Array<{ date: string; value: number }>;
+  }) => (
+    <div data-testid="equity-chart">
+      equity-chart overlay:
+      {benchmark
+        ? benchmark.map((p) => `${p.date}=${p.value.toFixed(4)}`).join(",")
+        : "none"}
+    </div>
+  ),
   // The page calls toWealth() to convert the cumulative-RETURN equity curve to
   // wealth form before feeding EquityChart — keep the real conversion.
   toWealth: (points: Array<{ date: string; value: number }>) =>
@@ -124,14 +165,15 @@ vi.mock(
   "@/app/(dashboard)/allocations/components/ScenarioBenchmarkSection",
   () => ({
     ScenarioBenchmarkSection: ({
-      benchmarkAvailable,
+      btc,
       periodsPerYear,
     }: {
-      benchmarkAvailable: boolean;
+      btc: { prices: unknown[] } | null;
       periodsPerYear?: number;
     }) => (
       <div data-testid="benchmark-section">
-        benchmark:{String(benchmarkAvailable)} basis:{String(periodsPerYear)}
+        benchmark:{String(btc !== null)} closes:{btc === null ? 0 : btc.prices.length}{" "}
+        basis:{String(periodsPerYear)}
       </div>
     ),
   }),
@@ -174,6 +216,42 @@ function okRow() {
   };
 }
 
+// Phase 147 / SCEN-01 — the analytics-service-only shape: the RPC's series row
+// carries a NULL daily_returns (that column is CSV-ingest only), and the real
+// track arrives from the sibling strategy_analytics read as a cumprod WEALTH
+// index. Built as the cumulative product of makeSeries() — the mathematical
+// INVERSE of the differencing under test, never that function itself.
+// ⚠️ ANCHORED variant: the prepended 1.0 base row is a TEST CONVENIENCE that
+// makes all 40 returns recoverable, so this fixture and makeSeries() carry
+// identical economics BY CONSTRUCTION. The production writer never persists
+// that base row — its first element is (1 + r_0) over the returns' own date
+// index (metrics.py day-0-exclusion semantics) — so real data yields N−1
+// returns and day one drops. makeProductionWealthIndex() below pins that shape.
+function makeWealthIndex(): Array<{ date: string; value: number }> {
+  const out = [{ date: "2022-12-31", value: 1 }];
+  let w = 1;
+  for (const r of makeSeries()) {
+    w *= 1 + r.value;
+    out.push({ date: r.date, value: w });
+  }
+  return out;
+}
+
+// The PRODUCTION shape: `(1+r).cumprod()` with NO base row — first element
+// (1 + r_0). Exactly the anchored fixture minus its test-convenience anchor.
+function makeProductionWealthIndex(): Array<{ date: string; value: number }> {
+  return makeWealthIndex().slice(1);
+}
+
+function analyticsOnlyRow() {
+  return {
+    name: "My Q3 Blend",
+    draft: okDraft(),
+    schema_version: 2,
+    series: [{ strategy_id: STRAT_A, daily_returns: null }],
+  };
+}
+
 // Phase 64 / PRESENT-03 — a MIXED share: persisted book membership
 // (memberKeyIds non-empty) PLUS catalog adds (addedStrategies non-empty). Only
 // the catalog legs are publicly computable → the honesty caption must fire.
@@ -208,20 +286,23 @@ async function renderPage(token = "raw-token-abc"): Promise<string> {
   return renderToStaticMarkup(element);
 }
 
-// Stub the public BTC benchmark fetch (200 [] → benchmark unavailable, which is
-// fine for these assertions; resolve→404 logic does not depend on it).
+// Stub the public BTC closes fetch (200 with an empty closes body → benchmark
+// unavailable, which is fine for these assertions; resolve→404 logic does not
+// depend on it). Phase 169.4 D-67: the page reads `/api/benchmark/btc/prices`.
 beforeEach(() => {
   notFoundMock.mockClear();
   rpcMock.mockReset();
   adminFromMock.mockClear();
   strategiesReadMock.mockReset();
   strategiesReadMock.mockResolvedValue({ data: [], error: null });
+  analyticsReadMock.mockReset();
+  analyticsReadMock.mockResolvedValue({ data: [], error: null });
   dashboardMock.mockClear();
   vi.stubGlobal(
     "fetch",
     vi.fn(async () => ({
       ok: true,
-      json: async () => [] as unknown,
+      json: async () => ({ prices: [], dropped: [], through: null }) as unknown,
     })),
   );
 });
@@ -249,11 +330,16 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     // RPC was the primary read, hashed-token arg, never the dashboard helper.
     expect(rpcMock).toHaveBeenCalledWith("get_shared_scenario", expect.any(Object));
     expect(dashboardMock).not.toHaveBeenCalled();
-    // BLEND-01 — the page performs exactly ONE non-RPC read: the narrow
-    // published-only `strategies` asset_class enrichment. It must NEVER touch any
-    // OTHER table (the guard `from()` throws for anything but "strategies").
+    // BLEND-01 + SCEN-01 — the page performs exactly TWO non-RPC reads: the
+    // narrow published-only `strategies` asset_class enrichment and the
+    // `strategy_analytics` returns_series enrichment, both bounded to the RPC's
+    // own series ids. It must NEVER touch any OTHER table. This stays a CLOSED
+    // allow-list (the guard `from()` throws for anything outside it) — widening
+    // it to a third table is a deliberate, reviewable edit, never incidental.
     expect(
-      adminFromMock.mock.calls.every(([t]) => t === "strategies"),
+      adminFromMock.mock.calls.every(
+        ([t]) => t === "strategies" || t === "strategy_analytics",
+      ),
     ).toBe(true);
     expect(notFoundMock).not.toHaveBeenCalled();
 
@@ -311,17 +397,138 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     expect(html).toContain("basis:365");
   });
 
-  it("BLEND-01 — a failed/empty strategies read degrades to the √252 default, never throws the page", async () => {
-    // The read rejects (a transient DB hiccup). The page must swallow it, fall
-    // back to the empty lookup → √252, and still render — never a thrown page.
+  it("BLEND-01 — a failed/empty strategies read degrades to the CONSERVATIVE √365 all-unknown basis, never throws the page", async () => {
+    // PRIMARY intent, unchanged: the read REJECTS (a transient DB hiccup). The
+    // page must swallow it and still render — a failed basis enrichment never
+    // throws the recipient's page.
+    //
+    // The basis it degrades TO changed at RANK-06 (159-04). A rejected read
+    // leaves the lookup empty, so every leg reaches blendPeriodsPerYear carrying
+    // `asset_class: null` (share-resolve.ts :237, `?? null`) — a NON-empty array
+    // of UNKNOWN-class legs, which is NOT the empty-`legs` case that still keeps
+    // the byte-identical 252 default. `strategies.asset_class` is NOT NULL
+    // DEFAULT 'traditional' in the DB, so a null class here is a caller
+    // PROJECTION GAP, never an honest "traditional": resolving it to 252 would
+    // understate a crypto blend's annualized vol by √(365/252) (~17%) and inflate
+    // its Sharpe (~×1.20) — the silent failure direction is the FLATTERING one.
+    // Unknown therefore fails toward the crypto clock; √252 is now reachable
+    // only via a stated-'traditional' row (the sibling test below).
     strategiesReadMock.mockRejectedValueOnce(new Error("transient db error"));
     rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
 
     const html = await renderPage("degrade");
 
     expect(notFoundMock).not.toHaveBeenCalled();
+    expect(html).toContain("My Q3 Blend"); // rendered, not thrown — the point
+    expect(html).toContain("basis:365"); // all-unknown → conservative clock
+  });
+
+  it("BLEND-01 — a STATED-'traditional' leg keeps the √252 basis (RANK-06: the only route to 252 here)", async () => {
+    // The tradfi counterpart to the crypto test above, and this file's ONLY √252
+    // coverage. Before RANK-06 the traditional clock was pinned here only
+    // INCIDENTALLY, as the failed-read test's all-unknown default; now that
+    // unknown resolves to 365, an explicit 'traditional' row is the only thing
+    // proving the 252 branch still exists — without this test a regression that
+    // hard-wired blendPeriodsPerYear to 365 would pass the whole file.
+    //
+    // ⚠️ Note the CAPS in this test's name. Plan 159-04's blast-radius scan used
+    // `vitest -t "blend"`, which is CASE-SENSITIVE: it matched the lowercase
+    // "blend" tests in share-resolve.test.ts and silently skipped every
+    // "BLEND-01" test in this file, which is how the stale √252 expectation above
+    // survived the rule change. Scan blendPeriodsPerYear CALL SITES (grep), never
+    // a lowercase test-name substring.
+    strategiesReadMock.mockResolvedValueOnce({
+      data: [{ id: STRAT_A, asset_class: "traditional" }],
+      error: null,
+    });
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+
+    const html = await renderPage("tradfi-blend");
+
+    expect(notFoundMock).not.toHaveBeenCalled();
     expect(html).toContain("My Q3 Blend");
-    expect(html).toContain("basis:252"); // honest default, no crash
+    expect(html).toContain("basis:252"); // stated tradfi → the √252 clock
+  });
+
+  it("SCEN-01 — reads returns_series bounded to the RPC series ids, and an analytics-only leg renders the SAME projection as the CSV leg", async () => {
+    // The economic invariant: a strategy whose real track lives in
+    // `strategy_analytics.returns_series` (daily_returns null — the
+    // analytics-service-only case) must project IDENTICALLY to the same track
+    // arriving via daily_returns. Pre-147 the analytics-only leg resolved EMPTY
+    // and the recipient saw a silently zeroed blend. The wealth index below is
+    // the ANCHORED cumprod of makeSeries() (1.0 base row prepended — a fixture
+    // convenience the production writer never persists), so the two paths carry
+    // the same economics BY CONSTRUCTION and the rendered markup must match
+    // byte-for-byte. On PRODUCTION data day one drops (N−1 semantics) and exact
+    // parity is NOT expected — the companion test below pins that shape.
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    const csvHtml = await renderPage("csv-leg");
+
+    analyticsReadMock.mockResolvedValueOnce({
+      data: [{ strategy_id: STRAT_A, returns_series: makeWealthIndex() }],
+      error: null,
+    });
+    rpcMock.mockResolvedValueOnce({ data: [analyticsOnlyRow()], error: null });
+    const analyticsHtml = await renderPage("analytics-leg");
+
+    // The read contract: narrow projection, bounded to the RPC-returned ids.
+    // No status filter — `status` is a `strategies` column, and these ids were
+    // already published-gated inside the SECURITY DEFINER RPC that emitted them.
+    expect(analyticsReadMock).toHaveBeenCalledTimes(2); // once per render
+    const [cols, inCol, ids] = analyticsReadMock.mock.calls[1]!;
+    expect(cols).toBe("strategy_id, returns_series");
+    expect(inCol).toBe("strategy_id");
+    expect(ids).toEqual([STRAT_A]);
+
+    // Same series, same projection — and NOT the degenerate all-em-dash shell.
+    expect(analyticsHtml).toBe(csvHtml);
+    expect(analyticsHtml).toContain("My Q3 Blend");
+    expect(analyticsHtml).toMatch(/\d%/); // a real percentage KPI, not "—"
+
+    // The RAW wealth index never reaches the client — the page emits only the
+    // resolved projection. 1.0-based wealth values are absent from the markup.
+    expect(analyticsHtml).not.toContain("returns_series");
+  });
+
+  it("SCEN-01 — a PRODUCTION-shaped wealth index (no 1.0 base row) renders a real projection, but byte parity with the CSV twin is an anchored-fixture property only", async () => {
+    // The writer's `returns_series` is `(1+r).cumprod()` over the returns' own
+    // date index — first element (1 + r_0), no base row. Differencing recovers
+    // N−1 returns: day one's return is unrecoverable and the derived start date
+    // shifts one day later. So an analytics-only leg on REAL data must still
+    // render a live projection (never the em-dash shell), while the CSV twin's
+    // exact markup is NOT reproducible — the previous test's byte-for-byte
+    // parity holds only for the anchored fixture.
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    const csvHtml = await renderPage("csv-leg-prod");
+
+    analyticsReadMock.mockResolvedValueOnce({
+      data: [
+        { strategy_id: STRAT_A, returns_series: makeProductionWealthIndex() },
+      ],
+      error: null,
+    });
+    rpcMock.mockResolvedValueOnce({ data: [analyticsOnlyRow()], error: null });
+    const analyticsHtml = await renderPage("analytics-leg-prod");
+
+    // A real projection renders — never the degenerate all-em-dash shell.
+    expect(analyticsHtml).toContain("My Q3 Blend");
+    expect(analyticsHtml).toMatch(/\d%/);
+    expect(analyticsHtml).not.toContain("returns_series");
+    // …but not the CSV twin's markup: one fewer daily return, a later start.
+    expect(analyticsHtml).not.toBe(csvHtml);
+  });
+
+  it("SCEN-01 — a failed returns_series read degrades to the pre-147 daily_returns projection, never throws the page", async () => {
+    // The enrichment is optional: a transient DB fault must fall back to the
+    // RPC's own daily_returns (the pre-147 behavior), never a thrown public page.
+    analyticsReadMock.mockRejectedValueOnce(new Error("transient db error"));
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+
+    const html = await renderPage("degrade-series");
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(html).toContain("My Q3 Blend");
+    expect(html).toMatch(/\d%/); // the daily_returns projection still rendered
   });
 
   it("unknown token (RPC 0 rows) → notFound()", async () => {
@@ -436,7 +643,7 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
 
     // Simulate the AbortController firing: fetch rejects with an AbortError
     // (DOMException name "AbortError"), exactly as a timed-out self-fetch does.
-    // The page's fetchBtcDaily catch must swallow it → [] → benchmark
+    // The page's fetchBtcCloses catch must swallow it → null → benchmark
     // unavailable, and the page must still render the scenario (NOT 404, NOT a
     // thrown render). Without the AbortController + timeout this fetch would
     // hang forever on a real hung route; here we prove the catch handles the
@@ -458,12 +665,211 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     // The page rendered the scenario despite the benchmark fetch aborting.
     expect(notFoundMock).not.toHaveBeenCalled();
     expect(html).toContain("My Q3 Blend");
-    // Benchmark degraded to its honest "unavailable" state ([] → false).
+    // Benchmark degraded to its honest "unavailable" state (null → false),
+    // and no overlay reaches the chart.
     expect(html).toContain("benchmark:false");
+    expect(html).toContain("overlay:none");
     // The fetch WAS attempted with an abort signal (the timeout is wired).
     const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
     expect(fetchMock).toHaveBeenCalled();
     const init = fetchMock.mock.calls[0]?.[1] as { signal?: AbortSignal } | undefined;
     expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  // ── Phase 169.4 plan 169.4-04 (SC11, D-66, D-67) ───────────────────────────
+  // The page self-fetches the BTC CLOSES; the overlay is the close level.
+
+  function stubFetch(res: { ok: boolean; status?: number; body: unknown }) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: res.ok,
+        status: res.status ?? (res.ok ? 200 : 500),
+        json: async () => res.body,
+      })),
+    );
+  }
+
+  it("D-67 — reads /api/benchmark/btc/prices and draws the overlay at the close LEVEL, with no point on a missing or dropped day (D-66)", async () => {
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    // 06-02 is a plain missing day, 06-04 a DROPPED (corrupt) close. The close
+    // level after the dropped date is close / first close (1.32 on 06-05);
+    // compounding the returns would lose the move across 06-04 for good.
+    stubFetch({
+      ok: true,
+      body: {
+        prices: [
+          { date: "2026-06-01", close: 100 },
+          { date: "2026-06-03", close: 110 },
+          { date: "2026-06-05", close: 132 },
+        ],
+        dropped: ["2026-06-04"],
+        through: "2026-06-05",
+      },
+    });
+
+    const html = await renderPage("closes");
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    expect(String(fetchMock.mock.calls[0]?.[0])).toMatch(/\/api\/benchmark\/btc\/prices$/);
+    expect(html).toContain("benchmark:true");
+    expect(html).toContain("closes:3");
+    expect(html).toContain("overlay:2026-06-01=1.0000,2026-06-03=1.1000,2026-06-05=1.3200");
+  });
+
+  it("169.4 review WR-01 — the overlay is based at the scenario's first date (2023-01-01), not at an earlier first served close", async () => {
+    // makeSeries() starts 2023-01-01. The served closes start months earlier;
+    // a base at their first close drew BTC at 16600 / 20000 on the scenario's
+    // first day instead of 1.0. EquityChart re-anchors on the first POINT it
+    // is given, so the page must not hand it the pre-scenario closes.
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    stubFetch({
+      ok: true,
+      body: {
+        prices: [
+          { date: "2022-06-01", close: 20_000 },
+          { date: "2022-12-31", close: 16_500 },
+          { date: "2023-01-01", close: 16_600 },
+          { date: "2023-01-02", close: 16_600 * 1.05 },
+        ],
+        dropped: [],
+        through: "2023-01-02",
+      },
+    });
+
+    const html = await renderPage("wr01-anchor");
+
+    expect(html).toContain("benchmark:true");
+    expect(html).toContain("overlay:2023-01-01=1.0000,2023-01-02=1.0500");
+    expect(html).not.toContain("2022-06-01=");
+    expect(html).not.toContain("2022-12-31=");
+  });
+
+  it("D-67 — a body in the OLD returns shape (an array) renders the unavailable state, never a misread series", async () => {
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    stubFetch({
+      ok: true,
+      body: [
+        { date: "2026-06-02", value: 0.01 },
+        { date: "2026-06-03", value: -0.02 },
+      ],
+    });
+
+    const html = await renderPage("old-shape");
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(html).toContain("My Q3 Blend");
+    expect(html).toContain("benchmark:false");
+    expect(html).toContain("overlay:none");
+  });
+
+  it("a closes body with no close renders the unavailable state, as the old empty series did", async () => {
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    stubFetch({ ok: true, body: { prices: [], dropped: [], through: null } });
+
+    const html = await renderPage("empty-closes");
+
+    expect(html).toContain("My Q3 Blend");
+    expect(html).toContain("benchmark:false");
+    expect(html).toContain("overlay:none");
+  });
+
+  it("WR-03 — a non-2xx closes fetch renders the unavailable state, never a thrown page", async () => {
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    stubFetch({
+      ok: false,
+      status: 503,
+      body: { prices: [{ date: "2026-06-01", close: 100 }], dropped: [], through: "2026-06-01" },
+    });
+
+    const html = await renderPage("non-2xx");
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(html).toContain("My Q3 Blend");
+    expect(html).toContain("benchmark:false");
+    expect(html).toContain("overlay:none");
+  });
+
+  it("169.4 review SFH MEDIUM-3 — each BTC fetch failure is logged with its discriminator and never the share token, and still renders unavailable", async () => {
+    // Four ways the closes fetch fails. Each used to return null with no
+    // trace, so an outage, a misconfigured APP_URL, a 429 and a contract drift
+    // were indistinguishable. Each must now log once, name its cause, and
+    // keep the page on the honest "unavailable" state.
+    const abortErr = new Error("The operation was aborted");
+    abortErr.name = "AbortError";
+    const cases: Array<{
+      token: string;
+      fetchImpl: () => Promise<unknown>;
+      message: RegExp;
+      detail?: Record<string, unknown>;
+    }> = [
+      {
+        token: "tok-status-429",
+        fetchImpl: async () => ({ ok: false, status: 429, json: async () => ({}) }),
+        message: /non-ok response/,
+        detail: { status: 429 },
+      },
+      {
+        token: "tok-old-shape",
+        fetchImpl: async () => ({ ok: true, status: 200, json: async () => [{ date: "2026-06-01", value: 0.01 }] }),
+        message: /unexpected body shape/,
+      },
+      {
+        token: "tok-timeout",
+        fetchImpl: async () => {
+          throw abortErr;
+        },
+        message: /timed out/,
+        detail: { timeoutMs: 2500 },
+      },
+      {
+        token: "tok-thrown",
+        fetchImpl: async () => {
+          throw new TypeError("fetch failed");
+        },
+        message: /fetch failed/,
+        detail: { error: "TypeError: fetch failed" },
+      },
+    ];
+
+    for (const c of cases) {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+        vi.stubGlobal("fetch", vi.fn(c.fetchImpl));
+
+        const html = await renderPage(c.token);
+
+        expect(html).toContain("benchmark:false");
+        const btcWarns = warn.mock.calls.filter((args) =>
+          String(args[0]).startsWith("[scenario-share] /api/benchmark/btc/prices"),
+        );
+        expect(btcWarns, c.token).toHaveLength(1);
+        expect(String(btcWarns[0][0])).toMatch(c.message);
+        if (c.detail) expect(btcWarns[0][1]).toEqual(c.detail);
+        // The share token is a bearer credential for the scenario: never logged.
+        expect(JSON.stringify(warn.mock.calls)).not.toContain(c.token);
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  });
+
+  it("SFH MEDIUM-3 control — a good closes body logs nothing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+      stubFetch({
+        ok: true,
+        body: { prices: [{ date: "2026-06-01", close: 100 }], dropped: [], through: "2026-06-01" },
+      });
+      const html = await renderPage("tok-good");
+      expect(html).toContain("benchmark:true");
+      expect(
+        warn.mock.calls.filter((a) => String(a[0]).startsWith("[scenario-share]")),
+      ).toHaveLength(0);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

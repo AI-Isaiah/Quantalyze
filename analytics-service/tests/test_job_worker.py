@@ -37,6 +37,11 @@ from services.job_worker import (
     classify_exception,
     dispatch,
 )
+from services.mt5_probe import (
+    MT5_GATEWAY_MISCONFIGURED_DETAIL,
+    MT5_GATEWAY_MISCONFIGURED_DETAILS,
+    Mt5GatewayMisconfigured,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +134,105 @@ class TestClassifyException:
         # must NOT be present.
         assert "raw fernet detail" not in msg
         assert "Credentials could not be decrypted" in msg
+
+    def test_mt5_gateway_misconfigured_is_permanent_with_curated_message(self) -> None:
+        """⭐ 153.6 / A3 — the MT5 operator fault must be PERMANENT, with a
+        curated message rather than ``str(exc)``.
+
+        WHY it is load-bearing (Rule 9). ``Mt5Adapter.validate`` raised a bare
+        ``RuntimeError`` for a terminal that refuses automated trading — a setting
+        in OUR gateway that no retry can clear. A ``RuntimeError`` falls through to
+        the ``("unknown", str(exc))`` catch-all at the bottom of this function, and
+        ``unknown`` RETRIES: the worker re-ran the whole serialized probe against
+        the ONE shared MT5 terminal on every attempt, queueing ahead of every other
+        user's validate, forever. ``permanent`` is what stops that.
+
+        The message is read through an ALLOW-LIST for the same reason
+        ``InvalidToken``'s is a fixed constant: ``sanitized_message`` is persisted
+        and rendered, and the raw text here is a credential-disclosure surface —
+        ``mt5linux`` f-string-interpolates the password into remotely-eval'd
+        source (T-134-01 / T-153.3-23).
+
+        ⭐ 161-02 widened the arm from ONE fixed constant to the curated FAMILY,
+        so this case now pins BOTH halves. The negative half is unchanged and is
+        the security property; the positive half is the whole point of 161-02 —
+        returning the generic constant unconditionally threw away the cause the
+        raise site had just derived from the terminal flags, which is how the
+        operator kept being told to check a checkbox that was already correct.
+        """
+        exc = Mt5GatewayMisconfigured(
+            "raw operator detail with investor-pw that must not leak"
+        )
+        kind, msg = classify_exception(exc)
+        assert kind == "permanent"
+        # ⛔ NEVER str(exc) — anything outside the curated family degrades to the
+        # generic curated constant, whatever the raise carried.
+        assert msg == MT5_GATEWAY_MISCONFIGURED_DETAIL
+        assert "raw operator detail" not in msg
+        assert "investor-pw" not in msg
+
+        # ...and EVERY curated arm reaches the operator intact.
+        assert len(MT5_GATEWAY_MISCONFIGURED_DETAILS) == 3, "the family shrank"
+        for curated in MT5_GATEWAY_MISCONFIGURED_DETAILS:
+            kind, msg = classify_exception(Mt5GatewayMisconfigured(curated))
+            assert kind == "permanent"
+            assert msg == curated
+
+    def test_mt5_gateway_misconfigured_message_carries_no_classify_vocabulary(
+        self,
+    ) -> None:
+        """The NEGATIVE half, asserted by RUNNING ``classify_mt5_login_error`` over
+        every emittable message — so a phrase added to ``mt5_validation`` reds here.
+
+        A message the classifier recognises is one call away from being re-read as
+        *the user's broker server is wrong*, which is the exact accusation the
+        153.6 A1 fix removed; and the pre-fix copy literally named investor and
+        master passwords to the user.
+
+        ⭐ 161-02: swept over EVERY message this arm can now return, not just the
+        default one. A sweep that scans only the constant it was written for would
+        have kept passing while two unchecked sentences shipped through the same
+        sink.
+
+        ⭐ 164.5.4 — THE ASSERTION MOVED FROM SUBSTRING-ABSENCE TO THE CLASSIFIER
+        ITSELF, and that is the point. This gate used to iterate the live tables
+        and assert no member appeared in the copy. That worked only while the
+        members were short common words; the anchored-phrase rewrite would have
+        made it TRIVIALLY GREEN WHILE MEASURING NOTHING — a test created unable to
+        fail, by the very fix it was guarding. The property the docstring always
+        wanted is asserted directly instead: feed the copy through the real seam
+        and demand ``"transient"``, the only blame-free class. That is strictly
+        stronger than absence, and it cannot go vacuous when the table changes
+        shape again.
+        """
+        from services.mt5_client import Mt5ClientError
+        from services.mt5_validation import (
+            _AUTH_PHRASES,
+            _WRONG_SERVER_PHRASES,
+            classify_mt5_login_error,
+        )
+
+        # The default (no-argument) raise, plus every curated arm the sink admits.
+        _, default_msg = classify_exception(Mt5GatewayMisconfigured())
+        emittable = (default_msg, *MT5_GATEWAY_MISCONFIGURED_DETAILS)
+        # ...and the tables must be non-empty, or a "transient" verdict is just the
+        # classifier having nothing to match on rather than the copy being safe.
+        assert _WRONG_SERVER_PHRASES and _AUTH_PHRASES
+
+        for msg in emittable:
+            low = msg.lower()
+            # Anti-vacuity: an empty message classifies transient for free.
+            assert len(low) > 40, "the curated message is too short to be real copy"
+            # Code 0 so the `_IPC_TRANSPORT_CODES` gate cannot answer for the text.
+            verdict = classify_mt5_login_error(Mt5ClientError(0, msg))
+            assert verdict == "transient", (
+                f"the operator copy classifies {verdict!r}; if it is ever "
+                f"re-classified it degrades to a PERMANENT user-blaming verdict"
+            )
+            for word in ("password", "investor", "master", "secret"):
+                assert word not in low, (
+                    f"the operator copy names the credential {word!r}"
+                )
 
     def test_asyncio_timeout_is_transient(self) -> None:
         """asyncio.TimeoutError is the failure mode of asyncio.wait_for.
@@ -1269,7 +1373,13 @@ class TestDeriveBrokerDailies:
         ):
             result = await run_derive_broker_dailies_job(job)
 
-        assert result.outcome == DispatchOutcome.DONE
+        # F1 (161.1): the stamp below and the dispatch outcome must AGREE. A
+        # DONE here routed the job to mark_compute_job_done, whose
+        # sync_strategy_analytics_status then took the all-done success branch
+        # and rewrote this very 'failed' stamp to 'complete' with a NULL error
+        # and a fresh computed_at.
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "permanent"
         assert len(analytics_upserts) == 1, (
             f"expected one strategy_analytics upsert; got {analytics_upserts}"
         )
@@ -1608,8 +1718,19 @@ class TestDeriveBrokerDailies:
         with stack:
             result = await run_derive_broker_dailies_job(job)
 
-        assert result.outcome == DispatchOutcome.DONE, (
-            f"Pass-2-priced flow must complete, not fail; got {result!r}"
+        # The subject here is the PRICE INDEX, and the assertions below are the
+        # subject's. This fixture's single deposit yields one interpretable day,
+        # so the handler lands on the insufficient-history arm — which since F1
+        # (161.1) terminates FAILED rather than DONE. Pin the REASON, not just
+        # the outcome: an unpriced-flow fail-loud (the failure this assertion was
+        # written to exclude) carries a different message, so the discrimination
+        # this line always meant to provide survives the outcome change.
+        assert result.outcome == DispatchOutcome.FAILED, (
+            f"Pass-2-priced flow must reach the series arms; got {result!r}"
+        )
+        assert "insufficient broker history" in (result.error_message or ""), (
+            "the Pass-2 flow FAILED for a pricing reason rather than the "
+            f"expected short-history short-circuit; got {result!r}"
         )
         flows = captured["external_flows"]
         assert len(flows) == 1, f"expected one collapsed daily flow, got {flows}"
@@ -2105,7 +2226,12 @@ class TestDeriveBrokerDailies:
         with stack:
             result = await run_derive_broker_dailies_job(job)
 
-        assert result.outcome == DispatchOutcome.DONE
+        # F1 (161.1): a fully-segmented series leaves <2 interpretable days, so
+        # this lands on the insufficient-history arm — which now terminates
+        # FAILED/permanent instead of laundering itself through the status
+        # bridge's all-done success branch.
+        assert result.outcome == DispatchOutcome.FAILED
+        assert "insufficient broker history" in (result.error_message or "")
         # No interpretable rows were written.
         assert captured["csv_rows"] == [], (
             f"a fully-segmented series must write no csv rows; got {captured['csv_rows']!r}"
@@ -4473,9 +4599,10 @@ class TestCircuitBreakerSingleDbClock:
     @pytest.mark.asyncio
     async def test_defer_serialization_failure_yields_deferred_not_failed(self):
         """NEW-C12-06 caller-side integration contract: when defer_compute_job
-        RAISES a claim-token serialization_failure (this worker was preempted —
+        RAISES the claim-token fence (SQLSTATE 55006 since Phase 164.9.3.2;
+        this worker was preempted —
         watchdog reclaim + another worker re-claimed under a fresh token), the
-        breaker must YIELD the job as DEFERRED, NOT let the 40001 propagate to
+        breaker must YIELD the job as DEFERRED, NOT let the fence propagate to
         dispatch's catch-all where it'd be classified error_kind='unknown',
         retried, and carry this worker's stale token into mark_compute_job_failed.
         Owning the preemption signal here is what keeps corruption-safety from
@@ -4496,11 +4623,11 @@ class TestCircuitBreakerSingleDbClock:
             if name == "api_key_cooldown_remaining":
                 builder.execute.return_value = MagicMock(data=120)  # cooldown active → will defer
             elif name == "defer_compute_job":
-                # The fence fired: this worker lost ownership (40001).
+                # The fence fired: this worker lost ownership (55006).
                 builder.execute.side_effect = _FakeAPIError(
                     "defer_compute_job: job X preempted by watchdog reclaim "
                     "(caller token=t1, current token=t2)",
-                    "40001",
+                    "55006",
                 )
             else:
                 builder.execute.return_value = MagicMock(data=None)
@@ -4515,12 +4642,50 @@ class TestCircuitBreakerSingleDbClock:
         result = await _check_circuit_breaker(supabase, job, key_row)
 
         assert result is not None and result.outcome == DispatchOutcome.DEFERRED, (
-            "a preempted defer (serialization_failure) must yield DEFERRED, not "
-            "propagate a 40001 that dispatch would classify 'unknown' and retry"
+            "a preempted defer (SQLSTATE 55006) must yield DEFERRED, not "
+            "propagate a fence error that dispatch would classify 'unknown' and retry"
         )
         assert any(n == "defer_compute_job" for n, _ in rpc_calls), (
             "it must have ATTEMPTED the defer (and been fenced) — not silently skipped"
         )
+
+    # Phase 164.9.3.2: _defer_lost_ownership reads SQLSTATE 55006 (the fence's
+    # new errcode; PostgREST 14 re-ran a 40001 without bound) and keeps both
+    # message literals as the deploy-window fallback.
+    class _CodedError(Exception):
+        def __init__(self, message: str, code: str) -> None:
+            super().__init__(message)
+            self.code = code
+
+    def test_defer_lost_ownership_code_55006_alone_classifies(self):
+        """The code alone identifies the fence: defer_compute_job raises 55006
+        nowhere else, so a message without either literal still yields."""
+        from services.job_worker import _defer_lost_ownership
+
+        exc = self._CodedError("object in use", "55006")
+        assert _defer_lost_ownership(exc) is True
+
+    def test_defer_lost_ownership_old_code_40001_with_literal_classifies(self):
+        """Deploy window: this worker meets a body that still raises 40001
+        (migration not yet applied). The literal fallback must yield."""
+        from services.job_worker import _defer_lost_ownership
+
+        exc = self._CodedError(
+            "defer_compute_job: job X preempted by watchdog reclaim "
+            "(caller token=t1, current token=t2)",
+            "40001",
+        )
+        assert _defer_lost_ownership(exc) is True
+
+    def test_defer_lost_ownership_bare_40001_does_not_classify(self):
+        """A bare 40001 without either literal is an unrelated serialization
+        conflict, not lost ownership. Yielding it as DEFERRED would bury it."""
+        from services.job_worker import _defer_lost_ownership
+
+        exc = self._CodedError(
+            "could not serialize access due to concurrent update", "40001"
+        )
+        assert _defer_lost_ownership(exc) is False
 
     @pytest.mark.asyncio
     async def test_genuine_defer_failure_propagates(self):

@@ -1,0 +1,1037 @@
+/**
+ * Phase 164.3.1 plan 12 — the gate family's META checks (SC-1, SC-7, SC-9).
+ *
+ * Three machine checks over the family of gates this phase made sound:
+ *
+ *   1. INSTANCE → ARM REGISTRY (SC-1). Every measured instance in the phase
+ *      taxonomy — the fifteen IDs in PHASE_TAXONOMY below — is bound to a named
+ *      arm in a named file. The check reads each file's bytes and asserts the
+ *      arm's distinctive name is there; a renamed or deleted arm fails BY
+ *      INSTANCE NAME, and an instance added to the taxonomy without a registry
+ *      entry (or an entry without an instance) fails the exact set. This is the
+ *      corpus's anti-decay gate: "every measured instance is an executable arm"
+ *      as a machine-checked invariant rather than a sentence in a SUMMARY.
+ *
+ *   2. DIAGNOSTIC-FIRST meta-arm (SC-7, D-12). Over the family's SHELL gates —
+ *      whose only interface is what they print — every failure emission must
+ *      carry at least one runtime-interpolated value. A gate in this family
+ *      cannot ship a bare conclusion. Exceptions are an exact-set allowlist,
+ *      each with its justification.
+ *
+ *   3. BARE-MEASUREMENT audit meta-arm (SC-9, D-10). Every threshold the family
+ *      carries — FLOOR/MIN constants and the literal comparisons inside its
+ *      absurdity blocks — must have a measured justification (a measurement
+ *      token AND a date) beside it. Criterion 9's grep, executed as a permanent
+ *      arm, with a non-vacuity floor on the number of thresholds it found.
+ *
+ * ── WHAT THIS FILE DOES AND DOES NOT CHECK, stated rather than implied ──────
+ * The registry binds NAMES to FILES so the corpus cannot decay silently. It does
+ * NOT re-prove that the arms fail: the recursive neuter→RED→restore proofs live
+ * in the committed records each entry cites (plans 04/06/07/08's SUMMARY
+ * evidence blocks, 164.3.1-11-CORPUS-PROOFS.md, 164.3.1-12-CORPUS-PROOFS.md).
+ * A needle present in a file proves the arm still EXISTS under that name; it
+ * does not prove the arm still bites — that is the job of the arm itself and
+ * of the CI job that runs it.
+ *
+ * Both meta-arms are deliberately STRUCTURAL. They check emission SHAPE (a
+ * shell expansion present in the emitted text; a measurement token and a date
+ * near the threshold), not runtime truth. A gate can interpolate the wrong
+ * variable, and a comment can carry a date beside a number that was never
+ * measured; neither predicate can tell. The runtime half — that the printed
+ * quantity is the one the verdict rests on, that the threshold separates the
+ * measured fires-shape from the measured silent-shape — lives in the per-gate
+ * DRIVEN arms the registry binds (VAC08-253, VAC04-C1, the VAC-04 and runner
+ * absurdity-floor fire/silent pairs). The two halves are complementary and
+ * neither claims the other's ground.
+ *
+ * All reads go through node:fs. Never shell grep: this repo carries a MEASURED
+ * NUL-blind test file (src/lib/wizardErrors.test.ts:1572), where grep's exit 1
+ * reads as "clean".
+ */
+import { describe, it, expect } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const ROOT = process.cwd();
+const read = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
+const countOf = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1. THE INSTANCE → ARM REGISTRY (SC-1)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type Primitive = "A" | "B" | "C" | "D";
+
+/**
+ * The phase taxonomy — every MEASURED instance, by primitive. Declared apart
+ * from the registry so the two can be compared as sets in both directions.
+ *
+ * SOURCE: 164.3.1-CONTEXT.md § Phase Boundary (the four primitives and their
+ * measured members) and 164.3.1-12-PLAN.md § must_haves (the fifteen IDs as
+ * the corpus-completeness set). Adding an instance here without a registry
+ * entry, or an entry without an instance here, fails below by name.
+ */
+export const PHASE_TAXONOMY: ReadonlyArray<{ instance: string; primitive: Primitive }> = [
+  // A — an accepted neuter leaves privileged state live
+  { instance: "R4-C01/P3", primitive: "A" },
+  { instance: "MUT-I01-P4", primitive: "A" },
+  { instance: "MUT-I01-P5", primitive: "A" },
+  // B — an arm counts toward `biting` without executing
+  { instance: "R4-C02", primitive: "B" },
+  { instance: "NESTED-EXECUTE", primitive: "B" },
+  // C — a verdict not bounded by what was measured, in either direction
+  { instance: "VAC04-C1", primitive: "C" },
+  { instance: "VAC04-C2", primitive: "C" },
+  { instance: "VAC04-C3", primitive: "C" },
+  { instance: "VAC04-C4", primitive: "C" },
+  { instance: "VAC08-253", primitive: "C" },
+  { instance: "VAC08-JOIN", primitive: "C" },
+  // D — a control whose own oracle or fixture agrees with it by construction
+  { instance: "VAC-SELFREF-01", primitive: "D" },
+  { instance: "SP-C04", primitive: "D" },
+  { instance: "AUDCOV-01", primitive: "D" },
+  { instance: "MUT-W02", primitive: "D" },
+];
+
+export type RegistryEntry = {
+  instance: string;
+  primitive: Primitive;
+  /** Repo-relative file holding the arm. */
+  file: string;
+  /** A distinctive substring of the arm's NAME — a test title, a scenario
+   *  header, or a describe title — quoted from the file's bytes. */
+  armNeedle: string;
+  /** Further (file, needle) bindings for the same instance — e.g. the unit
+   *  arm beside the lane-driven scenario. Each must resolve. */
+  also?: ReadonlyArray<{ file: string; needle: string }>;
+  /** A fixture file the arm reads; checked with existsSync. */
+  fixture?: string;
+  /** Which plan shipped the arm, and which committed record proves it can
+   *  fail. The registry does not re-prove; it cites. */
+  citation: string;
+};
+
+/**
+ * Needle values were populated by READING each target file and quoting a
+ * stable, distinctive string — never by guessing a title. Each occurs in its
+ * file's bytes at HEAD (measured 2026-09-02; the check below re-measures on
+ * every run).
+ */
+export const INSTANCE_ARM_REGISTRY: ReadonlyArray<RegistryEntry> = [
+  // ── Primitive A ────────────────────────────────────────────────────────
+  {
+    instance: "R4-C01/P3",
+    primitive: "A",
+    file: "scripts/mutation-runner/run.mjs",
+    armNeedle: "SELF-TEST 9/17: [R4-C01] the P3 compound HEAD must be REFUSED",
+    also: [
+      {
+        file: "src/__tests__/mutation-runner-neuter.test.ts",
+        needle: "P3: `SET ROLE postgres; IF NOT ok THEN` can no longer produce an accepted neuter",
+      },
+    ],
+    fixture: "scripts/mutation-runner/fixtures/selftest/compound-head-gate.sql",
+    // Shipped by plan 11 (lane-driven scenario 9/12) over plan 01's tokenizer;
+    // RED under neuter N1 in 164.3.1-11-CORPUS-PROOFS.md §2.
+    citation: "164.3.1-11 (scenario 9/12) + 164.3.1-01 (unit arm); proof: 164.3.1-11-CORPUS-PROOFS.md §2 (N1)",
+  },
+  {
+    instance: "MUT-I01-P4",
+    primitive: "A",
+    file: "scripts/mutation-runner/run.mjs",
+    armNeedle: "neither refuse the neuter (P4)",
+    also: [
+      {
+        file: "src/__tests__/mutation-runner-neuter.test.ts",
+        needle: "P4 (odd parity, LOUD): an apostrophe in a `--` comment is not a spurious neuter-missed",
+      },
+    ],
+    fixture: "scripts/mutation-runner/fixtures/selftest/comment-parity-gate.sql",
+    // Scenario 10/12 covers both parities; the P4 half is the spurious
+    // `neuter-missed`. RED under neuter N2 in 164.3.1-11-CORPUS-PROOFS.md §3.
+    citation: "164.3.1-11 (scenario 10/12, P4 half) + 164.3.1-01 (unit arm); proof: 164.3.1-11-CORPUS-PROOFS.md §3 (N2)",
+  },
+  {
+    instance: "MUT-I01-P5",
+    primitive: "A",
+    file: "scripts/mutation-runner/run.mjs",
+    armNeedle: "nor over-neuter the statement after it (P5)",
+    also: [
+      {
+        file: "src/__tests__/mutation-runner-neuter.test.ts",
+        needle: "P5 (even parity, SILENT): the statement after the RAISE's terminator must SURVIVE",
+      },
+    ],
+    fixture: "scripts/mutation-runner/fixtures/selftest/comment-parity-gate.sql",
+    // The silent over-neuter, made loud by the fixture's SURVIVOR LOST raise.
+    // RED under neuter N2 in 164.3.1-11-CORPUS-PROOFS.md §3.
+    citation: "164.3.1-11 (scenario 10/12, P5 half) + 164.3.1-01 (unit arm); proof: 164.3.1-11-CORPUS-PROOFS.md §3 (N2)",
+  },
+  // ── Primitive B ────────────────────────────────────────────────────────
+  {
+    instance: "R4-C02",
+    primitive: "B",
+    file: "scripts/mutation-runner/run.mjs",
+    armNeedle: "SELF-TEST 11/17: [R4-C02] a current_query() trigger",
+    fixture: "scripts/mutation-runner/fixtures/selftest/current-query-forge-gate.sql",
+    // Plan 05's FORGE 1 / CTRL 1 promoted verbatim by plan 11; RED under the
+    // attribution neuter N3 in 164.3.1-11-CORPUS-PROOFS.md §4.
+    citation: "164.3.1-11 (scenario 11/12) over 164.3.1-05's attribution; proof: 164.3.1-11-CORPUS-PROOFS.md §4 (N3)",
+  },
+  {
+    instance: "NESTED-EXECUTE",
+    primitive: "B",
+    file: "scripts/mutation-runner/run.mjs",
+    armNeedle: "SELF-TEST 12/17: the nested-EXECUTE DO forgery",
+    fixture: "scripts/mutation-runner/fixtures/selftest/nested-execute-forge-gate.sql",
+    // FORGE 2 + echo-free FORGE 3; RED under the chain-length-only neuter N4
+    // while scenario 11 stayed green — 164.3.1-11-CORPUS-PROOFS.md §5.
+    citation: "164.3.1-11 (scenario 12/12) over 164.3.1-05's attribution; proof: 164.3.1-11-CORPUS-PROOFS.md §5 (N4)",
+  },
+  // ── Primitive C ────────────────────────────────────────────────────────
+  {
+    instance: "VAC04-C1",
+    primitive: "C",
+    file: "src/__tests__/drift-check-scripts.test.ts",
+    armNeedle: "REOPEN PIN: the composing zero path prints BOTH readers' evidence and then EXITS NON-ZERO",
+    // Plan 07's reopen pin, failing two ways (execution + marker); neuter A/B
+    // record in 164.3.1-07-SUMMARY.md § The reopen pin's two-directional proof.
+    citation: "164.3.1-07 task 2; proof: 164.3.1-07-SUMMARY.md § reopen pin two-directional proof (neuters A and B, restore a669211c)",
+  },
+  {
+    instance: "VAC04-C2",
+    primitive: "C",
+    // READER-LEVEL (plan 04): the two reader CLIs driven through a symlink and a space path.
+    file: "src/__tests__/vac04-reader-guards.test.ts",
+    armNeedle: "main-module guard ([VAC04-C2]) — every invocation shape must actually RUN the reader",
+    // GATE-LEVEL (plan 13, SC-4 "driven through the real gate"): the same guard
+    // reached through scripts/prod-body-drift-check.sh via its injected reader paths.
+    also: [
+      {
+        file: "src/__tests__/drift-check-scripts.test.ts",
+        needle: "[VAC04-C2] GATE-LEVEL — the realpath guard driven THROUGH THE REAL GATE",
+      },
+    ],
+    // Plan 04: the realpath guard in both union members; pre-fix RED recorded
+    // verbatim (symlinked invocation exits 0 having run nothing).
+    citation:
+      "164.3.1-04 task 1; proof: 164.3.1-04-SUMMARY.md § Pre-fix RED / [VAC04-C2] + 164.3.1-13 task 1 (gate-level arm through scripts/prod-body-drift-check.sh); proof: 164.3.1-13-SUMMARY.md § cycles C2-N1/C2-N2",
+  },
+  {
+    instance: "VAC04-C3",
+    primitive: "C",
+    file: "src/__tests__/drift-check-scripts.test.ts",
+    armNeedle: "VAC04-C3 RED: a grep that ERRORS on the name index is a MEASURE_FAIL, not 'measured absent'",
+    // Plan 07 task 1 (landed as ab99ab99): three-way grep exit branching; the
+    // pre-fix fail-open observation is quoted in the SUMMARY.
+    citation: "164.3.1-07 task 1; proof: 164.3.1-07-SUMMARY.md § Task 1 — cited, not re-derived",
+  },
+  {
+    instance: "VAC04-C4",
+    primitive: "C",
+    // READER-LEVEL (plan 04): the two reader CLIs on the P10 non-ASCII identifier.
+    file: "src/__tests__/vac04-reader-guards.test.ts",
+    armNeedle: "charset refusal ([VAC04-C4]) — a reader that cannot read the name must REFUSE, never narrow it",
+    // GATE-LEVEL (plan 13, SC-4 "driven through the real gate"): the same input
+    // through scripts/prod-body-drift-check.sh — exit 1 naming U+00FA, no body text.
+    also: [
+      {
+        file: "src/__tests__/drift-check-scripts.test.ts",
+        needle: "[VAC04-C4] GATE-LEVEL — the charset refusal driven THROUGH THE REAL GATE",
+      },
+    ],
+    // Plan 04: the P10 non-ASCII input, pre-fix truncate-or-drop in two
+    // directions, post-fix refusal in both members.
+    citation:
+      "164.3.1-04 task 2; proof: 164.3.1-04-SUMMARY.md § Pre-fix RED / [VAC04-C4] + 164.3.1-13 task 2 (gate-level arm through scripts/prod-body-drift-check.sh); proof: 164.3.1-13-SUMMARY.md § cycle C4-N1",
+  },
+  {
+    instance: "VAC08-253",
+    primitive: "C",
+    file: "src/__tests__/drift-check-scripts.test.ts",
+    armNeedle: "RED: a populated ledger matching under half the repo is MEASURE_FAIL, not drift",
+    // The absurdity-floor family (RED arm + two controls) shipped in 164.3;
+    // proven load-bearing in this phase by disabling the floor — cycle 2.
+    citation: "164.3 (floor arms) re-proven by 164.3.1-12 task 1; proof: 164.3.1-12-CORPUS-PROOFS.md §4 (cycle 2)",
+  },
+  {
+    instance: "VAC08-JOIN",
+    primitive: "C",
+    file: "src/__tests__/drift-check-scripts.test.ts",
+    armNeedle: "VAC08-JOIN: a ledger row matching under EACH convention is not reported missing",
+    // This plan: the per-convention driven arm; RED under a removed clause.
+    citation: "164.3.1-12 task 1; proof: 164.3.1-12-CORPUS-PROOFS.md §2 (cycle 1) and §3 (cycle 1b)",
+  },
+  // ── Primitive D ────────────────────────────────────────────────────────
+  {
+    instance: "VAC-SELFREF-01",
+    primitive: "D",
+    file: "src/__tests__/self-referential-oracle.test.ts",
+    armNeedle: "SRO-01 red fixture is flagged",
+    also: [
+      {
+        // The fixed site itself: it now asserts over the red fixture's real bytes.
+        file: "src/__tests__/lint-sql-gates.test.ts",
+        needle: "every red fixture cites the mechanism it reproduces — the NUMBER, derived from RULES",
+      },
+    ],
+    fixture: "scripts/self-referential-oracle-fixtures/SRO-01-same-block-const.red.ts",
+    // Plan 02 observed the rule flagging the live :182-186 site at HEAD before
+    // any fix (D-06); plan 08 fixed the site and re-ran the fire proof.
+    citation: "164.3.1-02 (rule + SRO-01 pair) + 164.3.1-08 (site fix); proof: 164.3.1-02-CALIBRATION.md § II and § V, 164.3.1-08-SUMMARY.md § Task 2",
+  },
+  {
+    instance: "SP-C04",
+    primitive: "D",
+    file: "src/__tests__/self-referential-oracle.test.ts",
+    armNeedle: "BLOCKING corpus scan over src/__tests__ — exact against SRO_ALLOWLIST",
+    fixture: "scripts/self-referential-oracle-fixtures/SRO-01-same-block-const.red.ts",
+    // SP-C04 is the same-block-const SHAPE (local-stack-teardown-assertion
+    // :178, since removed); the blocking scan is the arm that refuses it
+    // corpus-wide, proven to bite on a planted probe in plan 08.
+    citation: "164.3.1-08 task 1 (blocking) over 164.3.1-02's rule; proof: 164.3.1-08-SUMMARY.md § Task 2 observations 1–3 (plant RED, neuter, restore ad01e593)",
+  },
+  {
+    instance: "AUDCOV-01",
+    primitive: "D",
+    file: "src/__tests__/audit-coverage.test.ts",
+    armNeedle: "case A ([AUDCOV-01]): a `/*` inside a MULTI-LINE template no longer blanks the file",
+    // Plan 06: pre-fix RED (A=[]), calibration control B, shipped fence C;
+    // quote-carry neutered → A regresses, B stays green; restore ce51e2fb.
+    citation: "164.3.1-06; proof: 164.3.1-06-SUMMARY.md § Case A's pre-fix RED and § Neuter/restore proof",
+  },
+  {
+    instance: "MUT-W02",
+    primitive: "D",
+    file: "src/__tests__/lint-sql-gates.test.ts",
+    armNeedle: "MW02 red fixture: the OLD single-spelling regex is BLIND to it, the parser is not",
+    fixture: "scripts/aggregator-tolerance-fixtures/MW02-alternate-spelling.red.yml",
+    // Plan 08 task 3: the structural result-loop parse; parser blinded to `[[`
+    // → only the red-fixture arm reds; restore c7348516.
+    citation: "164.3.1-08 task 3; proof: 164.3.1-08-SUMMARY.md § TASK 3 — [MUT-W02], measured",
+  },
+];
+
+/**
+ * A needle shorter than this binds too little to name an arm.
+ * MEASURED 2026-09-02 at 8969513e over INSTANCE_ARM_REGISTRY: 21 needles,
+ * shortest 29 chars ("SRO-01 red fixture is flagged"), longest 94. The floor
+ * sits under the shortest real needle so a registry entry cut down to a bare
+ * word ("fixture", "RED:") reds here; it is not tuned to the corpus's exact
+ * minimum, which would red on every legitimate short title.
+ */
+const NEEDLE_MIN_LENGTH = 16;
+
+describe("164.3.1-12 — instance → arm registry (SC-1 corpus completeness, mechanical)", () => {
+  it("non-vacuity: every needle is non-trivial and unique — a needle that matches everything binds nothing", () => {
+    const seen = new Map<string, string>();
+    for (const e of INSTANCE_ARM_REGISTRY) {
+      const needles = [e.armNeedle, ...(e.also ?? []).map((a) => a.needle)];
+      for (const n of needles) {
+        expect(n.trim().length, `${e.instance}: empty needle`).toBeGreaterThan(0);
+        expect(n.length, `${e.instance}: needle "${n}" is shorter than ${NEEDLE_MIN_LENGTH} chars`).toBeGreaterThanOrEqual(
+          NEEDLE_MIN_LENGTH,
+        );
+        const prior = seen.get(n);
+        expect(prior, `${e.instance} and ${prior ?? ""} share the needle "${n}" — one arm cannot stand for two instances`).toBeUndefined();
+        seen.set(n, e.instance);
+      }
+      expect(e.citation, `${e.instance}: citation must name the shipping plan (164.3.1-NN)`).toMatch(/164\.3(\.1)?-\d\d|^164\.3 /);
+      expect(e.citation, `${e.instance}: citation must name the committed record proving the arm can fail`).toMatch(
+        /CORPUS-PROOFS|SUMMARY|CALIBRATION/,
+      );
+    }
+  });
+
+  it.each(INSTANCE_ARM_REGISTRY)("$instance (primitive $primitive) → $file binds by name", (e) => {
+    const bindings = [{ file: e.file, needle: e.armNeedle }, ...(e.also ?? [])];
+    for (const b of bindings) {
+      expect(existsSync(join(ROOT, b.file)), `${e.instance}: arm file ${b.file} is gone`).toBe(true);
+      const n = countOf(read(b.file), b.needle);
+      expect(
+        n,
+        `${e.instance}: its arm "${b.needle}" is no longer in ${b.file}. The arm was renamed or deleted. If renamed, update the needle HERE with the new title; if deleted, the corpus lost a measured instance — restore it (see ${e.citation}). Do NOT drop the registry entry.`,
+      ).toBeGreaterThanOrEqual(1);
+    }
+    if (e.fixture !== undefined) {
+      expect(existsSync(join(ROOT, e.fixture)), `${e.instance}: fixture ${e.fixture} is gone`).toBe(true);
+    }
+  });
+
+  it("EXACT SET, both directions: registry instances === phase taxonomy, failing by name", () => {
+    const taxonomy = new Set(PHASE_TAXONOMY.map((t) => t.instance));
+    const registered = new Set(INSTANCE_ARM_REGISTRY.map((e) => e.instance));
+
+    expect(taxonomy.size, "duplicate instance IDs in PHASE_TAXONOMY").toBe(PHASE_TAXONOMY.length);
+    expect(registered.size, "duplicate instance IDs in INSTANCE_ARM_REGISTRY").toBe(INSTANCE_ARM_REGISTRY.length);
+
+    const unbound = [...taxonomy].filter((i) => !registered.has(i));
+    expect(
+      unbound,
+      `measured instance(s) with NO arm in the corpus: ${unbound.join(", ")}. SC-1 says every measured instance is an executable arm — ship the arm, prove it RED under the neuter of its fix, then register it here with its citation. Do NOT delete the taxonomy entry.`,
+    ).toEqual([]);
+
+    const orphan = [...registered].filter((i) => !taxonomy.has(i));
+    expect(
+      orphan,
+      `registry entr(y/ies) for instance(s) NOT in the phase taxonomy: ${orphan.join(", ")}. Either a new measured instance was found — add it to PHASE_TAXONOMY with its source — or the entry is a typo.`,
+    ).toEqual([]);
+
+    // The primitive letter is part of the identity: an instance filed under
+    // the wrong primitive would be counted for a class it does not belong to.
+    for (const e of INSTANCE_ARM_REGISTRY) {
+      const t = PHASE_TAXONOMY.find((x) => x.instance === e.instance);
+      expect(t?.primitive, `${e.instance}: registry says primitive ${e.primitive}, taxonomy says ${t?.primitive}`).toBe(e.primitive);
+    }
+
+    // Coverage across ALL FOUR primitives — the "corpus-wide" in SC-1.
+    const covered = new Set(INSTANCE_ARM_REGISTRY.map((e) => e.primitive));
+    expect([...covered].sort()).toEqual(["A", "B", "C", "D"]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2. DIAGNOSTIC-FIRST meta-arm (SC-7, D-12)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * The family's SHELL gates — the members whose ONLY interface is their output.
+ * INCLUSION RULE: a bash gate this phase made sound, run by CI with its stdout
+ * and exit code as the whole verdict. A new shell gate in this family goes
+ * here; the meta-arm then reads its every failure emission.
+ */
+export const FAMILY_SHELL_GATES: readonly string[] = [
+  "scripts/test-ledger-drift-check.sh",
+  "scripts/prod-body-drift-check.sh",
+];
+
+export type Emission = {
+  file: string;
+  /** 1-based line of the emission's first line. */
+  line: number;
+  kind: "fail-call" | "error-block";
+  /** The emitted text — the `fail` argument, or the joined block. */
+  text: string;
+};
+
+/**
+ * Every failure emission in a shell gate: each `fail "…"` call site, and each
+ * contiguous `echo "::error::…"` block (evidence pipes, `if/else/fi` control
+ * lines and comments inside the block are part of it; a blank line or any
+ * other statement ends it).
+ */
+export function findFailureEmissions(file: string, src: string): Emission[] {
+  const lines = src.split("\n");
+  const out: Emission[] = [];
+  const isErrorEcho = (l: string) => /^\s*echo "::error::/.test(l);
+  const continues = (l: string) =>
+    isErrorEcho(l) || /^\s*(sed |head |run_ledger_query |if .*\bthen\b|else\b|fi\b|&&|\|\||#)/.test(l);
+
+  let i = 0;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (isErrorEcho(l)) {
+      let j = i;
+      const buf: string[] = [];
+      while (j < lines.length && continues(lines[j])) {
+        buf.push(lines[j]);
+        j++;
+      }
+      out.push({ file, line: i + 1, kind: "error-block", text: buf.join("\n") });
+      i = j;
+      continue;
+    }
+    // A `fail "…"` call site. The helper's own definition (`fail() {`) is not
+    // an emission; a comment line is not either.
+    if (!/^\s*#/.test(l) && !/^\s*fail\(\)/.test(l)) {
+      // The quoted argument (balanced double quotes); an unterminated quote
+      // falls back to the rest of the line rather than being skipped.
+      const m = /\bfail "((?:[^"\\]|\\.)*)"/.exec(l) ?? /\bfail "(.*)$/.exec(l);
+      if (m !== null) out.push({ file, line: i + 1, kind: "fail-call", text: m[1] });
+    }
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Does the emitted text carry at least one RUNTIME-interpolated value?
+ * `${GATE}` is the gate's constant name and is excluded — with it counted the
+ * rule would be satisfied by every line in the family and bind nothing.
+ * `$*` / `$@` / `$0` / `$(…)` / `${x}` / `$x` all count.
+ */
+export function carriesRuntimeValue(text: string): boolean {
+  const stripped = text.split("${GATE}").join("");
+  return /\$\{[A-Za-z_#@*!?0-9]|\$\(|\$[A-Za-z_][A-Za-z0-9_]*|\$[#@*?0-9]/.test(stripped);
+}
+
+/** The emissions that ship a BARE conclusion. */
+export function diagnosticFirstViolations(file: string, src: string): Emission[] {
+  return findFailureEmissions(file, src).filter((e) => !carriesRuntimeValue(e.text));
+}
+
+/** A short, stable identity for an emission: file :: kind :: first 48 chars. */
+export function emissionKey(e: Emission): string {
+  return `${e.file} :: ${e.kind} :: ${e.text.replace(/\s+/g, " ").trim().slice(0, 48).trimEnd()}`;
+}
+
+// ── FIXTURES (SP-L02: same predicate, mutilated input) ──────────────────────
+// These strings are INPUTS to the predicates under test, never assertion
+// subjects — the assertions below read the predicates' RESULTS. That is why
+// they are not the same-block-const shape the SRO rule flags.
+const DIAGNOSTIC_RED_FIXTURE = [
+  "#!/usr/bin/env bash",
+  "GATE=\"fixture gate\"",
+  "if [ \"$count\" -lt 3 ]; then",
+  "  echo \"::error::${GATE}: the check failed.\"",
+  "  echo \"::error::Something was wrong with the input. Fix it and re-run.\"",
+  "  exit 1",
+  "fi",
+  "[ -f \"$f\" ] || fail \"the file is missing.\"",
+  "",
+].join("\n");
+
+const DIAGNOSTIC_GREEN_FIXTURE = [
+  "#!/usr/bin/env bash",
+  "GATE=\"fixture gate\"",
+  "if [ \"$count\" -lt 3 ]; then",
+  "  echo \"::error::${GATE}: MEASURE_FAIL — only ${count} row(s) read, floor is 3.\"",
+  "  echo \"::error::  first rows actually read:\"",
+  "  head -n 3 \"$rows\" | sed 's|^|::error::    |'",
+  "  exit 1",
+  "fi",
+  "[ -f \"$f\" ] || fail \"the file is missing at ${f}.\"",
+  "",
+].join("\n");
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3. BARE-MEASUREMENT audit meta-arm (SC-9, D-10)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * The threshold-bearing members of the family. INCLUSION RULE: every file in
+ * this family that declares a numeric FLOOR/MIN threshold or compares against
+ * a literal inside an absurdity block — the two shell gates, the mutation
+ * runner, the vitest gates that carry non-vacuity floors — and THIS FILE,
+ * whose own NEEDLE_MIN_LENGTH and EMISSION_FLOOR are thresholds the rule must
+ * not exempt (a meta-arm that skips itself is the D primitive it audits for).
+ * A new threshold anywhere in these files must carry its measurement AND be
+ * registered in KNOWN_THRESHOLD_SITES below.
+ *
+ * ⚠️ CURRENCY 2026-09-18 (Phase 164.8.2, round-2 finding F-R2-03): THREE files
+ * joined the list, and the reason is the gap itself. The fix rounds of this very
+ * phase introduced two floors — `RUN_BLOCK_FLOOR` in
+ * src/__tests__/test-restore-workflow-wiring.test.ts and `SEAM_FLOOR` in
+ * src/__tests__/restore-test-from-baseline.test.ts — that this scan WOULD have
+ * matched (both are name-class JS constants) but never saw, because the scan only
+ * looks where it is pointed. A control that only covers the files someone
+ * remembered to list is the shape this whole arm exists to refuse.
+ *   • src/__tests__/test-restore-workflow-wiring.test.ts — `RUN_BLOCK_FLOOR`, the
+ *     SOLE anti-vacuity guard for `errexitOffenders()`.
+ *   • src/__tests__/restore-test-from-baseline.test.ts — `SEAM_FLOOR`, the
+ *     anti-narrowing ratchet for the WR-04 env-seam derivation.
+ *   • scripts/restore-test-from-baseline.sh — the TWIN of the already-listed
+ *     scripts/test-ledger-drift-check.sh, which this phase treats as twins
+ *     everywhere else. It carries ZERO threshold sites today (MEASURED 2026-09-18
+ *     by running this scan over it: 0 sites), so it adds nothing to the tally; it
+ *     is listed so a floor added to it LATER is caught on the commit that adds it
+ *     rather than on the commit that remembers this list. It is deliberately NOT
+ *     in FAMILY_SHELL_GATES: that membership drives the diagnostic-first arm and
+ *     its EMISSION_FLOOR, which is a separate decision from threshold coverage.
+ */
+export const THRESHOLD_BEARING_FILES: readonly string[] = [
+  ...FAMILY_SHELL_GATES,
+  "scripts/restore-test-from-baseline.sh",
+  "scripts/mutation-runner/run.mjs",
+  "src/__tests__/lint-sql-gates.test.ts",
+  "src/__tests__/self-referential-oracle.test.ts",
+  "src/__tests__/gate-family-meta.test.ts",
+  "src/__tests__/test-restore-workflow-wiring.test.ts",
+  "src/__tests__/restore-test-from-baseline.test.ts",
+];
+
+export type ThresholdSite = {
+  file: string;
+  /** 1-based line of the threshold. */
+  line: number;
+  /** `NAME=<n>` for a constant, `<lhs> <op> <n>` for a literal comparison. */
+  label: string;
+  /** Whether a measurement token AND a date sit within JUSTIFICATION_WINDOW lines above. */
+  justified: boolean;
+  /** What justified it — for the diagnostic print. */
+  evidence: string;
+};
+
+/** Lines above a threshold within which its measurement must be recorded. */
+export const JUSTIFICATION_WINDOW = 80;
+
+/**
+ * What counts as a measurement beside a threshold: one of these tokens AND a
+ * dated stamp. The vocabulary is the family's own — every measured comment in
+ * it says MEASURED, records what a shape SCORED, or states a SAMPLE SIZE.
+ */
+const MEASUREMENT_TOKEN = /MEASURED|measured|Measured|scored|SAMPLE SIZE|sample size/;
+const DATE_STAMP = /\b20\d\d-\d\d-\d\d\b/;
+
+/**
+ * Every threshold site in a family file, each with its justification verdict.
+ * A site is (a) a FLOOR/MIN/CEILING/MAX/LIMIT-named constant bound to a numeric
+ * literal (JS `const`/`export const`, or a shell `NAME=<n>`), or (b) a shell
+ * numeric comparison against a literal of two or more digits (`-ge 50`);
+ * single-digit literals are exit codes and booleans, not thresholds. Comment
+ * lines never produce a site.
+ *
+ * ⚠️ The name class covers BOTH directions deliberately. It was `FLOOR|MIN`
+ * only until 2026-09-02, which let `WAIVED_CEILING = 0` (run.mjs:228 AS MEASURED
+ * THAT DAY; the constant is at run.mjs:1047 at HEAD 2026-09-04 — the phase's
+ * annotations pushed it down, the value never moved) escape
+ * the SC-9 no-bare-thresholds arm — a bound that fails when the corpus carries
+ * MORE than was measured is exactly as capable of being picked by taste as a
+ * lower bound, and this phase's whole thesis is that a control scoped to the
+ * spellings that happen to exist today is unsound by construction.
+ *
+ * ⛔ TWO COUNTING CONVENTIONS, NAMED — they were conflated here until
+ * 2026-09-02 and produced three different integers for one list. `shCmp` above
+ * matches a shell literal comparison and is NOT gated by the name class, so
+ * widening the class moves the NAME-CLASS count and the TOTAL-SITE count by the
+ * same one, from different bases:
+ *
+ *   RE-MEASURED 2026-09-02 at HEAD, by running the two name classes over all
+ *   six THRESHOLD_BEARING_FILES (a node scan reproducing this function):
+ *     `FLOOR|MIN`                     → 7 name-class constants + 1 shell
+ *                                       comparison = 8 TOTAL sites
+ *     `FLOOR|MIN|CEILING|MAX|LIMIT`   → 8 name-class constants + 1 shell
+ *                                       comparison = 9 TOTAL sites
+ *
+ * The one added site is `WAIVED_CEILING=0` at run.mjs:228 (2026-09-02 anchor;
+ * run.mjs:1047 at HEAD 2026-09-04), and it is justified,
+ * so the arm stays green on a real gain rather than on an unchanged set. TOTAL
+ * SITES is the convention the arm's own diagnostic prints (`META
+ * bare-measurement: N threshold site(s) over 6 file(s)` — 9 today) and the
+ * convention KNOWN_THRESHOLD_SITES is counted in. The RED fixture below carries
+ * a CEILING case so a regression of this name class fails by fixture, not by
+ * audit.
+ */
+export function findThresholdSites(file: string, src: string): ThresholdSite[] {
+  const lines = src.split("\n");
+  const sites: ThresholdSite[] = [];
+  lines.forEach((l, idx) => {
+    if (/^\s*(#|\/\/|\*)/.test(l)) return;
+    let label: string | null = null;
+    const jsConst = /^\s*(?:export\s+)?const\s+([A-Z][A-Z0-9_]*(?:FLOOR|MIN|CEILING|MAX|LIMIT)[A-Z0-9_]*)\s*=\s*(\d+)\b/.exec(l);
+    const shConst = /^\s*([A-Z][A-Z0-9_]*(?:FLOOR|MIN|CEILING|MAX|LIMIT)[A-Z0-9_]*)=(\d+)\b/.exec(l);
+    const shCmp = /\[\s*"?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"?\s+-(ge|gt|lt|le)\s+(\d{2,})\s*\]/.exec(l);
+    if (jsConst !== null) label = `${jsConst[1]}=${jsConst[2]}`;
+    else if (shConst !== null) label = `${shConst[1]}=${shConst[2]}`;
+    else if (shCmp !== null) label = `${shCmp[1]} -${shCmp[2]} ${shCmp[3]}`;
+    if (label === null) return;
+
+    // ⛔ THE WINDOW IS THE CONTIGUOUS COMMENT BLOCK IMMEDIATELY ABOVE THE SITE, NOT
+    // THE PRECEDING N LINES (measured 2026-09-18, review of F-R2-03). A raw
+    // `slice(idx - 80, idx)` is satisfied by ANY occurrence of "measured" plus ANY
+    // date in those 80 lines, including prose about a DIFFERENT constant — so in a
+    // comment-dense file the rule passes without the site being justified at all.
+    // MEASURED on this repo: `RUN_BLOCK_FLOOR` in test-restore-workflow-wiring.test.ts
+    // carried THREE tokens in its window; with BOTH of its own justifications
+    // neutralised the gate stayed GREEN on an unrelated "MEASURED" 69 lines above.
+    // Walking up through comment and blank lines until the first line of CODE binds
+    // the evidence to the site it is evidence FOR.
+    // ⛔ CORRECTED 2026-09-18 — AN EARLIER DRAFT OF THIS COMMENT CLAIMED "every site then
+    // justified stayed justified, so this cost no coverage". THAT WAS FALSE, and a review
+    // measured it: the tightening reddened `ledger_rows -ge 50` in
+    // scripts/test-ledger-drift-check.sh, whose derivation sat ~60 lines up BEHIND CODE.
+    // It was re-greened by MOVING a justification beside that site IN THE SAME COMMIT —
+    // so the honest statement is that the tightening cost one site and that site was paid
+    // for, not that it cost nothing. A comment claiming a control is free, beside a
+    // control that was not, is the defect this phase exists to remove.
+    // ⚠️ `JUSTIFICATION_WINDOW` still CAPS the walk — a block longer than it does not
+    // buy a wider search, it just stops there.
+    let blockStart = idx;
+    while (
+      blockStart > 0 &&
+      idx - blockStart < JUSTIFICATION_WINDOW &&
+      /^\s*(?:\*|\/\*|\/\/|#|$)/.test(lines[blockStart - 1])
+    ) {
+      blockStart -= 1;
+    }
+    const window = lines.slice(blockStart, idx + 1).join("\n");
+    const tok = MEASUREMENT_TOKEN.exec(window);
+    const date = DATE_STAMP.exec(window);
+    const justified = tok !== null && date !== null;
+    sites.push({
+      file,
+      line: idx + 1,
+      label,
+      justified,
+      evidence: justified
+        ? `"${(tok as RegExpExecArray)[0]}" + ${(date as RegExpExecArray)[0]} within the adjacent comment block (walk capped at ${JUSTIFICATION_WINDOW} lines)`
+        : `missing ${tok === null ? "measurement token" : ""}${tok === null && date === null ? " and " : ""}${date === null ? "date stamp" : ""} within the adjacent comment block (walk capped at ${JUSTIFICATION_WINDOW} lines)`,
+    });
+  });
+  return sites;
+}
+
+// ── FIXTURES ────────────────────────────────────────────────────────────────
+const THRESHOLD_RED_FIXTURE = [
+  "#!/usr/bin/env bash",
+  "# Refuse tiny inputs.",
+  "ROWS_FLOOR=7",
+  "if [ \"$rows\" -lt \"$ROWS_FLOOR\" ]; then exit 1; fi",
+  "if [ \"$other\" -ge 25 ]; then exit 1; fi",
+  // An UPPER bound, unjustified. Pins the CEILING/MAX/LIMIT half of the name
+  // class: if it ever narrows back to FLOOR|MIN this line stops being a site
+  // and the arm below goes RED on the missing label.
+  "WAIVERS_CEILING=3",
+  "",
+].join("\n");
+
+const THRESHOLD_GREEN_FIXTURE = [
+  "#!/usr/bin/env bash",
+  "# MEASURED 2026-09-02 over the whole fixture corpus: legitimate runs score",
+  "# 40-60 rows, the broken reader scores 0; the floor sits an order of",
+  "# magnitude under the silent shape (sample size 12 runs).",
+  "ROWS_FLOOR=7",
+  "if [ \"$rows\" -lt \"$ROWS_FLOOR\" ]; then exit 1; fi",
+  "",
+].join("\n");
+
+describe("164.3.1-12 — META-ARM fixtures: both rules can fire (SP-L02, same predicate as the family scan)", () => {
+  it("diagnostic-first: the RED fixture's bare-conclusion block AND bare fail are flagged; the GREEN fixture is clean and really read", () => {
+    const red = diagnosticFirstViolations("fixture.red.sh", DIAGNOSTIC_RED_FIXTURE);
+    expect(
+      red.map((e) => e.kind).sort(),
+      `the rule must flag the fixture's bare ::error:: block and its bare fail call; findings were ${JSON.stringify(red)}`,
+    ).toEqual(["error-block", "fail-call"]);
+
+    // Vacuity fence: the green fixture must PARSE to emissions before its
+    // emptiness means anything (an absence is satisfied perfectly by rubble).
+    const greenEmissions = findFailureEmissions("fixture.green.sh", DIAGNOSTIC_GREEN_FIXTURE);
+    expect(greenEmissions.map((e) => e.kind).sort()).toEqual(["error-block", "fail-call"]);
+    expect(
+      diagnosticFirstViolations("fixture.green.sh", DIAGNOSTIC_GREEN_FIXTURE),
+      "an emission that interpolates its quantity must not be flagged",
+    ).toEqual([]);
+  });
+
+  it("bare-measurement: the RED fixture's unjustified floor and literal comparison are flagged; the GREEN fixture's measured floor is not", () => {
+    const red = findThresholdSites("fixture.red.sh", THRESHOLD_RED_FIXTURE);
+    expect(
+      red.map((s) => s.label).sort(),
+      `the scan must find the ROWS_FLOOR constant, the WAIVERS_CEILING upper bound and the literal \`-ge 25\` comparison; sites were ${JSON.stringify(red)}`,
+    ).toEqual(["ROWS_FLOOR=7", "WAIVERS_CEILING=3", "other -ge 25"]);
+    expect(red.every((s) => !s.justified), "no site carries a measurement, so all must be UNJUSTIFIED").toBe(true);
+
+    const green = findThresholdSites("fixture.green.sh", THRESHOLD_GREEN_FIXTURE);
+    expect(green.map((s) => s.label)).toEqual(["ROWS_FLOOR=7"]);
+    expect(green[0]?.justified, `the measured floor must be justified; evidence was ${green[0]?.evidence}`).toBe(true);
+  });
+});
+
+// ── THE FAMILY SCANS ────────────────────────────────────────────────────────
+
+/**
+ * Justified exceptions to diagnostic-first — EXACT SET, keyed by emissionKey
+ * (file :: kind :: first 48 chars), never by line number. Every entry says
+ * why that emission legitimately carries no runtime quantity. A new bare
+ * emission fails below by key; a discharged entry fails too.
+ */
+export const DIAGNOSTIC_FIRST_ALLOWLIST: ReadonlyArray<{ key: string; reason: string }> = [
+  // MEASURED 2026-09-02 at 03585b88 by running this arm with the list EMPTY:
+  // 68 emissions over the two gates, 17 bare. Every one of the 17 falls into
+  // one of four classes, stated per entry. None was silenced by taste: the
+  // classes were decided BEFORE the keys were transcribed from the scan.
+  //
+  //   PRECONDITION  the failure is the ABSENCE of a tool or credential. There is
+  //                 no runtime quantity — the value is unset — and the text
+  //                 names the variable or binary, which IS the diagnostic.
+  //   REDACTED      the observable is withheld by the gates' public-log rule
+  //                 (NON-NEGOTIABLES: never a DSN, host, username or body text).
+  //   EMPTY-BY-COND the branch condition IS the measurement: the list/index
+  //                 was found empty, and the text says so. Printing an empty
+  //                 string would add nothing.
+  //   READER-STDERR the failure is a child reader's non-zero exit whose own
+  //                 stderr passes through UN-redirected on the lines above the
+  //                 `|| fail` (plan 164.3.1-04's refusals name file, line and
+  //                 byte). The wrapper adds only the conclusion; the diagnostic
+  //                 was already printed by the reader. The reader's exit CODE
+  //                 is not captured by the `|| fail` idiom — recorded as a
+  //                 follow-up in 164.3.1-12-SUMMARY.md and booked in TODOS.md
+  //                 (§ Phase 164.3.1 review-fix), not fixed here. Reasons name
+  //                 the reader MODE, never a line: the gate script is edited by
+  //                 later plans in this phase and line anchors go stale.
+  //
+  // ── scripts/test-ledger-drift-check.sh ──────────────────────────────────
+  {
+    key: "scripts/test-ledger-drift-check.sh :: fail-call :: node is not on PATH; the shared normalizer canno",
+    reason: "PRECONDITION — `node` absent from PATH; the binary name is the diagnostic",
+  },
+  {
+    key: "scripts/test-ledger-drift-check.sh :: error-block :: echo \"::error::${GATE}: TEST_SUPABASE_DB_URL is",
+    reason: "PRECONDITION — the DSN is unset; the five-line block names the variable and the job contract, and the value must never be printed (REDACTED as well)",
+  },
+  {
+    key: "scripts/test-ledger-drift-check.sh :: fail-call :: psql is not on PATH.",
+    reason: "PRECONDITION — `psql` absent from PATH",
+  },
+  {
+    key: "scripts/test-ledger-drift-check.sh :: fail-call :: BODY_CHECK_FUNCTIONS is empty or whitespace-only",
+    reason: "EMPTY-BY-COND — the list was measured empty/whitespace by the branch; there is nothing to interpolate",
+  },
+  // ── scripts/prod-body-drift-check.sh ────────────────────────────────────
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: BODY_FETCH_CMD is unset — there is no way to rea",
+    reason: "PRECONDITION — injectable command unset; the variable name is the diagnostic",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: BODY_NAME_INDEX_CMD is unset — without PROD's fu",
+    reason: "PRECONDITION — injectable command unset",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: BODY_NAME_INDEX_XCHECK_CMD is unset — with ONE i",
+    reason: "PRECONDITION — injectable command unset",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: node is not on PATH; the shared normalizer canno",
+    reason: "PRECONDITION — `node` absent from PATH",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: could not extract function names from the change",
+    reason: "READER-STDERR — `node $NORMALIZER --function-names` exits non-zero with its stderr on the log; the refusal names file/line/byte",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: the independent name reader failed on the change",
+    reason: "READER-STDERR — `node $NAIVE_NAMES` (unqualified mode) exits non-zero with its stderr on the log",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: could not read the schema qualifiers of this PR'",
+    reason: "READER-STDERR — `node $NORMALIZER --function-qualified-names` exits non-zero with its stderr on the log",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: the independent name reader could not read the s",
+    reason: "READER-STDERR — `node $NAIVE_NAMES --qualified` exits non-zero with its stderr on the log",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: could not index PROD's function names (stderr wi",
+    reason: "REDACTED — the index command reads a PROD dump; its stderr is redirected to a file and withheld from the public log by design",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: could not build the INDEPENDENT cross-check inde",
+    reason: "REDACTED — same as the primary index; stderr withheld by design",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: PROD's function-name index came back EMPTY. A da",
+    reason: "EMPTY-BY-COND — `grep -q` on the primary index found no non-blank line; the quantity is zero and the text says so",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: the INDEPENDENT cross-check index of PROD's func",
+    reason: "EMPTY-BY-COND — same, for the cross-check index",
+  },
+];
+
+/**
+ * Non-vacuity floor on the emission walk. MEASURED 2026-09-02 at 03585b88:
+ * 68 emissions over the two gates (test-ledger 30, prod-body 38); re-measured
+ * 2026-09-02 at 8969513e (review-fix branch, prod-body gate under edit): 71
+ * (test-ledger 27, prod-body 44). The floor
+ * is 40, not 68 — pinned at the measurement it reds on every legitimate
+ * consolidation of an error block and gets raised by reflex (D-10, wide
+ * separation). A walker that stopped recognising `echo "::error::` or `fail "`
+ * scores a handful and reds here rather than reporting a clean family of
+ * nothing.
+ */
+const EMISSION_FLOOR = 40;
+
+describe("164.3.1-12 — META-ARM diagnostic-first over the family's shell gates (SC-7)", () => {
+  it("every failure emission prints a runtime value — exact against DIAGNOSTIC_FIRST_ALLOWLIST, both directions", () => {
+    const emissions: Emission[] = [];
+    const violations: Emission[] = [];
+    for (const rel of FAMILY_SHELL_GATES) {
+      const src = read(rel);
+      const found = findFailureEmissions(rel, src);
+      emissions.push(...found);
+      violations.push(...diagnosticFirstViolations(rel, src));
+    }
+
+    // DIAGNOSTIC-FIRST about itself (D-12): print what was seen. A raw
+    // process.stdout.write because vitest 4's default reporter swallows
+    // console output from passing tests.
+    process.stdout.write(
+      `META diagnostic-first: ${emissions.length} emission(s) over ${FAMILY_SHELL_GATES.length} gate(s), ` +
+        `${violations.length} bare, ${DIAGNOSTIC_FIRST_ALLOWLIST.length} allowlisted\n` +
+        violations.map((v) => `  bare ${emissionKey(v)} (line ${v.line})\n`).join(""),
+    );
+
+    expect(
+      emissions.length,
+      `the emission walk found ${emissions.length} site(s); a broken walk reports a clean family of nothing`,
+    ).toBeGreaterThanOrEqual(EMISSION_FLOOR);
+
+    const allow = new Set(DIAGNOSTIC_FIRST_ALLOWLIST.map((a) => a.key));
+    const found = new Set(violations.map(emissionKey));
+
+    const unexplained = violations.filter((v) => !allow.has(emissionKey(v)));
+    expect(
+      unexplained.map((v) => `${emissionKey(v)} (line ${v.line})`),
+      "a gate in this family ships a BARE CONCLUSION — a failure emission with no runtime-interpolated value. Print what the gate SAW (the count, the name, the exit code) before the verdict (D-12/SC-7). Do NOT add the site to DIAGNOSTIC_FIRST_ALLOWLIST to silence this; that list holds emissions that legitimately have no quantity, each with its reason",
+    ).toEqual([]);
+
+    const discharged = DIAGNOSTIC_FIRST_ALLOWLIST.filter((a) => !found.has(a.key));
+    expect(
+      discharged.map((a) => a.key),
+      "allowlist entr(y/ies) no longer match a bare emission — either the site now prints its quantity (delete the entry) or the walker stopped seeing it (a regression in this rule; re-run the fixture arm before touching the list)",
+    ).toEqual([]);
+  });
+});
+
+/**
+ * Every threshold the family carries, EXACT SET by `file :: label`. A new
+ * threshold anywhere in THRESHOLD_BEARING_FILES must be measured (the scan
+ * asserts that) AND registered here — a floor set by taste and a floor set by
+ * measurement look identical to a reader who did not check.
+ */
+export const KNOWN_THRESHOLD_SITES: readonly string[] = [
+  // ⚠️ EVERY COUNT HERE IS A **TOTAL SITE** COUNT — name-class constants PLUS
+  // the shell literal comparisons, which the name class does not gate. That is
+  // the convention this list is length-checked in and the one the arm's
+  // diagnostic prints; the 7-vs-8 pair in findThresholdSites' doc-comment is the
+  // NAME-CLASS convention and counts a different thing.
+  //
+  // MEASURED 2026-09-02 at 03585b88 by running this arm with the list EMPTY:
+  // 6 threshold sites over the 5 threshold-bearing files, all 6 justified
+  // (token + date within the window). Re-measured 2026-09-02 at 8969513e with
+  // this file added: 8 sites over 6 files, NEEDLE_MIN_LENGTH was BARE (no date)
+  // until its measurement was recorded. RE-MEASURED 2026-09-02 at HEAD after
+  // the name class widened past `FLOOR|MIN`: 9 sites over the same 6 files
+  // (8 name-class constants + 1 shell literal comparison), all 9 justified.
+  // ⚠️ CURRENCY 2026-09-10 (Phase 164.8.2): the list now holds TEN entries —
+  // `FRONTIER_EXEMPT_CEILING=3` joined it with WR-02. The "9 sites" reading above
+  // is the 2026-09-02 measurement and is kept as dated lineage; the sentence
+  // "the entries below, one per site" was left standing when the tenth landed and
+  // is corrected here rather than re-dated. Regenerate rather than trust either
+  // numeral — this arm reports the live tally when run with the list EMPTY, and
+  // `awk '/^export const KNOWN_THRESHOLD_SITES/,/^\];/' src/__tests__/gate-family-meta.test.ts | grep -cE '^\s*"'`
+  // prints the registration count. One entry per site. The known count IS the
+  // non-vacuity floor: an exact set both directions is strictly stronger than
+  // `>= 6`, and a threshold leaving this family is a decision worth a red, not
+  // churn.
+  "scripts/test-ledger-drift-check.sh :: ledger_rows -ge 50", //  VAC-08 absurdity floor: 'scored' + 2026-08-29
+  // The family's SECOND upper bound, and the first whose reality is NOT in this
+  // repo. It caps the apply-on-merge frontier exemption (WR-02, Phase 164.8.2):
+  // more exempted above-tip migrations than this is a stalled `apply-test`, not a
+  // timing window, and the gate names every exempted version and exits 1.
+  // ⚠️ A STALE-HIGH VALUE HERE IS NOT RE-DERIVABLE, unlike FILES_FLOOR/ARMS_FLOOR
+  // (whose corpus is on disk, re-derived by mutation-runner-floors.test.ts). The
+  // exempt count is a property of a LIVE, shared ledger. So this registration IS
+  // the second layer: it makes any change to the value a reviewed diff. Lowering
+  // the ceiling when reality allows stays a human act, recorded by the dated line
+  // beside the constant.
+  "scripts/test-ledger-drift-check.sh :: FRONTIER_EXEMPT_CEILING=3", // frontier exempt ceiling: MEASURED + 2026-09-09 (live above-tip count on main was 0 — `ledger frontier: tip=20260908120000; 0 above-tip migration(s) exempted.`, CI run 34390777698, sql-tests job 102600855496 — so the ceiling reds nothing green today; pinned at 3 rather than 0 so an ordinary migration-adding PR is not RED by construction)
+  "scripts/prod-body-drift-check.sh :: SNAPSHOT_MIN=50", //         VAC-04 absurdity floor: 'measured' + 2026-09-01
+  "scripts/mutation-runner/run.mjs :: FILES_FLOOR=55", //           coverage ratchet: MEASURED + 2026-10-01 (54 -> 55 at Phase 164.9.3.2 DEFER40001 plan 06, which added the NEW gate file supabase/tests/test_compute_job_fence_errcode.sql: the four claim-token fence raises of migration 20261001120000 answer SQLSTATE 55006, never 40001, 8 arms. The denominator moved with it, 81 -> 82. SEPARATED on ONE full lane run on the tree merged with origin/main, node scripts/mutation-runner/run.mjs, no file edited during it: scope FULL 55/55, coverage files 55/82, arms: 553/553/0, biting: 553, lane-invocations: 553 plus 55 baseline / 55 restore legs, unreachable 27, lane-blocked 0, ✅ No defects, exit 0; stale-low observed as RATCHET STALE in src/__tests__/mutation-runner-floors.test.ts at the old 54. Registered in the SAME commit as the constant). Prior: MEASURED + 2026-09-29 (53 -> 54 at Phase 167.1.2 ACCOUNTTRUTH PR C2 review fix B, WR-04: plan 12's NEW gate file supabase/tests/test_refresh_fanout_zero_snapshot_bootstrap.sql reached the branch without its census commits. The denominator moved with it, 80 -> 81. SEPARATED on ONE full lane run at a6fc18e45, node scripts/mutation-runner/run.mjs, no file edited during it: scope FULL 54/54, coverage files 54/81, arms: 545/545/0, biting: 545, lane-invocations: 545 plus 54 baseline / 54 restore legs, unreachable 27, lane-blocked 0, ✅ No defects, exit 0; stale-low observed as RATCHET STALE in src/__tests__/mutation-runner-floors.test.ts at the old 53. Registered in the SAME commit as the constant). Prior: MEASURED + 2026-09-27 (52 -> 53 at Phase 164.9.3 CLAIMPAIR plan 05, which added the NEW gate file supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql: a due failed_retry job beside a pending twin of the same (kind, partition) never makes a claim entry point raise 23505, 15 arms against migration 20260927120000. The denominator moved with it, 79 -> 80. SEPARATED on ONE full lane run, node scripts/mutation-runner/run.mjs, no file edited during it: scope FULL 53/53, coverage files 53/80, arms: 506/506/0, biting: 506, lane-invocations: 506 plus 53 baseline / 53 restore legs, unreachable 27, lane-blocked 0, ✅ No defects, exit 0, wall clock 710 s; separated in both directions as recorded beside the constant. Registered in the SAME commit as the constant). Prior: MEASURED + 2026-09-26 (51 -> 52 at the merge of origin/main into Phase 164.5.2 BRIDGELOCK: the UNION of two branches that EACH added one NEW gate file over the common base of 50 annotated / 77 total — supabase/tests/test_mark_rpc_bridge_advisory_lock.sql on this branch and supabase/tests/test_api_keys_account_identity.sql on origin/main — so the denominator moves 78 -> 79. SEPARATED on ONE full lane run on the merged tree, node scripts/mutation-runner/run.mjs: scope FULL 52/52, coverage files 52/79, arms: 491/491/0, biting: 491, lane-invocations: 491 plus 52 baseline / 52 restore legs, ✅ No defects, exit 0. Registered in the SAME commit as the constant). Prior (164.5.2 side): MEASURED + 2026-09-26 (50 -> 51 at Phase 164.5.2 BRIDGELOCK plan 03, which added the NEW gate file supabase/tests/test_mark_rpc_bridge_advisory_lock.sql: the LANE-ONLY two-backend dblink gate, arms L1-L4. The denominator moved with it, 77 -> 78. SEPARATED on full lane runs, node scripts/mutation-runner/run.mjs: coverage files 51/78, arms: 453/453/0, biting: 453, lane-invocations: 453 plus 51 baseline / 51 restore legs, unreachable 27, lane-blocked 0; stale-low observed as RATCHET STALE in src/__tests__/mutation-runner-floors.test.ts at the old 50. Registered in the SAME commit as the constant). Prior (origin/main side): MEASURED + 2026-09-26 (50 -> 51 at Phase 167.1.2 ACCOUNTTRUTH plan 03, which added the NEW gate file supabase/tests/test_api_keys_account_identity.sql: the duplicate marker, the departed-history flag and its owner RPC, and the reconnect named refusal of migration 20260925120000, 24 arms. The denominator moved with it, 77 -> 78. SEPARATED on ONE full lane run after merging origin/main, node scripts/mutation-runner/run.mjs, no file edited during it: scope FULL 51/51, coverage files 51/78, arms: 474/474/0, biting: 474, lane-invocations: 474 plus 51 baseline / 51 restore legs, unreachable 27, lane-blocked 0, ✅ No defects, exit 0. Registered in the SAME commit as the constant). Prior: MEASURED + 2026-09-24 (49 -> 50 at Phase 164.6 GATE-HYGIENE review fix round 1, which added the NEW gate file supabase/tests/test_cron_runs_rls.sql: anon and a non-admin authenticated user read ZERO cron_runs rows, beside an admin anti-vacuity control, three arms. The denominator moved with it, 76 -> 77. SEPARATED on ONE full lane run, node scripts/mutation-runner/run.mjs, no file edited during it: scope FULL 50/50, coverage files 50/77, arms: 445/445/0, biting: 445, lane-invocations: 445 plus 50 baseline / 50 restore legs, unreachable 27, lane-blocked 0, ✅ No defects, exit 0. Registered in the SAME commit as the constant). Prior: MEASURED + 2026-09-22 (48 -> 49 at Phase 167 CREDTRUST plan 03 Task 2, which added the NEW gate file supabase/tests/test_api_keys_sync_status_sign_in_failed.sql. ⛔ REGISTERED LATE, at plan 03's review fix: Task 2 moved the CONSTANT and not this row, so the registry read 48 against a shipped 49 and this arm was RED at HEAD — the exact "a threshold nobody registered is a threshold nobody reviewed" shape, and the second time this registry has lagged its own constants. Re-derived over scanCorpus at HEAD: filesTotal 76, annotated 49). Prior: MEASURED + 2026-09-20 (47 -> 48 at phase 164.5.1.4 SYNCCURSOR, which added supabase/tests/test_strategy_sync_cursors_rls.sql, the behavioural deny-all gate for the new per-STRATEGY marker table; the denominator moved with it, 74 -> 75). Prior: MEASURED + 2026-09-07 (45 -> 46 at phase 164.7 plan 02, which added supabase/tests/test_analytics_service_settings_and_vault_tick.sql; the denominator moved with it, 72 -> 73. Unmoved by the SQL-fixer pass later the same day, which grew that file's ARMS but added no FILE)
+  "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=553", //           biting ratchet: MEASURED + 2026-10-01 (545 -> 553 at Phase 164.9.3.2 DEFER40001 plan 06. EIGHT arms, D1, D1L, M1, M1L, M2, M2L, F1 and F1L, all in the NEW gate file supabase/tests/test_compute_job_fence_errcode.sql (which also moves FILES_FLOOR 54 -> 55), against migration 20261001120000. SEPARATED on ONE full lane run on the tree merged with origin/main, no file edited during it: arms: 553/553/0, biting: 553, lane-invocations: 553 (the two independent tallies AGREE), per-file row sections 8 / judged 8 / annotated 8 / waived 0 / biting 8, ✅ No defects, exit 0; separated in both directions as recorded beside the constant. WAIVED_CEILING stays 0). Prior: MEASURED + 2026-09-29 (513 -> 545 at Phase 167.1.2 ACCOUNTTRUTH PR C2 review fix B, WR-04. THIRTY-TWO arms, all in plan 12's NEW supabase/tests/test_refresh_fanout_zero_snapshot_bootstrap.sql (which also moves FILES_FLOOR 53 -> 54), against migration 20260928140000, re-measured here because the file reached the branch without its census commits. SEPARATED on ONE full lane run at a6fc18e45, no file edited during it: arms: 545/545/0, biting: 545, lane-invocations: 545 (the two independent tallies AGREE), ✅ No defects, exit 0; at the old 513 the runner cannot see it and src/__tests__/mutation-runner-floors.test.ts fails instead. WAIVED_CEILING stays 0). Prior: MEASURED + 2026-09-27 (509 -> 513 at the merge of origin/main into Phase 167.1.2 PR C1: C1's four D-18 arms join CLAIMPAIR's count. Before that: 507 -> 509 at Phase 164.9.3 CLAIMPAIR review round 3, WR-01, founder decision D-11. TWO new arms, W-C39SIB and W-C39INTRO, in the ALREADY-ANNOTATED gate file supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql (16 -> 18), so FILES_FLOOR stays 53; their layered twins revert the 5-arg throttle probe's allocator widening and re-add the intro carve-out in front of its strategy EXISTS, in migration 20260927120000. MEASURED on ONE full lane run, node scripts/mutation-runner/run.mjs, no file edited during it: arms: 509/509/0, biting: 509, lane-invocations: 509 (the two independent tallies AGREE), per-file row sections 12 / judged 18 / annotated 18 / waived 0 / biting 18, ✅ No defects, exit 0; the stale-low direction observed at 507 in src/__tests__/mutation-runner-floors.test.ts, the too-high direction not re-run. WAIVED_CEILING stays 0). Prior: MEASURED + 2026-09-27 (506 -> 507 at Phase 164.9.3 CLAIMPAIR review round 1, WR-01. ONE new arm, W-LOWTWIN, in the ALREADY-ANNOTATED gate file supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql (15 -> 16), so FILES_FLOOR stays 53; its layered twin reverts the 5-arg throttle-probe exclusion of migration 20260927120000. MEASURED on ONE full lane run, node scripts/mutation-runner/run.mjs, no file edited during it: arms: 507/507/0, biting: 507, lane-invocations: 507 (the two independent tallies AGREE), per-file row sections 10 / judged 16 / annotated 16 / waived 0 / biting 16, ✅ No defects, exit 0; the stale-low direction observed at 506 in src/__tests__/mutation-runner-floors.test.ts. WAIVED_CEILING stays 0). Prior: MEASURED + 2026-09-27 (491 -> 506 at Phase 164.9.3 CLAIMPAIR plan 05. FIFTEEN new arms, all in the NEW gate file supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql (which also moves FILES_FLOOR 52 -> 53), each with one layered RED-UNDER-M twin against migration 20260927120000. SEPARATED on ONE full lane run, node scripts/mutation-runner/run.mjs, no file edited during it: arms: 506/506/0, biting: 506, lane-invocations: 506 (the two independent tallies AGREE), per-file row waived 0 / biting 15, ✅ No defects, exit 0; separated in both directions as recorded beside the constant. WAIVED_CEILING stays 0). Prior: MEASURED + 2026-09-26 (491 at the merge of origin/main into Phase 164.5.2 BRIDGELOCK: the UNION of the two lineages below. Over the common base of 449, this branch added FOUR arms (L1-L4, the NEW test_mark_rpc_bridge_advisory_lock.sql) and origin/main added THIRTY-EIGHT (all 37 of the NEW test_api_keys_account_identity.sql plus 6f CCXT in test_api_keys_venue_identity_uniq.sql), on disjoint gate files: 449 + 4 + 38 = 491. SEPARATED on ONE full lane run on the merged tree, node scripts/mutation-runner/run.mjs: arms: 491/491/0, biting: 491, lane-invocations: 491 (the two independent tallies AGREE), ✅ No defects, exit 0. WAIVED_CEILING stays 0). Prior (164.5.2 side): MEASURED + 2026-09-26 (449 -> 453 at Phase 164.5.2 BRIDGELOCK plan 03. FOUR new arms, L1-L4, all in the NEW gate file supabase/tests/test_mark_rpc_bridge_advisory_lock.sql (which also moves FILES_FLOOR 50 -> 51). SEPARATED in both directions on full lane runs, node scripts/mutation-runner/run.mjs: at 454 the runner exits 1 naming the floor; at 453 it exits 0 with arms: 453/453/0, biting: 453, lane-invocations: 453 (the two independent tallies AGREE); at the old 449 the runner cannot see it and src/__tests__/mutation-runner-floors.test.ts fails instead. WAIVED_CEILING stays 0). Prior (origin/main side): MEASURED + 2026-09-26 (486 -> 487 at Phase 167.1.2 PR B review round-4 fixes: ONE new arm, HIST-requeued, in test_api_keys_account_identity.sql (36 -> 37), full lane run `arms: 487/487/0`, `biting: 487`; before that 485 -> 486 at Phase 167.1.2 PR B review round 4: ONE new arm, HIST-tenant, in test_api_keys_account_identity.sql (35 -> 36), full lane run `arms: 486/486/0`, `biting: 486`; before that 484 -> 485 at Phase 167.1.2 PR B review round 3: ONE new arm, HIST-retry, in test_api_keys_account_identity.sql (34 -> 35), full lane run `arms: 485/485/0`, `biting: 485`; before that 483 -> 484 at Phase 167.1.2 PR B review round 2: ONE new arm, HIST-lock, in test_api_keys_account_identity.sql, full lane run `arms: 484/484/0`, `biting: 484`; before that 474 -> 483 at Phase 167.1.2 ACCOUNTTRUTH plan 03, PR B pre-merge review fixes. NINE new arms, all in the ALREADY-ANNOTATED supabase/tests/test_api_keys_account_identity.sql (24 -> 33): ACCT-l, ACCT-m, ACCT-n, ACCT-o, ACCT-p, HIST-running, RECON-hist, RECON-tenant, RECON-other-exchange, against migration 20260925120000 edited in place. No file joined the annotated set, so FILES_FLOOR stays 51; WAIVED_CEILING stays 0. SEPARATED on a narrowed lane run (arms 33/33/0, every arm RED (identity ok)) and on ONE full lane run, tree frozen, constant still at 474: scope FULL 51/51, coverage files 51/78, arms: 483/483/0, biting: 483, lane-invocations: 483 plus 51 baseline / 51 restore legs, ✅ No defects, exit 0; recorded beside the constant in scripts/mutation-runner/run.mjs). Prior: MEASURED + 2026-09-26 (449 -> 474 at Phase 167.1.2 ACCOUNTTRUTH plan 03. TWENTY-FIVE new arms: all 24 of the NEW supabase/tests/test_api_keys_account_identity.sql (which moves FILES_FLOOR 50 -> 51) plus arm 6f CCXT in the ALREADY-ANNOTATED supabase/tests/test_api_keys_venue_identity_uniq.sql (7 -> 8). SEPARATED per file on narrowed lane runs (arms 24/24/0 and 8/8/0, every arm RED (identity ok)) and on one full lane run recorded beside the constant in scripts/mutation-runner/run.mjs. WAIVED_CEILING stays 0). Prior: MEASURED + 2026-09-24 (445 -> 449 at Phase 164.6 GATE-HYGIENE review fix round 2. FOUR new arms: a W/deadlock sub-arm in EACH of supabase/tests/test_ledger_refresh_fanout.sql (31 -> 32) and supabase/tests/test_ledger_refresh_composite_arm.sql (28 -> 29), a deadlock (40P01) now being a failure that must be named, plus the WRITE arms ANON 2 and USER 2 in supabase/tests/test_cron_runs_rls.sql (3 -> 5). No file joined the annotated set, so FILES_FLOOR stays 50; WAIVED_CEILING stays 0. SEPARATED per file on narrowed lane runs (biting 32, 29 and 5, every arm RED (identity ok)) and on one full lane run recorded beside the constant in scripts/mutation-runner/run.mjs). Prior: MEASURED + 2026-09-24 (428 -> 445 at Phase 164.6 GATE-HYGIENE review fix round 1. SEVENTEEN new arms: N2, T, N3, U, V1, V2 and W in EACH of the ALREADY-ANNOTATED supabase/tests/test_ledger_refresh_fanout.sql (24 -> 31) and supabase/tests/test_ledger_refresh_composite_arm.sql (21 -> 28), against migration 20260924120000 edited in place, plus ADMIN 1, ANON 1 and USER 1 in the NEW supabase/tests/test_cron_runs_rls.sql (which moves FILES_FLOOR 49 -> 50). SEPARATED on ONE full lane run, node scripts/mutation-runner/run.mjs, no file edited during it: coverage files 50/77, arms: 445/445/0, biting: 445, lane-invocations: 445 (the two independent tallies AGREE), lane-blocked 0, pg_cron AVAILABLE, unreachable 27, every new arm RED (identity ok), ✅ No defects, exit 0. The run was taken with the constant still at 428, which the runner cannot see by construction; the stale-low direction is src/__tests__/mutation-runner-floors.test.ts's. WAIVED_CEILING stays 0). Prior: MEASURED + 2026-09-24 (426 -> 428 at Phase 164.6 GATE-HYGIENE plans 03/04, OPS-08-F2. TWO new arms, both named N, one in each of the ALREADY-ANNOTATED supabase/tests/test_ledger_refresh_fanout.sql (23 -> 24) and supabase/tests/test_ledger_refresh_composite_arm.sql (20 -> 21): one poisoned candidate beside a healthy one, each twin neutering the failure count in migration 20260924120000. SEPARATED on a full lane run, node scripts/mutation-runner/run.mjs: coverage files 49/76, arms: 428/428/0, biting: 428, lane-invocations: 428 (the two independent tallies AGREE), lane-blocked 0, pg_cron AVAILABLE, unreachable 27, pending 0, both arms N RED (identity ok). The stale-low direction was observed: with ARMS_FLOOR left at 426, src/__tests__/mutation-runner-floors.test.ts fails. FILES_FLOOR stays 49 and WAIVED_CEILING stays 0). Prior: MEASURED + 2026-09-22 (423 -> 426 in TWO uncredited steps plus one credited: Phase 167 CREDTRUST plan 03 Task 2 took it 423 -> 425 with two arms in the new gate file and NEVER moved this row, so the registry read 423 against a shipped 425 and was RED at HEAD; plan 03's review fix then added arm 3 — the prefix-family mutation that drops 'complete' while keeping 'complete_with_warnings', which this file's pre-fix SUBSTRING probe passed clean — taking it to 426. The pin is set to the MEASURED value, not walked through the intermediate state nothing was ever registered at. SEPARATED on a full lane run, node scripts/mutation-runner/run.mjs: coverage files 49/76, arms: 426/426/0, biting: 426, lane-invocations: 426 (the two independent tallies AGREE), lane-blocked 0, pg_cron AVAILABLE, unreachable 27, pending 0, ✅ No defects, exit 0. FILES_FLOOR stays 49 — arm 3 landed in an already-annotated file — and WAIVED_CEILING stays 0). Prior: MEASURED + 2026-09-21 (422 -> 423 at phase 164.9 TESTISOLATION plan 10, [164.8.1-TEST-ANALYTICS-URL-PROD]. ONE new arm, D1, in the ALREADY-ANNOTATED supabase/tests/test_analytics_service_settings_and_vault_tick.sql: a second transaction that branches on the database-identity marker, READS the live analytics destination row where the marker names TEST, measures the allow-list constraint where nobody has hand-set a marker, refuses outright where the marker names production, and reddens when NO branch was taken. So ARMS moves and FILES does not — FILES_FLOOR stays 48 and the 48/75 coverage ratio is unchanged — and WAIVED_CEILING stays 0. SEPARATED on a real narrowed lane run: `--file <gate>` gives `arms: 14/14/0`, `biting: 14`, `No defects in the narrowed scope.`, every arm `RED (identity ok)` including D1. ⛔ D1's twin is a NARROWING of the allow-list and deliberately NOT a `DROP CONSTRAINT`: the drop is arm U2's twin, U2 runs FIRST in the same file, and two arms cannot share one mutation because only one of them can be the FIRST failure). Prior: MEASURED + 2026-09-20 (402 -> 413 in two steps, +10 then +1; the +1 is arm "0", the applied-ness gate added when the skip was reverted to a hard failure. Originally recorded as 402 -> 412 at phase 164.5.1.4 SYNCCURSOR. The TEN new arms are all in the one new gate file test_strategy_sync_cursors_rls.sql: SEED 1, GRANT 1, RLS 1, RLS 2, POLICY 1-4, POLICY 4 PRECONDITION and RESTORE 1. Re-derived over scanCorpus at HEAD with the test's own regexes: 412 twins across 48 annotated files of 75, 0 waivers, so 402 + 10 = 412 reconciles. SEPARATED on the vitest re-derivation, which is what caught this registration being stale. ⛔ NOTE, OBSERVED AND NOT REPAIRED: the lineage prose that follows describes a move to 392 while the registered value read 402 — a pre-existing drift of this same class, left as-is because re-deriving phase 164.8.6's run is not possible from here; do not read the narrative below as describing the CURRENT value). Prior: MEASURED + 2026-09-11 (369 -> 380 across phase 164.7 plans 02 and 04; 380 -> 384 in the SQL-fixer pass; now 384 -> 392 in phase 164.8.6 VAULTTICKFIX plan 05. The EIGHT new arms are V2 and G1 in test_analytics_service_settings_and_vault_tick.sql against the new migration 20260911120000, and S1/M1/M2 in EACH of test_ledger_refresh_fanout.sql and test_ledger_refresh_composite_arm.sql against 20260911130000. SEPARATED in both directions on real full-corpus lane runs: 393 gives "ARMS_FLOOR regression: 392 biting arm(s) < floor 393" and exit 1 with EXACTLY that one defect; 392 gives 0 defects and exit 0, with arms/biting/lane-invocations all reading 392 and coverage files 46/73. The stale-low direction was observed FIRST, at 384, where the run still exits 0 and it is src/__tests__/mutation-runner-floors.test.ts that fails — two layers, by design. WAIVED_CEILING still 0; FILES_FLOOR still 46. Full log: 164.8.6-05-FLOORS.log, five runs with exit codes and wall clocks)
+  //                                                               ⚠️ CURRENCY 2026-09-17 (phase 164.5.1.1 FANOUTCOHORT, plans 01+02): 392 -> 394,
+  //                                                               two edit-kind twins (P, Q) in test_ledger_refresh_fanout.sql; MEASURED off the runner's own `biting:` line, never a grep (the naive grep sums to 405).
+  //                                                               ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 01): FILES_FLOOR
+  //                                                               46 -> 47 and ARMS_FLOOR 395 -> 397 (both labels above updated in the SAME
+  //                                                               commit — a stale label here would itself be a bare threshold). ONE new
+  //                                                               annotated gate, supabase/tests/test_prod_prober_cadence.sql, two arms (G, S).
+  //                                                               MEASURED off a clean-tree full-corpus lane run's own output: `coverage: files
+  //                                                               47/74`, `arms: 397/397/0`, `biting: 397`, `lane-invocations: 397` (the two
+  //                                                               independent tallies AGREE), 0 defects, exit 0. See both constants' own
+  //                                                               dated lineage comments in scripts/mutation-runner/run.mjs for the full
+  //                                                               separation evidence.
+  //                                                               ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 02): ARMS_FLOOR
+  //                                                               397 -> 402 (FILES_FLOOR unchanged at 47 — five new arms landed in the
+  //                                                               SAME already-annotated file plan 01 added). MEASURED off two real
+  //                                                               full-corpus lane runs' own output: `arms: 402/402/0`, `biting: 402`,
+  //                                                               `lane-invocations: 402` (the two independent tallies AGREE), 0 defects,
+  //                                                               exit 0; SEPARATED upward at ARMS_FLOOR=403, which gave `ARMS_FLOOR
+  //                                                               regression: 402 biting arm(s) < floor 403` and exit 1. See run.mjs's own
+  //                                                               dated lineage comment for the full separation evidence.
+  //                                                               ⚠️ CURRENCY 2026-09-21 (Phase 164.9 plan 04, FANOUT-GLOBAL-01 closure):
+  //                                                               ARMS_FLOOR 413 -> 416 (FILES_FLOOR unchanged at 48 -- all THREE new
+  //                                                               arms landed in already-annotated files). One foreign-row calibration
+  //                                                               arm each in test_strategy_analytics_stuck_computing_reaper.sql
+  //                                                               (7/FANOUT-GLOBAL-01), test_retention_orphaned_running.sql
+  //                                                               (4/FANOUT-GLOBAL-01) and test_reconcile_dropped_enqueue_sweep.sql
+  //                                                               (5/FANOUT-GLOBAL-01). MEASURED off real per-file pg-lane runs' own
+  //                                                               output: `arms: 29/29/0` / `arms: 25/25/0` / `arms: 38/38/0`
+  //                                                               respectively (each was N-1/N-1/0 before this plan), all three 0
+  //                                                               defects, exit 0. See run.mjs's own dated lineage comment for the
+  //                                                               full per-gate separation evidence.
+  //                                                               ⚠️ CURRENCY 2026-09-21 (Phase 164.9 plan 04, fix round): ARMS_FLOOR
+  //                                                               416 -> 422 (FILES_FLOOR unchanged at 48 -- all SIX new arms landed
+  //                                                               in already-annotated files). Closes a section-coverage gap the
+  //                                                               164.4-02 vitest gate found: six `TEST FAILED (...)` identities in
+  //                                                               the three files above had no twin. Two new arms each, own-1/own
+  //                                                               and foreign, per gate. MEASURED off real per-file pg-lane runs'
+  //                                                               own output: `arms: 31/31/0` / `arms: 27/27/0` / `arms: 40/40/0`
+  //                                                               respectively (each was N-2/N-2/0 before this round), all three 0
+  //                                                               defects, exit 0, reconcile re-run twice to confirm no flakiness
+  //                                                               against that file's own Part 2 nondeterminism. See run.mjs's own
+  //                                                               dated lineage comment for the full per-gate separation evidence.
+  // The family's FIRST upper bound. ⚠️ This line read "the family's only UPPER
+  // bound" until 2026-09-10, while the FRONTIER_EXEMPT_CEILING entry added above it
+  // on this same branch already called itself "the family's SECOND upper bound" —
+  // two rows of one list disagreeing about the same fact. There are TWO now.
+  // Invisible to this arm until the name class
+  // widened past FLOOR|MIN on 2026-09-02 — registered here on the run that
+  // first saw it, with its measurement at run.mjs:201-227 and the constant
+  // itself at run.mjs:228 (MEASURED + a dated --parse-only run at 8969513e
+  // scoring 0 waivers, cross-checked by an independent fs scan). Both anchors
+  // RE-MEASURED at HEAD 2026-09-02; they had shifted by two lines.
+  // ⚠️ CURRENCY 2026-09-04 (Phase 164.4 close, review finding IN-02): the two
+  // line anchors above are the 2026-09-02 measurement and are kept as such. At
+  // HEAD the measurement block is at run.mjs:1020-1046 and the constant at
+  // run.mjs:1047 — twelve waves of annotation inserted above it. The VALUE is
+  // unmoved at 0 (`git log -L '/^export const WAIVED_CEILING/,+1'` returns one
+  // commit, the phase base), which is the property this row exists to record.
+  "scripts/mutation-runner/run.mjs :: WAIVED_CEILING=0", //          waiver ceiling: MEASURED + 2026-09-02 (unmoved through 2026-09-04, plan 164.4-11: 0 waivers over 262 arms)
+  "src/__tests__/lint-sql-gates.test.ts :: RESULT_LOOP_CONDITION_FLOOR=8", // [MUT-W02] parse floor: 'measured' + 2026-09-01
+  "src/__tests__/self-referential-oracle.test.ts :: CORPUS_FLOOR=100", //    SRO corpus-walk floor: MEASURED + 2026-09-01
+  "src/__tests__/gate-family-meta.test.ts :: NEEDLE_MIN_LENGTH=16", //      registry needle floor: MEASURED + 2026-09-02
+  "src/__tests__/gate-family-meta.test.ts :: EMISSION_FLOOR=40", //         emission-walk floor: MEASURED + 2026-09-02
+  // ⚠️ CURRENCY 2026-09-18 (Phase 164.8.2, round-2 finding F-R2-03). The two rows below
+  // are the floors THIS PHASE'S OWN FIX ROUNDS introduced outside this registry — the
+  // exact "a threshold nobody registered is a threshold nobody reviewed" shape, produced
+  // by the file that states it. RE-DERIVED by running this arm's scan over the widened
+  // THRESHOLD_BEARING_FILES: **12 threshold site(s) over 9 file(s), all 12 justified**
+  // (10 over 6 before; +2 sites from the two vitest files, +0 from
+  // scripts/restore-test-from-baseline.sh, which carries none today and is listed for
+  // the future). ⛔ Re-derive both integers by running the arm with this list EMPTY —
+  // never by arithmetic on this prose, which has gone stale in this repo before.
+  "src/__tests__/test-restore-workflow-wiring.test.ts :: RUN_BLOCK_FLOOR=16", // errexit-scan anti-vacuity floor: MEASURED + 2026-09-18 (16 `run: |` blocks re-measured at HEAD after the round-2 restructure of the workflow, by raising the constant to 999 and reading the arm's own "only 16 …" text; separated upward at 999, green at 16. Floor sits AT the measurement deliberately: the count is re-derived from the file on disk and the comparison is `>=`, so growth cannot red it and a silently-narrowing parser can)
+  "src/__tests__/restore-test-from-baseline.test.ts :: SEAM_FLOOR=16", //     WR-04 seam-derivation ratchet: MEASURED + 2026-09-18 (`envSeams(SRC)` derives exactly 16 seams, all named in the constant's own comment; separated upward at 999, green at 16. Same equal-floor reasoning as the row above — this one reds precisely when the derivation covers LESS of the operator contract, which is the WR-04 defect)
+];
+
+describe("164.3.1-12 — META-ARM bare-measurement audit over the family's thresholds (SC-9)", () => {
+  it("every threshold carries a measurement token and a date within the window, and the found set is exactly KNOWN_THRESHOLD_SITES", () => {
+    const sites: ThresholdSite[] = [];
+    for (const rel of THRESHOLD_BEARING_FILES) sites.push(...findThresholdSites(rel, read(rel)));
+
+    process.stdout.write(
+      `META bare-measurement: ${sites.length} threshold site(s) over ${THRESHOLD_BEARING_FILES.length} file(s)\n` +
+        sites.map((s) => `  ${s.justified ? "ok  " : "BARE"} ${s.file} :: ${s.label} (line ${s.line}) — ${s.evidence}\n`).join(""),
+    );
+
+    const keys = sites.map((s) => `${s.file} :: ${s.label}`);
+    expect(new Set(keys).size, "two threshold sites share a key — labels must be unique per file").toBe(keys.length);
+
+    const bare = sites.filter((s) => !s.justified);
+    expect(
+      bare.map((s) => `${s.file} :: ${s.label} (line ${s.line}) — ${s.evidence}`),
+      `a threshold in this family has NO measurement beside it. Record the measurement — the command, the date, the sample size and coverage, and both separation directions — in the comment block IMMEDIATELY above the value — not merely within ${JUSTIFICATION_WINDOW} lines of it (D-10/SC-9). Do not widen the window back to a raw line count`,
+    ).toEqual([]);
+
+    const known = new Set(KNOWN_THRESHOLD_SITES);
+    const found = new Set(keys);
+    expect(
+      keys.filter((k) => !known.has(k)),
+      "a threshold site not in KNOWN_THRESHOLD_SITES — a new floor appeared in the family. Register it here WITH its measurement recorded beside it in the file; a threshold nobody registered is a threshold nobody reviewed",
+    ).toEqual([]);
+    expect(
+      KNOWN_THRESHOLD_SITES.filter((k) => !found.has(k)),
+      "a registered threshold site was not found — the floor was removed or renamed, or the scan stopped seeing it. Establish which before editing this list",
+    ).toEqual([]);
+  });
+});

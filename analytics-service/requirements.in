@@ -83,3 +83,19 @@ vcrpy==8.3.0
 # deliberate review, not a silent transitive float (the 3.14 incident proved
 # that class) — supabase->realtime only requires >=3.11.18,<4.0.0.
 aiohttp<3.15
+# v1.15 MT5 go-live: the worker reaches the self-hosted MT5 gateway's RPyC bridge
+# as a pure network client (`from mt5linux import MetaTrader5`, lazy import in
+# services/mt5_client.py). rpyc is the ONLY real runtime dep of that client path.
+# ⚠️LOAD-BEARING PIN: rpyc MUST stay on the 5.x line (`<6`). The gateway's Wine-side
+# mt5linux server speaks rpyc 5.x; rpyc 6.x is NOT wire-compatible with 5.x and
+# fails the handshake with `ValueError: invalid message type: 18`. The running Wine
+# server is 5.2.3, but the gateway constraint pins mt5linux's declared `rpyc==5.0.1`,
+# so a fresh gateway rebuild may run 5.0.1 — 5.0.1 and 5.2.3 are verified
+# cross-compatible (live wire test: 5.0.1 server ↔ 5.2.3 client). What matters is the
+# SAME 5.x major-protocol on both ends, NOT an exact match; 5.2.3 chosen here as the
+# newest 5.x that imports clean on the py3.12 runtime. Do NOT let this float to 6.x.
+# mt5linux itself is installed in the Dockerfile with
+# --no-deps (its 0.1.9 wheel metadata mis-declares twine/urllib3==1.26.7/six as
+# runtime deps, which conflict with this service's urllib3/six) — so mt5linux does
+# NOT belong in this lock; only rpyc (+its plumbum) does.
+rpyc==5.2.3

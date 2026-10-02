@@ -82,6 +82,27 @@ function makePayloadWithMtmBundle(): FactsheetPayload {
   } as unknown as FactsheetPayload;
 }
 
+// Phase 133 (SMTM-01) — the FLAGSHIP options shape: a smoothed bundle LONGER than
+// cash and NO mark_to_market bundle (MTM gated OFF, smoothed serving the charts). The
+// F2.3 clamp must consult the smoothed bundle length (its own third max() term),
+// otherwise the recent smoothed days past the cash length are permanently unreachable.
+const SMTM_LEN = 150;
+function makePayloadWithSmoothedBundle(): FactsheetPayload {
+  const payload = cashPayload();
+  const smDates = Array.from({ length: SMTM_LEN }).map((_, i) => `S${String(i).padStart(3, "0")}`);
+  const smEquity = Array.from({ length: SMTM_LEN }).map((_, i) => 1 + i * 0.01);
+  return {
+    ...payload,
+    seriesByBasis: {
+      smoothed_mtm: {
+        dates: smDates,
+        strategyEquity: smEquity,
+        strategyReturns: smEquity.map(() => 0.01),
+      },
+    },
+  } as unknown as FactsheetPayload;
+}
+
 function BasisSetter({ basis }: { basis: Basis }) {
   const { setBasis } = useBasis();
   useEffect(() => {
@@ -174,6 +195,22 @@ describe("[F2] MasterBrush follows the active basis", () => {
     const { getByTestId } = renderBrush("cash_settlement", { payload: cash, drive: [0, 9999] });
     await waitFor(() => {
       expect(getByTestId("xr").textContent).toBe(`0-${cashLen - 1}`);
+    });
+  });
+
+  it("SMTM-01 widened clamp: a SMOOTHED index past the cash length is REACHABLE (neuter the third max() term → RED)", async () => {
+    // The flagship options shape: a smoothed bundle LONGER than cash, NO MTM bundle.
+    // Drive the window end to the LAST smoothed index (149), past the cash length
+    // (99). With the third max() term (seriesByBasis.smoothed_mtm.dates.length) this
+    // resolves to "S149"; without it the cash-sized clamp clips to "S099" (the
+    // permanently-unreachable recent-days bug the F2.3 comment documents).
+    const { container } = renderBrush("smoothed_mtm", {
+      payload: makePayloadWithSmoothedBundle(),
+      drive: [0, SMTM_LEN - 1],
+    });
+    await waitFor(() => {
+      const { end } = edgeLabels(container);
+      expect(end).toBe(`S${String(SMTM_LEN - 1).padStart(3, "0")}`);
     });
   });
 });

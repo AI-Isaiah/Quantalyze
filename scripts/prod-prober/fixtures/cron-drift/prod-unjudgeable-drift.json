@@ -1,0 +1,29 @@
+[
+  {
+    "jobid": 1,
+    "jobname": "match_engine_cron",
+    "schedule": "0 * * * *",
+    "active": true,
+    "database": "postgres",
+    "username": "postgres",
+    "command": "SELECT public.match_engine_cron_tick('FAKE-abcdef0123' || '456789abcdef0123456789');"
+  },
+  {
+    "jobid": 2,
+    "jobname": "audit_log_cold_purge",
+    "schedule": "17 3 * * *",
+    "active": true,
+    "database": "postgres",
+    "username": "postgres",
+    "command": "SELECT purge_audit_log_cold(\n  interval '91 days'\n)"
+  },
+  {
+    "jobid": 3,
+    "jobname": "retention_compute_jobs_done",
+    "schedule": "23 4 * * *",
+    "active": true,
+    "database": "postgres",
+    "username": "postgres",
+    "command": "SELECT retention_sweep('compute_jobs_done', interval '30 days')"
+  }
+]

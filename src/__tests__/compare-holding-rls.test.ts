@@ -179,7 +179,10 @@ describe("/compare holding RLS access gate (live-DB)", () => {
       expect(result?.symbol).toBe(SYMBOL);
       expect(result?.venue).toBe("binance");
       expect(result?.holding_type).toBe("spot");
-      expect(result?.analytics.cumulative_return).not.toBeNull();
+      // Phase 167.1.2 / D-13: the item carries no analytics while the equity
+      // history is rebuilt; availability (non-null above) is what RLS gates.
+      expect(result?.historyState).toBe("rebuilding");
+      expect(result?.analytics).toBeNull();
     },
     30_000,
   );

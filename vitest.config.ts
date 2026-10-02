@@ -1,7 +1,9 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig, defaultExclude } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import { resolve } from "path";
 import os from "os";
+import { NODE_ENV_TEST_FILES } from "./vitest.node-env";
+import { LOCAL_STACK_LANE_FILES } from "./vitest.local-stack-files";
 
 // CI-flake mitigation (2026-05-20, per HANDOVER-CI-FLAKES-2026-05-20.md).
 // GitHub Actions runners have 4 logical cores; Vitest's default worker
@@ -15,6 +17,43 @@ import os from "os";
 // dev machines.
 const MAX_THREADS = Math.max(1, os.cpus().length - 1);
 
+// The whole suite, shared by both projects below (each one narrows it — the
+// jsdom project by excluding the node list, the node project by being that
+// list).
+const INCLUDE = [
+  "src/**/*.test.{ts,tsx}",
+  // D-164-A / B3 (2026-08-27) — colocated tests for the CI gate SCRIPTS.
+  // There was no `scripts/**` glob here, so `scripts/check-gdpr-export-
+  // coverage.test.ts` — 20 KB of assertions over the GDPR export-coverage
+  // hook — had NEVER executed in this repo's CI. An uncollected test file is
+  // indistinguishable from a passing one by every signal a reviewer reads,
+  // which is the same class of defect the hook itself guards against. Adding
+  // the glob was the remedy recorded in the phase's deferred-items.md, and it
+  // is taken here because B3 hardens that exact hook and the assertions had to
+  // be running for the hardening to mean anything.
+  // ⚠️ Directory-wide on purpose: a per-file entry would leave the next
+  // colocated script test uncollected and silent all over again.
+  "scripts/**/*.test.{ts,tsx}",
+  "tests/a11y/**/*.test.ts",
+  "tests/visual/**/*.test.ts",
+  "tests/visual/**/*.test.tsx",
+  // Phase 18 / FIX-04 — TS↔Python parity test reads both
+  // src/lib/admin/pii-scrub.ts and analytics-service/services/redact.py
+  // via fs.readFileSync to enforce denylist parity across runtimes.
+  "tests/lib/**/*.test.ts",
+  // Phase 19 / BACKBONE-05 + BACKBONE-10 — integration tests for
+  // (a) thin-adapter outbound /process-key fetch shape (headers + body)
+  //     across the 7 converted routes when the unified-backbone flag is on
+  // (b) auto-rollback cron + Sentry env-tag smoke
+  // both globs share the `tests/integration/` directory so a single
+  // `vitest run` invocation picks them up alongside the unit suite.
+  "tests/integration/**/*.test.ts",
+  // B25 — RuleTester fixtures for the local eslint-plugin-quantalyze rules
+  // live next to the rules they exercise (plugin self-containment) and are
+  // run as part of the normal vitest suite.
+  "tools/eslint-plugin-quantalyze/tests/**/*.test.ts",
+];
+
 export default defineConfig({
   plugins: [react()],
   test: {
@@ -22,28 +61,102 @@ export default defineConfig({
     // Vitest 4.x: maxWorkers is the top-level cap on parallel workers
     // (replaces the 3.x `poolOptions.threads.maxThreads` shape).
     maxWorkers: MAX_THREADS,
-    include: [
-      "src/**/*.test.{ts,tsx}",
-      "tests/a11y/**/*.test.ts",
-      "tests/visual/**/*.test.ts",
-      "tests/visual/**/*.test.tsx",
-      // Phase 18 / FIX-04 — TS↔Python parity test reads both
-      // src/lib/admin/pii-scrub.ts and analytics-service/services/redact.py
-      // via fs.readFileSync to enforce denylist parity across runtimes.
-      "tests/lib/**/*.test.ts",
-      // Phase 19 / BACKBONE-05 + BACKBONE-10 — integration tests for
-      // (a) thin-adapter outbound /process-key fetch shape (headers + body)
-      //     across the 7 converted routes when the unified-backbone flag is on
-      // (b) auto-rollback cron + Sentry env-tag smoke
-      // both globs share the `tests/integration/` directory so a single
-      // `vitest run` invocation picks them up alongside the unit suite.
-      "tests/integration/**/*.test.ts",
-      // B25 — RuleTester fixtures for the local eslint-plugin-quantalyze rules
-      // live next to the rules they exercise (plugin self-containment) and are
-      // run as part of the normal vitest suite.
-      "tools/eslint-plugin-quantalyze/tests/**/*.test.ts",
-    ],
+    // Phase 140.5-01 / SEAMPROSE-04 — restore stubbed globals and stubbed env
+    // vars BEFORE each test. DEF-16-1, this repo's known CI-only failure cause
+    // (green on local Node 25, red on CI Node 22), is an ORDERING defect: 81
+    // files call `vi.stubGlobal` and 38 of them never clean up, so with the
+    // threads pool sharing one `globalThis` per worker the suite's verdict
+    // depends on which file the worker happened to run first.
+    //
+    // Config rather than an `afterEach` in src/test-setup.ts, deliberately: the
+    // config option runs BEFORE each test and cannot be shadowed by a
+    // file-local `afterEach`, whereas a setup-file hook can. Coverage-law row 1
+    // either way — every test file inherits it with no edit.
+    //
+    // ⚠️ `unstubEnvs` covers ONLY vars set through `vi.stubEnv()`. The 54 files
+    // that assign `process.env.X =` directly are covered by the snapshot
+    // restore in src/test-setup.ts, which is a SEPARATE mechanism; neither one
+    // makes the other redundant. `src/test-setup.leak-canary.test.ts` fails if
+    // either is removed (ledger rows SC-HARNESS-1 and SC-ENV-1).
+    unstubGlobals: true,
+    unstubEnvs: true,
+    // ⚠️ EMPTY ON PURPOSE — the projects below own the file sets, and this
+    // must stay empty for them to. `extends: true` merges a project's config
+    // into this one with vite's `mergeConfig`, which CONCATENATES arrays
+    // instead of replacing them: with `INCLUDE` here, the node project's
+    // include resolves to `INCLUDE ∪ NODE_ENV_TEST_FILES` and it runs the
+    // whole suite — MEASURED, 791 files in the node project and 2,736 red
+    // `document is not defined`. Scalars (`environment`) DO override, which is
+    // why the node project can still flip that one.
+    include: [],
     setupFiles: ["src/test-setup.ts"],
+    // Two projects, split ONLY by test environment. jsdom stays the default
+    // and keeps everything except the explicit opt-in list in
+    // vitest.node-env.ts; that list is the node project. Both `extends: true`,
+    // so the react plugin, the `@` alias and every option above (setupFiles,
+    // the unstub pair) are inherited rather than restated — a project that
+    // forgot `setupFiles` would silently lose the env-restore fence, and one
+    // that forgot the plugin could not transform JSX at all.
+    //
+    // WHY. Building a jsdom per file is the largest single cost in a run:
+    // MEASURED at 987s of the 1289s of CPU a green parallel run burns, and 291
+    // of the 791 files never touch a DOM. Same tests, same assertions, no
+    // window.
+    //
+    // ⚠️ The two file sets are COMPLEMENTARY by construction — the node list
+    // is the node project's include and the jsdom project's exclude. Keep it
+    // that way: overlap runs a file twice (inflating the test count and the
+    // coverage denominator), a gap drops it silently.
+    //
+    // ⚠️ Phase 164.5 / VAC-07 — A THIRD SET NOW SITS OUTSIDE BOTH PROJECTS.
+    // `LOCAL_STACK_LANE_FILES` (vitest.local-stack-files.ts) is excluded from the
+    // jsdom project and appears in neither project's include, so this run covers
+    // `INCLUDE − NODE_ENV_TEST_FILES − LOCAL_STACK_LANE_FILES`. Those files need a
+    // booted Supabase CLI stack (PostgREST + GoTrue over HTTP) that the sharded
+    // `frontend-test` job has not got; left in, they would redden every shard.
+    // They run instead under `vitest.local-stack.config.ts`, in the
+    // `frontend-local-stack` CI job, which boots the lane first.
+    // ⛔ Their exclusion here is what makes the CI wiring LOAD-BEARING rather than
+    // convenient: a file in that list with no lane job runs NOWHERE. That is the
+    // `csv-finalize-rpc.test.ts` tombstone class, so
+    // `src/__tests__/local-stack-lane-wiring.test.ts` — which DOES run in these
+    // shards — pins the exclusion here, the include there, and the job's presence
+    // in the `frontend` aggregator's `needs:` list AND its result loop.
+    // The node project needs no matching exclude: its include IS
+    // `NODE_ENV_TEST_FILES`, which the list is deliberately not a member of.
+    //
+    // ⚠️ `defaultExclude` must be spread back in. Setting `exclude` REPLACES
+    // vitest's default (node_modules, dist, .idea, …) rather than adding to
+    // it, and without it the jsdom project walks node_modules.
+    //
+    // CI-COMPAT, verified rather than assumed (2026-08-12): `--shard=N/2`
+    // still partitions the union of both projects, `--reporter=blob` writes
+    // one report per shard, and `vitest run --merge-reports --coverage` merges
+    // them and enforces the thresholds below on the full-suite numbers.
+    // Coverage is a ROOT option, not a project one, so the split does not
+    // fragment it.
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "jsdom",
+          include: INCLUDE,
+          exclude: [
+            ...defaultExclude,
+            ...NODE_ENV_TEST_FILES,
+            ...LOCAL_STACK_LANE_FILES,
+          ],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "node",
+          environment: "node",
+          include: NODE_ENV_TEST_FILES,
+        },
+      },
+    ],
     // Coverage tracking — GATED in CI by the `frontend-coverage` job
     // (.github/workflows/ci.yml), which since 2026-07-02 MERGES the two
     // vitest shards' blob reports (`vitest run --merge-reports --coverage`)

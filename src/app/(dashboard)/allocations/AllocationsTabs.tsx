@@ -23,6 +23,11 @@ import type { SavedScenarioRow } from "./components/ScenarioComposer";
 import { TweaksProvider, useTweakValue } from "./context/TweaksContext";
 import { TweaksToggle } from "./components/TweaksToggle";
 import { Tweaks } from "./components/Tweaks";
+import { computeTabStripScroll } from "@/lib/tab-strip-scroll";
+
+// Plan 170-08 imports the scroll math from the lib module. Re-exported here
+// so the existing test import from this file keeps working unchanged.
+export { computeTabStripScroll } from "@/lib/tab-strip-scroll";
 // Phase 116 / ADDALLOC-02 — the real-data onboarding overlay. Hosted at the
 // tab level so the context-aware header "+ Allocation" button can open it on
 // Holdings / Overview (where ScenarioComposer, its other host, is not mounted).
@@ -35,7 +40,10 @@ import { ContributionWizardOverlay } from "./components/ContributionWizardOverla
 // hydrate immediately on first paint (no skeleton flash for the nudge).
 import { OnboardingBanner } from "./components/OnboardingBanner";
 import { MandateQuickSetCard } from "./components/MandateQuickSetCard";
-import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import type {
+  MyAllocationDashboardPayload,
+  OwnCapitalStrategy,
+} from "@/lib/queries";
 import type { ExposureSectionData } from "./lib/exposure-props";
 import type { FavoriteRow, OptimizerPrefetch } from "./lib/watchlist-read";
 import { useCrossTabStorage } from "@/lib/storage/cross-tab";
@@ -131,7 +139,11 @@ const ScenarioComposer = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div className="mx-auto max-w-[1440px] py-6">
+      // 153.2 review WR-02 — the skeleton tracks the body it stands in for.
+      // `ScenarioComposer` dropped its 1440px cap in the same commit; leaving
+      // one here would reinstate the skeleton→page width jump that
+      // `compare/loading.test.tsx` states as the invariant.
+      <div className="mx-auto py-6">
         {/* KpiStrip skeleton — 5 cells × ~40px */}
         <div className="grid grid-cols-5 gap-2">
           {Array.from({ length: 5 }).map((_, i) => (
@@ -232,9 +244,14 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
  * Here, browser back/forward updates the URL → searchParams changes →
  * re-render → activeTab recomputes → visible tab toggles correctly.
  *
- * Tab clicks call `router.replace(url, { scroll: false })` to update
- * the URL without scrolling; the URL change triggers a re-render which
- * re-derives activeTab. No local state for `activeTab` is kept.
+ * Tab clicks call `window.history.replaceState(null, "", url)` to update
+ * the URL (Phase 167.1.2 plan 07, SC-5c). Next integrates the native History
+ * API with `useSearchParams`, so the URL change re-renders this component and
+ * re-derives activeTab, WITHOUT a navigation: the router's replace to a changed
+ * query on this force-dynamic page refetched the RSC payload and re-ran
+ * getMyAllocationDashboard on every tab click. replaceState adds no history
+ * entry (as the router's replace did not) and never scrolls. No local state
+ * for `activeTab` is kept.
  *
  * Live-refresh polling (Phase 06 D-11 inheritance): 30s router.refresh()
  * while Overview is active AND document.visibilityState is visible.
@@ -338,35 +355,6 @@ const TAB_COUNT_BADGE_ACTIVE =
 const TAB_COUNT_BADGE_INACTIVE =
   "rounded-sm bg-page px-1.5 py-0.5 text-fixed-10 font-mono leading-none text-text-muted";
 
-/**
- * NAV-02 (Phase 45) — pure horizontal-scroll math for the <sm tab strip.
- *
- * Given the active tab's content-box left/width and the strip's visible window
- * (scrollLeft + clientWidth), return the strip scrollLeft target that brings the
- * tab fully into view, plus the motion to use, or `null` when it is already
- * visible (the no-op case). This deliberately models ONLY the horizontal axis:
- * the prior `scrollIntoView({ block: "nearest" })` also moved the nearest
- * VERTICAL scroll container, which yanked the page back up to the strip after a
- * user had scrolled down — defeating `changeTab`'s intentional
- * `router.replace(..., { scroll: false })`. Keeping the math pure here makes the
- * reduced-motion branch (WCAG — never animate a forced scroll for reduce users)
- * and the already-visible no-op directly unit-testable without a layout engine.
- */
-export function computeTabStripScroll(args: {
-  elLeft: number;
-  elWidth: number;
-  viewLeft: number;
-  viewWidth: number;
-  prefersReducedMotion: boolean;
-}): { left: number; behavior: ScrollBehavior } | null {
-  const { elLeft, elWidth, viewLeft, viewWidth, prefersReducedMotion } = args;
-  const behavior: ScrollBehavior = prefersReducedMotion ? "auto" : "smooth";
-  if (elLeft < viewLeft) return { left: elLeft, behavior };
-  const elRight = elLeft + elWidth;
-  if (elRight > viewLeft + viewWidth) return { left: elRight - viewWidth, behavior };
-  return null; // already in view — no scroll, and never any vertical movement
-}
-
 export function AllocationsTabs(
   // Phase 100 / 100-04 — `favorites` / `optimizer` / `note` are ADDITIVE props
   // threaded from page.tsx's Promise.all straight through to HoldingsTabPanel
@@ -380,6 +368,20 @@ export function AllocationsTabs(
     favorites?: FavoriteRow[];
     optimizer?: OptimizerPrefetch;
     note?: { initialContent: string; initialLastSavedAt: Date | null };
+    // Phase 150 / OWN-03 — ADDITIVE, same precedent as the trio above: two
+    // server reads threaded straight through to HoldingsTabPanel (already
+    // spread via `{...props}`). OPTIONAL here so the pre-existing
+    // AllocationsTabs test call-sites stay byte-unmodified; page.tsx always
+    // supplies both, and the panel renders honest-empty if either is absent.
+    ownCapitalStrategies?: OwnCapitalStrategy[];
+    hasAnyStrategies?: boolean;
+    /**
+     * Review WR-02 — did EITHER strategies read fail (both return `null`, never
+     * `[]`, on a transient DB/RLS failure)? Threaded so the panel can render a
+     * degraded notice instead of an account-state claim. Optional/defaults to
+     * false for the same reason as the two above; page.tsx always supplies it.
+     */
+    strategiesReadFailed?: boolean;
   },
 ) {
   const router = useRouter();
@@ -430,17 +432,21 @@ export function AllocationsTabs(
   // Scroll-safe URL cleanup: if the allocator lands on ?tab=overview
   // (the new default — redundant) OR ?tab=performance (legacy Phase 07
   // alias — bookmark compat), strip it so the canonical URL is
-  // /allocations. Runs after render to avoid touching render-phase state;
-  // shallow-replace does not trigger another data fetch.
+  // /allocations. Runs after render to avoid touching render-phase state.
+  // Phase 167.1.2 plan 07 (SC-5c): the native History API, not the router.
+  // An App Router navigation to a changed query on this force-dynamic page
+  // refetches the RSC payload (the old comment's "shallow replace does not
+  // refetch" was wrong for the App Router); history.replaceState does not,
+  // and Next syncs useSearchParams to it.
   useEffect(() => {
     const current = searchParams.get("tab");
     if (current === "overview" || current === "performance") {
       const params = new URLSearchParams(searchParams.toString());
       params.delete("tab");
       const qs = params.toString();
-      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+      window.history.replaceState(null, "", qs ? `${pathname}?${qs}` : pathname);
     }
-  }, [searchParams, router, pathname]);
+  }, [searchParams, pathname]);
 
   // Live-refresh polling — only while on Overview + document visible
   // (Phase 06 D-11 inherited pattern). Never polls on Holdings / Outcomes /
@@ -466,13 +472,14 @@ export function AllocationsTabs(
   }, [activeTab, router]);
 
   // Tab change — update URL; the URL change triggers a re-render which
-  // re-derives activeTab. No local state for activeTab.
+  // re-derives activeTab. No local state for activeTab. The native History API
+  // (SC-5c): no RSC refetch, no history entry, no scroll.
   const changeTab = (key: TabKey) => {
     const params = new URLSearchParams(searchParams.toString());
     if (key === "overview") params.delete("tab");
     else params.set("tab", key);
     const qs = params.toString();
-    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+    window.history.replaceState(null, "", qs ? `${pathname}?${qs}` : pathname);
   };
 
   // Phase 116 / ADDALLOC — context-aware header "+ Allocation" button.
@@ -651,20 +658,21 @@ export function AllocationsTabs(
     }
   };
 
-  // NAV-02 (Phase 45) — keep the active tab in view inside the <sm
-  // horizontally-scrollable strip. A keyboard arrow-nav or a programmatic tab
-  // change can leave the selected tab clipped off-screen; scroll it back into
-  // view on every activeTab change. We scroll the STRIP (the role="tablist"
-  // scroll container — the tab button's direct parent, pinned by the axe
-  // aria-required-children gate) on its horizontal axis ONLY, never the page.
+  // NAV-02 (Phase 45) — keep the active tab in view inside the horizontally-
+  // scrollable strip (a scroller at EVERY width since GC-01, 2026-09-30). A
+  // keyboard arrow-nav or a programmatic tab change can leave the selected
+  // tab clipped off-screen; scroll it back into view on every activeTab
+  // change. We scroll the STRIP (the role="tablist" scroll container — the
+  // tab button's direct parent, pinned by the axe aria-required-children gate) on its horizontal axis ONLY, never the page.
   // The earlier `el.scrollIntoView({ block: "nearest" })` also moved the
   // nearest VERTICAL scroll container, so switching tabs after scrolling down
   // yanked the page back up to the strip — defeating changeTab's deliberate
-  // router.replace(..., { scroll: false }). `computeTabStripScroll` returns null
-  // when the tab is already visible (and at >=sm where the strip wraps and never
-  // overflows), so this is a no-op except when a horizontal correction is
-  // actually needed. Honor prefers-reduced-motion: instant ("auto") for reduce,
-  // smooth otherwise — never animate a forced scroll for reduced-motion users
+  // no-scroll URL write (history.replaceState). `computeTabStripScroll` returns null
+  // when the tab is already visible (including whenever all tabs fit and the
+  // strip does not overflow), so this is a no-op except when a horizontal
+  // correction is actually needed — at any width, not just <sm (GC-01).
+  // Honor prefers-reduced-motion: instant ("auto") for reduce, smooth
+  // otherwise — never animate a forced scroll for reduced-motion users
   // (UI-SPEC States row). The `typeof ... === "function"` guards keep it safe in
   // environments without getBoundingClientRect / Element.scrollTo / matchMedia
   // (jsdom, older browsers) — the effect no-ops there instead of throwing.
@@ -788,17 +796,31 @@ export function AllocationsTabs(
             role="tab" children (axe aria-required-children, critical), so the
             tablist wraps just the tabs; the actions are siblings in the same
             flex row. */}
-        <div className="ml-auto flex items-center gap-1">
-          {/* NAV-02 (Phase 45) — CSS-first horizontally-scrollable tab strip at
-              <sm so all six surfaces stay reachable on a phone (no tab dropped).
+        {/* Phase 170, item (a), 2026-09-27 PROD measurement — min-w-0 is
+            load-bearing. A flex item's default min-width is auto, so this
+            wrapper could not shrink below its content and the NAV-02
+            scroller never engaged (tab bar 682px, #main-content overflow
+            235px). max-w-full + flex-wrap lets the actions drop to their
+            own right-aligned row below sm; from sm up sm:flex-nowrap keeps
+            the tablist and Export on ONE line, and the tablist (a shrinking
+            sm:basis-auto item) scrolls inside itself when its tabs do not
+            fit rather than wrapping (GC-01, 2026-09-30). */}
+        <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1 sm:flex-nowrap">
+          {/* NAV-02 (Phase 45) / GC-01 (2026-09-30) — CSS-first horizontally-
+              scrollable tab strip at EVERY width, so all six surfaces stay
+              reachable on a phone (no tab dropped) and the strip never wraps.
               JOURNEY-03 is preserved: this is the SAME element with the SAME
               role="tablist" and the SAME direct role="tab" children — no role is
               added to any wrapper and the tabs are NOT re-nested (re-nesting would
               re-introduce the critical axe aria-required-children violation the
               comment above warns about; the seeded composer-axe.spec.ts gate
               catches a regression). `flex-nowrap overflow-x-auto` keeps the tabs on
-              one scrollable line at <sm; `sm:flex-wrap sm:overflow-x-visible`
-              restores the original wrap-on-one-row layout at >=sm. The native
+              one line at every width: below sm the strip is its own full-width
+              row (basis-full); from sm up it is a shrinking item beside Export
+              (sm:basis-auto). It scrolls inside itself only when its tabs do
+              not fit, and it never wraps or switches to visible overflow — the
+              old `sm:flex-wrap sm:overflow-x-visible` pair did both (CI run
+              36764778803: no scroll at V640, a wrapped strip at V960). The native
               scrollbar is hidden ([scrollbar-width:none]) and iOS momentum-scrolls
               ([-webkit-overflow-scrolling:touch]); the cut-off tab peeking past the
               right edge IS the scroll affordance — no edge-fade overlay is
@@ -808,7 +830,7 @@ export function AllocationsTabs(
           <div
             role="tablist"
             aria-label="Allocation surfaces"
-            className="flex flex-nowrap items-center gap-1 overflow-x-auto sm:flex-wrap sm:overflow-x-visible snap-x [scrollbar-width:none] [-webkit-overflow-scrolling:touch]"
+            className="flex flex-nowrap items-center gap-1 min-w-0 basis-full overflow-x-auto snap-x [scrollbar-width:none] [-webkit-overflow-scrolling:touch] sm:basis-auto"
           >
           {VISIBLE_TAB_KEYS.map((key) => {
             const isActive = activeTab === key;
@@ -854,7 +876,7 @@ export function AllocationsTabs(
             );
           })}
           </div>
-          <span aria-hidden className="mx-2 h-4 w-px bg-border" />
+          <span aria-hidden className="mx-2 hidden h-4 w-px bg-border sm:inline-block" />
           <button
             type="button"
             onClick={() => {
@@ -880,7 +902,7 @@ export function AllocationsTabs(
               }
               changeTab("holdings");
             }}
-            className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
             aria-label="Export"
           >
             <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -890,6 +912,10 @@ export function AllocationsTabs(
             </svg>
             <span>Export</span>
           </button>
+          {/* Phase 170 / AD-05 — inline at every width, between Export and
+              + Allocation. The root-level mount is removed so exactly one
+              toggle renders. <Tweaks /> stays at the dashboard root. */}
+          <TweaksToggle />
           {/* Phase 116 / ADDALLOC-01/02/03 — primary context-aware header
               button. Its label, action, and aria-label are derived from
               activeTab: on Scenario it reads "+ Strategy" and opens the
@@ -901,7 +927,7 @@ export function AllocationsTabs(
             ref={addButtonRef}
             type="button"
             onClick={handleHeaderAdd}
-            className="ml-1 inline-flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            className="ml-1 inline-flex shrink-0 items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
             aria-label={
               isScenarioTab
                 ? "Add strategy — open the strategy picker"
@@ -1001,11 +1027,8 @@ export function AllocationsTabs(
             />
           ))}
       </div>
-      {/* PR3 (HANDOFF G5) — Floating Tweaks chip + panel mounted at the
-          dashboard root so they stay visible across all tabs (Overview
-          / Holdings / Outcomes / Mandate / Risk / Scenario) and float
-          bottom-right per the truth screenshot. */}
-      <TweaksToggle />
+      {/* Phase 170 / AD-05 — the toggle lives in the header action row.
+          The panel stays mounted here so it is available on every tab. */}
       <Tweaks />
       {/* Phase 116 / ADDALLOC-02 — tab-agnostic host for the "+ Allocation"
           onboarding wizard. Rendered unconditionally (null while closed) so the
@@ -1142,6 +1165,13 @@ function ScenarioTabContent({
     perKeyReturnsByApiKeyId: props.perKeyReturnsByApiKeyId,
     eligibleApiKeyIds: props.eligibleApiKeyIds,
     perKeyDailiesGateSatisfied: props.perKeyDailiesGateSatisfied,
+    // Phase 151 AUM-04 / review WR-07 — the split gate + the contributing set.
+    // Without these the panel's membership seams fall back to the role-blind
+    // eligible set and the all-or-nothing flag, and compare diverges from the
+    // composer for exactly the owner-manager / partial-book population this
+    // phase exists to serve.
+    bookEntryGateSatisfied: props.bookEntryGateSatisfied,
+    contributingApiKeyIds: props.contributingApiKeyIds,
   };
 
   return (

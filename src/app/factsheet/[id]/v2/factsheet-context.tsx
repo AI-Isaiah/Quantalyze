@@ -207,8 +207,9 @@ export function FactsheetProvider({
   // setXRange fires 60+ times/sec during pan/zoom. Wrapping the write in a
   // transition lets React interrupt expensive chart-stack reconciliations
   // when a newer pan frame arrives — keeps dragging smooth on long pages.
-  // Phase 103 (MTM-follow, F2.3): the upper clamp sizes to the LONGER of the cash
-  // axis and any present mark_to_market series bundle. This provider sits ABOVE
+  // Phase 103 (MTM-follow, F2.3) + Phase 133 (SMTM-01): the upper clamp sizes to the
+  // LONGER of the cash axis, any present mark_to_market bundle, AND any present
+  // smoothed_mtm bundle (each an additive `?? 0` max() term). This provider sits ABOVE
   // BasisProvider so it cannot read the active basis, but it does not need to: a
   // cash consumer (MasterBrush/TimeSeriesChart) reads the cash `view.dates` and so
   // never emits an index beyond `payload.dates.length - 1`, making the widened
@@ -225,6 +226,13 @@ export function FactsheetProvider({
         Math.max(
           payload.dates.length,
           payload.seriesByBasis?.mark_to_market?.dates.length ?? 0,
+          // Phase 133 (SMTM-01): a THIRD max() term over the smoothed bundle axis. On
+          // the flagship options case (MTM bundle absent/gated, smoothed serving the
+          // charts) a smoothed axis LONGER than cash would otherwise have its recent
+          // days permanently brush-unreachable — the exact harm the F2.3 comment above
+          // documents for MTM. Strictly additive: max over an extra `?? 0` term is a
+          // NO-OP for every cash/MTM payload (byte-identity; `fullRange` stays cash-sized).
+          payload.seriesByBasis?.smoothed_mtm?.dates.length ?? 0,
         ) - 1;
       let [s, e] = next;
       if (s < 0) s = 0;
@@ -233,7 +241,13 @@ export function FactsheetProvider({
       if (e - s < MIN_VISIBLE_SAMPLES - 1) s = Math.max(0, e - MIN_VISIBLE_SAMPLES + 1);
       startTransition(() => setXRangeRaw([s, e]));
     },
-    [payload.dates.length, payload.seriesByBasis?.mark_to_market?.dates.length],
+    [
+      payload.dates.length,
+      payload.seriesByBasis?.mark_to_market?.dates.length,
+      // React Compiler infers the smoothed dep at the `.dates` array level (not
+      // `.dates.length`); match its inference so manual memoization is preserved.
+      payload.seriesByBasis?.smoothed_mtm?.dates,
+    ],
   );
 
   // resetXRange is low-volume (one click), so the eager update is preferable

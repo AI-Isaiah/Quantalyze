@@ -109,10 +109,19 @@ KIND_MTM_DAILY_RETURNS = "mtm_daily_returns"
 # authoritative cash SCALARS stay on the legacy analytics_runner path until 105.
 KIND_CASH_SETTLEMENT = "cash_settlement"
 
-# The basis → kind map. Cash joined here in Phase 104 (104-SC1).
+# Phase 132 (SMTM-01): the smoothed_mtm third factsheet basis joins the route as its
+# own persist kind. Still no DDL — `strategy_analytics_series.kind` is unconstrained
+# TEXT by documented design (migration 20260428120919), so a new kind is a map entry
+# + a constant, not an ALTER. The daily-mark ΔMTM redistribution (deribit smoothed
+# arm, Phase 131) produces a daily-return series persisted under this kind alongside
+# the existing two.
+KIND_SMOOTHED_MTM = "smoothed_mtm_daily_returns"
+
+# The basis → kind map. Cash joined here in Phase 104 (104-SC1); smoothed_mtm in 132.
 _KIND_BY_BASIS: dict[str, str] = {
     "mark_to_market": KIND_MTM_DAILY_RETURNS,
     "cash_settlement": KIND_CASH_SETTLEMENT,
+    "smoothed_mtm": KIND_SMOOTHED_MTM,
 }
 
 # JSONB payload schema version (bump if the row/gap_spans/conventions shape changes
@@ -165,8 +174,11 @@ class BasisSeriesResult:
     insufficient_window:
         Pass-through of the `MetricsResult.insufficient_window` DQ flag (NOT
         persisted). Exposed so the composite/single-key runners can duck-swap onto
-        this helper without losing the annualization-window annotation (Plans 04/05,
-        consumed at job_worker.py:4586 / analytics_runner.py:2399).
+        this helper without losing the annualization-window annotation (Plans 04/05).
+        Consumed by the two `HARD-04` lifts — `job_worker.run_stitch_composite_job`
+        (`_cash_basis_result.insufficient_window` → `merged_flags`) and
+        `analytics_runner.run_csv_strategy_analytics`
+        (`metrics_result.insufficient_window` → `data_quality_flags`).
     """
 
     metrics_json: dict[str, Any]

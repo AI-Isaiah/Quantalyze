@@ -60,16 +60,16 @@ const SIBLING_KINDS = [
  * runtime cost — type-only assertion (the runtime fixture↔set parity is
  * gated separately in metrics-parity.test.ts).
  */
-// `mtm_daily_returns` (Phase 103) is a sibling-table kind READ DIRECTLY via the
-// service-role admin client, NOT via the `fetch_strategy_lazy_metrics` RPC panel
-// that `test_metrics_parity_full`'s `len(data['sibling']) == 12` invariant counts.
-// So it is excluded here exactly like `equity_series_1y` is excluded by absence —
-// keeping SIBLING_KINDS pinned to the 12 RPC-panel kinds. If a FUTURE kind is added
-// to the RPC panel map, it must join SIBLING_KINDS (and the Python count), not this
-// exclusion list.
+// `mtm_daily_returns` (Phase 103) and `smoothed_mtm_daily_returns` (Phase 131/133)
+// are sibling-table kinds READ DIRECTLY via the series read path, NOT via the
+// `fetch_strategy_lazy_metrics` RPC panel that `test_metrics_parity_full`'s
+// `len(data['sibling']) == 12` invariant counts. So they are excluded here exactly
+// like `equity_series_1y` is excluded by absence — keeping SIBLING_KINDS pinned to
+// the 12 RPC-panel kinds. If a FUTURE kind is added to the RPC panel map, it must
+// join SIBLING_KINDS (and the Python count), not this exclusion list.
 type _MissingSiblingKind = Exclude<
   StrategyAnalyticsSeriesKind,
-  (typeof SIBLING_KINDS)[number] | "mtm_daily_returns"
+  (typeof SIBLING_KINDS)[number] | "mtm_daily_returns" | "smoothed_mtm_daily_returns"
 >;
 const _siblingKindsExhaustivenessCheck: _MissingSiblingKind extends never
   ? true

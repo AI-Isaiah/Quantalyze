@@ -3,21 +3,62 @@
 import React, { type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
+import { pairedFloorReason } from "@/lib/factsheet/joint";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
+// Phase 163 / HONEST-08 — the SERIES ladder (3d/7d) is shared with the
+// discovery-list badge, which must judge the same fact about the same rows.
+// WR-06-UTC — and the future ALLOWANCE for the series arm, for the same
+// reason: two bucketers judge one fact, so the number lives in one file.
+import {
+  SERIES_FRESH_DAYS,
+  SERIES_STALE_DAYS,
+  SERIES_END_FUTURE_ALLOWANCE_DAYS,
+} from "@/lib/freshness";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
+import { OwnershipTag } from "@/components/strategy/OwnershipTag";
+import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
+// Phase 164 (SHARE-04) — THE ONE SHARE PREDICATE, shared with the other two
+// affordance sites (the strategies page and discovery detail, both of which go
+// through `ShareableLink` in the same module). Importing the decision rather
+// than restating it is what makes "one predicate, three sites" a fact a grep can
+// check instead of a promise in a comment.
+import {
+  shareAffordanceMode,
+  mintShareUrl,
+  type ShareAffordanceMode,
+} from "@/components/strategy/ShareableLink";
+import type { CapitalOwnership } from "@/lib/capital-ownership";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
-import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSeriesView, useAppliedLeverage, leverageApplies, leverageEligibleFor, mtmDisabledReasonCopy, mtmReasonTone, type Basis } from "./basis-context";
+import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSeriesView, useWindowedView, useAppliedLeverage, leverageApplies, leverageEligibleFor, mtmDisabledReasonCopy, mtmReasonTone, smoothedDisabledReasonCopy, type Basis } from "./basis-context";
 // Phase 90.5 (LEV-01, D1/D2) + Phase 107 (LEV-BB): ephemeral single-key leverage.
 // LeverageProvider wraps the body (transparent to GUARD-02); useLeverage drives the
 // ControlBar input AND the KpiStrip's levered-view gate. The KpiStrip now reads the
 // leverage-composed useBasisSeriesView (plan 01), so the derived metrics hooks are gone.
 import { LeverageProvider, useLeverage } from "./leverage-context";
-import { MAX_LEVERAGE } from "@/lib/leverage";
+/**
+ * 151 UAT — the shared CONTRACT ceiling (`MAX_LEVERAGE`, src/lib/leverage.ts)
+ * was raised 10 → 200 for the Scenario Composer's strategy rows, which is what
+ * the founder asked for. This PUBLIC, anonymous what-if projection was NOT in
+ * that ask, so it keeps its own, narrower input bound.
+ *
+ * That direction is the safe one and only that direction: the sanitizer's
+ * ceiling stays the WIDEST bound in the system, so nothing a viewer can set
+ * here is ever silently reduced on read. (Do not invert this — a surface bound
+ * ABOVE the contract ceiling would be silently truncated by `sanitizeLeverage`.)
+ *
+ * 151 review A6 — the constant is IMPORTED from the contract module rather than
+ * declared here, because a module-private literal made that ordering rule
+ * unenforceable: `leverage.test.ts` now pins
+ * `FACTSHEET_MAX_LEVERAGE <= MAX_LEVERAGE` directly. The value is unchanged, so
+ * this surface's behaviour and copy are byte-identical.
+ */
+import { FACTSHEET_MAX_LEVERAGE } from "@/lib/leverage";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
+import { SMOOTHED_MTM_UI_ENABLED } from "@/lib/closed-sets";
 import { ComparatorPicker } from "./ComparatorPicker";
 import { TimeSeriesChart } from "./TimeSeriesChart";
 import { HistogramChart } from "./HistogramChart";
-import { MetricsColumn } from "./MetricsColumn";
+import { MetricsColumn, RangeEyebrow, headlineCoverageCaveat, windowCoverageCaveat } from "./MetricsColumn";
 import { AllocatorSection } from "./BatchDPanels";
 import { StreakDistributionPanel } from "./AnalyticalPanels";
 import { EndOfYearBarsPanel, QuantileBoxPlotPanel, CorrelationStripPanel, CorrelationsMatrixPanel } from "./DistributionPanels";
@@ -83,10 +124,111 @@ import { CHART_CONFIGS } from "./chart-configs";
 const trackSectionToggle = (section: string) => (open: boolean) =>
   trackFactsheetEvent("factsheet_v2_section_toggle", { section, open });
 
-export function FactsheetView({ payload }: { payload: FactsheetPayload }) {
+/**
+ * Phase 148 + 150 — the LANE render props, threaded together because they share
+ * one rule: every one of them is derived from the route's lane decision and NONE
+ * of them may live on `FactsheetPayload`. The payload is the object the shared,
+ * id-keyed public cache serves; lane state inside it would be handed to
+ * anonymous readers for the full TTL (T-150-27, and the phase-148 pins are the
+ * regression gate).
+ *
+ * All of them are `undefined` on every default mount, and each renders ZERO
+ * nodes (or suppresses none) when absent — no wrapper, no reserved space — so
+ * the public masthead is byte-identical to today.
+ *
+ * ⚠️ The name is now narrower than the contents: phase 164 added
+ * `recipientShare`, which is set by the tokenized RECIPIENT lane, not by an
+ * owner. The interface was not renamed because the rule it encodes — lane state
+ * rides the render props, never the payload — is unchanged, and a rename would
+ * churn five call sites for no invariant. Read "OwnerLane" as "lane".
+ */
+interface OwnerLaneProps {
+  /** Viewer-context notice rendered ABOVE the masthead (default undefined).
+   *  Phase 148 (OWN-02): the v2 page's OWNER lane — and only that lane — passes
+   *  "owner_unpublished" so the owner of an unpublished strategy sees why the
+   *  link 404s for everybody else. Undefined on every other call site
+   *  (AllocationDashboardV2.tsx:162, ScenarioFactsheetChart.tsx:237).
+   *
+   *  A string union rather than a boolean so later phases can add notice kinds
+   *  without a second prop. Phase 164 (SHARE-01) is that later phase:
+   *  "shared_privately" is passed by the tokenized RECIPIENT lane
+   *  (`/factsheet-share/[token]`). */
+  viewerNotice?: "owner_unpublished" | "shared_privately";
+  /**
+   * Phase 164 (SHARE-01) — the viewer arrived via a private share TOKEN, so
+   * every affordance that hands out or rebuilds a URL must be suppressed.
+   *
+   * ⛔ A RENDER PROP, NEVER A PAYLOAD FIELD. `FactsheetPayload` is the object
+   * the shared id-keyed cache serves, so lane state folded into it would be
+   * cached once and published to every subsequent reader — the T-150-27 rule
+   * that `viewerNotice`, `ownershipMark` and `renameTarget` already follow.
+   *
+   * ⛔ This does NOT replace `useShareMode()` (D-09). The `?share=1` mechanism
+   * on the id route stays byte-identical and keeps serving PUBLISHED strategies;
+   * this flag is the token route's structural equivalent, because that URL has
+   * no query param to sniff. Both are true share mode; see `ControlBar`.
+   */
+  recipientShare?: boolean;
+  /**
+   * Phase 150 / OWN-03 — the capital mark, READ-ONLY here. The mark is SET from
+   * /my-strategies (D-09); the factsheet only shows it, so there is deliberately
+   * no set/change affordance on this surface. `null` (never asked) renders
+   * nothing.
+   */
+  ownershipMark?: CapitalOwnership | null;
+  /**
+   * Phase 150 / OWN-05 — present only when the viewer may rename this strategy,
+   * which the page derives from `lane === "owner"` (reachable only for an
+   * unpublished row the session owns — the D-17 gate for free).
+   */
+  renameTarget?: { id: string; name: string };
+  /**
+   * Phase 164 / SHARE-04 — the owner-lane SHARE state, and the reason the Copy
+   * Link control stops lying.
+   *
+   * PRESENCE IS THE PREDICATE. The v2 page passes this only on `lane === "owner"`,
+   * which is reachable only for an UNPUBLISHED row the session owns (the same
+   * free gate `renameTarget` rides). So `ownerShare !== undefined` ⇔ "not
+   * published", which is exactly the input `shareAffordanceMode` needs, with no
+   * second predicate to keep in sync. Absent ⇒ the published lane, whose URL is
+   * byte-identical to before this phase (D-09).
+   *
+   * `hasActiveShare` is the live-link half: it decides whether the revoke control
+   * renders at all, and which of the owner notice's two TRUE sentences is shown.
+   *
+   * ⛔ A RENDER PROP, NEVER A PAYLOAD FIELD — T-164-01. `FactsheetPayload` is the
+   * object the shared id-keyed cache serves; owner share state folded into it
+   * would be cached once and handed to anonymous readers for the full TTL.
+   *
+   * ⛔ It carries NO token and NO `generation`. The URL is obtained by the CLIENT
+   * calling the idempotent mint route, which returns the same url every time.
+   */
+  ownerShare?: { hasActiveShare: boolean };
+}
+
+/** The masthead H1's class string, extracted so the owner and public arms of
+ *  the baseline row below cannot drift apart. */
+const MASTHEAD_H1 =
+  "font-serif text-page-title leading-tight sm:leading-none text-text-primary";
+
+export function FactsheetView({
+  payload,
+  viewerNotice,
+  recipientShare,
+  ownershipMark,
+  renameTarget,
+  ownerShare,
+}: { payload: FactsheetPayload } & OwnerLaneProps) {
   return (
     <FactsheetProvider payload={payload}>
-      <FactsheetShell payload={payload} />
+      <FactsheetShell
+        payload={payload}
+        viewerNotice={viewerNotice}
+        recipientShare={recipientShare}
+        ownershipMark={ownershipMark}
+        renameTarget={renameTarget}
+        ownerShare={ownerShare}
+      />
     </FactsheetProvider>
   );
 }
@@ -96,7 +238,14 @@ export function FactsheetView({ payload }: { payload: FactsheetPayload }) {
  * Oxford Blue / Claret palette overrides via CSS custom property scoping on
  * the article container. Lives inside the provider so it can subscribe.
  */
-function FactsheetShell({ payload }: { payload: FactsheetPayload }) {
+function FactsheetShell({
+  payload,
+  viewerNotice,
+  recipientShare,
+  ownershipMark,
+  renameTarget,
+  ownerShare,
+}: { payload: FactsheetPayload } & OwnerLaneProps) {
 
   // One-shot view event when the page mounts so adoption of the new
   // surface can be measured cleanly without folding into the v1 funnel.
@@ -136,10 +285,19 @@ function FactsheetShell({ payload }: { payload: FactsheetPayload }) {
       window.removeEventListener("afterprint", afterprint);
     };
   }, []);
-  return <FactsheetBody payload={payload} />;
+  return (
+    <FactsheetBody
+      payload={payload}
+      viewerNotice={viewerNotice}
+      recipientShare={recipientShare}
+      ownershipMark={ownershipMark}
+      renameTarget={renameTarget}
+      ownerShare={ownerShare}
+    />
+  );
 }
 
-export interface FactsheetBodyOptions {
+export interface FactsheetBodyOptions extends OwnerLaneProps {
   /** Suppress the strategy-name header (caller already provides its own). */
   hideHeader?: boolean;
   /** Suppress the demo allocator-portfolio section (skip on allocator dashboards). */
@@ -174,8 +332,27 @@ export function FactsheetBody({
   hideFooter = false,
   topSlot,
   scenarioMode = false,
+  viewerNotice,
+  recipientShare = false,
+  ownershipMark,
+  renameTarget,
+  ownerShare,
 }: { payload: FactsheetPayload } & FactsheetBodyOptions) {
   const { colorblind, darkMode } = useDisplay();
+  // Phase 164 / SHARE-04 — the live-link fact, held HERE because two children on
+  // opposite sides of the tree read it (the notice above the masthead, the share
+  // + revoke controls in the ControlBar) and because minting or revoking must
+  // update BOTH in the same tick. The server value seeds it; a successful mint
+  // flips it true and a converged revoke flips it false, with no refetch — the
+  // route's answer is already known at that point, so re-reading it would only
+  // add a window in which the page contradicts what the user just did.
+  //
+  // ⛔ Not `useEffect`-synced from the prop. A prop change only arrives with a
+  // fresh server render, which already remounts this subtree; an effect would
+  // additionally clobber a just-minted `true` on any unrelated re-render.
+  const [shareLive, setShareLive] = React.useState(
+    ownerShare?.hasActiveShare ?? false,
+  );
   // Centralised palette — resolve once, apply as CSS custom properties on
   // the article container so descendants pick up the new tokens via var().
   const resolved = resolvePalette({ darkMode, colorblind });
@@ -203,11 +380,30 @@ export function FactsheetBody({
         className="factsheet-v2-shell mx-auto max-w-[1440px] px-4 sm:px-6 lg:px-10 py-6 sm:py-10 lg:py-12"
         style={{ background: "var(--color-page)", ...shellStyle }}
       >
-        {!hideHeader && <FactsheetHeader payload={payload} />}
+        {/* Phase 148 (OWN-02): viewer context ("who can see this") precedes
+            document content, so the notice is the article's FIRST child — above
+            the masthead, before any number. NOT `topSlot`, which renders BELOW
+            the masthead (UI-SPEC:97). Absent prop ⇒ zero nodes (GUARD-02). */}
+        {viewerNotice === "owner_unpublished" && (
+          <OwnerUnpublishedNotice hasActiveShare={shareLive} />
+        )}
+        {viewerNotice === "shared_privately" && <SharedPrivatelyNotice />}
+        {!hideHeader && (
+          <FactsheetHeader
+            payload={payload}
+            ownershipMark={ownershipMark}
+            renameTarget={renameTarget}
+          />
+        )}
         {topSlot}
         <KpiStrip />
         <SectionNav />
-        <ControlBar scenarioMode={scenarioMode} />
+        <ControlBar
+          scenarioMode={scenarioMode}
+          recipientShare={recipientShare}
+          ownerShare={ownerShare ? { hasActiveShare: shareLive } : undefined}
+          onShareLiveChange={setShareLive}
+        />
 
         <div className="mt-6 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-x-12 gap-y-10">
           <section className="flex flex-col gap-10 min-w-0">
@@ -256,9 +452,11 @@ export function FactsheetBody({
             {/* FINDING-2 (b06-silentfailure): Gate signatures on ingestSource === "api"
                 in addition to hasComparator. Event signatures stitch the internal BTC
                 fixture alongside the strategy returns; for CSV strategies with too few
-                observations aggregate() fills empty trace populations with all-zero
+                observations aggregate() filled empty trace populations with all-zero
                 arrays — fabricating a flat zero band line indistinguishable from a
-                real observation at 0% delta. Suppress for CSV to prevent false panels. */}
+                real observation at 0% delta. Suppress for CSV to prevent false panels.
+                (Phase 169.4 CR-01: aggregate() now returns null for an empty population
+                and the panels render the em-dash state; the api-arm gate stands.) */}
             {hasComparator && payload.ingestSource === "api" && (
               <CollapsibleSection
                 id="factsheet-signatures"
@@ -335,8 +533,15 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   // renders CASH; gating on `basis` alone would label that cash rail
   // "MARK-TO-MARKET" (the mislabel). This mirrors the PerformanceCharts caption,
   // which is already gated on the same bundle presence.
+  // Phase 133 (SMTM-01): the eyebrow follows whichever persisted-overlay basis is
+  // ACTIVE with its bundle present — mark_to_market OR smoothed_mtm. Same F4 discipline
+  // as the MTM arm: gated on the ACTIVE basis's bundle presence so a bundle-absent read
+  // (rail renders cash) never earns a mislabeled non-cash eyebrow.
   const onMtm =
-    basis === "mark_to_market" && payload.seriesByBasis?.mark_to_market != null;
+    (basis === "mark_to_market" && payload.seriesByBasis?.mark_to_market != null) ||
+    (basis === "smoothed_mtm" && payload.seriesByBasis?.smoothed_mtm != null);
+  const basisEyebrowLabel =
+    basis === "smoothed_mtm" ? "BASIS · SMOOTHED MARK-TO-MARKET" : "BASIS · MARK-TO-MARKET";
   // A single-key options book that participates in the MTM basis story carries a
   // gate; every other single-key strategy has none. Gating the basis eyebrow on
   // this keeps NON-participants byte-identical (GUARD-02) — no reserved line.
@@ -359,7 +564,7 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
           aria-hidden={!onMtm}
           className="text-micro uppercase tracking-wider text-text-muted"
         >
-          {onMtm ? "BASIS · MARK-TO-MARKET" : " "}
+          {onMtm ? basisEyebrowLabel : " "}
         </p>
         <MetricsColumn scenarioMode={scenarioMode} />
       </div>
@@ -422,6 +627,9 @@ function PerformanceCharts() {
   // Bundle presence decides the honest three-state caption: absent (stale cache /
   // not-yet-backfilled / gated) → charts fall back to cash + the "showing cash" copy.
   const mtmBundlePresent = payload.seriesByBasis?.mark_to_market != null;
+  // Phase 133 (SMTM-01): the smoothed sibling — bundle present ⇒ charts followed the
+  // smoothed series; absent ⇒ the honest cash fallback (summary-metrics-only) copy.
+  const smoothedBundlePresent = payload.seriesByBasis?.smoothed_mtm != null;
   // Defensive fallbacks: a cache entry created before the rollingWindow
   // fields were added would crash readers. The cache key was bumped in
   // the same commit so this should only hit during the 1h TTL drain; if
@@ -443,6 +651,14 @@ function PerformanceCharts() {
     }
   }, [payload.rollingWindow, payload.rollingBetaWindow, payload.strategyId]);
 
+  const volMatchedAbsent = view.comparators[cmpKey]?.volMatched == null;
+  // The reason line below is shown only when the comparator HAS a summary, so it
+  // has covered returns and the match was skipped for want of a measurable vol.
+  // A comparator with no summary (prices unavailable, no covered day, or the
+  // composer's inert block) is hidden without it: the picker already names the
+  // unavailable case, and "no measurable volatility" would misstate the others.
+  const volMatchedNoVol =
+    cmpKey !== "none" && volMatchedAbsent && view.comparators[cmpKey]?.summary != null;
   const configs = React.useMemo(() => {
     return CHART_CONFIGS
       .filter(cfg => !(cmpKey === "none" && cfg.stratField === null && cfg.comparatorAsPrimary))
@@ -452,6 +668,13 @@ function PerformanceCharts() {
       // visually identical to the Equity Curve panel above it. Show it only
       // when there's an actual comparator to scale.
       .filter(cfg => !(cmpKey === "none" && cfg.key === "volMatched"))
+      // 169.1 review-fix E (SFH-R2 MEDIUM-1): the same panel, for the same
+      // reason, when a comparator IS selected but has nothing to match (the
+      // strategy or the comparator has no finite, non-zero vol on this basis):
+      // its volMatched is null and the panel would draw the strategy line alone.
+      // Read from the basis view, the block TimeSeriesChart draws, not the cash
+      // payload: the strategy-side null shows up on the MTM / smoothed bundles.
+      .filter(cfg => !(volMatchedAbsent && cfg.key === "volMatched"))
       .filter(cfg => !(cfg.key === "rollingBeta" && !beta.enough))
       .filter(cfg => !(ROLLING_CHART_KEYS.has(cfg.key) && !roll.enough))
       .map(cfg => {
@@ -465,7 +688,7 @@ function PerformanceCharts() {
         }
         return cfg;
       });
-  }, [cmpKey, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window]);
+  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window]);
 
   return (
     <>
@@ -508,11 +731,19 @@ function PerformanceCharts() {
               re-derived/backfilled — Zavara pre-backfill) → cash charts + cash copy */}
       {mtmToggleAvailable && (
         <p role="status" className="text-caption text-text-secondary">
-          {basis !== "mark_to_market"
-            ? ""
-            : mtmBundlePresent
+          {/* Phase 133 (SMTM-01): the caption is now per-basis three-state. Cash → ""
+              (unchanged idiom); MTM → its byte-identical two copies; smoothed → the
+              smoothed sibling (present → smoothed-series copy; absent → the honest
+              cash-fallback "applies to summary metrics only" copy). */}
+          {basis === "mark_to_market"
+            ? mtmBundlePresent
               ? "Charts show the mark-to-market series."
-              : "Charts show the cash-settlement series. Mark-to-market applies to summary metrics only."}
+              : "Charts show the cash-settlement series. Mark-to-market applies to summary metrics only."
+            : basis === "smoothed_mtm"
+              ? smoothedBundlePresent
+                ? "Charts show the smoothed mark-to-market series."
+                : "Charts show the cash-settlement series. Smoothed mark-to-market applies to summary metrics only."
+              : ""}
         </p>
       )}
       {!roll.enough && (
@@ -525,6 +756,12 @@ function PerformanceCharts() {
         <NotEnoughDataPanel
           title="Rolling β — Not enough data"
           body="Strategy history is too short to compute even a 30-day rolling beta against the comparator. This panel will appear once the strategy has at least ~35 observations."
+        />
+      )}
+      {volMatchedNoVol && (
+        <NotEnoughDataPanel
+          title="Volatility Matched — Not available"
+          body="The strategy or the comparator has no measurable volatility on this basis, so there is no scale to match the comparator to. This panel will appear once both do."
         />
       )}
     </>
@@ -544,7 +781,203 @@ function NotEnoughDataPanel({ title, body }: { title: string; body: string }) {
   );
 }
 
-function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
+/**
+ * Phase 148 (OWN-02) — owner-lane visibility notice, rendered ONLY when the v2
+ * page resolved via the owner probe (`viewerNotice="owner_unpublished"`).
+ *
+ * Reuses the NotEnoughDataPanel data-panel treatment (square, flat, hairline
+ * border, subtle surface) with the three UI-SPEC deltas:
+ *   - body is `text-caption` (12px), NOT `text-micro` — 10-11px is too small for
+ *     a load-bearing disclosure (UI-SPEC:66);
+ *   - `role="note"` + `aria-label` (UI-SPEC:110) — NOT `role="alert"` (nothing
+ *     went wrong) and NOT `aria-live` (server-rendered, present at load);
+ *   - `mb-6` before the masthead, and `h2` because it precedes the masthead h1.
+ *
+ * Muted neutral by the DESIGN.md semantic-color gates: never red (a draft is
+ * absence, not failure) and not amber (amber promises a one-click remedy, but
+ * publication is admin-only — the owner has no action that flips it).
+ *
+ * Not dismissible, and it carries no print-hiding class on purpose (UI-SPEC:108):
+ * a draft screenshotted or handed to an LP on paper must still carry its
+ * unpublished status.
+ *
+ * EXPORTED (review WR-02): page.tsx's payload-pending placeholder arm renders
+ * this same component when `lane === "owner"` — a draft mid-recompute is when
+ * an owner is MOST likely to share the URL "for when it's ready", so the
+ * placeholder must carry the disclosure too. One exported component keeps the
+ * UI-SPEC copy single-sourced; do NOT inline a second copy of the banner.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * Phase 164 (SHARE-04) — TWO VARIANTS, BOTH TRUE, BECAUSE ONE SENTENCE STOPPED
+ * BEING TRUE.
+ *
+ * The original copy said "only you can see this … anyone else who opens this
+ * link sees a 404". Both clauses become FALSE the moment the owner mints a share
+ * token: someone else CAN see the factsheet, and they do not get a 404. That is
+ * not a cosmetic staleness — it is the platform telling an owner their draft is
+ * unreachable while a recipient is reading it, which is precisely the class of
+ * dishonest affordance this milestone exists to remove. The 404 sentence must
+ * therefore not merely be softened; in the live-link state it must not render.
+ *
+ * The heading branches for the same reason. "only you can see this" is a
+ * disclosure claim, not a label, and a live link falsifies it exactly as it
+ * falsifies the body.
+ *
+ * ⚠️ `hasActiveShare` defaults FALSE, so every call site that does not pass it
+ * gets the pre-phase-164 copy verbatim — the placeholder arm, and any future
+ * caller that has no share state to offer. Absence of knowledge renders the
+ * conservative sentence, never the permissive one.
+ */
+export function OwnerUnpublishedNotice({
+  hasActiveShare = false,
+  children,
+}: {
+  hasActiveShare?: boolean;
+  /**
+   * Phase 170 C1-F3 — a last row INSIDE the notice box. Only
+   * `OwnerUnpublishedPanel` passes it (its share controls); absent, nothing
+   * renders, so the full-factsheet mount is byte-identical.
+   */
+  children?: React.ReactNode;
+}) {
+  return (
+    <section
+      role="note"
+      aria-label="Visibility notice"
+      className="mb-6 border border-border bg-surface-subtle px-4 py-3"
+    >
+      <h2 className="text-caption font-semibold uppercase tracking-[0.18em] text-text-primary">
+        {hasActiveShare
+          ? "Unpublished — shared through your private link"
+          : "Unpublished — only you can see this"}
+      </h2>
+      {hasActiveShare ? (
+        <p className="mt-1 text-caption text-text-muted">
+          This factsheet is not published, so it is not listed on Quantalyze. A private share
+          link is live: anyone holding that link can view this factsheet until you revoke it.
+        </p>
+      ) : (
+        <p className="mt-1 text-caption text-text-muted">
+          This factsheet is visible only from the account that uploaded the strategy. Anyone else who
+          opens this link sees a 404 until Quantalyze review publishes it. You can create a private
+          share link to let someone view it without publishing.
+        </p>
+      )}
+      {children}
+    </section>
+  );
+}
+
+/**
+ * Phase 164 (SHARE-04) — the owner's visibility notice WITH the controls it
+ * talks about, for render paths that never reach `<FactsheetView>`.
+ *
+ * ⛔ WHY THIS EXISTS. `page.tsx`'s pending-state early return (the "still
+ * computing" placeholder) rendered `OwnerUnpublishedNotice` alone. That notice
+ * ends with "You can create a private share link to let someone view it without
+ * publishing" — and on that path there was no control to do it. MEASURED
+ * 2026-08-28 in the browser: zero clickable elements on the whole page, under a
+ * sentence promising a capability. That is the same dishonesty class SHARE-04
+ * exists to close, reappearing on the one render the class review did not walk.
+ * The placeholder's own comment says the pending state "is when an owner is MOST
+ * likely to share the URL", which makes the omission worse, not incidental.
+ *
+ * ⛔ WHY THE NOTICE AND THE CONTROLS SHARE ONE STATE, rather than the caller
+ * passing `hasActiveShare` to a notice and mounting buttons beside it. Minting
+ * flips the notice's own text to "shared through your private link … until you
+ * revoke it". If the controls were not driven by the SAME `shareLive`, fixing
+ * the missing mint button would have manufactured a second false claim on the
+ * next render: a notice promising revocation with no revoke control. Both
+ * controls hang off this one state, exactly as `FactsheetView` does.
+ */
+export function OwnerUnpublishedPanel({
+  strategyId,
+  hasActiveShare = false,
+  shareNote,
+}: {
+  strategyId: string;
+  hasActiveShare?: boolean;
+  /**
+   * Phase 167.2 / KCS-12 (S7) — what a recipient of this strategy's private
+   * link sees right now, rendered as the panel's last child. Only the owner
+   * pending page passes it; absent, no element renders, so every other mount
+   * is byte-identical.
+   */
+  shareNote?: string;
+}) {
+  const [shareLive, setShareLive] = React.useState(hasActiveShare);
+
+  return (
+    <div className="mb-6">
+      {/* Phase 170 C1-F3 — the controls are the notice's own last row, one
+          layer, instead of a separate row pulled up under the box by a
+          negative margin. */}
+      <OwnerUnpublishedNotice hasActiveShare={shareLive}>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <ShareLinkButton
+            strategyId={strategyId}
+            ownerShare={{ hasActiveShare: shareLive }}
+            onShareLiveChange={setShareLive}
+          />
+          {shareLive && (
+            <ShareRevokeControl
+              strategyId={strategyId}
+              onShareLiveChange={setShareLive}
+            />
+          )}
+        </div>
+      </OwnerUnpublishedNotice>
+      {shareNote && (
+        <p className="mt-2 text-fixed-12 text-text-muted">{shareNote}</p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Phase 164 (SHARE-01) — the RECIPIENT-lane visibility notice, rendered only
+ * when the tokenized route passes `viewerNotice="shared_privately"`.
+ *
+ * Deliberately the SAME visual shape as `OwnerUnpublishedNotice` (square, flat,
+ * hairline border, subtle surface, `role="note"`, muted neutral, `mb-6` before
+ * the masthead, `h2` because it precedes the masthead h1) — the two are the same
+ * KIND of statement, "here is who can see this document", and rendering them
+ * differently would imply a distinction that does not exist.
+ *
+ * The copy does two jobs and neither is optional. It tells the recipient the
+ * document is private, so they understand this is not a public listing they
+ * stumbled onto. And it says Quantalyze has not published or reviewed it, so a
+ * strategy that never passed review cannot borrow the platform's credibility
+ * from the surrounding chrome. Muted neutral by the DESIGN.md semantic-color
+ * gates: not red (nothing failed) and not amber (there is no one-click remedy).
+ */
+export function SharedPrivatelyNotice() {
+  return (
+    <section
+      role="note"
+      aria-label="Visibility notice"
+      className="mb-6 border border-border bg-surface-subtle px-4 py-3"
+    >
+      <h2 className="text-caption font-semibold uppercase tracking-[0.18em] text-text-primary">
+        Shared privately
+      </h2>
+      <p className="mt-1 text-caption text-text-muted">
+        The owner of this strategy shared this factsheet with you through a private link.
+        It is not published on Quantalyze and has not been reviewed by Quantalyze. The owner
+        can turn the link off at any time.
+      </p>
+    </section>
+  );
+}
+
+function FactsheetHeader({
+  payload,
+  ownershipMark,
+  renameTarget,
+}: {
+  payload: FactsheetPayload;
+} & Pick<OwnerLaneProps, "ownershipMark" | "renameTarget">) {
+  const [renameOpen, setRenameOpen] = React.useState(false);
   const exchanges = payload.supportedExchanges.length > 0 ? payload.supportedExchanges.join(", ") : null;
   const leverage = payload.leverageRange;
   // Lead chip line — types / markets / subtypes / exchanges / leverage. Drop
@@ -578,11 +1011,48 @@ function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
       </p>
       <div className="mt-2 flex flex-col sm:flex-row sm:flex-wrap sm:items-end sm:justify-between gap-4">
         <div className="max-w-3xl">
-          <h1 className="font-serif text-page-title leading-tight sm:leading-none text-text-primary">
-            {payload.strategyName}
-          </h1>
+          {/* Phase 150 / OWN-05 — the owner arm puts `Rename…` on the H1's
+              baseline row. The two arms are kept apart rather than always
+              wrapping the H1, so a public render emits the SAME single <h1>
+              with no extra wrapper (the class string is shared above, so the
+              two arms cannot drift).
+
+              151 review A2 — the focus ring is the Phase-117 / UIFIX-02
+              CLIP-PROOF idiom, the same one every other focusable site on this
+              route already carries (see focus-ring-clipproof.test.tsx). It
+              first shipped as `ring-accent/20`, which is ≈1.3:1 against the
+              masthead — far under the WCAG 1.4.11 ≥3:1 non-text floor, and on
+              a borderless, underline-less text button the ring is the ENTIRE
+              focus affordance, so a keyboard user reaching the only owner
+              action on this masthead saw nothing. Full-opacity + inset + a
+              radius for the ring to follow; pinned so `/20` cannot return. */}
+          {renameTarget ? (
+            <div className="flex flex-wrap items-baseline gap-3">
+              <h1 className={MASTHEAD_H1}>{payload.strategyName}</h1>
+              <button
+                type="button"
+                onClick={() => setRenameOpen(true)}
+                className="text-caption text-text-muted hover:text-text-primary transition-colors rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
+              >
+                Rename…
+              </button>
+            </div>
+          ) : (
+            <h1 className={MASTHEAD_H1}>{payload.strategyName}</h1>
+          )}
+          {renameTarget && (
+            <RenameStrategyDialog
+              open={renameOpen}
+              onClose={() => setRenameOpen(false)}
+              strategyId={renameTarget.id}
+              currentName={renameTarget.name}
+            />
+          )}
           <div className="mt-3 flex flex-wrap items-center gap-2 sm:gap-3">
             <TrustTierLabel trustTier={payload.trustTier} />
+            {/* READ-ONLY here (D-09: the mark is SET from /my-strategies).
+                Absent prop or an unmarked row ⇒ zero nodes. */}
+            <OwnershipTag mark={ownershipMark} />
             <span className="text-caption text-text-secondary">{chips.length > 0 ? chips.join(" · ") : "—"}</span>
             {isSelfReported && chips.length > 0 && (
               <span
@@ -604,7 +1074,28 @@ function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
           )}
         </div>
         <div className="text-left sm:text-right flex flex-row sm:flex-col items-start sm:items-end gap-6 sm:gap-3 flex-wrap">
-          <FreshnessChip computedAt={payload.computedAt} />
+          {/* Phase 162 / HONEST-02 (D-162-2, UI-SPEC C-1) — the recency line
+              stacks DIRECTLY BELOW the chip's date line, so the wrapper (not
+              FreshnessChip) owns the pairing. Putting the line INSIDE the chip
+              would have been the shorter diff and is still the wrong one: the
+              chip's anatomy is one label row + one date line, and the line is a
+              sentence in its own right (pinned by
+              FactsheetView.recency-line.test.tsx F-1 and F-4).
+
+              ⚠️ Both components now read `payload.dates`, and that is the point,
+              not a leak: the founder's 2026-08-26 ruling superseded D-162-2's
+              "existing badge logic is untouched" half, so the chip's TONE and
+              the line's sentence state one fact from one derivation
+              (`resolveSeriesEnd`). READ F-4 ACCORDINGLY — its prose still says
+              the chip "consumes only computedAt", which is no longer true. It
+              passes because its two fixtures share a 112-day-old `computedAt`,
+              which is stale enough to bind the verdict on BOTH sides (series
+              known-old vs series unknown → same "Computed · old"). It is a
+              structural-independence pin now, not a data-independence one. */}
+          <div>
+            <FreshnessChip computedAt={payload.computedAt} seriesDates={payload.dates} />
+            <SeriesRecencyLine seriesDates={payload.dates} />
+          </div>
           {payload.aum != null && (
             <CapacityChip
               aum={payload.aum}
@@ -632,10 +1123,119 @@ function formatUsdCompact(v: number): string {
 const EPOCH_SENTINEL = "1970-01-01T00:00:00Z";
 
 /**
+ * The resolved return series' END — the ONE derivation of "how far does the
+ * track record run", shared by `FreshnessChip` and `SeriesRecencyLine` below.
+ *
+ * It exists as a shared function rather than twice inline for the same reason
+ * F-2 compares two RENDERED dates: the chip's tone and the line's sentence now
+ * state one fact, and two independent derivations of one fact are how a number
+ * and a picture drift apart. Returns null when there is no resolvable end —
+ * empty series, or a last point `formatIsoDate` cannot parse (it answers "—").
+ * Callers must treat null as "unknown", never as "fine".
+ */
+function resolveSeriesEnd(seriesDates: string[]): { iso: string; formatted: string } | null {
+  const last = seriesDates.length > 0 ? seriesDates[seriesDates.length - 1] : null;
+  if (!last) return null;
+  const formatted = formatIsoDate(last);
+  if (formatted === "—") return null;
+  return { iso: last, formatted };
+}
+
+/** The chip's freshness verdicts, plus `unknown` (Phase 162 / HONEST-02). */
+type FreshnessTone = "fresh" | "unknown" | "stale" | "old" | "future" | "neutral";
+
+/**
+ * THE chip ladder — 3d / 7d — applied to an age in days. Extracted verbatim
+ * from the tone ternary it replaces so the series arm below reuses the SAME
+ * thresholds. HONEST-02 deliberately introduces NO new threshold: UI-SPEC C-1
+ * records that `computeFreshness` (12h/48h) and this chip (3d/7d) already
+ * disagree, and a fourth ladder for the series would compound it.
+ *
+ * Phase 163 / HONEST-08 — the two numbers now LIVE in lib/freshness.ts and are
+ * imported here. The discovery-list badge had to judge a return series too,
+ * and transcribing 3 and 7 into a second file is how the list and this chip
+ * came to disagree about the same strategy in the first place (a row reading
+ * "Synced 7h ago" beside a factsheet reading `Track record · old`). The
+ * literals moved; the ladder did not change.
+ */
+function bucketByAge(days: number, arm: "sync" | "series"): FreshnessTone {
+  // A future date (days < 0) means the timestamp is ahead of now — treat as
+  // neutral/suspicious, never "fresh". (NEW-C20-07)
+  //
+  // ⛔ THE FUTURE ALLOWANCE IS DERIVED FROM THE ARM, NOT PASSED IN (WR-06-UTC,
+  // Phase 164.2). This function is called TWICE and the two calls must NOT get
+  // the same tolerance: the `"sync"` arm judges `computedAt` — an INSTANT our
+  // own pipeline wrote, where NEW-C20-07's bare zero is exactly right and C-10
+  // is the tripwire that says so — while the `"series"` arm judges the SERIES
+  // end, which is a UTC DATE and can legitimately sit a calendar day ahead of a
+  // browser west of UTC.
+  //
+  // That split used to ride on a `futureAllowanceDays = 0` default, i.e. on
+  // every caller remembering not to pass a number to the sync arm. It is now
+  // carried by the TYPE: the allowance is not a parameter at all, so widening
+  // the series tolerance cannot reach `computedAt`, and a future compute
+  // timestamp stays `future — check data` no matter how far the series arm's
+  // tolerance ever moves. The only remaining mistake — naming the wrong arm —
+  // is a discriminant a reader can check at the call site.
+  const futureAllowanceDays = arm === "series" ? SERIES_END_FUTURE_ALLOWANCE_DAYS : 0;
+  if (!Number.isFinite(days)) return "neutral";
+  if (days < 0) return -days <= futureAllowanceDays ? "fresh" : "future";
+  if (days <= SERIES_FRESH_DAYS) return "fresh";
+  if (days <= SERIES_STALE_DAYS) return "stale";
+  return "old";
+}
+
+/**
+ * How pessimistic each verdict is. The chip states the WORST of what it knows,
+ * so this ordering is load-bearing, not cosmetic:
+ *
+ *   `unknown` sits ABOVE `fresh` — an unresolvable series end cannot support a
+ *   freshness claim, so a fresh job over an unknown track reads "—", not green.
+ *
+ *   `unknown` sits BELOW `stale`/`old` — those are DEFINITE claims the chip has
+ *   evidence for ("this job last ran 112 days ago"). Letting a mere absence of
+ *   series data erase a known-bad job age would trade a fact for a shrug.
+ */
+const TONE_RANK: Record<Exclude<FreshnessTone, "neutral">, number> = {
+  fresh: 0,
+  unknown: 1,
+  stale: 2,
+  old: 3,
+  future: 4,
+};
+
+/**
  * Data freshness — institutional buyers reject stale reports.
  * Green ≤ 3d, amber 3-7d, red >7d. Date below.
+ *
+ * Phase 162 / HONEST-02 (founder ruling 2026-08-26) — THE CHIP BUCKETS ON THE
+ * STALER OF TWO FACTS: when the analytics job last RAN (`computedAt`) and where
+ * the TRACK RECORD ends (last point of the resolved return series). Before this,
+ * it read `computedAt` alone, so the 162 census subject — a live, error-free,
+ * still-polling key whose venue-side watermark had not moved in 111 days —
+ * rendered `Computed · fresh` in green one line above "Track record through
+ * May 6, 2026". Both statements were literally true and the pair was a lie: the
+ * chip is a claim about the JOB and every reader takes it as a claim about the
+ * STRATEGY. 162-07 shipped the line beside it on the additive contract D-162-2;
+ * the founder then ruled the badge itself must stop making the claim.
+ *
+ * THE SUBJECT IS NAMED, NOT ASSUMED. "Computed · old" beside a date computed an
+ * hour ago would just move the contradiction. So the eyebrow names whichever
+ * fact is driving the verdict: `Computed · …` while the job is the stalest
+ * thing here (unchanged — every previously-shipped render still reads exactly
+ * this), and `Track record · …` on the one new arm, where a recent job sits over
+ * a dead track.
+ *
+ * THE DATE LINE ALWAYS BELONGS TO THE SUBJECT (Phase 169 D-16, SC5). Until 169
+ * the date line kept stamping the compute date even under "Track record", so
+ * the chip said "track record: old" over a date from this morning. On the
+ * "Track record" arm the date line now shows the series end and its age, and
+ * the compute date moves to its own line labelled "Computed", so provenance is
+ * kept and every date on the chip names what it is a date of. On the
+ * "Computed" arm the render is exactly what it was. No threshold, tone or
+ * formatter was added: the ladder is the 3d / 7d one above.
  */
-function FreshnessChip({ computedAt }: { computedAt: string }) {
+function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; seriesDates: string[] }) {
   // Hooks must run unconditionally and in the same order every render, so this
   // useState is hoisted ABOVE the EPOCH_SENTINEL early-return below
   // (react-hooks/rules-of-hooks). The initializer runs once per mount so render
@@ -662,14 +1262,46 @@ function FreshnessChip({ computedAt }: { computedAt: string }) {
   }
   const d = new Date(computedAt);
   const days = (nowMs - d.getTime()) / 86_400_000;
-  // A future computedAt (days < 0) means the upstream series window is ahead
-  // of now — treat as neutral/suspicious, never "fresh". (NEW-C20-07)
-  const tone =
-    !Number.isFinite(days) ? "neutral"
-    : days < 0 ? "future"
-    : days <= 3 ? "fresh"
-    : days <= 7 ? "stale"
-    : "old";
+  const jobTone = bucketByAge(days, "sync");
+  // The series arm. `resolveSeriesEnd` is the SAME derivation SeriesRecencyLine
+  // renders, so the chip and the sentence below it can never disagree about
+  // where the track record ends.
+  const seriesEnd = resolveSeriesEnd(seriesDates);
+  // 169 review WR-04: the series end is a UTC DATE, so its age is whole elapsed
+  // days (floor), and the tone is bucketed on the SAME number the date line
+  // prints. Bucketing the fractional age while printing the floored one read
+  // "old (7d)" and "stale (3d)" for most of each boundary day, against the
+  // ladder above. The future allowance holds: a bar dated tomorrow west of UTC
+  // is floor(-0.4) = -1, within SERIES_END_FUTURE_ALLOWANCE_DAYS; two days
+  // ahead is -2, still `future`.
+  const seriesAgeDays = seriesEnd
+    ? Math.floor((nowMs - new Date(seriesEnd.iso).getTime()) / 86_400_000)
+    : NaN;
+  const seriesAgeTone: FreshnessTone = seriesEnd
+    ? bucketByAge(
+        seriesAgeDays,
+        // WR-06-UTC — the SERIES arm, and the only one whose discriminant
+        // unlocks `SERIES_END_FUTURE_ALLOWANCE_DAYS`. The badge's
+        // `bucketSeriesAge` reads the same constant from the same file, so
+        // tomorrow's bar cannot read `fresh` on the discovery list and
+        // `future — check data` here.
+        "series",
+      )
+    : "unknown";
+  // `resolveSeriesEnd` only ever returns a date `formatIsoDate` already parsed,
+  // so `bucketByAge` cannot answer "neutral" here. Mapped rather than asserted:
+  // if that ever stopped holding, the honest read of an unreadable series end
+  // is "unknown", and NEVER a freshness claim.
+  const seriesTone: Exclude<FreshnessTone, "neutral"> =
+    seriesAgeTone === "neutral" ? "unknown" : seriesAgeTone;
+  // An unparseable `computedAt` keeps its own arm: "—", muted, no claim. It is
+  // already the most cautious render, and a series cannot make it worse.
+  // Otherwise the verdict is the STALER of the two, and the eyebrow's subject
+  // is whichever fact carried it there.
+  const seriesIsBinding =
+    jobTone !== "neutral" && TONE_RANK[seriesTone] > TONE_RANK[jobTone];
+  const tone: FreshnessTone = seriesIsBinding ? seriesTone : jobTone;
+  const subject = seriesIsBinding ? "Track record" : "Computed";
   const toneColor =
     tone === "fresh" ? "var(--color-positive)" :
     tone === "stale" ? "var(--color-warning, #B45309)" :
@@ -680,17 +1312,84 @@ function FreshnessChip({ computedAt }: { computedAt: string }) {
     : tone === "old" ? "old"
     : tone === "future" ? "future — check data"
     : "—";
+  // Phase 169 D-16 (SC5): the date line belongs to the SUBJECT. Under
+  // "Track record" it is the series end and its age, read from the same
+  // `seriesEnd` the tone used (one derivation, so it matches SeriesRecencyLine
+  // byte for byte); an unknown end prints "—", never the compute date. The
+  // series age is already whole elapsed days (floor, above), the same value the
+  // tone was bucketed on: Math.round would call a bar dated 120 days ago "121d"
+  // every afternoon UTC.
+  const dateText = seriesIsBinding ? (seriesEnd?.formatted ?? "—") : formatIsoDate(computedAt);
+  const ageDays = seriesIsBinding ? seriesAgeDays : Math.round(days);
   return (
     <div>
       <div className="flex items-center justify-end gap-1.5 text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
         <span aria-hidden className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: toneColor }} />
-        Computed · {label}
+        {subject} · {label}
       </div>
       <p className="mt-1 text-small font-mono tabular-nums text-text-secondary">
-        {formatIsoDate(computedAt)}
-        {Number.isFinite(days) && days >= 0 && <span className="ml-1 text-text-muted">({Math.round(days)}d)</span>}
+        {dateText}
+        {Number.isFinite(ageDays) && ageDays >= 0 && <span className="ml-1 text-text-muted">({ageDays}d)</span>}
       </p>
+      {seriesIsBinding && (
+        <p className="mt-0.5 text-caption font-mono tabular-nums text-text-muted">
+          Computed {formatIsoDate(computedAt)}
+        </p>
+      )}
     </div>
+  );
+}
+
+/**
+ * Series-recency line — Phase 162 / HONEST-02 (D-162-2, UI-SPEC § C-1).
+ *
+ * WHY this line exists. `FreshnessChip` above stamps when the analytics job
+ * last RAN. That is not the same fact as how current the TRACK RECORD is: an
+ * account whose fills stopped months ago still gets polled and still gets
+ * recomputed, so when this line shipped the chip read "fresh" over a series
+ * that had ended in the spring. The 162 census measured exactly that case — a
+ * live, polling, error-free key whose venue-side watermark had not moved in
+ * 111 days. Without this line an allocator read a green chip and inferred a
+ * live track record.
+ *
+ * DATA SOURCE — the whole point. The date is the LAST POINT OF THE RESOLVED
+ * RETURN SERIES (`payload.dates`, built by the read path from
+ * `resolveDailyReturnSeries`, src/lib/factsheet/resolve-series.ts). That is a
+ * value only a real analytics run over real fills can advance. NEVER
+ * `computed_at`, NEVER `last_sync_at` — both advance for an account that has
+ * not traded, which is precisely the dishonesty this line exists to kill.
+ *
+ * ADDITIVE BY CONTRACT (D-162-2): no staleness threshold of its own, no tone,
+ * no fourth ladder. The repo already carries one known
+ * chip-vs-`computeFreshness` threshold disagreement; a fourth ladder here
+ * would make it worse. Tone stays on the chip, which earns it.
+ *
+ * ⚠️ D-162-2's OTHER half — "existing badge logic is untouched" — was
+ * SUPERSEDED by the founder on 2026-08-26: fix the badge too, not just the line
+ * beside it. The chip now buckets on the staler of the job and THIS series end,
+ * through the shared `resolveSeriesEnd` above. What survives unchanged is this
+ * line's own contract: it still states a dated fact, still carries no tone, and
+ * still introduces no threshold — the chip reuses ITS OWN 3d/7d ladder for the
+ * series arm rather than inventing one here.
+ */
+function SeriesRecencyLine({ seriesDates }: { seriesDates: string[] }) {
+  // `resolveSeriesEnd` (above) holds BOTH halves of what used to be inline
+  // here: the last-point pick, and `formatIsoDate` — the SAME formatter the
+  // chip's date line one row above calls. Two formatters on adjacent lines is
+  // the drift the one-formatter-per-surface rule exists to prevent, and since
+  // HONEST-02 the chip's TONE reads the same series end, so a second copy of
+  // this derivation could put the badge and the sentence on different days.
+  const end = resolveSeriesEnd(seriesDates);
+  // `resolveSeriesEnd` answers null when the series is empty OR its last point
+  // does not parse. UI-SPEC C-1 unknown-date rule: the line then does not
+  // render AT ALL — no "Track record through —", no placeholder. A claim with
+  // no date fails the print test, and the chip's "Computed · not yet" state
+  // already covers the no-analytics case. Absence is the honest render here,
+  // not a fallback. (The chip has its own answer to that same null: it refuses
+  // to read "fresh" — see TONE_RANK.)
+  if (!end) return null;
+  return (
+    <p className="mt-1 text-caption text-text-muted">Track record through {end.formatted}</p>
   );
 }
 
@@ -757,6 +1456,9 @@ function KpiStrip() {
   const view = useBasisSeriesView(payload);
   const { m: basisM } = useBasisMetrics(payload);
   const mtmBundlePresent = payload.seriesByBasis?.mark_to_market != null;
+  // Phase 133 (SMTM-01): the smoothed sibling — drives the smoothed suppressRelative
+  // arm (an absent-bundle smoothed view must never show the cash joint relatives).
+  const smoothedBundlePresent = payload.seriesByBasis?.smoothed_mtm != null;
   // WR-01 / IN-02 (Phase 107 review): read the DEFERRED applied leverage — the SAME
   // value `useBasisSeriesView` derived the displayed bundle from (107-03) — and gate
   // on the ONE shared `leverageApplies` predicate. This is the EXACT mirror of the
@@ -766,8 +1468,40 @@ function KpiStrip() {
   // read let the caption claim a what-if the (deferred) numbers had not yet applied.
   const appliedLeverage = useAppliedLeverage();
   const leverageApplied = leverageApplies(payload, basis, appliedLeverage);
-  const m = leverageApplied ? view.strategyMetrics : basisM;
-  const j = view.comparators[cmpKey].joint;
+  // Phase 169.1 (SC10, D-27): the strip follows the zoom window. `wv` is `view` BY
+  // REFERENCE at full history (so everything below reads exactly as before), and the
+  // active view re-derived on the selected slice otherwise. Inside a window the seven
+  // scalars are the slice bundle's own: no persisted overlay and no leverage re-pin,
+  // which describe the whole record.
+  const { view: wv, scope } = useWindowedView(payload);
+  const selected = scope.kind === "selected";
+  const m = selected ? wv.strategyMetrics : leverageApplied ? view.strategyMetrics : basisM;
+  // Phase 169 review round 1 (SFH H-1): on a chain-broken row the stored cash
+  // headline covers only the record after its last break. Said beside it, only
+  // while the stored figures are the ones shown (cash basis, no what-if; a
+  // chain-broken row has no what-if anyway, `leverageEligibleFor`). Round 2,
+  // IN-R2-02: named by the strip's own labels.
+  // 169.1 review round 1 (SFH MEDIUM-2): a window shows no stored figure (D-78),
+  // but unlike the leverage arm it DOES compute on a chain-broken row, so a range
+  // starting before the last break compounds days the engine leaves out. It keeps a
+  // caveat that says so, naming the same three figures as the full-history caveat:
+  // the engine's Max DD already spans the whole record (`compute_all_metrics`).
+  const coverageCaveat = selected
+    ? windowCoverageCaveat(payload.dataQuality, basis, scope.start, "Cum. Return, CAGR and Calmar")
+    : leverageApplied
+      ? null
+      : headlineCoverageCaveat(payload.dataQuality, basis, "Cum. Return, CAGR and Calmar");
+  const j = wv.comparators[cmpKey].joint;
+  // 169.4 review round 2 (SFH-R2 MEDIUM-2): below the paired floor the joint is
+  // withheld, not absent. The α/IR cells stay (9 cells) and read "—", and one
+  // muted line under the strip names the cause in the widget's words. Inside a
+  // window it is the slice's own paired count (169.4 D-69 as amended, D-78).
+  const jointWithheld = j ? null : (wv.comparators[cmpKey].jointWithheld ?? null);
+  // A withheld window (D-27 short slice, D-82 no annualization basis) blanks the
+  // joint; the α/IR slots stay, reading "—", wherever the full view shows them, so
+  // the strip keeps its cell count.
+  const baseBlock = view.comparators[cmpKey];
+  const keepRelativeSlots = wv.withheld != null && (baseBlock.joint != null || baseBlock.jointWithheld != null);
   const cn = cmp.shortName;
 
   // 9 cells when a comparator is active (mockup contract). When NONE, the
@@ -791,7 +1525,7 @@ function KpiStrip() {
     { label: "Max DD", value: pct(m.max_dd, 1), tone: maxDdTone(m.max_dd) },
     { label: "Ann. Vol", value: pct(m.ann_vol, 1) },
   ];
-  if (j && cmpKey !== "none") {
+  if ((j || jointWithheld || keepRelativeSlots) && cmpKey !== "none") {
     // F5 (phase 103) + Phase 107 (LEV-BB): α / β / IR FOLLOW the active basis AND
     // leverage via the view's joint (above), matching §IV. At L≠1 the view re-derives
     // the joint on the levered strategy leg (β→L·β / α→L·α honestly, jointMetrics on
@@ -801,26 +1535,42 @@ function KpiStrip() {
     //     payload by reference) yields the CASH joint; showing it under the MTM story
     //     would mislabel cash (the SAME discipline as the F4 rail eyebrow, which blanks
     //     when the bundle is absent). This is an orthogonal basis concern, not leverage.
-    const suppressRelative = basis === "mark_to_market" && !mtmBundlePresent;
+    // Phase 133 (SMTM-01): suppress under EITHER persisted-overlay basis when its own
+    // bundle is absent — a bundle-absent read yields the CASH joint, and showing it
+    // under a non-cash story mislabels cash (the F4 rail-eyebrow discipline). Cash is
+    // never suppressed. Each basis consults ITS OWN bundle-present flag.
+    const suppressRelative =
+      (basis === "mark_to_market" && !mtmBundlePresent) ||
+      (basis === "smoothed_mtm" && !smoothedBundlePresent);
+    const shown = suppressRelative ? null : j;
     items.push({
       label: `α vs ${cn}`,
-      value: suppressRelative ? "—" : pctSigned(j.alpha, 1),
-      tone: suppressRelative ? undefined : signTone(j.alpha),
+      value: shown ? pctSigned(shown.alpha, 1) : "—",
+      tone: shown ? signTone(shown.alpha) : undefined,
     });
     items.push({
       label: `IR vs ${cn}`,
-      value: suppressRelative ? "—" : num(j.info_ratio),
-      tone: suppressRelative ? undefined : signTone(j.info_ratio),
+      value: shown ? num(shown.info_ratio) : "—",
+      tone: shown ? signTone(shown.info_ratio) : undefined,
     });
   }
+  const jointFloorReason =
+    jointWithheld && cmpKey !== "none"
+      ? pairedFloorReason(cn, jointWithheld.paired, selected ? "range" : "record", jointWithheld.floor)
+      : null;
   // Phase 52-06 / TYPE-04 — the strip reflows on ITS OWN width via `@container`
   // (`@`-prefixed variants), NOT the viewport. The KPI strip sits in the
   // factsheet body whose effective width varies (full ~1440 measure on the route
   // vs the narrower composer mount), so a container query keeps it from thinking
   // it is at desktop width when it isn't. The 9-cell strip steps up to its full
   // column count only when the CONTAINER is wide (`@5xl`, ≈64rem — the old `lg:`
-  // ~1024px breakpoint as a container width); 7 cells likewise. `grid-cols-3` is
-  // the container-narrow fallback (3 rows of 3). Inline-size containment ONLY —
+  // ~1024px breakpoint as a container width); 7 cells likewise. Below that the
+  // ladder is `grid-cols-2`, then `@md:grid-cols-3` from a 28rem container.
+  // Phase 170 (j), 2026-09-30: three columns at 390 px and in the ~326 px
+  // composer mount broke values mid-number and ellipsised labels ("SOR…",
+  // "CAL…", "MAX…"), so the narrowest rung is two columns. Every cell keeps its
+  // own right + top hairline, so an odd last cell in the 2-column layout needs
+  // no filler. Inline-size containment ONLY —
   // the size-containment variant collapses the strip's block size to 0
   // (Pitfall 1), so the bare `@container` host is deliberate. The host is the
   // enclosing `<section>` (an ANCESTOR of the grid), not the grid itself — an
@@ -838,7 +1588,13 @@ function KpiStrip() {
       {composite && (
         <p className="mt-6 text-micro uppercase tracking-wider text-text-muted">
           BASIS ·{" "}
-          {basis === "mark_to_market" ? "MARK-TO-MARKET" : "CASH SETTLEMENT"}
+          {/* Phase 133 (SMTM-01): three-way — smoothed earns its own label, never the
+              binary-ternary "CASH SETTLEMENT" fallthrough under a smoothed basis. */}
+          {basis === "mark_to_market"
+            ? "MARK-TO-MARKET"
+            : basis === "smoothed_mtm"
+              ? "SMOOTHED MARK-TO-MARKET"
+              : "CASH SETTLEMENT"}
         </p>
       )}
       {/* Phase 107 (LEV-BB, UI-SPEC Copywriting + Color): the reworded what-if
@@ -860,14 +1616,25 @@ function KpiStrip() {
           {`What-if projection at ${appliedLeverage}× leverage: daily returns are scaled r → L·r and the return-derived metrics, charts, and rail re-derive; peer, allocator, and event-study panels stay at base 1×. Excludes borrow, funding, and liquidation cost — not the strategy's realized track record.`}
         </p>
       )}
+      {/* Phase 169.1 (SC10, D-27): the range the strip's figures cover, from the
+          same scope the figures use: "Full history: <start> – <end>" or
+          "Selected range: <start> – <end>". The rail renders the same component
+          (MetricsColumn.tsx RangeEyebrow), so the two print one string. Outside
+          the role="status" leverage caption. */}
+      <RangeEyebrow scope={scope} surface="strip" className="mt-6" />
+      {wv.withheld === "no-annualization-basis" && (
+        <p className="mt-1 text-caption text-text-muted" data-testid="window-withheld-reason">
+          The figures for a selected range need an annualization basis this view does not carry. Resetting the range shows the full-history figures.
+        </p>
+      )}
       <section
-        className="mt-6 overflow-hidden @container"
+        className="mt-2 overflow-hidden @container"
         style={{
           backgroundColor: "var(--color-surface)",
           border: "1px solid var(--color-border)",
         }}
       >
-      <div className={`grid grid-cols-3 ${containerCols} @5xl:divide-y-0`} style={{ }}>
+      <div className={`grid grid-cols-2 @md:grid-cols-3 ${containerCols} @5xl:divide-y-0`} style={{ }}>
         {items.map(it => (
           <div
             key={it.label}
@@ -875,6 +1642,7 @@ function KpiStrip() {
             style={{ borderRight: "1px solid var(--color-border)", borderTop: "1px solid var(--color-border)" }}
           >
             <p
+              data-testid="factsheet-kpi-label"
               className="text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis"
               style={{ color: "var(--color-text-muted)" }}
             >
@@ -893,6 +1661,7 @@ function KpiStrip() {
                 normal values. The LABEL <p> above KEEPS its pinned bounded-label
                 clip (short labels only). */}
             <p
+              data-testid="factsheet-kpi-value"
               className="mt-1.5 sm:mt-2 font-mono tabular-nums text-h2 leading-tight break-words"
               style={{
                 color:
@@ -908,6 +1677,15 @@ function KpiStrip() {
           </div>
         ))}
       </div>
+      {jointFloorReason && (
+        <p
+          className="px-3 sm:px-4 py-2 text-micro font-mono"
+          data-testid="joint-floor-reason"
+          style={{ borderTop: "1px solid var(--color-border)", color: "var(--color-text-muted)" }}
+        >
+          {jointFloorReason}
+        </p>
+      )}
       {/* Short-track caveat: annualized CAGR/Sharpe/Sortino/Calmar/Ann.Vol
           are statistically unreliable with fewer than 252 observations (~1y).
           Surface the same warning here at the hero strip so mobile users who
@@ -919,7 +1697,9 @@ function KpiStrip() {
           `m.n` (always cash) would understate the low-N risk under an MTM label.
           Under cash the view returns the payload by reference, so this is
           byte-identical to `m.n`. */}
-      {view.strategyMetrics.n < 252 && (
+      {/* Phase 169.1 (D-27): inside a window the count is the WINDOW's (`wv` is
+          `view` by reference at full history). */}
+      {wv.strategyMetrics.n < 252 && (
         <p
           className="px-3 sm:px-4 py-2 text-micro font-mono"
           style={{
@@ -927,7 +1707,7 @@ function KpiStrip() {
             color: "var(--color-warning, #B45309)",
           }}
         >
-          ⚠ Only {view.strategyMetrics.n} observation{view.strategyMetrics.n !== 1 ? "s" : ""} — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
+          ⚠ Only {wv.strategyMetrics.n} observation{wv.strategyMetrics.n !== 1 ? "s" : ""} — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
         </p>
       )}
       {/* HARD-04 (#67): server-truth short-window flag from
@@ -944,6 +1724,17 @@ function KpiStrip() {
           }}
         >
           ⚠ Track record under 90 days — annualized metrics are flagged as computed on an insufficient window.
+        </p>
+      )}
+      {coverageCaveat && (
+        <p
+          className="px-3 sm:px-4 py-2 text-micro font-mono"
+          style={{
+            borderTop: "1px solid var(--color-border)",
+            color: "var(--color-warning, #B45309)",
+          }}
+        >
+          ⚠ {coverageCaveat}
         </p>
       )}
       {/* HARD-05 (Phase 93): server-truth degraded-member flag from
@@ -1084,17 +1875,90 @@ function useShareMode(): boolean {
   return shareMode;
 }
 
-function ShareLinkButton({ strategyId }: { strategyId: string }) {
-  const [copied, setCopied] = React.useState(false);
-  const onClick = React.useCallback(() => {
+/**
+ * Phase 164 (SHARE-04) — the Copy-Link button's four visible states.
+ *
+ * `working` and `failed` are reachable ONLY on the mint lane. The published lane
+ * keeps its original fire-and-forget handler, which has no in-flight state and
+ * whose clipboard rejection deliberately leaves the label alone (FINDING-9), so
+ * `shareButtonLabel` reproduces the pre-phase-164 rendering for it exactly.
+ */
+type ShareCopyPhase = "idle" | "working" | "copied" | "failed";
+
+/**
+ * Label as a pure function of state — extracted so the D-09 byte-identity claim
+ * about the published lane is a two-line argument anyone can check, rather than
+ * something buried in a nested ternary inside JSX.
+ */
+function shareButtonLabel(
+  phase: ShareCopyPhase,
+  mode: ShareAffordanceMode,
+  hasActiveShare: boolean,
+): string {
+  if (phase === "copied") return "Link copied";
+  // ⛔ D-09. The published lane only ever holds "idle" or "copied", so this one
+  // literal IS the whole of its old rendering.
+  if (mode === "public-url") return "Copy share link";
+  if (phase === "working") return hasActiveShare ? "Copying…" : "Creating link…";
+  // Deliberately generic: the mint may have failed, or the mint succeeded and
+  // the clipboard refused. Both mean the same thing to the person standing in
+  // front of it — no working link reached your clipboard — and a label that
+  // named the wrong one would be a guess presented as a fact.
+  if (phase === "failed") return "Couldn't copy the link — try again";
+  return hasActiveShare ? "Copy share link" : "Create share link";
+}
+
+/**
+ * Phase 164 (SHARE-04) — the share affordance, now status-aware.
+ *
+ * THE DEFECT: this component took only `strategyId`, did not know whether the
+ * strategy was published, and built the `?share=1` URL unconditionally. An owner
+ * viewing their own UNPUBLISHED strategy therefore copied a URL that 404s for
+ * whoever they sent it to — and the button said "Link copied", so nothing about
+ * the interaction suggested anything was wrong. That is the founder-hit bug.
+ *
+ * THE FIX IS A BRANCH, NOT A REPLACEMENT (ruling D-09). Published strategies
+ * keep the exact URL and the exact handler they had; unpublished ones mint-or-
+ * reuse a revocable capability. The two mechanisms differ because a public id
+ * and a private capability are different subjects — see `shareAffordanceMode`.
+ *
+ * ⛔ NO "Link copied!" FOR A LINK THAT CANNOT WORK (T-164-15). On the mint lane
+ * every failure — non-2xx, malformed body, absent clipboard, rejected write —
+ * lands in `failed`, and `copied` is set on exactly one path: after an awaited
+ * clipboard write of a url the route actually returned.
+ */
+function ShareLinkButton({
+  strategyId,
+  ownerShare,
+  onShareLiveChange,
+}: {
+  strategyId: string;
+  ownerShare?: { hasActiveShare: boolean };
+  onShareLiveChange?: (live: boolean) => void;
+}) {
+  const [phase, setPhase] = React.useState<ShareCopyPhase>("idle");
+  // THE ONE PREDICATE, imported from the module the other two affordance sites
+  // call (src/components/strategy/ShareableLink.tsx). `ownerShare` is passed
+  // only on the owner lane, which is reachable only for an unpublished row the
+  // session owns — so its absence IS "published", with no second predicate to
+  // drift out of sync.
+  const mode = shareAffordanceMode(ownerShare === undefined);
+  const hasActiveShare = ownerShare?.hasActiveShare ?? false;
+
+  const copyPublishedUrl = React.useCallback(() => {
     if (typeof window === "undefined") return;
+    // ⛔ D-09 — BYTE-IDENTICAL to the pre-phase-164 handler, deliberately. The
+    // URL shape, the fire-and-forget promise, the 1500ms flash and the
+    // log-only rejection arm are all the behaviour a published factsheet has
+    // today, and this phase is not allowed to change any of it.
+    //
     // Strip every query param except `share=1` so recipients don't inherit
     // the sender's transient camera/comparator state.
     const url = `${window.location.origin}${window.location.pathname}?share=1`;
     void navigator.clipboard?.writeText(url).then(
       () => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1500);
+        setPhase("copied");
+        window.setTimeout(() => setPhase("idle"), 1500);
       },
       () => {
         // FINDING-9 (b06-silentfailure): Log so we can track clipboard
@@ -1106,23 +1970,177 @@ function ShareLinkButton({ strategyId }: { strategyId: string }) {
     );
     trackFactsheetEvent("factsheet_v2_share_copy", { strategy_id: strategyId });
   }, [strategyId]);
+
+  const mintAndCopy = React.useCallback(async () => {
+    if (typeof window === "undefined") return;
+    setPhase("working");
+    trackFactsheetEvent("factsheet_v2_share_copy", { strategy_id: strategyId });
+    try {
+      // Mint happens over the NETWORK before the clipboard write — the async
+      // wrinkle this lane has and the published lane does not.
+      const url = await mintShareUrl(strategyId);
+      // The share row exists NOW, whether or not the clipboard write lands.
+      // House precedent (SavedScenariosList, audit-#43): never block the link
+      // on the copy. Flipping here is what keeps the notice honest — a live
+      // link is live even when the owner has to copy the URL by hand.
+      onShareLiveChange?.(true);
+      // ⛔ NOT `navigator.clipboard?.writeText(url)`. Optional chaining on a
+      // missing clipboard yields `undefined`, and `await undefined` RESOLVES —
+      // which would flash "Link copied" having copied nothing at all.
+      if (typeof navigator.clipboard?.writeText !== "function") {
+        throw new Error("clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(url);
+      setPhase("copied");
+      window.setTimeout(() => setPhase("idle"), 1500);
+    } catch (err) {
+      console.warn("[factsheet] share mint/copy failed", { strategyId, err });
+      setPhase("failed");
+      window.setTimeout(() => setPhase("idle"), 4000);
+    }
+  }, [strategyId, onShareLiveChange]);
+
   return (
     <button
       type="button"
-      onClick={onClick}
-      title="Copy a public, link-only factsheet URL — recipients see the same page with no outbound navigation"
-      className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+      onClick={mode === "public-url" ? copyPublishedUrl : () => void mintAndCopy()}
+      disabled={phase === "working"}
+      title={
+        mode === "public-url"
+          ? "Copy a public, link-only factsheet URL — recipients see the same page with no outbound navigation"
+          : "Copy a private, revocable link to this unpublished factsheet — anyone holding it can view this page until you revoke the link"
+      }
+      className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] disabled:opacity-60"
     >
-      {copied ? "Link copied" : "Copy share link"}
+      {shareButtonLabel(phase, mode, hasActiveShare)}
     </button>
   );
 }
 
-function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
+/**
+ * Phase 164 (SHARE-03 / D-03) — revoke, ON THE FACTSHEET, beside the control
+ * that handed the link out. `StrategyActions` is deliberately NOT touched: its
+ * private fall-through stays exactly as it is.
+ *
+ * INLINE CONFIRM, never `window.confirm` — the shape is lifted from
+ * `SavedScenariosList` (confirm sentence + danger Revoke + ghost "Keep link"),
+ * because a browser dialog is unstyleable, unannounceable to the surrounding
+ * page, and blocks the whole tab for a decision that is local to one control.
+ *
+ * ⛔ 404 IS CONVERGENCE, NOT FAILURE. The revoke route returns 404 when there is
+ * no active share to revoke — a benign double-revoke across two tabs, a stale
+ * live-link flag, or an already-expired share. The link IS gone, so the
+ * end-state matches a 200: flip the local state, dismiss the confirm, and do
+ * NOT show an error the user cannot act on. The route's 404 contract is
+ * unchanged (it preserves the no-existence-oracle posture); the client simply
+ * stops reading "already revoked" as "revoke failed".
+ */
+function ShareRevokeControl({
+  strategyId,
+  onShareLiveChange,
+}: {
+  strategyId: string;
+  onShareLiveChange?: (live: boolean) => void;
+}) {
+  const [confirming, setConfirming] = React.useState(false);
+  const [failed, setFailed] = React.useState(false);
+
+  const confirmRevoke = React.useCallback(async () => {
+    setFailed(false);
+    try {
+      const res = await fetch(`/api/strategies/${strategyId}/share/revoke`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok && res.status !== 404) {
+        // Honest failure — the link stays LIVE, so the live state is not
+        // flipped and the Copy/Revoke controls stay on screen beside the alert.
+        setFailed(true);
+        setConfirming(false);
+        return;
+      }
+      setConfirming(false);
+      onShareLiveChange?.(false);
+    } catch (err) {
+      console.warn("[factsheet] share revoke failed", { strategyId, err });
+      setFailed(true);
+      setConfirming(false);
+    }
+  }, [strategyId, onShareLiveChange]);
+
+  if (confirming) {
+    return (
+      <span className="flex flex-wrap items-center gap-2">
+        <span className="text-caption text-text-secondary">
+          Revoke this share link? Anyone with the link will lose access.
+        </span>
+        <button
+          type="button"
+          autoFocus
+          onClick={() => void confirmRevoke()}
+          className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+        >
+          Revoke
+        </button>
+        <button
+          type="button"
+          onClick={() => setConfirming(false)}
+          className="px-2.5 py-1 text-caption rounded-sm text-text-2 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+        >
+          Keep link
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <span className="flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        onClick={() => {
+          setFailed(false);
+          setConfirming(true);
+        }}
+        title="Turn off the private share link — anyone holding it loses access immediately"
+        className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+      >
+        Revoke link
+      </button>
+      {failed && (
+        <span role="alert" className="text-caption text-negative">
+          Couldn&apos;t revoke this link. Try again.
+        </span>
+      )}
+    </span>
+  );
+}
+
+function ControlBar({
+  scenarioMode = false,
+  recipientShare = false,
+  ownerShare,
+  onShareLiveChange,
+}: {
+  scenarioMode?: boolean;
+  recipientShare?: boolean;
+  /** Phase 164 (SHARE-04) — owner-lane share state; see `OwnerLaneProps`.
+   *  Absent on every non-owner mount, which is what keeps the published
+   *  `?share=1` lane byte-identical (D-09). */
+  ownerShare?: { hasActiveShare: boolean };
+  /** Lifted setter: minting and revoking both change what the notice ABOVE the
+   *  masthead may truthfully say, so the fact lives in `FactsheetBody` and both
+   *  controls report into it. */
+  onShareLiveChange?: (live: boolean) => void;
+}) {
   const payload = usePayload();
   const { resetXRange } = useXRange();
   const { setComparator } = useComparator();
-  const shareMode = useShareMode();
+  // Phase 164 (D-09) — TWO share mechanisms, one meaning. `useShareMode()` reads
+  // `?share=1` and serves the PUBLISHED id route; it is untouched. The token
+  // route has no query param to read, so its share mode arrives structurally as
+  // a prop. Both suppress the same outbound chrome, so they are OR'd here rather
+  // than branched anywhere below.
+  const shareMode = useShareMode() || recipientShare;
   // Phase 90 (FS-03, D2/D5) + Phase 102 (MTM-01): cash↔MTM toggle. NEVER apiKeyId —
   // the server-truth `dataQuality.composite` marker OR (Phase 102) a single-key
   // options strategy that participates in the MTM basis story (`payload.mtmGate`
@@ -1145,6 +2163,12 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   const composite = payload.dataQuality?.composite === true;
   const mtmAvailable = payload.mtmGate?.available === true;
   const mtmReason = mtmDisabledReasonCopy(payload.mtmGate?.reason);
+  // Phase 133 (SMTM-01): the smoothed gate — enabled ⇔ the persisted smoothed_mtm
+  // basis is available; disabled → the mapped closed-set reason copy. Always a STEADY
+  // honest-empty condition (no self-healing transient), so the inline reason renders
+  // muted — no amber, no tone split.
+  const smoothedAvailable = payload.smoothedGate?.available === true;
+  const smoothedReason = smoothedDisabledReasonCopy(payload.smoothedGate?.reason);
   // Phase 102 (DESIGN.md tone split): amber --color-warning is reserved for
   // transient/recoverable reasons (timeout, anchor-race — the system re-attempts
   // on the next derive); steady-state honest-empty reasons render muted. Amber on
@@ -1172,7 +2196,7 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   const onLeverageChange = (raw: number) => {
     if (!Number.isFinite(raw)) {
       setLeverageMsg(
-        `Invalid leverage — enter a number between 0 and ${MAX_LEVERAGE}. The previous value was kept.`,
+        `Invalid leverage — enter a number between 0 and ${FACTSHEET_MAX_LEVERAGE}. The previous value was kept.`,
       );
       return;
     }
@@ -1180,12 +2204,12 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
       setLeverageMsg(
         "Leverage can't be negative — shorting isn't included in this what-if. Clamped to 0.",
       );
-    } else if (raw > MAX_LEVERAGE) {
-      setLeverageMsg(`Leverage clamped to ${MAX_LEVERAGE}× — the maximum in this what-if projection.`);
+    } else if (raw > FACTSHEET_MAX_LEVERAGE) {
+      setLeverageMsg(`Leverage clamped to ${FACTSHEET_MAX_LEVERAGE}× — the maximum in this what-if projection.`);
     } else {
       setLeverageMsg(null);
     }
-    setLeverage(Math.min(MAX_LEVERAGE, Math.max(0, raw)));
+    setLeverage(Math.min(FACTSHEET_MAX_LEVERAGE, Math.max(0, raw)));
   };
   const resetLeverage = () => {
     setLeverage(1);
@@ -1204,7 +2228,11 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   };
   return (
     <section className="factsheet-v2-no-print mt-6 flex flex-wrap items-center justify-start lg:justify-end gap-x-3 sm:gap-x-6 gap-y-3 border-b border-border pb-3">
-      {leverageEligible && (
+      {/* Phase 167.1.2 plan 07: never inside the composer (scenarioMode). Its
+          payload now carries periodsPerYear, which makes it leverage-eligible,
+          but the composer already levers each constituent, and a whole-blend
+          multiplier on top would lever the blend a second time. */}
+      {!scenarioMode && leverageEligible && (
         <div className="mr-auto flex flex-col items-start gap-1">
           <div className="flex items-center gap-2">
             <label
@@ -1218,7 +2246,7 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
               type="number"
               step="0.1"
               min="0"
-              max={MAX_LEVERAGE}
+              max={FACTSHEET_MAX_LEVERAGE}
               value={leverage.toString()}
               title="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
               aria-label="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
@@ -1240,7 +2268,7 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
                 type="button"
                 onClick={resetLeverage}
                 aria-label="Reset leverage to 1×"
-                className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+                className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
               >
                 Reset 1×
               </button>
@@ -1272,6 +2300,27 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
                 disabled: !mtmAvailable,
                 disabledReason: mtmReason,
               },
+              // Phase 133 (SMTM-01): the third segment — sentence-case "Smoothed
+              // mark-to-market" (matches the "Mark-to-market" sibling's full-word
+              // casing per DESIGN.md, not an "MTM" abbreviation). Enabled ⇔ the
+              // persisted smoothed basis is available; honest-disabled otherwise.
+              //
+              // Phase 134 kill-switch: the segment is HIDDEN (not rendered at all,
+              // never merely disabled) unless SMOOTHED_MTM_UI_ENABLED is on. With the
+              // dark default the worker never persists a smoothed basis, so the segment
+              // would only ever be honest-disabled — omitting it keeps the control
+              // byte-identical to the pre-v1.14 two-segment cash/MTM toggle. cash/MTM
+              // segments are untouched by the flag.
+              ...(SMOOTHED_MTM_UI_ENABLED
+                ? [
+                    {
+                      id: "smoothed_mtm",
+                      label: "Smoothed mark-to-market",
+                      disabled: !smoothedAvailable,
+                      disabledReason: smoothedReason,
+                    },
+                  ]
+                : []),
             ]}
           />
           {!mtmAvailable &&
@@ -1287,6 +2336,23 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
               // Steady-state honest-empty → muted (#64748B, WCAG-AA 4.85:1 on white).
               <p className="text-caption text-text-muted">{mtmReason}</p>
             ))}
+          {/* Phase 133 (SMTM-01, review IN-02): the smoothed disabled-reason
+              paragraph — always STEADY (never a self-healing transient), so muted
+              only, never amber. It renders ONLY when it adds information beyond
+              the MTM paragraph above: smoothed is the sole disabled basis (MTM
+              available), or the book is an options composite (the one state where
+              the smoothed basis is the specific remedy, so "has not been
+              computed" is honest pending information). On a non-options book with
+              MTM ALSO disabled, permanently stacking a second "unavailable" line
+              under the specific MTM reason is density noise (DESIGN.md restraint)
+              and reads as pending for a pass that will never run — the segment
+              itself stays honest-disabled with the mapped reason as its tooltip
+              (aria-disabled + title, SegmentedControl). */}
+          {SMOOTHED_MTM_UI_ENABLED &&
+            !smoothedAvailable &&
+            (mtmAvailable || payload.mtmGate?.reason === "unsmoothed_options_book") && (
+              <p className="text-caption text-text-muted">{smoothedReason}</p>
+            )}
         </div>
       )}
       <DisplayMenu />
@@ -1294,20 +2360,47 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
         type="button"
         onClick={resetView}
         title="Reset comparator + visible window to defaults (toggles, persisted layout stay)"
-        className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+        className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
       >
         Reset view
       </button>
-      {!scenarioMode && <ShareLinkButton strategyId={payload.strategyId} />}
+      {/* Phase 170 C1-F2 — Compare sits BEFORE the share controls, so the
+          private-link control is the last action ahead of ComparatorPicker. The
+          bar is `flex flex-wrap`, so it wraps and never overlaps content. */}
       {!scenarioMode && !shareMode && (
         <a
           href={`/compare?ids=${payload.strategyId}`}
           onClick={() => trackFactsheetEvent("factsheet_v2_compare_click", { strategy_id: payload.strategyId })}
           title="Compare this strategy against another (multi-strategy overlay)"
-          className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
+          className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
         >
           Compare strategies
         </a>
+      )}
+      {/* Phase 164 (SHARE-04) — a RECIPIENT must never see this control. It
+          rebuilds the URL from `window.location` as `<origin><pathname>?share=1`,
+          which on the token route would hand out a Copy-Link button that strips
+          the token and produces a link that 404s for the next person. The
+          published `?share=1` lane is unaffected: `recipientShare` is false
+          there, so this renders exactly as before. */}
+      {!scenarioMode && !recipientShare && (
+        <ShareLinkButton
+          strategyId={payload.strategyId}
+          ownerShare={ownerShare}
+          onShareLiveChange={onShareLiveChange}
+        />
+      )}
+      {/* Phase 164 (D-03 / SHARE-03) — revoke sits beside the control that
+          handed the link out, and only while there is a link to revoke. The
+          `!recipientShare` guard is not redundant belt-and-braces: a recipient
+          must never see ANY control that manages someone else's capability,
+          and gating it on the same flag as the Copy-Link control means the two
+          cannot drift apart (T-164-16). */}
+      {!scenarioMode && !recipientShare && ownerShare?.hasActiveShare && (
+        <ShareRevokeControl
+          strategyId={payload.strategyId}
+          onShareLiveChange={onShareLiveChange}
+        />
       )}
       <ComparatorPicker />
     </section>
@@ -1325,7 +2418,7 @@ function DisplayMenu() {
   const activeCount = (darkMode ? 1 : 0) + (colorblind ? 1 : 0) + (regimes ? 1 : 0);
   return (
     <details className="relative">
-      <summary className="list-none cursor-pointer px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center gap-1">
+      <summary className="list-none cursor-pointer px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center gap-1">
         Display
         {activeCount > 0 && (
           <span
@@ -1420,9 +2513,9 @@ function FactsheetFooter({
   return (
     <footer className="mt-16 border-t border-text pt-6 flex flex-wrap items-start justify-between gap-6">
       <p className="max-w-3xl text-micro italic leading-relaxed text-text-muted">
-        Returns computed from the strategy&apos;s daily series. Benchmarks are daily
-        closes (forward-filled to the strategy&apos;s observation dates). Risk-free
-        rate set to 0%. Past performance is not indicative of future results.
+        Returns computed from the strategy&apos;s daily series. Benchmark returns are
+        taken from daily closes over the strategy&apos;s own intervals, never past a
+        benchmark&apos;s last close. Risk-free rate set to 0%. Past performance is not indicative of future results.
         Demo cohorts and demo portfolios are flagged inline; production replaces them
         with platform data.
       </p>

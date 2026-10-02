@@ -25,6 +25,11 @@ try:
 except ImportError:  # pragma: no cover
     create_client = None  # type: ignore[assignment]
 
+# Phase 164.9 plan 05: retries transient transport faults against shared TEST
+# (`[164.9-SHARED-TEST-TRANSPORT-FLAKE]`). Wraps the client only — no skip
+# condition, env read, or assertion below changes.
+from tests.live_db_transport import wrap_live_db_client
+
 
 SUPABASE_URL = os.getenv("SUPABASE_TEST_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_TEST_SERVICE_KEY")
@@ -38,7 +43,7 @@ def _need_supabase():
 @pytest.fixture
 def admin():
     _need_supabase()
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    return wrap_live_db_client(create_client(SUPABASE_URL, SUPABASE_KEY))
 
 
 def _seed_user_id(admin) -> str:
@@ -124,7 +129,13 @@ def test_claim_writes_unified_backbone_metadata(admin, strategy_id):
         admin.rpc("claim_compute_jobs_with_priority", {
             "p_batch_size": 50,
             "p_worker_id": "drain-test",
+            # Scope the claim to the kind THIS test seeded. Without it the
+            # batch is filled by the shared TEST project's undrained
+            # `derive_broker_dailies` backlog (2320 rows from the 05:30 UTC
+            # cron fan-out, measured 2026-08-11) and our row is never
+            # claimed — the assertion below then reads 'pending'.
             "p_unified_backbone_active": True,
+            "p_kind_include": ["process_key_long"],
         }).execute()
         row = admin.table("compute_jobs").select("metadata,status").eq("id", job_id).single().execute().data
         assert row["status"] == "running"
@@ -159,7 +170,13 @@ def test_drain_reclaim_preserves_snapshot(admin, strategy_id):
         admin.rpc("claim_compute_jobs_with_priority", {
             "p_batch_size": 50,
             "p_worker_id": "drain-test-1",
+            # Scope the claim to the kind THIS test seeded. Without it the
+            # batch is filled by the shared TEST project's undrained
+            # `derive_broker_dailies` backlog (2320 rows from the 05:30 UTC
+            # cron fan-out, measured 2026-08-11) and our row is never
+            # claimed — the assertion below then reads 'pending'.
             "p_unified_backbone_active": True,
+            "p_kind_include": ["process_key_long"],
         }).execute()
         row1 = admin.table("compute_jobs").select("metadata").eq("id", job_id).single().execute().data
         assert row1["metadata"]["unified_backbone_at_claim"] == "true"
@@ -175,7 +192,13 @@ def test_drain_reclaim_preserves_snapshot(admin, strategy_id):
         admin.rpc("claim_compute_jobs_with_priority", {
             "p_batch_size": 50,
             "p_worker_id": "drain-test-2",
+            # Scope the claim to the kind THIS test seeded. Without it the
+            # batch is filled by the shared TEST project's undrained
+            # `derive_broker_dailies` backlog (2320 rows from the 05:30 UTC
+            # cron fan-out, measured 2026-08-11) and our row is never
+            # claimed — the assertion below then reads 'pending'.
             "p_unified_backbone_active": False,
+            "p_kind_include": ["process_key_long"],
         }).execute()
         row2 = admin.table("compute_jobs").select("metadata").eq("id", job_id).single().execute().data
         # D-1: snapshot preserved
@@ -200,7 +223,13 @@ def test_status_enum_pending_not_queued(admin, strategy_id):
         admin.rpc("claim_compute_jobs_with_priority", {
             "p_batch_size": 50,
             "p_worker_id": "c1-test",
+            # Scope the claim to the kind THIS test seeded. Without it the
+            # batch is filled by the shared TEST project's undrained
+            # `derive_broker_dailies` backlog (2320 rows from the 05:30 UTC
+            # cron fan-out, measured 2026-08-11) and our row is never
+            # claimed — the assertion below then reads 'pending'.
             "p_unified_backbone_active": True,
+            "p_kind_include": ["process_key_long"],
         }).execute()
         row = admin.table("compute_jobs").select("status").eq("id", job["id"]).single().execute().data
         assert row["status"] == "running", "pending row should claim"
