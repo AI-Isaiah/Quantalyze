@@ -384,7 +384,10 @@ export function isPrMergeCommit(committerEmail, subject) {
  *       conclusion in `PREDECESSOR_OK_CONCLUSIONS`. Read with `filter=all` and
  *       deduplicated HERE, explicitly, by (check_suite.id, name), keeping the
  *       highest id: the latest attempt inside ONE suite, so an in-suite re-run
- *       that went green supersedes its red attempt. Runs in DIFFERENT suites are
+ *       that went green supersedes its red attempt. (Measured 2026-10-02: CI run
+ *       `36899566710`'s attempt 1, cancelled, and attempt 2, success, share check
+ *       suite `99947175931`, and `filter=all` returns both attempts' runs there,
+ *       26 names twice. A re-run is therefore in-suite.) Runs in DIFFERENT suites are
  *       never collapsed, so a newer suite cannot hide an older red one. (Round 3
  *       relied on `filter=latest` for that, and whether `latest` also collapses
  *       across suites was unmeasured, SFH LOW-07. Now it is true by construction.)
