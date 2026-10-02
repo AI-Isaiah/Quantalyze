@@ -708,7 +708,7 @@ describe("corpus re-derivation", () => {
     // `expected 545 to be 513`, and one full lane run printed `arms: 545/545/0`, `biting: 545`.
     // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 545 -> 553. EIGHT arms, all in the NEW gate supabase/tests/test_compute_job_fence_errcode.sql. MEASURED: this file's own run read `expected 553 to be 545`, and one full lane run on the tree merged with origin/main printed `arms: 553/553/0`, `biting: 553`.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 553 -> 555. TWO arms, R1 and R2, both in the NEW gate supabase/tests/test_enqueue_race_loss_40001.sql. MEASURED: this file's own run read `expected 555 to be 553`, and one full lane run on the tree merged with origin/main printed `arms: 555/555/0`, `biting: 555`.
-    // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 555 -> 556. ONE arm, R3, in the ALREADY-ANNOTATED supabase/tests/test_enqueue_race_loss_40001.sql (the api_key-target branch). MEASURED: this file's own run read `expected 555 to be 556`, and one full lane run printed `arms: 556/556/0`, `biting: 556`.
+    // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 555 -> 556. ONE arm, R3, in the ALREADY-ANNOTATED supabase/tests/test_enqueue_race_loss_40001.sql (the api_key-target branch). MEASURED: this file's own run read `expected 556 to be 555`, and one full lane run printed `arms: 556/556/0`, `biting: 556`.
     expect(totalAnchored).toBe(556);
   });
 });
