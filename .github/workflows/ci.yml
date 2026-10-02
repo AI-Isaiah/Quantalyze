@@ -6003,7 +6003,7 @@ jobs:
               --update-snapshots \
               --timeout 60000
           else
-            npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/no-clip-sweep.spec.ts e2e/axe-app-wide.spec.ts e2e/marketing-shell.spec.ts e2e/route-redirects.spec.ts e2e/api-key-flow.spec.ts e2e/sync-analytics-flow.spec.ts
+            npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/no-clip-sweep.spec.ts e2e/axe-app-wide.spec.ts e2e/marketing-shell.spec.ts e2e/route-redirects.spec.ts e2e/api-key-flow.spec.ts e2e/sync-analytics-flow.spec.ts e2e/hydration-guard.self-test.spec.ts
           fi
           PW_EXIT=$?
           set -e

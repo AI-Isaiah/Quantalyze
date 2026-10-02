@@ -198,6 +198,15 @@ test.describe("Phase 91 — composite factsheet render + axe (QA-02/QA-03)", () 
     await expect(page.getByText(/Stitched from \d+ keys/)).toContainText(
       "shown as breaks, never as zero returns",
     );
+    // Phase 169.1.1 SC-6 (founder fold-in, 2026-10-02): the two text waits
+    // above can match inside React's hidden streaming segment (`<div hidden
+    // id="S:1">`, delivered but not yet revealed), and axe then scans before
+    // the reveal and reports `page-has-heading-one`. Wait for the single
+    // masthead <h1> to be VISIBLE first. This is a streaming-reveal race, NOT
+    // the hydration class: 3/3 lane failures carried zero page errors
+    // (169.1.1-RESEARCH Finding 9).
+    await expect(page.locator("#factsheet-main h1")).toHaveCount(1);
+    await expect(page.locator("#factsheet-main h1")).toBeVisible();
 
     const results = await buildAxe(page).analyze();
     expect(results.violations).toEqual([]);
