@@ -3344,6 +3344,8 @@ Plans:
 **Goal:** `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner.
 **Requirements**: TODOS `[164.9.4-CI-MUTEX-QUEUE]` (owned here)
 **Depends on:** Phase 164.9.1
+⭐ **Founder override, 2026-10-03 (AskUserQuestion "Ship now, grade on its CI"):** ships with VERIFICATION `human_needed`; the one open item is SC-3's e2e-seeded half, graded on the ship CI run (merge only on passed ≥ 201 and no flaky line). The lane flake behind the 2026-10-02 gap was root-caused and fixed first (option D: `e2e/full-flow.spec.ts` unticks "Hide examples" and fails on an empty table). Recorded in `164.9.4-CONTEXT.md` as well.
+
 **Plans:** 12 plans (planned 2026-09-26; 4 waves: W1 01–06 · W2 07 · W3 08 · W4 09–12; plan-checked, 3 rounds)
 
 ⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
