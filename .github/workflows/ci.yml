@@ -5274,7 +5274,16 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          bash scripts/local-stack/run.sh down
+          # Review 164.9.4 round 2, LOW-01: `supabase/setup-cli` runs AFTER steps
+          # that can fail first (installs, mypy, Playwright, the hydration
+          # self-test). Then `run.sh down` exits 127 on a missing CLI and adds a
+          # second red that names a lane which never booted. Stop only when the
+          # CLI is present; the docker census below is still the real proof.
+          if command -v supabase >/dev/null 2>&1; then
+            bash scripts/local-stack/run.sh down
+          else
+            echo "lane never booted (no supabase CLI on PATH), nothing to stop; the census below still runs."
+          fi
           bash scripts/local-stack/run.sh --assert-teardown
 
   test-db-drift:
@@ -6601,7 +6610,16 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          bash scripts/local-stack/run.sh down
+          # Review 164.9.4 round 2, LOW-01: `supabase/setup-cli` runs AFTER steps
+          # that can fail first (installs, mypy, Playwright, the hydration
+          # self-test). Then `run.sh down` exits 127 on a missing CLI and adds a
+          # second red that names a lane which never booted. Stop only when the
+          # CLI is present; the docker census below is still the real proof.
+          if command -v supabase >/dev/null 2>&1; then
+            bash scripts/local-stack/run.sh down
+          else
+            echo "lane never booted (no supabase CLI on PATH), nothing to stop; the census below still runs."
+          fi
           bash scripts/local-stack/run.sh --assert-teardown
       # retro-PR179-H1 / C-0293(c): NO playwright-report upload from this
       # job, ever. Every spec here runs against the REAL-env build, and
