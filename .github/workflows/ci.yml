@@ -215,8 +215,9 @@ jobs:
       # empty on a pull_request and a workflow_dispatch, which never read them.
       # (2026-10-02, review round 2 SFH-04; round 3 WR-01) A docs-only push
       # range takes the short path ONLY when Railway's own gate would pass on
-      # `before`: every GitHub Actions check run on it (latest per check name,
-      # all workflows and events) completed as success, skipped or neutral.
+      # `before`: every GitHub Actions check run `filter=latest` returns on it
+      # (all workflows and events; no cross-suite dedupe) completed as success,
+      # skipped or neutral.
       # Red, cancelled, timed out, pending, absent, a truncated or malformed
       # response, or an API error runs the full corpus with the reason printed.
       # `GH_TOKEN` is this job's `checks: read` token, scoped to this step

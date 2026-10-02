@@ -327,9 +327,13 @@ export function classifyPushRange({ before, forced, cwd, fetchCheckRuns = defaul
  * every workflow and every event, `workflow_dispatch` included because Railway
  * counts those too. Non-Actions check runs (Vercel's, for one) are ignored.
  *
- * Per check NAME the latest run (highest id) is the verdict, and it must be
- * `completed` with a conclusion in `PREDECESSOR_OK_CONCLUSIONS`. At least one
- * Actions check run must exist.
+ * EVERY Actions check run the lookup returns must be `completed` with a
+ * conclusion in `PREDECESSOR_OK_CONCLUSIONS`, and at least one must exist.
+ * `filter=latest` already collapses re-run attempts INSIDE a check suite, and
+ * that is the only "superseded" case trusted here. Runs of the same check name in
+ * DIFFERENT suites (a push and a dispatch, say) are NOT deduplicated: whether
+ * Railway lets a newer suite hide an older red one is unmeasured, so an older
+ * red suite still refuses the short path (orchestrator decision 2026-10-02).
  */
 export const PREDECESSOR_APP_SLUG = "github-actions";
 export const PREDECESSOR_OK_CONCLUSIONS = new Set(["success", "skipped", "neutral"]);
@@ -414,13 +418,7 @@ export function predecessorVerdict(sha, fetchCheckRuns = defaultFetchCheckRuns) 
   }
   const foreign = all.find((r) => r?.head_sha !== sha);
   if (foreign) return { ok: false, why: `the lookup returned a check run for another commit (${String(foreign?.head_sha).slice(0, 12)})` };
-  const latest = new Map();
-  for (const r of all) {
-    if (r?.app?.slug !== PREDECESSOR_APP_SLUG) continue;
-    const prev = latest.get(r.name);
-    if (!prev || Number(r.id) > Number(prev.id)) latest.set(r.name, r);
-  }
-  const runs = [...latest.values()];
+  const runs = all.filter((r) => r?.app?.slug === PREDECESSOR_APP_SLUG);
   if (runs.length === 0) return { ok: false, why: "absent: no GitHub Actions check run on that commit" };
   const pending = runs.find((r) => r.status !== "completed");
   if (pending) return { ok: false, why: `pending: check '${pending.name}' status ${pending.status}` };
@@ -827,7 +825,9 @@ const CASES = [
         const proven = [
           ["every Actions check green, one SKIPPED and one NEUTRAL", checkRuns(done("frontend", "success"), done("e2e", "skipped"), done("lighthouse-mobile", "neutral"))],
           ["a FAILED non-Actions check (a Vercel deployment) is ignored", checkRuns(done("frontend", "success"), done("Vercel", "failure", { app: { slug: "vercel" } }))],
-          ["an older RED run superseded by a newer GREEN run of the same check", checkRuns(done("e2e", "failure"), done("e2e", "success"), done("frontend", "success"))],
+          // An in-suite re-run: `filter=latest` returns only the latest attempt, so
+          // a red attempt re-run green arrives as ONE green run. That is trusted.
+          ["an in-suite re-run (only the latest, green attempt returned)", checkRuns(done("e2e", "success", { id: 7 }), done("frontend", "success", { id: 8 }))],
         ];
         for (const [label, fetchCheckRuns] of proven) {
           const v = classifyPushRange({ before, cwd: r.dir, fetchCheckRuns });
@@ -841,6 +841,9 @@ const CASES = [
           ["a RED check from ANOTHER workflow on the same commit", checkRuns(done("frontend", "success"), done("apply-test", "failure")), "'apply-test' concluded failure"],
           ["a RED dispatch-run check (Railway counts dispatch runs too)", checkRuns(done("frontend", "success"), done("secret-scan", "failure")), "'secret-scan' concluded failure"],
           ["an older GREEN run superseded by a newer RED run of the same check", checkRuns(done("e2e", "success"), done("e2e", "failure")), "'e2e' concluded failure"],
+          // Orchestrator decision 2026-10-02: a newer suite does NOT hide an older
+          // red one. Whether Railway lets it is unmeasured, so this is refused.
+          ["an older RED run in another suite beside a newer GREEN run of the same check", checkRuns(done("e2e", "failure"), done("e2e", "success"), done("frontend", "success")), "'e2e' concluded failure"],
           ["a CANCELLED predecessor", checkRuns(done("frontend", "cancelled")), "concluded cancelled"],
           ["a TIMED-OUT check", checkRuns(done("frontend", "timed_out")), "concluded timed_out"],
           ["an ACTION_REQUIRED check", checkRuns(done("frontend", "action_required")), "concluded action_required"],
