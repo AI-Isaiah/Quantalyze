@@ -193,6 +193,12 @@ BEGIN
   INSERT INTO compute_jobs (strategy_id, kind, status, metadata)
   VALUES (s_r1, c_kind, 'done', jsonb_build_object('fixture', 'enq40001-r2-winner'))
   RETURNING id INTO v_done_id;
+  -- Precondition: without a done row the `v_new_id = v_done_id` check below
+  -- compares against NULL and is skipped silently, so R2 would pass with its
+  -- premise (the winner is terminal) never set up.
+  IF v_done_id IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (R2-precondition): the done winner seed inserted no row, so R2 cannot test that the re-run skips a done job.';
+  END IF;
 
   -- The re-run PostgREST 14 makes after the 40001, here made by hand. The
   -- single shot was spent in R1, so this call runs disarmed.
