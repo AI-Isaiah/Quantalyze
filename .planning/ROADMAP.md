@@ -4212,6 +4212,10 @@ Plans:
 5. ⛔ `e2e/target-size.spec.ts` is not weakened: no re-query-until-stable at its line 274, no added retry.
 6. Whether the `e2e/composite-factsheet-render.spec.ts` axe (cash basis) flake is the same class is measured and recorded.
 
+⭐ **Founder decision, 2026-10-02 (AskUserQuestion, "Minimal fix"), overriding CONTEXT.md's earlier wording:** the shared helper keeps today's `v += step` accumulation and replaces only the power of ten with an engine-independent exact one (`Number("1e"+exp)`, exponent from `toExponential()`, no `Math.pow`/`Math.log10`), plus snap-to-zero. The earlier sentence "tick values should come from an integer index times the step, rounded to the step's decimals" is withdrawn: research (`169.1.1-RESEARCH.md` Finding 3) measured that it changes non-zero labels at `toFixed` half-way points (377/4,400 EquityChart cases, 2/4,400 factsheet), breaking UI-SPEC TK-4, while the accumulation is IEEE-exact in every engine and never caused #418. The minimal construction is identical in Node and Chromium on all six sites and changes only zero ticks.
+
+⭐ **Founder decision, 2026-10-02 (AskUserQuestion, "Fold it in"):** the `e2e/composite-factsheet-render.spec.ts` axe (cash basis) flake is NOT hydration (research Finding 9: axe scans while the `<h1>` is still inside React's hidden streaming segment); its one-line fix (`await expect(h1).toBeVisible()` before the scan) is in this phase's scope.
+
 Plans:
 - [ ] TBD (run /gsd-plan-phase 169.1.1 to break down)
 
