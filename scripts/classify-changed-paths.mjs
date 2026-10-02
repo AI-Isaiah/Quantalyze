@@ -369,9 +369,11 @@ let defaultFetchWorkflowRuns = readWorkflowRuns;
 /**
  * Review 164.9.4 round 2, LOW-03: git's own reason for a fail-safe arm, as
  * `: <first stderr line>`, so a recurring cause is named in the log rather than
- * quietly costing every docs-only push a full run. Empty when git printed
- * nothing: `cat-file -e` on a missing object and `merge-base --is-ancestor` on a
- * non-ancestor both exit 1 with no stderr, and an empty reason is honest there.
+ * quietly costing every docs-only push a full run. Measured (review 164.9.4
+ * round 3, IN-01): `cat-file -e <sha>^{commit}`, the form called here, prints
+ * `fatal: Not a valid object name …` and exits 128 on a missing object, and the
+ * self-test pins that line. Only `merge-base --is-ancestor` on a non-ancestor
+ * exits 1 with no stderr, so its reason is empty, which is honest there.
  * git's `fatal:` line names refs and paths, never a secret.
  */
 function gitWhy(e) {
