@@ -1537,6 +1537,35 @@ true for 146 and half of 142–145, and **false for 141**.
       `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
       evidence.
 
+- [x] **`[164.9.4-DEFER-40001-RETRY-HANG]` A mismatched-token `defer_compute_job` RPC hangs through PostgREST instead of failing (booked 2026-09-26, Phase 164.9.4 D-15, evidence only).**
+      **Measured 2026-09-26 on a private local-stack lane** (no shared TEST, no other load on
+      the database). `defer_compute_job` raises `USING ERRCODE = 'serialization_failure'`
+      (SQLSTATE 40001) on its mismatched-token path, read from the function definition on the
+      lane. A direct PostgREST call with a mismatched token got no response within
+      `--max-time 25` (`http=000 real 25.18`); the same call with the matching token returned
+      `http=200 real 0.36`. The PostgREST log answered the hung request only after the row's
+      state changed (`defer_compute_job: job … not found or not running`). This is the
+      behaviour Supabase documents on its troubleshooting page "High CPU and infinite
+      transaction retries when using custom error codes in RPC functions"
+      (https://supabase.com/docs/guides/troubleshooting/high-cpu-and-infinite-transaction-retries-when-using-custom-error-codes-in-rpc-functions-77326b):
+      PostgREST retries a transaction that raises 40001. Source: `164.9.4-RESEARCH.md`,
+      `## Python on the lane (MEASURED)`.
+      **Consequence.** The skip reasons in `analytics-service/tests/test_compute_jobs_fencing.py`
+      carry a MISATTRIBUTED root cause. `test_defer_compute_job_token_fence` skips at runtime
+      after about 120 s on the idle private lane too, deterministically, so shared-TEST contention
+      is not the cause. The three `@pytest.mark.skip("P1 TODO — flaky httpx.ReadTimeout …")`
+      fence tests (`test_late_mark_done_with_stale_token_raises_serialization_failure`,
+      `test_late_mark_failed_with_stale_token_raises_serialization_failure`,
+      `test_late_mark_done_after_w2_completed_raises_serialization_failure`) blame the same
+      contention. Their functions raise the same SQLSTATE, so the 40001 retry loop is the likely
+      cause there too; that half is UNMEASURED, only `defer_compute_job` was probed. Leaving
+      shared TEST therefore does not un-skip any of them. The job worker
+      (`analytics-service/services/job_worker.py`) calls `defer_compute_job` through the same
+      PostgREST RPC path, so a stale worker may hang instead of failing fast: the compute
+      pipeline may be affected, so this may be data-integrity.
+      ⏳ **Destination: AWAITS ROUTING.** The 2026-09-26 founder freeze forbids new phases; route it with /gsd-phase when the freeze lifts. Not fixed in 164.9.4, and it moves no count there.
+      ✅ CLOSED 2026-10-02 by Phase 164.9.3.2 DEFER40001. Migration `supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql` moves all four claim-token fence raises (`defer_compute_job`, `mark_compute_job_done` twice, `mark_compute_job_failed`) from SQLSTATE 40001 to `55006` with the message text unchanged, and PostgREST answers that code once. Evidence, plans 01-05: all four raises measured hanging through the lane's PostgREST v14.7 before the fix (no answer at 20 s, the retry loop still running after the client left); the gate `supabase/tests/test_compute_job_fence_errcode.sql` RED without the migration (first failure D1, SQLSTATE 40001) and GREEN with it (`ALL 8 ARMS EXECUTED`), each of its 8 twins observed biting; the four live-DB arms in `src/__tests__/compute-jobs-audit-2026-05-07-g10b.test.ts` aborted at their 10 s bound on the seam lane and answered `55006` once on the fixed lane; in Python, `test_defer_compute_job_token_fence` was SKIPPED after 121.61 s before the fix and PASSED in 0.01 s with no skip after, and the three decorated late-mark tests measured PASSED on the lane (their decorators stay until 164.9.4 moves `python` off shared TEST). ENQ-SCOPE = `enq-sibling` (founder, 2026-10-01): the enqueue race-loss raise in `_enqueue_compute_job_internal` is routed to Phase 164.9.3.2.1 ENQ40001. The fix is live only once this phase's merge applies the migration to PROD. The text above is kept as lineage.
+
 - [x] **`[164.9.5-MANUAL-BASELINE-REDUMP]` Every PROD migration apply leaves `main` red on
       baseline-content-drift until someone runs a manual schema dump (booked 2026-09-26, founder
       decision).**

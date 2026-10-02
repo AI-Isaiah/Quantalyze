@@ -918,14 +918,24 @@ def _defer_lost_ownership(exc: Exception) -> bool:
     """True when a defer_compute_job call failed because THIS worker no longer
     owns the job. NEW-C12-06 fenced defer_compute_job on claim_token: a
     watchdog reclaim + re-claim under a fresh token makes defer raise
-    serialization_failure (SQLSTATE 40001, message 'preempted by watchdog
-    reclaim'); a row that is no longer 'running' raises no_data_found
-    (message 'not found or not running'). Either way the job belongs to
-    another worker now and must be yielded (DEFERRED), not failed/retried with
-    a stale token. Matched by SQLSTATE when PostgREST surfaces it, else by the
-    RPC's own RAISE-message text. Kept local to avoid a circular import with
-    main_worker (which imports this module)."""
-    if getattr(exc, "code", None) == "40001":  # serialization_failure
+    SQLSTATE 55006 (object_in_use, message 'preempted by watchdog reclaim');
+    a row that is no longer 'running' raises no_data_found (message 'not
+    found or not running'). Either way the job belongs to another worker now
+    and must be yielded (DEFERRED), not failed/retried with a stale token.
+    Matched by SQLSTATE 55006 when PostgREST surfaces it, else by the RPC's
+    own RAISE-message text.
+
+    Phase 164.9.3.2: the fence raised serialization_failure (40001) before,
+    and PostgREST 14 re-runs a 40001 without bound, so the defer never
+    returned. The message literals cover ONE deploy order: migration first,
+    old worker. The body answers a 55006 once, and an old classifier matches
+    it by the literal. The reverse order (new worker, old body) is NOT
+    covered: the body still raises 40001, PostgREST 14 re-runs it without
+    bound, and no response ever reaches this classifier. That is the pre-fix
+    hang, unchanged, until the migration applies. A bare 40001 without either literal is an unrelated serialization
+    conflict and is NOT classified (PR #149 I4 narrowing). Kept local to
+    avoid a circular import with main_worker (which imports this module)."""
+    if getattr(exc, "code", None) == "55006":  # object_in_use: the claim-token fence
         return True
     msg = str(exc).lower()
     return (
@@ -1020,11 +1030,13 @@ async def _check_circuit_breaker(
     except Exception as _defer_exc:  # noqa: BLE001
         # NEW-C12-06: defer_compute_job is now claim-token fenced. If THIS
         # worker was preempted (watchdog reclaim + another worker re-claimed
-        # under a fresh token), the defer raises serialization_failure; if the
+        # under a fresh token), the defer raises SQLSTATE 55006 (Phase
+        # 164.9.3.2: it raised 40001 before, which PostgREST 14 re-ran without
+        # bound, so the call never returned); if the
         # row is no longer running, no_data_found. In both cases this worker no
         # longer owns the job — yield it as DEFERRED (the owner will process
         # it). Owning the preemption signal HERE is the point: otherwise the
-        # raw 40001 propagates to dispatch's catch-all, is classified
+        # raw fence error propagates to dispatch's catch-all, is classified
         # error_kind='unknown' and RETRIED, then carries our stale token into
         # mark_compute_job_failed — corruption-safe only incidentally via the
         # mig-117 mark fence. A genuine defer failure (DB down, etc.) is

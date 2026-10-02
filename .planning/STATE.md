@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 170
-current_phase_name: LAYOUT — page layout reads clean and holds on every page
+current_phase: 164.9.3.2
+current_phase_name: DEFER40001
 status: executing
 stopped_at: Completed 170-10-PLAN.md
-last_updated: "2026-09-27T23:26:18.000Z"
-last_activity: 2026-09-27
-last_activity_desc: Completed 170-10-PLAN.md
-state_head: 85c46849c7c9a2f9778feb5832c788b1db72c605
+last_updated: "2026-10-01T18:31:27.486Z"
+last_activity: 2026-10-01
+last_activity_desc: Phase 164.9.3.2 execution started
+state_head: 82f0ee391fd72beb28f9503edf0cbbae3b6cb3e1
 progress:
   total_phases: 80
   completed_phases: 44
@@ -179,10 +179,10 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.9.3 (CLAIMPAIR) — COMPLETE 2026-09-27 (verification passed; PR #890 merged, v0.109.0.0)
+Phase: 164.9.3.2 (DEFER40001) — EXECUTING
 Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
 Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
-Plan: 20 of 20; VERIFICATION passed (post-deploy pass 2026-10-01; Holdings and FC-2 routed to 170.2)
+Plan: 1 of 8
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
 Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
@@ -498,7 +498,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 170
+Status: Executing Phase 164.9.3.2
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -514,7 +514,7 @@ Status: Executing Phase 170
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-27 — Completed 170-10-PLAN.md
+Last activity: 2026-10-01 — Phase 164.9.3.2 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1421,6 +1421,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 169.4 edited: edited fields: success_criteria (criterion 12: the allocations scenario benchmark's innerJoinByDate must use the D-A interval-matched pairing and the day-one rule; routed 2026-09-27 from the 166.4 BENCHALIGN research)
 - Phase 167.1.1 edited: routed in: D-13 /compare per-holding metrics need a flow-neutral per-holding source (from 167.1.2 PR C2, 2026-09-29)
 - Phase 167.1.2.1 edited: routed in: 8 C2 writer-side residuals from review rounds 1-3 (SFH-05 writer half, single failing key dilution, SFH-R3-02, SFH-R3-07, SFH-08, SFH-09, R2-CR-02 residual, R3-WR-02) (from 167.1.2 PR C2, 2026-09-29)
+- Phase 164.9.3.2.1 inserted after Phase 164.9.3.2: ENQ40001: enqueue race-loss 40001 raise, booked by ENQ-SCOPE=enq-sibling
 
 ### Decisions
 

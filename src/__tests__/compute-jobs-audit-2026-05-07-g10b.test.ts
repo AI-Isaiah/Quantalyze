@@ -611,7 +611,8 @@ describe("audit-2026-05-07 G10.B / mig 109 — mark_compute_job_done idempotency
         // ⚠️ The SAME token: mig 117's idempotent branch returns silently only
         // when the caller's token matches the one recorded on the done row; a
         // DIFFERENT token is a late mark after a watchdog reclaim and raises
-        // serialization_failure by design.
+        // SQLSTATE 55006 by design (164.9.3.2; it was 40001 before, which
+        // PostgREST retried without bound).
         const second = await admin.rpc("mark_compute_job_done", {
           p_job_id: jobId,
           p_claim_token: claimToken,
@@ -1391,6 +1392,215 @@ describe("audit-2026-05-07 G10.B / mig 110 — sync_trades date-range DELETE", (
           .eq("strategy_id", strategyId);
         // Empty payload must NOT wipe pre-existing rows. (mig 110 P1)
         expect((rows ?? []).length).toBe(1);
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyId],
+        });
+      }
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Phase 164.9.3.2 DEFER40001: the claim-token fence raises answer ONCE
+// through PostgREST
+// ---------------------------------------------------------------------------
+//
+// PostgREST 14 re-runs a call whose transaction raises SQLSTATE 40001
+// (serialization failure) without bound. A claim-token mismatch never changes
+// on retry, so a fence that raised 40001 made a worker's RPC call loop instead
+// of failing once. Migration 20261001120000 moves the four fence raises
+// (defer_compute_job once, mark_compute_job_done twice, mark_compute_job_failed
+// once) to SQLSTATE 55006, which PostgREST answers once.
+//
+// A psql gate cannot see the loop: it lives in PostgREST's retrying
+// transaction, not in the function. Only a real call through PostgREST can
+// tell "answered once" from "looping", so each arm below calls the RPC with a
+// STALE token through the lane's PostgREST, bounded on the client.
+//
+// ⛔ The 10 s client bound is the DISCRIMINATOR. On a schema without the fix
+// the call aborts at the bound (error.code is not 55006: the abort surfaces as
+// an empty code, observed on the seam lane), so the arm FAILS
+// instead of hanging the suite. Never raise the bound to make an arm pass.
+const FENCE_CALL_BOUND_MS = 10_000;
+const FENCE_LITERAL = "preempted by watchdog reclaim";
+
+describe("164.9.3.2 DEFER40001 — fence raises answer once through PostgREST", () => {
+  async function seedRunningRow(
+    admin: SupabaseClient,
+    marker: string,
+  ): Promise<{
+    userId: string;
+    strategyId: string;
+    jobId: string;
+    tokenA: string;
+  }> {
+    const userId = await createTestUser(
+      admin,
+      `g10b-fence-${marker}-${Date.now()}@test.sec`,
+    );
+    const strategyId = await seedStrategy(admin, userId, `fence-${marker}`);
+    // Token A is the one a real claim would have written (see F2 above).
+    const tokenA = mintClaimToken();
+    const jobId = await insertComputeJob(admin, {
+      strategy_id: strategyId,
+      kind: "sync_trades",
+      status: "running",
+      attempts: 1,
+      max_attempts: 3,
+      claimed_at: new Date().toISOString(),
+      claimed_by: `test-worker-fence-${marker}`,
+      claim_token: tokenA,
+    });
+    return { userId, strategyId, jobId, tokenA };
+  }
+
+  function expectAnsweredOnceWith55006(
+    error: { code?: string; message?: string } | null,
+    elapsedMs: number,
+  ): void {
+    expect(
+      error?.code,
+      `the stale-token call must answer SQLSTATE 55006 (got code=${JSON.stringify(error?.code)} elapsed=${elapsedMs}ms); an abort at the bound means PostgREST looped on a 40001`,
+    ).toBe("55006");
+    expect(
+      error?.message ?? "",
+      "the worker's classifier keys on this literal; it must survive the errcode change",
+    ).toContain(FENCE_LITERAL);
+    expect(
+      elapsedMs,
+      "the call must answer once, well inside the client bound",
+    ).toBeLessThan(FENCE_CALL_BOUND_MS);
+  }
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "DEFER-55006: defer_compute_job with a stale token answers once with 55006 and leaves the row untouched",
+    async () => {
+      const admin = createLiveAdminClient();
+      const { userId, strategyId, jobId, tokenA } = await seedRunningRow(
+        admin,
+        "defer",
+      );
+      try {
+        const t0 = Date.now();
+        const { error } = await admin
+          .rpc("defer_compute_job", {
+            p_job_id: jobId,
+            p_defer_seconds: 60,
+            p_reason: "164.9.3.2 probe",
+            p_claim_token: mintClaimToken(),
+          } as never)
+          .abortSignal(AbortSignal.timeout(10_000));
+        expectAnsweredOnceWith55006(error, Date.now() - t0);
+
+        const row = await fetchJob(admin, jobId);
+        expect(row.status).toBe("running");
+        expect(row.claim_token).toBe(tokenA);
+        expect(row.attempts).toBe(1);
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyId],
+        });
+      }
+    },
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "DONE-LATE-55006: a late mark_compute_job_done on a done row answers once with 55006 and leaves the row done",
+    async () => {
+      const admin = createLiveAdminClient();
+      const { userId, strategyId, jobId, tokenA } = await seedRunningRow(
+        admin,
+        "done-late",
+      );
+      try {
+        // The P6 flow: the owning worker marks the row done with token A.
+        const first = await admin.rpc("mark_compute_job_done", {
+          p_job_id: jobId,
+          p_claim_token: tokenA,
+        } as never);
+        expect(first.error, "seeding the done row with its own token").toBeNull();
+
+        const t0 = Date.now();
+        const { error } = await admin
+          .rpc("mark_compute_job_done", {
+            p_job_id: jobId,
+            p_claim_token: mintClaimToken(),
+          } as never)
+          .abortSignal(AbortSignal.timeout(10_000));
+        expectAnsweredOnceWith55006(error, Date.now() - t0);
+
+        const row = await fetchJob(admin, jobId);
+        expect(row.status).toBe("done");
+        expect(row.claim_token).toBe(tokenA);
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyId],
+        });
+      }
+    },
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "DONE-RUNNING-55006: mark_compute_job_done with a stale token on a running row answers once with 55006 and leaves the row running",
+    async () => {
+      const admin = createLiveAdminClient();
+      const { userId, strategyId, jobId, tokenA } = await seedRunningRow(
+        admin,
+        "done-running",
+      );
+      try {
+        const t0 = Date.now();
+        const { error } = await admin
+          .rpc("mark_compute_job_done", {
+            p_job_id: jobId,
+            p_claim_token: mintClaimToken(),
+          } as never)
+          .abortSignal(AbortSignal.timeout(10_000));
+        expectAnsweredOnceWith55006(error, Date.now() - t0);
+
+        const row = await fetchJob(admin, jobId);
+        expect(row.status).toBe("running");
+        expect(row.claim_token).toBe(tokenA);
+        expect(row.attempts).toBe(1);
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyId],
+        });
+      }
+    },
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "FAILED-55006: mark_compute_job_failed with a stale token answers once with 55006 and leaves the row running",
+    async () => {
+      const admin = createLiveAdminClient();
+      const { userId, strategyId, jobId, tokenA } = await seedRunningRow(
+        admin,
+        "failed",
+      );
+      try {
+        const t0 = Date.now();
+        // A valid error_kind, so the call passes the input guard and reaches
+        // the claim-token fence.
+        const { error } = await admin
+          .rpc("mark_compute_job_failed", {
+            p_job_id: jobId,
+            p_error: "164.9.3.2 probe",
+            p_error_kind: "transient",
+            p_claim_token: mintClaimToken(),
+          } as never)
+          .abortSignal(AbortSignal.timeout(10_000));
+        expectAnsweredOnceWith55006(error, Date.now() - t0);
+
+        const row = await fetchJob(admin, jobId);
+        expect(row.status).toBe("running");
+        expect(row.claim_token).toBe(tokenA);
+        expect(row.attempts).toBe(1);
       } finally {
         await cleanupLiveDbRow(admin, {
           userIds: [userId],
