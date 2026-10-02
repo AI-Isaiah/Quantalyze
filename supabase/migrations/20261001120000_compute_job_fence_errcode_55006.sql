@@ -27,7 +27,9 @@
 -- WHAT IT DOES NOT CLOSE. The enqueue race-loss raise in
 -- `_enqueue_compute_job_internal` (also SQLSTATE 40001) is not touched here;
 -- its routing is the founder's ENQ-SCOPE decision, recorded by plan
--- 164.9.3.2-01.
+-- 164.9.3.2-01. ENQ-SCOPE = enq-sibling (founder, 2026-10-01): that raise is
+-- routed to Phase 164.9.3.2.1 ENQ40001, and this migration covers the fence
+-- family only.
 --
 -- THE RULE (RESEARCH Pitfall 8): never raise 40001 or 40P01 from a
 -- PostgREST-callable function on PostgREST < 16. hasql-transaction retries both
