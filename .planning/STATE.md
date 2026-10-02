@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.9.3.2.1
 current_phase_name: ENQ40001
 status: planning
-stopped_at: Phase 169.1.1 complete (PR #925 merged, v0.118.1.0); next the 164.4.2 gate-only close, then Phase 164.9.3.2.1
+stopped_at: Phase 164.4.2 complete (SUBSET observed in CI on PR #927); next Phase 164.9.3.2.1
 last_updated: "2026-10-02T10:48:30.128Z"
 last_activity: 2026-10-02
-last_activity_desc: Phase 169.1.1 HYDRATIONTICKS complete — verification passed (SC-4/SC-6 read from CI on PR #925), merged 8b9b02e7
+last_activity_desc: Phase 164.4.2 SUBSETSPLIT complete — verification passed (SUBSET run read from CI on PR #927, merged fd4d86cd)
 state_head: 4dd2aacfb
 progress:
   total_phases: 85
-  completed_phases: 47
+  completed_phases: 48
   total_plans: 450
-  completed_plans: 443
-  percent: 55
+  completed_plans: 449
+  percent: 56
 ---
 
 ## ⭐ STATE lineage
@@ -517,7 +517,7 @@ Status: Ready to plan Phase 164.9.3.2.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-10-02 — Phase 169.1.1 complete (PR #925)
+Last activity: 2026-10-02 — Phase 164.4.2 complete (SUBSET observed on PR #927)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -971,7 +971,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [██████░░░░] 55%
+Progress: [██████░░░░] 56%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -2494,7 +2494,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** Phase 169.1.1 complete; next 164.4.2 gate-only close, then 164.9.3.2.1
+**Stopped At:** Phase 164.4.2 complete; next 164.9.3.2.1
 **Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
