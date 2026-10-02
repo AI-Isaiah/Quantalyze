@@ -1238,6 +1238,17 @@ async def watchdog_loop(interval: float = 60.0) -> None:
 
 async def daily_enqueue_loop(interval: float = 86400.0) -> None:
     """Daily enqueue loop: once per day, seed poll_positions jobs."""
+    # A `backfill` worker runs NEXT TO the API's merged worker (FLIP runbook
+    # Step 1), which already seeds the daily poll. Seeding here too would give
+    # every strategy a second poll_positions job per day (the in-flight dedup
+    # does not cover completed rows), doubling exchange calls.
+    if WORKER_CLAIM_ROLE == "backfill":
+        logger.info(
+            "daily_enqueue: disabled for WORKER_CLAIM_ROLE=backfill — the "
+            "interactive/merged worker owns the daily poll seed.",
+            extra={"event_type": "daily_enqueue_disabled_backfill_role"},
+        )
+        return
     # Run on startup ONLY if the daily enqueue hasn't already run today.
     # redteam-2026-05 W1 (LOW9): without this gate, every Railway
     # redeploy/crash within one day re-ran the full enqueue, inflating the
