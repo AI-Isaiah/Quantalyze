@@ -36,10 +36,17 @@ export const HYDRATION_ERROR_PATTERNS: readonly RegExp[] = [
   /Hydration failed because the server rendered/,
 ];
 
-export const test = base.extend<{ hydrationGuard: void }>({
+export const test = base.extend<{ hydrationHits: string[]; hydrationGuard: void }>({
+  /**
+   * The hydration-mismatch messages recorded for this test. Exposed so the
+   * self-test can assert on them directly; a spec that empties it after an
+   * expected hit lets teardown pass.
+   */
+  hydrationHits: async ({}, provide) => {
+    await provide([]);
+  },
   hydrationGuard: [
-    async ({ context }, use) => {
-      const hits: string[] = [];
+    async ({ context, hydrationHits: hits }, use) => {
       context.on("weberror", (webError) => {
         const err = webError.error();
         const message = String(err?.message ?? err);

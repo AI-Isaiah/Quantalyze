@@ -3,12 +3,19 @@
  *
  * A guard that cannot fail is worse than none, so this spec drives the fixture
  * in both polarities with no app server (`page.setContent` only):
- *   - a page reporting the production #418 message fails its test;
- *   - a page reporting the dev-mode "Hydration failed …" message fails its test;
- *   - a page reporting an unrelated error passes.
- * The two failing cases are marked expected failures. If the guard stops
- * biting they PASS, which Playwright reports as a failure, so this spec goes
- * red exactly when the guard goes blind. It runs in CI's unseeded e2e list.
+ *   - a page reporting the production #418 message is RECORDED;
+ *   - a page reporting the dev-mode "Hydration failed …" message is RECORDED;
+ *   - a page reporting an unrelated error is NOT recorded.
+ * Those three assert on `hydrationHits` directly, in the positive, so a failure
+ * anywhere else (a listener that throws, an event that times out) fails them
+ * instead of counting as the expected failure. The recorded hit is then cleared
+ * so teardown passes.
+ *
+ * One case keeps `test.fail()`, the only way to cover the teardown assertion
+ * itself: it leaves its hit in place, and its body first asserts the hit was
+ * recorded, so the expected failure can only come from teardown. If teardown
+ * stops throwing, the case PASSES and Playwright reports that as a failure.
+ * It runs in CI's unseeded e2e list.
  *
  * Each case awaits the `weberror` event together with the `reportError` call,
  * so the event is delivered before fixture teardown runs. A plain sleep would
@@ -27,26 +34,45 @@ async function reportPageError(page: Page, context: BrowserContext, message: str
   expect(webError.error().message).toBe(message);
 }
 
+const REACT_418 = "Minified React error #418; visit https://react.dev/errors/418?args[]=text";
+const DEV_HYDRATION = "Hydration failed because the server rendered text didn't match the client.";
+
 test.describe("hydration guard self-test", () => {
-  test("a page reporting React #418 fails the test", async ({ page, context }) => {
-    test.fail();
-    await reportPageError(
-      page,
-      context,
-      "Minified React error #418; visit https://react.dev/errors/418?args[]=text",
-    );
+  test("a page reporting React #418 is recorded", async ({ page, context, hydrationHits }) => {
+    await reportPageError(page, context, REACT_418);
+    expect(hydrationHits).toHaveLength(1);
+    expect(hydrationHits[0]).toContain("Minified React error #418");
+    hydrationHits.length = 0; // expected hit: let teardown pass
   });
 
-  test("a page reporting the dev hydration message fails the test", async ({ page, context }) => {
-    test.fail();
-    await reportPageError(
-      page,
-      context,
-      "Hydration failed because the server rendered text didn't match the client.",
-    );
+  test("a page reporting the dev hydration message is recorded", async ({
+    page,
+    context,
+    hydrationHits,
+  }) => {
+    await reportPageError(page, context, DEV_HYDRATION);
+    expect(hydrationHits).toHaveLength(1);
+    expect(hydrationHits[0]).toContain("Hydration failed because the server rendered");
+    hydrationHits.length = 0; // expected hit: let teardown pass
   });
 
-  test("a page reporting an unrelated error passes", async ({ page, context }) => {
+  test("a page reporting an unrelated error is not recorded", async ({
+    page,
+    context,
+    hydrationHits,
+  }) => {
     await reportPageError(page, context, "unrelated probe error");
+    expect(hydrationHits).toEqual([]);
+  });
+
+  test("a recorded hit left in place fails the test in teardown", async ({
+    page,
+    context,
+    hydrationHits,
+  }) => {
+    test.fail();
+    await reportPageError(page, context, REACT_418);
+    // The body itself passes, so the expected failure can only be teardown's.
+    expect(hydrationHits).toHaveLength(1);
   });
 });
