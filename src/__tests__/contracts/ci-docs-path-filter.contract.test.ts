@@ -750,6 +750,31 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
     ).toEqual([]);
   });
 
+  // ── review 164.9.4 round 2, SFH-04: the predecessor lookup's credentials ─
+  it("`changed-paths` declares exactly `contents: read` + `checks: read`, and only `classify` gets GH_TOKEN", () => {
+    const block = jobBlockLines(DETECTOR);
+    const at = block.findIndex((l) => /^ {4}permissions:\s*$/.test(l));
+    expect(
+      at,
+      "`changed-paths` has no job-level `permissions:` block. The push classifier reads `before`'s " +
+        "`frontend` check run and needs `checks: read`; without it every lookup fails and every " +
+        "docs-only push silently loses its short path (safe, but the founder's routing stops working).",
+    ).toBeGreaterThan(-1);
+    const perms: string[] = [];
+    for (let i = at + 1; i < block.length && /^ {6}\S/.test(block[i]); i += 1) perms.push(block[i].trim());
+    // A job-level block REPLACES the workflow-level one: `contents: read` must
+    // be restated, and nothing broader may ride in beside the one uplift.
+    expect(perms.sort()).toEqual(["checks: read", "contents: read"]);
+    const tokenLines = block.filter((l) => /^\s+GH_TOKEN:/.test(l));
+    expect(tokenLines, "GH_TOKEN must reach exactly one step, the classify step").toHaveLength(1);
+    const classifyAt = block.findIndex((l) => /^ {6}- id: classify\s*$/.test(l));
+    const nextStep = block.findIndex((l, i) => i > classifyAt && /^ {6}- /.test(l));
+    const tokenAt = block.findIndex((l) => /^\s+GH_TOKEN:/.test(l));
+    expect(classifyAt, "the classify step is gone").toBeGreaterThan(-1);
+    expect(tokenAt > classifyAt && (nextStep === -1 || tokenAt < nextStep), "GH_TOKEN is not on the classify step").toBe(true);
+    expect(tokenLines[0].trim()).toBe("GH_TOKEN: ${{ github.token }}");
+  });
+
   // ── the CONDITION FORM: one physical line, fail-closed spelling ──────────
   it("every filtered condition is ONE physical line in the not-equals-true form", () => {
     for (const job of DERIVED_FILTERED) {
@@ -1022,6 +1047,19 @@ describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test 
     expect(code, `a classifier that trusts a non-ancestor before-SHA must EXIT NON-ZERO.\n${out}`).not.toBe(0);
     expect(out).toContain(FAILED_BANNER);
     expect(out).toContain("FAIL — a non-ancestor (force-pushed-over) before-SHA classifies as code");
+  });
+
+  // ── neuter leg 5: the predecessor-verdict gate (review 164.9.4 round 2, SFH-04)
+  it("CALIBRATION — dropping the predecessor-verdict gate turns the self-test RED (SFH-04)", () => {
+    // Without the gate a `.planning/`-only push on top of a red code commit gets
+    // a short green run on code CI rejected, and Railway deploys it.
+    const mutated = mutate("if (!verdict.ok) return fullCorpus(", "if (false) return fullCorpus(", "predecessor-gate");
+    const { code, out } = selfTest(mutated);
+    expect(code, `a classifier that ignores a red predecessor must EXIT NON-ZERO.\n${out}`).not.toBe(0);
+    expect(out).toContain(FAILED_BANNER);
+    expect(out).toContain("FAIL — a RED predecessor (frontend concluded failure) classifies as code");
+    expect(out).toContain("FAIL — a PENDING predecessor (its CI still running) classifies as code");
+    expect(out).toContain("FAIL — an API ERROR during the lookup classifies as code");
   });
 
   // ── review 164.4.2 IN-02: no raw git line above a PASSED verdict ──────────

@@ -154,6 +154,13 @@ jobs:
     # sufficient here — the `git diff` route was chosen over a third-party
     # changed-files action precisely so no permission uplift and no new action
     # SHA are needed.
+    # (⚠️ CORRECTED 2026-10-02, Phase 164.9.4 review round 2, SFH-04: this job
+    # now declares its OWN `permissions:` block, `contents: read` plus
+    # `checks: read`. On a docs-only push the classifier reads the `frontend`
+    # check run on `before` through `gh api` and takes the short path only when
+    # it concluded `success`. A job-level block REPLACES the workflow-level one,
+    # so `contents: read` is restated, not inherited. No new action SHA. The
+    # sentence above is kept as lineage.)
     #
     # ⭐ Phase 164.4.2 / DECISION D — this job ALSO publishes the SQL gate
     # SUBSET that `sql-mutation` narrows to on a pull request:
@@ -172,6 +179,9 @@ jobs:
     # `if:` — the no-`if:` paragraph above binds this derivation too.
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: read
     outputs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
       sql_gate_mode: ${{ steps.sql_gate_subset.outputs.sql_gate_mode }}
@@ -195,11 +205,18 @@ jobs:
       # before-SHA missing from this clone or not an ancestor). The two event
       # fields reach it through `env:`, never interpolated into `run:`. Both are
       # empty on a pull_request and a workflow_dispatch, which never read them.
+      # (2026-10-02, review round 2 SFH-04) A docs-only push range takes the
+      # short path ONLY when `before`'s `frontend` check run concluded
+      # `success`; red, cancelled, pending, absent or an API error runs the
+      # full corpus with the reason printed. `GH_TOKEN` is this job's
+      # `checks: read` token, scoped to this step alone. `GITHUB_REPOSITORY`
+      # is a runner default.
       - id: classify
         run: node scripts/classify-changed-paths.mjs
         env:
           PUSH_BEFORE_SHA: ${{ github.event.before }}
           PUSH_FORCED: ${{ github.event.forced }}
+          GH_TOKEN: ${{ github.token }}
       # Same red-path-first shape for the SQL gate subset derivation: its
       # self-test drives every verdict (including an unreadable base, which is
       # a MEASURE_FAIL and never an empty change set) before the real run. A

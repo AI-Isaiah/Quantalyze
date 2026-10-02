@@ -197,13 +197,24 @@ export function changedFilesAgainstBase({ baseRefName = process.env.GITHUB_BASE_
  * always-on jobs and the `if: always()` `frontend` aggregator still run, so the
  * SHA gets a recorded green run that deploy automation can wait on.
  *
- * @param {{before?: string, forced?: string|boolean, cwd?: string}} opts —
+ * ⛔ (2026-10-02, review 164.9.4 round 2, SFH-04) A docs-only range is ALSO
+ * required to sit on a PROVEN predecessor: `before`'s own `frontend` check run
+ * must have completed with `success`. Without that, a `.planning/`-only push on
+ * top of a red or still-running code commit got a short green run on the very
+ * code CI had rejected, and Railway (which deploys on a docs-only push, gated on
+ * that push's own suite) shipped it. Red, cancelled, pending, absent, or a
+ * lookup that failed: full corpus, with the reason printed.
+ *
+ * @param {{before?: string, forced?: string|boolean, cwd?: string, fetchCheckRuns?: (sha: string) => any}} opts —
  *   `before` and `forced` come from `github.event.before` / `.forced`, passed in
  *   through the step's `env:`. `cwd` exists for the self-test's scratch repos.
+ *   `fetchCheckRuns` is the predecessor-verdict seam: production reads it through
+ *   `gh api` (`readCheckRuns`); the self-test injects canned responses, offline.
  * @returns {{docsOnly: boolean, reason: string}}
  */
-export function classifyPushRange({ before, forced, cwd } = {}) {
-  const code = (reason) => ({ docsOnly: false, reason: `push range undeterminable (${reason}) — classified as code, full corpus` });
+export function classifyPushRange({ before, forced, cwd, fetchCheckRuns = readCheckRuns } = {}) {
+  const fullCorpus = (reason) => ({ docsOnly: false, reason: `${reason} — classified as code, full corpus` });
+  const code = (reason) => fullCorpus(`push range undeterminable (${reason})`);
   const sha = String(before ?? "").trim();
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return code(`before-SHA ${sha ? "is not an object name" : "is absent"}`);
   if (/^0+$/.test(sha)) return code("before-SHA is all zeros, a branch-creating push");
@@ -229,7 +240,76 @@ export function classifyPushRange({ before, forced, cwd } = {}) {
     return code("git diff over the range failed");
   }
   if (files.length === 0) return code("the range changed no files");
-  return { docsOnly: judge(files), reason: `${files.length} changed file(s) in the pushed range ${sha.slice(0, 12)}..HEAD` };
+  const range = `${files.length} changed file(s) in the pushed range ${sha.slice(0, 12)}..HEAD`;
+  if (!judge(files)) return { docsOnly: false, reason: range };
+  // Review 164.9.4 round 2, SFH-04. A docs-only range proves nothing about the
+  // CODE under it, which is exactly `before`'s code. The short path is taken
+  // only when `before` itself carries a successful `frontend` verdict; see
+  // `predecessorVerdict`. Consulted LAST, so a code push never calls the API.
+  const verdict = predecessorVerdict(sha, fetchCheckRuns);
+  if (!verdict.ok) return fullCorpus(`predecessor ${sha.slice(0, 12)} has no successful frontend verdict (${verdict.why})`);
+  return { docsOnly: true, reason: `${range}; predecessor ${sha.slice(0, 12)} ${verdict.why}` };
+}
+
+/**
+ * The name of the `frontend` aggregator's check run, the one verdict that
+ * covers every gate on a push to main. A red `python` reaches it too: on a push
+ * `test-db-drift` needs `python`, so a failed `python` skips it, and the
+ * aggregator's `test-db-drift` arm reds a skip on a trusted event.
+ */
+export const PREDECESSOR_CHECK_NAME = "frontend";
+
+/**
+ * PRODUCTION reader for `before`'s check runs, through `gh api` with the job's
+ * `GH_TOKEN` (`checks: read`). `GITHUB_REPOSITORY` is set on every Actions
+ * runner. THROWS on anything it cannot read; `predecessorVerdict` turns a throw
+ * into a code verdict.
+ */
+export function readCheckRuns(sha, repo = process.env.GITHUB_REPOSITORY) {
+  if (!/^[\w.-]+\/[\w.-]+$/.test(String(repo ?? ""))) {
+    throw new Error(`GITHUB_REPOSITORY is ${repo ? "not an owner/name pair" : "absent"}`);
+  }
+  // argv elements, never a shell string; a bounded wait, since the job has five
+  // minutes in total.
+  const raw = execFileSync("gh", ["api", `repos/${repo}/commits/${sha}/check-runs?check_name=${PREDECESSOR_CHECK_NAME}`], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 60_000,
+  });
+  return JSON.parse(raw);
+}
+
+/** The first line of a failed child's stderr, or the error message. */
+function firstLine(e) {
+  return (String(e?.stderr ?? "").trim().split("\n")[0] || String(e?.message ?? e)).trim();
+}
+
+/**
+ * PURE apart from the injected `fetchCheckRuns(sha)`: is `before`'s
+ * `frontend` verdict a completed SUCCESS? Anything else (red, cancelled,
+ * pending, absent, an unreadable response or a lookup that threw) is
+ * `ok: false` with the reason, and the caller runs the full corpus.
+ *
+ * ⛔ FAIL SAFE TO CODE. Every run named `frontend` on the commit must have
+ * completed with `success`; one pending or failed re-run is enough to refuse.
+ *
+ * @returns {{ok: boolean, why: string}}
+ */
+export function predecessorVerdict(sha, fetchCheckRuns = readCheckRuns) {
+  let body;
+  try {
+    body = fetchCheckRuns(sha);
+  } catch (e) {
+    return { ok: false, why: `the check-run lookup failed: ${firstLine(e)}` };
+  }
+  if (!Array.isArray(body?.check_runs)) return { ok: false, why: "the check-run lookup returned no check_runs array" };
+  const runs = body.check_runs.filter((r) => r?.name === PREDECESSOR_CHECK_NAME);
+  if (runs.length === 0) return { ok: false, why: "absent: no frontend check run on that commit" };
+  const pending = runs.find((r) => r.status !== "completed");
+  if (pending) return { ok: false, why: `pending: status ${pending.status}` };
+  const bad = runs.find((r) => r.conclusion !== "success");
+  if (bad) return { ok: false, why: `concluded ${bad.conclusion}` };
+  return { ok: true, why: "frontend concluded success" };
 }
 
 /**
@@ -273,17 +353,54 @@ function scratchRepo(label) {
  * Run THIS script's `main()` end to end as CI does, in `cwd`, on a push event.
  * Returns the exit code and the `docs_only=` value it appended to GITHUB_OUTPUT.
  */
-function runMainOnPush(cwd, env) {
+function runMainOnPush(cwd, env, { gh = "fail" } = {}) {
   const outFile = join(cwd, ".gsd-github-output");
   writeFileSync(outFile, "");
-  const res = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
-    cwd,
-    encoding: "utf8",
-    env: { ...process.env, GITHUB_EVENT_NAME: "push", GITHUB_OUTPUT: outFile, PUSH_BEFORE_SHA: "", PUSH_FORCED: "", ...env },
-  });
-  const line = readFileSync(outFile, "utf8").match(/^docs_only=(.*)$/m);
-  return { code: res.status, docsOnly: line ? line[1] : null, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
+  // ⭐ OFFLINE BY CONSTRUCTION (SFH-04). A fake `gh` goes FIRST on the child's
+  // PATH, so the production reader runs its real argv and never reaches the
+  // network. It records the argv it was given and answers with the canned
+  // check-run body for `gh` ("success" | "failure"), or exits 1 for "fail". The
+  // default is "fail": a row that reaches the lookup without asking for a
+  // verdict reads as code, the safe direction.
+  const bin = mkdtempSync(join(tmpdir(), "gsd-classify-gh-"));
+  const argvFile = join(bin, "argv");
+  const body = JSON.stringify({ total_count: 1, check_runs: [{ name: PREDECESSOR_CHECK_NAME, status: "completed", conclusion: gh }] });
+  const script =
+    gh === "fail"
+      ? `#!/bin/sh\nprintf '%s\\n' "$@" > '${argvFile}'\necho 'gh: self-test lookup failure' >&2\nexit 1\n`
+      : `#!/bin/sh\nprintf '%s\\n' "$@" > '${argvFile}'\nprintf '%s' '${body}'\n`;
+  writeFileSync(join(bin, "gh"), script, { mode: 0o755 });
+  try {
+    const res = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+      cwd,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        GITHUB_REPOSITORY: "self-test/repo",
+        GITHUB_EVENT_NAME: "push",
+        GITHUB_OUTPUT: outFile,
+        PUSH_BEFORE_SHA: "",
+        PUSH_FORCED: "",
+        ...env,
+      },
+    });
+    const line = readFileSync(outFile, "utf8").match(/^docs_only=(.*)$/m);
+    let ghArgv = null;
+    try {
+      ghArgv = readFileSync(argvFile, "utf8").split("\n").filter(Boolean);
+    } catch {
+      // the fake gh was never invoked
+    }
+    return { code: res.status, docsOnly: line ? line[1] : null, out: `${res.stdout ?? ""}${res.stderr ?? ""}`, ghArgv };
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+  }
 }
+
+/** Canned check-run bodies for the in-process predecessor rows. */
+const checkRuns = (...runs) => () => ({ total_count: runs.length, check_runs: runs.map((r) => ({ name: PREDECESSOR_CHECK_NAME, ...r })) });
+const GREEN = checkRuns({ status: "completed", conclusion: "success" });
 
 /**
  * The fixture table. Every row carries its own claim and fires on its own
@@ -481,8 +598,11 @@ const CASES = [
       try {
         const before = r.commit({ "src/a.ts": "export {};\n" });
         r.commit({ ".planning/ROADMAP.md": "# r\n" });
-        let pass = ok(classifyPushRange({ before, cwd: r.dir }).docsOnly === true, "classifyPushRange says docs-only for a .planning/-only pushed range");
-        const e2e = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: before });
+        let pass = ok(
+          classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === true,
+          "classifyPushRange says docs-only for a .planning/-only pushed range on a green predecessor",
+        );
+        const e2e = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: before }, { gh: "success" });
         pass = ok(e2e.code === 0 && e2e.docsOnly === "true", `main() on a push event writes docs_only=true and exits 0 (got exit ${e2e.code}, docs_only=${e2e.docsOnly})`) && pass;
         return pass;
       } finally {
@@ -533,7 +653,7 @@ const CASES = [
         );
         // CALIBRATION: the same repo says docs-only for its real range, so a
         // `false` below is caused by the bad input and not by the fixture.
-        pass = ok(classifyPushRange({ before: base, cwd: r.dir }).docsOnly === true, "CALIBRATION: the real pushed range is docs-only") && pass;
+        pass = ok(classifyPushRange({ before: base, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === true, "CALIBRATION: the real pushed range is docs-only") && pass;
         const undeterminable = [
           ["a non-ancestor (force-pushed-over) before-SHA", { before: sibling }],
           ["a forced push flag (string, as GitHub's expression renders it)", { before: base, forced: "true" }],
@@ -551,6 +671,68 @@ const CASES = [
         pass = ok(e2e.code === 0 && e2e.docsOnly === "false", `main() exits 0 with docs_only=false on an undeterminable range, never red (got exit ${e2e.code}, docs_only=${e2e.docsOnly})`) && pass;
         const dispatch = runMainOnPush(r.dir, { GITHUB_EVENT_NAME: "workflow_dispatch", PUSH_BEFORE_SHA: base });
         pass = ok(dispatch.code === 0 && dispatch.docsOnly === "false", `a workflow_dispatch is still never filtered (got docs_only=${dispatch.docsOnly})`) && pass;
+        return pass;
+      } finally {
+        r.cleanup();
+      }
+    },
+  },
+  {
+    claim: "SFH-04: a docs-only push on an UNPROVEN predecessor runs the full corpus; only a green `frontend` on `before` earns the short path",
+    run: (ok) => {
+      // RED against the round-1 code, which judged the pushed range alone: every
+      // row below then said docs_only=true over a red or unfinished code commit.
+      const r = scratchRepo("push-pred");
+      try {
+        const before = r.commit({ "src/a.ts": "export {};\n" });
+        r.commit({ ".planning/STATE.md": "# s\n" });
+        const sha12 = before.slice(0, 12);
+        // CALIBRATION: with a green predecessor this exact range IS docs-only,
+        // so each `false` below is caused by the verdict and not by the range.
+        let pass = ok(classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === true, "CALIBRATION: green predecessor, docs-only range → docs_only=true");
+        const unproven = [
+          ["a RED predecessor (frontend concluded failure)", checkRuns({ status: "completed", conclusion: "failure" }), "concluded failure"],
+          ["a CANCELLED predecessor", checkRuns({ status: "completed", conclusion: "cancelled" }), "concluded cancelled"],
+          ["a PENDING predecessor (its CI still running)", checkRuns({ status: "in_progress", conclusion: null }), "pending: status in_progress"],
+          ["a MISSING predecessor verdict (no frontend run)", () => ({ total_count: 0, check_runs: [] }), "absent"],
+          ["a green run beside a failed re-run of the same check", checkRuns({ status: "completed", conclusion: "success" }, { status: "completed", conclusion: "failure" }), "concluded failure"],
+          ["an API ERROR during the lookup", () => { const e = new Error("Command failed: gh api"); e.stderr = "gh: HTTP 502: Bad Gateway\n"; throw e; }, "gh: HTTP 502: Bad Gateway"],
+          ["a malformed API body", () => ({ message: "Not Found" }), "no check_runs array"],
+        ];
+        for (const [label, fetchCheckRuns, why] of unproven) {
+          const v = classifyPushRange({ before, cwd: r.dir, fetchCheckRuns });
+          pass =
+            ok(
+              v.docsOnly === false && v.reason.startsWith(`predecessor ${sha12} has no successful frontend verdict`) && v.reason.includes(why),
+              `${label} classifies as code, naming why (${v.reason})`,
+            ) && pass;
+        }
+        // A zero before-SHA never reaches the lookup at all: it is code first.
+        let called = false;
+        const spy = () => {
+          called = true;
+          return GREEN();
+        };
+        const zero = classifyPushRange({ before: "0".repeat(40), cwd: r.dir, fetchCheckRuns: spy });
+        pass = ok(zero.docsOnly === false && !called, `a zero before-SHA is code without consulting the predecessor (${zero.reason})`) && pass;
+        // End to end through main() and the production `gh api` reader, offline:
+        // the fake gh records its argv, so the endpoint itself is pinned.
+        const red = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: before }, { gh: "failure" });
+        pass = ok(red.code === 0 && red.docsOnly === "false", `main() on a red predecessor writes docs_only=false and exits 0, never red (got exit ${red.code}, docs_only=${red.docsOnly})`) && pass;
+        pass =
+          ok(
+            JSON.stringify(red.ghArgv) === JSON.stringify(["api", `repos/self-test/repo/commits/${before}/check-runs?check_name=frontend`]),
+            `the production reader asks gh for exactly before's frontend check runs (got ${JSON.stringify(red.ghArgv)})`,
+          ) && pass;
+        const broken = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: before }, { gh: "fail" });
+        pass = ok(broken.code === 0 && broken.docsOnly === "false" && /gh: self-test lookup failure/.test(broken.out), `main() on a failing gh writes docs_only=false, exits 0 and prints gh's reason (got exit ${broken.code}, docs_only=${broken.docsOnly})`) && pass;
+        const norepo = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: before, GITHUB_REPOSITORY: "" }, { gh: "success" });
+        pass = ok(norepo.code === 0 && norepo.docsOnly === "false" && norepo.ghArgv === null, `main() with no GITHUB_REPOSITORY is code and never calls gh (got docs_only=${norepo.docsOnly})`) && pass;
+        // A CODE range never calls the API either: the lookup is consulted last.
+        r.commit({ "src/b.ts": "export {};\n" });
+        called = false;
+        const codeRange = classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: spy });
+        pass = ok(codeRange.docsOnly === false && !called, `a code-touching range is code without consulting the predecessor (${codeRange.reason})`) && pass;
         return pass;
       } finally {
         r.cleanup();
