@@ -29,7 +29,11 @@ import type { BrowserContext } from "@playwright/test";
  * mismatch only after it hydrates the affected subtree, which is after the
  * page's scripts load. A spec that ends on a server-text assertion can finish
  * before that, so the assertion would run before the error exists. The drain
- * waits for each open page's load event and one idle callback, both bounded.
+ * waits for each open page's load event and one idle callback. The load wait is
+ * bounded by `SETTLE_LOAD_TIMEOUT_MS`. The idle wait is bounded in-page by
+ * `SETTLE_IDLE_TIMEOUT_MS` only while the page's event loop runs; a page whose
+ * main thread is wedged is bounded by the fixture timeout instead, and then
+ * fails as a generic timeout, not as the named "could not let … settle" error.
  *
  * Retries: `playwright.config.ts` retries twice in CI. A #418 is deterministic
  * for a given pair of render engines, so it reproduces on every retry; retries
