@@ -5,7 +5,15 @@ re_verified: "2026-08-23T19:58:08Z @ 939165aa2ce13acf900c4667d7494bf54497d9e5"
 status: passed
 score: 31.5/32 — the arm's TRUTH is verified; the prescribed 3-surface method is 2/3 executed (ApiKeyManager 2026-08-25, AllocatorExchangeManager 2026-10-02; StrategyForm not smoked). Numeric score NOT re-cut by 160-07 Task 3 — re-scoring belongs to the verifier.
 behavior_unverified: 1
-overrides_applied: 0
+overrides_applied: 1  # 2026-10-02 founder decision: the StrategyForm smoke stays untested ("leave it as not tested"); passed stands with behavior_unverified: 1
+verified_at_sha: 939165aa2ce13acf900c4667d7494bf54497d9e5
+drift_subjects:
+  - src/app/api/keys/validate-and-encrypt/route.ts
+  - src/app/api/strategies/finalize-wizard/route.ts
+  - src/components/exchanges/AllocatorExchangeManager.tsx
+  - src/components/strategy/ApiKeyManager.tsx
+  - src/components/strategy/StrategyForm.tsx
+  - supabase/tests/test_api_keys_insert_not_client_writable.sql
 re_verification:
   previous_status: gaps_found
   previous_score: 30/32

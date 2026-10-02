@@ -76,7 +76,7 @@ phases below carry the corrections, not the bullets.
 
 - [x] **Phase 158: OPS-CI — A merge means a deploy** - External FIFO mutex + `cancelled`-conclusion watcher close the shared-test-db eviction (#616); `sql-tests` gated by an aggregator; orphaned e2e specs run; TEST stale-`pending` drained; MultiKeyConnectStep flake root-caused (completed 2026-08-21)
 - [x] **Phase 159: RANK — Public-ranking integrity** - Failed/stale-computation KPIs out of published percentiles on BOTH engines; anon `(*)` splats become explicit projections; quantstats sign-flip + blend-annualization default closed; FILL-arm CAS; uid shape validated
-- [x] **Phase 160: PROVENANCE — The server's venue is the venue that annualizes** - `api_keys.exchange` server-authoritative at every INSERT; the `asset_class` √365/√252 stamp derives from the attested venue WITH the null-attestation guard; B-M1 PROD census first
+- [x] **Phase 160: PROVENANCE — The server's venue is the venue that annualizes** - `api_keys.exchange` server-authoritative at every INSERT; the `asset_class` √365/√252 stamp derives from the attested venue WITH the null-attestation guard; B-M1 PROD census first — verification: passed (completed 2026-10-02; PRs #703–#706, closed in #790, plan 07 in #930; StrategyForm smoke left untested by founder decision)
 - [ ] **Phase 161: WIZERR — Honest error surfaces** - The recorded WIZFORM-02 class residue: thirteen surfaces stop rendering `UNKNOWN`, false sentences, or unwinnable "try again"
 - [x] **Phase 161.1: LEDGER-REFRESH — Recurring strategy refresh for ledger-backed venues, shipped dormant behind a founder-gated schedule** (INSERTED)
 - [x] **Phase 162: HONEST — What the user sees is true** - No raw Python exceptions as copy, no FRESH badge on a dead series, real equity curves, metrics on drawer rows, the clicked key preselected
@@ -87,7 +87,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.1.1.1: LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only fixture, and the exclusion must be impossible to grow silently. MEASURED DEFECT shipped in PR #815 and RED ON MAIN (run 35347643700, merge eec8a659): supabase/tests/test_prod_prober_cadence.sql fails under sql-tests with ERROR relation net._lane_posts does not exist at :645. That table is the pg-net stand-in from scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql, whose own header says NEVER APPLIED TO TEST OR PROD — it exists only inside the throwaway pg-lane cluster. But sql-tests globs supabase/tests/test_*.sql unconditionally, so the gate passes on the lane (sql-mutation SUCCESS, mutation-covered there) and CANNOT pass on shared TEST, permanently. NOT hygiene: sql-tests is BLOCKING in the frontend aggregator and ci.yml:2205 records that Railway SKIPS the analytics-service deploy while main CI is red, so this red is what prevents POST /api/prober-cadence-alert (shipped in #815) from reaching production. SAFETY, and it forbids the lazy fix: shared TEST carries the REAL pg_net, so a gate that worked there would make genuine outbound HTTP from shared infrastructure every run — it must be EXCLUDED from that lane, never accommodated into it. LOCKED: do NOT weaken WR-03. sql-tests is built on A PRINTED SKIP IS NOT A PASS and fails the step on a whole-file RAISE NOTICE SKIP bail-out, so the fix must be a FILE-LEVEL EXCLUSION (never executed by this job, coverage asserted by sql-mutation instead), NOT an in-file skip, and that distinction must be argued in the artifact rather than assumed. SCOPE: (1) a machine-readable LANE-ONLY declaration in the gate file naming the fixture it requires; (2) the sql-tests loop honouring it and PRINTING every exclusion on every run, since a silent exclusion is the same defect class as a gate reporting PASS having measured nothing; (3) the excluded SET pinned as SITES NOT A COUNT per the B3 convention in drift-check-scripts.test.ts, re-derived from the corpus by a contract test so a one-for-one swap or a new exclusion cannot land unseen; (4) evidence the excluded file is still mutation-covered. Check whether any OTHER gate references a scripts/pg-lane/fixtures/** object — the vault stand-in vault.decrypted_secrets is the near-miss: it EXISTS on both sides (stand-in table on the lane, real view on TEST) so it is explicitly NOT this class and must not be swept in.** (INSERTED)
 - [x] **Phase 164.2: CURATED-COPY — the curated failure sentence must reach the user** (INSERTED)
 - [x] **Phase 164.2.1: SESSIONID-FENCE — the stale wizardSessionId root cause: a preselect for key B must never inherit an abandoned draft's idempotency token from key A** (INSERTED)
-- [x] **Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team** (INSERTED)
+- [x] **Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team** (INSERTED) — verification: passed (completed 2026-09-12, PR #724, v0.77.0.0; plan 07 superseded by 164.5-07, closed 2026-10-02 in #930)
 - [x] **Phase 164.3.1: SOUND-PRIMITIVES — all FOUR cycling primitives closed by construction: neuter scan, mutation identity, VAC-04, self-referential oracle** (INSERTED)
 - [x] **Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites** (INSERTED)
 - [x] **Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral** (INSERTED)
@@ -145,7 +145,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — not yet verified
 - [ ] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed
 - [ ] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed
-- [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02)
+- [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
 - [ ] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified
 - [ ] **Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers** (INSERTED) — not yet verified (plan 01 shipped in #868)
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
@@ -227,7 +227,7 @@ Plans:
   3. The `asset_class` stamp at `finalize-wizard` derives from the attested venue, and the swap MOVES WITH the null-attestation extension of the `skipAssetClassWrite` guard — a NULL attestation SKIPS; it never stamps `traditional`/√252 onto a crypto strategy (⚠️ TODOS.md's "one-identifier change" framing is measured WRONG; `isCryptoExchange(null) === false` is the trap).
   4. The B-D2 oracle pins the ECONOMICS (a null attestation annualizes on nothing — it skips), never the implementation's own expression; if the census finds affected strategies, their re-annualization gets golden-parity treatment.
 
-**Plans**: 7 plans (6 executed + 1 gap closure)
+**Plans:** 7/7 plans complete (6 executed + 1 gap closure)
 
 Plans:
 **Wave 1**
@@ -661,7 +661,7 @@ ordering is unenforced, wave frontmatter drifting from ROADMAP, and `NYQ-01`. Sa
 system (upstream `gsd-core`, not this repo). Mixing them in makes this unshippable. Book them
 separately.
 
-**Plans:** 9/10 plans executed
+**Plans:** 10/10 plans complete (plan 07 superseded by Phase 164.5 plan 07; supersession SUMMARY in #930, 2026-10-02). Was "9/10 plans executed" until 2026-10-03.
 
 Plans:
 
@@ -4630,7 +4630,7 @@ kept verbatim.
 | 164.1.1.1 LANEONLYGATES | 2/2 | Complete | #817 |
 | 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC both bucketers, HONEST-08-RESIDUAL, 161-ERRPREFIX) | 10/10 | Complete — PR #749 merged `05994f1d`, main CI green, PROD verified by effect. All 21 artifacts stripped from main by `22a5fe96` | v0.77.16.0 |
 | 164.2.1 SESSIONID-FENCE | 2/2 | Complete | v0.77.17.0 |
-| 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8 routed on, H-0001 routed on) | 9/10 | Complete — plan 07 (VAC-07) DEFERRED to 164.5 by founder decision 2026-08-29, stays unchecked | v0.77.0.0 |
+| 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8 routed on, H-0001 routed on) | 10/10 | Complete — plan 07 (VAC-07) DEFERRED to 164.5 by founder decision 2026-08-29, superseded by 164.5-07 and closed 2026-10-02 (#930) | v0.77.0.0 |
 | 164.3.1 SOUND-PRIMITIVES (four cycling primitives) | 13/13 | Complete | v0.77.1.x |
 | 164.4 REDUNDER-BACKFILL (39 idiom files annotated; 5 pg_cron-blocked files handed to 164.4.1) | 12/12 | Complete — the phase was planned as 13 and replanned to 12 against the Plan 00 spike (`9b83b064`); plan 12 was dropped there, not left undone | v0.77.12.0 |
 | 164.4.1 PGCRON-LANE (pg_cron on the lane; 5 deferred gates annotated; lane-blocked 0; ARMS_FLOOR 361) | 6/6 | Complete — PR #744 merged `e01cc2e6`, ubuntu-measured | v0.77.13.0 |
