@@ -4607,7 +4607,7 @@ kept verbatim.
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | #866 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 03 is the founder's live retry | v0.97.0.0 · #867 |
 | 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 7 plans on `feat/169-pagetruth`, not on main | Queued — feature; comparator plans split to 169.5 on 2026-09-27 (D-61); waits for 167.1.2 PR C | - |
-| 169.1 ZOOMKPIS | 9 plans on `feat/169-pagetruth`, not on main | Queued — feature; split order runs it last, after 169, 169.5 and 169.4 | - |
+| 169.1 ZOOMKPIS | 9/9 | Complete    | 2026-10-01 |
 | 169.2 BENCHFRESH | 3/3 | Shipped — verification `human_needed` (14/16, 2 routed to human checks): post-deploy checks pending, not closed | v0.107.0.0 · #879 |
 | 169.3 SMALLFIXES | 1/5 (plan 01 on main; 02–05 on `feat/169-pagetruth`) | In progress — plan 01 shipped (v0.97.0.1, #868); plans 02–05 next, 03/04 gated on 167.1.2 PR C | - |
 | 169.4 ALLOCTRUTH | 3 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 169, 169.5, 169.2 and 167.1.2 PR C | - |
