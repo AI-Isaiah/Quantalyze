@@ -17,7 +17,10 @@
  *      power call or a `10 **` exponent in CODE. Comments are stripped first
  *      (`stripCommentsPreserveLines`), so prose that names the idiom does not
  *      trip it, and line numbers stay real.
- *   2. `src/lib/chart-ticks.ts` itself calls no transcendental Math function.
+ *   2. `src/lib/chart-ticks.ts` itself uses no `Math` member other than
+ *      `Math.ceil` and `Math.abs`, and no `**` (an allowlist, not a denylist:
+ *      `Math.log2`, `Math.hypot` and friends are implementation-approximated
+ *      too, and `Math.round` is outside the module's stated contract).
  *   3. The four nice-tick builder bodies call no base-10 logarithm.
  *      `makeYTicks`'s log-scale decade lines are deliberately NOT checked: they
  *      are outside the locked class (RESEARCH Open Question 1).
@@ -36,12 +39,14 @@ import { stripCommentsPreserveLines } from "@/lib/source-scan";
 const REPO_ROOT = process.cwd();
 const SRC = join(REPO_ROOT, "src");
 
-/** A native base-10 power call: `Math.pow(10, …)`. */
-const NATIVE_POW10_RE = /Math\.pow\(\s*10\s*,/;
+/** A literal base ten: `10`, `10.0`, `1e1`. A named constant or alias is not seen. */
+const TEN_LITERAL = String.raw`(?:10(?:\.0*)?|1[eE]\+?1)`;
+/** A native base-10 power call: `Math.pow(10, …)`, `Math.pow(1e1, …)`. */
+const NATIVE_POW10_RE = new RegExp(String.raw`Math\.pow\(\s*${TEN_LITERAL}\s*,`);
 /** A `10 ** e` exponent (not `1.10 ** e`, not `x10 ** e`). */
-const EXP_POW10_RE = /(^|[^.\w])10\s*\*\*/;
-/** Transcendental Math calls and the exponent operator, banned in the helper. */
-const HELPER_BANNED_RE = /Math\.pow\b|Math\.log10\b|Math\.log\(|Math\.exp\b|\*\*/;
+const EXP_POW10_RE = new RegExp(String.raw`(^|[^.\w])${TEN_LITERAL}\s*\*\*`);
+/** Any Math member except ceil and abs, and the exponent operator: banned in the helper. */
+const HELPER_BANNED_RE = /Math\.(?!ceil\b|abs\b)\w+|\*\*/;
 
 const HELPER = "src/lib/chart-ticks.ts";
 
@@ -138,12 +143,27 @@ describe("chart-ticks class guard — self-tests (the matchers can fail)", () =>
     expect(findPow10Idiom(src, "sample.ts")).toEqual([]);
   });
 
+  it("reports a base ten written as 10.0 or 1e1", () => {
+    for (const sample of ["Math.pow(10.0, p)", "Math.pow(1e1, p)", "const m = 10.0 ** e;", "const m = 1e1 ** e;"]) {
+      expect(findPow10Idiom(`${sample}\n`, "sample.ts"), sample).toHaveLength(1);
+    }
+  });
+
   it("does NOT report a power of a number that merely ends in 10", () => {
     expect(findPow10Idiom("const a = 1.10 ** 2; const b = x10 ** 2;\n", "sample.ts")).toEqual([]);
   });
 
   it("the helper matcher reports each banned call", () => {
-    for (const sample of ["Math.pow(2, 3)", "Math.log10(x)", "Math.log(x)", "Math.exp(x)", "2 ** 3"]) {
+    for (const sample of [
+      "Math.pow(2, 3)",
+      "Math.log10(x)",
+      "Math.log(x)",
+      "Math.exp(x)",
+      "2 ** 3",
+      "Math.log2(x)",
+      "Math.hypot(x, y)",
+      "Math.round(x)",
+    ]) {
       expect(HELPER_BANNED_RE.test(sample), sample).toBe(true);
     }
     expect(HELPER_BANNED_RE.test("Math.ceil(x) + Math.abs(y)")).toBe(false);
@@ -186,7 +206,7 @@ describe("chart-ticks class guard — the power-of-ten idiom is gone from src/",
     ).toEqual([]);
   });
 
-  it("the helper itself calls no transcendental Math function", () => {
+  it("the helper itself uses no Math member but ceil and abs", () => {
     const code = stripCommentsPreserveLines(read(HELPER), "ts");
     const bad = code
       .split("\n")
