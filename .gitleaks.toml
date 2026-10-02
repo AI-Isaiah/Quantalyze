@@ -394,6 +394,24 @@ condition = "AND"
 paths = ['''(^|/)analytics-service/tests/test_allocator_positions\.py$''']
 regexes = ['''^fetch=_raise_sign_in_failed$''']
 
+[[allowlists]]
+description = """
+Phase 167.1.2 plan 07 (PR C2) test fixture, entropy false-positive only. PK9 and
+PK10 in scenario-adapter.test.ts use a fixed UUID as a synthetic api_key_id
+(`const KEY = "0f1e2d3c-…"`) to assert that a Scenario unit is named by its label
+and never by that id. generic-api-key reads `KEY = "<uuid>"` as a key assignment.
+It is a row id in a unit test, not credential material. Config rather than a
+source edit because the PR scan walks every branch commit (commit d8cb58d06).
+Scoped to that one rule, that one file AND that one literal (condition = "AND"),
+as in the blocks above. MEASURED 2026-09-29 with gitleaks 8.30.1: the two hits
+clear, while a planted high-entropy api-key literal in the same file is still
+reported.
+"""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)src/app/\(dashboard\)/allocations/lib/scenario-adapter\.test\.ts$''']
+regexes = ['''0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e''']
+
 # ── Phase 164.9.5 WR-03: two rules the default set lacks ──────────────────────
 # The automated baseline re-dump (`scripts/baseline-redump.mjs --gate-dump`) runs
 # gitleaks over the PROD dump with THIS config before a bot branch is pushed to a

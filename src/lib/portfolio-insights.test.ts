@@ -107,6 +107,36 @@ describe("computeBiggestRisk", () => {
     expect(insight?.sentence).toContain("30%");
   });
 
+  // 2026-09-29, Phase 169 review round 1 SFH M-5. A row whose weight does
+  // not exist cannot be "concentrated on 0% of capital": only rows with both a
+  // risk share and a weight are compared, as a null share already is.
+  it("never flags concentration on a row whose weight is missing", () => {
+    const insight = computeBiggestRisk(
+      buildAnalytics({
+        risk_decomposition: [
+          {
+            strategy_id: "a",
+            strategy_name: "Alpha",
+            marginal_risk_pct: 60,
+            weight_pct: null,
+            standalone_vol: 0.2,
+            component_var: 0.04,
+          },
+          {
+            strategy_id: "b",
+            strategy_name: "Beta",
+            marginal_risk_pct: 40,
+            weight_pct: 70,
+            standalone_vol: 0.05,
+            component_var: 0.02,
+          },
+        ],
+      }),
+    );
+    expect(insight?.key).not.toBe("biggest_risk_concentration");
+    expect(insight?.sentence ?? "").not.toContain("0% of capital");
+  });
+
   it("flags correlation when avg pairwise > 0.5", () => {
     const insight = computeBiggestRisk(
       buildAnalytics({ avg_pairwise_correlation: 0.62 }),
@@ -381,6 +411,41 @@ describe("computeConcentrationCreep", () => {
     expect(insight?.sentence).toContain("Alpha");
     expect(insight?.sentence).toContain("50%");
     expect(insight?.sentence).toContain("20%");
+  });
+});
+
+// 2026-09-29, Phase 169 review round 1 SFH M-5: a missing weight is not a
+// weight. It cannot be the top weight, and its null never reads as 0%.
+describe("computeConcentrationCreep — a missing weight", () => {
+  it("picks the top weight from the rows that have one", () => {
+    const insight = computeConcentrationCreep(
+      buildAnalytics({
+        risk_decomposition: [
+          { strategy_id: "a", strategy_name: "Alpha", marginal_risk_pct: 0, weight_pct: null, standalone_vol: 0, component_var: 0 },
+          { strategy_id: "b", strategy_name: "Beta",  marginal_risk_pct: 0, weight_pct: 50,   standalone_vol: 0, component_var: 0 },
+          { strategy_id: "c", strategy_name: "Gamma", marginal_risk_pct: 0, weight_pct: 25,   standalone_vol: 0, component_var: 0 },
+          { strategy_id: "d", strategy_name: "Delta", marginal_risk_pct: 0, weight_pct: 25,   standalone_vol: 0, component_var: 0 },
+        ],
+      }),
+    );
+    // 4 strategies -> equal weight 25%, trip at 37.5%; Beta's 50% trips.
+    expect(insight?.sentence).toBe(
+      "Beta is 50% of the portfolio (equal-weight baseline would be 25%).",
+    );
+  });
+
+  it("stays silent when no row has a weight", () => {
+    const rows = ["a", "b", "c"].map((id) => ({
+      strategy_id: id,
+      strategy_name: id,
+      marginal_risk_pct: 0,
+      weight_pct: null,
+      standalone_vol: 0,
+      component_var: 0,
+    }));
+    expect(
+      computeConcentrationCreep(buildAnalytics({ risk_decomposition: rows })),
+    ).toBeNull();
   });
 });
 

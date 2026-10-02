@@ -425,6 +425,16 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
       path: "/api/match/eval?lookback_days=30",
       invoke: (m) => m.evalMatch({ lookback_days: "30" }, WIRING_TENANT),
     },
+    {
+      // Phase 169.2 / D-08 — the daily BTC benchmark refresh. No argument: the
+      // tenant is the wrapper's own fixed server literal (a scheduled job has
+      // no user).
+      binding: "B-16",
+      wrapper: "refreshBenchmark",
+      budgetKey: "benchmark-refresh",
+      path: "/api/benchmark-refresh",
+      invoke: (m) => m.refreshBenchmark(),
+    },
   ];
 
   describe("SC6 / SEAMCORE-08 — every budget key pinned to a hand-typed literal", () => {
@@ -902,7 +912,7 @@ const ANALYTICS_RETRY = "RETRY_SAFE_ANALYTICS[options.budgetKey]?.retries ?? 0";
 const PROCESS_KEY_RETRY = "retriesForFlow(args.flow_type, args.context)";
 
 /**
- * The 14 bindings, typed HERE as literals — the whole class, one entry per
+ * The 16 bindings, typed HERE as literals — the whole class, one entry per
  * binding, each entry listing every site that binding occupies.
  *
  * B-14 (153.4-02) is the second binding of ONE call site: `validateKey` selects
@@ -977,6 +987,11 @@ const EXPECTED_BINDINGS: ReadonlyArray<{
   // broker — the same non-idempotency reason validate-key-serialized states.
   { id: "B-15", family: "iii", key: "keys-rotate-secret",
     sites: [{ site: "src/app/api/keys/[id]/rotate-secret/route.ts", path: "/internal/keys/{}/rotate-secret", retry: "0" }] },
+  // Phase 169.2 / D-08 — `refreshBenchmark`, the daily BTC benchmark refresh.
+  // Family (i): a client wrapper, so the retry is the chokepoint expression,
+  // which resolves to 0 because the key has a NO verdict in the registry.
+  { id: "B-16", family: "i", key: "benchmark-refresh",
+    sites: [{ site: `${ANALYTICS_CLIENT}::refreshBenchmark`, path: "/api/benchmark-refresh", retry: ANALYTICS_RETRY }] },
 ];
 
 /**
@@ -998,8 +1013,9 @@ const EXPECTED_SEAM_CALL_FILES: string[] = [
   "src/lib/resilient-fetch.ts",
 ];
 
-/** The 15 budget keys these bindings cover — no orphan key, no unbound key. */
+/** The 16 budget keys these bindings cover — no orphan key, no unbound key. */
 const EXPECTED_BOUND_KEYS: string[] = [
+  "benchmark-refresh",
   "bridge",
   "encrypt-key",
   "keys-permissions",
@@ -1072,7 +1088,7 @@ describe("SC6 / SEAMCORE-08 — the budget-key binding class stays closed", () =
     );
   });
 
-  it("every discovered binding is classified in the roster (a 15th binding FAILS)", () => {
+  it("every discovered binding is classified in the roster (a 17th binding FAILS)", () => {
     const expectedSites = EXPECTED_BINDINGS.flatMap((b) =>
       b.sites.map((s) =>
         encodeBinding({
@@ -1126,7 +1142,7 @@ describe("SC6 / SEAMCORE-08 — the budget-key binding class stays closed", () =
     ).toEqual([]);
   });
 
-  it("the roster covers exactly the 15 budget keys (no orphan key, no unbound key)", () => {
+  it("the roster covers exactly the 16 budget keys (no orphan key, no unbound key)", () => {
     const boundKeys = [...new Set(discovered.map((b) => b.key))].sort();
     expect(
       boundKeys,

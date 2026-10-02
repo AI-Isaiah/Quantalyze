@@ -1368,6 +1368,69 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[164.9.3.2.1-OQ1-DEPARTED-KEY-55006-DEFEATS-RETRY]` `set_departed_key_history_inclusion` turns the
+      enqueue race-loss 40001 into a 55006 "try again", so the user is asked to retry a race PostgREST 14
+      would have absorbed (booked 2026-10-02, Phase 164.9.3.2.1 review WR-02, RESEARCH open question 1).**
+      - **Where.** `supabase/migrations/20260927180000_working_holder_rule_d18.sql`, the
+        `EXCEPTION WHEN serialization_failure THEN RAISE EXCEPTION 'HISTORY_RECOMPOSE_RACED' USING ERRCODE = '55006'`
+        block around its `enqueue_compute_job(p_kind := 'derive_allocator_equity', p_allocator_id := v_uid)`
+        call. Its DETAIL reads "Try again; nothing was changed."
+      - **Why it matters.** Phase 164.9.3.2.1 plan 01 measured the race-loss 40001 converging through
+        PostgREST v14.7: the gateway re-runs the transaction and the re-run enqueues. Catching the 40001
+        inside the function and re-raising 55006 removes the code PostgREST retries, so the gateway
+        returns the error to the user once instead of converging. The mechanism is REASONED, NOT
+        MEASURED: the 20260927180000 comment itself says the lost race "needs a second backend", and
+        this call is on the allocator-target branch, which neither plan 01 nor
+        `supabase/tests/test_enqueue_race_loss_40001.sql` exercises (that gate pins the strategy and
+        api_key branches only).
+      - **Not changed in 164.9.3.2.1:** that phase took the D-02 converge branch, which carries no
+        migration. A fix is a re-based `CREATE OR REPLACE` of the function (latest definition across ALL
+        migrations) with the three pre-merge migration reviewers, because merge auto-applies to PROD.
+      - **Trigger.** A user report of `HISTORY_RECOMPOSE_RACED` / 55006 on the departed-key history
+        toggle, OR the next edit to `set_departed_key_history_inclusion`, OR evidence that PROD's
+        PostgREST is ≥16 (where the 40001 would no longer be retried and the 55006 becomes the
+        better answer, so the decision flips).
+      ⏳ **Destination: AWAITS ROUTING via /gsd-phase (founder freeze 2026-09-27).**
+
+- [ ] **`[164.9.3.2.1-OQ2-PYTHON-ENQUEUE-NO-40001]` The Python enqueue callers have no 40001 handling, so on
+      PostgREST ≥16 a lost enqueue race fails the enqueue instead of converging (booked 2026-10-02, Phase
+      164.9.3.2.1 review WR-02, RESEARCH open question 2).**
+      - **Where.** `supabase.rpc("enqueue_compute_job", …)` call sites in `analytics-service/`, measured
+        2026-10-02 by grep: `routers/process_key.py:947` and `:1896`, `routers/cron.py:1151`,
+        `services/job_worker.py:2117`, `:5722` and `:6684`, `services/ingestion/long_fetch.py:685`.
+        None of those files handles SQLSTATE 40001 around an enqueue (the `40001` hits in
+        `job_worker.py` are the claim-token fence, now 55006).
+      - **Why it matters.** On PostgREST 14.x the gateway re-runs the race-loss 40001 itself and the
+        re-run converges (measured on v14.7, Phase 164.9.3.2.1 plan 01). PostgREST 16.0 stopped retrying
+        and returns the 40001 to the client as HTTP 500 (PostgREST PR #4222), so after an upgrade each
+        of these callers would see a lost race as an enqueue error: a compute job that should have been
+        queued is not. The TS callers already carry a retry-once helper
+        (`src/lib/supabase/retry-serialization-failure.ts`); the Python side has no equivalent.
+      - **Not changed in 164.9.3.2.1:** D-04 limited that phase to comment corrections.
+      - **Trigger.** Any evidence that PROD's PostgREST is ≥16 (D-06 forbade measuring it in
+        164.9.3.2.1; RESEARCH assumed 14.5 from a link cache), OR a PostgREST image bump on the
+        local-stack lane to ≥16, OR a production enqueue failure carrying `40001`.
+      ⏳ **Destination: AWAITS ROUTING via /gsd-phase (founder freeze 2026-09-27).**
+
+- [ ] **`[170.1-READ-ONLY-ONLY-COPY]` The connect-key warning strip reads "READ ONLY ONLY — keys with
+      Trade or Withdraw permissions are refused on submission." (seen by the founder on the composite
+      wizard, 2026-10-01).**
+      - **Where.** `src/app/(dashboard)/strategies/new/wizard/WithdrawalWarningStrip.tsx`; the bold
+        span `READ ONLY` is followed by the text `ONLY — …`, so the page shows the word twice.
+      - ⚠️ **A test pins it:** `WithdrawalWarningStrip.test.tsx`
+        asserts the sentence byte for byte as the "verbatim D-08 sentence". Find the D-08 decision
+        before changing it; if D-08 meant the doubled form, the fix is a decision, not a typo.
+      - **Destination: Phase 170.1 COPY.**
+
+- [ ] **`[169.1-UAT-SCENARIO-COMMIT-BAR-GAP]` On the /allocations Scenario tab at narrow widths, the
+      sticky `No changes yet / Commit scenario` bar floats about 74 px above the bottom nav, and the
+      chart scrolls visibly through the gap (seen in the 169.1 browser pass, 2026-10-01).**
+      - **Measured.** At a 735 px viewport the bar's bottom edge sat at 629 px and the nav's top at
+        703 px. The bar carries `sticky bottom-16 md:bottom-0`; the 64 px offset alone does not explain
+        the 74 px gap, so measure the scroll container's own bottom padding before fixing.
+      - Seen at 500 px and 735 px. Not caused by 169.1.
+      - **Destination: Phase 170.1 COPY** (page-layout pass), or fix-or-drop if 170.1 declines it.
+
 - [ ] **`[164.6.7-RETRY-PLAIN-COMPLETE]` The transient retry keeps a factsheet published only if
       its row was `complete_with_warnings` or warned; a plain `complete` row is not protected across
       the retry (booked 2026-09-26, Phase 164.6.7 round-2 review WR-01 / SFH-R2-03).**
@@ -1454,6 +1517,59 @@ true for 146 and half of 142–145, and **false for 141**.
       **Closed when:** a migration drops the function, `database.types.ts` loses it, and
       `grep -rn get_admin_compute_jobs src` finds only lineage comments.
 
+- [ ] **`[169.2-BTC-GAP-RETURN-STAMP]` A BTC return across a missing stored day is stamped as one
+      day's move (booked 2026-09-27, Phase 169.2 D-47, review round 3 WR-01).**
+      `pricesToDailyReturns` (`src/lib/factsheet/benchmark-source.ts`) bridges two stored closes with
+      a missing day between them into ONE return at the later date. The cumulative BTC overlay
+      (`ScenarioComposer`, the scenario-share page) needs that bridge to stay on BTC's real level;
+      the inner-joined metrics would rather skip it. Phase 169.2 briefly skipped every gap (round-2
+      WR-03), which made the overlay drift, so it reverted to bridging and kept only the skip across a
+      dropped corrupt close. Pre-existing and latent: the daily refresh treats any calendar gap as a
+      cache miss and refetches, so a gap in `benchmark_prices` should not persist.
+      ✅ **Destination: Phase 169.4 ALLOCTRUTH**, whose plans read BTC through `readBenchmarkPrices`
+      and `mergeWithFixture`. **Closed when:** consumers build the overlay from closes (or levels)
+      and the metrics from exactly-one-day returns, with a test for each across a missing day.
+- [x] **`[169-SCENARIO-WINDOW-ANNUALIZATION]` A selected range on the `/allocations` Scenario tab
+      shows the withheld form, because the Scenario payload carries no `periodsPerYear`
+      (booked 2026-09-26, Phase 169 D-29).**
+      Phase 169 plan 14 makes the KPI strip and the rail follow the zoom window on every
+      `FactsheetBody` mount (founder decision D-27). `buildScenarioFactsheetPayload`
+      (`scenario-factsheet-payload.ts`) is the one builder that emits no `periodsPerYear`, so the
+      window arm refuses to annualize there and shows every window figure as the em-dash with one
+      sentence. That is fail-closed and correct, but the Scenario tab is the one mount where
+      zooming does not show figures.
+      **Why not fixed in 169:** giving the payload a `periodsPerYear` also switches on the leverage
+      control there (`leverageEligibleFor` reads the same field), a full-history behaviour change
+      on a surface whose full-history values Phase 167.1.2 owns (169 D-25 (ii)).
+      **Owner:** Phase 167.1.2 ACCOUNTTRUTH. **Trigger:** 169 PR 2 merged (the window arm exists),
+      or 167.1.2's next edit of `scenario-factsheet-payload.ts`, whichever is first.
+      **Closed when (gate):** the Scenario payload carries the book's `periodsPerYear` from the same
+      asset-class rule `buildFactsheetPayload` uses; a test renders a Scenario payload through
+      `FactsheetBody` under a sub-range and asserts figures (not the em-dash) that equal
+      `compute()` of the slice; and 167.1.2 records whether the leverage control should appear on
+      the Scenario tab.
+      ✅ **CLOSED 2026-10-01 by Phase 169.1 ZOOMKPIS (plan 169.1-02, D-82).** The Scenario payload has
+      carried `periodsPerYear` since Phase 167.1.2 plan 07, and the leverage control is hidden in
+      `scenarioMode` (`FactsheetView.tsx`, `!scenarioMode && leverageEligible`). The gate test is
+      `FactsheetView.window-kpis.test.tsx` > "the Scenario mount shows window figures equal to
+      compute() of its slice, keeps its inert comparator blocks, renders no leverage control, and
+      resets exactly (D-82, W2)", commit `c78baf846`.
+
+- [ ] **`[169-PORTFOLIO-ANALYTICS-COLUMNS]` The portfolio analytics compute behind `/portfolios/[id]`
+      may never refresh (booked 2026-09-27, Phase 169 D-53; inferred from source, NOT measured).**
+      `_compute_portfolio_analytics` (`analytics-service/routers/portfolio.py`) selects
+      `strategy_analytics` columns that `supabase/schema/baseline.sql` does not carry, and reads
+      `returns_series` as daily returns while `metrics.py` writes that field as a cumulative series.
+      If so, every portfolio analytics compute fails and the risk decomposition on `/portfolios/[id]`
+      is stale or absent, and `standalone_vol`'s period cannot be confirmed end to end.
+      **Why not fixed in 169:** a Python compute path, not a page-number surface; found by the
+      169 replan research (`169-RESEARCH.md` Open Question 1).
+      **Owner:** THE FOUNDER, to route to a phase (data-integrity). *(Routed 2026-09-27: Phase 166.4.1
+      PORTFOLIOANALYTICS, inserted on main by PR #889.)* **Trigger:** one read of the
+      analytics logs for "Portfolio analytics computation failed" confirms or clears it.
+      **Closed when:** the compute selects only real columns, derives daily returns from the stored
+      series, and a test that fails on today's select pins both.
+
 - [ ] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
       queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
       **Measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).** `python` took
@@ -1464,6 +1580,35 @@ true for 146 and half of 142–145, and **false for 141**.
       ✅ **Destination: Phase 164.9.4 CIOFFMUTEX** — routed there 2026-09-26 via
       `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
       evidence.
+
+- [x] **`[164.9.4-DEFER-40001-RETRY-HANG]` A mismatched-token `defer_compute_job` RPC hangs through PostgREST instead of failing (booked 2026-09-26, Phase 164.9.4 D-15, evidence only).**
+      **Measured 2026-09-26 on a private local-stack lane** (no shared TEST, no other load on
+      the database). `defer_compute_job` raises `USING ERRCODE = 'serialization_failure'`
+      (SQLSTATE 40001) on its mismatched-token path, read from the function definition on the
+      lane. A direct PostgREST call with a mismatched token got no response within
+      `--max-time 25` (`http=000 real 25.18`); the same call with the matching token returned
+      `http=200 real 0.36`. The PostgREST log answered the hung request only after the row's
+      state changed (`defer_compute_job: job … not found or not running`). This is the
+      behaviour Supabase documents on its troubleshooting page "High CPU and infinite
+      transaction retries when using custom error codes in RPC functions"
+      (https://supabase.com/docs/guides/troubleshooting/high-cpu-and-infinite-transaction-retries-when-using-custom-error-codes-in-rpc-functions-77326b):
+      PostgREST retries a transaction that raises 40001. Source: `164.9.4-RESEARCH.md`,
+      `## Python on the lane (MEASURED)`.
+      **Consequence.** The skip reasons in `analytics-service/tests/test_compute_jobs_fencing.py`
+      carry a MISATTRIBUTED root cause. `test_defer_compute_job_token_fence` skips at runtime
+      after about 120 s on the idle private lane too, deterministically, so shared-TEST contention
+      is not the cause. The three `@pytest.mark.skip("P1 TODO — flaky httpx.ReadTimeout …")`
+      fence tests (`test_late_mark_done_with_stale_token_raises_serialization_failure`,
+      `test_late_mark_failed_with_stale_token_raises_serialization_failure`,
+      `test_late_mark_done_after_w2_completed_raises_serialization_failure`) blame the same
+      contention. Their functions raise the same SQLSTATE, so the 40001 retry loop is the likely
+      cause there too; that half is UNMEASURED, only `defer_compute_job` was probed. Leaving
+      shared TEST therefore does not un-skip any of them. The job worker
+      (`analytics-service/services/job_worker.py`) calls `defer_compute_job` through the same
+      PostgREST RPC path, so a stale worker may hang instead of failing fast: the compute
+      pipeline may be affected, so this may be data-integrity.
+      ⏳ **Destination: AWAITS ROUTING.** The 2026-09-26 founder freeze forbids new phases; route it with /gsd-phase when the freeze lifts. Not fixed in 164.9.4, and it moves no count there.
+      ✅ CLOSED 2026-10-02 by Phase 164.9.3.2 DEFER40001. Migration `supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql` moves all four claim-token fence raises (`defer_compute_job`, `mark_compute_job_done` twice, `mark_compute_job_failed`) from SQLSTATE 40001 to `55006` with the message text unchanged, and PostgREST answers that code once. Evidence, plans 01-05: all four raises measured hanging through the lane's PostgREST v14.7 before the fix (no answer at 20 s, the retry loop still running after the client left); the gate `supabase/tests/test_compute_job_fence_errcode.sql` RED without the migration (first failure D1, SQLSTATE 40001) and GREEN with it (`ALL 8 ARMS EXECUTED`), each of its 8 twins observed biting; the four live-DB arms in `src/__tests__/compute-jobs-audit-2026-05-07-g10b.test.ts` aborted at their 10 s bound on the seam lane and answered `55006` once on the fixed lane; in Python, `test_defer_compute_job_token_fence` was SKIPPED after 121.61 s before the fix and PASSED in 0.01 s with no skip after, and the three decorated late-mark tests measured PASSED on the lane (their decorators stay until 164.9.4 moves `python` off shared TEST). ENQ-SCOPE = `enq-sibling` (founder, 2026-10-01): the enqueue race-loss raise in `_enqueue_compute_job_internal` is routed to Phase 164.9.3.2.1 ENQ40001. The fix is live only once this phase's merge applies the migration to PROD. The text above is kept as lineage.
 
 - [x] **`[164.9.5-MANUAL-BASELINE-REDUMP]` Every PROD migration apply leaves `main` red on
       baseline-content-drift until someone runs a manual schema dump (booked 2026-09-26, founder
@@ -1494,12 +1639,13 @@ true for 146 and half of 142–145, and **false for 141**.
       and human-run: dispatch `supabase-migrate.yml` on main and expect a no-op or one bot PR,
       and approve the workflows on the first bot PR.
 
-- [ ] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
+- [x] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
       same (kind, allocator) makes every claim entry point raise `23505` (booked 2026-09-26, found
       on the pg-lane by the Phase 167.1.2 PR B fixer).**
       **Repro, measured 2026-09-26.** Seed a `failed_retry` `derive_allocator_equity` row with
       `next_attempt_at` in the past and a `pending` row for the same allocator. Then
-      `claim_compute_jobs_with_priority` (6-arg and 2-arg) and `claim_compute_jobs` all raise
+      `claim_compute_jobs_with_priority` (6-arg and 2-arg; ⛔ CORRECTED 2026-09-27: 5-arg, and the
+      2-arg's pre-fix result is 42725 not 23505, see 164.9.3 CONTEXT) and `claim_compute_jobs` all raise
       `23505` on `compute_jobs_one_inflight_per_kind_allocator`.
       **Why.** The claim's C39 guard skips a candidate only for a `running` or
       `done_pending_children` sibling, not a `pending` one. `_enqueue_compute_job_internal`'s dedup
@@ -1520,6 +1666,37 @@ true for 146 and half of 142–145, and **false for 141**.
       any kind is claimed until the pair clears. The full repro is kept verbatim in the Phase
       164.5.2 ROADMAP section as lineage. **Owner: Phase 164.9.3 CLAIMPAIR**, whose criterion 4
       now covers all four partitions (api_key_id, portfolio, strategy, allocator).
+      ✅ CLOSED 2026-09-27 by Phase 164.9.3 CLAIMPAIR. Migration
+      `20260927120000_claim_pair_pre_rank_exclusion.sql` (D-08): a `failed_retry` candidate whose
+      `(kind, partition)` already holds a `pending` row is dropped from the `ranked` CTE BEFORE
+      `row_number()` in all three claim bodies, `claim_compute_jobs(integer, text)`, the 5-arg
+      and the 2-arg `claim_compute_jobs_with_priority`, with one clause per partition
+      (`api_key_id`, portfolio, strategy, allocator) matching its
+      `compute_jobs_one_inflight_per_kind_*` index predicate (D-02). The 2-arg is re-based, not
+      dropped, and also gains the C39 running / done_pending_children guard. The enqueue side is
+      unchanged. Gate `supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql`,
+      18 arms (12 partition arms, W-LOST, P2-C39, regression arm W-INTRO, W-LOWTWIN from review
+      round 1, and W-C39SIB and W-C39INTRO from review round 3), each with a mutation twin.
+      Red-first census on the pre-fix lane: 14 RED, all 14 with SQLSTATE 23505, W-INTRO GREEN;
+      W-LOWTWIN RED before the probe fix (no error, 0 of 3 rows claimed); W-C39SIB and
+      W-C39INTRO RED before the round-3 widening (no error, the unrelated `low` job and the retry
+      each claimed 0 times). After the fixes: 18 of 18 green on the pg-lane.
+      Residual (i) is CLOSED in review rounds 1 and 3: the priority throttle probe counted a
+      held-back retry, which beside a `low` pending twin claimed neither row and throttled every
+      due `low` job with no error, on every tick. Both priority overloads now skip such a retry
+      in the probe (a marked `CLAIMPAIR PROBE EXCLUSION` block). Round 3 (founder decision D-11)
+      widened the block to the C39 half: a retry the C39 guard holds back beside a `running` or
+      `done_pending_children` sibling is skipped too, with the intro carve-out on the `pending`
+      sibling only. So the far-future-twin hold, the low-twin wedge and the C39-sibling hold are
+      all gone. What stays (review IN-11): the block covers `failed_retry` rows only, so a due
+      `pending` `compute_intro_snapshot` row that C39 drops beside an in-flight intro sibling is
+      still counted; it predates this phase and is latent while no writer sets `low`.
+      ⚠️ Two residuals are recorded in the migration
+      header, not fixed: (ii) a retry waits for a not-yet-due twin to run first (delay, not
+      loss); (iii) a claim racing a concurrent enqueue of the twin can still raise 23505 for one
+      tick (reasoned, not measured). The ROADMAP-booked option (a), adding `pending` to the
+      post-rank C39 list, was measured as a SILENT permanent wedge that also starves
+      `compute_intro_snapshot`, and was rejected.
 
 - [ ] **`[164.9.3.1-FANIN-GRAPH-RESIDUALS]` Four latent or loud defects on the fan-in graph and
       the bridge's decision cascade (booked 2026-09-26; routed 2026-09-25 from the Phase 164.9.1
@@ -3635,7 +3812,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       script that takes a shared-TEST lock.
       **Owner:** Phase 164.9 TESTISOLATION.
 
-- [ ] **`[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` the discovery detail page assembles the
+- [x] **`[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` the discovery detail page assembles the
       factsheet builder a second time, beside `fetchAndBuildPayload` (booked 2026-09-25, Phase
       167.2.1 D-03; routed to Phase 169 PAGETRUTH)** — `src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx` calls the
       builder's steps itself: `resolveDailyReturnSeries`, `readCompositeFactsheet`,
@@ -3656,6 +3833,9 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       **Routing:** Phase 169 PAGETRUTH, which owns factsheet KPI sourcing (its SC4). The ROADMAP
       carries the matching dated note under `### Phase 169`, "Routed in, 2026-09-25 (Phase 167.2.1
       D-03)", written at planning time.
+      **Closed 2026-10-01 by Phase 169.1 plan 169.1-01 (commit `509b0d68c`):** the page builds
+      through `fetchAndBuildPayloadWithReason(strategy.id, withPublishedOnly)` and makes none of
+      the four calls itself; `page.one-path.test.tsx` and the phase-147 source guard pin it.
 
 - [ ] **`[167.2.1-CLIENT-SENTRY-NOOP]` every `captureToSentry` call in browser code is a silent
       no-op, because there is no client `Sentry.init` (booked 2026-09-26, Phase 167.2.1
@@ -7398,7 +7578,7 @@ disagreed):
 1. **KNOWN LIMITATION (D-02) — the flag-monitor error rate is ATTEMPT-grained on both sides, so retries bias it DOWNWARD.** Deliberate, and the safe direction: the alternative that 141.1's D-16 reached for (dedup on `metadata->>correlation_id`) bought a fabricated denominator above PostgREST's `max_rows` and a denominator the wire could pin to 1 through the unauthenticated teaser route. Quieter-under-retry beats false pages plus attacker-chosen silence. A true PER-REQUEST rate needs a **server-minted request id that the retry reuses** — the client-side id cannot serve, because the Python handler re-mints any non-bare-UUID inbound value. That is a cross-seam contract change with its own blast radius, and it is the deferred work. Two further honest caveats already in the docblock, repeated here because they bound what the instrument can see at all: `429`/`401` attempts are refused ABOVE the audit write and produce no row, and the write is fire-and-forget so a lost row biases the rate UPWARD.
 2. **FINDING 8 RESIDUAL — DISPOSITIONED, NOT REMEDIATED. The retry→limiter amplification is STILL LIVE.** A granted retry spends a second token of both `/process-key` limiters, including the platform-wide ceiling that is one shared bucket for every caller; draining it refuses the anonymous teaser and the CSV path, neither of which retries. The breaker structurally cannot contain it — `seamBreakerVerdict` classifies `429` caller-throttled and non-counting — and **no signal covers a ceiling drain at all**, because a 429 is refused above the audit write, so neither the breaker nor the flag-monitor denominator advances. **No limiter code was written and no constant moved.** What changed is exposure, not mechanism: post-D-01/D-03 the retry-eligible population is `onboard`-with-a-key only, and `resync` — just under half of all `/process-key` traffic ever recorded, per the 2026-08-01 production audit history — no longer retries, so the worst case applies to an order of magnitude less traffic. Recorded in the `retriesForFlow` docblock in `seam-retry-registry.ts`. *Re-raise if:* a new YES flow verdict lands, `resync` is re-granted, or `RetrySafeEntry.retries` widens past one. **Supersedes H1 above**, which named the same mechanism before it had been measured.
 3. **D-01 FOLLOW-UP — a CLIENT-MINTED stable idempotency key.** 141.2 made `onboard`'s retry conditional on the key it already had (`retriesForFlow` refuses a retry when `context.wizard_session_id` is falsy, using `Boolean()` to byte-match the Python truthiness gate). The better end state is to make the antecedent unconditionally TRUE rather than conditionally checked — and it is the same key `resync` would need to earn its grant back. Rejected in-phase on blast radius: it changes the cross-seam contract and the `strategy_verifications` uniqueness semantics, which is more than a defect fix should carry. Needs its own decision, not an inference from the registry entry.
-4. **CLASS — unbounded `.select()` on unbounded-growth tables (8 remaining sites).** 141.2 / D-02 closed the one instance the findings named (the flag-monitor denominator, proven truncating in production: `audit_log` held 7350 rows and an unbounded select returned exactly 1000 with HTTP 200 and `error: null`). The class census found 93 unbounded chains, of which these grow without bound: ⚠️ **`api/benchmark/btc` is the highest risk — ASC-ordered over one row per day forever, so past 1000 daily closes the BTC chart silently drops the NEWEST data and the series just ends**; then the two cron enqueue sweeps (`sync-funding`, `reconcile-strategies`, which would silently fund-sync/reconcile only the first 1000 strategies while reporting the truncated number as truth); then `allocator/scenario/commit`'s holdings recompute, the `queries.ts` discovery aggregates, and the marketing page's headline AUM sum. Distinct sub-shape, note only: `cron/cleanup-ack-tokens` caps its DELETE's RETURNING body, so the reported deletion COUNT is wrong, not the deletion. One entry, not eight, deliberately — the fix is the same three-way choice each time (COUNT / `.range()` pagination / an explicit `.limit()` that says so).
+4. **CLASS — unbounded `.select()` on unbounded-growth tables (8 remaining sites; 7 after Phase 169.2, see the 2026-09-27 correction at the end of this entry).** 141.2 / D-02 closed the one instance the findings named (the flag-monitor denominator, proven truncating in production: `audit_log` held 7350 rows and an unbounded select returned exactly 1000 with HTTP 200 and `error: null`). The class census found 93 unbounded chains, of which these grow without bound: ⚠️ **`api/benchmark/btc` is the highest risk — ASC-ordered over one row per day forever, so past 1000 daily closes the BTC chart silently drops the NEWEST data and the series just ends**; then the two cron enqueue sweeps (`sync-funding`, `reconcile-strategies`, which would silently fund-sync/reconcile only the first 1000 strategies while reporting the truncated number as truth); then `allocator/scenario/commit`'s holdings recompute, the `queries.ts` discovery aggregates, and the marketing page's headline AUM sum. Distinct sub-shape, note only: `cron/cleanup-ack-tokens` caps its DELETE's RETURNING body, so the reported deletion COUNT is wrong, not the deletion. One entry, not eight, deliberately — the fix is the same three-way choice each time (COUNT / `.range()` pagination / an explicit `.limit()` that says so). ⛔ **CORRECTED 2026-09-27 (Phase 169.2 BENCHFRESH, review IN-03); the sentences above are kept as lineage.** The highest-risk site, `api/benchmark/btc`, is CLOSED by Phase 169.2's branch: the route now reads through `readBenchmarkPrices` (`src/lib/factsheet/benchmark-source.ts`), the one reader of `benchmark_prices`, which pages newest-first by a keyset cursor on `date` until an EMPTY page and returns an error (never a truncated series) at its `BENCHMARK_MAX_PAGES` ceiling. It closes on `main` when that phase merges. **7 sites remain by this entry's own count (8 − 1)**: the ones named above after `api/benchmark/btc`, highest risk now the two cron enqueue sweeps. The 8 was never itemised site by site, so re-measure the census before relying on the 7.
 7. **DEF-141.2-03-A — stale route coordinates inside a skipped test's comment.** `src/__tests__/audit-coverage.test.ts:962-964` cites three `flag-monitor/route.ts:NN` coordinates, one of them a "feature_flags upsert — kill-switch flip" site Phase 106 (Stage B) retired. Already stale before 141.2 and inside an `it.skip(...)` comment rather than an assertion, so nothing reds and plan 03's edits shifted the numbers further. Comment-only drift, below the bar. Booked here because `deferred-items.md` is a per-phase scratch file and this file is the one backlog.
 8. **`Boolean()` does NOT byte-agree with Python's `bool()` for empty JSON collections — the docblock says it does.** Found by the ship red-team pass. `seam-retry-registry.ts` `retriesForFlow` gates on `Boolean(context?.wizard_session_id)` and its docblock claims "the same truthiness predicate the Python gate uses" (`process_key.py`'s `bool(body.context.get("wizard_session_id"))`). True for `null` / `undefined` / `""` / `0` / `false` — the empty-string case it explicitly names is genuinely correct. **False for `[]` and `{}`**: truthy in JS, falsy in Python. A context carrying `wizard_session_id: []` would grant the retry TS-side while Python falls to `… or str(uuid.uuid4())`, mints a fresh session per attempt, skips the duplicate pre-check, and inserts a second draft `strategy_verifications` row — the exact harm D-03 withdrew resync's grant over. **Unreachable at HEAD**, which is why it is logged and not fixed: `retriesForFlow` short-circuits to 0 for every flow but `onboard`, and `onboard`-through-`postProcessKey` has one producer (`finalize-wizard`), whose context is a hand-listed allowlist of validated scalars plus a `wizardSessionId` read off a uuid DB column. Fix when touched: `typeof context?.wizard_session_id === "string" && context.wizard_session_id.length > 0`. Founder call 2026-08-01: ship as-is, the surface is well tested. *Re-raise if:* a second `onboard` producer appears, or any context field stops being an allowlisted scalar.
 9. **`hasContractualWait`'s docblock contradicts itself on the HTTP-date form.** `resilient-fetch.ts` states "A date-form wait is a contractual wait like any other and fails fast; there is no deliberate gap here to work around" two lines after correctly noting that no `Date` header yields null. `retry-after.ts` returns null when `Date` is absent, so a date-form 503 WITHOUT a `Date` header does not fail fast — it retries. Harmless in practice (HTTP/1.1 origins must send `Date`; our own emitter uses delta-seconds), but the gap is real and the sentence denies it. Prose-only, below the bar.
@@ -8085,6 +8265,12 @@ EXECUTED, §str/None follow-through, §Discovery observation).
           card, and the `KEY_SIGN_IN_FAILED` envelope.
       **Closed when:** each item's verdict is written into `167-UAT.md` (verdict and counts only —
       no key id, account number or server name).
+
+## Phase 167.1.2 (ACCOUNTTRUTH) — PR C2 informational items (logged 2026-09-29)
+
+- [ ] **`[167.1.2-C2-R3-IN-05]` A corrupt `key_inputs` row on an older key fails the stitched book permanently (Info, C2 round-3 review IN-05, founder: "It is an informational. Just put it into todos").**
+      - **What happens.** When the derive stitches a failing older key's history onto the working key (C2 round-2 fix SFH-R2-03), one corrupt `key_inputs` row on the older key marks the whole book `shared_account_history_truncated`, so the book stays hidden, while the rebuilding line says the history is recomputed once a day.
+      - **Source.** `.planning/phases/167.1.2-accounttruth-one-exchange-account-is-counted-once-and-the-al/167.1.2-C2-REVIEW-R3.md`, IN-05.
 
 ## Phase 167.1.2 (ACCOUNTTRUTH) — PR B review round 4, routed items (logged 2026-09-26)
 

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { renderHook, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
-import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
+import { deriveSeriesBundle, fixtureBenchmarkPrices } from "@/lib/factsheet/build-payload";
 import { BasisProvider, useBasis, useBasisSeriesView, leverageEligibleFor } from "./basis-context";
 import { LeverageProvider, useLeverage } from "./leverage-context";
 
@@ -88,6 +88,9 @@ function makePayload(o: PayloadOverrides = {}): FactsheetPayload {
     periodsPerYear: periodsPerYear ?? undefined,
     missingSegments,
     dataQuality: composite ? { composite: true } : undefined,
+    // Phase 169.5 (D-21): both builders always carry the BTC series; a payload
+    // without it re-derives BTC as unavailable.
+    benchmarkPrices: fixtureBenchmarkPrices([STRAT.map((r, i) => ({ date: DATES[i], value: r }))]),
   };
   if (periodsPerYear == null) delete p.periodsPerYear;
   if (withMtmBundle) {
@@ -100,6 +103,7 @@ function makePayload(o: PayloadOverrides = {}): FactsheetPayload {
           markets: ["BTC"],
           strategyName: "Test Strategy",
           missingSegments,
+          benchmarkPrices: fixtureBenchmarkPrices([mtmRets.map((r, i) => ({ date: DATES[i], value: r }))]),
         },
       ),
     };
@@ -159,7 +163,13 @@ describe("useBasisSeriesView — leverage layer (Phase 107 LEV-BB)", () => {
     // dailies) to compare ann_vol against.
     const baseBundle = deriveSeriesBundle(
       STRAT.map((r, i) => ({ date: DATES[i], value: r })),
-      { periodsPerYear: 252, isArithmetic: false, markets: ["BTC"], strategyName: "Test Strategy" },
+      {
+        periodsPerYear: 252,
+        isArithmetic: false,
+        markets: ["BTC"],
+        strategyName: "Test Strategy",
+        benchmarkPrices: fixtureBenchmarkPrices([STRAT.map((r, i) => ({ date: DATES[i], value: r }))]),
+      },
     );
     act(() => result.current.lev.setLeverage(2));
     const v = result.current.view;
@@ -179,7 +189,13 @@ describe("useBasisSeriesView — leverage layer (Phase 107 LEV-BB)", () => {
     const { result } = renderHook(() => useViewProbe(payload), { wrapper: bothWrapper });
     const baseBundle = deriveSeriesBundle(
       STRAT.map((r, i) => ({ date: DATES[i], value: r })),
-      { periodsPerYear: 252, isArithmetic: false, markets: ["BTC"], strategyName: "Test Strategy" },
+      {
+        periodsPerYear: 252,
+        isArithmetic: false,
+        markets: ["BTC"],
+        strategyName: "Test Strategy",
+        benchmarkPrices: fixtureBenchmarkPrices([STRAT.map((r, i) => ({ date: DATES[i], value: r }))]),
+      },
     );
     const baseJoint = baseBundle.comparators.btc.joint;
     act(() => result.current.lev.setLeverage(2));
@@ -325,7 +341,13 @@ describe("SMTM-01 useBasisSeriesView + leverageEligibleFor — smoothed leverage
       p.seriesByBasis = {
         smoothed_mtm: deriveSeriesBundle(
           smRets.map((r, i) => ({ date: DATES[i], value: r })),
-          { periodsPerYear: 252, isArithmetic: false, markets: ["BTC"], strategyName: "Test Strategy" },
+          {
+            periodsPerYear: 252,
+            isArithmetic: false,
+            markets: ["BTC"],
+            strategyName: "Test Strategy",
+            benchmarkPrices: fixtureBenchmarkPrices([smRets.map((r, i) => ({ date: DATES[i], value: r }))]),
+          },
         ),
       };
       p.metricsByBasis = { smoothed_mtm: SMOOTHED_SCALARS };
@@ -350,7 +372,13 @@ describe("SMTM-01 useBasisSeriesView + leverageEligibleFor — smoothed leverage
       seriesByBasis: {
         smoothed_mtm: deriveSeriesBundle(
           makeReturns(9).map((r, i) => ({ date: DATES[i], value: r })),
-          { periodsPerYear: 252, isArithmetic: false, markets: ["BTC"], strategyName: "Test Strategy" },
+          {
+            periodsPerYear: 252,
+            isArithmetic: false,
+            markets: ["BTC"],
+            strategyName: "Test Strategy",
+            benchmarkPrices: fixtureBenchmarkPrices([makeReturns(9).map((r, i) => ({ date: DATES[i], value: r }))]),
+          },
         ),
       },
     } as unknown as FactsheetPayload;

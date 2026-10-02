@@ -89,6 +89,25 @@ class FactsheetReadError extends Error {
   }
 }
 
+/**
+ * 169.1 review round 1 (SFH HIGH-1) — the public build succeeded, but its
+ * `cash_settlement` conventions read failed, so the payload was built on the
+ * config tier (D-30) and may draw its curve on a method the stored headline was
+ * not computed under. Thrown from inside the `unstable_cache` callback, exactly
+ * like `FactsheetReadError`, so that build is never stored for the analytics
+ * run. Unlike a `read_error` it CARRIES the payload: a blip must not blank a
+ * factsheet (D-30), so the page renders it, uncached. The resolve stage has
+ * already captured the failed read once. Module-private.
+ */
+class FactsheetDegradedBuildError extends Error {
+  readonly payload: FactsheetPayload;
+  constructor(payload: FactsheetPayload) {
+    super("public factsheet build: built on the config tier after a failed conventions read");
+    this.name = "FactsheetDegradedBuildError";
+    this.payload = payload;
+  }
+}
+
 function buildFactsheetPayloadCached(
   id: string,
   computedAt: string,
@@ -133,14 +152,15 @@ function buildFactsheetPayloadCached(
   // therefore can no longer pin a placeholder under this `computed_at` for the
   // TTL while /strategies' fresh probe shows no note. Every OTHER reason is a
   // fact about the stored row and is cached as `null`, as before.
-  // ⚠️ Accepted residual under D-07, owned by Phase 169 plan 04: a composite's
-  // failed `csv_daily_returns` read still arrives as `composite_unbuildable`
-  // (`readCompositeFactsheet` folds the error into an empty series), so that
-  // outage cannot be told apart here and its `null` is still cached.
+  // The composite residual of D-07 is closed by Phase 169 plan 169-07 (169
+  // D-41): the composite reader throws on a failed `csv_daily_returns` read and
+  // the resolve stage answers `read_error`, so the throw below covers it.
   return unstable_cache(
     async () => {
       const built = await fetchAndBuildPayloadWithReason(id, withPublishedOnly);
       if (built.reason === "read_error") throw new FactsheetReadError();
+      // SFH HIGH-1: a degraded build is rendered, never stored (see the class).
+      if (built.payload && built.conventionsDegraded) throw new FactsheetDegradedBuildError(built.payload);
       return built.payload;
     },
     // Cache key carries a shape-version suffix. Bump it (e.g. -v2 → -v3)
@@ -173,7 +193,36 @@ function buildFactsheetPayloadCached(
     // but the VALUES are not. A ratio that does not exist (Sharpe, Sortino,
     // Calmar, a peer rank) is now NaN, "—", where a v6 entry holds a fabricated
     // 0; bumping serves the fix at deploy instead of after the 1h TTL drain.
-    ["factsheet-v2-payload-v7", id, computedAt],
+    // Bumped v7→v8 (Phase 169 FACTSHEETTRUTH, 169 D-62, 2026-09-27): the shape
+    // AND the values change. 169-04: the MTD / YTD / 3M / 6M / 1Y windows are
+    // nullable (a window the record does not cover is null) and `p3y` / `p5y`
+    // are added; 169-01: the single-key headline reads the persisted analytics
+    // scalars instead of the TypeScript recompute. A v7 entry lacks `p3y` /
+    // `p5y`, and 169-05's row gates omit a null row, so serving one would HIDE
+    // correct 3 Year / 5 Year rows on a long record: a wrong page, not an old
+    // figure. `revalidate` and the admin route's tag bust are both
+    // stale-while-revalidate, so only a key move stops a pre-deploy entry being
+    // served after the deploy. Phase 169.5 moves the key again (169.5-01).
+    // Review round 1 (2026-09-29) changed the payload again before any v8 entry
+    // existed (v8 was not on origin/main): optional `dataQuality` fields
+    // (`twrChainBroken`, `headlineCoversFrom`, `returnsConventionOverride`), an
+    // arithmetic curve for a single-key `simple` config, and an MTM / smoothed /
+    // cash-series read outage that now throws instead of building a degraded
+    // payload. They ride this one v8 bump; no second move was needed.
+    // Bumped v8→v9 (Phase 169.5 BENCHCOMPARE, 169 D-48 as amended by 169 D-62):
+    // comparator blocks carry `through`, null windows past it and covered-day
+    // summaries (169.5-01); the payload carries the bounded BTC prices, their
+    // `through` and `dropped` for the browser re-derive, and comparator chart
+    // series (cumulative, cumVsBench, volMatched) are null past coverage with
+    // rolling statistics on the comparator's own basis (169.5-02); comparator
+    // `dailyReturns` are null where uncovered (169.5-04). A stale v8 entry lacks
+    // them, so during the 1 h TTL drain it would show +0.00% benchmark windows and
+    // feed the MTM / leverage re-derive no prices; one bump covers Phase 169.5
+    // because its plans deploy in one PR. Phase 169's own payload changes are
+    // covered by its v7→v8 bump (169 D-62) and are not v9 content.
+    // Bumped v9→v10 (Phase 169.4 D-71): 169.4-05 and 169.4-06 changed the api-arm panels (null-honest signatures and allocator blends).
+    // Bumped v10→v11 (Phase 169.1 D-80): 169.1-03 to 169.1-07 changed the payload's conventions fields and the per-basis, bucket, rolling, bootstrap and stress values.
+    ["factsheet-v2-payload-v11", id, computedAt],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
@@ -493,9 +542,14 @@ export default async function FactsheetV2Page({
     try {
       payload = await buildFactsheetPayloadCached(id, computedAt);
     } catch (err) {
-      if (!(err instanceof FactsheetReadError)) throw err;
-      publicReadFailed = true;
-      payload = null;
+      // SFH HIGH-1: a degraded build renders its payload, uncached (D-30).
+      if (err instanceof FactsheetDegradedBuildError) {
+        payload = err.payload;
+      } else {
+        if (!(err instanceof FactsheetReadError)) throw err;
+        publicReadFailed = true;
+        payload = null;
+      }
     }
   }
   if (!payload) {

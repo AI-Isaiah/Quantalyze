@@ -32,6 +32,12 @@ const baseRow = {
   // since 20260812083206). Same three-way sync as 066/068/075, so the
   // fixture carries it for `.strict()` to accept the row.
   venue_account_id: null,
+  // Phase 167.1.2 plan 04 — the account-share marker and the departed-history
+  // flag joined the projection (migration 20260925120000 GRANTs them), so the
+  // fixture carries them for `.strict()` to accept the row.
+  account_shared_with_api_key_id: null,
+  account_share_kind: null,
+  history_inclusion: null,
 };
 
 describe("ApiKeyRowSchema — M-0583 trust-boundary guard", () => {

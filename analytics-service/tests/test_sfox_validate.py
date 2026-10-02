@@ -432,7 +432,9 @@ async def test_ccxt_exchange_still_uses_create_exchange_path(exchange_router):
         router, _make_req(router, exchange="binance", api_key="k", api_secret="s")
     )
 
-    assert result == {"valid": True, "read_only": True}
+    # Phase 167.1.2 (D-01): the ccxt success path also carries the venue
+    # account id; None here because the stubbed verdict carries none.
+    assert result == {"valid": True, "read_only": True, "venue_account_id": None}
     create_exchange_spy.assert_called_once()
     assert create_exchange_spy.call_args.args[0] == "binance"
     sfox_factory.assert_not_called()

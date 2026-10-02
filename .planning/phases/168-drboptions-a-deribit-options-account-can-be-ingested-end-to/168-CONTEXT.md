@@ -109,6 +109,7 @@ against. It is one occurrence on one instrument (n=1). D-01 and D-02 say how n=1
   `assignment` refusal recurred. A live census read is NOT planned. D-01/D-02 make n=1 safe
   without one, so it is not needed.
   — **Reversibility:** reversible.
+  ⛔ **OVERRIDE 2026-10-02 (founder rule 2026-10-01: agents run read-only PROD SELECTs via the linked CLI, marker query first):** plan 03's observation was read by the orchestrator, read-only, after the founder confirmed in chat that the 2026-09-23 strategy had been re-created on 2026-09-27. No write to PROD, no Deribit call, no credential read. Recorded here and in the ROADMAP 168 section, per the rule.
 
 ### Amendments after research (2026-09-26, orchestrator, autonomous)
 

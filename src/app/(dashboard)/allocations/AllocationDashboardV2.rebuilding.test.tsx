@@ -13,10 +13,14 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
 // +100% jump, a -50% "crash" and Sharpe 1.44 beside -42.8% cumulative. While
 // `equityHistoryState === "rebuilding"` the Overview must show NONE of it: no
 // curve, no factsheet KPI built from the curve, and not the warm-up copy (which
-// would promise panels "once two days of history are available" — a wrong
+// would promise panels once enough days of history are available — a wrong
 // reason, since the history is withheld, not short). Holdings-backed chrome
-// (InsightStrip) stays. The one exception is IN-01: a brand-new book with no
-// history at all has nothing withheld, so it gets the warm-up note and no panel.
+// (InsightStrip) stays. Phase 167.1.2 D-15 (2026-09-27) supersedes IN-01
+// (2026-09-25): the copy is chosen by state, never by a snapshot count, so a
+// brand-new book under "rebuilding" gets the panel and its reason too. The
+// warm-up note renders only in the "ready" branch, where more days do build
+// the panels (review C3 WR-01: its count is measured against the real builder
+// in `AllocationDashboardV2.warmup.test.tsx`).
 //
 // The factsheet body mock renders a "Sharpe" label and the payload builder
 // returns a non-null stub, so a regression that let the factsheet mount would
@@ -24,7 +28,7 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
 // mocks DO render the curve and the Sharpe label when the state allows it.
 // ---------------------------------------------------------------------------
 
-const buildPayloadSpy = vi.fn(() => ({ stub: true }));
+const buildPayloadSpy = vi.fn((..._args: unknown[]) => ({ stub: true }));
 
 vi.mock("@/components/portfolio/InsightStrip", () => ({
   InsightStrip: () => <div data-testid="mock-insight-strip" />,
@@ -49,8 +53,57 @@ vi.mock("@/app/factsheet/[id]/v2/FactsheetView", () => ({
   ),
 }));
 vi.mock("@/lib/factsheet/allocator-portfolio-payload", () => ({
-  buildAllocatorPortfolioFactsheetPayload: () => buildPayloadSpy(),
+  buildAllocatorPortfolioFactsheetPayload: (...args: unknown[]) =>
+    buildPayloadSpy(...args),
 }));
+
+// The one authored line per rebuild reason, over the closed set of
+// `EquityHistoryRebuildReason`. Shared by the per-reason arm and the D-15
+// reason-and-count arm below, so the two cannot drift apart.
+const REASON_LINES = [
+  [
+    "duplicate_account",
+    "Two of your keys read the same exchange account. Disconnect one of them on the Exchanges page and the history rebuilds.",
+  ],
+  [
+    // Review C2 WR-02: the line no longer promises the NEXT sync succeeds.
+    // The stamper runs after every successful poll, and that is all the
+    // line claims.
+    "account_identity_pending",
+    "We are confirming which exchange account each key reads. Each daily sync checks it again.",
+  ],
+  [
+    // Review C2 round 2 IN-04: with no key list to name from (a payload
+    // without the ids), the line stays true for any number of keys.
+    "key_not_syncing",
+    "A key is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+  ],
+  [
+    "awaiting_derivation",
+    "Your history is recomputed from each account's returns and cash flows once a day.",
+  ],
+  [
+    "derivation_rejected",
+    "The latest rebuild of your history did not pass its checks, so it is not shown.",
+  ],
+  [
+    // Review C2 round 2 IN-05: active voice (DESIGN.md Voice).
+    "history_read_failed",
+    "We could not load your history just now. Reload the page to try again.",
+  ],
+  [
+    // Review C2 round 3 R3-WR-03: the cause and the unlock, never "did not
+    // pass its checks". No account and no number (T-167.1.2-22a).
+    "shared_account_no_working_key",
+    "The keys that read one of your exchange accounts are all failing to sync, so that account's history stops. Fix or reconnect one of them on the Exchanges page.",
+  ],
+  [
+    "shared_account_history_truncated",
+    "One of your exchange accounts changed keys, and we cannot join its history from before the change to the new key's yet, so your history is not shown.",
+  ],
+] as const satisfies ReadonlyArray<
+  readonly [NonNullable<MyAllocationDashboardPayload["equityHistoryRebuildReason"]>, string]
+>;
 
 const baseProps = {
   portfolio: {
@@ -255,20 +308,21 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     expect(buildPayloadSpy).not.toHaveBeenCalled();
   });
 
-  // Phase 167.1.2 / IN-01 (founder copy call 2026-09-25, "Warm-up note on
-  // Overview"). A brand-new book, with no legacy snapshot and no derived curve,
-  // has no history for D-02 to withhold. The "being rebuilt" panel would tell
-  // that allocator their chart is hidden because the history could double-count
-  // an account, which says nothing about their book, while the Scenario
-  // composer on the same page stays silent for the same book. They get the
-  // warm-up note, which says what unlocks the panels. The curve and the
-  // factsheet stay unmounted. This is a first connect: no holdings yet and a
-  // sync in flight.
-  it("rebuilding + a brand-new book (0 snapshots, no derived curve): the warm-up note renders INSTEAD of the rebuilding panel", () => {
+  // Phase 167.1.2 D-15 (2026-09-27) supersedes IN-01 (2026-09-25): under
+  // 'rebuilding' the copy is chosen by state, never by count, because the
+  // warm-up line promises a timer the D-02 hold never honours.
+  // IN-01 gave a brand-new book (no legacy snapshot, no derived curve) the
+  // warm-up note, "Aggregated factsheet panels appear once at least two days
+  // of blended equity history are available". Under "rebuilding" no number of
+  // days flips the state; only the conditions the reason names do. So this
+  // book gets the panel and its reason. Do NOT restore the IN-01 branch.
+  // This is a first connect: no holdings yet and a sync in flight.
+  it("rebuilding + a brand-new book (0 snapshots, no derived curve): the rebuilding panel and its reason render, never the warm-up timer (D-15)", () => {
     render(
       <AllocationDashboardV2
         {...baseProps}
         equityHistoryState="rebuilding"
+        equityHistoryRebuildReason="awaiting_derivation"
         equityDailyPoints={[]}
         snapshotCount={0}
         equityCurveSource="legacy"
@@ -276,13 +330,12 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
         hasSyncing
       />,
     );
-    const note = screen.getByTestId("overview-factsheet-warmup");
-    expect(note.textContent).toContain(
-      "Aggregated factsheet panels appear once at least two days of blended equity history are available.",
+    const panel = screen.getByTestId("overview-equity-rebuilding");
+    expect(panel.textContent).toContain(
+      "Your history is recomputed from each account's returns and cash flows once a day.",
     );
-    // With zero snapshots the "N snapshot recorded so far" line stays hidden.
-    expect(note.textContent).not.toMatch(/recorded so far/);
-    expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
+    expect(screen.queryByTestId("overview-factsheet-warmup")).toBeNull();
+    expect(screen.queryByText(/appear once/)).toBeNull();
     // D-02 still holds: no curve, no factsheet, no KPI built.
     expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
     expect(screen.queryByTestId("mock-equity-chart")).toBeNull();
@@ -291,41 +344,164 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     expect(buildPayloadSpy).not.toHaveBeenCalled();
   });
 
-  // Once there is history, the rebuilding panel shows as before. The history
-  // has two sources, and either one alone decides it: a derived curve with no
-  // legacy snapshot, and legacy snapshots with no derived curve.
-  it.each([
-    ["a derived curve and 0 legacy snapshots", 0, "derived"],
-    ["1 legacy snapshot and no derived curve", 1, "legacy"],
-  ])(
-    "rebuilding + history from %s: the rebuilding panel renders and the warm-up note does not",
-    (_label, snapshotCount, equityCurveSource) => {
+  // Phase 167.1.2 D-15 (2026-09-27) supersedes IN-01 (2026-09-25): under
+  // 'rebuilding' the copy is chosen by state, never by count, because the
+  // warm-up line promises a timer the D-02 hold never honours.
+  // This arm replaced a count-driven one (a derived curve, or one legacy
+  // snapshot, turned the panel on). Now every reason in the closed set, on
+  // every combination of the two history sources, gets the panel with that
+  // reason's line, and the warm-up note never renders.
+  const HISTORY_SHAPES = [
+    ["0 snapshots, legacy source", 0, "legacy"],
+    ["0 snapshots, derived source", 0, "derived"],
+    ["1 snapshot, legacy source", 1, "legacy"],
+  ] as const;
+  it.each(
+    REASON_LINES.flatMap(([reason, line]) =>
+      HISTORY_SHAPES.map(
+        ([shape, snapshotCount, equityCurveSource]) =>
+          [reason, shape, snapshotCount, equityCurveSource, line] as const,
+      ),
+    ),
+  )(
+    "rebuilding reason %s with %s: the panel renders that reason's line and the warm-up note does not (D-15)",
+    (reason, _shape, snapshotCount, equityCurveSource, line) => {
       render(
         <AllocationDashboardV2
           {...baseProps}
           equityHistoryState="rebuilding"
+          equityHistoryRebuildReason={reason}
           snapshotCount={snapshotCount}
-          equityCurveSource={equityCurveSource as "derived" | "legacy"}
+          equityCurveSource={equityCurveSource}
         />,
       );
       expect(
-        screen.getByTestId("overview-equity-rebuilding"),
-      ).toBeInTheDocument();
+        screen.getByTestId("overview-equity-rebuilding").textContent,
+      ).toContain(line);
       expect(screen.queryByTestId("overview-factsheet-warmup")).toBeNull();
+      expect(screen.queryByText(/appear once/)).toBeNull();
       expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
+      expect(screen.queryByText("Sharpe")).toBeNull();
       expect(buildPayloadSpy).not.toHaveBeenCalled();
     },
   );
+
+  // D-15: the warm-up note keeps exactly one home, the "ready" branch, where
+  // the curve IS shown and is too short for factsheet panels. Review C3 WR-01
+  // moved that arm to `AllocationDashboardV2.warmup.test.tsx`: it mocked the
+  // builder and pinned a two-day threshold the real builder does not have. The
+  // arm there runs the real builder on a producer-shaped ready payload.
 
   // Positive control (moved behaviour, D-02): with the state explicitly "ready"
   // the same fixture DOES render the curve and the factsheet, so the absences
   // asserted above are the gate, not a broken fixture.
   it("ready: the curve and the factsheet render and the rebuilding panel does not", () => {
-    render(<AllocationDashboardV2 {...baseProps} equityHistoryState="ready" />);
+    const equityDailyReturns = [
+      { date: "2026-03-11", value: 0.01 },
+      { date: "2026-03-12", value: -0.02 },
+    ];
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        equityHistoryState="ready"
+        equityDailyReturns={equityDailyReturns}
+      />,
+    );
     expect(screen.getByTestId("overview-equity-curve")).toBeInTheDocument();
     expect(screen.getByTestId("mock-factsheet-body")).toBeInTheDocument();
     expect(screen.getByText("Sharpe")).toBeInTheDocument();
     expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
-    expect(buildPayloadSpy).toHaveBeenCalled();
+    // D-06: the builder receives the persisted returns, not a curve-derived series.
+    expect(buildPayloadSpy).toHaveBeenCalledWith(
+      baseProps.equityDailyPoints,
+      expect.objectContaining({ dailyReturns: equityDailyReturns }),
+    );
+  });
+
+  it.each(REASON_LINES)("rebuilding reason %s renders its one line", (reason, line) => {
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        equityHistoryState="rebuilding"
+        equityHistoryRebuildReason={reason}
+      />,
+    );
+    const panel = screen.getByTestId("overview-equity-rebuilding");
+    expect(panel.textContent).toContain(line);
+    // Review C2 round 3 R3-WR-03: neither shared-account line falls back to
+    // the generic refusal.
+    if (reason.startsWith("shared_account_")) {
+      expect(panel.textContent).not.toContain("did not pass its checks");
+    }
+    if (
+      reason === "duplicate_account" ||
+      reason === "key_not_syncing" ||
+      reason === "shared_account_no_working_key"
+    ) {
+      expect(screen.getByRole("link", { name: "Exchanges page" })).toHaveAttribute(
+        "href",
+        "/profile?tab=exchanges",
+      );
+    }
+  });
+
+  // Review C2 round 2 IN-04. The key_not_syncing line names the key when there
+  // is exactly one, with the label the Exchanges page and the Scenario rows
+  // use (`{Exchange} — {nickname}`, or the masked id tail when the key has no
+  // nickname). Two or more keys get a plural line, never "one of your keys".
+  const notSyncing = (id: string, exchange: string, label: string) => ({
+    id,
+    exchange,
+    label,
+    is_active: true,
+    sync_status: "error",
+    last_sync_at: null,
+    account_balance_usdt: null,
+    created_at: "2026-01-01T00:00:00Z",
+    sync_error: null,
+    last_429_at: null,
+    disconnected_at: null,
+  });
+  it.each([
+    [
+      "one key with a nickname is named",
+      [notSyncing("k-bad-0001", "okx", "Main")],
+      ["k-bad-0001"],
+      "Your key OKX — Main is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+    ],
+    [
+      "one key with no nickname is named by its masked tail",
+      [notSyncing("k-bad-7f3a", "bybit", "  ")],
+      ["k-bad-7f3a"],
+      "Your key Bybit — ••••7f3a is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+    ],
+    [
+      "two keys get the plural line",
+      [notSyncing("k-a", "okx", "Main"), notSyncing("k-b", "binance", "Spare")],
+      ["k-a", "k-b"],
+      "Some of your keys are not syncing, so we cannot confirm which exchange accounts they read. Check them on the Exchanges page.",
+    ],
+    [
+      "an id missing from the key list falls back to the unnamed line",
+      [notSyncing("k-a", "okx", "Main")],
+      ["k-gone"],
+      "A key is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+    ],
+  ])("key_not_syncing: %s", (_label, apiKeys, ids, line) => {
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        apiKeys={apiKeys as never}
+        equityHistoryState="rebuilding"
+        equityHistoryRebuildReason="key_not_syncing"
+        equityHistoryNotSyncingKeyIds={ids}
+      />,
+    );
+    const panel = screen.getByTestId("overview-equity-rebuilding");
+    expect(panel.textContent).toContain(line);
+    expect(screen.getByRole("link", { name: "Exchanges page" })).toHaveAttribute(
+      "href",
+      "/profile?tab=exchanges",
+    );
   });
 });

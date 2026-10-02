@@ -81,10 +81,15 @@ class _StubDeribit:
         self.load_markets_calls += 1
         return {}
 
-    async def fetch_balance(self) -> dict[str, object]:
+    async def fetch_balance(
+        self, params: dict[str, object] | None = None
+    ) -> dict[str, object]:
         # DRB-03: must NEVER be reached on a scope-rejection path — the deribit
         # precheck returns before this. If a test's rejection path calls this,
         # the precheck ordering is broken (SC3 regression).
+        # Phase 167.1.2 (D-01): takes `params` like ccxt's real
+        # `fetch_balance(params={})`, because the validator now passes
+        # `{"extended": True}` to read the Deribit account id.
         self.fetch_balance_calls += 1
         return {"free": {}, "used": {}, "total": {}}
 

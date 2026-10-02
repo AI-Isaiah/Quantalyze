@@ -164,8 +164,16 @@ function emptyComputeSummary(): ComputeSummary {
     mtd: NaN,
     ytd: NaN,
     p3m: NaN,
-    p6m: NaN,
-    p1y: NaN,
+    // Phase 169 review round 1 (IN-03 / SFH L-1): a zero-observation blend is
+    // shorter than every record-length window, so D-57 omits all four rows.
+    // null, not NaN: NaN passes the renderer's `!= null` gate and drew
+    // "6 Month —" / "1 Year —" beside hidden 3 Year / 5 Year rows. MTD, YTD and
+    // 3M stay NaN (em-dash rows): YTD is a calendar window (D-11) and MTD / 3M
+    // rows are always shown.
+    p6m: null,
+    p1y: null,
+    p3y: null,
+    p5y: null,
     best_day: NaN,
     worst_day: NaN,
     best_week: NaN,
@@ -517,5 +525,10 @@ export function buildScenarioFactsheetPayload(
     correlationMatrix: { labels: [], matrix: [] },
     stressWindows: body.stressWindows,
     quantiles: body.quantiles,
+    // Phase 167.1.2 plan 07 (W2) — the SAME basis every compute() call above
+    // used (the resolved arg, 252 by default; not a new default). MetricsColumn
+    // hides its observation warning on a payload with no basis, so dropping it
+    // here would blank a warning this surface has a basis for.
+    periodsPerYear,
   };
 }

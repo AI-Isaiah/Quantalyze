@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, cleanup, within, act } from "@testing-library/react";
 import { AllocatorMatchQueue } from "./AllocatorMatchQueue";
 
 /**
@@ -847,5 +847,227 @@ describe("<AllocatorMatchQueue> — [140.4-05] the load failure is announced", (
       await screen.findByRole("heading", { name: /Demo Allocator/i }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+/**
+ * N-MATCH (170-06, AD-07). Below md the queue is read-only in the handlers,
+ * not only in the banner: Recompute, KEEP/SKIP, Send intro and the
+ * preferences-panel recompute request must not leave the browser, and every
+ * write control carries `hidden` plus an `md:` display class. The server
+ * snapshot of useMediaQuery is false, so visibility is CSS — these cases
+ * drive the JS guard by stubbing matchMedia.
+ *
+ * A real viewport below 768 is also below 1024, so both queries are false.
+ * `!/min-width: 768px/.test(query)` alone would report lg as matching.
+ */
+function installMatchMedia(initial: { md: boolean; lg: boolean }) {
+  const state = { ...initial };
+  const listeners = new Set<() => void>();
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    configurable: true,
+    value: (query: string) => ({
+      get matches() {
+        if (/min-width:\s*768px/.test(query)) return state.md;
+        if (/min-width:\s*1024px/.test(query)) return state.lg;
+        return false;
+      },
+      media: query,
+      onchange: null,
+      addEventListener: (_event: string, cb: () => void) => {
+        listeners.add(cb);
+      },
+      removeEventListener: (_event: string, cb: () => void) => {
+        listeners.delete(cb);
+      },
+      addListener: (cb: () => void) => {
+        listeners.add(cb);
+      },
+      removeListener: (cb: () => void) => {
+        listeners.delete(cb);
+      },
+      dispatchEvent: () => false,
+    }),
+  });
+  return {
+    set(next: Partial<{ md: boolean; lg: boolean }>) {
+      if (next.md !== undefined) state.md = next.md;
+      if (next.lg !== undefined) state.lg = next.lg;
+      for (const cb of listeners) cb();
+    },
+  };
+}
+
+function mutationCalls(mock: { mock: { calls: unknown[][] } }, needle: string) {
+  return mock.mock.calls.filter((call) => String(call[0]).includes(needle));
+}
+
+describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
+  function jsonResponse(body: unknown, status = 200) {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  it("below md, action-bar and empty-state Recompute now issue no request and Edit preferences opens no panel", async () => {
+    installMatchMedia({ md: false, lg: false });
+    const payload = { ...buildPayload(), batch: null, candidates: [] };
+    const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue(jsonResponse(payload));
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+
+    const recomputes = screen.getAllByRole("button", { name: /Recompute now/i });
+    expect(recomputes).toHaveLength(2);
+    for (const button of recomputes) fireEvent.click(button);
+    fireEvent.click(screen.getByRole("button", { name: /Edit preferences/i }));
+
+    expect(mutationCalls(fetchMock, "/api/admin/match/recompute")).toHaveLength(0);
+    expect(screen.queryByRole("heading", { name: /CRM-style editor/i })).toBeNull();
+  });
+
+  it("below md, shortlist Send intro and detail KEEP / SKIP / Send intro issue no request and open no panel", async () => {
+    installMatchMedia({ md: false, lg: false });
+    const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue(jsonResponse(buildPayload()));
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+
+    fireEvent.click(screen.getByRole("button", { name: "KEEP" }));
+    fireEvent.click(screen.getByRole("button", { name: "SKIP" }));
+    for (const button of screen.getAllByRole("button", { name: /Send intro/i })) {
+      if (button.tagName === "BUTTON") fireEvent.click(button);
+    }
+
+    expect(mutationCalls(fetchMock, "/api/admin/match/decisions")).toHaveLength(0);
+    expect(mutationCalls(fetchMock, "/api/admin/match/send-intro")).toHaveLength(0);
+    expect(document.querySelector(".fixed.inset-0")).toBeNull();
+
+    // s/u/d/r. Below md is also below lg, and the handlers must still not fetch.
+    (document.body as HTMLElement).focus();
+    for (const key of ["s", "u", "d", "r"]) {
+      fireEvent.keyDown(window, { key });
+    }
+    expect(mutationCalls(fetchMock, "/api/admin/match/recompute")).toHaveLength(0);
+    expect(mutationCalls(fetchMock, "/api/admin/match/decisions")).toHaveLength(0);
+    expect(document.querySelector(".fixed.inset-0")).toBeNull();
+  });
+
+  // SFH-170-05 replaced the case that stood here. It submitted the form below
+  // md and waited for the post-save confirm, which only fires after a
+  // successful PUT, so it asserted the defect (Save still wrote below md) as
+  // the expected path. The two cases below split what it was reaching for.
+  function prefsFetch() {
+    return vi.spyOn(global, "fetch").mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("/preferences/")) return Promise.resolve(jsonResponse({ ok: true }));
+      return Promise.resolve(jsonResponse(buildPayload()));
+    });
+  }
+
+  it("SFH-170-05: preferences opened at md then narrowed below md disable Save, say why, and write nothing", async () => {
+    const media = installMatchMedia({ md: true, lg: false });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const fetchMock = prefsFetch();
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+    fireEvent.click(screen.getByRole("button", { name: /Edit preferences/i }));
+    const editor = screen.getByRole("heading", { name: /CRM-style editor/i });
+    const save = screen.getByRole("button", { name: "Save preferences" });
+    expect(save).not.toBeDisabled();
+
+    act(() => {
+      media.set({ md: false });
+    });
+
+    expect(save).toBeDisabled();
+    const panel = editor.closest(".fixed") as HTMLElement;
+    expect(within(panel).getByRole("status").textContent).toMatch(
+      /Read-only on mobile\..*768px or wider.*save preferences/,
+    );
+
+    // A disabled button does not stop a scripted or implicit submit.
+    fireEvent.submit(save.closest("form")!);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+    expect(mutationCalls(fetchMock, "/preferences/")).toHaveLength(0);
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(mutationCalls(fetchMock, "/api/admin/match/recompute")).toHaveLength(0);
+  });
+
+  it("SFH-170-05: a confirmed recompute after narrowing below md mid-save is refused visibly, not dropped", async () => {
+    const media = installMatchMedia({ md: true, lg: false });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const fetchMock = prefsFetch();
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+    fireEvent.click(screen.getByRole("button", { name: /Edit preferences/i }));
+
+    // Save at md: the PUT goes out and its success arms the 100 ms confirm.
+    fireEvent.submit(screen.getByRole("button", { name: "Save preferences" }).closest("form")!);
+    await waitFor(() => {
+      expect(mutationCalls(fetchMock, "/preferences/")).toHaveLength(1);
+    });
+
+    // The viewport crosses below md before the confirm runs.
+    act(() => {
+      media.set({ md: false });
+    });
+
+    await waitFor(() => {
+      expect(confirmSpy).toHaveBeenCalled();
+    });
+    const notice = await screen.findByText(
+      "Recompute did not run. Open on a tablet or desktop (768px or wider) to recompute the match queue.",
+    );
+    expect(notice.closest('[role="status"]')).not.toBeNull();
+    // Visible at every width: no `hidden` / `md:hidden` on the notice.
+    expect(notice.closest('[role="status"]')!.className).not.toMatch(/(^|\s)(md:)?hidden(\s|$)/);
+    expect(mutationCalls(fetchMock, "/api/admin/match/recompute")).toHaveLength(0);
+  });
+
+  it("hides every write control with hidden plus an md display class, and the banner names 768px or wider", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(jsonResponse(buildPayload()));
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+
+    for (const name of [/Recompute now/i, /Edit preferences/i]) {
+      const classes = screen.getByRole("button", { name }).className.split(/\s+/);
+      expect(classes, String(name)).toContain("hidden");
+      expect(classes, String(name)).toContain("md:inline-flex");
+      // Button's base `inline-flex` is emitted after `.hidden` in Tailwind v4
+      // and would keep the control visible. The unprefixed display must be gone.
+      expect(classes, String(name)).not.toContain("inline-flex");
+    }
+
+    const shortlist = screen.getByText("Shortlist").parentElement;
+    expect(shortlist).not.toBeNull();
+    // The card itself is role="button" and its name includes "Send intro".
+    // The write control is the nested <button>.
+    const nestedSend = within(shortlist!)
+      .getAllByRole("button", { name: /Send intro/i })
+      .find((el) => el.tagName === "BUTTON");
+    if (!nestedSend) throw new Error("shortlist Send intro button missing");
+    const sendClasses = nestedSend.className.split(/\s+/);
+    expect(sendClasses).toContain("hidden");
+    expect(sendClasses).toContain("md:inline-flex");
+
+    const bar = screen.getByRole("button", { name: "KEEP" }).parentElement;
+    expect(bar).not.toBeNull();
+    const barClasses = bar!.className.split(/\s+/);
+    expect(barClasses).toContain("hidden");
+    expect(barClasses).toContain("md:flex");
+    expect(barClasses).not.toContain("flex");
+
+    const banner = screen.getByText(/768px or wider/);
+    expect(banner.textContent).not.toContain("1024px");
+    expect(banner.closest("div")?.className).toContain("md:hidden");
+    expect(banner.closest("div")?.className).toContain("border-accent/30");
+    expect(banner.closest("div")?.className).toContain("bg-accent/5");
   });
 });

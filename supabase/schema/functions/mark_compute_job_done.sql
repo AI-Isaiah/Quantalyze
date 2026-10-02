@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260926120000_mark_compute_job_bridge_advisory_lock.sql
+-- source migration: 20261001120000_compute_job_fence_errcode_55006.sql
 -- --------------------------------------------------------------------------
 -- mark_compute_job_done
 -- --------------------------------------------------------------------------
@@ -58,7 +58,7 @@ BEGIN
       END IF;
       RAISE EXCEPTION 'mark_compute_job_done: job % preempted by watchdog reclaim (late mark on already-done row, caller token=%, current token=%)',
         p_job_id, p_claim_token, v_current_token
-        USING ERRCODE = 'serialization_failure';
+        USING ERRCODE = '55006';
     END IF;
 
     -- mig 117 P97: token mismatch on a still-running row.
@@ -66,7 +66,7 @@ BEGIN
        AND v_current_token IS DISTINCT FROM p_claim_token THEN
       RAISE EXCEPTION 'mark_compute_job_done: job % preempted by watchdog reclaim (caller token=%, current token=%)',
         p_job_id, p_claim_token, v_current_token
-        USING ERRCODE = 'serialization_failure';
+        USING ERRCODE = '55006';
     END IF;
 
     -- Row in some other state (failed_retry, failed_final, pending,

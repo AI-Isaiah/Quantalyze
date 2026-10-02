@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
+import { NowrapWords } from "@/components/ui/NowrapWords";
 import { Card } from "@/components/ui/Card";
 import { StrategyActions } from "@/components/strategy/StrategyActions";
 import { ShareableLink } from "@/components/strategy/ShareableLink";
@@ -770,14 +771,20 @@ export default async function StrategiesPage() {
             const shareNote = shareNotes.get(s.id);
             return (
               <Card key={s.id} data-testid="strategy-row">
-                <div className="flex items-center justify-between">
-                  <div className="flex-1 min-w-0">
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  {/* CR-01 (170 review, measured 2026-10-01): from md up the name
+                      block keeps a hard 160 px floor and the control group may
+                      shrink and wrap its own items. With `md:shrink-0` the group
+                      stayed at its one-line width (~400 px for a draft row), so
+                      at 768-840 px (desktop 200% zoom) the name block got 0 px
+                      and the name painted over the controls. */}
+                  <div className="flex-1 min-w-0 md:min-w-[160px]">
                     <Link href={`/strategies/${s.id}/edit`} className="font-medium text-text-primary hover:text-accent transition-colors">
-                      {s.name}
+                      <NowrapWords text={s.name} breakOverlong />
                     </Link>
-                    <div className="flex gap-1.5 mt-1">
+                    <div className="flex flex-wrap gap-1 mt-1">
                       {s.strategy_types.map((t: string) => (
-                        <Badge key={t} label={t} />
+                        <Badge key={t} label={t} className="whitespace-nowrap" />
                       ))}
                     </div>
                     {s.review_note && s.status === "draft" && (
@@ -786,7 +793,7 @@ export default async function StrategiesPage() {
                       </p>
                     )}
                   </div>
-                  <div className="flex items-center gap-3 ml-4">
+                  <div className="flex flex-wrap items-center gap-3 md:ml-4 md:min-w-0 md:justify-end">
                     {/* Phase 164 (SHARE-04) — the status gate is GONE, and its
                         removal is the point, not a side effect. Hiding the control
                         for unpublished rows was the other half of the same
@@ -800,6 +807,7 @@ export default async function StrategiesPage() {
                     <ShareableLink
                       strategyId={s.id}
                       published={isPublishedStatus(s.status)}
+                      size="sm"
                     />
                     <Badge label={s.status} type="status" />
                     <StrategyActions strategyId={s.id} status={s.status} hasApiKey={!!s.api_key_id} hasData={!!s.api_key_id} />

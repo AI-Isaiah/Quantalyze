@@ -144,6 +144,39 @@ describe("adaptPortfolioAnalytics", () => {
     expect(r?.weight_pct).toBe(50);
   });
 
+  // 2026-09-29, Phase 169 review round 1 SFH M-5. The producer writes
+  // `_safe_float(ordered_weights[i] * 100)`, which can be None. `?? 0` read a
+  // missing weight as "0.0% of capital", and every row with a risk share then
+  // read "Overweight risk". A weight that does not exist stays null, as the
+  // risk share already does (166.1 D7).
+  it("keeps a missing weight null, never 0", () => {
+    const row = {
+      ...complete,
+      risk_decomposition: [
+        {
+          strategy_id: "s-a",
+          strategy_name: "Alpha",
+          marginal_risk_pct: 30,
+          standalone_vol: 0.2,
+          component_var: 0.01,
+          weight_pct: null,
+        },
+        {
+          strategy_id: "s-b",
+          strategy_name: "Beta",
+          marginal_risk_pct: 70,
+          standalone_vol: 0.3,
+          component_var: 0.02,
+        },
+      ],
+    };
+    const parsed = adaptPortfolioAnalytics(row);
+    expect(parsed).not.toBeNull();
+    if (!parsed) return;
+    expect(parsed.risk_decomposition?.[0].weight_pct).toBeNull();
+    expect(parsed.risk_decomposition?.[1].weight_pct).toBeNull();
+  });
+
   it("handles a row with benchmark_comparison set to null", () => {
     const parsed = adaptPortfolioAnalytics(partialNullBenchmark);
     expect(parsed).not.toBeNull();

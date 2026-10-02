@@ -1,9 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   buildAllocatorPortfolioFactsheetPayload,
   equityCurveToDailyReturns,
   resolveDailyReturnSeries,
 } from "./allocator-portfolio-payload";
+import * as resolveSeries from "./resolve-series";
 import { buildFactsheetPayload } from "./build-payload";
 import type { DailyReturn } from "./types";
 
@@ -142,6 +143,54 @@ describe("buildAllocatorPortfolioFactsheetPayload", () => {
     expect(alloc!.strategyMetrics.cagr).toBe(p252!.strategyMetrics.cagr);
     expect(p365!.strategyMetrics.cagr).toBe(p252!.strategyMetrics.cagr);
   });
+
+  it("D-06: a supplied dailyReturns series is the Sharpe input and the $-curve is not converted", () => {
+    // The curve doubles on day 2 (a deposit, if read as a level ratio). The
+    // persisted returns are a small oscillation. Those two Sharpes differ, so
+    // a builder that ignored dailyReturns would fail this.
+    const base = Date.UTC(2025, 0, 1);
+    const day = (i: number) =>
+      new Date(base + i * 86_400_000).toISOString().slice(0, 10);
+    const curve = Array.from({ length: 40 }, (_, i) => ({
+      date: day(i),
+      value: i === 0 ? 100 : 200,
+    }));
+    const dailyReturns: DailyReturn[] = Array.from({ length: 39 }, (_, i) => ({
+      date: day(i + 1),
+      value: i % 2 === 0 ? 0.01 : -0.004,
+    }));
+    const spy = vi.spyOn(resolveSeries, "equityCurveToDailyReturns");
+    const fromReturns = buildAllocatorPortfolioFactsheetPayload(curve, {
+      allocatorId: "alloc-returns",
+      computedAt: "2025-02-10T00:00:00Z",
+      dailyReturns,
+    });
+    expect(spy).not.toHaveBeenCalled();
+    const ref = buildFactsheetPayload(
+      {
+        id: "portfolio:alloc-returns",
+        name: "My Portfolio",
+        types: ["allocator_portfolio"],
+        markets: [],
+        computedAt: "2025-02-10T00:00:00Z",
+        trustTier: null,
+        ingestSource: "api",
+        assetClass: "crypto",
+      },
+      dailyReturns,
+    );
+    expect(fromReturns).not.toBeNull();
+    expect(ref).not.toBeNull();
+    expect(fromReturns!.strategyMetrics.sharpe).toBe(ref!.strategyMetrics.sharpe);
+    const fromCurve = buildAllocatorPortfolioFactsheetPayload(curve, {
+      allocatorId: "alloc-returns",
+    });
+    expect(spy).toHaveBeenCalled();
+    expect(fromCurve!.strategyMetrics.sharpe).not.toBe(
+      fromReturns!.strategyMetrics.sharpe,
+    );
+    spy.mockRestore();
+  });
 });
 
 describe("resolveDailyReturnSeries — analytics column-drift fallback", () => {
@@ -208,5 +257,61 @@ describe("resolveDailyReturnSeries — analytics column-drift fallback", () => {
   it("returns an empty array when neither column has data", () => {
     expect(resolveDailyReturnSeries(null, null)).toEqual([]);
     expect(resolveDailyReturnSeries(undefined, undefined)).toEqual([]);
+  });
+});
+
+/**
+ * Phase 169.4 plan 02 (SC3, D-09, D-69). The /allocations Overview used to
+ * reach `buildFactsheetPayload` with no BTC opt, so its BTC comparator was the
+ * bundled fixture (last date 2026-05-12) while every factsheet read the fed
+ * table. These cases pin that the dashboard's database closes reach the build,
+ * and that a read error renders the unavailable comparator, never the fixture.
+ * The book is dated after the fixture's last date so a fixture close can never
+ * stand in for a database close.
+ */
+describe("buildAllocatorPortfolioFactsheetPayload — the dashboard's BTC closes (169.4-02)", () => {
+  const DAY_MS = 86_400_000;
+  const isoDay = (startIso: string, i: number) =>
+    new Date(Date.parse(`${startIso}T00:00:00Z`) + i * DAY_MS).toISOString().slice(0, 10);
+  // 60 book returns, 2026-08-01 .. 2026-09-29 ("yesterday" for these cases).
+  const BOOK: DailyReturn[] = Array.from({ length: 60 }, (_, i) => ({
+    date: isoDay("2026-08-01", i),
+    value: 0.002 * Math.sin(i / 3) + 0.0005,
+  }));
+  // BTC closes from the day before the book's first date through its last.
+  const CLOSES = Array.from({ length: 61 }, (_, i) => ({
+    date: isoDay("2026-07-31", i),
+    close: 60_000 * (1 + 0.01 * Math.cos(i / 4)),
+  }));
+  const meta = { allocatorId: "a-1", dailyReturns: BOOK };
+
+  it("closes through yesterday: the BTC comparator is dated yesterday (not the fixture's 2026-05-12) with numeric windows", () => {
+    const payload = buildAllocatorPortfolioFactsheetPayload([], {
+      ...meta,
+      btcBenchmarkPrices: { prices: CLOSES, through: "2026-09-29", dropped: [] },
+    });
+    const btc = payload!.comparators.btc;
+    expect(btc.through).toBe("2026-09-29");
+    expect(btc.summary).not.toBeNull();
+    expect(Number.isFinite(btc.summary!.cum_ret)).toBe(true);
+    expect(Number.isFinite(btc.summary!.ann_vol)).toBe(true);
+    expect(btc.joint).not.toBeNull();
+    expect(Number.isFinite(btc.joint!.beta)).toBe(true);
+  });
+
+  it("the unavailable marker: the BTC comparator is the unavailable form, never fixture closes", () => {
+    // A book dated INSIDE the bundled fixture's range, so a build that ignored
+    // the marker would fall back to fixture closes and show a BTC summary.
+    const bookInFixture: DailyReturn[] = BOOK.map((r, i) => ({ ...r, date: isoDay("2026-03-01", i) }));
+    const withoutOpt = buildAllocatorPortfolioFactsheetPayload([], { allocatorId: "a-1", dailyReturns: bookInFixture });
+    expect(withoutOpt!.comparators.btc.summary).not.toBeNull(); // the fixture path this case guards against
+    const payload = buildAllocatorPortfolioFactsheetPayload([], {
+      allocatorId: "a-1",
+      dailyReturns: bookInFixture,
+      btcBenchmarkPrices: { unavailable: true },
+    });
+    const btc = payload!.comparators.btc;
+    expect(btc.summary).toBeNull();
+    expect(btc.through ?? null).toBeNull();
   });
 });

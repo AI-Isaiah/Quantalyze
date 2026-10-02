@@ -209,6 +209,9 @@ const EXPECTED_LIMITER_ROUTES: readonly string[] = [
   "src/app/api/admin/match/eval/route.ts",
   "src/app/api/admin/match/recompute/route.ts",
   "src/app/api/bridge/route.ts",
+  // Phase 169 D-20 — the daily BTC benchmark refresh cron; its limiter bounds
+  // what a leaked CRON_SECRET could replay against the service.
+  "src/app/api/cron/refresh-benchmark/route.ts",
   "src/app/api/keys/[id]/permissions/route.ts",
   // Phase 164.5.3 / MT5CREDS (D-04) — the credential-rotation route.
   "src/app/api/keys/[id]/rotate-secret/route.ts",
@@ -281,6 +284,12 @@ const EXPECTED_ROUTE_LIMITERS: ReadonlyArray<readonly [string, string[]]> = [
   // effective backend budget (slowapi "10/hour" per tenant x 1 measured
   // replica); see the limiter's docblock in `src/lib/ratelimit.ts`.
   ["src/app/api/bridge/route.ts", ["bridgeComputeLimiter"]],
+  // Phase 169 D-20 — why THIS bucket: no cron route had a limiter (measured
+  // 2026-09-25: `checkLimit` in 0 of the 7 cron route files), so there was no
+  // cron precedent. The precedent is the operator-triggered seam routes
+  // (`admin/match/recompute`, `admin/match/eval`) on `adminActionLimiter`; the
+  // cron spends one token per daily tick under one fixed identifier.
+  ["src/app/api/cron/refresh-benchmark/route.ts", ["adminActionLimiter"]],
   ["src/app/api/keys/[id]/permissions/route.ts", ["userActionLimiter"]],
   // Phase 164.5.3 / MT5CREDS (D-04). `userActionLimiter` is the same bucket
   // its two sibling key routes consume, and it is the right one: this route

@@ -352,40 +352,40 @@ describe("STALE-01 · getStrategyDetail withholds a failed run's figures", () =>
   it("C1: the SERIES the discovery factsheet is built from are withheld, not just the scalars", async () => {
     seeded.strategyRow = strategyRow(DEAD_ROW());
 
-    const result = await getStrategyDetail(STRATEGY_ID, "crypto-sma", "discovery");
+    const result = await getStrategyDetail(STRATEGY_ID, "crypto-sma");
 
     expect(result).not.toBeNull();
     for (const key of KPI_KEYS) {
       expect(result!.analytics[key], `${key} leaked`).toBeNull();
     }
-    // /discovery/[slug]/[id] resolves `daily_returns` ?? `returns_series` into
-    // the series `buildFactsheetPayload` consumes; it returns null on an empty
-    // one, which is what routes the page to its EXISTING still-computing
-    // placeholder rather than a factsheet drawn on a dead run.
+    // Phase 169.1 plan 01 (D-26): the discovery page no longer builds from
+    // these columns (it builds through the shared path, whose own G1 gate
+    // refuses a failed run), and the default projection does not request
+    // them. Shaping still withholds whatever arrives, so a future projection
+    // that widened again could not leak a dead run's series through here.
     expect(result!.analytics.daily_returns).toBeNull();
     expect(result!.analytics.returns_series).toBeNull();
-    // `metrics_json_by_basis` is projected by the "discovery" variant but is
-    // not on the `StrategyAnalytics` interface, so read it off the row shape
-    // the page itself casts to.
+    // `metrics_json_by_basis` is not on the `StrategyAnalytics` interface, so
+    // read it off the raw row shape.
     expect(
       (result!.analytics as unknown as { metrics_json_by_basis?: unknown })
         .metrics_json_by_basis ?? null,
     ).toBeNull();
   });
 
-  it("C2: the real status survives so the basis assembly still reads the truth", async () => {
+  it("C2: the real status survives so the detail read still reports the truth", async () => {
     seeded.strategyRow = strategyRow(DEAD_ROW());
 
-    const result = await getStrategyDetail(STRATEGY_ID, "crypto-sma", "discovery");
+    const result = await getStrategyDetail(STRATEGY_ID, "crypto-sma");
 
     expect(result!.analytics.computation_status).toBe("failed");
     expect(result!.analytics.computed_at).toBeFalsy();
   });
 
-  it("C3: CONTROL — a `complete` row keeps its scalars AND its series", async () => {
+  it("C3: CONTROL — a `complete` row keeps its scalars AND whatever series arrive", async () => {
     seeded.strategyRow = strategyRow(LIVE_ROW());
 
-    const result = await getStrategyDetail(STRATEGY_ID, "crypto-sma", "discovery");
+    const result = await getStrategyDetail(STRATEGY_ID, "crypto-sma");
 
     expect(result!.analytics.sharpe).toBe(LIVE_KPIS.sharpe);
     expect(result!.analytics.daily_returns).toEqual(HEAVY.daily_returns);

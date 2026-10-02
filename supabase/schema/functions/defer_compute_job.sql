@@ -2,7 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260529170000_defer_compute_job_claim_token_fence.sql
+-- source migration: 20261001120000_compute_job_fence_errcode_55006.sql
+-- --------------------------------------------------------------------------
+-- defer_compute_job
+-- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION defer_compute_job(
   p_job_id        UUID,
   p_defer_seconds INTEGER,
@@ -54,7 +57,7 @@ BEGIN
   IF NOT FOUND THEN
     -- Distinguish a token mismatch on a still-running row (W1 lost the race
     -- to W2's watchdog re-claim) from a genuine not-found / not-running,
-    -- mirroring mark_compute_job_done's P97 serialization_failure branch.
+    -- mirroring mark_compute_job_done's P97 preempted branch (SQLSTATE 55006).
     SELECT status, claim_token
       INTO v_current_status, v_current_token
       FROM compute_jobs
@@ -66,7 +69,7 @@ BEGIN
        AND v_current_token IS DISTINCT FROM p_claim_token THEN
       RAISE EXCEPTION 'defer_compute_job: job % preempted by watchdog reclaim (caller token=%, current token=%)',
         p_job_id, p_claim_token, v_current_token
-        USING ERRCODE = 'serialization_failure';
+        USING ERRCODE = '55006';
     END IF;
 
     RAISE EXCEPTION 'defer_compute_job: job % not found or not running', p_job_id

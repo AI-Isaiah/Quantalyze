@@ -5,7 +5,11 @@
  *
  * Renders inside the tab content area (NOT viewport — `position: sticky`
  * keeps it bound to the tabpanel; switching tabs hides it via the tabpanel
- * `hidden` attr). 56px tall.
+ * `hidden` attr). At least 56px tall; the box grows when the status line wraps.
+ *
+ * Phase 170 (2026-09-27, N-FOOT): the offset is classes, not an inline style.
+ * Below `md` it sticks at `bottom-16` so it clears MobileNav; at `md` and up
+ * it sits at the scroll-port bottom.
  *
  * Contract:
  *   - Left: live diff count chip — "{N} changes" / "1 change" / "No changes yet"
@@ -20,8 +24,6 @@
  * Reset / Commit fires the upstream callback (the composer decides whether
  * to open a confirmation modal vs. the commit drawer).
  */
-
-import type { CSSProperties } from "react";
 
 export interface ScenarioFooterDeltaItem {
   /** KPI display name, e.g. "Sharpe", "Max DD", "TWR". */
@@ -75,19 +77,6 @@ export interface ScenarioFooterProps {
   commitBlocked?: boolean;
 }
 
-const FOOTER_STYLE: CSSProperties = {
-  position: "sticky",
-  bottom: 0,
-  height: 56,
-  background: "var(--color-surface, #FFFFFF)",
-  borderTop: "1px solid var(--color-border, #E2E8F0)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  padding: "0 16px",
-  zIndex: 10,
-};
-
 export function ScenarioFooter({
   diffCount,
   committableCount,
@@ -114,21 +103,17 @@ export function ScenarioFooter({
         ? "1 change"
         : `${diffCount} changes`;
 
-  // Delta summary copy:
-  //   - zero diffs        → "No changes yet" (chip already says this; the
-  //                         summary slot mirrors it so the footer reads as
-  //                         a single status line at rest)
+  // Delta summary copy, rendered only when hasDiffs (Phase 170, 2026-09-27,
+  // N-FOOT item (h)). At zero diffs the chip alone says "No changes yet".
+  // Mirroring that phrase into this slot was the (h) defect: the empty state
+  // printed twice. With diffs:
   //   - all-muted deltas  → "No material change yet."
-  //   - some non-muted    → top 3 joined by " · " in "{value} {label}" form
+  //   - some non-muted    → top 3 in "{value} {label}" form, each its own
+  //                         nowrap span, joined by " · " so wrapping happens
+  //                         between items, never inside one
   //                         e.g. "+0.3 Sharpe · −4% Max DD"
-  const summaryText = !hasDiffs
-    ? "No changes yet"
-    : significant.length === 0
-      ? "No material change yet."
-      : significant
-          .slice(0, 3)
-          .map((d) => `${d.value} ${d.label}`)
-          .join(" · ");
+  const summaryItems = significant.slice(0, 3).map((d) => `${d.value} ${d.label}`);
+  const mutedOnly = significant.length === 0;
 
   return (
     // JOURNEY-03 (a11y) — a labeled region landmark on a <div>, NOT a <footer>:
@@ -138,20 +123,31 @@ export function ScenarioFooter({
     <div
       role="region"
       aria-label="Scenario draft summary and actions"
-      style={FOOTER_STYLE}
+      className="sticky bottom-16 md:bottom-0 z-10 min-h-[56px] flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2 bg-surface border-t border-border"
     >
-      <span className="rounded-md px-2 py-1 text-xs font-medium text-text-muted">
-        {countLabel}
-      </span>
-      <span className="font-mono text-fixed-13 font-medium tabular-nums text-text-secondary">
-        {summaryText}
-      </span>
-      <div className="flex items-center gap-3">
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="rounded-md px-2 py-1 text-xs font-medium text-text-muted">
+          {countLabel}
+        </span>
+        {hasDiffs && (
+          <span className="font-mono text-fixed-13 font-medium tabular-nums text-text-secondary">
+            {mutedOnly
+              ? "No material change yet."
+              : summaryItems.map((item, i) => (
+                  <span key={item}>
+                    {i > 0 ? " · " : null}
+                    <span className="whitespace-nowrap">{item}</span>
+                  </span>
+                ))}
+          </span>
+        )}
+      </div>
+      <div className="ml-auto flex shrink-0 items-center gap-3">
         <button
           type="button"
           aria-label="Reset scenario draft"
           onClick={onResetRequested}
-          className="rounded-md border border-border px-3 py-1.5 text-xs text-text-secondary hover:border-negative hover:text-negative"
+          className="min-h-[44px] rounded-md border border-border px-3 py-1.5 text-xs text-text-secondary hover:border-negative hover:text-negative"
           data-testid="scenario-footer-reset"
         >
           Reset
@@ -161,7 +157,7 @@ export function ScenarioFooter({
           onClick={onCommitRequested}
           disabled={!canCommit}
           aria-describedby={commitBlocked ? "scenario-fingerprint-mismatch-banner" : undefined}
-          className="rounded-md bg-accent px-4 py-1.5 text-sm font-medium text-white hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
+          className="min-h-[44px] rounded-md bg-accent px-4 py-1.5 text-sm font-medium text-white hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="scenario-footer-commit"
         >
           Commit scenario

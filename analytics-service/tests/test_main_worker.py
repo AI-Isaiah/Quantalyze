@@ -701,6 +701,42 @@ class TestLoopFailureIsolation:
             restore()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("role,expect_ticks", [("backfill", 0), ("interactive", 1), ("all", 1)])
+    async def test_daily_enqueue_loop_skipped_only_for_backfill_role(self, role: str, expect_ticks: int) -> None:
+        # FLIP runbook Step 1 adds a SECOND worker service (WORKER_CLAIM_ROLE=
+        # backfill) next to the API's merged worker, which already runs this
+        # loop. If the backfill worker ran it too, every strategy would get a
+        # second poll_positions job per day (the in-flight dedup does not cover
+        # completed rows) — double exchange calls. Only the backfill role skips;
+        # interactive/all must keep seeding, or the daily poll stops entirely.
+        from main_worker import daily_enqueue_loop
+
+        shutdown, restore = self._fresh_shutdown()
+        shutdown.set()
+        try:
+            ticks = 0
+
+            async def _tick() -> None:
+                nonlocal ticks
+                ticks += 1
+
+            with patch("main_worker.WORKER_CLAIM_ROLE", role), \
+                 patch("main_worker.daily_enqueue_tick", new=_tick), \
+                 patch("main_worker._daily_enqueue_already_ran_today", new=self._gate_not_run_today):
+                loop_task = asyncio.create_task(daily_enqueue_loop(interval=0.01))
+                done, pending = await asyncio.wait({loop_task}, timeout=2.0)
+                for p in pending:
+                    p.cancel()
+
+            assert loop_task.done(), f"daily_enqueue_loop hung for role={role}"
+            assert loop_task.exception() is None
+            assert ticks == expect_ticks, (
+                f"role={role}: expected {expect_ticks} daily enqueue tick(s), got {ticks}"
+            )
+        finally:
+            restore()
+
+    @pytest.mark.asyncio
     async def test_daily_enqueue_loop_initial_tick_failure_does_not_crash_and_exits_on_shutdown(self) -> None:
         # daily_enqueue_loop runs an INITIAL tick on startup (outside the
         # while-loop) before entering the wait/tick cycle. That initial tick

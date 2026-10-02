@@ -128,7 +128,9 @@ function parseRiskDecompositionRow(v: Json): RiskDecompositionRow | null {
     marginal_risk_pct: asNumber(v.marginal_risk_pct),
     standalone_vol: asNumber(v.standalone_vol) ?? 0,
     component_var: asNumber(v.component_var),
-    weight_pct: asNumber(v.weight_pct) ?? 0,
+    // 169 review round 1 SFH M-5 (2026-09-29): a missing weight stays null
+    // for the same reason; `?? 0` made every row with a share "overweight".
+    weight_pct: asNumber(v.weight_pct),
   };
 }
 

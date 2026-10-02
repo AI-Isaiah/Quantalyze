@@ -38,6 +38,19 @@ import { UpdateMt5SecretDialog } from "@/components/strategy/UpdateMt5SecretDial
 import { createClient } from "@/lib/supabase/client";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 import { computeRetryAtSeconds } from "@/lib/allocator-cooldowns";
+import { accountShareNote, isWorkingHolder } from "@/lib/account-share-note";
+import {
+  accountIdentityTokens,
+  departedAnchorOf,
+  departedHistoryCard,
+  isDepartedKey,
+  isLiveKey,
+  type DepartedAnchor,
+  type DepartedHistoryKey,
+} from "@/lib/departed-history";
+// Phase 169 review round 1 IN-04: the balance is an amount, so it renders
+// through the ONE money module in whole dollars (DESIGN.md Currency row).
+import { formatUsd } from "@/lib/dollar-validation";
 import { AllocatorSyncStatus } from "./AllocatorSyncStatus";
 
 interface ExchangeConnection {
@@ -70,6 +83,12 @@ interface ExchangeConnection {
   // connected with; NULL for every ccxt venue. Rendered in both the active
   // and disconnected sections for exchange === "mt5" only.
   venue_account_id: string | null;
+  // Migration 20260925120000 (Phase 167.1.2 D-11 / D-05). The duplicate
+  // marker the daily poll's identity stamper writes, read by accountShareNote
+  // for the note on an active row, and the owner's departed-history choice.
+  account_shared_with_api_key_id: string | null;
+  account_share_kind: string | null;
+  history_inclusion: string | null;
   // f8 (client-only — NOT persisted to DB): captured from the sync route's
   // `already_inflight` response. When syncing AND ≥30s out, the pill renders
   // the Queued helper via AllocatorSyncStatus.
@@ -104,6 +123,9 @@ type InitialKey = Omit<
   | "last_429_at"
   | "disconnected_at"
   | "venue_account_id"
+  | "account_shared_with_api_key_id"
+  | "account_share_kind"
+  | "history_inclusion"
   | "queued_next_attempt_at"
   | "helper_override"
 > & {
@@ -111,6 +133,9 @@ type InitialKey = Omit<
   last_429_at?: string | null;
   disconnected_at?: string | null;
   venue_account_id?: string | null;
+  account_shared_with_api_key_id?: string | null;
+  account_share_kind?: string | null;
+  history_inclusion?: string | null;
 };
 
 interface Props {
@@ -172,11 +197,68 @@ function formatRelative(iso: string | null): string {
   return `${days}d ago`;
 }
 
-function formatUsd(n: number | null): string {
-  if (n == null) return "—";
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}k`;
-  return `$${n.toFixed(0)}`;
+/**
+ * Phase 169.3 review round 1 WR-02 / SFH-04, founder D-74 — which active row
+ * carries an exchange account's balance. The balance is the ACCOUNT's, so it
+ * renders on exactly one row per account.
+ *
+ * An account is the 167.1.2 D-16(a) / D-09 identity: `identity` is the
+ * component's own `accountIdentityTokens` map (a shared non-blank
+ * (exchange, venue account id), or a `duplicate` / `composite_member`
+ * marker, unioned), the grouping Open Positions uses. A key whose account is
+ * unknown is its own account. D-74 (2026-09-30) supersedes plan 03's "a live
+ * composite_member key keeps its balance": a composite_member pair and two
+ * unmarked keys on one venue account id now carry one balance too.
+ *
+ * One rule picks the row that reads the account now, among the group's live
+ * keys (`isLiveKey`, the departed predicate the count uses): a WORKING key
+ * (`isWorkingHolder`, the D-18 rule the share note uses) before a
+ * live-but-failing one, then a key holding a balance before one with none yet
+ * (review round 2 WR-02: a freshly connected key has no balance until its
+ * first sync, and must not hide its twin's), then an unmarked key (a holder)
+ * before a marked one, then the lowest id. Working is the proxy for the
+ * freshest read: nothing on the row dates the stored balance (`last_sync_at`
+ * is the trades cursor), so a failing key's stale number never beats a
+ * working key. A group with no live key has no bearer, so none of its rows
+ * shows a balance.
+ *
+ * Returns the bearer per group; `groupOf` maps a key to its group.
+ */
+function balanceBearers(
+  activeKeys: readonly ExchangeConnection[],
+  identity: ReadonlyMap<string, string | null>,
+): {
+  groupOf: (key: ExchangeConnection) => string;
+  bearerByGroup: Map<string, ExchangeConnection>;
+} {
+  const groupOf = (k: ExchangeConnection): string =>
+    identity.get(k.id) ?? `key:${k.id}`;
+  const isMarked = (k: ExchangeConnection): boolean =>
+    (k.account_share_kind === "duplicate" ||
+      k.account_share_kind === "composite_member") &&
+    k.account_shared_with_api_key_id !== null &&
+    k.account_shared_with_api_key_id !== k.id;
+  const rank = (k: ExchangeConnection): [number, number, number, string] => [
+    isWorkingHolder(k) ? 0 : 1,
+    k.account_balance_usdt == null ? 1 : 0,
+    isMarked(k) ? 1 : 0,
+    k.id,
+  ];
+  const before = (a: ExchangeConnection, b: ExchangeConnection): boolean => {
+    const [ra, rb] = [rank(a), rank(b)];
+    if (ra[0] !== rb[0]) return ra[0] < rb[0];
+    if (ra[1] !== rb[1]) return ra[1] < rb[1];
+    if (ra[2] !== rb[2]) return ra[2] < rb[2];
+    return ra[3] < rb[3];
+  };
+  const bearerByGroup = new Map<string, ExchangeConnection>();
+  for (const k of activeKeys) {
+    if (!isLiveKey(k)) continue;
+    const group = groupOf(k);
+    const current = bearerByGroup.get(group);
+    if (current === undefined || before(k, current)) bearerByGroup.set(group, k);
+  }
+  return { groupOf, bearerByGroup };
 }
 
 const SYNC_FAILED_HELPER =
@@ -190,6 +272,59 @@ const SYNC_FAILED_HELPER =
 // meaning.
 const SYNC_DISCONNECTED_HELPER =
   "This API key is disconnected. Reconnect it before syncing holdings.";
+
+// Phase 167.1.2 plan 04 (RESEARCH Pitfall 5). Once ccxt keys carry an account
+// id, a Reconnect into an exchange account another live key of this owner
+// already reads is refused by the database with SQLSTATE 23505: either plan
+// 03's named pre-check (KEY_VENUE_ALREADY_CONNECTED) or, when a connect races
+// it, the unique index api_keys_user_exchange_venue_account_uniq itself. Both
+// carry the same code, so ONE mapping by code covers both, and the message is
+// never parsed. Venue-neutral, and it never echoes the account id.
+const RECONNECT_ACCOUNT_ALREADY_CONNECTED =
+  "This exchange account is already connected through another of your keys. Disconnect that key first, then reconnect this one.";
+const RECONNECT_FAILED_HELPER = "Reconnect failed — try again";
+
+// Phase 167.1.2 plan 09 (D-05, D-09): the departed-account overview. Each
+// departed key (disconnected, or revoked / inactive and never disconnected)
+// says whether its history counts in the book, until which UTC day and why,
+// from the same inputs the derive job reads (src/lib/departed-history.ts).
+const HISTORY_LOADING = "Checking this key's history…";
+const HISTORY_LOAD_FAILED =
+  "Could not check this key's history. Refresh the page to try again.";
+const HISTORY_RECOMPUTE_NOTICE =
+  "Your equity history is recomputed with this change within a few minutes.";
+const HISTORY_RECOMPOSE_FALLBACK =
+  "Your history is being recomputed right now. Try again in a few minutes.";
+const DELETE_REMOVES_HISTORY =
+  "Deleting also removes this account's history. Disconnect instead to keep it.";
+
+/**
+ * set_departed_key_history_inclusion's refusals, mapped BY SQLSTATE and never by
+ * message (migration 20260925120000, PR B review fix): 55000 KEY_NOT_DEPARTED
+ * (the key is working again), 55006 HISTORY_RECOMPOSE_IN_PROGRESS (nothing was
+ * written; its DETAIL says how long the recompose has run and its HINT when a
+ * worker reclaims it — shown as given, never parsed), 42501 (signed out or not
+ * the owner). 22023 HISTORY_INCLUSION_INVALID is a client bug and takes the
+ * generic line.
+ */
+function historyInclusionErrorMessage(error: {
+  code?: string | null;
+  details?: string | null;
+  hint?: string | null;
+}): string {
+  switch (error.code) {
+    case "55000":
+      return "This key is connected again, so its history always counts. Refresh the page.";
+    case "55006":
+      return error.details && error.hint
+        ? `${error.details} ${error.hint}`
+        : HISTORY_RECOMPOSE_FALLBACK;
+    case "42501":
+      return "Could not change this key's history: you are signed out or this key is not yours.";
+    default:
+      return "Could not change this key's history. Please try again.";
+  }
+}
 
 function disconnectedRefusalMessage(body: unknown): string {
   const error =
@@ -276,6 +411,9 @@ function normalizeInitialKey(
     // M1: preserve local null (reconnect in-flight) against stale server snapshot.
     disconnected_at: disconnectedAt,
     venue_account_id: k.venue_account_id ?? null,
+    account_shared_with_api_key_id: k.account_shared_with_api_key_id ?? null,
+    account_share_kind: k.account_share_kind ?? null,
+    history_inclusion: k.history_inclusion ?? null,
     // Landmine 8 + f8/f4 preservation: client-only fields carry over across
     // router.refresh() server-state cycles when the row id matches, unless the
     // row changed section (R2-1, R2-2 above).
@@ -313,8 +451,244 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   // re-validation, not a retry of the stored one.
   const [updatingKeyId, setUpdatingKeyId] = useState<string | null>(null);
   const [, startTransition] = useTransition();
+  // Plan 09: each key's first and last csv_daily_returns day, read through the
+  // owner's own client (policy csv_daily_returns_allocator_owner_select), and
+  // what a departed key's history is measured from: a usable anchor, no
+  // key_inputs row, or a row whose last balance read stamped a null anchor.
+  const [returnsDays, setReturnsDays] = useState<
+    Record<string, { first: string | null; last: string | null }>
+  >({});
+  const [anchorById, setAnchorById] = useState<Record<string, DepartedAnchor>>({});
+  const [historyLoadFailed, setHistoryLoadFailed] = useState<Record<string, true>>({});
+  const [historyPendingId, setHistoryPendingId] = useState<string | null>(null);
+  const [historyNotice, setHistoryNotice] = useState<
+    Record<string, { kind: "status" | "retry" | "alert"; text: string }>
+  >({});
 
   const supabase = createClient();
+
+  // The D-09 rule's inputs, one per key. The returns days and the departed
+  // keys' anchors are the only inputs not on the key row; until they load, a
+  // card says so rather than guessing. WR-R2-02: a departed key with no usable
+  // anchor neither covers nor bounds another key, as in the derive.
+  const historyKeys: DepartedHistoryKey[] = keys.map((k) => ({
+    id: k.id,
+    exchange: k.exchange,
+    venue_account_id: k.venue_account_id,
+    account_shared_with_api_key_id: k.account_shared_with_api_key_id,
+    account_share_kind: k.account_share_kind,
+    is_active: k.is_active,
+    disconnected_at: k.disconnected_at,
+    sync_status: k.sync_status,
+    history_inclusion: k.history_inclusion,
+    first_returns_day: returnsDays[k.id]?.first ?? null,
+    last_returns_day: returnsDays[k.id]?.last ?? null,
+    anchored: anchorById[k.id] === undefined || anchorById[k.id].state === "anchored",
+  }));
+  const historyKeysById = new Map(historyKeys.map((k) => [k.id, k]));
+  const departedIds = new Set(historyKeys.filter(isDepartedKey).map((k) => k.id));
+  const identity = accountIdentityTokens(historyKeys);
+  // The keys a departed key's decision reads: itself and every key on the same
+  // known account (a live key there bounds it, and so does a later departed one).
+  const historyInputIds = (keyId: string): string[] => {
+    const token = identity.get(keyId) ?? null;
+    return token === null
+      ? [keyId]
+      : historyKeys.filter((k) => identity.get(k.id) === token).map((k) => k.id);
+  };
+  const missingDayIds = [
+    ...new Set([...departedIds].flatMap((id) => historyInputIds(id))),
+  ]
+    .filter((id) => !(id in returnsDays) && !historyLoadFailed[id])
+    .sort();
+  const missingAnchorIds = [...departedIds]
+    .filter((id) => !(id in anchorById) && !historyLoadFailed[id])
+    .sort();
+  const missingDaySignature = missingDayIds.join(",");
+  const missingAnchorSignature = missingAnchorIds.join(",");
+
+  useEffect(() => {
+    if (!missingDaySignature && !missingAnchorSignature) return;
+    let cancelled = false;
+    const dayIds = missingDaySignature ? missingDaySignature.split(",") : [];
+    const anchorIds = missingAnchorSignature ? missingAnchorSignature.split(",") : [];
+    const client = createClient();
+    // One ascending and one descending limit(1) read per key: the first and
+    // last returns day, the same inputs the derive job's rule reads.
+    const readDay = async (id: string, ascending: boolean): Promise<string | null> => {
+      const { data, error } = await client
+        .from("csv_daily_returns")
+        .select("date")
+        .eq("api_key_id", id)
+        .order("date", { ascending })
+        .limit(1);
+      if (error) throw error;
+      return data?.[0]?.date ?? null;
+    };
+    (async () => {
+      try {
+        const days = await Promise.all(
+          dayIds.map(async (id) => {
+            const [first, last] = await Promise.all([
+              readDay(id, true),
+              readDay(id, false),
+            ]);
+            return [id, { first, last }] as const;
+          }),
+        );
+        const anchors: Record<string, DepartedAnchor> = {};
+        if (anchorIds.length > 0) {
+          const { data, error } = await client
+            .from("allocator_equity_derived")
+            .select("kind,payload")
+            .in(
+              "kind",
+              anchorIds.map((id) => `key_inputs:${id}`),
+            );
+          if (error) throw error;
+          const rowById = new Map(
+            (data ?? []).map((row) => [row.kind.replace(/^key_inputs:/, ""), row]),
+          );
+          for (const id of anchorIds) anchors[id] = departedAnchorOf(rowById.get(id));
+        }
+        if (cancelled) return;
+        setReturnsDays((prev) => ({ ...prev, ...Object.fromEntries(days) }));
+        setAnchorById((prev) => ({ ...prev, ...anchors }));
+      } catch (err) {
+        console.error(
+          "[AllocatorExchangeManager] departed-history read failed:",
+          err,
+        );
+        if (cancelled) return;
+        setHistoryLoadFailed((prev) => ({
+          ...prev,
+          ...Object.fromEntries(
+            [...dayIds, ...anchorIds].map((id) => [id, true as const]),
+          ),
+        }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [missingDaySignature, missingAnchorSignature]);
+
+  // Mirrors the Disconnect handler: optimistic update, the owner's own RPC
+  // (auth.uid() is the authority, T-167.1.2-34), rollback and an error line on
+  // failure.
+  async function handleHistoryToggle(
+    keyId: string,
+    next: "include" | "exclude",
+  ) {
+    const previous = keys.find((k) => k.id === keyId)?.history_inclusion ?? null;
+    setHistoryPendingId(keyId);
+    setHistoryNotice((prev) => {
+      const rest = { ...prev };
+      delete rest[keyId];
+      return rest;
+    });
+    setKeys((prev) =>
+      prev.map((k) => (k.id === keyId ? { ...k, history_inclusion: next } : k)),
+    );
+    const { error } = await supabase.rpc("set_departed_key_history_inclusion", {
+      p_api_key_id: keyId,
+      p_inclusion: next,
+    });
+    setHistoryPendingId(null);
+    if (error) {
+      console.error(
+        "[AllocatorExchangeManager] set_departed_key_history_inclusion failed:",
+        { code: error.code },
+      );
+      setKeys((prev) =>
+        prev.map((k) =>
+          k.id === keyId ? { ...k, history_inclusion: previous } : k,
+        ),
+      );
+      setHistoryNotice((prev) => ({
+        ...prev,
+        [keyId]: {
+          kind: error.code === "55006" ? "retry" : "alert",
+          text: historyInclusionErrorMessage(error),
+        },
+      }));
+      return;
+    }
+    setHistoryNotice((prev) => ({
+      ...prev,
+      [keyId]: { kind: "status", text: HISTORY_RECOMPUTE_NOTICE },
+    }));
+    startTransition(() => router.refresh());
+  }
+
+  function renderDepartedHistory(keyId: string) {
+    const input = historyKeysById.get(keyId);
+    if (!input || !isDepartedKey(input)) return null;
+    const ids = historyInputIds(keyId);
+    const failed = ids.some((id) => historyLoadFailed[id]);
+    // Every departed key on the account must have its anchor state, or a key
+    // with none would still read as able to cover this one (WR-R2-02).
+    const loaded =
+      ids.every((id) => id in returnsDays) &&
+      ids.filter((id) => departedIds.has(id)).every((id) => id in anchorById);
+    // The switch is ON only when the book holds the history, and live only
+    // where flipping it changes what the book holds (SFH-C4-05): see
+    // departedHistoryCard.
+    const card =
+      !failed && loaded ? departedHistoryCard(input, historyKeys, anchorById[keyId]) : null;
+    const line = failed
+      ? HISTORY_LOAD_FAILED
+      : card === null
+        ? HISTORY_LOADING
+        : card.sentence;
+    const included = card?.checked ?? false;
+    const next = card?.toggleTo ?? null;
+    const canToggle = next !== null && historyPendingId !== keyId;
+    const notice = historyNotice[keyId];
+    return (
+      <div data-testid={`departed-history-${keyId}`} className="mt-1">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={included}
+            aria-label="Include this account's history"
+            disabled={!canToggle}
+            onClick={() => {
+              if (next !== null) void handleHistoryToggle(keyId, next);
+            }}
+            className={`flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+              included ? "bg-accent" : "bg-border"
+            }`}
+          >
+            <span
+              aria-hidden
+              className={`h-4 w-4 rounded-full bg-white transition-transform ${
+                included ? "translate-x-4" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+          <p className="text-xs text-text-secondary">{line}</p>
+        </div>
+        {notice?.kind === "status" ? (
+          <p role="status" className="mt-1 text-xs text-text-muted">
+            {notice.text}
+          </p>
+        ) : notice ? (
+          <p
+            role="alert"
+            className={`mt-1 text-xs rounded px-3 py-2 ${
+              notice.kind === "retry"
+                ? "text-warning bg-warning/5 border border-warning/20"
+                : "text-negative bg-negative/5 border border-negative/20"
+            }`}
+          >
+            {notice.text}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
 
   async function openDeleteConfirm(keyId: string) {
     setDeleteError(null);
@@ -482,7 +856,10 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                   disconnected_at:
                     originalDisconnectedAt ?? new Date().toISOString(),
                   sync_status: "idle",
-                  helper_override: "Reconnect failed — try again",
+                  helper_override:
+                    rpcErr.code === "23505"
+                      ? RECONNECT_ACCOUNT_ALREADY_CONNECTED
+                      : RECONNECT_FAILED_HELPER,
                 }
               : k,
           ),
@@ -856,25 +1233,46 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   // Sync + Disconnect; disconnected rows render under a separate section
   // with Reconnect. Derived each render — keys list is small (rarely >10).
   const activeKeys = keys.filter((k) => k.disconnected_at === null);
+  // Phase 167.1.2 plan 04 — the holder a duplicate note names is looked up in
+  // the owner's whole key list, disconnected keys included, so the note can
+  // tell a departed holder (no note) from a missing one.
+  const keysById = new Map(keys.map((k) => [k.id, k]));
   const disconnectedKeys = keys.filter((k) => k.disconnected_at !== null);
+  // Phase 169.3 plan 03 (SC7): "N connected" counts LIVE keys only, by
+  // 167.1.2's one departed predicate (D-09). A revoked or inactive key that
+  // was never disconnected keeps its row above (its pill, its departed-history
+  // card, its Disconnect), but it reads no account, so it is not connected.
+  const liveKeys = activeKeys.filter(isLiveKey);
+  const connectedCount = liveKeys.length;
+  // WR-02 / SFH-04, founder D-74: one row per exchange account (the D-16(a)
+  // identity above) carries its balance.
+  const { groupOf, bearerByGroup } = balanceBearers(activeKeys, identity);
 
   // DOGFOOD-2: only assert an active allocation when holdings actually back it.
   // When keys are connected but allocator_holdings is empty, show an honest
   // state instead — either the first sync is still in flight, or no positions
   // are open. anySyncing distinguishes those two cases.
-  const anySyncing = activeKeys.some((k) => k.sync_status === "syncing");
+  // Review round 1 WR-03 / SFH-03: read over LIVE keys, like the count, so an
+  // inactive key left in `syncing` cannot claim a first sync for the book.
+  const anySyncing = liveKeys.some((k) => k.sync_status === "syncing");
   // DOGFOOD-2 FIX 2 (fail-loud): hasHoldings === null means the holdings
   // head-count failed server-side. Do NOT fall through to "no open positions
   // yet" (an affirmative-negative the failed count cannot support) — show a
   // neutral "connected" subtitle that asserts nothing about the book state.
+  // WR-03 / SFH-03: with no live key (every remaining row revoked or
+  // inactive) nothing reads the account, so the line asserts nothing about
+  // syncing or positions; allocator_holdings outlives its keys, so a true
+  // hasHoldings there would read "auto-synced" over a frozen book.
   const connectedSubtitle =
-    hasHoldings === true
-      ? `${activeKeys.length} connected · Active Allocation auto-synced`
-      : hasHoldings === null
-        ? `${activeKeys.length} connected`
-        : anySyncing
-          ? `${activeKeys.length} connected · first sync in progress`
-          : `${activeKeys.length} connected · no open positions yet`;
+    connectedCount === 0
+      ? "0 connected"
+      : hasHoldings === true
+        ? `${connectedCount} connected · Active Allocation auto-synced`
+        : hasHoldings === null
+          ? `${connectedCount} connected`
+          : anySyncing
+            ? `${connectedCount} connected · first sync in progress`
+            : `${connectedCount} connected · no open positions yet`;
 
   return (
     <div className="mt-6 space-y-4">
@@ -913,10 +1311,23 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                 bg: "#F1F5F9",
                 fg: "#475569",
               };
+              const shareNote = accountShareNote(key, keysById, "Disconnect");
+              // Phase 169.3 plan 03 (SC7): the balance is the ACCOUNT's, so it
+              // renders once, on the row balanceBearers picks for the key's
+              // account (review round 1 WR-02, founder D-74: grouped by the
+              // D-16(a) account identity). Every other row of that account
+              // names the row that carries it. A departed key is never
+              // picked: nothing on the row dates its last good read
+              // (last_sync_at is the trades cursor).
+              const bearer = bearerByGroup.get(groupOf(key));
+              const showBalance = bearer?.id === key.id;
+              const balanceElsewhere =
+                bearer !== undefined && bearer.id !== key.id ? bearer : null;
               return (
                 <div
                   key={key.id}
-                  className="flex items-center gap-4 bg-surface px-4 py-3"
+                  data-testid="allocator-key-row"
+                  className="flex flex-wrap items-center gap-4 bg-surface px-4 py-3"
                 >
                   <div
                     className="flex h-10 w-10 items-center justify-center rounded-md font-metric text-xs font-bold tabular-nums"
@@ -930,14 +1341,38 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                       {key.label}
                     </p>
                     <p className="text-fixed-10 text-text-muted uppercase tracking-wider mt-0.5">
-                      {key.exchange} · Read-only · Balance{" "}
-                      {formatUsd(key.account_balance_usdt)}
+                      {key.exchange} · Read-only
+                      {showBalance
+                        ? ` · Balance ${formatUsd(key.account_balance_usdt)}`
+                        : null}
                     </p>
+                    {/* Founder D-74: this account's balance is on another
+                        row; say which, in the muted caption tone. */}
+                    {balanceElsewhere ? (
+                      <p
+                        data-testid="balance-shown-elsewhere"
+                        className="text-xs text-text-muted mt-0.5"
+                      >
+                        Balance shown on {balanceElsewhere.label}
+                      </p>
+                    ) : null}
                     {key.exchange === "mt5" && (
                       <p className="text-xs text-text-secondary font-metric mt-0.5">
                         MT5 account {key.venue_account_id ?? "—"}
                       </p>
                     )}
+                    {/* Phase 167.1.2 plan 04 (D-01, D-11): the named cleanup
+                        path for a key whose exchange account another working
+                        key of this owner already reads. Amber: recoverable
+                        by the owner's own Disconnect on this row (DESIGN.md
+                        semantic-color gates). Active rows only: a disconnected
+                        duplicate is no longer counted, so it asks nothing. */}
+                    {shareNote ? (
+                      <p role="note" className="text-xs text-warning mt-0.5">
+                        {shareNote}
+                      </p>
+                    ) : null}
+                    {renderDepartedHistory(key.id)}
                   </div>
                   <div className="text-right">
                     <p className="text-fixed-10 uppercase tracking-wider text-text-muted font-semibold">
@@ -959,35 +1394,37 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     queuedNextAttemptAt={key.queued_next_attempt_at}
                     helperOverride={key.helper_override}
                   />
-                  <Button
-                    variant="primary"
-                    disabled={key.sync_status === "syncing"}
-                    aria-label={`Sync ${key.exchange} now`}
-                    title={
-                      key.sync_status === "syncing"
-                        ? "Sync in progress"
-                        : undefined
-                    }
-                    onClick={() => handleSync(key.id)}
-                  >
-                    Sync now
-                  </Button>
-                  {key.exchange === "mt5" && (
+                  <div className="flex flex-wrap gap-2 basis-full sm:basis-auto sm:ml-auto">
+                    <Button
+                      variant="primary"
+                      disabled={key.sync_status === "syncing"}
+                      aria-label={`Sync ${key.exchange} now`}
+                      title={
+                        key.sync_status === "syncing"
+                          ? "Sync in progress"
+                          : undefined
+                      }
+                      onClick={() => handleSync(key.id)}
+                    >
+                      Sync now
+                    </Button>
+                    {key.exchange === "mt5" && (
+                      <Button
+                        variant="secondary"
+                        aria-label={`Update password for ${key.exchange} key`}
+                        onClick={() => setUpdatingKeyId(key.id)}
+                      >
+                        Update password
+                      </Button>
+                    )}
                     <Button
                       variant="secondary"
-                      aria-label={`Update password for ${key.exchange} key`}
-                      onClick={() => setUpdatingKeyId(key.id)}
+                      aria-label={`Disconnect ${key.exchange} key`}
+                      onClick={() => openDeleteConfirm(key.id)}
                     >
-                      Update password
+                      Disconnect
                     </Button>
-                  )}
-                  <Button
-                    variant="secondary"
-                    aria-label={`Disconnect ${key.exchange} key`}
-                    onClick={() => openDeleteConfirm(key.id)}
-                  >
-                    Disconnect
-                  </Button>
+                  </div>
                 </div>
               );
             })}
@@ -1017,7 +1454,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
               return (
                 <div
                   key={key.id}
-                  className="flex items-center gap-4 bg-surface px-4 py-3 opacity-75"
+                  className="flex flex-wrap items-center gap-4 bg-surface px-4 py-3 opacity-75"
                 >
                   <div
                     className="flex h-10 w-10 items-center justify-center rounded-md font-metric text-xs font-bold tabular-nums"
@@ -1053,6 +1490,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                         MT5 account {key.venue_account_id ?? "—"}
                       </p>
                     )}
+                    {renderDepartedHistory(key.id)}
                   </div>
                   <div className="text-right">
                     <p className="text-fixed-10 uppercase tracking-wider text-text-muted font-semibold">
@@ -1067,28 +1505,30 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                       before the RPC in handleReconnect, so this disabled check
                       prevents a second click from queuing a duplicate RPC +
                       sync POST and racing against the first. */}
-                  <Button
-                    variant="primary"
-                    disabled={key.sync_status === "syncing"}
-                    aria-label={`Reconnect ${key.exchange} key`}
-                    title={
-                      key.sync_status === "syncing"
-                        ? "Reconnect in progress"
-                        : undefined
-                    }
-                    onClick={() => handleReconnect(key.id)}
-                  >
-                    Reconnect
-                  </Button>
-                  {key.exchange === "mt5" && (
+                  <div className="flex flex-wrap gap-2 basis-full sm:basis-auto sm:ml-auto">
                     <Button
-                      variant="secondary"
-                      aria-label={`Update password for ${key.exchange} key`}
-                      onClick={() => setUpdatingKeyId(key.id)}
+                      variant="primary"
+                      disabled={key.sync_status === "syncing"}
+                      aria-label={`Reconnect ${key.exchange} key`}
+                      title={
+                        key.sync_status === "syncing"
+                          ? "Reconnect in progress"
+                          : undefined
+                      }
+                      onClick={() => handleReconnect(key.id)}
                     >
-                      Update password
+                      Reconnect
                     </Button>
-                  )}
+                    {key.exchange === "mt5" && (
+                      <Button
+                        variant="secondary"
+                        aria-label={`Update password for ${key.exchange} key`}
+                        onClick={() => setUpdatingKeyId(key.id)}
+                      >
+                        Update password
+                      </Button>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -1207,6 +1647,15 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     ? "Checked: holdings are permanently deleted and excluded from all historical metrics."
                     : "Unchecked: holdings are kept for audit continuity and reflected in past performance."}
                 </p>
+                {/* Plan 09, measured: this path calls delete_allocator_api_key,
+                    which hard-deletes the api_keys row, and
+                    csv_daily_returns_api_key_id_fkey is ON DELETE CASCADE, so
+                    the key's daily returns (its history) go with it. */}
+                {cascadeHoldings ? (
+                  <p className="ml-6 mt-1 text-fixed-11 text-warning">
+                    {DELETE_REMOVES_HISTORY}
+                  </p>
+                ) : null}
               </div>
             )}
 

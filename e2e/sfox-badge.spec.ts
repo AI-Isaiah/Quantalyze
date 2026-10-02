@@ -45,7 +45,7 @@
  * Axe: one buildAxe() pass (the ONLY sanctioned rule-set factory — never a
  * local rule set) on the badge-bearing factsheet, zero-violations threshold.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { buildAxe } from "./helpers/axe";
 import {
   seedSfoxVerifiedStrategy,

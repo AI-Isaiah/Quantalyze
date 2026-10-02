@@ -133,7 +133,7 @@ export function CandidateDetail({
 
       {/* Action bar — hidden in read-only mode (mobile <md). */}
       {!isReadOnly && (
-        <div className="mt-6 border-t border-border pt-4 flex items-center gap-2 flex-wrap">
+        <div className="mt-6 border-t border-border pt-4 hidden md:flex items-center gap-2 flex-wrap">
           {alreadySent ? (
             <div className="flex-1 text-small text-text-muted">Intro already sent to this strategy.</div>
           ) : (

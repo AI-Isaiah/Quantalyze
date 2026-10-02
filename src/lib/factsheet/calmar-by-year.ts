@@ -1,8 +1,8 @@
-import { cumEq, drawdowns } from "./compute";
+import { arithmeticUnderwater, cumEq, drawdowns } from "./compute";
 
 export type CalmarYearRow = {
   year: string;
-  ret: number;     // year-of-year compounded return
+  ret: number;     // the year's return: compounded, or summed under arithmetic
   max_dd: number;  // worst drawdown within the year (≤ 0)
   calmar: number;  // ret / |max_dd|; NaN when the year has no drawdown (D7)
   days: number;    // observed trading days within the year
@@ -13,8 +13,19 @@ export type CalmarYearRow = {
  * mockup. For each year, walks just the days inside that year, compounds
  * to a year-return, builds an intra-year equity curve, and reports the
  * worst drawdown observed within the year. Calmar = year_return / |dd|.
+ *
+ * `cumulativeMethod` (Phase 169.1 D-31): geometric (the default) compounds the
+ * year and takes the drawdown of its compounded equity; ARITHMETIC sums the
+ * year, as the engine's `simple` arm does, and takes the drawdown from the
+ * year's {@link arithmeticUnderwater}, so the row's return equals the heatmap's
+ * YTD and compute()'s `yearly` figure for the same year.
  */
-export function calmarByYear(rets: number[], dates: string[]): CalmarYearRow[] {
+export function calmarByYear(
+  rets: number[],
+  dates: string[],
+  cumulativeMethod: "geometric" | "arithmetic" = "geometric",
+): CalmarYearRow[] {
+  const arithmetic = cumulativeMethod === "arithmetic";
   const byYear = new Map<string, { rets: number[] }>();
   for (let i = 0; i < rets.length; i++) {
     const yr = dates[i].slice(0, 4);
@@ -26,9 +37,19 @@ export function calmarByYear(rets: number[], dates: string[]): CalmarYearRow[] {
   Array.from(byYear.entries())
     .sort(([a], [b]) => a.localeCompare(b))
     .forEach(([year, { rets: yrRets }]) => {
-      const eq = cumEq(yrRets);
-      const dd = drawdowns(eq);
-      const yearRet = eq[eq.length - 1] - 1;
+      let yearRet: number;
+      let dd: number[];
+      if (arithmetic) {
+        // A left fold in date order, as compute()'s bucket and the heatmap's YTD
+        // are, so the three agree exactly; never `1 + Σr - 1`.
+        yearRet = 0;
+        for (const r of yrRets) yearRet += r;
+        dd = arithmeticUnderwater(yrRets);
+      } else {
+        const eq = cumEq(yrRets);
+        dd = drawdowns(eq);
+        yearRet = eq[eq.length - 1] - 1;
+      }
       const maxDd = Math.min(...dd);
       // A year with no drawdown has no Calmar: the ratio would be infinite,
       // which means "does not exist", not 0. NaN renders "—", as compute's

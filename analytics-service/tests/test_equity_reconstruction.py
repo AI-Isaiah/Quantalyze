@@ -80,6 +80,9 @@ class _FakeTable:
         self._select_neq_filters: list[tuple[str, Any]] = []
         self._select_is_null_cols: list[str] = []
         self._select_ranges: list[tuple[str, str, str]] = []  # (col, op, val)
+        # PostgREST `.in_(col, values)`: col IN (values). Added for the daily
+        # refresh's reconstruct-hold probe (Phase 167.1.2 plan 12, SFH-R2-01).
+        self._select_in_filters: list[tuple[str, frozenset]] = []
         self._select_count_mode: str | None = None
         # Pending write
         self._pending_op: str | None = None  # 'upsert' | 'update' | 'insert' | 'delete'
@@ -147,6 +150,10 @@ class _FakeTable:
             self._select_is_null_cols.append(col)
         else:
             self._select_filters.append((col, val))
+        return self
+
+    def in_(self, col: str, values):
+        self._select_in_filters.append((col, frozenset(values)))
         return self
 
     def gte(self, col: str, val):
@@ -248,6 +255,8 @@ class _FakeTable:
                 if any(row.get(c) == v for c, v in self._select_neq_filters):
                     continue
                 if any(row.get(c) is not None for c in self._select_is_null_cols):
+                    continue
+                if not all(row.get(c) in vals for c, vals in self._select_in_filters):
                     continue
                 # range filters
                 ok = True
@@ -419,6 +428,29 @@ def _install_fake_preflight(monkeypatch, venue: str, fake_supabase: FakeSupabase
     from services import db as db_module
     monkeypatch.setattr(db_module, "get_supabase", lambda: fake_supabase)
     monkeypatch.setattr(er, "get_supabase", lambda: fake_supabase, raising=False)
+
+
+def _seed_eligible_keys_for_holdings(fake_supabase: FakeSupabaseClient) -> None:
+    """Phase 167.1.2 plan 10 (D-07): the daily refresh sums the holdings of the
+    allocator's ELIGIBLE keys only (``eligible_key_predicate``), so every key
+    that owns a seeded ``allocator_holdings`` row needs an eligible ``api_keys``
+    row. Before plan 10 the refresh read every row at ``asof = today`` without
+    looking at the keys. A key row a test seeded itself is left alone."""
+    key_ids = {
+        row.get("api_key_id")
+        for row in fake_supabase.rows_for("allocator_holdings")
+        if row.get("api_key_id")
+    }
+    for key_id in sorted(key_ids):
+        fake_supabase.store.setdefault(("api_keys", (key_id,)), {
+            "id": key_id,
+            "user_id": ALLOCATOR_ID,
+            "is_active": True,
+            "sync_status": "ok",
+            "disconnected_at": None,
+            "account_share_kind": None,
+            "account_shared_with_api_key_id": None,
+        })
 
 
 def _install_fake_audit(monkeypatch):
@@ -924,6 +956,7 @@ async def test_refresh_daily_appends_one_row(monkeypatch):
     }
     assert "allocator_id" not in job, "refresh_allocator_equity_daily must be KEY-SCOPED (f1)"
 
+    _seed_eligible_keys_for_holdings(fake_supabase)
     result = await run_refresh_allocator_equity_daily_job(job)
 
     from services.job_worker import DispatchOutcome
@@ -1099,6 +1132,7 @@ async def test_refresh_daily_aggregates_across_keys(monkeypatch):
     job1 = {"id": "refresh-1", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_1}
     job2 = {"id": "refresh-2", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_2}
 
+    _seed_eligible_keys_for_holdings(fake_supabase)
     result1 = await run_refresh_allocator_equity_daily_job(job1)
     result2 = await run_refresh_allocator_equity_daily_job(job2)
 
@@ -2827,6 +2861,7 @@ async def test_refresh_daily_uses_unrealized_pnl_for_perp_not_notional(monkeypat
 
     monkeypatch.setattr(er, "datetime", _FakeDatetime)
 
+    _seed_eligible_keys_for_holdings(fake_supabase)
     result = await run_refresh_allocator_equity_daily_job(
         {"id": "refresh-1", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_1}
     )
@@ -2930,6 +2965,7 @@ async def test_refresh_daily_excludes_deribit_derivatives(monkeypatch):
 
     monkeypatch.setattr(er, "datetime", _FakeDatetime)
 
+    _seed_eligible_keys_for_holdings(fake_supabase)
     result = await run_refresh_allocator_equity_daily_job(
         {"id": "refresh-drb", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_1}
     )
@@ -3834,6 +3870,7 @@ async def test_h1161_refresh_logs_audit_when_perp_upnl_is_none(monkeypatch):
 
     monkeypatch.setattr(er, "datetime", _FakeDatetime)
 
+    _seed_eligible_keys_for_holdings(fake_supabase)
     result = await run_refresh_allocator_equity_daily_job(
         {"id": "refresh-null-upnl", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_1}
     )
@@ -3883,6 +3920,7 @@ async def test_h1161_refresh_keeps_perp_breakdown_entry_when_upnl_is_zero(monkey
 
     monkeypatch.setattr(er, "datetime", _FakeDatetime)
 
+    _seed_eligible_keys_for_holdings(fake_supabase)
     result = await run_refresh_allocator_equity_daily_job(
         {"id": "refresh-zero-upnl", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_1}
     )
@@ -4253,6 +4291,279 @@ async def test_h1168_reconstruct_no_data_emits_distinct_audit_kind(
     actions = [c.kwargs.get("action") for c in audit_mock.call_args_list]
     assert "allocator.equity.reconstruct_no_data" in actions, actions
     assert "allocator.equity.reconstruct_complete" not in actions
+
+
+# ---- Item 7 (b): an empty sole-key replay must not wipe existing history --
+#
+# The sole-key test counts only CONNECTED siblings (D-05). A book whose other
+# keys were disconnected still takes replace_allocator_equity_snapshots, and
+# that RPC deletes every legacy row before inserting. An empty replay has
+# nothing to insert, so today's helper purges then writes zero. These arms
+# refuse that purge. The seeded USD digit sequence must not appear in logs
+# or audit metadata (no figure, no holdings).
+
+_ITEM7B_SEEDED_USD = 813579.17
+_ITEM7B_SEEDED_USD_DIGITS = "813579"
+
+
+def _seed_item7b_history(fake: FakeSupabaseClient, n: int = 3) -> list[str]:
+    asofs: list[str] = []
+    for i in range(n):
+        asof = f"2024-01-{i + 1:02d}"
+        asofs.append(asof)
+        fake.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID,
+            "asof": asof,
+            "value_usd": _ITEM7B_SEEDED_USD,
+            "breakdown": {"USDT": _ITEM7B_SEEDED_USD},
+        }
+    return asofs
+
+
+def _install_item7b_empty_replay(monkeypatch, fake_supabase: FakeSupabaseClient):
+    """H-1168 harness: sole key, no trades, no deposits, no positions, empty balance."""
+    audit_mock = _install_fake_audit(monkeypatch)
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "is_active": True, "disconnected_at": None, "sync_status": "ok",
+    }
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(return_value=[])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=[])
+    mock_exchange.fetch_balance = AsyncMock(return_value={"total": {}})
+    mock_exchange.fetch_positions = AsyncMock(return_value=[])
+    mock_exchange.close = AsyncMock()
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+    return audit_mock
+
+
+def _item7b_no_data_meta(audit_mock) -> dict:
+    hits = [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action") == "allocator.equity.reconstruct_no_data"
+    ]
+    assert len(hits) == 1, [c.kwargs.get("action") for c in audit_mock.call_args_list]
+    meta = hits[0].kwargs.get("metadata") or {}
+    assert isinstance(meta, dict)
+    return meta
+
+
+def _assert_item7b_no_seeded_usd(caplog, audit_mock, extra: str = "") -> None:
+    """The seeded USD digit sequence must not leak into logs or audit values."""
+    blob = caplog.text + extra
+    for call in audit_mock.call_args_list:
+        blob += str(call.kwargs.get("metadata"))
+    assert _ITEM7B_SEEDED_USD_DIGITS not in blob, blob
+
+
+@pytest.mark.asyncio
+async def test_item7b_purge_refused_keeps_existing_history(monkeypatch, caplog):
+    """Empty sole-key reconstruct over existing history leaves every row.
+
+    Outcome is DONE. The replace RPC is not called. The audit stays
+    reconstruct_no_data and records the refusal. RED against today's helper,
+    which purges then inserts zero.
+    """
+    from services.job_worker import DispatchOutcome
+
+    fake = FakeSupabaseClient()
+    asofs = _seed_item7b_history(fake)
+    audit_mock = _install_item7b_empty_replay(monkeypatch, fake)
+
+    with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics.equity_reconstruction"):
+        result = await run_reconstruct_allocator_history_job({
+            "id": "item7b-keep",
+            "kind": "reconstruct_allocator_history",
+            "api_key_id": API_KEY_ID_1,
+        })
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert not any(
+        name == "replace_allocator_equity_snapshots" for name, _ in fake.rpc_calls
+    ), fake.rpc_calls
+    survivors = fake.rows_for("allocator_equity_snapshots")
+    assert sorted(r["asof"] for r in survivors) == asofs, survivors
+    assert all(r["value_usd"] == _ITEM7B_SEEDED_USD for r in survivors)
+    meta = _item7b_no_data_meta(audit_mock)
+    assert meta.get("purge_refused") is True
+    assert meta.get("existing_history") is True
+    assert meta.get("snapshot_lookup_failed") is False
+    _assert_item7b_no_seeded_usd(caplog, audit_mock)
+
+
+@pytest.mark.asyncio
+async def test_item7b_purge_refused_empty_book_calls_rpc(monkeypatch, caplog):
+    """Positive control: a book with no snapshots still calls the RPC once.
+
+    p_rows is empty. The audit is reconstruct_no_data and does not carry
+    purge_refused — the refusal did not fire.
+    """
+    from services.job_worker import DispatchOutcome
+
+    fake = FakeSupabaseClient()
+    audit_mock = _install_item7b_empty_replay(monkeypatch, fake)
+
+    with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics.equity_reconstruction"):
+        result = await run_reconstruct_allocator_history_job({
+            "id": "item7b-empty",
+            "kind": "reconstruct_allocator_history",
+            "api_key_id": API_KEY_ID_1,
+        })
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    replace_calls = [
+        c for c in fake.rpc_calls if c[0] == "replace_allocator_equity_snapshots"
+    ]
+    assert len(replace_calls) == 1, fake.rpc_calls
+    assert replace_calls[0][1]["p_rows"] == []
+    assert fake.rows_for("allocator_equity_snapshots") == []
+    meta = _item7b_no_data_meta(audit_mock)
+    assert "purge_refused" not in meta
+    assert "existing_history" not in meta
+    assert "snapshot_lookup_failed" not in meta
+    _assert_item7b_no_seeded_usd(caplog, audit_mock)
+
+
+def _fail_snapshot_head_count(fake: FakeSupabaseClient) -> None:
+    """Raise on an allocator_equity_snapshots SELECT only; writes stay intact."""
+    original_table = fake.table
+
+    def table(name: str):
+        tbl = original_table(name)
+        if name != "allocator_equity_snapshots":
+            return tbl
+        original_execute = tbl.execute
+
+        def execute():
+            if getattr(tbl, "_pending_op", None) == "select":
+                raise RuntimeError("snapshot presence lookup failed")
+            return original_execute()
+
+        tbl.execute = execute
+        return tbl
+
+    fake.table = table
+
+
+@pytest.mark.asyncio
+async def test_item7b_purge_refused_lookup_failed(monkeypatch, caplog):
+    """A raised snapshot lookup refuses the purge and keeps the seeded rows.
+
+    Fail-safe: present is treated as unknown, so the RPC does not run.
+    existing_history in the audit is false (not confirmed); snapshot_lookup_failed
+    is why the purge was still refused.
+    """
+    from services.job_worker import DispatchOutcome
+
+    fake = FakeSupabaseClient()
+    asofs = _seed_item7b_history(fake)
+    audit_mock = _install_item7b_empty_replay(monkeypatch, fake)
+    _fail_snapshot_head_count(fake)
+
+    with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics.equity_reconstruction"):
+        result = await run_reconstruct_allocator_history_job({
+            "id": "item7b-lookup-failed",
+            "kind": "reconstruct_allocator_history",
+            "api_key_id": API_KEY_ID_1,
+        })
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert not any(
+        name == "replace_allocator_equity_snapshots" for name, _ in fake.rpc_calls
+    ), fake.rpc_calls
+    survivors = fake.rows_for("allocator_equity_snapshots")
+    assert sorted(r["asof"] for r in survivors) == asofs, survivors
+    meta = _item7b_no_data_meta(audit_mock)
+    assert meta.get("purge_refused") is True
+    assert meta.get("snapshot_lookup_failed") is True
+    assert meta.get("existing_history") is False
+    presence_warnings = [
+        r.getMessage() for r in caplog.records
+        if "presence lookup failed" in r.getMessage()
+    ]
+    assert len(presence_warnings) == 1, [r.getMessage() for r in caplog.records]
+    assert ALLOCATOR_ID not in presence_warnings[0]
+    assert API_KEY_ID_1 not in presence_warnings[0]
+    _assert_item7b_no_seeded_usd(caplog, audit_mock, extra=presence_warnings[0])
+
+
+@pytest.mark.asyncio
+async def test_item7b_missing_head_count_refuses_purge():
+    """A head count with no count is not an empty book.
+
+    ``select(..., head=True)`` returns no rows. Falling through to
+    ``len(data)`` would read that as absent and the empty replace would
+    wipe. A missing count is the same fail-safe as a raised lookup.
+    """
+    from services.equity_reconstruction import (
+        EmptyReplaceRefusedError,
+        replace_equity_snapshots,
+    )
+
+    class _Res:
+        count = None
+        data: list = []
+
+    class _Tbl:
+        def select(self, *_a, **_k):
+            return self
+
+        def eq(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            return _Res()
+
+    class _Client:
+        def table(self, _name):
+            return _Tbl()
+
+        def rpc(self, *_a, **_k):
+            raise AssertionError("empty replace must not call the RPC")
+
+    with pytest.raises(EmptyReplaceRefusedError) as raised:
+        await replace_equity_snapshots(_Client(), [], ALLOCATOR_ID, None)
+    assert raised.value.lookup_failed is True
+    assert raised.value.existing_history is None
+    assert ALLOCATOR_ID not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_item7b_purge_refused_helper_raises(caplog):
+    """replace_equity_snapshots([], ...) over seeded rows raises and deletes nothing."""
+    from services.equity_reconstruction import (
+        EmptyReplaceRefusedError,
+        replace_equity_snapshots,
+    )
+
+    fake = FakeSupabaseClient()
+    _seed_item7b_history(fake)
+    with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics.equity_reconstruction"):
+        with pytest.raises(EmptyReplaceRefusedError) as raised:
+            await replace_equity_snapshots(fake, [], ALLOCATOR_ID, None)
+    exc = raised.value
+    assert exc.existing_history is True
+    assert exc.lookup_failed is False
+    assert "813579" not in str(exc)
+    assert ALLOCATOR_ID not in str(exc)
+    assert len(fake.rows_for("allocator_equity_snapshots")) == 3
+    assert not any(
+        name == "replace_allocator_equity_snapshots" for name, _ in fake.rpc_calls
+    ), fake.rpc_calls
+    _assert_item7b_no_seeded_usd(caplog, MagicMock(), extra=str(exc))
 
 
 # ---- M-1029 - Purge failure bubbles -------------------------------------
@@ -4767,13 +5078,15 @@ async def test_pta7_refresh_skips_non_numeric_upnl(monkeypatch):
     fake_supabase.store[
         ("allocator_holdings", (ALLOCATOR_ID, today_iso, "USDT"))
     ] = {
-        "allocator_id": ALLOCATOR_ID, "asof": today_iso, "symbol": "USDT",
+        "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+        "asof": today_iso, "symbol": "USDT",
         "holding_type": "spot", "value_usd": 100.0,
     }
     fake_supabase.store[
         ("allocator_holdings", (ALLOCATOR_ID, today_iso, "BTCUSDT"))
     ] = {
-        "allocator_id": ALLOCATOR_ID, "asof": today_iso, "symbol": "BTCUSDT",
+        "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+        "asof": today_iso, "symbol": "BTCUSDT",
         "holding_type": "derivative", "value_usd": 1000.0,
         "unrealized_pnl_usd": "not_a_number",
     }
@@ -4912,14 +5225,16 @@ async def test_spec_sfh4_refresh_perp_upnl_missing_is_aggregated(monkeypatch):
         fake_supabase.store[
             ("allocator_holdings", (ALLOCATOR_ID, today_iso, sym))
         ] = {
-            "allocator_id": ALLOCATOR_ID, "asof": today_iso, "symbol": sym,
+            "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+            "asof": today_iso, "symbol": sym,
             "holding_type": "derivative", "value_usd": 1000.0,
             "unrealized_pnl_usd": None,
         }
     fake_supabase.store[
         ("allocator_holdings", (ALLOCATOR_ID, today_iso, "USDT"))
     ] = {
-        "allocator_id": ALLOCATOR_ID, "asof": today_iso, "symbol": "USDT",
+        "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+        "asof": today_iso, "symbol": "USDT",
         "holding_type": "spot", "value_usd": 50.0,
     }
 

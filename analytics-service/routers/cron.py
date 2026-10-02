@@ -3,14 +3,18 @@ import logging
 import re
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
+import pandas as pd
 import sentry_sdk
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from services.db import get_supabase, rows
+from services import benchmark as benchmark_service
+from services.benchmark import get_benchmark_returns
+from services.error_contract import service_error
+from services.db import db_execute, get_supabase, rows
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions, get_and_clear_last_dq_flags, EXCHANGE_CLASSES
 
@@ -2312,3 +2316,195 @@ async def prober_cadence_alert(alert: ProberCadenceAlert) -> dict[str, Any]:
     """
     _escalate_prober_cadence_gap(alert)
     return {"acknowledged": True}
+
+
+async def _stored_through(symbol: str, *, today: str) -> str | None:
+    """The newest COMPLETED day stored in ``benchmark_prices`` for ``symbol``
+    (``YYYY-MM-DD``), or None when there is none.
+
+    Review-fix round 1 (REVIEW CR-01 / WR-01, SFH CR-01 / HR-01). The refresh
+    endpoint's 200 must rest on the table, because the fetcher it delegates to
+    swallows a failed cache upsert and still returns a current series.
+    ``lt(today)`` mirrors the fetcher's completed-days rule
+    (``services.benchmark._completed_days_only``): a partial-day row for today
+    is not a close and must not count as fresh.
+    """
+    supabase = get_supabase()
+    result = await db_execute(
+        lambda: supabase.table("benchmark_prices")
+        .select("date")
+        .eq("symbol", symbol)
+        .lt("date", today)
+        .order("date", desc=True)
+        .limit(1)
+        .execute()
+    )
+    stored = rows(result)
+    return str(stored[0]["date"])[:10] if stored else None
+
+
+# Review-fix round 2 (REVIEW IN-01) — the TOTAL wall-clock bound on one
+# refresh (fetch, cache write, table read-back). The fetcher has no total bound
+# of its own: `httpx.AsyncClient(timeout=30)` bounds each phase of a request,
+# `_fetch_from_binance` may page up to 20 times, and `db_execute` has no
+# timeout. It must stay BELOW the TypeScript seam's budget for this call,
+# `SEAM_BUDGETS["benchmark-refresh"].timeoutMs` in `src/lib/resilient-fetch.ts`,
+# with margin for the network hop, so the service always answers first and a
+# slow price source becomes this handler's 500 rather than a seam deadline.
+# `tests/test_benchmark_refresh.py` reads that budget and pins the margin.
+_BENCHMARK_REFRESH_DEADLINE_S = 80.0
+
+
+@router.post("/benchmark-refresh")
+async def benchmark_refresh() -> dict[str, Any]:
+    """Refresh the cached BTC benchmark through the ONE existing fetcher.
+
+    Phase 169.2 / plan 01 (SC3, D-08). Called daily by the Vercel cron route
+    ``/api/cron/refresh-benchmark`` (plan 169.2-02) through the analytics
+    client. Before it, the only writer of ``benchmark_prices`` was a lazy
+    refetch during an analytics compute, so nothing kept the benchmark current
+    on a schedule. This handler adds no fetch logic of its own: it awaits
+    ``services.benchmark.get_benchmark_returns("BTC")`` with that function's
+    default window, which reads the cache first and refetches and upserts only
+    on a miss.
+
+    Lives under ``/api`` (not ``/internal``) so the global ``X-Service-Key``
+    middleware guards it, exactly like ``/api/cron-sync`` (CONTEXT D-08).
+
+    Answers 200 with ``{symbol, through, stale, points}`` ONLY when the TABLE
+    holds a completed BTC day of yesterday (UTC) or later after the refresh,
+    and ``through`` is that stored day, read back from ``benchmark_prices``
+    (review-fix round 1, REVIEW CR-01 / WR-01). The fetcher's return is not
+    proof: it swallows a failed cache upsert and still returns
+    ``(series, False)``, and its fresh-fetch arm never compares the series to
+    the calendar, so a lost write or a lagging upstream would otherwise read
+    green every morning. Every other outcome (no series, an empty or stale
+    series, an exception, a failed table read, a table older than yesterday)
+    is HTTP 500, because the cron runner only alarms on a non-2xx (the same
+    reason ``cron_sync`` raises 500 above).
+
+    The failure status is 500 and never 503, even though a failed upstream
+    price is arguably a dependency outage (W2): the TypeScript seam records a
+    breaker failure for a 503 only, and that breaker is shared by every
+    analytics call, so a stale benchmark must not be able to trip it.
+
+    Every failure arm raises through ``service_error(500,
+    "BENCHMARK_REFRESH_FAILED", retryable=False, ...)``, never a raw
+    ``HTTPException``: that routes each one through the error contract's
+    ``_validate`` and puts the R-2 envelope at ``body.detail``, and
+    ``tests/test_raw_5xx_census.py`` forbids a raw 5xx outside its quarantine.
+    No ``dependency`` is named, so the TypeScript budget row's
+    ``dependencies: []`` stays true. The per-arm ``detail`` string is what
+    tells the arms apart.
+
+    Review-fix round 2:
+
+    * REVIEW WR-02 — the fetcher is called with ``require_persist=True``, so a
+      cache write that fails after a fresh fetch raises instead of being
+      swallowed. The table read-back proves only the NEWEST day; a refetch
+      triggered by a gap or by too few cached rows can fail its write while the
+      newest stored day is already yesterday, and that must page too.
+    * REVIEW IN-01 — the whole refresh runs under
+      ``_BENCHMARK_REFRESH_DEADLINE_S``; exceeding it is a 500, logged by type
+      and captured like the other arms. The cancelled coroutine cannot recall
+      a database call already handed to ``db_execute``'s thread, so a write
+      may still land after the 500; the next run's read-back sees it.
+    * REVIEW IN-02 — "today" is read ONCE, before the fetch, through
+      ``services.benchmark._utc_today`` (the fetcher's own pinnable clock), so
+      a run that crosses 00:00 UTC cannot demand a day the fetcher never
+      aimed at, and tests pin one clock for both.
+    """
+    today = benchmark_service._utc_today()
+    try:
+        return await asyncio.wait_for(
+            _benchmark_refresh_once(today), timeout=_BENCHMARK_REFRESH_DEADLINE_S
+        )
+    except TimeoutError as exc:
+        # Every failure inside `_benchmark_refresh_once` is already an
+        # HTTPException, so a TimeoutError here is the deadline and nothing else.
+        logger.error(
+            "benchmark_refresh: exceeded the %ss deadline", _BENCHMARK_REFRESH_DEADLINE_S
+        )
+        sentry_sdk.capture_exception(exc)
+        raise service_error(
+            500,
+            "BENCHMARK_REFRESH_FAILED",
+            retryable=False,
+            detail=(
+                "Benchmark refresh failed: exceeded the "
+                f"{_BENCHMARK_REFRESH_DEADLINE_S:g}s deadline"
+            ),
+        ) from None
+
+
+async def _benchmark_refresh_once(today: date) -> dict[str, Any]:
+    """The body of ``benchmark_refresh``, run under its deadline. Every failure
+    leaves as an ``HTTPException`` (500)."""
+    try:
+        series, is_stale = await get_benchmark_returns("BTC", require_persist=True)
+    except Exception as exc:  # noqa: BLE001 - any failure must page, as a 500
+        # Log the exception TYPE only: an upstream message can carry URLs,
+        # headers or response fragments. The exception itself, with its stack,
+        # goes to Sentry, whose `before_send` redacts (REVIEW IN-04 / SFH
+        # MD-02, the same capture `services.benchmark` makes on its cache read).
+        logger.error("benchmark_refresh: refresh raised %s", type(exc).__name__)
+        sentry_sdk.capture_exception(exc)
+        raise service_error(
+            500,
+            "BENCHMARK_REFRESH_FAILED",
+            retryable=False,
+            detail=f"Benchmark refresh failed: {type(exc).__name__}",
+        ) from None
+
+    if series is None or series.empty:
+        logger.error("benchmark_refresh: refresh returned no BTC series")
+        raise service_error(
+            500,
+            "BENCHMARK_REFRESH_FAILED",
+            retryable=False,
+            detail="Benchmark refresh failed: no BTC series",
+        )
+
+    series_through = pd.Timestamp(series.index[-1]).date().isoformat()
+    if is_stale:
+        logger.error("benchmark_refresh: BTC series is stale (through %s)", series_through)
+        raise service_error(
+            500,
+            "BENCHMARK_REFRESH_FAILED",
+            retryable=False,
+            detail=f"Benchmark refresh stale: BTC prices through {series_through}",
+        )
+
+    yesterday = (today - timedelta(days=1)).isoformat()
+    try:
+        through = await _stored_through("BTC", today=today.isoformat())
+    except Exception as exc:  # noqa: BLE001 - an unverifiable refresh must page
+        logger.error(
+            "benchmark_refresh: reading the stored BTC date raised %s", type(exc).__name__
+        )
+        sentry_sdk.capture_exception(exc)
+        raise service_error(
+            500,
+            "BENCHMARK_REFRESH_FAILED",
+            retryable=False,
+            detail=f"Benchmark refresh unverified: {type(exc).__name__}",
+        ) from None
+
+    if through is None or through < yesterday:
+        # `logger.error` is a Sentry event under the default LoggingIntegration.
+        logger.error(
+            "benchmark_refresh: benchmark_prices not current (stored BTC through %s, "
+            "needs %s; fetched series through %s)",
+            through, yesterday, series_through,
+        )
+        raise service_error(
+            500,
+            "BENCHMARK_REFRESH_FAILED",
+            retryable=False,
+            detail=(
+                f"Benchmark refresh did not reach {yesterday}: "
+                f"stored BTC prices through {through or 'none'}"
+            ),
+        )
+
+    return {"symbol": "BTC", "through": through, "stale": False, "points": int(len(series))}

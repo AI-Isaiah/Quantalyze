@@ -27,6 +27,9 @@ import { NoteSaveStatus } from "@/components/notes/NoteSaveStatus";
 import { useNoteAutoSave } from "@/components/notes/useNoteAutoSave";
 import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
 import { formatNumber, formatPercent } from "@/lib/utils";
+// Phase 169 review round 1 IN-04: the ONE money module (DESIGN.md Currency
+// row). The private copy that stood here duplicated its body.
+import { formatUsd } from "@/lib/dollar-validation";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
 import { OutcomeForm } from "./OutcomeForm";
 
@@ -39,16 +42,6 @@ export type HoldingDetailProps = {
   onRecorded?: (outcomeId: string) => void;
   onClose?: () => void;
 };
-
-function formatUsd(n: number | null): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  return n.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  });
-}
 
 function formatDays(n: number | null): string {
   if (n == null || !Number.isFinite(n)) return "—";

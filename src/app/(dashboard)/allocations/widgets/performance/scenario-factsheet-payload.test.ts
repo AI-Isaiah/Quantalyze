@@ -697,6 +697,31 @@ describe("buildScenarioFactsheetPayload — periodsPerYear knob (#597 part 2)", 
       portfolioDaily: [],
       periodsPerYear: 365,
     });
-    expect(at365).toEqual(at252);
+    // Phase 167.1.2 plan 07 (W2): the payload now CARRIES its basis, so the
+    // two differ in `periodsPerYear` and in nothing else.
+    expect(at252.periodsPerYear).toBe(252);
+    expect(at365.periodsPerYear).toBe(365);
+    const { periodsPerYear: _a, ...rest365 } = at365;
+    const { periodsPerYear: _b, ...rest252 } = at252;
+    void _a;
+    void _b;
+    expect(rest365).toEqual(rest252);
+  });
+
+  // Phase 167.1.2 plan 07 (W2). MetricsColumn hides its observation warning
+  // when a payload carries no basis, so a builder that resolves a basis for its
+  // own compute() calls and then drops it would blank a warning the Scenario
+  // surface has a basis for. The payload carries the SAME value compute() used.
+  it("the returned payload carries the periodsPerYear its compute() used (365 passed → 365)", () => {
+    const at365 = buildScenarioFactsheetPayload({
+      portfolioDaily: BLEND_30,
+      periodsPerYear: 365,
+    });
+    expect(at365.periodsPerYear).toBe(365);
+  });
+
+  it("with no basis argument the payload carries the builder's existing 252 default", () => {
+    const dflt = buildScenarioFactsheetPayload({ portfolioDaily: BLEND_30 });
+    expect(dflt.periodsPerYear).toBe(252);
   });
 });

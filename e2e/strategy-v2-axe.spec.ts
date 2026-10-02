@@ -11,7 +11,7 @@
  * absent so the spec is authored but not CI-blocking until the seed env
  * vars are wired.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { buildAxe } from "./helpers/axe";
 import { seedStrategyWithHistory } from "./helpers/seed-test-project";
 

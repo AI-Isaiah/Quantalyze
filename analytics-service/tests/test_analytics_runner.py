@@ -2773,6 +2773,12 @@ async def test_csv_sibling_upsert_failure_keeps_complete_status():
     range_chain = MagicMock()
     range_chain.execute.return_value = MagicMock(data=rows)
     order_chain.range.return_value = range_chain
+    # C3 topic H: the series load is KEYSET — .eq().order().limit() serves the
+    # first page and .eq().gt().order().limit() the next, which is empty here.
+    order_chain.limit.return_value = range_chain
+    eq_chain.gt.return_value.order.return_value.limit.return_value.execute.return_value = (
+        MagicMock(data=[])
+    )
     eq_chain.order.return_value = order_chain
     select_chain.eq.return_value = eq_chain
     table_mock.select.return_value = select_chain
@@ -2964,12 +2970,18 @@ def _csv_supabase_mock(rows, *, existing_flags, strategy_row=None):
 
     select_chain = MagicMock()
     eq_chain = MagicMock()
-    # data load: .select().eq().order().range().execute()
+    # data load: .select().eq()[.gt()].order().limit().execute() (keyset, C3 topic H)
     order_chain = MagicMock()
     order_chain.execute.return_value = MagicMock(data=rows)
     range_chain = MagicMock()
     range_chain.execute.return_value = MagicMock(data=rows)
     order_chain.range.return_value = range_chain
+    # C3 topic H: the series load is KEYSET — .eq().order().limit() serves the
+    # first page and .eq().gt().order().limit() the next, which is empty here.
+    order_chain.limit.return_value = range_chain
+    eq_chain.gt.return_value.order.return_value.limit.return_value.execute.return_value = (
+        MagicMock(data=[])
+    )
     eq_chain.order.return_value = order_chain
     # existence probe: .select().eq().single().execute()
     single_chain = MagicMock()
@@ -3374,7 +3386,12 @@ async def test_csv_truncation_arm_omits_series_completeness():
         raise PaginatedSelectTruncated(page_count=5, page_size=1000, hint="csv")
 
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
-         patch("services.analytics_runner.paginated_select", side_effect=_boom), \
+         patch(
+             # C3 topic H: the series load is the keyset helper now; patching
+             # the no-longer-called paginated_select would be a silent no-op.
+             "services.analytics_runner._load_strategy_daily_returns",
+             side_effect=_boom,
+         ), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=([], False))):
         with pytest.raises(PaginatedSelectTruncated):
