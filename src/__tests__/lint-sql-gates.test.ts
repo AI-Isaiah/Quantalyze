@@ -1137,7 +1137,11 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // supabase/tests/test_compute_job_fence_errcode.sql joined the corpus.
     // MEASURED on the tree merged with origin/main: `node scripts/lint-sql-gates.mjs` printed
     // `scanned 82 file(s); 0 finding(s)`.
-    expect(res.out).toMatch(/scanned 82 file/);
+    // MOVED 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03), 82 -> 83: the new
+    // supabase/tests/test_enqueue_race_loss_40001.sql joined the corpus.
+    // MEASURED on the tree merged with origin/main: `node scripts/lint-sql-gates.mjs` printed
+    // `scanned 83 file(s); 0 finding(s)`.
+    expect(res.out).toMatch(/scanned 83 file/);
     expect(res.status, res.out).toBe(0);
   });
 

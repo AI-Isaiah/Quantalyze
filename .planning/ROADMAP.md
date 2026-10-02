@@ -3329,15 +3329,22 @@ Plans:
 
 ### Phase 164.9.3.2.1: ENQ40001 — the enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) answers a PostgREST caller instead of re-running the call (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
+**Goal:** The enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) is measured deterministically, in psql and through the lane's PostgREST, and the binding D-02 rule acts on the outcome. If it converges, 40001 is kept, a both-lanes gate pins the converging behaviour, and the app-side retry comments say why the helper stays. If it hangs, the phase is replanned for the 55006 fence remedy.
 **Requirements**: TBD
 **Depends on:** Phase 164.9.3.2
-**Plans:** 0 plans
+**Plans:** 3 plans
 
 Booked 2026-10-01 by founder decision ENQ-SCOPE = `enq-sibling` (164.9.3.2 plan 01). Evidence carried from `164.9.3.2-01-SUMMARY.md`: the two-target shape (A2) is REFUTED (rejected up front with 22023), and the conflict-wait path converges through PostgREST (answered in 2–4 s). The race-loss RAISE itself never fired in five attempts, so its PostgREST behaviour is UNMEASURED; that it converges on retry is reasoned, not measured.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.9.3.2.1 to break down)
+**Wave 1**
+- [x] 164.9.3.2.1-01-PLAN.md — measure the race-loss raise on the local-stack lane (psql proof, PostgREST K=1/K=3, negative control) and record the D-02 branch
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 164.9.3.2.1-02-PLAN.md — converge branch: gate `test_enqueue_race_loss_40001.sql` (R1/R2 + twins, both lanes) and the D-04 comment corrections
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 164.9.3.2.1-03-PLAN.md — census moves on the merged tree and the release commit
 
 ### Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner (INSERTED)
 
