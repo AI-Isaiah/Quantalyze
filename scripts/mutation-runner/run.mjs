@@ -2801,9 +2801,10 @@ export const FILES_FLOOR = 56;
 //    `per-arm lane time: mean 1.2s over 556 arm run(s)`. Per-file line:
 //    `test_enqueue_race_loss_40001.sql: sections 3 / judged 3 / annotated 3 /
 //    waived 0 / biting 3`. That run's only defect was `dirty-checkout`, caused by
-//    comment and census edits made in the checkout while it ran; the
-//    confirmation run at 556, with no file edited during it, is recorded in the
-//    phase's 164.9.3.2.1-REVIEW-FIX.md. Stale-low direction OBSERVED at 555:
+//    comment and census edits made in the checkout while it ran. Confirmation
+//    run at 556, at 7cbf8f389, no file edited during it: `arms: 556/556/0`,
+//    `biting: 556`, `lane-invocations: 556`, `✅ No defects`, exit 0, 823 s.
+//    Stale-low direction OBSERVED at 555:
 //    src/__tests__/mutation-runner-floors.test.ts FAILS with `The corpus
 //    declares 556 twin(s) of which 0 are waivers, so a green run bites 556.
 //    ARMS_FLOOR is 555.` Too-high direction NOT re-run for this +1.
