@@ -536,7 +536,7 @@ jobs:
       # backup, and the tool that post-verifies the ledger are one tool.
       # ⚠️ Installed UNCONDITIONALLY, not inside the restore-only post-verify below:
       # the backup step needs `supabase db dump`, and the backup runs in BOTH modes.
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           version: 2.98.2
       - name: Log in to ghcr.io before the CLI pulls its images

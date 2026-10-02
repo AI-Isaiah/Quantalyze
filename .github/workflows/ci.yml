@@ -777,7 +777,7 @@ jobs:
             echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
             sleep $((n*5))
           done
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # ⚠️ SKEW, STATED RATHER THAN HIDDEN. This is the SAME pin every other
           # workflow here uses (migration-drift-check, supabase-migrate and
@@ -1116,7 +1116,7 @@ jobs:
         # only by order of the job's preamble — the seam itself runs `node` with
         # built-ins and needs neither node_modules nor git history.
         run: bash scripts/local-stack/run.sh --check-currency
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # The SAME pin `frontend-local-stack` uses, so this file keeps ONE answer to
           # "which CLI". ⛔ The fourth workflow that shares this pin is deliberately
@@ -3863,7 +3863,7 @@ jobs:
         # and FAILS LOUD when it cannot. Needs node built-ins only — no
         # node_modules, no git history.
         run: bash scripts/local-stack/run.sh --check-currency
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # The SAME pin `frontend-local-stack` uses — the repo keeps ONE answer to
           # "which CLI". The skew note on that job's setup-cli step applies here
